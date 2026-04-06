@@ -1,0 +1,94 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "PresenceJam",
+  "version": "2.0.0",
+  "identifier": "com.presencejam.app",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../build"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "PresenceJam",
+        "label": "main",
+        "width": 480,
+        "height": 640,
+        "minWidth": 400,
+        "minHeight": 500,
+        "resizable": true,
+        "center": true,
+        "visible": true,
+        "decorations": true,
+        "transparent": false
+      }
+    ],
+    "trayIcon": {
+      "iconPath": "icons/icon.ico",
+      "iconAsTemplate": false
+    },
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' https://i.scdn.co https://mosh-pa.spotify.com; style-src 'self' 'unsafe-inline'; connect-src 'self' https://api.spotify.com https://login.microsoftonline.com https://graph.microsoft.com https://accounts.spotify.com https://api-secure.spotify.com"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "msi"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": [],
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "http://timestamp.comodoca.com",
+      "allowDowngrades": true,
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    },
+    "shortDescription": "Spotify to Teams Status Sync",
+    "longDescription": "Automatically syncs your currently playing Spotify track to your Microsoft Teams status message."
+  },
+  "plugins": {
+    "notification": {
+      "all": true
+    },
+    "store": {},
+    "autostart": {
+      "macOSExtraIdentifiers": ["com.presencejam.app"]
+    },
+    "log": {
+      "targets": [
+        {
+          "kind": "folder",
+          "path": "",
+          "filename": "PresenceJam"
+        },
+        {
+          "kind": "stdout"
+        }
+      ],
+      "maxFileSize": 5242880
+    },
+    "shell": {
+      "open": true
+    },
+    "http": {
+      "scope": [
+        "https://api.spotify.com/*",
+        "https://login.microsoftonline.com/*",
+        "https://graph.microsoft.com/*",
+        "https://accounts.spotify.com/*",
+        "https://api-secure.spotify.com/*"
+      ]
+    }
+  }
+}

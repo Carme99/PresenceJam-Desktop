@@ -1,0 +1,33 @@
+# Tauri
+src-tauri/target/
+src-tauri/Cargo.lock
+src-tauri/.cargo/
+
+# SvelteKit
+build/
+.svelte-kit/
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Secrets / env
+.env
+.env.*
+*.local
+
+# Logs
+*.log
+logs/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Testing
+coverage/
