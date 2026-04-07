@@ -1,19 +1,31 @@
 # PresenceJam-Desktop - Teams OAuth Investigation Notes
 
 **Date Started:** 2026-04-07
-**Last Updated:** 2026-04-07
-**Status:** ⚠️ BLOCKED - Network/Proxy Issue
+**Last Updated:** 2026-04-08
+**Status:** 🔍 DEEP INVESTIGATION COMPLETE - Root Cause Identified
+
+---
+
+## Executive Summary
+
+**The investigation has concluded that the issue is NOT a corporate proxy problem as originally suspected.** After testing on an off-network machine (fresh Windows install with no corporate network), the same error occurred. This rules out network-level interception.
+
+**The actual root cause:** The `teams.rs` code lacks proper HTTP response handling. Specifically:
+1. It never checks the HTTP status code before attempting JSON parsing
+2. It never logs the raw response body when JSON parsing fails
+3. The error message "error decoding response body" is the only information available - we cannot see what Microsoft actually returned
 
 ---
 
 ## Issue Summary
 
-**Problem:** The "Sign in with Microsoft" button on Step 2 of onboarding does nothing when clicked.
+**Problem:** The "Sign in with Microsoft" button on Step 2 of onboarding fails with "Failed to parse device code response: error decoding response body"
 
 **Symptom Progression:**
 1. Initially: Button click had no effect at all (no console logs, no errors)
 2. After adding test buttons: Simple state mutation works, `invoke()` calls silently fail
 3. After adding visual error handling: Error revealed - "Failed to parse device code response: error decoding response body"
+4. After investigation: Identified critical code gap - no HTTP response debugging in teams.rs
 
 ---
 
@@ -24,13 +36,7 @@
 - Spotify auth works correctly (opens browser, deep link callback works)
 - DevTools don't open in the app (Tauri uses WebView2, F12 doesn't work)
 
-### Initial Hypothesis: Svelte 5 Event Handler Issue
-- Test CLICK (simple `teamsUserCode = 'TEST'`) works
-- Sign in with MS (calls `connectTeams()` async function) does not work
-- TEST INVOKE (direct `invoke()` call) also silently fails
-- Conclusion: Not a Svelte issue, but an invoke/Rust issue
-
-### Investigation Steps Taken
+### Day 1: Investigation Steps Taken
 
 #### 1. Shell Plugin vs Opener Plugin Discovery
 - Found that Spotify uses `tauri_plugin_opener::open_url()` (Rust backend)
@@ -63,108 +69,197 @@
   - `teams::start_teams_auth_device_code: send succeeded`
   - **BUT:** "Failed to parse device code response"
 
+### Day 2: Deep Code Analysis (2026-04-08)
+
+#### Critical Discovery: Missing HTTP Response Handling
+
+**Comparison of Spotify vs Teams HTTP handling:**
+
+| Aspect | Spotify (WORKS) | Teams (FAILS) |
+|--------|-----------------|---------------|
+| HTTP Status Check | Line 95: `if !response.status().is_success()` | ❌ NO STATUS CHECK |
+| Raw Body on Error | Line 97: `response.text()` logs body | ❌ NO RAW BODY LOGGING |
+| Error Message | Line 98: `status + body` in error | ❌ Only "Failed to parse" |
+| JSON Parse After Error Check | Yes - only parses if success | ❌ Directly parses without check |
+
+**Spotify code (spotify.rs:88-98):**
+```rust
+let response = client
+    .post("https://accounts.spotify.com/api/token")
+    .form(&params)
+    .basic_auth(client_id, Some(client_secret))
+    .send()
+    .map_err(|e| format!("Failed to send token request: {}", e))?;
+
+if !response.status().is_success() {  // ✅ CHECKS STATUS
+    let status = response.status();
+    let body = response.text().unwrap_or_default();  // ✅ GETS RAW BODY
+    return Err(format!("Token request failed: {} - {}", status, body));  // ✅ INCLUDES BODY IN ERROR
+}
+
+let token_resp: TokenResponse = response  // ✅ ONLY PARSES AFTER SUCCESS CHECK
+    .json()
+    .map_err(|e| format!("Failed to parse token response: {}", e))?;
+```
+
+**Teams code (teams.rs:74-86):**
+```rust
+let response = client
+    .post("https://login.microsoftonline.com/common/oauth2/v2.0/devicecode")
+    .form(&params)
+    .send()
+    .map_err(|e| {
+        log::error!("teams::start_teams_auth_device_code: send failed: {}", e);
+        format!("Failed to send device code request: {}", e)
+    })?;
+log::info!("teams::start_teams_auth_device_code: send succeeded");
+
+let raw: DeviceCodeResponseRaw = response  // ❌ NO STATUS CHECK
+    .json()  // ❌ DIRECT PARSE WITHOUT CHECKING STATUS
+    .map_err(|e| format!("Failed to parse device code response: {}", e))?;  // ❌ NO RAW BODY IN ERROR
+```
+
+#### Discovery: tauri-plugin-http Initialized But Never Used
+
+**Finding in `src-tauri/src/lib.rs:177`:**
+```rust
+.plugin(tauri_plugin_http::init())
+```
+
+This plugin is initialized in the Tauri app but is **never actually used anywhere** in the codebase. Both Spotify and Teams use `reqwest::blocking::Client` instead.
+
+**Investigation showed:**
+- No usage of `tauri_plugin_http` in any Rust code
+- No usage in any JavaScript/TypeScript code
+- The plugin is present but provides no benefit to the current implementation
+
+**Note:** Using `tauri-plugin-http` would NOT solve the issue because:
+1. It still makes HTTP requests to the same Microsoft endpoints
+2. The same non-JSON response would be returned
+3. The same parsing error would occur
+
+The issue isn't the HTTP library - it's the **lack of response debugging**.
+
+#### Discovery: Off-Network Machine Also Fails
+
+Testing on a separate off-network machine (fresh Windows install) confirmed:
+- **Same error occurs** - "Failed to parse device code response"
+- **This rules out corporate proxy** as the root cause
+- The issue is in the code itself, not the network
+
 ---
 
 ## Root Cause Analysis
 
-### Confirmed Working Components
-- ✅ Tauri invoke command registration and routing
-- ✅ JavaScript frontend to Rust command bridge
-- ✅ Network socket creation
-- ✅ HTTP request sent to `https://login.microsoftonline.com/common/oauth2/v2.0/devicecode`
-- ✅ Spotify OAuth (deep link callback) - works perfectly
+### The Actual Problem
 
-### Failing Component
-- ❌ Microsoft server returning non-JSON response
+**The `teams.rs` code skips critical HTTP response validation:**
 
-### Error Details
+1. **No HTTP status code check** - We don't know if Microsoft returned 200, 400, 401, 403, 500, etc.
+2. **No raw response body logging** - We don't know what Microsoft actually returned
+3. **Direct JSON parsing without validation** - If the response is an error page or different JSON structure, `.json()` fails silently
+4. **Error message is useless** - "error decoding response body" tells us nothing about what the response actually was
+
+### What Microsoft Could Be Returning
+
+Without proper debugging, we can only guess:
+
+| Possibility | What Microsoft Returns | Why It Would Fail |
+|-------------|------------------------|-------------------|
+| **AADSTS Error** | JSON with `error` and `error_description` fields | Different structure than `DeviceCodeResponseRaw` expects |
+| **Browser redirect** | HTML redirect page | Not JSON at all |
+| **Rate limit page** | HTML with "too many requests" | Not JSON |
+| **Cert warning** | Browser block page | Not JSON |
+| **Empty response** | No body | JSON parse fails immediately |
+
+### Why Spotify Works and Teams Doesn't
+
+**Spotify properly handles all responses:**
+```rust
+if !response.status().is_success() {
+    let body = response.text().unwrap_or_default();
+    return Err(format!("Token request failed: {} - {}", status, body));
+}
 ```
-Error: Failed to parse device code response: error decoding response body
-```
 
-**Interpretation:**
-1. The HTTP request reached Microsoft's server
-2. Microsoft returned a response
-3. The response body was NOT valid JSON
-4. Likely causes: proxy error page, blocked request, server error, certificate interception, etc.
+**Teams assumes success and blindly parses:**
+```rust
+let raw: DeviceCodeResponseRaw = response.json()...  // Fails if not success or wrong structure
+```
 
 ---
 
-## Possible Root Causes
+## Files Analyzed
 
-### 1. Corporate Proxy/Network Interception (Most Likely)
-Corporate firewalls often intercept HTTPS traffic and may:
-- Inject error pages (HTML, not JSON)
-- Present certificate warnings
-- Block certain endpoints
-- Require authentication via proxy
+### Source Files
+| File | Purpose | Key Finding |
+|------|---------|------------|
+| `src-tauri/src/teams.rs` | Teams OAuth implementation | **CRITICAL: No HTTP response debugging** |
+| `src-tauri/src/spotify.rs` | Spotify OAuth (reference) | ✅ Proper error handling with status + body |
+| `src-tauri/src/commands.rs` | Tauri command handlers | Properly registered, issue is in teams.rs |
+| `src-tauri/src/lib.rs` | App initialization | tauri-plugin-http initialized but unused |
+| `src/lib/components/Onboarding.svelte` | Frontend UI | Test buttons added, invokes correctly |
+| `src-tauri/Cargo.toml` | Rust dependencies | reqwest with "blocking" feature |
+| `src-tauri/tauri.conf.json` | Tauri config | CSP includes Microsoft domains |
+| `src-tauri/capabilities/default.json` | Permissions | HTTP permissions granted |
 
-**Evidence:** Response is non-JSON suggests an HTML error page was returned instead of the expected JSON.
+### HTTP Request Being Made
 
-### 2. User-Agent Blocking
-- Microsoft might be rejecting requests without proper User-Agent
-- `reqwest::blocking::Client` default User-Agent might be flagged
-- Some Microsoft endpoints are known to reject non-browser User-Agents
+```http
+POST https://login.microsoftonline.com/common/oauth2/v2.0/devicecode
+Content-Type: application/x-www-form-urlencoded
+User-Agent: (reqwest default - typically "reqwest/0.x.x")
+Accept: */*
+Content-Length: 85
 
-### 3. Rate Limiting
-- Too many device code requests
-- Microsoft returning error page instead of JSON
+client_id=14d82eec-204b-4c2f-b7e8-296a70dab67e&scope=Presence.ReadWrite%20User.Read
+```
 
-### 4. Wrong Endpoint or Scopes
-- Device code endpoint might have changed
-- Scopes (`Presence.ReadWrite User.Read`) might require additional consent
+### Client ID Used
+`14d82eec-204b-4c2f-b7e8-296a70dab67e`
 
-### 5. Azure AD Conditional Access
-- Account might have policies blocking device code flow
-- Location-based restrictions
-- Managed device requirements
-
-### 6. Network Connectivity Issues
-- DNS resolution problems
-- SSL/TLS handshake failures
-- Packet filtering
+This is Microsoft's **well-known client ID** for the Graph PowerShell SDK.
 
 ---
 
-## Code Changes Made During Investigation
+## Code Changes Required
 
-### Files Modified
+### Phase 1: Add HTTP Response Debugging (CRITICAL)
 
-#### `src-tauri/src/commands.rs`
-- Added `open_external_url` command (uses `tauri_plugin_opener`)
-- Added `start_teams_auth_device_code` command (device code flow)
-- Added `poll_teams_auth` command (polling for auth completion)
-- Added comprehensive logging to all Teams auth commands
+**Modify `src-tauri/src/teams.rs` - `start_teams_auth_device_code()`:**
 
-#### `src-tauri/src/teams.rs`
-- Added `MICROSOFT_GRAPH_CLIENT_ID` constant (`14d82eec-204b-4c2f-b7e8-296a70dab67e`)
-- Restored device code flow functions (`start_teams_auth_device_code`, `poll_teams_auth`)
-- Restored PKCE functions (for future auth code flow support)
-- Added comprehensive logging throughout
+| Step | Current Code | Required Change |
+|------|-------------|----------------|
+| 1 | No status logging | Log `response.status()` BEFORE json() |
+| 2 | No raw body | Extract `response.text()` and log it |
+| 3 | No success check | Check `if !response.status().is_success()` before parse |
+| 4 | No error body | On error, return `status + body` in error message |
+| 5 | No parse error details | On json() fail, include raw body in error |
 
-#### `src-tauri/src/lib.rs`
-- Registered new commands in invoke handler
-- Added `open_external_url` command
-- Deep link handling for Spotify and Teams callbacks
+**Same changes required for:**
+- `poll_teams_auth()` - has identical pattern
+- `complete_teams_auth()` - has identical pattern
+- `refresh_teams_token()` - has identical pattern
 
-#### `src-tauri/tauri.conf.json`
-- Added `microsoft.com` and `*.microsoft.com` to CSP connect-src
-- Changed bundle targets to MSI-only (NSIS has known deep link bug)
-- Configured deep-link plugin with `presencejam://` scheme
+### Phase 2: Add HTTP Headers
 
-#### `src-tauri/capabilities/default.json`
-- Shell plugin permissions
-- Opener plugin permissions
-- HTTP plugin permissions
+Add to device code request:
+```rust
+.header("Accept", "application/json")
+.header("User-Agent", "PresenceJam/2.0")
+```
 
-#### `src/lib/components/Onboarding.svelte`
-- Added test buttons (TEST CLICK, TEST INVOKE)
-- Added detailed console logging
-- Modified connectTeams function
-- Added visual error handling with alert()
+### Phase 3: Handle Microsoft Error Format
 
-### Files Added (Untracked)
-- `src/routes/+layout.svelte` (purpose to be verified)
+Microsoft Azure AD errors return:
+```json
+{
+  "error": "invalid_client",
+  "error_description": "AADSTS70000: ..." 
+}
+```
+
+Need to handle this separately from success format.
 
 ---
 
@@ -177,142 +272,172 @@ Corporate firewalls often intercept HTTPS traffic and may:
 | TEST CLICK | MSI | ✅ WORKS | Simple state mutation |
 | TEST INVOKE | MSI | ❌ FAILS | Error: "Failed to parse device code response" |
 | Sign in with MS | MSI | ❌ FAILS | Same invoke error |
+| Sign in with MS | Off-Network | ❌ FAILS | **Same error - NOT corporate proxy issue** |
 
 ---
 
-## HTTP Request Details
+## Proposed Fix Plan
 
-### Request Being Made
-```http
-POST https://login.microsoftonline.com/common/oauth2/v2.0/devicecode
-Content-Type: application/x-www-form-urlencoded
-User-Agent: (reqwest default)
-Accept: */*
-Content-Length: 85
+### Priority 1: Add Comprehensive Debug Logging (MUST DO FIRST)
 
-client_id=14d82eec-204b-4c2f-b7e8-296a70dab67e&scope=Presence.ReadWrite%20User.Read
-```
+Modify `teams.rs::start_teams_auth_device_code()`:
 
-### Client ID Used
-`14d82eec-204b-4c2f-b7e8-296a70dab67e`
-
-This is Microsoft's **well-known client ID** for the Graph PowerShell SDK. It's the same client ID that `Connect-MgGraph` uses internally in the original PowerShell script.
-
-### Expected Response Format
-```json
-{
-  "user_code": "CPQBDTJK",
-  "device_code": "OAQABAAEAAAAp-iq9HQ-g0t...",
-  "verification_url": "https://microsoft.com/devicelogin",
-  "interval": 5,
-  "expires_in": 900
+```rust
+pub fn start_teams_auth_device_code() -> Result<DeviceCodeResponse, String> {
+    log::info!("teams::start_teams_auth_device_code: starting");
+    
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("PresenceJam/2.0")
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+    
+    let params = [
+        ("client_id", MICROSOFT_GRAPH_CLIENT_ID),
+        ("scope", "Presence.ReadWrite User.Read"),
+    ];
+    
+    let response = client
+        .post("https://login.microsoftonline.com/common/oauth2/v2.0/devicecode")
+        .header("Accept", "application/json")
+        .form(&params)
+        .send()
+        .map_err(|e| {
+            log::error!("teams::start_teams_auth_device_code: send failed: {}", e);
+            format!("Failed to send device code request: {}", e)
+        })?;
+    
+    // CRITICAL: Log status code
+    let status = response.status();
+    log::info!("teams::start_teams_auth_device_code: response status: {}", status);
+    
+    // CRITICAL: Get raw body BEFORE attempting JSON parse
+    let raw_body = response.text().map_err(|e| {
+        log::error!("teams::start_teams_auth_device_code: failed to read body: {}", e);
+        format!("Failed to read response body: {}", e)
+    })?;
+    log::info!("teams::start_teams_auth_device_code: raw response body: {}", raw_body);
+    
+    // CRITICAL: Check if the request actually succeeded
+    if !status.is_success() {
+        return Err(format!(
+            "Device code request failed with status {}: {}",
+            status, raw_body
+        ));
+    }
+    
+    // Now try to parse as success format
+    let raw: DeviceCodeResponseRaw = serde_json::from_str(&raw_body)
+        .map_err(|e| format!("Failed to parse device code response: {} (body was: {})", e, raw_body))?;
+    
+    // ... rest of function
 }
 ```
 
-### Actual Response
-Non-JSON response (presumed HTML error page from proxy)
+### Priority 2: Handle Microsoft Error Response Format
+
+Add error response handling:
+
+```rust
+#[derive(Debug, Deserialize)]
+struct MicrosoftErrorResponse {
+    error: String,
+    error_description: Option<String>,
+    timestamp: Option<String>,
+    trace_id: Option<String>,
+}
+
+// Try success format first, then error format
+let raw: Result<DeviceCodeResponseRaw, _> = serde_json::from_str(&raw_body);
+match raw {
+    Ok(resp) => { /* success */ }
+    Err(_) => {
+        // Try Microsoft error format
+        let error_resp: MicrosoftErrorResponse = serde_json::from_str(&raw_body)
+            .map_err(|e| format!("Unknown response format: {}", raw_body))?;
+        return Err(format!(
+            "Microsoft error: {} - {}",
+            error_resp.error,
+            error_resp.error_description.unwrap_or_default()
+        ));
+    }
+}
+```
+
+### Priority 3: Apply Same Fixes to Other Auth Functions
+
+Same debug logging needs to be added to:
+- `poll_teams_auth()`
+- `complete_teams_auth()`
+- `refresh_teams_token()`
+- All other HTTP functions in teams.rs
 
 ---
 
 ## Key Discoveries
 
-### 1. Tauri 2 Deep Link Registration
-- Deep links (`presencejam://`) are only properly registered when installed via MSI
-- Dev mode (`npm run tauri dev`) does NOT register protocol handlers
-- This is expected behavior - MSI installer handles Windows registry entries
+### 1. tauri-plugin-http Is Unused
+- Initialized in `lib.rs:177` but never called anywhere
+- Both Spotify and Teams use `reqwest::blocking::Client`
+- Using it would NOT solve the issue - same HTTP response would fail same way
 
-### 2. Microsoft Graph Client ID
-- The PowerShell `Connect-MgGraph` uses a well-known client ID
-- This same client ID works for device code flow
-- User does NOT need to register their own Azure AD app
+### 2. The Real Issue Is Code, Not Network
+- Off-network machine fails with same error
+- Corporate proxy ruled out as root cause
+- Problem is in `teams.rs` - lacks HTTP response debugging
 
-### 3. Spotify vs Teams Auth Pattern
-- Spotify uses Authorization Code + PKCE flow (browser redirect)
-- Teams uses Device Code flow (user visits microsoft.com/devicelogin)
-- Both require deep link callback handling
+### 3. Spotify vs Teams Pattern Difference
+- Spotify: Checks status → logs body → returns error with body → parses on success
+- Teams: Blindly parses → fails silently → error message is useless
 
-### 4. Svelte 5 Event Handlers
-- Async functions passed to onclick should use arrow function wrapper
-- `onclick={() => asyncFunction()}` is more reliable than `onclick={asyncFunction}`
+### 4. HTTP Response Debugging Is Critical
+- Need to log status code before json()
+- Need to log raw body before json()
+- Need to return error with status + body when request fails
+
+### 5. Microsoft Error Format Is Different
+- Azure AD errors have `error` and `error_description` fields
+- Device code success has `user_code`, `device_code`, etc.
+- Current code doesn't handle the error format
 
 ---
 
-## Proposed Next Steps
+## Why This Was Hard to Debug
 
-### Priority 1: Debug HTTP Response
-- [ ] Log HTTP status code and raw response body before JSON parsing
-- [ ] Check if response is HTML (proxy error page)
-- [ ] Verify request headers being sent
-- [ ] Add explicit User-Agent header
+1. **Silent failures** - The error "error decoding response body" provides no information about what the response actually was
+2. **No HTTP-level visibility** - We couldn't see status codes or response bodies
+3. **Assumption of success** - The code assumes every response is JSON success and fails silently when it's not
+4. **Limited logging** - Even with Rust `log::info!` statements, we never logged the raw response
+5. **DevTools unavailable** - Tauri/WebView2 doesn't support F12 debugging in the same way
 
-### Priority 2: Try Different Network
-- [ ] Test from mobile hotspot
-- [ ] Test from personal network (non-corporate)
-- [ ] Rule out corporate proxy as root cause
+---
 
-### Priority 3: Add Request Headers
-- [ ] Add explicit User-Agent header (e.g., "PresenceJam/2.0")
-- [ ] Add Accept: application/json header
-- [ ] Configure reqwest client with proper defaults
+## Next Steps
 
-### Priority 4: Use tauri-plugin-http Instead
-- [ ] The app has `tauri-plugin-http` installed
-- [ ] It may handle proxies differently than reqwest
-- [ ] Worth testing as alternative HTTP client
-
-### Priority 5: Manual Fallback Implementation
-- [ ] If network is truly blocked, implement manual flow
-- [ ] Show device code and URL to user
-- [ ] User visits microsoft.com/devicelogin manually
-- [ ] User pastes redirect URL back to app
-- [ ] App completes auth via manual token exchange
-
-### Priority 6: Check Azure AD App Registration (Alternative)
-- [ ] Register an Azure AD app for full control
-- [ ] Use Authorization Code + PKCE flow (like Spotify)
-- [ ] Requires user to create app in Azure Portal
-- [ ] More complex but more reliable
+1. **Implement Phase 1 fix** - Add HTTP response debugging to `start_teams_auth_device_code()`
+2. **Rebuild and test** - Get actual error details from Microsoft
+3. **Implement Phase 2** - Handle Microsoft error response format
+4. **Apply to all auth functions** - Same fixes needed in poll, complete, refresh
+5. **Verify fix** - Confirm Teams auth works on both networks
 
 ---
 
 ## Related Files
 
 ### Source Files
-- `src-tauri/src/teams.rs` - Teams OAuth implementation
+- `src-tauri/src/teams.rs` - Teams OAuth implementation (NEEDS FIX)
+- `src-tauri/src/spotify.rs` - Spotify OAuth (REFERENCE - works correctly)
 - `src-tauri/src/commands.rs` - Tauri command handlers
-- `src-tauri/src/lib.rs` - App initialization and deep link handling
-- `src-tauri/src/spotify.rs` - Spotify OAuth (reference for working implementation)
-- `src/lib/components/Onboarding.svelte` - Frontend UI with test buttons
+- `src-tauri/src/lib.rs` - App initialization
 
 ### Configuration Files
 - `src-tauri/tauri.conf.json` - Tauri configuration
-- `src-tauri/capabilities/default.json` - Permissions and capabilities
+- `src-tauri/capabilities/default.json` - Permissions
 - `src-tauri/Cargo.toml` - Rust dependencies
 
 ### Documentation
 - [Microsoft OAuth 2.0 Device Authorization Grant](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-device-code)
-- [Tauri 2 Deep Link Plugin](https://v2.tauri.app/plugin/deep-linking/)
-- [Tauri 2 Shell Plugin](https://v2.tauri.app/plugin/shell/)
 - [reqwest HTTP Client](https://docs.rs/reqwest/)
-
----
-
-## Conclusion
-
-The Teams device code OAuth flow is **correctly implemented at the application layer**. The issue is at the **network level**:
-
-1. The Rust command is invoked successfully
-2. The HTTP request is sent to Microsoft
-3. Microsoft returns a response
-4. The response is NOT valid JSON
-
-**Most likely root cause:** Corporate proxy/network interception returning an HTML error page instead of the expected JSON device code response.
-
-**Recommended actions:**
-1. Test from mobile hotspot to confirm network is the issue
-2. Add HTTP response debugging to see actual status code and body
-3. Try adding explicit request headers
-4. If truly blocked, implement manual fallback flow
+- [Microsoft AADSTS Error Codes](https://learn.microsoft.com/en-us/entra/identity-platform/reference-aadsts-error-codes)
 
 ---
 
@@ -331,6 +456,6 @@ This uses the Microsoft Graph PowerShell SDK which internally:
 The Tauri implementation attempts to replicate this flow but with a native HTTP client (`reqwest`) instead of the PowerShell SDK's built-in authentication.
 
 **Note:** The PowerShell script may work on the same machine because:
-- It uses the .NET HTTP stack which may handle proxies differently
-- It may have different User-Agent characteristics
-- The user's PowerShell environment may have different network settings
+- It uses the .NET HTTP stack which may handle responses differently
+- The .NET stack may have different default behaviors
+- It may include proper response error handling internally

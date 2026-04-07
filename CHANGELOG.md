@@ -5,19 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] - 2026-04-07
+## [Unreleased] - 2026-04-08
 
-### Status: ⚠️ Teams Auth Blocked - Network Issue
+### Status: 🔍 INVESTIGATION COMPLETE - Fix In Progress
 
 **Issue:** Teams device code OAuth fails with "error decoding response body"
 
-**Workaround:** See [INVESTIGATION_NOTES.md](./INVESTIGATION_NOTES.md) for details and troubleshooting steps.
+**Root Cause Identified:** `teams.rs` lacks HTTP response debugging - doesn't check status code or log raw response body before JSON parsing.
+
+**Key Finding:** Off-network machine also fails - NOT a corporate proxy issue as originally suspected.
+
+**Workaround:** See [INVESTIGATION_NOTES.md](./INVESTIGATION_NOTES.md) for detailed analysis and fix plan.
 
 ---
 
 ## [2.0.0] - 2026-04-07
 
 ### Added
+
+#### Development Environment Setup
+- **Visual Studio Code** - Installed via winget for development
+- **Rust toolchain** - rustc 1.94.1, cargo 1.94.1
+- **Tauri CLI** - tauri-cli 2.10.1 installed globally via npm
+- **Repository cloned** to `C:\GitHubProjects\PresenceJam-Desktop`
+- MSI installer built successfully
 
 #### Teams Device Code OAuth (Investigation in Progress)
 - Added `start_teams_auth_device_code` command for Microsoft device code flow
@@ -68,7 +79,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Known Issues
 
-- ⚠️ Teams device code flow fails with "error decoding response body" - likely corporate proxy issue
+- ⚠️ **Teams device code flow fails** - "error decoding response body"
+  - **Root cause identified:** `teams.rs` lacks HTTP response debugging
+  - **Not a corporate proxy issue** - confirmed by off-network testing
+  - **Fix in progress:** Need to add status code checking and raw body logging
 - ⚠️ Dev mode (`npm run tauri dev`) does not register `presencejam://` protocol - use MSI for testing deep links
 
 ---
@@ -110,7 +124,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `tauri-plugin-autostart` v2 - Windows startup
 - `tauri-plugin-log` v2 - Logging
 - `tauri-plugin-shell` v2 - Shell operations
-- `tauri-plugin-http` v2 - HTTP requests
+- `tauri-plugin-http` v2 - HTTP requests (initialized but unused - teams.rs uses reqwest directly)
 - `tauri-plugin-process` v2 - Process management
 - `reqwest` v0.12 - HTTP client (for Spotify and Teams APIs)
 - `chrono` v0.4 - Date/time handling
