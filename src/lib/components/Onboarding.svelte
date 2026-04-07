@@ -1,69 +1,81 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
-  import { open } from '@tauri-apps/plugin-shell';
+  import { listen } from '@tauri-apps/api/event';
+  import { onMount } from 'svelte';
   import { configStore, saveConfig, type AppConfig } from '$lib/stores/config';
 
   let step = $state(1);
   let spotifyClientId = $state('');
   let spotifyClientSecret = $state('');
-  let spotifyVerifier = $state('');
   let spotifyConnected = $state(false);
   let spotifyUsername = $state('');
   let spotifyManualUrl = $state('');
   let spotifyWaiting = $state(false);
 
-  let teamsClientId = $state('');
   let teamsUserCode = $state('');
   let teamsVerificationUrl = $state('');
   let teamsDeviceCode = $state('');
   let teamsConnected = $state(false);
-  let teamsUsername = $state('');
   let teamsPolling = $state(false);
 
   let statusFormat = $state('🎵 {artist} - {track} 🎧');
   let launchAtLogin = $state(false);
   let pollingInterval = $state(30);
 
+  onMount(() => {
+    const unlistenComplete = listen('spotify-auth-complete', () => {
+      spotifyConnected = true;
+      spotifyWaiting = false;
+    });
+    
+    const unlistenFailed = listen<string>('spotify-auth-failed', (event) => {
+      console.error('Spotify auth failed:', event.payload);
+      spotifyWaiting = false;
+    });
+    
+    const unlistenTeamsComplete = listen('teams-auth-complete', () => {
+      teamsConnected = true;
+      teamsPolling = false;
+    });
+    
+    const unlistenTeamsFailed = listen<string>('teams-auth-failed', (event) => {
+      console.error('Teams auth failed:', event.payload);
+      teamsPolling = false;
+    });
+    
+    return () => {
+      unlistenComplete.then(fn => fn());
+      unlistenFailed.then(fn => fn());
+      unlistenTeamsComplete.then(fn => fn());
+      unlistenTeamsFailed.then(fn => fn());
+    };
+  });
+
   async function connectSpotify() {
     try {
-      const verifier = crypto.randomUUID().replace(/-/g, '') + crypto.randomUUID().replace(/-/g, '');
-      const challenge = btoa(String.fromCharCode(...new Uint8Array(
-        await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))
-      ))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
-      
-      const redirectUri = 'http://localhost:7890/callback';
-      const authUrl = `https://accounts.spotify.com/authorize?client_id=${spotifyClientId}&response_type=code&redirect_uri=${encodeURIComponent(redirectUri)}&code_challenge_method=S256&code_challenge=${challenge}&scope=user-read-currently-playing+user-read-playback-state`;
-      
-      await open(authUrl);
-      spotifyVerifier = verifier;
+      await invoke('start_spotify_auth', {
+        clientId: spotifyClientId,
+        clientSecret: spotifyClientSecret,
+        redirectUri: 'presencejam://callback'
+      });
       spotifyWaiting = true;
-      
-      // Wait up to 5 minutes for callback server to receive the code
-      const code = await waitForCallback();
-      if (code) {
-        await completeSpotifyAuth(code, verifier);
-      }
     } catch (e) {
       console.error('Spotify auth failed:', e);
-      spotifyWaiting = false;
     }
   }
 
-  async function completeSpotifyAuth(code: string, verifier: string) {
+  async function handleManualUrlPaste() {
     try {
-      const tokens = await invoke<any>('complete_spotify_auth', {
-        code,
-        verifier,
-        clientId: spotifyClientId,
-        clientSecret: spotifyClientSecret
-      });
-      if (tokens) {
-        spotifyConnected = true;
+      const code = extractCodeFromUrl(spotifyManualUrl);
+      if (code) {
+        const tokens = await invoke<any>('complete_spotify_auth_manual', { code });
+        if (tokens) {
+          spotifyConnected = true;
+          spotifyWaiting = false;
+        }
       }
     } catch (e) {
       console.error('Spotify token exchange failed:', e);
-    } finally {
-      spotifyWaiting = false;
     }
   }
 
@@ -76,55 +88,33 @@
     }
   }
 
-  async function handleManualUrlPaste() {
-    const code = extractCodeFromUrl(spotifyManualUrl);
-    if (code && spotifyVerifier) {
-      await completeSpotifyAuth(code, spotifyVerifier);
-    }
-  }
-
-  async function waitForCallback(): Promise<string | null> {
-    // Poll the local callback server every second for up to 5 minutes
-    const timeout = Date.now() + 300000;
-    while (Date.now() < timeout) {
-      try {
-        // Try fetching a simple endpoint - the server will capture the code from the redirect
-        const resp = await fetch('http://localhost:7890/', { mode: 'no-cors' });
-        // If we get here without error, server is running - wait a bit more for the redirect
-        await new Promise(r => setTimeout(r, 2000));
-      } catch {
-        // Server not responding yet, keep waiting
-      }
-      await new Promise(r => setTimeout(r, 1000));
-    }
-    return null;
-  }
-
   async function connectTeams() {
+    console.log('connectTeams START');
     try {
-      const resp = await invoke<any>('start_teams_auth', { clientId: teamsClientId });
-      teamsUserCode = resp.user_code;
-      teamsVerificationUrl = resp.verification_url;
-      teamsDeviceCode = resp.device_code;
-      await open(resp.verification_url);
+      console.log('connectTeams: calling invoke start_teams_auth_device_code');
+      const response = await invoke<any>('start_teams_auth_device_code');
+      console.log('connectTeams: got response', response);
+      teamsUserCode = response.user_code;
+      teamsVerificationUrl = response.verification_url;
+      teamsDeviceCode = response.device_code;
+      console.log('connectTeams: calling open_external_url');
+      await invoke('open_external_url', { url: teamsVerificationUrl });
+      console.log('connectTeams: done');
     } catch (e) {
-      console.error('Teams auth failed:', e);
+      console.error('connectTeams ERROR:', e);
     }
   }
 
   async function pollTeamsAuth() {
-    teamsPolling = true;
     try {
-      const tokens = await invoke<any>('poll_teams_auth', {
-        deviceCode: teamsDeviceCode,
-        clientId: teamsClientId
-      });
+      teamsPolling = true;
+      const tokens = await invoke<any>('poll_teams_auth', { deviceCode: teamsDeviceCode });
       if (tokens) {
         teamsConnected = true;
+        teamsPolling = false;
       }
     } catch (e) {
       console.error('Teams auth failed:', e);
-    } finally {
       teamsPolling = false;
     }
   }
@@ -134,7 +124,7 @@
       spotify: {
         client_id: spotifyClientId,
         client_secret: spotifyClientSecret,
-        redirect_uri: 'http://localhost:7890/callback',
+        redirect_uri: 'presencejam://callback',
         scopes: ['user-read-currently-playing', 'user-read-playback-state']
       },
       teams: {
@@ -179,12 +169,12 @@
       <p>PresenceJam syncs your Spotify playback to your Teams status.</p>
       
       <div class="form-group">
-        <label>Client ID</label>
-        <input bind:value={spotifyClientId} placeholder="3abc..." />
+        <label for="spotify-client-id">Client ID</label>
+        <input id="spotify-client-id" bind:value={spotifyClientId} placeholder="3abc..." />
       </div>
       <div class="form-group">
-        <label>Client Secret</label>
-        <input bind:value={spotifyClientSecret} type="password" placeholder="••••••••" />
+        <label for="spotify-client-secret">Client Secret</label>
+        <input id="spotify-client-secret" bind:value={spotifyClientSecret} type="password" placeholder="••••••••" />
       </div>
       
       {#if !spotifyConnected && !spotifyWaiting}
@@ -206,7 +196,7 @@
           <button onclick={handleManualUrlPaste} disabled={!spotifyManualUrl}>
             Submit URL
           </button>
-          <button class="back" onclick={() => { spotifyWaiting = false; spotifyVerifier = ''; }}>
+          <button class="back" onclick={() => { spotifyWaiting = false; }}>
             Cancel
           </button>
         </div>
@@ -222,17 +212,33 @@
       <h2>Connect Microsoft Teams</h2>
       <p>Sign in with Microsoft to update your Teams presence.</p>
       
-      {#if !teamsUserCode}
-        <div class="form-group">
-          <label>Client ID (from Azure AD app registration)</label>
-          <input bind:value={teamsClientId} placeholder="abc123..." />
-        </div>
-        <button onclick={connectTeams} disabled={!teamsClientId}>
+      {#if !teamsConnected && !teamsUserCode}
+        <button onclick={() => connectTeams()}>
           Sign in with Microsoft
         </button>
+        <button onclick={() => { console.log('test click'); teamsUserCode = 'TEST'; }}>
+          TEST CLICK
+        </button>
+        <button onclick={() => { 
+          console.log('invoke test start'); 
+          invoke<any>('start_teams_auth_device_code')
+            .then((r: any) => { 
+              console.log('invoke success', r); 
+              teamsUserCode = r.user_code;
+              teamsVerificationUrl = r.verification_url;
+              teamsDeviceCode = r.device_code;
+            })
+            .catch((e: any) => { 
+              console.error('invoke error', e); 
+              alert('Error: ' + e); 
+            }); 
+        }}>
+          TEST INVOKE
+        </button>
+        <p id="teams-debug" style="color: red; font-size: 12px; margin-top: 10px;"></p>
       {:else if !teamsConnected}
         <div class="device-code-box">
-          <p>Visit <a href={teamsVerificationUrl} onclick={(e) => { e.preventDefault(); open(teamsVerificationUrl); }}>{teamsVerificationUrl}</a></p>
+          <p>Visit <a href={teamsVerificationUrl}>{teamsVerificationUrl}</a></p>
           <div class="code-display">{teamsUserCode}</div>
           <p class="hint">Enter this code when prompted</p>
         </div>
@@ -256,19 +262,19 @@
       <h2>Customize your status</h2>
       
       <div class="form-group">
-        <label>Status format</label>
-        <input bind:value={statusFormat} placeholder="🎵 {'{artist}'} - {'{track}'} 🎧" />
+        <label for="status-format">Status format</label>
+        <input id="status-format" bind:value={statusFormat} placeholder="🎵 {'{artist}'} - {'{track}'} 🎧" />
         <p class="hint">Use {'{artist}'}, {'{track}'}, {'{album}'}, {'{emoji}'}</p>
       </div>
       
       <div class="form-group">
-        <label>Polling interval: {pollingInterval}s</label>
-        <input type="range" min="10" max="60" step="5" bind:value={pollingInterval} />
+        <label for="polling-interval">Polling interval: {pollingInterval}s</label>
+        <input id="polling-interval" type="range" min="10" max="60" step="5" bind:value={pollingInterval} />
       </div>
       
       <div class="form-group toggle">
-        <label>Launch at login</label>
-        <input type="checkbox" bind:checked={launchAtLogin} />
+        <label for="launch-at-login">Launch at login</label>
+        <input id="launch-at-login" type="checkbox" bind:checked={launchAtLogin} />
       </div>
       
       <button onclick={finish}>Finish</button>
@@ -282,6 +288,11 @@
     padding: 32px;
     max-width: 420px;
     margin: 0 auto;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    box-sizing: border-box;
+    overflow: hidden;
   }
   .progress {
     display: flex;
@@ -306,10 +317,13 @@
   h2 { font-size: 24px; margin-bottom: 8px; }
   p { color: var(--text-secondary); margin-bottom: 24px; font-size: 14px; }
   .form-group { margin-bottom: 16px; }
+  .step {
+    flex: 1;
+    overflow-y: auto;
+  }
   .form-group label { display: block; margin-bottom: 6px; font-size: 13px; font-weight: 500; }
-  input[type="text"],
   input[type="password"],
-  input[type="email"] {
+  input[type="range"] {
     width: 100%;
     padding: 10px 12px;
     border: 1px solid var(--border-color);

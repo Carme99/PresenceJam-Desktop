@@ -14,7 +14,7 @@ pub struct SpotifyConfig {
 }
 
 fn default_redirect_uri() -> String {
-    "http://localhost:7890/callback".to_string()
+    "presencejam://callback".to_string()
 }
 
 fn default_scopes() -> Vec<String> {

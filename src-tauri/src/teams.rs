@@ -1,7 +1,25 @@
-use std::time::Duration as StdDuration;
 use chrono::Utc;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use base64::Engine;
+use sha2::Digest;
+use std::time::Duration as StdDuration;
 use std::thread;
+
+pub const MICROSOFT_GRAPH_CLIENT_ID: &str = "14d82eec-204b-4c2f-b7e8-296a70dab67e";
+
+pub fn pkce_generate_verifier() -> String {
+    let mut bytes = [0u8; 64];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+pub fn pkce_generate_challenge(verifier: &str) -> String {
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(verifier.as_bytes());
+    let hash = hasher.finalize();
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hash)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TeamsTokens {
@@ -42,23 +60,31 @@ struct TokenErrorResponse {
     interval: Option<u64>,
 }
 
-pub fn start_teams_auth(client_id: &str) -> Result<(DeviceCodeResponse, String), String> {
+pub fn start_teams_auth_device_code() -> Result<DeviceCodeResponse, String> {
+    log::info!("teams::start_teams_auth_device_code: starting");
     let client = reqwest::blocking::Client::new();
+    log::info!("teams::start_teams_auth_device_code: client created");
 
     let params = [
-        ("client_id", client_id),
+        ("client_id", MICROSOFT_GRAPH_CLIENT_ID),
         ("scope", "Presence.ReadWrite User.Read"),
     ];
+    log::info!("teams::start_teams_auth_device_code: calling devicecode endpoint");
 
     let response = client
         .post("https://login.microsoftonline.com/common/oauth2/v2.0/devicecode")
         .form(&params)
         .send()
-        .map_err(|e| format!("Failed to send device code request: {}", e))?;
+        .map_err(|e| {
+            log::error!("teams::start_teams_auth_device_code: send failed: {}", e);
+            format!("Failed to send device code request: {}", e)
+        })?;
+    log::info!("teams::start_teams_auth_device_code: send succeeded");
 
     let raw: DeviceCodeResponseRaw = response
         .json()
         .map_err(|e| format!("Failed to parse device code response: {}", e))?;
+    log::info!("teams::start_teams_auth_device_code: parsed response");
 
     let result = DeviceCodeResponse {
         user_code: raw.user_code,
@@ -74,10 +100,10 @@ pub fn start_teams_auth(client_id: &str) -> Result<(DeviceCodeResponse, String),
         result.verification_url
     );
 
-    Ok((result, raw.device_code))
+    Ok(result)
 }
 
-pub fn poll_teams_auth(device_code: &str, client_id: &str) -> Result<TeamsTokens, String> {
+pub fn poll_teams_auth(device_code: &str) -> Result<TeamsTokens, String> {
     let client = reqwest::blocking::Client::new();
     let start_time = std::time::Instant::now();
     let timeout = StdDuration::from_secs(900);
@@ -89,7 +115,7 @@ pub fn poll_teams_auth(device_code: &str, client_id: &str) -> Result<TeamsTokens
 
         let params = [
             ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-            ("client_id", client_id),
+            ("client_id", MICROSOFT_GRAPH_CLIENT_ID),
             ("device_code", device_code),
         ];
 
@@ -133,7 +159,7 @@ pub fn poll_teams_auth(device_code: &str, client_id: &str) -> Result<TeamsTokens
             "slow_down" => {
                 let interval = error_resp.interval.unwrap_or(5);
                 log::warn!("Server requested slow down, waiting {} seconds", interval);
-                thread::sleep(std::time::Duration::from_secs(interval));
+                thread::sleep(StdDuration::from_secs(interval));
                 continue;
             }
             "expired_token" => {
@@ -150,12 +176,62 @@ pub fn poll_teams_auth(device_code: &str, client_id: &str) -> Result<TeamsTokens
     }
 }
 
-pub fn refresh_teams_token(tokens: &TeamsTokens, client_id: &str) -> Result<TeamsTokens, String> {
+pub fn complete_teams_auth(
+    code: &str,
+    code_verifier: &str,
+    client_id: &str,
+    redirect_uri: &str,
+) -> Result<TeamsTokens, String> {
+    let client = reqwest::blocking::Client::new();
+
+    let params = [
+        ("grant_type", "authorization_code"),
+        ("code", code),
+        ("redirect_uri", redirect_uri),
+        ("client_id", client_id),
+        ("code_verifier", code_verifier),
+    ];
+
+    let response = client
+        .post("https://login.microsoftonline.com/common/oauth2/v2.0/token")
+        .form(&params)
+        .send()
+        .map_err(|e| format!("Failed to send token request: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().unwrap_or_default();
+        return Err(format!("Token request failed: {} - {}", status, body));
+    }
+
+    #[derive(Deserialize)]
+    struct TokenResponse {
+        access_token: String,
+        refresh_token: String,
+        expires_in: u64,
+        #[allow(dead_code)]
+        token_type: String,
+    }
+
+    let token_resp: TokenResponse = response
+        .json()
+        .map_err(|e| format!("Failed to parse token response: {}", e))?;
+
+    let expires_at = chrono::Utc::now() + chrono::Duration::seconds(token_resp.expires_in as i64);
+
+    Ok(TeamsTokens {
+        access_token: token_resp.access_token,
+        refresh_token: token_resp.refresh_token,
+        expires_at,
+    })
+}
+
+pub fn refresh_teams_token(tokens: &TeamsTokens) -> Result<TeamsTokens, String> {
     let client = reqwest::blocking::Client::new();
 
     let params = [
         ("grant_type", "refresh_token"),
-        ("client_id", client_id),
+        ("client_id", MICROSOFT_GRAPH_CLIENT_ID),
         ("refresh_token", &tokens.refresh_token),
     ];
 

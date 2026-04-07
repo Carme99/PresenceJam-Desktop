@@ -1,6 +1,5 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
-  import { open } from '@tauri-apps/plugin-shell';
   import { onMount } from 'svelte';
   import { currentView } from '$lib/stores/app';
   import { configStore, saveConfig, loadConfig, type AppConfig } from '$lib/stores/config';
@@ -142,8 +141,8 @@
         />
       </div>
       <div class="form-group">
-        <label>Live Preview</label>
-        <div class="preview-box">{preview}</div>
+        <label for="live-preview">Live Preview</label>
+        <div id="live-preview" class="preview-box">{preview}</div>
       </div>
       <p class="hint">
         Available placeholders: <code>{'{artist}'}</code>, <code>{'{track}'}</code>, <code>{'{album}'}</code>, <code>{'{emoji}'}</code>
@@ -234,6 +233,11 @@
     padding: 20px;
     max-width: 600px;
     margin: 0 auto;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    box-sizing: border-box;
+    overflow: hidden;
   }
 
   .header {
@@ -272,6 +276,8 @@
     display: flex;
     flex-direction: column;
     gap: 16px;
+    flex: 1;
+    overflow-y: auto;
   }
 
   .card {

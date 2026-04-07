@@ -15,8 +15,8 @@
       {
         "title": "PresenceJam",
         "label": "main",
-        "width": 480,
-        "height": 640,
+        "width": 600,
+        "height": 750,
         "minWidth": 400,
         "minHeight": 500,
         "resizable": true,
@@ -31,12 +31,12 @@
       "iconAsTemplate": false
     },
     "security": {
-      "csp": "default-src 'self'; img-src 'self' https://i.scdn.co https://mosh-pa.spotify.com; style-src 'self' 'unsafe-inline'; connect-src 'self' https://api.spotify.com https://login.microsoftonline.com https://graph.microsoft.com https://accounts.spotify.com https://api-secure.spotify.com"
+      "csp": "default-src 'self'; img-src 'self' https://i.scdn.co https://mosh-pa.spotify.com; style-src 'self' 'unsafe-inline'; connect-src 'self' https://api.spotify.com https://login.microsoftonline.com https://graph.microsoft.com https://accounts.spotify.com https://api-secure.spotify.com https://microsoft.com https://*.microsoft.com"
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "msi"],
+    "targets": ["msi"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -58,37 +58,10 @@
     "longDescription": "Automatically syncs your currently playing Spotify track to your Microsoft Teams status message."
   },
   "plugins": {
-    "notification": {
-      "all": true
-    },
-    "store": {},
-    "autostart": {
-      "macOSExtraIdentifiers": ["com.presencejam.app"]
-    },
-    "log": {
-      "targets": [
-        {
-          "kind": "folder",
-          "path": "",
-          "filename": "PresenceJam"
-        },
-        {
-          "kind": "stdout"
-        }
-      ],
-      "maxFileSize": 5242880
-    },
-    "shell": {
-      "open": true
-    },
-    "http": {
-      "scope": [
-        "https://api.spotify.com/*",
-        "https://login.microsoftonline.com/*",
-        "https://graph.microsoft.com/*",
-        "https://accounts.spotify.com/*",
-        "https://api-secure.spotify.com/*"
-      ]
+    "deep-link": {
+      "desktop": {
+        "schemes": ["presencejam"]
+      }
     }
   }
 }

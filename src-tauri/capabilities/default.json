@@ -46,6 +46,7 @@
     "http:default",
     "process:default",
     "process:allow-exit",
-    "process:allow-restart"
+    "process:allow-restart",
+    "deep-link:default"
   ]
 }

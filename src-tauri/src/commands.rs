@@ -1,7 +1,7 @@
 use crate::config::{self, AppConfig};
 use crate::spotify::{SpotifyTokens, TrackInfo};
 use crate::teams::{DeviceCodeResponse, TeamsTokens};
-use crate::{polling, AppState};
+use crate::{polling, AppState, PendingSpotifyAuth};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_store::StoreExt;
@@ -42,14 +42,10 @@ pub fn start_spotify_auth(
     client_secret: String,
     redirect_uri: String,
     app: AppHandle,
-) -> Result<SpotifyAuthResponse, String> {
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<(), String> {
     let verifier = crate::spotify::pkce_generate_verifier();
     let challenge = crate::spotify::pkce_generate_challenge(&verifier);
-    let state = crate::spotify::pkce_generate_verifier();
-
-    let encoded_redirect = urlencoding::encode(&redirect_uri);
-    let encoded_challenge = urlencoding::encode(&challenge);
-    let encoded_state = urlencoding::encode(&state);
 
     let auth_url = format!(
         "https://accounts.spotify.com/authorize\
@@ -58,11 +54,24 @@ pub fn start_spotify_auth(
          &redirect_uri={}\
          &code_challenge_method=S256\
          &code_challenge={}\
-         &state={}\
          &scope=user-read-currently-playing user-read-playback-state",
-        client_id, encoded_redirect, encoded_challenge, encoded_state
+        client_id,
+        urlencoding::encode(&redirect_uri),
+        urlencoding::encode(&challenge)
     );
 
+    // Store pending auth in AppState
+    {
+        let mut pending = state.pending_spotify_auth.write();
+        *pending = Some(PendingSpotifyAuth {
+            verifier: verifier.clone(),
+            client_id: client_id.clone(),
+            client_secret: client_secret.clone(),
+            redirect_uri: redirect_uri.clone(),
+        });
+    }
+
+    // Also persist to store for crash recovery
     let store = app.store("tokens").map_err(|e| e.to_string())?;
     store.set("spotify_client_id", serde_json::json!(client_id));
     store.set("spotify_client_secret", serde_json::json!(client_secret));
@@ -74,8 +83,8 @@ pub fn start_spotify_auth(
         log::warn!("Failed to open browser for Spotify auth: {}", e);
     }
 
-    log::info!("Opened Spotify auth URL");
-    Ok(SpotifyAuthResponse { auth_url, verifier })
+    log::info!("Spotify auth started with redirect_uri: {}", redirect_uri);
+    Ok(())
 }
 
 #[tauri::command]
@@ -106,6 +115,39 @@ pub fn complete_spotify_auth(
     let _ = app.emit("spotify-auth-complete", &tokens);
 
     log::info!("Spotify authentication completed successfully");
+    Ok(tokens)
+}
+
+#[tauri::command]
+pub fn complete_spotify_auth_manual(
+    code: String,
+    app: AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<SpotifyTokens, String> {
+    // Get pending auth from AppState
+    let pending = {
+        let mut guard = state.pending_spotify_auth.write();
+        guard.take().ok_or("No pending Spotify auth. Please start auth again.")?
+    };
+    
+    let tokens = crate::spotify::complete_spotify_auth(
+        &code,
+        &pending.verifier,
+        &pending.client_id,
+        &pending.client_secret,
+        &pending.redirect_uri,
+    )?;
+
+    polling::save_spotify_tokens(&app, &tokens)?;
+
+    {
+        let mut tokens_guard = state.spotify_tokens.write();
+        *tokens_guard = Some(tokens.clone());
+    }
+
+    let _ = app.emit("spotify-auth-complete", &tokens);
+
+    log::info!("Spotify authentication completed (manual fallback)");
     Ok(tokens)
 }
 
@@ -166,29 +208,32 @@ pub fn refresh_spotify(
 }
 
 #[tauri::command]
-pub fn start_teams_auth(client_id: String, app: AppHandle) -> Result<DeviceCodeResponse, String> {
-    let (response, _device_code) = crate::teams::start_teams_auth(&client_id)?;
+pub fn open_external_url(url: String) -> Result<(), String> {
+    tauri_plugin_opener::open_url(&url, None::<&str>)
+        .map_err(|e| format!("Failed to open URL: {}", e))
+}
+
+#[tauri::command]
+pub fn start_teams_auth_device_code(app: AppHandle) -> Result<DeviceCodeResponse, String> {
+    log::info!("start_teams_auth_device_code called");
+    let response = crate::teams::start_teams_auth_device_code()?;
+    log::info!("start_teams_auth_device_code: got response");
 
     let store = app.store("tokens").map_err(|e| e.to_string())?;
-    store.set("teams_client_id", serde_json::json!(client_id));
+    store.set("teams_device_code", serde_json::json!(response.device_code));
     store.save().map_err(|e| e.to_string())?;
 
-    log::info!(
-        "Teams auth started. User code: {}, verification URL: {}",
-        response.user_code,
-        response.verification_url
-    );
+    log::info!("Teams device code auth started");
     Ok(response)
 }
 
 #[tauri::command]
 pub fn poll_teams_auth(
     device_code: String,
-    client_id: String,
     app: AppHandle,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<TeamsTokens, String> {
-    let tokens = crate::teams::poll_teams_auth(&device_code, &client_id)?;
+    let tokens = crate::teams::poll_teams_auth(&device_code)?;
 
     polling::save_teams_tokens(&app, &tokens)?;
 
@@ -200,6 +245,37 @@ pub fn poll_teams_auth(
     let _ = app.emit("teams-auth-complete", &tokens);
 
     log::info!("Teams authentication completed successfully");
+    Ok(tokens)
+}
+
+#[tauri::command]
+pub fn complete_teams_auth_manual(
+    code: String,
+    app: AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<TeamsTokens, String> {
+    let pending = {
+        let mut guard = state.pending_teams_auth.write();
+        guard.take().ok_or("No pending Teams auth. Please start auth again.")?
+    };
+    
+    let tokens = crate::teams::complete_teams_auth(
+        &code,
+        &pending.verifier,
+        &pending.client_id,
+        &pending.redirect_uri,
+    )?;
+
+    polling::save_teams_tokens(&app, &tokens)?;
+
+    {
+        let mut guard = state.teams_tokens.write();
+        *guard = Some(tokens.clone());
+    }
+
+    let _ = app.emit("teams-auth-complete", &tokens);
+
+    log::info!("Teams authentication completed (manual fallback)");
     Ok(tokens)
 }
 
@@ -230,19 +306,12 @@ pub fn refresh_teams(
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<(), String> {
-    let store = app.store("tokens").map_err(|e| e.to_string())?;
-
-    let client_id = store
-        .get("teams_client_id")
-        .and_then(|v| v.as_str().map(String::from))
-        .ok_or("Teams client ID not found")?;
-
     let current_tokens = {
         let guard = state.teams_tokens.read();
         guard.clone().ok_or("No Teams tokens to refresh")?
     };
 
-    let new_tokens = crate::teams::refresh_teams_token(&current_tokens, &client_id)?;
+    let new_tokens = crate::teams::refresh_teams_token(&current_tokens)?;
 
     polling::save_teams_tokens(&app, &new_tokens)?;
 
