@@ -5,6 +5,8 @@
 
 **Sync your Spotify playback to Microsoft Teams status automatically.**
 
+*A solo-dev, vibe-coded Windows app built for fun.*
+
 ## Screenshots
 
 [PLACEHOLDER: Add screenshot of the app UI here]
@@ -14,18 +16,17 @@
 ## Downloads
 
 Download the latest release from GitHub:
-- `PresenceJam_2.0.0_x64-setup.exe` — Installer (requires admin)
-- `PresenceJam_2.0.0_x64_portable.zip` — Portable (no install, no UAC)
+- `PresenceJam_2.0.0_x64_en-US.msi` — Windows installer
 
 ## Features
 
 - Automatically updates Teams status with current Spotify track
-- Secure token storage (DPAPI on Windows)
-- Optional Windows notifications on track change
+- Token storage in user profile
 - Customizable status format with emoji
-- Smart polling (faster near track end)
+- Configurable polling interval
 - Launch at login
 - Real-time log viewer
+- Optional Windows notifications on track change *(planned)*
 
 ## Setup
 
@@ -35,30 +36,32 @@ Download the latest release from GitHub:
 - Spotify Premium account
 - Microsoft 365 account with Teams
 
-### Step 1: Register Spotify App
+### Step 1: Register Your Spotify App
 
-1. Go to https://developer.spotify.com/dashboard
+1. Go to [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)
 2. Create a new app
-3. Add `http://localhost:7890/callback` to Redirect URIs
-4. Copy Client ID and Client Secret
+3. Add `presencejam://callback` to Redirect URIs
+4. Copy your Client ID and Client Secret
 
-### Step 2: Register Azure AD App (Teams)
-
-1. Go to https://portal.azure.com → Azure Active Directory → App registrations
-2. Register a new app
-3. Add `Native` platform (no redirect URI needed)
-4. Enable: API permissions → Microsoft Graph → Presence.ReadWrite
-5. Copy Application (client) ID
-
-### Step 3: Configure PresenceJam
+### Step 2: Connect to Spotify
 
 1. Run PresenceJam
-2. Enter your Spotify Client ID + Secret
-3. Click "Connect Spotify" → authorize in browser
-4. Enter your Azure AD Client ID
-5. Click "Sign in with Microsoft" → enter the user code
-6. Customize your status format
-7. Click "Finish"
+2. Enter your Spotify Client ID + Client Secret
+3. Click "Connect Spotify" — authorization opens in your browser
+4. If the app doesn't detect authorization automatically, paste the redirect URL from your browser manually
+
+### Step 3: Connect Microsoft Teams
+
+1. Click "Sign in with Microsoft"
+2. A code will be displayed — note it down
+3. Visit the verification URL shown and enter the code
+4. Click "I've completed sign-in"
+
+### Step 4: Customize & Finish
+
+1. Adjust your status format using `{artist}`, `{track}`, `{album}`, `{emoji}`
+2. Configure polling interval
+3. Click "Finish"
 
 ## Status Format
 
@@ -75,12 +78,12 @@ Default: `🎵 {artist} - {track} 🎧`
 
 ### "Spotify not connected"
 
-- Verify your Spotify app redirect URI includes `http://localhost:7890/callback`
-- Try pasting the redirect URL manually
+- Verify your Spotify app redirect URI includes `presencejam://callback`
+- Try pasting the redirect URL from your browser manually
 
 ### "Teams not updating"
 
-- Ensure the Azure AD app has `Presence.ReadWrite` permission
+- Sign out and sign back in via the app
 - Check logs in the app (Logs view)
 
 ### App closes on X button
@@ -91,7 +94,7 @@ Default: `🎵 {artist} - {track} 🎧`
 ## Data & Privacy
 
 - All data stored locally (no cloud)
-- Tokens encrypted via Windows DPAPI
+- Tokens stored in your user profile
 - Nothing is sent to third-party servers except Spotify and Microsoft APIs
 
 ## Contributing

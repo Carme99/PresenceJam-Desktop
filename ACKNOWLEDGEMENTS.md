@@ -19,7 +19,7 @@ PresenceJam uses the following open-source projects. We're grateful to all the m
 | [reqwest](https://github.com/seanmonstar/reqwest) | 0.12 | Apache-2.0 OR MIT | HTTP client for Spotify/Graph APIs |
 | [serde](https://github.com/serde-rs/serde) | 1.x | Apache-2.0 OR MIT | Serialization framework |
 | [serde_json](https://github.com/serde-rs/json) | 1.x | Apache-2.0 OR MIT | JSON parsing |
-| [tokio](https://github.com/tokio-rs/tokio) | 1.x | MIT | Async runtime |
+| [tokio](https://github.com/tokio-rs/tokio) | 1.x | MIT | Async runtime (used throughout Rust codebase for non-blocking operations) |
 | [chrono](https://github.com/chronotope/chrono) | 0.4 | Apache-2.0 OR MIT | Date/time handling |
 | [sha2](https://github.com/RustCrypto/hashes) | 0.10 | Apache-2.0 OR MIT | SHA256 for PKCE |
 | [base64](https://github.com/marshallpierce/rust-base64) | 0.22 | Apache-2.0 OR MIT | Base64 encoding for PKCE |
