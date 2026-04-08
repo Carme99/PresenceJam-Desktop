@@ -13,8 +13,8 @@
 
 ## Why?
 
-I wanted to see what song my colleagues were jamming to without asking — 
-so I built this. It's a bit cursed, a bit wonderful, and fully vibe-coded.
+I had a weekend, some caffeine, and a vague memory of MSN Messenger's 
+"Now Playing" feature. This is the result. Fully vibe-coded.
 
 ## What It Does
 
