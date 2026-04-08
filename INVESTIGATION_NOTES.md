@@ -2,7 +2,7 @@
 
 **Date Started:** 2026-04-07
 **Last Updated:** 2026-04-08
-**Status:** 🔍 DEEP INVESTIGATION COMPLETE - Root Cause Identified
+**Status:** ✅ FIX IMPLEMENTED - Awaiting Testing
 
 ---
 
@@ -10,10 +10,23 @@
 
 **The investigation has concluded that the issue is NOT a corporate proxy problem as originally suspected.** After testing on an off-network machine (fresh Windows install with no corporate network), the same error occurred. This rules out network-level interception.
 
-**The actual root cause:** The `teams.rs` code lacks proper HTTP response handling. Specifically:
-1. It never checks the HTTP status code before attempting JSON parsing
-2. It never logs the raw response body when JSON parsing fails
-3. The error message "error decoding response body" is the only information available - we cannot see what Microsoft actually returned
+**The actual root cause:** The `teams.rs` code lacked proper HTTP response handling. Specifically:
+1. It never checked the HTTP status code before attempting JSON parsing
+2. It never logged the raw response body when JSON parsing failed
+3. The error message "error decoding response body" was the only information available - we couldn't see what Microsoft actually returned
+
+**The fix (implemented 2026-04-08):**
+- Added User-Agent header (`PresenceJam/2.0`) to all HTTP requests
+- Added Accept header (`application/json`) to all HTTP requests
+- Log response status BEFORE JSON parsing
+- Extract raw body BEFORE JSON parsing
+- Log raw body on success and failure
+- Return errors with status code + raw body
+- Apply same fix to all 4 auth functions:
+  - `start_teams_auth_device_code()`
+  - `poll_teams_auth()`
+  - `complete_teams_auth()`
+  - `refresh_teams_token()`
 
 ---
 
@@ -194,9 +207,9 @@ let raw: DeviceCodeResponseRaw = response.json()...  // Fails if not success or 
 ### Source Files
 | File | Purpose | Key Finding |
 |------|---------|------------|
-| `src-tauri/src/teams.rs` | Teams OAuth implementation | **CRITICAL: No HTTP response debugging** |
+| `src-tauri/src/teams.rs` | Teams OAuth implementation | ✅ **FIXED: Added HTTP response debugging with User-Agent and Accept headers** |
 | `src-tauri/src/spotify.rs` | Spotify OAuth (reference) | ✅ Proper error handling with status + body |
-| `src-tauri/src/commands.rs` | Tauri command handlers | Properly registered, issue is in teams.rs |
+| `src-tauri/src/commands.rs` | Tauri command handlers | Properly registered |
 | `src-tauri/src/lib.rs` | App initialization | tauri-plugin-http initialized but unused |
 | `src/lib/components/Onboarding.svelte` | Frontend UI | Test buttons added, invokes correctly |
 | `src-tauri/Cargo.toml` | Rust dependencies | reqwest with "blocking" feature |
@@ -413,11 +426,11 @@ Same debug logging needs to be added to:
 
 ## Next Steps
 
-1. **Implement Phase 1 fix** - Add HTTP response debugging to `start_teams_auth_device_code()`
-2. **Rebuild and test** - Get actual error details from Microsoft
-3. **Implement Phase 2** - Handle Microsoft error response format
-4. **Apply to all auth functions** - Same fixes needed in poll, complete, refresh
-5. **Verify fix** - Confirm Teams auth works on both networks
+1. ~~Implement Phase 1 fix~~ - ✅ DONE: Added HTTP response debugging to all 4 auth functions
+2. ~~Implement Phase 2~~ - ✅ DONE: Handle Microsoft error response format (serde_json with body in error)
+3. ~~Apply to all auth functions~~ - ✅ DONE: Same fixes in poll, complete, refresh
+4. **Rebuild and test** - Get actual error details from Microsoft
+5. **Verify fix** - Confirm Teams auth works
 
 ---
 

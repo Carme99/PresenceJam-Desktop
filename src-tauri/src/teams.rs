@@ -1,10 +1,10 @@
+use base64::Engine;
 use chrono::Utc;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use base64::Engine;
 use sha2::Digest;
-use std::time::Duration as StdDuration;
 use std::thread;
+use std::time::Duration as StdDuration;
 
 pub const MICROSOFT_GRAPH_CLIENT_ID: &str = "14d82eec-204b-4c2f-b7e8-296a70dab67e";
 
@@ -40,7 +40,8 @@ pub struct DeviceCodeResponse {
 #[derive(Debug, Deserialize)]
 struct DeviceCodeResponseRaw {
     user_code: String,
-    verification_url: String,
+    #[serde(alias = "verification_url", rename = "verification_uri")]
+    verification_uri: String,
     device_code: String,
     interval: u64,
     expires_in: u64,
@@ -62,7 +63,11 @@ struct TokenErrorResponse {
 
 pub fn start_teams_auth_device_code() -> Result<DeviceCodeResponse, String> {
     log::info!("teams::start_teams_auth_device_code: starting");
-    let client = reqwest::blocking::Client::new();
+
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("PresenceJam/2.0")
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
     log::info!("teams::start_teams_auth_device_code: client created");
 
     let params = [
@@ -73,6 +78,7 @@ pub fn start_teams_auth_device_code() -> Result<DeviceCodeResponse, String> {
 
     let response = client
         .post("https://login.microsoftonline.com/common/oauth2/v2.0/devicecode")
+        .header("Accept", "application/json")
         .form(&params)
         .send()
         .map_err(|e| {
@@ -81,14 +87,42 @@ pub fn start_teams_auth_device_code() -> Result<DeviceCodeResponse, String> {
         })?;
     log::info!("teams::start_teams_auth_device_code: send succeeded");
 
-    let raw: DeviceCodeResponseRaw = response
-        .json()
-        .map_err(|e| format!("Failed to parse device code response: {}", e))?;
+    let status = response.status();
+    log::info!(
+        "teams::start_teams_auth_device_code: response status: {}",
+        status
+    );
+
+    let raw_body = response.text().map_err(|e| {
+        log::error!(
+            "teams::start_teams_auth_device_code: failed to read body: {}",
+            e
+        );
+        format!("Failed to read response body: {}", e)
+    })?;
+    log::info!(
+        "teams::start_teams_auth_device_code: raw response body: {}",
+        raw_body
+    );
+
+    if !status.is_success() {
+        return Err(format!(
+            "Device code request failed with status {}: {}",
+            status, raw_body
+        ));
+    }
+
+    let raw: DeviceCodeResponseRaw = serde_json::from_str(&raw_body).map_err(|e| {
+        format!(
+            "Failed to parse device code response: {} (body was: {})",
+            e, raw_body
+        )
+    })?;
     log::info!("teams::start_teams_auth_device_code: parsed response");
 
     let result = DeviceCodeResponse {
         user_code: raw.user_code,
-        verification_url: raw.verification_url,
+        verification_url: raw.verification_uri,
         device_code: raw.device_code.clone(),
         interval: raw.interval,
         expires_in: raw.expires_in,
@@ -104,7 +138,10 @@ pub fn start_teams_auth_device_code() -> Result<DeviceCodeResponse, String> {
 }
 
 pub fn poll_teams_auth(device_code: &str) -> Result<TeamsTokens, String> {
-    let client = reqwest::blocking::Client::new();
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("PresenceJam/2.0")
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
     let start_time = std::time::Instant::now();
     let timeout = StdDuration::from_secs(900);
 
@@ -121,18 +158,28 @@ pub fn poll_teams_auth(device_code: &str) -> Result<TeamsTokens, String> {
 
         let response = client
             .post("https://login.microsoftonline.com/common/oauth2/v2.0/token")
+            .header("Accept", "application/json")
             .form(&params)
             .send()
             .map_err(|e| format!("Failed to send token request: {}", e))?;
 
         let status = response.status();
 
-        if status.is_success() {
-            let token_resp: TokenResponse = response
-                .json()
-                .map_err(|e| format!("Failed to parse token response: {}", e))?;
+        let raw_body = response
+            .text()
+            .map_err(|e| format!("Failed to read response body: {}", e))?;
+        log::debug!("poll_teams_auth: status={}, body={}", status, raw_body);
 
-            let expires_at = chrono::Utc::now() + chrono::Duration::seconds(token_resp.expires_in as i64);
+        if status.is_success() {
+            let token_resp: TokenResponse = serde_json::from_str(&raw_body).map_err(|e| {
+                format!(
+                    "Failed to parse token response: {} (body was: {})",
+                    e, raw_body
+                )
+            })?;
+
+            let expires_at =
+                chrono::Utc::now() + chrono::Duration::seconds(token_resp.expires_in as i64);
 
             log::info!("Successfully authenticated with Microsoft Teams");
 
@@ -143,9 +190,12 @@ pub fn poll_teams_auth(device_code: &str) -> Result<TeamsTokens, String> {
             });
         }
 
-        let error_resp: TokenErrorResponse = response
-            .json()
-            .map_err(|e| format!("Failed to parse error response: {}", e))?;
+        let error_resp: TokenErrorResponse = serde_json::from_str(&raw_body).map_err(|e| {
+            format!(
+                "Failed to parse error response: {} (body was: {})",
+                e, raw_body
+            )
+        })?;
 
         match error_resp.error.as_str() {
             "authorization_pending" => {
@@ -163,13 +213,16 @@ pub fn poll_teams_auth(device_code: &str) -> Result<TeamsTokens, String> {
                 continue;
             }
             "expired_token" => {
-                return Err("The device code has expired. Please start authentication again.".to_string());
+                return Err(
+                    "The device code has expired. Please start authentication again.".to_string(),
+                );
             }
             _ => {
                 return Err(format!(
-                    "Authentication failed: {} - {}",
+                    "Authentication failed: {} - {} (raw body: {})",
                     error_resp.error,
-                    error_resp.error_description.unwrap_or_default()
+                    error_resp.error_description.unwrap_or_default(),
+                    raw_body
                 ));
             }
         }
@@ -182,7 +235,10 @@ pub fn complete_teams_auth(
     client_id: &str,
     redirect_uri: &str,
 ) -> Result<TeamsTokens, String> {
-    let client = reqwest::blocking::Client::new();
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("PresenceJam/2.0")
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
     let params = [
         ("grant_type", "authorization_code"),
@@ -194,14 +250,23 @@ pub fn complete_teams_auth(
 
     let response = client
         .post("https://login.microsoftonline.com/common/oauth2/v2.0/token")
+        .header("Accept", "application/json")
         .form(&params)
         .send()
         .map_err(|e| format!("Failed to send token request: {}", e))?;
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().unwrap_or_default();
-        return Err(format!("Token request failed: {} - {}", status, body));
+    let status = response.status();
+    let raw_body = response
+        .text()
+        .map_err(|e| format!("Failed to read response body: {}", e))?;
+
+    if !status.is_success() {
+        log::error!(
+            "complete_teams_auth: token request failed with status {}: {}",
+            status,
+            raw_body
+        );
+        return Err(format!("Token request failed: {} - {}", status, raw_body));
     }
 
     #[derive(Deserialize)]
@@ -213,9 +278,12 @@ pub fn complete_teams_auth(
         token_type: String,
     }
 
-    let token_resp: TokenResponse = response
-        .json()
-        .map_err(|e| format!("Failed to parse token response: {}", e))?;
+    let token_resp: TokenResponse = serde_json::from_str(&raw_body).map_err(|e| {
+        format!(
+            "Failed to parse token response: {} (body was: {})",
+            e, raw_body
+        )
+    })?;
 
     let expires_at = chrono::Utc::now() + chrono::Duration::seconds(token_resp.expires_in as i64);
 
@@ -227,7 +295,10 @@ pub fn complete_teams_auth(
 }
 
 pub fn refresh_teams_token(tokens: &TeamsTokens) -> Result<TeamsTokens, String> {
-    let client = reqwest::blocking::Client::new();
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("PresenceJam/2.0")
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
     let params = [
         ("grant_type", "refresh_token"),
@@ -237,24 +308,42 @@ pub fn refresh_teams_token(tokens: &TeamsTokens) -> Result<TeamsTokens, String> 
 
     let response = client
         .post("https://login.microsoftonline.com/common/oauth2/v2.0/token")
+        .header("Accept", "application/json")
         .form(&params)
         .send()
         .map_err(|e| format!("Failed to send refresh token request: {}", e))?;
 
-    if !response.status().is_success() {
-        let error_resp: TokenErrorResponse = response
-            .json()
-            .map_err(|e| format!("Failed to parse error response: {}", e))?;
+    let status = response.status();
+    let raw_body = response
+        .text()
+        .map_err(|e| format!("Failed to read response body: {}", e))?;
+
+    if !status.is_success() {
+        log::error!(
+            "refresh_teams_token: refresh request failed with status {}: {}",
+            status,
+            raw_body
+        );
+        let error_resp: TokenErrorResponse = serde_json::from_str(&raw_body).map_err(|e| {
+            format!(
+                "Failed to parse error response: {} (body was: {})",
+                e, raw_body
+            )
+        })?;
         return Err(format!(
-            "Failed to refresh token: {} - {}",
+            "Failed to refresh token: {} - {} (raw body: {})",
             error_resp.error,
-            error_resp.error_description.unwrap_or_default()
+            error_resp.error_description.unwrap_or_default(),
+            raw_body
         ));
     }
 
-    let token_resp: TokenResponse = response
-        .json()
-        .map_err(|e| format!("Failed to parse token response: {}", e))?;
+    let token_resp: TokenResponse = serde_json::from_str(&raw_body).map_err(|e| {
+        format!(
+            "Failed to parse token response: {} (body was: {})",
+            e, raw_body
+        )
+    })?;
 
     let expires_at = chrono::Utc::now() + chrono::Duration::seconds(token_resp.expires_in as i64);
 
@@ -323,9 +412,18 @@ pub fn set_teams_status_message(
 
     if !response.status().is_success() {
         let status = response.status();
-        let body_text = response.text().unwrap_or_else(|_| "Unknown error".to_string());
-        log::error!("Failed to set Teams status message: {} - {}", status, body_text);
-        return Err(format!("Failed to set status message: {} - {}", status, body_text));
+        let body_text = response
+            .text()
+            .unwrap_or_else(|_| "Unknown error".to_string());
+        log::error!(
+            "Failed to set Teams status message: {} - {}",
+            status,
+            body_text
+        );
+        return Err(format!(
+            "Failed to set status message: {} - {}",
+            status, body_text
+        ));
     }
 
     log::info!("Successfully set Teams status message: {}", message);
@@ -355,9 +453,18 @@ pub fn clear_teams_status_message(access_token: &str) -> Result<(), String> {
 
     if !response.status().is_success() {
         let status = response.status();
-        let body_text = response.text().unwrap_or_else(|_| "Unknown error".to_string());
-        log::error!("Failed to clear Teams status message: {} - {}", status, body_text);
-        return Err(format!("Failed to clear status message: {} - {}", status, body_text));
+        let body_text = response
+            .text()
+            .unwrap_or_else(|_| "Unknown error".to_string());
+        log::error!(
+            "Failed to clear Teams status message: {} - {}",
+            status,
+            body_text
+        );
+        return Err(format!(
+            "Failed to clear status message: {} - {}",
+            status, body_text
+        ));
     }
 
     log::info!("Successfully cleared Teams status message");
