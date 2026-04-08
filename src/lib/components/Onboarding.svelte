@@ -3,6 +3,7 @@
   import { listen } from '@tauri-apps/api/event';
   import { onMount } from 'svelte';
   import { configStore, saveConfig, type AppConfig } from '$lib/stores/config';
+  import { currentView } from '$lib/stores/app';
 
   let step = $state(1);
   let spotifyClientId = $state('');
@@ -124,36 +125,42 @@
   }
 
   async function finish() {
-    const cfg: AppConfig = {
-      spotify: {
-        client_id: spotifyClientId,
-        client_secret: spotifyClientSecret,
-        redirect_uri: 'presencejam://callback',
-        scopes: ['user-read-currently-playing', 'user-read-playback-state']
-      },
-      teams: {
-        status_format: statusFormat,
-        clear_on_pause: true
-      },
-      polling: {
-        default_interval_seconds: pollingInterval,
-        minimum_interval_seconds: 5,
-        max_interval_seconds: 10,
-        expiry_buffer_seconds: 10
-      },
-      logging: {
-        enabled: true,
-        log_level: 'Info',
-        retention_days: 30
+    try {
+      const cfg: AppConfig = {
+        spotify: {
+          client_id: spotifyClientId,
+          client_secret: spotifyClientSecret,
+          redirect_uri: 'presencejam://callback',
+          scopes: ['user-read-currently-playing', 'user-read-playback-state']
+        },
+        teams: {
+          status_format: statusFormat,
+          clear_on_pause: true
+        },
+        polling: {
+          default_interval_seconds: pollingInterval,
+          minimum_interval_seconds: 5,
+          max_interval_seconds: 10,
+          expiry_buffer_seconds: 10
+        },
+        logging: {
+          enabled: true,
+          log_level: 'Info',
+          retention_days: 30
+        }
+      };
+      await saveConfig(cfg);
+      
+      if (launchAtLogin) {
+        await invoke('set_autostart_enabled', { enabled: true });
       }
-    };
-    await saveConfig(cfg);
-    
-    if (launchAtLogin) {
-      await invoke('set_autostart_enabled', { enabled: true });
+      
+      await invoke('complete_onboarding');
+      
+      currentView.set('dashboard');
+    } catch (e) {
+      console.error('Finish failed:', e);
     }
-    
-    await invoke('complete_onboarding');
   }
 </script>
 
@@ -220,26 +227,6 @@
         <button onclick={() => connectTeams()}>
           Sign in with Microsoft
         </button>
-        <button onclick={() => { console.log('test click'); teamsUserCode = 'TEST'; }}>
-          TEST CLICK
-        </button>
-        <button onclick={() => { 
-          console.log('invoke test start'); 
-          invoke<any>('start_teams_auth_device_code')
-            .then((r: any) => { 
-              console.log('invoke success', r); 
-              teamsUserCode = r.user_code;
-              teamsVerificationUrl = r.verification_url;
-              teamsDeviceCode = r.device_code;
-            })
-            .catch((e: any) => { 
-              console.error('invoke error', e); 
-              alert('Error: ' + e); 
-            }); 
-        }}>
-          TEST INVOKE
-        </button>
-        <p id="teams-debug" style="color: red; font-size: 12px; margin-top: 10px;"></p>
       {:else if !teamsConnected}
         <div class="device-code-box">
           <p>Visit <a href={teamsVerificationUrl}>{teamsVerificationUrl}</a></p>

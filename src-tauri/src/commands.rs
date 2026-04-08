@@ -32,8 +32,7 @@ pub fn save_config(config: AppConfig) -> Result<(), String> {
 
 #[tauri::command]
 pub fn get_config_dir() -> Result<String, String> {
-    config::config_dir()
-        .map(|p| p.to_string_lossy().to_string())
+    config::config_dir().map(|p| p.to_string_lossy().to_string())
 }
 
 #[tauri::command]
@@ -127,9 +126,11 @@ pub fn complete_spotify_auth_manual(
     // Get pending auth from AppState
     let pending = {
         let mut guard = state.pending_spotify_auth.write();
-        guard.take().ok_or("No pending Spotify auth. Please start auth again.")?
+        guard
+            .take()
+            .ok_or("No pending Spotify auth. Please start auth again.")?
     };
-    
+
     let tokens = crate::spotify::complete_spotify_auth(
         &code,
         &pending.verifier,
@@ -194,7 +195,8 @@ pub fn refresh_spotify(
         guard.clone().ok_or("No Spotify tokens to refresh")?
     };
 
-    let new_tokens = crate::spotify::refresh_spotify_token(&current_tokens, &client_id, &client_secret)?;
+    let new_tokens =
+        crate::spotify::refresh_spotify_token(&current_tokens, &client_id, &client_secret)?;
 
     polling::save_spotify_tokens(&app, &new_tokens)?;
 
@@ -256,9 +258,11 @@ pub fn complete_teams_auth_manual(
 ) -> Result<TeamsTokens, String> {
     let pending = {
         let mut guard = state.pending_teams_auth.write();
-        guard.take().ok_or("No pending Teams auth. Please start auth again.")?
+        guard
+            .take()
+            .ok_or("No pending Teams auth. Please start auth again.")?
     };
-    
+
     let tokens = crate::teams::complete_teams_auth(
         &code,
         &pending.verifier,
@@ -302,10 +306,7 @@ pub fn get_teams_tokens(
 }
 
 #[tauri::command]
-pub fn refresh_teams(
-    state: tauri::State<'_, Arc<AppState>>,
-    app: AppHandle,
-) -> Result<(), String> {
+pub fn refresh_teams(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> Result<(), String> {
     let current_tokens = {
         let guard = state.teams_tokens.read();
         guard.clone().ok_or("No Teams tokens to refresh")?
@@ -325,10 +326,7 @@ pub fn refresh_teams(
 }
 
 #[tauri::command]
-pub fn start_syncing(
-    state: tauri::State<'_, Arc<AppState>>,
-    app: AppHandle,
-) -> Result<(), String> {
+pub fn start_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> Result<(), String> {
     let is_syncing = {
         let guard = state.is_syncing.read();
         *guard
@@ -357,10 +355,7 @@ pub fn start_syncing(
 }
 
 #[tauri::command]
-pub fn stop_syncing(
-    state: tauri::State<'_, Arc<AppState>>,
-    app: AppHandle,
-) -> Result<(), String> {
+pub fn stop_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> Result<(), String> {
     polling::stop_polling(state.inner());
 
     {
@@ -443,23 +438,20 @@ pub fn set_autostart_enabled(app: AppHandle, enabled: bool) -> Result<(), String
 
 #[tauri::command]
 pub fn open_logs_folder(app: AppHandle) -> Result<(), String> {
-    let logs_path = app
-        .path()
-        .app_log_dir()
-        .map_err(|e| e.to_string())?;
+    let logs_path = app.path().app_log_dir().map_err(|e| e.to_string())?;
     let path_str = logs_path.to_string_lossy();
-    tauri_plugin_opener::open_url(&path_str, None::<&str>)
-        .map_err(|e| e.to_string())
+    tauri_plugin_opener::open_url(&path_str, None::<&str>).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn open_external(url: String) -> Result<(), String> {
-    tauri_plugin_opener::open_url(&url, None::<&str>)
-        .map_err(|e| e.to_string())
+    tauri_plugin_opener::open_url(&url, None::<&str>).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn get_current_track(state: tauri::State<'_, Arc<AppState>>) -> Result<Option<TrackInfo>, String> {
+pub fn get_current_track(
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<Option<TrackInfo>, String> {
     let guard = state.current_track.read();
     Ok(guard.clone())
 }
@@ -485,8 +477,18 @@ pub fn complete_onboarding(
         guard.is_some()
     };
 
+    log::info!(
+        "complete_onboarding: has_spotify={}, has_teams={}",
+        has_spotify,
+        has_teams
+    );
+
     if has_spotify && has_teams {
-        return start_syncing(state, app);
+        log::info!("complete_onboarding: starting sync");
+        start_syncing(state, app)?;
+        log::info!("complete_onboarding: sync started successfully");
+    } else {
+        log::warn!("complete_onboarding: missing tokens, not starting sync");
     }
 
     Ok(())
