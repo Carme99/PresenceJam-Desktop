@@ -365,6 +365,7 @@ pub fn refresh_teams_token(tokens: &TeamsTokens) -> Result<TeamsTokens, String> 
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct StatusMessageRequest {
     status_message: StatusMessageContent,
 }
@@ -372,19 +373,22 @@ struct StatusMessageRequest {
 #[derive(Debug, Serialize)]
 struct StatusMessageContent {
     message: MessageContent,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", rename = "expiryDateTime")]
     expiry_date_time: Option<ExpiryDateTime>,
 }
 
 #[derive(Debug, Serialize)]
 struct MessageContent {
     content: String,
+    #[serde(rename = "contentType")]
     content_type: String,
 }
 
 #[derive(Debug, Serialize)]
 struct ExpiryDateTime {
+    #[serde(rename = "dateTime")]
     date_time: String,
+    #[serde(rename = "timeZone")]
     time_zone: String,
 }
 
