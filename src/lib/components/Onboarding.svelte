@@ -25,109 +25,179 @@
   let pollingInterval = $state(30);
 
   onMount(() => {
+    console.log('[ONBOARDING] onMount: ENTRY');
+    
+    console.log('[ONBOARDING] onMount: setting up spotify-auth-complete listener');
     const unlistenComplete = listen('spotify-auth-complete', () => {
+      console.log('[ONBOARDING] EVENT: spotify-auth-complete received');
       spotifyConnected = true;
       spotifyWaiting = false;
+      console.log('[ONBOARDING] EVENT: spotifyConnected=true, spotifyWaiting=false');
     });
     
+    console.log('[ONBOARDING] onMount: setting up spotify-auth-failed listener');
     const unlistenFailed = listen<string>('spotify-auth-failed', (event) => {
-      console.error('Spotify auth failed:', event.payload);
+      console.error('[ONBOARDING] EVENT: spotify-auth-failed received:', event.payload);
       spotifyWaiting = false;
+      console.log('[ONBOARDING] EVENT: spotifyWaiting=false (from failed)');
     });
     
+    console.log('[ONBOARDING] onMount: setting up teams-auth-complete listener');
     const unlistenTeamsComplete = listen('teams-auth-complete', () => {
+      console.log('[ONBOARDING] EVENT: teams-auth-complete received');
       teamsConnected = true;
       teamsPolling = false;
+      teamsAuthError = '';
+      console.log('[ONBOARDING] EVENT: teamsConnected=true, teamsPolling=false, teamsAuthError=""');
     });
     
+    console.log('[ONBOARDING] onMount: setting up teams-auth-failed listener');
     const unlistenTeamsFailed = listen<string>('teams-auth-failed', (event) => {
-      console.error('Teams auth failed:', event.payload);
+      console.error('[ONBOARDING] EVENT: teams-auth-failed received:', event.payload);
       teamsPolling = false;
+      teamsAuthError = String(event.payload);
+      console.log('[ONBOARDING] EVENT: teamsPolling=false, teamsAuthError set');
     });
     
+    console.log('[ONBOARDING] onMount: setting up cleanup');
     return () => {
+      console.log('[ONBOARDING] onDestroy: cleaning up listeners');
       unlistenComplete.then(fn => fn());
       unlistenFailed.then(fn => fn());
       unlistenTeamsComplete.then(fn => fn());
       unlistenTeamsFailed.then(fn => fn());
+      console.log('[ONBOARDING] onDestroy: listeners cleaned up');
     };
   });
 
   async function connectSpotify() {
+    console.log('[ONBOARDING] connectSpotify: ENTRY');
+    console.log('[ONBOARDING] connectSpotify: spotifyClientId.length=', spotifyClientId.length);
+    console.log('[ONBOARDING] connectSpotify: spotifyClientSecret.length=', spotifyClientSecret.length);
+    console.log('[ONBOARDING] connectSpotify: redirectUri=presencejam://callback');
+    
     try {
+      console.log('[ONBOARDING] connectSpotify: calling invoke start_spotify_auth');
       await invoke('start_spotify_auth', {
         clientId: spotifyClientId,
         clientSecret: spotifyClientSecret,
         redirectUri: 'presencejam://callback'
       });
+      console.log('[ONBOARDING] connectSpotify: invoke SUCCESS');
       spotifyWaiting = true;
+      console.log('[ONBOARDING] connectSpotify: spotifyWaiting=true');
     } catch (e) {
-      console.error('Spotify auth failed:', e);
+      console.error('[ONBOARDING] connectSpotify: invoke FAILED:', e);
+      spotifyWaiting = false;
+      console.log('[ONBOARDING] connectSpotify: spotifyWaiting=false (from error)');
     }
+    
+    console.log('[ONBOARDING] connectSpotify: EXIT');
   }
 
   async function handleManualUrlPaste() {
+    console.log('[ONBOARDING] handleManualUrlPaste: ENTRY');
+    console.log('[ONBOARDING] handleManualUrlPaste: spotifyManualUrl.length=', spotifyManualUrl.length);
+    
     try {
       const code = extractCodeFromUrl(spotifyManualUrl);
+      console.log('[ONBOARDING] handleManualUrlPaste: extracted code:', code ? 'present' : 'null');
+      
       if (code) {
+        console.log('[ONBOARDING] handleManualUrlPaste: calling invoke complete_spotify_auth_manual');
         const tokens = await invoke<any>('complete_spotify_auth_manual', { code });
+        console.log('[ONBOARDING] handleManualUrlPaste: invoke SUCCESS, tokens=', tokens ? 'present' : 'null');
+        
         if (tokens) {
           spotifyConnected = true;
           spotifyWaiting = false;
+          console.log('[ONBOARDING] handleManualUrlPaste: spotifyConnected=true, spotifyWaiting=false');
         }
+      } else {
+        console.log('[ONBOARDING] handleManualUrlPaste: no code extracted');
       }
     } catch (e) {
-      console.error('Spotify token exchange failed:', e);
+      console.error('[ONBOARDING] handleManualUrlPaste: FAILED:', e);
     }
+    
+    console.log('[ONBOARDING] handleManualUrlPaste: EXIT');
   }
 
   function extractCodeFromUrl(url: string): string | null {
+    console.log('[ONBOARDING] extractCodeFromUrl: ENTRY - url.length=', url.length);
     try {
       const parsed = new URL(url);
-      return parsed.searchParams.get('code');
-    } catch {
+      const code = parsed.searchParams.get('code');
+      console.log('[ONBOARDING] extractCodeFromUrl: code=', code ? 'present' : 'null');
+      return code;
+    } catch (e) {
+      console.error('[ONBOARDING] extractCodeFromUrl: URL parse failed:', e);
       return null;
     }
   }
 
   async function connectTeams() {
-    console.log('connectTeams START');
+    console.log('[ONBOARDING] connectTeams: ENTRY');
+    
     try {
-      console.log('connectTeams: calling invoke start_teams_auth_device_code');
+      console.log('[ONBOARDING] connectTeams: calling invoke start_teams_auth_device_code');
       const response = await invoke<any>('start_teams_auth_device_code');
-      console.log('connectTeams: got response', response);
+      console.log('[ONBOARDING] connectTeams: invoke SUCCESS');
+      console.log('[ONBOARDING] connectTeams: response.user_code=', response.user_code);
+      console.log('[ONBOARDING] connectTeams: response.verification_url=', response.verification_url);
+      console.log('[ONBOARDING] connectTeams: response.device_code=', response.device_code ? 'present' : 'null');
+      
       teamsUserCode = response.user_code;
       teamsVerificationUrl = response.verification_url;
       teamsDeviceCode = response.device_code;
-      console.log('connectTeams: calling open_external_url');
+      console.log('[ONBOARDING] connectTeams: state updated');
+      
+      console.log('[ONBOARDING] connectTeams: calling invoke open_external_url');
       await invoke('open_external_url', { url: teamsVerificationUrl });
-      console.log('connectTeams: done');
+      console.log('[ONBOARDING] connectTeams: open_external_url SUCCESS');
     } catch (e) {
-      console.error('connectTeams ERROR:', e);
+      console.error('[ONBOARDING] connectTeams: FAILED:', e);
     }
+    
+    console.log('[ONBOARDING] connectTeams: EXIT');
   }
 
   async function pollTeamsAuth() {
+    console.log('[ONBOARDING] pollTeamsAuth: ENTRY');
     teamsAuthError = '';
+    
     try {
       teamsPolling = true;
+      console.log('[ONBOARDING] pollTeamsAuth: teamsPolling=true');
+      console.log('[ONBOARDING] pollTeamsAuth: calling invoke poll_teams_auth');
+      console.log('[ONBOARDING] pollTeamsAuth: deviceCode.length=', teamsDeviceCode.length);
+      
       const tokens = await invoke<any>('poll_teams_auth', { deviceCode: teamsDeviceCode });
+      console.log('[ONBOARDING] pollTeamsAuth: invoke SUCCESS, tokens=', tokens ? 'present' : 'null');
+      
       if (tokens) {
         teamsConnected = true;
         teamsPolling = false;
         teamsAuthError = '';
+        console.log('[ONBOARDING] pollTeamsAuth: teamsConnected=true, teamsPolling=false');
       }
     } catch (e) {
-      console.error('Teams auth failed:', e);
+      console.error('[ONBOARDING] pollTeamsAuth: FAILED:', e);
       teamsAuthError = String(e);
       teamsPolling = false;
+      console.log('[ONBOARDING] pollTeamsAuth: teamsAuthError set, teamsPolling=false');
     }
+    
+    console.log('[ONBOARDING] pollTeamsAuth: EXIT');
   }
 
   async function finish() {
-    console.log('finish: starting');
+    console.log('[ONBOARDING] finish: ENTRY');
+    console.log('[ONBOARDING] finish: spotifyConnected=', spotifyConnected);
+    console.log('[ONBOARDING] finish: teamsConnected=', teamsConnected);
+    
     try {
-      console.log('finish: step 1 - saving config');
+      console.log('[ONBOARDING] finish: step 1 - building config');
       const cfg: AppConfig = {
         spotify: {
           client_id: spotifyClientId,
@@ -151,30 +221,38 @@
           retention_days: 30
         }
       };
-      await saveConfig(cfg);
-      console.log('finish: config saved');
+      console.log('[ONBOARDING] finish: config built');
       
-      console.log('finish: step 2 - autostart');
+      console.log('[ONBOARDING] finish: step 2 - calling saveConfig');
+      await saveConfig(cfg);
+      console.log('[ONBOARDING] finish: saveConfig SUCCESS');
+      
+      console.log('[ONBOARDING] finish: step 3 - launchAtLogin=', launchAtLogin);
       if (launchAtLogin) {
+        console.log('[ONBOARDING] finish: calling invoke set_autostart_enabled');
         try {
           await invoke('set_autostart_enabled', { enabled: true });
-          console.log('finish: autostart enabled');
+          console.log('[ONBOARDING] finish: set_autostart_enabled SUCCESS');
         } catch (e) {
-          console.error('Autostart failed (non-critical):', e);
+          console.error('[ONBOARDING] finish: set_autostart_enabled FAILED (non-critical):', e);
         }
       }
       
-      console.log('finish: step 3 - complete_onboarding');
+      console.log('[ONBOARDING] finish: step 4 - calling invoke complete_onboarding');
       const result = await invoke('complete_onboarding');
-      console.log('finish: complete_onboarding result:', result);
+      console.log('[ONBOARDING] finish: complete_onboarding SUCCESS, result=', result);
       
-      console.log('finish: step 4 - switching to dashboard');
+      console.log('[ONBOARDING] finish: step 5 - switching to dashboard');
       currentView.set('dashboard');
-      console.log('finish: done');
+      console.log('[ONBOARDING] finish: currentView=dashboard');
+      
+      console.log('[ONBOARDING] finish: SUCCESS - all steps completed');
     } catch (e) {
-      console.error('Finish failed:', e);
+      console.error('[ONBOARDING] finish: FAILED:', e);
       alert('Setup failed: ' + e);
     }
+    
+    console.log('[ONBOARDING] finish: EXIT');
   }
 </script>
 
@@ -229,7 +307,7 @@
         <div class="success-badge">
           <span>✓</span> Connected to Spotify
         </div>
-        <button onclick={() => step = 2}>Next →</button>
+        <button onclick={() => { step = 2; console.log('[ONBOARDING] step changed to 2'); }}>Next →</button>
       {/if}
     </div>
   {:else if step === 2}
@@ -260,10 +338,10 @@
         <div class="success-badge">
           <span>✓</span> Connected to Microsoft Teams
         </div>
-        <button onclick={() => step = 3}>Next →</button>
+        <button onclick={() => { step = 3; console.log('[ONBOARDING] step changed to 3'); }}>Next →</button>
       {/if}
       
-      <button class="back" onclick={() => step = 1}>← Back</button>
+      <button class="back" onclick={() => { step = 1; console.log('[ONBOARDING] step changed to 1'); }}>← Back</button>
     </div>
   {:else}
     <div class="step">
@@ -286,7 +364,7 @@
       </div>
       
       <button onclick={finish}>Finish</button>
-      <button class="back" onclick={() => step = 2}>← Back</button>
+      <button class="back" onclick={() => { step = 2; console.log('[ONBOARDING] step changed to 2'); }}>← Back</button>
     </div>
   {/if}
 </div>

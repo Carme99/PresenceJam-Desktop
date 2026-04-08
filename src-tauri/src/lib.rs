@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::thread;
 use parking_lot::RwLock;
 use tauri::{Manager, Emitter, AppHandle};
 
@@ -23,13 +24,14 @@ pub struct AppState {
     pub teams_tokens: RwLock<Option<crate::teams::TeamsTokens>>,
     pub current_track: RwLock<Option<crate::spotify::TrackInfo>>,
     pub is_syncing: RwLock<bool>,
-    pub polling_handle: RwLock<Option<tokio::task::JoinHandle<()>>>,
+    pub polling_handle: RwLock<Option<thread::JoinHandle<()>>>,
     pub pending_spotify_auth: RwLock<Option<PendingSpotifyAuth>>,
     pub pending_teams_auth: RwLock<Option<PendingTeamsAuth>>,
 }
 
 impl AppState {
     pub fn new() -> Self {
+        log::info!("[APP_STATE] AppState::new: creating new AppState");
         Self {
             config: RwLock::new(None),
             spotify_tokens: RwLock::new(None),
@@ -51,15 +53,22 @@ pub mod tray;
 pub mod commands;
 
 async fn handle_spotify_callback(code: &str, app: &AppHandle) -> Result<(), String> {
+    log::info!("[CALLBACK] handle_spotify_callback: ENTRY - code.len={}", code.len());
+    
     let state = app.state::<Arc<AppState>>();
+    log::info!("[CALLBACK] handle_spotify_callback: got app state");
     
     let pending = {
         let mut guard = state.pending_spotify_auth.write();
-        guard.take().ok_or("No pending Spotify auth")?
+        log::info!("[CALLBACK] handle_spotify_callback: taking pending Spotify auth from state");
+        guard.take().ok_or_else(|| {
+            log::error!("[CALLBACK] handle_spotify_callback: No pending Spotify auth found");
+            "No pending Spotify auth".to_string()
+        })?
     };
+    log::info!("[CALLBACK] handle_spotify_callback: pending auth found - verifier.len={}", pending.verifier.len());
     
-    log::info!("Completing Spotify auth with code");
-    
+    log::info!("[CALLBACK] handle_spotify_callback: calling complete_spotify_auth");
     let tokens = crate::spotify::complete_spotify_auth(
         code,
         &pending.verifier,
@@ -67,83 +76,121 @@ async fn handle_spotify_callback(code: &str, app: &AppHandle) -> Result<(), Stri
         &pending.client_secret,
         &pending.redirect_uri,
     )?;
+    log::info!("[CALLBACK] handle_spotify_callback: token exchange successful - access_token.len={}", tokens.access_token.len());
     
+    log::info!("[CALLBACK] handle_spotify_callback: saving tokens to store");
     crate::polling::save_spotify_tokens(app, &tokens)?;
     
     {
         let mut guard = state.spotify_tokens.write();
-        *guard = Some(tokens);
+        *guard = Some(tokens.clone());
+        log::info!("[CALLBACK] handle_spotify_callback: tokens stored in AppState");
     }
     
+    log::info!("[CALLBACK] handle_spotify_callback: EMIT spotify-auth-complete event");
     let _ = app.emit("spotify-auth-complete", ());
     
-    log::info!("Spotify auth completed via deep link");
+    log::info!("[CALLBACK] handle_spotify_callback: SUCCESS");
     Ok(())
 }
 
 async fn handle_teams_callback(code: &str, app: &AppHandle) -> Result<(), String> {
+    log::info!("[CALLBACK] handle_teams_callback: ENTRY - code.len={}", code.len());
+    
     let state = app.state::<Arc<AppState>>();
+    log::info!("[CALLBACK] handle_teams_callback: got app state");
     
     let pending = {
         let mut guard = state.pending_teams_auth.write();
-        guard.take().ok_or("No pending Teams auth")?
+        log::info!("[CALLBACK] handle_teams_callback: taking pending Teams auth from state");
+        guard.take().ok_or_else(|| {
+            log::error!("[CALLBACK] handle_teams_callback: No pending Teams auth found");
+            "No pending Teams auth".to_string()
+        })?
     };
+    log::info!("[CALLBACK] handle_teams_callback: pending auth found");
     
-    log::info!("Completing Teams auth with code");
-    
+    log::info!("[CALLBACK] handle_teams_callback: calling complete_teams_auth");
     let tokens = crate::teams::complete_teams_auth(
         code,
         &pending.verifier,
         &pending.client_id,
         &pending.redirect_uri,
     )?;
+    log::info!("[CALLBACK] handle_teams_callback: token exchange successful - access_token.len={}", tokens.access_token.len());
     
+    log::info!("[CALLBACK] handle_teams_callback: saving tokens to store");
     crate::polling::save_teams_tokens(app, &tokens)?;
     
     {
         let mut guard = state.teams_tokens.write();
         *guard = Some(tokens);
+        log::info!("[CALLBACK] handle_teams_callback: tokens stored in AppState");
     }
     
+    log::info!("[CALLBACK] handle_teams_callback: EMIT teams-auth-complete event");
     let _ = app.emit("teams-auth-complete", ());
     
-    log::info!("Teams auth completed via deep link");
+    log::info!("[CALLBACK] handle_teams_callback: SUCCESS");
     Ok(())
 }
 
 fn handle_deep_link(url: &str, app: AppHandle) {
+    log::info!("[DEEP_LINK] handle_deep_link: ENTRY - url={}", url);
+    
     if let Ok(parsed) = url::Url::parse(url) {
-        if parsed.scheme() == "presencejam" {
+        log::info!("[DEEP_LINK] handle_deep_link: URL parsed successfully");
+        let scheme = parsed.scheme();
+        log::info!("[DEEP_LINK] handle_deep_link: scheme={}", scheme);
+        
+        if scheme == "presencejam" {
+            log::info!("[DEEP_LINK] handle_deep_link: recognized as presencejam scheme");
             let path = parsed.path();
+            log::info!("[DEEP_LINK] handle_deep_link: path={}", path);
+            
             let code = parsed.query_pairs().find(|(k, _)| k == "code").map(|(_, v)| v.to_string());
             
             if let Some(code_str) = code {
-                log::info!("Deep link received for path: {}", path);
+                log::info!("[DEEP_LINK] handle_deep_link: code found - code.len={}", code_str.len());
                 let app_clone = app.clone();
                 let code_clone = code_str.clone();
                 
                 if path == "/teams-callback" {
+                    log::info!("[DEEP_LINK] handle_deep_link: routing to Teams callback");
                     tauri::async_runtime::spawn(async move {
+                        log::info!("[DEEP_LINK] handle_deep_link: spawning Teams callback handler");
                         if let Err(e) = handle_teams_callback(&code_clone, &app_clone).await {
-                            log::error!("Teams auth failed: {}", e);
+                            log::error!("[DEEP_LINK] handle_teams_callback: FAILED - {}", e);
+                            log::info!("[DEEP_LINK] handle_deep_link: EMIT teams-auth-failed event");
                             let _ = app_clone.emit("teams-auth-failed", e);
                         }
                     });
                 } else {
+                    log::info!("[DEEP_LINK] handle_deep_link: routing to Spotify callback");
                     tauri::async_runtime::spawn(async move {
+                        log::info!("[DEEP_LINK] handle_deep_link: spawning Spotify callback handler");
                         if let Err(e) = handle_spotify_callback(&code_clone, &app_clone).await {
-                            log::error!("Spotify auth failed: {}", e);
+                            log::error!("[DEEP_LINK] handle_spotify_callback: FAILED - {}", e);
+                            log::info!("[DEEP_LINK] handle_deep_link: EMIT spotify-auth-failed event");
                             let _ = app_clone.emit("spotify-auth-failed", e);
                         }
                     });
                 }
+            } else {
+                log::warn!("[DEEP_LINK] handle_deep_link: no code found in URL");
             }
+        } else {
+            log::warn!("[DEEP_LINK] handle_deep_link: unknown scheme - {}", scheme);
         }
+    } else {
+        log::error!("[DEEP_LINK] handle_deep_link: failed to parse URL");
     }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    log::info!("[APP] run: ENTRY");
+    
     let mut builder = tauri::Builder::default();
 
     #[cfg(desktop)]
@@ -151,10 +198,11 @@ pub fn run() {
         use tauri_plugin_single_instance::init as single_instance_init;
 
         builder = builder.plugin(single_instance_init(|_app, argv, _cwd| {
-            log::info!("New app instance opened with deep link: {:?}", argv);
+            log::info!("[APP] single_instance: New instance opened with argv: {:?}", argv);
         }));
 
         builder = builder.plugin(tauri_plugin_deep_link::init());
+        log::info!("[APP] run: deep_link plugin registered");
     }
 
     builder
@@ -177,8 +225,32 @@ pub fn run() {
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
+            // Set panic hook to log crashes
+            std::panic::set_hook(Box::new(|panic_info| {
+                let msg = if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic_info.payload().downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "Unknown panic".to_string()
+                };
+                
+                let location = if let Some(loc) = panic_info.location() {
+                    format!("{}:{}:{}", loc.file(), loc.line(), loc.column())
+                } else {
+                    "unknown location".to_string()
+                };
+                
+                log::error!("[PANIC] {} at {}", msg, location);
+                eprintln!("[PANIC] {} at {}", msg, location);
+            }));
+            
+
+            log::info!("[APP] setup: ENTRY");
+            
             let state = Arc::new(AppState::new());
             app.manage(state);
+            log::info!("[APP] setup: AppState created and managed");
 
             #[cfg(desktop)]
             {
@@ -186,34 +258,49 @@ pub fn run() {
 
                 #[cfg(any(windows, all(debug_assertions, windows)))]
                 {
+                    log::info!("[APP] setup: registering deep links");
                     if let Err(e) = app.deep_link().register_all() {
-                        log::warn!("Failed to register deep links: {}", e);
+                        log::error!("[APP] setup: Failed to register deep links: {}", e);
+                    } else {
+                        log::info!("[APP] setup: deep links registered successfully");
                     }
                 }
 
                 // Setup system tray
+                log::info!("[APP] setup: setting up system tray");
                 if let Err(e) = tray::setup_tray(app) {
-                    log::error!("Failed to setup system tray: {}", e);
+                    log::error!("[APP] setup: Failed to setup system tray: {}", e);
                 } else {
-                    log::info!("System tray initialized");
+                    log::info!("[APP] setup: System tray initialized successfully");
                 }
 
+                // Check for deep links on startup
                 let start_urls = app.deep_link().get_current();
+                log::info!("[APP] setup: checking for start URLs");
                 if let Ok(Some(urls)) = start_urls {
+                    log::info!("[APP] setup: found {} start URL(s)", urls.len());
                     for url in urls {
+                        log::info!("[APP] setup: processing start URL: {}", url);
                         handle_deep_link(url.as_str(), app.handle().clone());
                     }
+                } else {
+                    log::info!("[APP] setup: no start URLs found");
                 }
 
+                // Register deep link callback
                 let app_handle = app.handle().clone();
+                log::info!("[APP] setup: registering on_open_url callback");
                 app.deep_link().on_open_url(move |event| {
-                    for url in event.urls() {
+                    let urls = event.urls();
+                    log::info!("[APP] on_open_url: received {} URL(s)", urls.len());
+                    for url in urls {
+                        log::info!("[APP] on_open_url: processing URL: {}", url);
                         handle_deep_link(url.as_str(), app_handle.clone());
                     }
                 });
             }
 
-            log::info!("PresenceJam 2.0 started");
+            log::info!("[APP] setup: PresenceJam 2.0 started successfully");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -245,6 +332,7 @@ pub fn run() {
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                log::info!("[APP] window_event: CloseRequested received, hiding window");
                 let _ = window.hide();
                 api.prevent_close();
             }

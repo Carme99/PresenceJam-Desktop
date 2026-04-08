@@ -13,58 +13,109 @@
   let unlisten: (() => void)[] = [];
 
   onMount(async () => {
+    console.log('[DASHBOARD] onMount: ENTRY');
+    
     try {
+      console.log('[DASHBOARD] onMount: calling invoke get_sync_status');
       const status = await invoke<any>('get_sync_status');
+      console.log('[DASHBOARD] onMount: get_sync_status SUCCESS');
+      console.log('[DASHBOARD] onMount: status.is_syncing=', status.is_syncing);
+      console.log('[DASHBOARD] onMount: status.spotify_connected=', status.spotify_connected);
+      console.log('[DASHBOARD] onMount: status.teams_connected=', status.teams_connected);
+      console.log('[DASHBOARD] onMount: status.current_track=', status.current_track ? status.current_track.title : 'null');
+      
       isSyncing = status.is_syncing;
       spotifyConnected = status.spotify_connected;
       teamsConnected = status.teams_connected;
       currentTrack = status.current_track;
-    } catch (e) {}
+    } catch (e) {
+      console.error('[DASHBOARD] onMount: get_sync_status FAILED:', e);
+    }
 
+    console.log('[DASHBOARD] onMount: setting up spotify-track-changed listener');
     unlisten.push(await listen('spotify-track-changed', (event: any) => {
+      console.log('[DASHBOARD] EVENT: spotify-track-changed received');
+      console.log('[DASHBOARD] EVENT: track.title=', event.payload.title);
+      console.log('[DASHBOARD] EVENT: track.artist=', event.payload.artist);
       currentTrack = event.payload;
     }));
+    
+    console.log('[DASHBOARD] onMount: setting up presence-updated listener');
     unlisten.push(await listen('presence-updated', (event: any) => {
+      console.log('[DASHBOARD] EVENT: presence-updated received');
+      console.log('[DASHBOARD] EVENT: status=', event.payload.status);
       statusPreview = event.payload.status;
     }));
+    
+    console.log('[DASHBOARD] onMount: setting up presence-cleared listener');
     unlisten.push(await listen('presence-cleared', () => {
+      console.log('[DASHBOARD] EVENT: presence-cleared received');
       currentTrack = null;
       statusPreview = 'No track playing';
+      console.log('[DASHBOARD] EVENT: currentTrack=null, statusPreview="No track playing"');
     }));
+    
+    console.log('[DASHBOARD] onMount: setting up error listener');
     unlisten.push(await listen('error', (event: any) => {
-      console.error('Error:', event.payload);
+      console.error('[DASHBOARD] EVENT: error received:', event.payload);
     }));
+    
+    console.log('[DASHBOARD] onMount: setting up toggle-pause listener');
     unlisten.push(await listen('toggle-pause', async () => {
+      console.log('[DASHBOARD] EVENT: toggle-pause received');
+      console.log('[DASHBOARD] EVENT: isSyncing=', isSyncing);
+      
       if (isSyncing) {
+        console.log('[DASHBOARD] EVENT: calling invoke stop_syncing');
         await invoke('stop_syncing');
         isSyncing = false;
+        console.log('[DASHBOARD] EVENT: isSyncing=false');
       } else {
+        console.log('[DASHBOARD] EVENT: calling invoke start_syncing');
         await invoke('start_syncing');
         isSyncing = true;
+        console.log('[DASHBOARD] EVENT: isSyncing=true');
       }
     }));
+    
+    console.log('[DASHBOARD] onMount: EXIT');
   });
 
   onDestroy(() => {
+    console.log('[DASHBOARD] onDestroy: ENTRY');
     unlisten.forEach(fn => fn());
+    console.log('[DASHBOARD] onDestroy: EXIT');
   });
 
   async function toggleSync() {
+    console.log('[DASHBOARD] toggleSync: ENTRY');
+    console.log('[DASHBOARD] toggleSync: isSyncing=', isSyncing);
+    
     if (isSyncing) {
+      console.log('[DASHBOARD] toggleSync: calling invoke stop_syncing');
       await invoke('stop_syncing');
       isSyncing = false;
+      console.log('[DASHBOARD] toggleSync: isSyncing=false');
     } else {
+      console.log('[DASHBOARD] toggleSync: calling invoke start_syncing');
       await invoke('start_syncing');
       isSyncing = true;
+      console.log('[DASHBOARD] toggleSync: isSyncing=true');
     }
+    
+    console.log('[DASHBOARD] toggleSync: EXIT');
   }
 
   async function openSettings() {
+    console.log('[DASHBOARD] openSettings: ENTRY');
     currentView.set('settings');
+    console.log('[DASHBOARD] openSettings: EXIT');
   }
 
   async function openLogs() {
+    console.log('[DASHBOARD] openLogs: ENTRY');
     currentView.set('logs');
+    console.log('[DASHBOARD] openLogs: EXIT');
   }
 
   function formatDuration(ms: number): string {
@@ -108,7 +159,7 @@
       <div class="setup-card card">
         <h2>Setup Required</h2>
         <p>Complete onboarding to connect Spotify and Teams.</p>
-        <button onclick={() => currentView.set('onboarding')}>Go to Setup</button>
+        <button onclick={() => { console.log('[DASHBOARD] Go to Setup clicked'); currentView.set('onboarding'); }}>Go to Setup</button>
       </div>
     {:else if currentTrack}
       <div class="track-card card">
