@@ -427,11 +427,20 @@ pub fn get_autostart_enabled(app: AppHandle) -> Result<bool, String> {
 
 #[tauri::command]
 pub fn set_autostart_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
+    log::info!("set_autostart_enabled called: enabled={}", enabled);
     let autolaunch_manager = app.state::<tauri_plugin_autostart::AutoLaunchManager>();
     if enabled {
-        autolaunch_manager.enable().map_err(|e| e.to_string())?;
+        autolaunch_manager.enable().map_err(|e| {
+            log::error!("Failed to enable autostart: {}", e);
+            e.to_string()
+        })?;
+        log::info!("Autostart enabled successfully");
     } else {
-        autolaunch_manager.disable().map_err(|e| e.to_string())?;
+        autolaunch_manager.disable().map_err(|e| {
+            log::error!("Failed to disable autostart: {}", e);
+            e.to_string()
+        })?;
+        log::info!("Autostart disabled successfully");
     }
     Ok(())
 }

@@ -125,7 +125,9 @@
   }
 
   async function finish() {
+    console.log('finish: starting');
     try {
+      console.log('finish: step 1 - saving config');
       const cfg: AppConfig = {
         spotify: {
           client_id: spotifyClientId,
@@ -150,16 +152,28 @@
         }
       };
       await saveConfig(cfg);
+      console.log('finish: config saved');
       
+      console.log('finish: step 2 - autostart');
       if (launchAtLogin) {
-        await invoke('set_autostart_enabled', { enabled: true });
+        try {
+          await invoke('set_autostart_enabled', { enabled: true });
+          console.log('finish: autostart enabled');
+        } catch (e) {
+          console.error('Autostart failed (non-critical):', e);
+        }
       }
       
-      await invoke('complete_onboarding');
+      console.log('finish: step 3 - complete_onboarding');
+      const result = await invoke('complete_onboarding');
+      console.log('finish: complete_onboarding result:', result);
       
+      console.log('finish: step 4 - switching to dashboard');
       currentView.set('dashboard');
+      console.log('finish: done');
     } catch (e) {
       console.error('Finish failed:', e);
+      alert('Setup failed: ' + e);
     }
   }
 </script>

@@ -14,12 +14,15 @@ const MINIMUM_INTERVAL_SECONDS: u64 = 10;
 const ERROR_RETRY_INTERVAL_SECONDS: u64 = 30;
 
 pub fn start_polling(state: Arc<AppState>, app: AppHandle) -> Result<tokio::task::JoinHandle<()>, String> {
+    log::info!("start_polling called");
     *state.is_syncing.write() = true;
 
     let handle = tokio::spawn(async move {
+        log::info!("polling_loop task started");
         polling_loop(state, app).await;
     });
-
+    
+    log::info!("start_polling: task spawned successfully");
     Ok(handle)
 }
 
