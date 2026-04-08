@@ -17,6 +17,7 @@
   let teamsDeviceCode = $state('');
   let teamsConnected = $state(false);
   let teamsPolling = $state(false);
+  let teamsAuthError = $state('');
 
   let statusFormat = $state('🎵 {artist} - {track} 🎧');
   let launchAtLogin = $state(false);
@@ -106,15 +107,18 @@
   }
 
   async function pollTeamsAuth() {
+    teamsAuthError = '';
     try {
       teamsPolling = true;
       const tokens = await invoke<any>('poll_teams_auth', { deviceCode: teamsDeviceCode });
       if (tokens) {
         teamsConnected = true;
         teamsPolling = false;
+        teamsAuthError = '';
       }
     } catch (e) {
       console.error('Teams auth failed:', e);
+      teamsAuthError = String(e);
       teamsPolling = false;
     }
   }
@@ -248,6 +252,9 @@
         {#if teamsPolling}
           <div class="spinner"></div>
         {/if}
+        {#if teamsAuthError}
+          <p class="error-message">{teamsAuthError}</p>
+        {/if}
       {:else}
         <div class="success-badge">
           <span>✓</span> Connected to Microsoft Teams
@@ -377,6 +384,7 @@
   .back { background: transparent; border: 1px solid var(--border-color); margin-top: 12px; color: var(--text-secondary); }
   .back:hover { background: var(--bg-elevated); }
   .success-badge { display: flex; align-items: center; gap: 8px; color: var(--color-success); margin-bottom: 16px; font-weight: 500; }
+  .error-message { color: var(--color-error); font-size: 13px; margin-top: 8px; padding: 8px; background: rgba(255,0,0,0.1); border-radius: 4px; }
   .device-code-box { background: var(--bg-elevated); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
   .code-display { font-size: 32px; font-weight: 700; letter-spacing: 4px; color: var(--color-accent); text-align: center; padding: 16px 0; }
   a { color: var(--color-accent); text-decoration: none; }

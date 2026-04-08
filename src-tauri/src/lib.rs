@@ -191,6 +191,13 @@ pub fn run() {
                     }
                 }
 
+                // Setup system tray
+                if let Err(e) = tray::setup_tray(app) {
+                    log::error!("Failed to setup system tray: {}", e);
+                } else {
+                    log::info!("System tray initialized");
+                }
+
                 let start_urls = app.deep_link().get_current();
                 if let Ok(Some(urls)) = start_urls {
                     for url in urls {
