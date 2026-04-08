@@ -24,7 +24,8 @@ pub fn pkce_generate_challenge(verifier: &str) -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TeamsTokens {
     pub access_token: String,
-    pub refresh_token: String,
+    #[serde(default)]
+    pub refresh_token: Option<String>,
     pub expires_at: chrono::DateTime<Utc>,
 }
 
@@ -50,7 +51,8 @@ struct DeviceCodeResponseRaw {
 #[derive(Debug, Deserialize)]
 struct TokenResponse {
     access_token: String,
-    refresh_token: String,
+    #[serde(default)]
+    refresh_token: Option<String>,
     expires_in: u64,
 }
 
@@ -272,7 +274,8 @@ pub fn complete_teams_auth(
     #[derive(Deserialize)]
     struct TokenResponse {
         access_token: String,
-        refresh_token: String,
+        #[serde(default)]
+        refresh_token: Option<String>,
         expires_in: u64,
         #[allow(dead_code)]
         token_type: String,
@@ -295,6 +298,11 @@ pub fn complete_teams_auth(
 }
 
 pub fn refresh_teams_token(tokens: &TeamsTokens) -> Result<TeamsTokens, String> {
+    let refresh_token = tokens
+        .refresh_token
+        .as_ref()
+        .ok_or("No refresh token available. Please sign in again.")?;
+
     let client = reqwest::blocking::Client::builder()
         .user_agent("PresenceJam/2.0")
         .build()
@@ -303,7 +311,7 @@ pub fn refresh_teams_token(tokens: &TeamsTokens) -> Result<TeamsTokens, String> 
     let params = [
         ("grant_type", "refresh_token"),
         ("client_id", MICROSOFT_GRAPH_CLIENT_ID),
-        ("refresh_token", &tokens.refresh_token),
+        ("refresh_token", refresh_token.as_str()),
     ];
 
     let response = client
