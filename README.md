@@ -13,103 +13,129 @@
 
 ## Why?
 
-I had a weekend, some caffeine, and a vague memory of MSN Messenger's 
+I had a weekend, some caffeine, and a vague memory of MSN Messenger's
 "Now Playing" feature. This is the result. Fully vibe-coded.
 
-## What It Does
+## Features
 
-🎵 **Reads your Spotify** — polls the Web API to see what's playing  
-📝 **Sets your Teams status** — updates your message with the track info  
-⚙️ **Configurable** — pick your own format, interval, and emoji  
-🔔 **Notifications** — get a toast when the track changes *(planned)*
+| Feature | Description |
+|---------|-------------|
+| 🎵 **Spotify Polling** | Real-time track detection via Spotify Web API |
+| 📝 **Teams Status** | Sets your Teams custom status message with track info |
+| ⏱️ **Smart Polling** | Sleeps until track ends + buffer — no wasted API calls |
+| 🗑️ **Auto-Clear** | Automatically clears status when Spotify pauses/stops |
+| 🔐 **Secure Auth** | PKCE OAuth for Spotify, Device Code flow for Teams |
+| ⚙️ **Configurable** | Custom status format, emoji, polling interval |
+| 🖥️ **System Tray** | Runs silently in the background |
+| 🚀 **Launch at Login** | Optional auto-start on Windows boot |
+
+## How It Works
+
+```
+Spotify Web API  →  PresenceJam (polling)  →  Microsoft Graph API  →  Teams Status
+     ↓                    ↓                        ↓
+  "Artist -      Format with           "🎵 Artist -
+   Track"          template            Track 🎧"
+```
+
+The app polls Spotify every few seconds while a track is playing. When the track changes, it formats a message using your custom template and pushes it to Teams via Microsoft Graph.
 
 ## Screenshots
 
-[PLACEHOLDER: Add screenshot of the app UI here]
+> **Want to add screenshots?** PRs welcome! See [CONTRIBUTING.md](./CONTRIBUTING.md#screenshots).
 
-[PLACEHOLDER: Add screenshot of Teams status with Spotify track here]
+| View | Description |
+|------|-------------|
+| Dashboard | Shows currently playing track, Teams connection status, and sync controls |
+| Onboarding | 3-step wizard: Spotify credentials → Microsoft auth → Customize settings |
+| Settings | Adjust status format, polling interval, launch-at-login |
+| Log Viewer | Scroll through the daily rotating log files |
 
 ## Downloads
 
-Download the latest release from GitHub:
-- `PresenceJam_2.0.0_x64_en-US.msi` — Windows installer
+Download the latest release from [GitHub Releases](https://github.com/Carme99/PresenceJam-Desktop/releases):
 
-## Setup
+- `PresenceJam_2.0.0_x64_en-US.msi` — Windows 10/11 installer (64-bit)
 
-### Prerequisites
+## Quickstart
 
-- Windows 10/11
-- Spotify Premium account
-- Microsoft 365 account with Teams
+```bash
+# 1. Install dependencies
+npm install
 
-### Step 1: Register Your Spotify App
+# 2. Start development mode
+npm run tauri dev
 
-1. Go to [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)
-2. Create a new app
-3. Add `presencejam://callback` to Redirect URIs
-4. Copy your Client ID and Client Secret
+# 3. Build for release
+npm run tauri build
+```
 
-### Step 2: Connect to Spotify
-
-1. Run PresenceJam
-2. Enter your Spotify Client ID + Client Secret
-3. Click "Connect Spotify" — authorization opens in your browser
-4. If the app doesn't detect authorization automatically, paste the redirect URL from your browser manually
-
-### Step 3: Connect Microsoft Teams
-
-1. Click "Sign in with Microsoft"
-2. A code will be displayed — note it down
-3. Visit the verification URL shown and enter the code
-4. Click "I've completed sign-in"
-
-### Step 4: Customize & Finish
-
-1. Adjust your status format using `{artist}`, `{track}`, `{album}`, `{emoji}`
-2. Configure polling interval
-3. Click "Finish"
+For full setup instructions (Spotify app registration, Teams auth flow), see [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ## Status Format
 
-Use these placeholders in your status format:
+Customise how your Teams status looks using these placeholders:
 
-- `{artist}` — Artist name
-- `{track}` — Track name
-- `{album}` — Album name
-- `{emoji}` — Auto-selected (🎵 playing, ⏸️ paused)
+| Placeholder | Output |
+|-------------|--------|
+| `{artist}` | Artist name |
+| `{track}` | Track name |
+| `{album}` | Album name |
+| `{emoji}` | 🎵 (playing) or ⏸️ (paused) |
 
-Default: `🎵 {artist} - {track} 🎧`
+**Default:** `🎵 {artist} - {track} 🎧`
 
-## Troubleshooting
-
-### "Spotify not connected"
-
-- Verify your Spotify app redirect URI includes `presencejam://callback`
-- Try pasting the redirect URL from your browser manually
-
-### "Teams not updating"
-
-- Sign out and sign back in via the app
-- Check logs in the app (Logs view)
-
-### App closes on X button
-
-- The app minimizes to system tray, not exit
-- Right-click tray icon → Quit to exit
+**Example output:** `🎵 Daft Punk - One More Time 🎧`
 
 ## Data & Privacy
 
-- All data stored locally (no cloud)
-- Tokens stored in your user profile
-- Nothing is sent to third-party servers except Spotify and Microsoft APIs
+| What | Where | How |
+|------|-------|-----|
+| Spotify tokens | `tauri-plugin-store` | DPAPI-encrypted on Windows |
+| Teams tokens | `tauri-plugin-store` | DPAPI-encrypted on Windows |
+| App config | `%APPDATA%\PresenceJam\config.json` | Plain JSON |
+| Credentials | `%APPDATA%\PresenceJam\credentials.json` | Plain JSON |
+| App logs | `%APPDATA%\PresenceJam\logs\` | Daily rotating, 30-day retention |
+
+- **No telemetry.** Nothing is sent to any server except Spotify and Microsoft directly.
+- Tokens are stored locally in your user profile — they never leave your machine except to authenticate with Spotify and Microsoft Graph APIs.
+
+## Troubleshooting
+
+Having issues? Check the [TROUBLESHOOTING](./TROUBLESHOOTING.md) guide for common problems and solutions.
+
+### App closes on X button
+
+The app minimizes to the system tray — this is by design. Right-click the tray icon → **Quit** to fully exit.
+
+### Spotify authorization loop
+
+1. Make sure your Spotify app's Redirect URIs include `presencejam://callback`
+2. If auto-detection fails, paste the full redirect URL from your browser manually
+
+### Teams not updating
+
+1. Check that you're signed into the same Microsoft account in Teams and in the app
+2. Try disconnecting and reconnecting via Settings
+3. Check the log viewer in-app for API errors
 
 ## Contributing
 
-Contributions welcome! See [CONTRIBUTING.md](./CONTRIBUTING.md) for development setup and guidelines.
+Contributions welcome! See [CONTRIBUTING.md](./CONTRIBUTING.md) for development setup, coding standards, and submission guidelines.
+
+**AI-generated contributions are encouraged.** Use whatever tools help you build the best code — just make sure it compiles and follows the project patterns.
+
+## Architecture
+
+Curious how it all works? See [ARCHITECTURE.md](./ARCHITECTURE.md) for deep-dive diagrams and explanation.
+
+## Changelog
+
+See [CHANGELOG.md](./CHANGELOG.md) for version history.
 
 ## Acknowledgements
 
-See [ACKNOWLEDGEMENTS.md](./ACKNOWLEDGEMENTS.md) for open-source dependencies.
+See [ACKNOWLEDGEMENTS.md](./ACKNOWLEDGEMENTS.md) for the open-source dependencies that make this project possible.
 
 ## License
 

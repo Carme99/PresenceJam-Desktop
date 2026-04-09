@@ -1,0 +1,96 @@
+name: Bug Report
+description: Report something that isn't working correctly
+title: "bug: "
+labels: ["bug"]
+assignees: ""
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Bug Report
+
+        Thanks for taking the time to report a bug. Please fill out as much detail as you can — clear bug reports get fixed faster.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: A brief description of the problem (1-2 sentences)
+      placeholder: "e.g. Spotify auth fails when Client Secret contains special characters"
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: "Numbered steps to reproduce the issue"
+      placeholder: |
+        1. Open PresenceJam
+        2. Enter Spotify credentials
+        3. Click Connect Spotify
+        4. See error...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What should happen
+      placeholder: "e.g. Browser should open with Spotify login page"
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happens
+      placeholder: "e.g. App shows error 'Failed to open browser'"
+
+  - type: checkboxes
+    id: environment
+    attributes:
+      label: Environment
+      options:
+        - label: |
+            OS: Windows 10
+          required: false
+        - label: |
+            OS: Windows 11
+          required: false
+        - label: |
+            App built from source (not release binary)
+          required: false
+
+  - type: input
+    id: app-version
+    attributes:
+      label: App Version
+      description: "Found in the app's Settings or in the .exe properties"
+      placeholder: "e.g. 2.0.0"
+
+  - type: checkboxes
+    id: logs
+    attributes:
+      label: Logs
+      options:
+        - label: |
+            Log file attached (found in %APPDATA%\PresenceJam\logs\)
+          required: false
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots
+      description: "Optional — screenshots help a lot"
+      placeholder: |
+        [PLACEHOLDER: Add screenshot here if applicable]
+        Drag and drop or paste image here.
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Context
+      description: "Anything else that might help (network setup, VPN, corporate proxy, etc.)"
+      placeholder: "e.g. Using a corporate laptop with restricted network access"
