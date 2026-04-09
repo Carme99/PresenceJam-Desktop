@@ -74,7 +74,7 @@ For full setup instructions (Spotify app registration, Teams auth flow), see [CO
 
 ## Status Format
 
-Customise how your Teams status looks using these placeholders:
+Customize how your Teams status looks using these placeholders:
 
 | Placeholder | Output |
 |-------------|--------|

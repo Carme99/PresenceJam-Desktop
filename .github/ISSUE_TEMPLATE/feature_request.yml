@@ -21,6 +21,16 @@ body:
     validations:
       required: true
 
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority / Impact
+      description: "Helps with planning and prioritization"
+      options:
+        - Critical — blocks core functionality
+        - Important — significant improvement
+        - Nice-to-have — enhancement, not urgent
+
   - type: textarea
     id: problem
     attributes:
@@ -42,19 +52,20 @@ body:
       description: "Any alternatives you've considered?"
       placeholder: "e.g. I tried using another app but it doesn't integrate with Teams"
 
-  - type: dropdown
+  - type: checkboxes
     id: area
     attributes:
-      label: Area
-      description: "Which part of the app does this relate to?"
+      label: Areas
+      description: "Which parts of the app does this relate to? Select all that apply."
       options:
-        - Spotify integration
-        - Teams integration
-        - UI / UX
-        - System tray
-        - Settings / Config
-        - Logging / Diagnostics
-        - Other
+        - label: Spotify integration
+        - label: Teams integration
+        - label: UI / UX
+        - label: System tray
+        - label: Settings / Config
+        - label: Logging / Diagnostics
+        - label: Multiple areas / Cross-cutting
+        - label: Other
 
   - type: textarea
     id: mockups
@@ -69,5 +80,5 @@ body:
     id: additional
     attributes:
       label: Additional Context
-      description: "Anything else that might help (use case, priority, etc.)"
+      description: "Anything else that might help (use case, priority reasoning, etc.)"
       placeholder: "e.g. This would be a nice-to-have but not urgent"

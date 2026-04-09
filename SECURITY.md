@@ -6,13 +6,26 @@ PresenceJam handles sensitive authentication credentials. Here's how it manages 
 
 If you find a security vulnerability, please report it responsibly:
 
+**How to report:**
+
+1. **Preferred — GitHub Security Advisories** (private, no public disclosure):
+   - Go to: [https://github.com/Carme99/PresenceJam-Desktop/security/advisories](https://github.com/Carme99/PresenceJam-Desktop/security/advisories)
+   - Click **"Report a vulnerability"**
+   - This creates a private advisory that only you and the repo maintainers can see
+   - Expected response time: within 7 days
+
+2. **Alternative — responsible public disclosure**:
+   - File a GitHub Issue with the title prefix `security: ` and the label `security`
+   - Mark the issue as ** confidential** (look for the "Keep this issue confidential" toggle in the issue form)
+   - Do not include sensitive details in the issue body — just a summary, and note that full details will be shared privately via discussion
+
 **Do:**
-- Report it via [GitHub Issues](https://github.com/Carme99/PresenceJam-Desktop/issues) with "Security" label
-- Give a reasonable description of the issue so it can be reproduced
+- Give a clear description of the vulnerability and how to reproduce it
 - Wait for a response before disclosing publicly
+- Include the affected version if known
 
 **Don't:**
-- File a public issue for security bugs — use the template and mark as confidential
+- File a regular public GitHub issue for security bugs
 - Ask for compensation in exchange for reporting
 
 Expected response time: within 7 days.
@@ -123,7 +136,7 @@ For a more secure experience:
 3. **Use a password/PIN** on your Windows account — no blank login
 4. **Don't share your machine** with untrusted parties while tokens are active
 5. **Uninstall the app** and delete `%APPDATA%\PresenceJam` when done
-6. **Rotate credentials** if you suspect compromise (Spotify Developer Dashboard → your app → Clients Secrets → Reset)
+6. **Rotate credentials** if you suspect compromise (Spotify Developer Dashboard → your app → Client Secrets → Reset)
 
 ## Open Source
 

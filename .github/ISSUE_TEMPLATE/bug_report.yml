@@ -12,6 +12,8 @@ body:
 
         Thanks for taking the time to report a bug. Please fill out as much detail as you can — clear bug reports get fixed faster.
 
+        > **Security vulnerability?** See [SECURITY.md](https://github.com/Carme99/PresenceJam-Desktop/blob/main/SECURITY.md#reporting-security-issues) for how to report privately.
+
   - type: textarea
     id: summary
     attributes:
@@ -48,27 +50,37 @@ body:
       description: What actually happens
       placeholder: "e.g. App shows error 'Failed to open browser'"
 
-  - type: checkboxes
-    id: environment
+  - type: dropdown
+    id: os
     attributes:
-      label: Environment
+      label: Operating System
+      description: "Select your Windows version"
       options:
-        - label: |
-            OS: Windows 10
-          required: false
-        - label: |
-            OS: Windows 11
-          required: false
-        - label: |
-            App built from source (not release binary)
-          required: false
+        - Windows 10
+        - Windows 11
+        - Other (describe below)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: build-type
+    attributes:
+      label: Build Type
+      description: "How did you install the app?"
+      options:
+        - Release binary (MSI installer)
+        - Built from source
+    validations:
+      required: true
 
   - type: input
     id: app-version
     attributes:
       label: App Version
-      description: "Found in the app's Settings or in the .exe properties"
+      description: "Semantic version (e.g. 2.0.0) — found in Settings or .exe properties. Required for reproducing and debugging issues."
       placeholder: "e.g. 2.0.0"
+    validations:
+      required: true
 
   - type: checkboxes
     id: logs
@@ -92,5 +104,5 @@ body:
     id: additional
     attributes:
       label: Additional Context
-      description: "Anything else that might help (network setup, VPN, corporate proxy, etc.)"
+      description: "Anything else that might help (network setup, VPN, corporate proxy, other OS details, etc.)"
       placeholder: "e.g. Using a corporate laptop with restricted network access"
