@@ -1,13 +1,4 @@
 # Code Owners
 
-This file defines who owns what parts of the codebase.
-
-For more information, see [GitHub Docs — About code owners](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-details/customizing-your-repository-about-code-owners).
-
-## Default Owner
-
-| Pattern | Owner |
-|---------|-------|
-| `*` | @Carme99 |
-
-All files default to @Carme99 as the code owner. PRs will request review from this account.
+# All files owned by @Carme99
+* @Carme99

@@ -27,7 +27,7 @@
 
 ## Changelog
 
-- [ ] I have added an entry to [CHANGELOG.md](./CHANGELOG.md) under `[Unreleased]`
+- [ ] I have added an entry to [CHANGELOG.md](../CHANGELOG.md) under `[Unreleased]`
 - [ ] This change does not require a changelog entry (e.g. typo fix in docs)
 
 ## Additional Context
