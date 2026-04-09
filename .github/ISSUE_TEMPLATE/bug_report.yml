@@ -1,0 +1,108 @@
+name: Bug Report
+description: Report something that isn't working correctly
+title: "bug: "
+labels: ["bug"]
+assignees: ""
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Bug Report
+
+        Thanks for taking the time to report a bug. Please fill out as much detail as you can — clear bug reports get fixed faster.
+
+        > **Security vulnerability?** See [SECURITY.md](https://github.com/Carme99/PresenceJam-Desktop/blob/main/SECURITY.md#reporting-security-issues) for how to report privately.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: A brief description of the problem (1-2 sentences)
+      placeholder: "e.g. Spotify auth fails when Client Secret contains special characters"
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: "Numbered steps to reproduce the issue"
+      placeholder: |
+        1. Open PresenceJam
+        2. Enter Spotify credentials
+        3. Click Connect Spotify
+        4. See error...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What should happen
+      placeholder: "e.g. Browser should open with Spotify login page"
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happens
+      placeholder: "e.g. App shows error 'Failed to open browser'"
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      description: "Select your Windows version"
+      options:
+        - Windows 10
+        - Windows 11
+        - Other (describe below)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: build-type
+    attributes:
+      label: Build Type
+      description: "How did you install the app?"
+      options:
+        - Release binary (MSI installer)
+        - Built from source
+    validations:
+      required: true
+
+  - type: input
+    id: app-version
+    attributes:
+      label: App Version
+      description: "Semantic version (e.g. 2.0.0) — found in Settings or .exe properties. Required for reproducing and debugging issues."
+      placeholder: "e.g. 2.0.0"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: logs
+    attributes:
+      label: Logs
+      options:
+        - label: |
+            Log file attached (found in %APPDATA%\PresenceJam\logs\)
+          required: false
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots
+      description: "Optional — screenshots help a lot"
+      placeholder: |
+        [PLACEHOLDER: Add screenshot here if applicable]
+        Drag and drop or paste image here.
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Context
+      description: "Anything else that might help (network setup, VPN, corporate proxy, other OS details, etc.)"
+      placeholder: "e.g. Using a corporate laptop with restricted network access"
