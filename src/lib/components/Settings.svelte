@@ -110,15 +110,7 @@
 
     <section class="card">
       <h2>Microsoft Teams</h2>
-      <div class="form-group">
-        <label for="teams-client-id">Client ID</label>
-        <input 
-          id="teams-client-id"
-          type="text" 
-          bind:value={localConfig.spotify.client_id}
-          placeholder="Enter Teams Client ID"
-        />
-      </div>
+      <p class="hint">Teams authentication uses your Microsoft 365 account. No additional configuration required.</p>
       <div class="connection-row">
         {#if teamsStatusConnected}
           <span class="badge success">Connected</span>
