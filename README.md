@@ -41,6 +41,7 @@ Spotify Web API  →  PresenceJam (polling)  →  Microsoft Graph API  →  Team
 The app polls Spotify every few seconds while a track is playing. When the track changes, it formats a message using your custom template and pushes it to Teams via Microsoft Graph.
 
 ## Screenshots
+<img width="601" height="414" alt="image" src="https://github.com/user-attachments/assets/dc8317bb-b326-4bc0-ba89-4a28b4d52abf" />
 
 > **Want to add screenshots?** PRs welcome! See [CONTRIBUTING.md](./CONTRIBUTING.md#screenshots).
 
