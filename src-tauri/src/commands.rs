@@ -1,7 +1,7 @@
 use crate::config::{self, AppConfig};
 use crate::spotify::{SpotifyTokens, TrackInfo};
 use crate::teams::{DeviceCodeResponse, TeamsTokens};
-use crate::{polling, AppState, PendingSpotifyAuth, PendingTeamsAuth};
+use crate::{polling, AppState, PendingSpotifyAuth};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_store::StoreExt;

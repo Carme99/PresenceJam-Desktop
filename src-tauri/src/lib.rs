@@ -249,7 +249,7 @@ pub fn run() {
             log::info!("[APP] setup: ENTRY");
             
             let state = Arc::new(AppState::new());
-            app.manage(state);
+            app.manage(state.clone());
             log::info!("[APP] setup: AppState created and managed");
 
             // Load config into AppState
@@ -265,7 +265,7 @@ pub fn run() {
             }
 
             // Load Spotify tokens into AppState
-            match polling::load_spotify_tokens(app) {
+            match polling::load_spotify_tokens(app.handle()) {
                 Ok(Some(tokens)) => {
                     let mut guard = state.spotify_tokens.write();
                     *guard = Some(tokens);
@@ -280,7 +280,7 @@ pub fn run() {
             }
 
             // Load Teams tokens into AppState
-            match polling::load_teams_tokens(app) {
+            match polling::load_teams_tokens(app.handle()) {
                 Ok(Some(tokens)) => {
                     let mut guard = state.teams_tokens.write();
                     *guard = Some(tokens);
