@@ -571,8 +571,13 @@ pub fn get_sync_status(state: tauri::State<'_, Arc<AppState>>) -> Result<SyncSta
     };
 
     let spotify_connected = {
-        let guard = state.spotify_tokens.read();
-        guard.is_some()
+        let tokens = state.spotify_tokens.read();
+        let config = state.config.read();
+        tokens.is_some()
+            && config
+                .as_ref()
+                .map(|c| !c.spotify.client_id.is_empty())
+                .unwrap_or(false)
     };
 
     let teams_connected = {
