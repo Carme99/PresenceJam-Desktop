@@ -42,6 +42,7 @@ The app polls Spotify every few seconds while a track is playing. When the track
 
 ## Screenshots
 <img width="601" height="414" alt="image" src="https://github.com/user-attachments/assets/dc8317bb-b326-4bc0-ba89-4a28b4d52abf" />
+<img width="597" height="686" alt="image" src="https://github.com/user-attachments/assets/404527a5-7d08-487d-abc7-2f39aa25d439" />
 
 > **Want to add screenshots?** PRs welcome! See [CONTRIBUTING.md](./CONTRIBUTING.md#screenshots).
 
