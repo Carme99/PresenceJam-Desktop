@@ -1,7 +1,7 @@
 use crate::config::{self, AppConfig};
 use crate::spotify::{SpotifyTokens, TrackInfo};
 use crate::teams::{DeviceCodeResponse, TeamsTokens};
-use crate::{polling, AppState, PendingSpotifyAuth};
+use crate::{polling, AppState, PendingSpotifyAuth, PendingTeamsAuth};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_store::StoreExt;
@@ -784,5 +784,51 @@ pub fn complete_onboarding(
     }
 
     log::info!("[CMD] complete_onboarding: SUCCESS");
+    Ok(())
+}
+
+#[tauri::command]
+pub fn reconnect_spotify(
+    state: tauri::State<'_, Arc<AppState>>,
+    app: AppHandle,
+) -> Result<(), String> {
+    log::info!("[CMD] reconnect_spotify: ENTRY");
+
+    // Clear Spotify tokens from state
+    *state.spotify_tokens.write() = None;
+    log::info!("[CMD] reconnect_spotify: cleared spotify_tokens");
+
+    // Clear pending Spotify auth
+    *state.pending_spotify_auth.write() = None;
+    log::info!("[CMD] reconnect_spotify: cleared pending_spotify_auth");
+
+    // Emit event so UI can show re-auth flow
+    let _ = app.emit("spotify-reconnect-required", ());
+    log::info!("[CMD] reconnect_spotify: EMIT spotify-reconnect-required event");
+
+    log::info!("[CMD] reconnect_spotify: SUCCESS");
+    Ok(())
+}
+
+#[tauri::command]
+pub fn reconnect_teams(
+    state: tauri::State<'_, Arc<AppState>>,
+    app: AppHandle,
+) -> Result<(), String> {
+    log::info!("[CMD] reconnect_teams: ENTRY");
+
+    // Clear Teams tokens from state
+    *state.teams_tokens.write() = None;
+    log::info!("[CMD] reconnect_teams: cleared teams_tokens");
+
+    // Clear pending Teams auth
+    *state.pending_teams_auth.write() = None;
+    log::info!("[CMD] reconnect_teams: cleared pending_teams_auth");
+
+    // Emit event so UI can show re-auth flow
+    let _ = app.emit("teams-reconnect-required", ());
+    log::info!("[CMD] reconnect_teams: EMIT teams-reconnect-required event");
+
+    log::info!("[CMD] reconnect_teams: SUCCESS");
     Ok(())
 }
