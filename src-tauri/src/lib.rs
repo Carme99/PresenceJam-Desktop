@@ -252,6 +252,48 @@ pub fn run() {
             app.manage(state);
             log::info!("[APP] setup: AppState created and managed");
 
+            // Load config into AppState
+            match config::load_config() {
+                Ok(cfg) => {
+                    let mut config_guard = state.config.write();
+                    *config_guard = Some(cfg);
+                    log::info!("[APP] setup: config loaded into AppState");
+                }
+                Err(e) => {
+                    log::warn!("[APP] setup: no config found: {}", e);
+                }
+            }
+
+            // Load Spotify tokens into AppState
+            match polling::load_spotify_tokens(app) {
+                Ok(Some(tokens)) => {
+                    let mut guard = state.spotify_tokens.write();
+                    *guard = Some(tokens);
+                    log::info!("[APP] setup: spotify_tokens loaded into AppState");
+                }
+                Ok(None) => {
+                    log::info!("[APP] setup: no spotify_tokens found");
+                }
+                Err(e) => {
+                    log::warn!("[APP] setup: failed to load spotify_tokens: {}", e);
+                }
+            }
+
+            // Load Teams tokens into AppState
+            match polling::load_teams_tokens(app) {
+                Ok(Some(tokens)) => {
+                    let mut guard = state.teams_tokens.write();
+                    *guard = Some(tokens);
+                    log::info!("[APP] setup: teams_tokens loaded into AppState");
+                }
+                Ok(None) => {
+                    log::info!("[APP] setup: no teams_tokens found");
+                }
+                Err(e) => {
+                    log::warn!("[APP] setup: failed to load teams_tokens: {}", e);
+                }
+            }
+
             #[cfg(desktop)]
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
