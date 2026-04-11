@@ -249,8 +249,50 @@ pub fn run() {
             log::info!("[APP] setup: ENTRY");
             
             let state = Arc::new(AppState::new());
-            app.manage(state);
+            app.manage(state.clone());
             log::info!("[APP] setup: AppState created and managed");
+
+            // Load config into AppState
+            match config::load_config() {
+                Ok(cfg) => {
+                    let mut config_guard = state.config.write();
+                    *config_guard = Some(cfg);
+                    log::info!("[APP] setup: config loaded into AppState");
+                }
+                Err(e) => {
+                    log::warn!("[APP] setup: no config found: {}", e);
+                }
+            }
+
+            // Load Spotify tokens into AppState
+            match polling::load_spotify_tokens(app.handle()) {
+                Ok(Some(tokens)) => {
+                    let mut guard = state.spotify_tokens.write();
+                    *guard = Some(tokens);
+                    log::info!("[APP] setup: spotify_tokens loaded into AppState");
+                }
+                Ok(None) => {
+                    log::info!("[APP] setup: no spotify_tokens found");
+                }
+                Err(e) => {
+                    log::warn!("[APP] setup: failed to load spotify_tokens: {}", e);
+                }
+            }
+
+            // Load Teams tokens into AppState
+            match polling::load_teams_tokens(app.handle()) {
+                Ok(Some(tokens)) => {
+                    let mut guard = state.teams_tokens.write();
+                    *guard = Some(tokens);
+                    log::info!("[APP] setup: teams_tokens loaded into AppState");
+                }
+                Ok(None) => {
+                    log::info!("[APP] setup: no teams_tokens found");
+                }
+                Err(e) => {
+                    log::warn!("[APP] setup: failed to load teams_tokens: {}", e);
+                }
+            }
 
             #[cfg(desktop)]
             {
@@ -329,6 +371,8 @@ pub fn run() {
             commands::get_current_track,
             commands::is_onboarding_complete,
             commands::complete_onboarding,
+            commands::reconnect_spotify,
+            commands::reconnect_teams,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

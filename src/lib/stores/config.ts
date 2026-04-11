@@ -37,7 +37,7 @@ export const defaultConfig: AppConfig = {
   spotify: {
     client_id: '',
     client_secret: '',
-    redirect_uri: 'http://localhost:7890/callback',
+    redirect_uri: 'presencejam://callback',
     scopes: ['user-read-currently-playing', 'user-read-playback-state']
   },
   teams: {

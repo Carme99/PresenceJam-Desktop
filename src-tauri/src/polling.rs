@@ -468,3 +468,40 @@ pub fn load_teams_tokens(app: &AppHandle) -> Result<Option<TeamsTokens>, String>
         }
     }
 }
+
+pub fn clear_spotify_tokens(app: &AppHandle) -> Result<(), String> {
+    log::info!("[POLLING] clear_spotify_tokens: ENTRY");
+
+    let store = app.store("tokens").map_err(|e| {
+        log::error!("[POLLING] clear_spotify_tokens: store open failed - {}", e);
+        e.to_string()
+    })?;
+    store.delete("spotify_tokens");
+    store.delete("spotify_client_id");
+    store.delete("spotify_client_secret");
+    store.delete("spotify_redirect_uri");
+    store.delete("spotify_verifier");
+    store.save().map_err(|e| {
+        log::error!("[POLLING] clear_spotify_tokens: save failed - {}", e);
+        e.to_string()
+    })?;
+    log::info!("[POLLING] clear_spotify_tokens: SUCCESS - tokens cleared from store");
+    Ok(())
+}
+
+pub fn clear_teams_tokens(app: &AppHandle) -> Result<(), String> {
+    log::info!("[POLLING] clear_teams_tokens: ENTRY");
+
+    let store = app.store("tokens").map_err(|e| {
+        log::error!("[POLLING] clear_teams_tokens: store open failed - {}", e);
+        e.to_string()
+    })?;
+    store.delete("teams_tokens");
+    store.delete("teams_device_code");
+    store.save().map_err(|e| {
+        log::error!("[POLLING] clear_teams_tokens: save failed - {}", e);
+        e.to_string()
+    })?;
+    log::info!("[POLLING] clear_teams_tokens: SUCCESS - tokens cleared from store");
+    Ok(())
+}
