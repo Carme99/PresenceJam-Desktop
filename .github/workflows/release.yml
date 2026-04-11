@@ -60,7 +60,7 @@ jobs:
       - name: Package macOS artifact
         if: matrix.os == 'macos-latest'
         run: |
-          app_path=$(find src-tauri/target/${{ matrix.target }}/release/bundle/dmg -name "*.app" 2>/dev/null | head -1)
+          app_path=$(find src-tauri/target/${{ matrix.target }}/release/bundle/app -name "*.app" 2>/dev/null | head -1)
           zip -r "PresenceJam-macos.zip" "$app_path"
 
       - name: Rename Windows MSI
