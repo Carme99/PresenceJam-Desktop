@@ -1,4 +1,4 @@
-# PresenceJam 2.0
+# PresenceJam 2.1
 
 [![GitHub release (latest by date)](https://img.shields.io/github/v/release/Carme99/PresenceJam-Desktop?style=flat-square)](https://github.com/Carme99/PresenceJam-Desktop/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](https://opensource.org/licenses/MIT)
@@ -57,7 +57,7 @@ The app polls Spotify every few seconds while a track is playing. When the track
 
 Download the latest release from [GitHub Releases](https://github.com/Carme99/PresenceJam-Desktop/releases):
 
-- `PresenceJam_2.0.0_x64_en-US.msi` — Windows 10/11 installer (64-bit)
+- `PresenceJam_2.1.0_x64_en-US.msi` — Windows 10/11 installer (64-bit)
 
 ## Quickstart
 

@@ -77,8 +77,8 @@ body:
     id: app-version
     attributes:
       label: App Version
-      description: "Semantic version (e.g. 2.0.0) — found in Settings or .exe properties. Required for reproducing and debugging issues."
-      placeholder: "e.g. 2.0.0"
+      description: "Semantic version (e.g. 2.1.0) — found in Settings or .exe properties. Required for reproducing and debugging issues."
+      placeholder: "e.g. 2.1.0"
     validations:
       required: true
 

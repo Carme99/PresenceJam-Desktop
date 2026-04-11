@@ -98,6 +98,68 @@ sequenceDiagram
 
 The app polls Microsoft's token endpoint every 5 seconds while the user completes the browser auth. Once authorized, tokens are stored and the status message is set via Graph API.
 
+## Startup Loading
+
+On app launch, PresenceJam loads saved config and tokens from persistent storage into `AppState`:
+
+```mermaid
+sequenceDiagram
+    participant App as Tauri App
+    participant Config as Config Module
+    participant Polling as Polling Module
+    participant Store as tauri-plugin-store
+    
+    App->>App: app.manage(state)
+    App->>Config: load_config()
+    Config-->>App: AppConfig
+    App->>App: state.config = Some(cfg)
+    App->>Polling: load_spotify_tokens()
+    Polling->>Store: get("spotify_tokens")
+    Store-->>Polling: SpotifyTokens | None
+    Polling-->>App: Some(tokens) | None
+    App->>App: state.spotify_tokens = Some(tokens)
+    App->>Polling: load_teams_tokens()
+    Polling->>Store: get("teams_tokens")
+    Store-->>Polling: TeamsTokens | None
+    Polling-->>App: Some(tokens) | None
+    App->>App: state.teams_tokens = Some(tokens)
+```
+
+This means:
+- **On first launch**, the app starts fresh and requires onboarding
+- **On subsequent launches**, the app auto-connects if valid tokens exist
+- **Reconnect** clears tokens from both memory and store, forcing re-auth
+
+## Reconnect Flow
+
+When a user clicks "Reconnect" in Settings, the app clears auth state and triggers re-authentication:
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant UI as Settings UI
+    participant Commands as Tauri Commands
+    participant Polling as Polling Module
+    participant Store as tauri-plugin-store
+    
+    User->>UI: Click Spotify reconnect
+    UI->>Commands: invoke("reconnect_spotify")
+    Commands->>Commands: state.spotify_tokens = None
+    Commands->>Commands: state.pending_spotify_auth = None
+    Commands->>Polling: clear_spotify_tokens()
+    Polling->>Store: delete("spotify_tokens")
+    Polling->>Store: delete("spotify_client_id, client_secret, etc.")
+    Commands->>UI: emit("spotify-reconnect-required")
+    UI->>User: Show re-authentication flow
+```
+
+### Commands
+
+| Command | Action |
+|---------|--------|
+| `reconnect_spotify` | Clears Spotify tokens from state and store, emits `spotify-reconnect-required` event |
+| `reconnect_teams` | Clears Teams tokens from state and store, emits `teams-reconnect-required` event |
+
 ## Polling Loop
 
 ```mermaid
@@ -160,6 +222,8 @@ sequenceDiagram
 | `presence-updated` | `{status, timestamp}` | Teams status successfully updated |
 | `presence-cleared` | `{timestamp}` | Teams status cleared |
 | `error` | `{source, message}` | Any API error (Spotify, Teams, or auth) |
+| `spotify-reconnect-required` | — | User clicked reconnect for Spotify |
+| `teams-reconnect-required` | — | User clicked reconnect for Teams |
 | `tray-click` | — | User clicks tray icon |
 | `toggle-pause` | — | User clicks Pause in tray menu |
 

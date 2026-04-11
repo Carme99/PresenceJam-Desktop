@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-04-11
+
 ### Fixed
 
 - Config persistence: Load saved Spotify/Teams tokens and config on app startup
@@ -46,5 +48,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - PowerShell script version — this is a full rewrite
 
-[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.1.0
 [2.0.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.0.0
