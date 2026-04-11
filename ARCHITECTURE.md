@@ -10,7 +10,7 @@ PresenceJam is a Tauri 2 desktop application with:
 - **Backend:** Rust (Tauri 2 command handlers + polling thread)
 - **Storage:** `tauri-plugin-store` for tokens, JSON files for config
 - **Auth:** Spotify PKCE OAuth 2.0 + Microsoft Teams Device Code flow
-- **Platform:** Windows-first (single-instance enforcement, system tray, DPAPI token encryption)
+- **Platform:** Windows + macOS (single-instance enforcement, system tray, DPAPI token encryption on Windows, Keychain on macOS)
 
 ## System Diagram
 
@@ -43,6 +43,50 @@ graph TD
     SpotifyAPI -->|"tokens"| TokenStore
     TeamsAPI -->|"tokens"| TokenStore
 ```
+
+## CI/CD Pipeline
+
+Releases are automated via GitHub Actions. When a version tag is pushed, the pipeline builds and releases for both platforms:
+
+```mermaid
+flowchart TD
+    subgraph Trigger["🔔 Trigger: git tag v* pushed"]
+        tag["git tag v2.2.0 && git push --tags"]
+    end
+
+    subgraph Build["🔨 Build Matrix"]
+        direction LR
+        macos_build["macOS Build<br/>aarch64-apple-darwin"]
+        windows_build["Windows Build<br/>x86_64-pc-windows-msvc"]
+    end
+
+    subgraph Package["📦 Package"]
+        direction LR
+        macos_zip["macOS: .app → .zip"]
+        msi["Windows: .msi"]
+    end
+
+    subgraph Release["🚀 GitHub Release"]
+        release["Auto-created Release<br/>Drafted from tag"]
+        assets["Artifacts attached:<br/>PresenceJam-v2.2.0-macos.zip<br/>PresenceJam-v2.2.0.msi"]
+    end
+
+    tag --> Build
+    Build --> Package
+    Package --> Release
+```
+
+### Release Process
+
+1. **Tag Push:** Developer runs `git tag v2.2.0 && git push --tags`
+2. **Workflow Trigger:** GitHub Actions detects the `v*` tag pattern
+3. **Parallel Build:** macOS and Windows builds run concurrently on GitHub's hosted runners
+4. **Artifact Upload:** Build outputs are uploaded as workflow artifacts
+5. **Release Creation:** `release-action` creates a GitHub Release and attaches all artifacts
+
+### Workflow File
+
+The CI/CD workflow is defined in [`.github/workflows/release.yml`](.github/workflows/release.yml).
 
 ## Authentication Flows
 

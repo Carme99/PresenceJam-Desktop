@@ -1,0 +1,95 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: PresenceJam-${{ github.ref_name }}-macos.zip
+          - os: windows-latest
+            target: ''
+            artifact_name: PresenceJam-${{ github.ref_name }}.msi
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Rust target
+        if: matrix.target != ''
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Build Tauri
+        env:
+          CARGO_INCREMENTAL: 0
+        run: |
+          if [ -n "${{ matrix.target }}" ]; then
+            npx tauri build --target ${{ matrix.target }}
+          else
+            npx tauri build
+          fi
+
+      - name: Package macOS artifact
+        if: matrix.os == 'macos-latest'
+        run: |
+          app_path=$(find src-tauri/target/${{ matrix.target }}/release/bundle/dmg -name "*.app" 2>/dev/null | head -1)
+          zip -r "PresenceJam-macos.zip" "$app_path"
+
+      - name: Rename Windows MSI
+        if: matrix.os == 'windows-latest'
+        run: |
+          msi_path=$(find src-tauri/target/release/bundle/msi -name "*.msi" | head -1)
+          cp "$msi_path" "PresenceJam-${{ github.ref_name }}.msi"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: |
+            ${{ matrix.os == 'macos-latest' && 'PresenceJam-macos.zip' || 'src-tauri/target/release/bundle/msi/*.msi' }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub Release
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: artifacts/**/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

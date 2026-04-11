@@ -1,4 +1,4 @@
-# PresenceJam 2.1
+# PresenceJam 2.2
 
 [![GitHub release (latest by date)](https://img.shields.io/github/v/release/Carme99/PresenceJam-Desktop?style=flat-square)](https://github.com/Carme99/PresenceJam-Desktop/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](https://opensource.org/licenses/MIT)
@@ -6,10 +6,11 @@
 [![Tauri](https://img.shields.io/badge/Tauri-2.0-ffc107?logo=tauri&style=flat-square)](https://tauri.app/)
 [![Svelte](https://img.shields.io/badge/Svelte-5-ff3e00?logo=svelte&style=flat-square)](https://svelte.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.6-3178c6?logo=typescript&style=flat-square)](https://www.typescriptlang.org/)
+[![macOS](https://img.shields.io/badge/macOS-2.2-ffffff?logo=apple&style=flat-square)](https://github.com/Carme99/PresenceJam-Desktop/releases)
 
 **Sync your Spotify playback to Microsoft Teams status automatically.**
 
-*A solo-dev, vibe-coded Windows app built for fun.*
+*A solo-dev, vibe-coded desktop app for Windows and macOS.*
 
 ## Why?
 
@@ -28,6 +29,7 @@ I had a weekend, some caffeine, and a vague memory of MSN Messenger's
 | ⚙️ **Configurable** | Custom status format, emoji, polling interval |
 | 🖥️ **System Tray** | Runs silently in the background |
 | 🚀 **Launch at Login** | Optional auto-start on Windows boot |
+| 🍎 **macOS Support** | Native Apple Silicon build |
 
 ## How It Works
 
@@ -57,7 +59,8 @@ The app polls Spotify every few seconds while a track is playing. When the track
 
 Download the latest release from [GitHub Releases](https://github.com/Carme99/PresenceJam-Desktop/releases):
 
-- `PresenceJam_2.1.0_x64_en-US.msi` — Windows 10/11 installer (64-bit)
+- `PresenceJam-2.2.0.msi` — Windows 10/11 installer (64-bit)
+- `PresenceJam-2.2.0-macos.zip` — macOS app (Apple Silicon, zipped)
 
 ## Quickstart
 
