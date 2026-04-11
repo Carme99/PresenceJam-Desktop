@@ -807,9 +807,20 @@ pub fn reconnect_spotify(
     *state.pending_spotify_auth.write() = None;
     log::info!("[CMD] reconnect_spotify: cleared pending_spotify_auth");
 
+    // Clear persisted Spotify tokens
+    if let Err(e) = polling::clear_spotify_tokens(&app) {
+        log::warn!(
+            "[CMD] reconnect_spotify: failed to clear persisted tokens - {}",
+            e
+        );
+    }
+
     // Emit event so UI can show re-auth flow
-    let _ = app.emit("spotify-reconnect-required", ());
-    log::info!("[CMD] reconnect_spotify: EMIT spotify-reconnect-required event");
+    if let Err(e) = app.emit("spotify-reconnect-required", ()) {
+        log::error!("[CMD] reconnect_spotify: failed to emit event - {}", e);
+    } else {
+        log::info!("[CMD] reconnect_spotify: EMIT spotify-reconnect-required event");
+    }
 
     log::info!("[CMD] reconnect_spotify: SUCCESS");
     Ok(())
@@ -830,9 +841,20 @@ pub fn reconnect_teams(
     *state.pending_teams_auth.write() = None;
     log::info!("[CMD] reconnect_teams: cleared pending_teams_auth");
 
+    // Clear persisted Teams tokens
+    if let Err(e) = polling::clear_teams_tokens(&app) {
+        log::warn!(
+            "[CMD] reconnect_teams: failed to clear persisted tokens - {}",
+            e
+        );
+    }
+
     // Emit event so UI can show re-auth flow
-    let _ = app.emit("teams-reconnect-required", ());
-    log::info!("[CMD] reconnect_teams: EMIT teams-reconnect-required event");
+    if let Err(e) = app.emit("teams-reconnect-required", ()) {
+        log::error!("[CMD] reconnect_teams: failed to emit event - {}", e);
+    } else {
+        log::info!("[CMD] reconnect_teams: EMIT teams-reconnect-required event");
+    }
 
     log::info!("[CMD] reconnect_teams: SUCCESS");
     Ok(())
