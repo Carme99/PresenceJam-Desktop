@@ -5,6 +5,7 @@ use std::time::Duration as StdDuration;
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_store::StoreExt;
 
+use crate::profanity;
 use crate::spotify::{
     format_status, get_currently_playing, is_token_expired, refresh_spotify_token, SpotifyTokens,
 };
@@ -202,6 +203,31 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle) {
                             let status_message = format_status(&track, status_format);
                             log::info!("[POLLING] polling_loop: status_message={}", status_message);
 
+                            let profanity_filter_enabled = config
+                                .as_ref()
+                                .map(|c| c.teams.profanity_filter)
+                                .unwrap_or(true);
+                            let placeholder = config
+                                .as_ref()
+                                .map(|c| c.teams.profanity_placeholder.as_str())
+                                .unwrap_or("Currently Listening to Spotify");
+                            let final_status = if profanity_filter_enabled {
+                                profanity::filter_status(
+                                    &status_message,
+                                    placeholder,
+                                    track.is_playing,
+                                )
+                            } else {
+                                status_message.clone()
+                            };
+                            if final_status != status_message {
+                                log::info!(
+                                    "[POLLING] profanity filter: replaced status '{}' with placeholder '{}'",
+                                    status_message,
+                                    final_status
+                                );
+                            }
+
                             let remaining_ms = track.duration_ms.saturating_sub(track.progress_ms);
                             let buffer_ms = config
                                 .as_ref()
@@ -217,18 +243,18 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle) {
 
                             match set_teams_status_message(
                                 &teams_tok.access_token,
-                                &status_message,
+                                &final_status,
                                 Some(&expiry_str),
                             ) {
                                 Ok(_) => {
                                     log::info!(
                                         "[POLLING] polling_loop: Teams status updated: {}",
-                                        status_message
+                                        final_status
                                     );
                                     let _ = app.emit(
                                         "presence-updated",
                                         serde_json::json!({
-                                            "status": status_message,
+                                            "status": final_status,
                                             "timestamp": Utc::now().to_rfc3339()
                                         }),
                                     );
