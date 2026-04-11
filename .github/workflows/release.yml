@@ -74,9 +74,10 @@ jobs:
 
       - name: Rename Windows MSI
         if: matrix.os == 'windows-latest'
+        shell: pwsh
         run: |
-          msi_path=$(find src-tauri/target/release/bundle/msi -name "*.msi" | head -1)
-          cp "$msi_path" "PresenceJam-${{ github.ref_name }}.msi"
+          $msi = Get-ChildItem "src-tauri/target/release/bundle/msi" -Filter "*.msi" | Select-Object -First 1
+          Copy-Item $msi.FullName "PresenceJam-${{ github.ref_name }}.msi"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
