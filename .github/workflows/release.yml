@@ -57,10 +57,19 @@ jobs:
           CARGO_INCREMENTAL: 0
         run: npx tauri build
 
+      - name: Debug macOS bundle
+        if: matrix.os == 'macos-latest'
+        run: |
+          echo "=== Bundle directory structure ==="
+          find src-tauri/target/${{ matrix.target }}/release/bundle -type f 2>/dev/null || echo "No files found"
+          echo "=== DMG files ==="
+          find src-tauri/target/${{ matrix.target }}/release/bundle -name "*.dmg" 2>/dev/null || echo "No dmg found"
+
       - name: Package macOS artifact
         if: matrix.os == 'macos-latest'
         run: |
-          dmg_path=$(find src-tauri/target/${{ matrix.target }}/release/bundle/dmg -name "*.dmg" 2>/dev/null | head -1)
+          dmg_path=$(find src-tauri/target/${{ matrix.target }}/release/bundle -name "*.dmg" 2>/dev/null | head -1)
+          echo "Found dmg: $dmg_path"
           cp "$dmg_path" "PresenceJam-macos.dmg"
 
       - name: Rename Windows MSI
