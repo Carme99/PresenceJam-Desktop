@@ -68,7 +68,7 @@ flowchart TD
 
     subgraph Release["🚀 GitHub Release"]
         release["Auto-created Release<br/>Drafted from tag"]
-        assets["Artifacts attached:<br/>PresenceJam-v2.2.0-macos.zip<br/>PresenceJam-v2.2.0.msi"]
+        assets["Artifacts attached:<br/>PresenceJam-v2.2.0-macos.dmg<br/>PresenceJam-v2.2.0.msi"]
     end
 
     tag --> Build

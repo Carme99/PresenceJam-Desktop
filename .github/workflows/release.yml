@@ -17,7 +17,7 @@ jobs:
         include:
           - os: macos-latest
             target: aarch64-apple-darwin
-            artifact_name: PresenceJam-${{ github.ref_name }}-macos.zip
+            artifact_name: PresenceJam-${{ github.ref_name }}-macos.dmg
           - os: windows-latest
             target: ''
             artifact_name: PresenceJam-${{ github.ref_name }}.msi
@@ -60,8 +60,8 @@ jobs:
       - name: Package macOS artifact
         if: matrix.os == 'macos-latest'
         run: |
-          app_path=$(find src-tauri/target/${{ matrix.target }}/release/bundle/app -name "*.app" 2>/dev/null | head -1)
-          zip -r "PresenceJam-macos.zip" "$app_path"
+          dmg_path=$(find src-tauri/target/${{ matrix.target }}/release/bundle/dmg -name "*.dmg" 2>/dev/null | head -1)
+          cp "$dmg_path" "PresenceJam-macos.dmg"
 
       - name: Rename Windows MSI
         if: matrix.os == 'windows-latest'
@@ -74,7 +74,7 @@ jobs:
         with:
           name: ${{ matrix.artifact_name }}
           path: |
-            ${{ matrix.os == 'macos-latest' && 'PresenceJam-macos.zip' || 'src-tauri/target/release/bundle/msi/*.msi' }}
+            ${{ matrix.os == 'macos-latest' && 'PresenceJam-macos.dmg' || 'src-tauri/target/release/bundle/msi/*.msi' }}
           if-no-files-found: error
 
   release:

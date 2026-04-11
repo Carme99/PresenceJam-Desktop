@@ -60,7 +60,7 @@ The app polls Spotify every few seconds while a track is playing. When the track
 Download the latest release from [GitHub Releases](https://github.com/Carme99/PresenceJam-Desktop/releases):
 
 - `PresenceJam-2.2.0.msi` — Windows 10/11 installer (64-bit)
-- `PresenceJam-2.2.0-macos.zip` — macOS app (Apple Silicon, zipped)
+- `PresenceJam-2.2.0-macos.dmg` — macOS installer (Apple Silicon)
 
 ## Quickstart
 
