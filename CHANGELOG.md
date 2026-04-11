@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Config persistence: Load saved Spotify/Teams tokens and config on app startup
+- Reconnect flow: Added `reconnect_spotify` and `reconnect_teams` commands to re-authenticate
+- `get_sync_status` now validates client_id presence
+- Settings UI: Removed non-functional Teams Client ID field
+- Spotify redirect_uri normalized to `presencejam://callback` in frontend config
+
 ## [2.0.0] - 2026-04-09
 
 ### Added
