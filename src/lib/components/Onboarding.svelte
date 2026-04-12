@@ -33,6 +33,7 @@
       console.log('[ONBOARDING] EVENT: spotify-auth-complete received');
       spotifyConnected = true;
       spotifyWaiting = false;
+      validationError = '';
       console.log('[ONBOARDING] EVENT: spotifyConnected=true, spotifyWaiting=false');
     });
     
@@ -49,6 +50,7 @@
       teamsConnected = true;
       teamsPolling = false;
       teamsAuthError = '';
+      validationError = '';
       console.log('[ONBOARDING] EVENT: teamsConnected=true, teamsPolling=false, teamsAuthError=""');
     });
     
@@ -69,10 +71,10 @@
         fn2();
         fn3();
         fn4();
+        console.log('[ONBOARDING] onDestroy: listeners cleaned up');
       } catch (e) {
         console.error('[ONBOARDING] onDestroy: cleanup error:', e);
       }
-      console.log('[ONBOARDING] onDestroy: listeners cleaned up');
     };
   });
 
@@ -269,7 +271,7 @@
       console.log('[ONBOARDING] finish: SUCCESS - all steps completed');
     } catch (e) {
       console.error('[ONBOARDING] finish: FAILED:', e);
-      alert('Setup failed: ' + e);
+      validationError = 'Setup failed: ' + e;
     }
     
     console.log('[ONBOARDING] finish: EXIT');
