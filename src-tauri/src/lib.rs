@@ -46,6 +46,7 @@ impl AppState {
 }
 
 pub mod config;
+pub mod profanity;
 pub mod spotify;
 pub mod teams;
 pub mod polling;

@@ -139,6 +139,29 @@
       <p class="hint">
         Available placeholders: <code>{'{artist}'}</code>, <code>{'{track}'}</code>, <code>{'{album}'}</code>, <code>{'{emoji}'}</code>
       </p>
+      <div class="toggle-row">
+        <label for="profanity-filter">Filter profanity in status</label>
+        <input
+          id="profanity-filter"
+          type="checkbox"
+          bind:checked={localConfig.teams.profanity_filter}
+        />
+      </div>
+      {#if localConfig.teams.profanity_filter}
+        <div class="form-group">
+          <label for="profanity-placeholder">Placeholder text</label>
+          <p class="hint">
+            Use <code>{'{emoji}'}</code> for play state (🎵 playing / ⏸️ paused).
+            Shown when profanity is detected in track info.
+          </p>
+          <input
+            id="profanity-placeholder"
+            type="text"
+            bind:value={localConfig.teams.profanity_placeholder}
+            placeholder="Currently Listening to Spotify"
+          />
+        </div>
+      {/if}
     </section>
 
     <section class="card">

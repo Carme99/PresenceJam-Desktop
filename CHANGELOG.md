@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-04-12
+
+### Added
+
+- Profanity filter for Spotify track status (`profanity_filter` toggle in Settings)
+- Customizable profanity placeholder text (`profanity_placeholder`) with `{emoji}` token support
+- Leetspeak normalization (1→i, 3→e, $→s, @→a, 0→o, etc.) and repeated-char collapse
+- Word-boundary detection to avoid false positives (class, assassin, cocktail, etc.)
+- Safe default placeholder: "Currently Listening to Spotify"
+
+### Changed
+
+- `config.teams.clear_on_pause` field restored (was dropped during serde round-trip)
+- Logging: profanity filter no longer logs original profane status (security hardening)
+- Polling: added TODO note about future refactor to filter raw Spotify fields before formatting
+
+### Fixed
+
+- `matches_at_pos` boundary tracking: was skipping arbitrary chars instead of only repeated chars
+- `at_end` match: now validates left boundary before detection (peacock/cock false positive)
+- Config test: uses `profanity::safe_placeholder_default()` instead of hardcoded literal
+- Frontend TS config: added NOTE that Rust is canonical source for placeholder default
+
 ## [2.2.0] - 2026-04-11
 
 ### Added

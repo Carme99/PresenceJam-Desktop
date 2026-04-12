@@ -1,3 +1,4 @@
+use crate::profanity;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{Read, Write};
@@ -28,10 +29,28 @@ fn default_scopes() -> Vec<String> {
 pub struct TeamsConfig {
     #[serde(default = "default_status_format")]
     pub status_format: String,
+    #[serde(default = "default_clear_on_pause")]
+    pub clear_on_pause: bool,
+    #[serde(default = "default_profanity_filter")]
+    pub profanity_filter: bool,
+    #[serde(default = "default_profanity_placeholder")]
+    pub profanity_placeholder: String,
 }
 
 fn default_status_format() -> String {
     "🎵 {artist} - {track} 🎧".to_string()
+}
+
+fn default_clear_on_pause() -> bool {
+    true
+}
+
+fn default_profanity_filter() -> bool {
+    true
+}
+
+fn default_profanity_placeholder() -> String {
+    profanity::safe_placeholder_default().to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,6 +130,9 @@ impl Default for TeamsConfig {
     fn default() -> Self {
         Self {
             status_format: default_status_format(),
+            clear_on_pause: default_clear_on_pause(),
+            profanity_filter: default_profanity_filter(),
+            profanity_placeholder: default_profanity_placeholder(),
         }
     }
 }
@@ -155,17 +177,23 @@ pub struct Credentials {
 }
 
 pub fn config_dir() -> Result<PathBuf, String> {
-    let base_dir = dirs::config_dir()
-        .ok_or_else(|| "Failed to get config directory: dirs::config_dir() returned None".to_string())?;
-    
+    let base_dir = dirs::config_dir().ok_or_else(|| {
+        "Failed to get config directory: dirs::config_dir() returned None".to_string()
+    })?;
+
     let app_dir = base_dir.join("PresenceJam");
-    
+
     if !app_dir.exists() {
-        fs::create_dir_all(&app_dir)
-            .map_err(|e| format!("Failed to create config directory '{}': {}", app_dir.display(), e))?;
+        fs::create_dir_all(&app_dir).map_err(|e| {
+            format!(
+                "Failed to create config directory '{}': {}",
+                app_dir.display(),
+                e
+            )
+        })?;
         log::info!("Created config directory at '{}'", app_dir.display());
     }
-    
+
     Ok(app_dir)
 }
 
@@ -176,38 +204,41 @@ pub fn get_config_path() -> Result<PathBuf, String> {
 
 pub fn load_config() -> Result<AppConfig, String> {
     let path = get_config_path()?;
-    
+
     if !path.exists() {
-        log::info!("Config file not found at '{}', using defaults", path.display());
+        log::info!(
+            "Config file not found at '{}', using defaults",
+            path.display()
+        );
         return Ok(AppConfig::default());
     }
-    
+
     let mut file = fs::File::open(&path)
         .map_err(|e| format!("Failed to open config file '{}': {}", path.display(), e))?;
-    
+
     let mut contents = String::new();
     file.read_to_string(&mut contents)
         .map_err(|e| format!("Failed to read config file '{}': {}", path.display(), e))?;
-    
+
     let config: AppConfig = serde_json::from_str(&contents)
         .map_err(|e| format!("Failed to parse config file '{}': {}", path.display(), e))?;
-    
+
     log::info!("Loaded configuration from '{}'", path.display());
     Ok(config)
 }
 
 pub fn save_config(config: &AppConfig) -> Result<(), String> {
     let path = get_config_path()?;
-    
+
     let json = serde_json::to_string_pretty(config)
         .map_err(|e| format!("Failed to serialize config to JSON: {}", e))?;
-    
+
     let mut file = fs::File::create(&path)
         .map_err(|e| format!("Failed to create config file '{}': {}", path.display(), e))?;
-    
+
     file.write_all(json.as_bytes())
         .map_err(|e| format!("Failed to write config file '{}': {}", path.display(), e))?;
-    
+
     log::info!("Saved configuration to '{}'", path.display());
     Ok(())
 }
@@ -215,21 +246,36 @@ pub fn save_config(config: &AppConfig) -> Result<(), String> {
 pub fn load_credentials() -> Result<Credentials, String> {
     let dir = config_dir()?;
     let path = dir.join("credentials.json");
-    
+
     if !path.exists() {
         return Err("Credentials file not found".to_string());
     }
-    
-    let mut file = fs::File::open(&path)
-        .map_err(|e| format!("Failed to open credentials file '{}': {}", path.display(), e))?;
-    
+
+    let mut file = fs::File::open(&path).map_err(|e| {
+        format!(
+            "Failed to open credentials file '{}': {}",
+            path.display(),
+            e
+        )
+    })?;
+
     let mut contents = String::new();
-    file.read_to_string(&mut contents)
-        .map_err(|e| format!("Failed to read credentials file '{}': {}", path.display(), e))?;
-    
-    let credentials: Credentials = serde_json::from_str(&contents)
-        .map_err(|e| format!("Failed to parse credentials file '{}': {}", path.display(), e))?;
-    
+    file.read_to_string(&mut contents).map_err(|e| {
+        format!(
+            "Failed to read credentials file '{}': {}",
+            path.display(),
+            e
+        )
+    })?;
+
+    let credentials: Credentials = serde_json::from_str(&contents).map_err(|e| {
+        format!(
+            "Failed to parse credentials file '{}': {}",
+            path.display(),
+            e
+        )
+    })?;
+
     log::info!("Loaded credentials from '{}'", path.display());
     Ok(credentials)
 }
@@ -237,16 +283,26 @@ pub fn load_credentials() -> Result<Credentials, String> {
 pub fn save_credentials(credentials: &Credentials) -> Result<(), String> {
     let dir = config_dir()?;
     let path = dir.join("credentials.json");
-    
+
     let json = serde_json::to_string_pretty(credentials)
         .map_err(|e| format!("Failed to serialize credentials to JSON: {}", e))?;
-    
-    let mut file = fs::File::create(&path)
-        .map_err(|e| format!("Failed to create credentials file '{}': {}", path.display(), e))?;
-    
-    file.write_all(json.as_bytes())
-        .map_err(|e| format!("Failed to write credentials file '{}': {}", path.display(), e))?;
-    
+
+    let mut file = fs::File::create(&path).map_err(|e| {
+        format!(
+            "Failed to create credentials file '{}': {}",
+            path.display(),
+            e
+        )
+    })?;
+
+    file.write_all(json.as_bytes()).map_err(|e| {
+        format!(
+            "Failed to write credentials file '{}': {}",
+            path.display(),
+            e
+        )
+    })?;
+
     log::info!("Saved credentials to '{}'", path.display());
     Ok(())
 }
@@ -258,8 +314,14 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = AppConfig::default();
-        assert_eq!(config.spotify.redirect_uri, "http://localhost:7890/callback");
+        assert_eq!(config.spotify.redirect_uri, "presencejam://callback");
         assert_eq!(config.teams.status_format, "🎵 {artist} - {track} 🎧");
+        assert!(config.teams.clear_on_pause);
+        assert!(config.teams.profanity_filter);
+        assert_eq!(
+            config.teams.profanity_placeholder,
+            profanity::safe_placeholder_default()
+        );
         assert_eq!(config.polling.default_interval_seconds, 30);
         assert!(config.logging.enabled);
     }
