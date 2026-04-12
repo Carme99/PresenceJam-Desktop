@@ -62,11 +62,15 @@
     console.log('[ONBOARDING] onMount: setting up cleanup');
     return async () => {
       console.log('[ONBOARDING] onDestroy: cleaning up listeners');
-      const [fn1, fn2, fn3, fn4] = await Promise.all([unlistenComplete, unlistenFailed, unlistenTeamsComplete, unlistenTeamsFailed]);
-      fn1();
-      fn2();
-      fn3();
-      fn4();
+      try {
+        const [fn1, fn2, fn3, fn4] = await Promise.all([unlistenComplete, unlistenFailed, unlistenTeamsComplete, unlistenTeamsFailed]);
+        fn1();
+        fn2();
+        fn3();
+        fn4();
+      } catch (e) {
+        console.error('[ONBOARDING] onDestroy: cleanup error:', e);
+      }
       console.log('[ONBOARDING] onDestroy: listeners cleaned up');
     };
   });
