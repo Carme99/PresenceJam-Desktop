@@ -211,6 +211,12 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle) {
                                 .as_ref()
                                 .map(|c| c.teams.profanity_placeholder.as_str())
                                 .unwrap_or(profanity::safe_placeholder_default());
+
+                            // TODO(future): Currently filters the formatted status string. If filtering
+                            // raw Spotify fields is desired to avoid placeholder injection, refactor to
+                            // apply profanity detection on track metadata (artist/track/album) before
+                            // formatting, then use sanitized values in format_status or construct
+                            // final_status from sanitized pieces directly.
                             let final_status = if profanity_filter_enabled {
                                 profanity::filter_status(
                                     &status_message,
@@ -222,8 +228,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle) {
                             };
                             if final_status != status_message {
                                 log::info!(
-                                    "[POLLING] profanity filter: replaced status '{}' with placeholder '{}'",
-                                    status_message,
+                                    "[POLLING] profanity filter: status replaced (replaced=true) with placeholder '{}'",
                                     final_status
                                 );
                             }

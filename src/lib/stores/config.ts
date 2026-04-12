@@ -46,6 +46,8 @@ export const defaultConfig: AppConfig = {
     status_format: '🎵 {artist} - {track} 🎧',
     clear_on_pause: true,
     profanity_filter: true,
+    // NOTE: The Rust backend (profanity::safe_placeholder_default) is the canonical source.
+    // This default is only used if load_config fails. Both must stay in sync manually.
     profanity_placeholder: 'Currently Listening to Spotify'
   },
   polling: {
