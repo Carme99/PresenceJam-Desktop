@@ -25,6 +25,25 @@ pub struct TrackInfo {
     pub duration_ms: u64,
 }
 
+#[derive(Debug)]
+pub enum SpotifyApiError {
+    ExpiredToken,
+    NotPlaying,
+    RateLimited,
+    Other(String),
+}
+
+impl std::fmt::Display for SpotifyApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SpotifyApiError::ExpiredToken => write!(f, "Access token expired"),
+            SpotifyApiError::NotPlaying => write!(f, "Not playing"),
+            SpotifyApiError::RateLimited => write!(f, "Rate limited"),
+            SpotifyApiError::Other(s) => write!(f, "{}", s),
+        }
+    }
+}
+
 pub fn pkce_generate_verifier() -> String {
     let mut bytes = [0u8; 64];
     rand::thread_rng().fill_bytes(&mut bytes);
@@ -38,10 +57,7 @@ pub fn pkce_generate_challenge(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(hash)
 }
 
-pub fn start_spotify_auth(
-    client_id: &str,
-    redirect_uri: &str,
-) -> Result<(String, String), String> {
+pub fn start_spotify_auth(client_id: &str, redirect_uri: &str) -> Result<(String, String), String> {
     let verifier = pkce_generate_verifier();
     let challenge = pkce_generate_challenge(&verifier);
 
@@ -63,7 +79,8 @@ pub fn start_spotify_auth(
     );
 
     log::info!("Opening Spotify auth URL: {}", auth_url);
-    tauri_plugin_opener::open_url(&auth_url, None::<&str>).map_err(|e| format!("Failed to open browser: {}", e))?;
+    tauri_plugin_opener::open_url(&auth_url, None::<&str>)
+        .map_err(|e| format!("Failed to open browser: {}", e))?;
 
     Ok((challenge, verifier))
 }
@@ -163,12 +180,14 @@ pub fn refresh_spotify_token(
 
     Ok(SpotifyTokens {
         access_token: token_resp.access_token,
-        refresh_token: token_resp.refresh_token.unwrap_or_else(|| tokens.refresh_token.clone()),
+        refresh_token: token_resp
+            .refresh_token
+            .unwrap_or_else(|| tokens.refresh_token.clone()),
         expires_at,
     })
 }
 
-pub fn get_currently_playing(access_token: &str) -> Result<Option<TrackInfo>, String> {
+pub fn get_currently_playing(access_token: &str) -> Result<Option<TrackInfo>, SpotifyApiError> {
     let client = Client::new();
 
     let response = client
@@ -176,7 +195,9 @@ pub fn get_currently_playing(access_token: &str) -> Result<Option<TrackInfo>, St
         .header("Authorization", format!("Bearer {}", access_token))
         .timeout(Duration::from_secs(10))
         .send()
-        .map_err(|e| format!("Failed to send currently playing request: {}", e))?;
+        .map_err(|e| {
+            SpotifyApiError::Other(format!("Failed to send currently playing request: {}", e))
+        })?;
 
     match response.status().as_u16() {
         200 => {
@@ -211,9 +232,9 @@ pub fn get_currently_playing(access_token: &str) -> Result<Option<TrackInfo>, St
                 url: String,
             }
 
-            let playing: CurrentlyPlayingResponse = response
-                .json()
-                .map_err(|e| format!("Failed to parse currently playing response: {}", e))?;
+            let playing: CurrentlyPlayingResponse = response.json().map_err(|e| {
+                SpotifyApiError::Other(format!("Failed to parse currently playing response: {}", e))
+            })?;
 
             if let Some(item) = playing.item {
                 let artist = item
@@ -244,10 +265,14 @@ pub fn get_currently_playing(access_token: &str) -> Result<Option<TrackInfo>, St
             }
         }
         204 => Ok(None),
-        401 => Err("Access token expired".to_string()),
+        401 => Err(SpotifyApiError::ExpiredToken),
+        429 => Err(SpotifyApiError::RateLimited),
         _ => {
             let body = response.text().unwrap_or_default();
-            Err(format!("Currently playing request failed: {}", body))
+            Err(SpotifyApiError::Other(format!(
+                "Currently playing request failed: {}",
+                body
+            )))
         }
     }
 }

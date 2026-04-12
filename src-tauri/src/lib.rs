@@ -78,7 +78,8 @@ async fn handle_spotify_callback(code: &str, state_param: Option<&str>, app: &Ap
         }
         log::info!("[CALLBACK] handle_spotify_callback: state verified successfully");
     } else {
-        log::warn!("[CALLBACK] handle_spotify_callback: no state parameter in callback URL");
+        log::error!("[CALLBACK] handle_spotify_callback: missing state parameter in callback URL");
+        return Err("Missing state parameter - possible CSRF attack".to_string());
     }
     
     log::info!("[CALLBACK] handle_spotify_callback: calling complete_spotify_auth");

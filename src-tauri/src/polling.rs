@@ -7,7 +7,8 @@ use tauri_plugin_store::StoreExt;
 
 use crate::profanity;
 use crate::spotify::{
-    format_status, get_currently_playing, is_token_expired, refresh_spotify_token, SpotifyTokens,
+    format_status, get_currently_playing, is_token_expired, refresh_spotify_token, SpotifyApiError,
+    SpotifyTokens,
 };
 use crate::teams::{clear_teams_status_message, set_teams_status_message, TeamsTokens};
 use crate::AppState;
@@ -374,15 +375,14 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle) {
                 thread::sleep(StdDuration::from_secs(DEFAULT_INTERVAL_SECONDS));
             }
             Err(e) => {
-                let err_str = e.to_string();
                 log::error!(
                     "[POLLING] polling_loop: Failed to get currently playing track: {}",
-                    err_str
+                    e
                 );
 
-                // If token expired (401), attempt refresh and retry once
-                if err_str.contains("expired") || err_str.contains("401") {
-                    log::info!("[POLLING] polling_loop: token may be expired, attempting refresh");
+                // If token expired, attempt refresh and retry once
+                if matches!(e, SpotifyApiError::ExpiredToken) {
+                    log::info!("[POLLING] polling_loop: token expired, attempting refresh");
 
                     let client_id = config
                         .as_ref()
@@ -415,9 +415,9 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle) {
                                             ));
                                             continue;
                                         }
-                                        Err(_) => {
+                                        Err(retry_err) => {
                                             // Retry still failed, fall through to error emit
-                                            log::error!("[POLLING] polling_loop: retry after refresh also failed");
+                                            log::error!("[POLLING] polling_loop: retry after refresh also failed: {}", retry_err);
                                         }
                                     }
                                 }
@@ -436,7 +436,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle) {
                     "error",
                     serde_json::json!({
                         "source": "spotify",
-                        "message": format!("Failed to get currently playing: {}", err_str)
+                        "message": format!("Failed to get currently playing: {}", e)
                     }),
                 );
                 log::info!("[POLLING] polling_loop: EMIT error event");

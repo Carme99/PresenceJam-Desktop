@@ -95,9 +95,12 @@ export async function saveConfig(cfg: AppConfig): Promise<void> {
   if (savePromise) await savePromise;
 
   savePromise = (async () => {
-    await invoke('save_config', { config: cfg });
-    configStore.set(cfg);
-    savePromise = null;
+    try {
+      await invoke('save_config', { config: cfg });
+      configStore.set(cfg);
+    } finally {
+      savePromise = null;
+    }
   })();
 
   await savePromise;

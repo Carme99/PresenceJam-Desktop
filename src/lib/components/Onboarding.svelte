@@ -28,50 +28,51 @@
 
   let unlistenFns: (() => void)[] = [];
 
-  onMount(() => {
+  onMount(async () => {
     console.log('[ONBOARDING] onMount: ENTRY');
 
     console.log('[ONBOARDING] onMount: setting up spotify-auth-complete listener');
-    const p1 = listen('spotify-auth-complete', () => {
+    const fn1 = await listen('spotify-auth-complete', () => {
       console.log('[ONBOARDING] EVENT: spotify-auth-complete received');
       spotifyConnected = true;
       spotifyWaiting = false;
       validationError = '';
       console.log('[ONBOARDING] EVENT: spotifyConnected=true, spotifyWaiting=false');
-    }).then(fn => { unlistenFns.push(fn); });
+    });
 
     console.log('[ONBOARDING] onMount: setting up spotify-auth-failed listener');
-    const p2 = listen<string>('spotify-auth-failed', (event) => {
+    const fn2 = await listen<string>('spotify-auth-failed', (event) => {
       console.error('[ONBOARDING] EVENT: spotify-auth-failed received:', event.payload);
       spotifyWaiting = false;
       console.log('[ONBOARDING] EVENT: spotifyWaiting=false (from failed)');
-    }).then(fn => { unlistenFns.push(fn); });
+    });
 
     console.log('[ONBOARDING] onMount: setting up teams-auth-complete listener');
-    const p3 = listen('teams-auth-complete', () => {
+    const fn3 = await listen('teams-auth-complete', () => {
       console.log('[ONBOARDING] EVENT: teams-auth-complete received');
       teamsConnected = true;
       teamsPolling = false;
       teamsAuthError = '';
       validationError = '';
       console.log('[ONBOARDING] EVENT: teamsConnected=true, teamsPolling=false, teamsAuthError=""');
-    }).then(fn => { unlistenFns.push(fn); });
+    });
 
     console.log('[ONBOARDING] onMount: setting up teams-auth-failed listener');
-    const p4 = listen<string>('teams-auth-failed', (event) => {
+    const fn4 = await listen<string>('teams-auth-failed', (event) => {
       console.error('[ONBOARDING] EVENT: teams-auth-failed received:', event.payload);
       teamsPolling = false;
       teamsAuthError = String(event.payload);
       console.log('[ONBOARDING] EVENT: teamsPolling=false, teamsAuthError set');
-    }).then(fn => { unlistenFns.push(fn); });
+    });
 
-    console.log('[ONBOARDING] onMount: listeners registered (cleanup chained to each promise)');
+    unlistenFns = [fn1, fn2, fn3, fn4];
+    console.log('[ONBOARDING] onMount: listeners registered');
+  });
 
-    return () => {
-      console.log('[ONBOARDING] onDestroy: cleaning up listeners');
-      unlistenFns.forEach(fn => fn());
-      console.log('[ONBOARDING] onDestroy: listeners cleaned up');
-    };
+  onDestroy(() => {
+    console.log('[ONBOARDING] onDestroy: cleaning up listeners');
+    unlistenFns.forEach(fn => fn());
+    console.log('[ONBOARDING] onDestroy: listeners cleaned up');
   });
 
   async function connectSpotify() {
