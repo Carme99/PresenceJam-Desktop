@@ -408,15 +408,125 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle) {
                                     *state.spotify_tokens.write() = Some(new_tokens.clone());
                                     let retry_token = new_tokens.access_token.clone();
                                     match get_currently_playing(&retry_token) {
-                                        Ok(Some(_)) | Ok(None) => {
-                                            // Retry succeeded or no track, continue loop
+                                        Ok(Some(track)) => {
+                                            log::info!(
+                                                "[POLLING] polling_loop: retry track found - {} by {}",
+                                                track.title,
+                                                track.artist
+                                            );
+                                            let track_key =
+                                                format!("{} - {}", track.title, track.artist);
+                                            if last_track_key.as_ref() != Some(&track_key) {
+                                                last_track_key = Some(track_key.clone());
+                                            }
+                                            *state.current_track.write() = Some(track.clone());
+                                            let _ = app.emit(
+                                                "spotify-track-changed",
+                                                serde_json::json!({
+                                                    "title": track.title,
+                                                    "artist": track.artist,
+                                                    "album": track.album,
+                                                    "album_art_url": track.album_art_url,
+                                                    "is_playing": track.is_playing,
+                                                    "progress_ms": track.progress_ms,
+                                                    "duration_ms": track.duration_ms
+                                                }),
+                                            );
+
+                                            let teams_tokens = {
+                                                let guard = state.teams_tokens.read();
+                                                guard.clone()
+                                            };
+                                            if let Some(teams_tok) = teams_tokens {
+                                                if track.is_playing {
+                                                    let status_format = config
+                                                        .as_ref()
+                                                        .map(|c| c.teams.status_format.as_str())
+                                                        .unwrap_or("🎵 {artist} - {track} 🎧");
+                                                    let status_message =
+                                                        format_status(&track, status_format);
+                                                    let profanity_filter_enabled = config
+                                                        .as_ref()
+                                                        .map(|c| c.teams.profanity_filter)
+                                                        .unwrap_or(true);
+                                                    let placeholder = config
+                                                        .as_ref()
+                                                        .map(|c| {
+                                                            c.teams.profanity_placeholder.as_str()
+                                                        })
+                                                        .unwrap_or(
+                                                            profanity::safe_placeholder_default(),
+                                                        );
+                                                    let final_status = if profanity_filter_enabled {
+                                                        profanity::filter_status(
+                                                            &status_message,
+                                                            placeholder,
+                                                            track.is_playing,
+                                                        )
+                                                    } else {
+                                                        status_message.clone()
+                                                    };
+                                                    let remaining_ms = track
+                                                        .duration_ms
+                                                        .saturating_sub(track.progress_ms);
+                                                    let buffer_ms = config
+                                                        .as_ref()
+                                                        .map(|c| {
+                                                            c.polling.expiry_buffer_seconds as u64
+                                                        })
+                                                        .unwrap_or(10)
+                                                        * 1000;
+                                                    let expiry = Utc::now()
+                                                        + chrono::Duration::milliseconds(
+                                                            remaining_ms as i64 + buffer_ms as i64,
+                                                        );
+                                                    let expiry_str = expiry.to_rfc3339();
+                                                    match set_teams_status_message(
+                                                        &teams_tok.access_token,
+                                                        &final_status,
+                                                        Some(&expiry_str),
+                                                    ) {
+                                                        Ok(_) => {
+                                                            let _ = app.emit(
+                                                                "presence-updated",
+                                                                serde_json::json!({
+                                                                    "status": final_status,
+                                                                    "timestamp": Utc::now().to_rfc3339()
+                                                                }),
+                                                            );
+                                                        }
+                                                        Err(e) => {
+                                                            log::error!("[POLLING] polling_loop: set Teams status failed on retry: {}", e);
+                                                        }
+                                                    }
+                                                } else {
+                                                    let _ = clear_teams_status_message(
+                                                        &teams_tok.access_token,
+                                                    );
+                                                    let _ = app.emit("presence-cleared", ());
+                                                }
+                                            }
+                                            continue;
+                                        }
+                                        Ok(None) => {
+                                            log::info!("[POLLING] polling_loop: retry no track");
+                                            *state.current_track.write() = None;
+                                            let _ = app.emit("presence-cleared", ());
+                                            let teams_tokens = {
+                                                let guard = state.teams_tokens.read();
+                                                guard.clone()
+                                            };
+                                            if let Some(teams_tok) = teams_tokens {
+                                                let _ = clear_teams_status_message(
+                                                    &teams_tok.access_token,
+                                                );
+                                            }
                                             thread::sleep(StdDuration::from_secs(
                                                 DEFAULT_INTERVAL_SECONDS,
                                             ));
                                             continue;
                                         }
                                         Err(retry_err) => {
-                                            // Retry still failed, fall through to error emit
                                             log::error!("[POLLING] polling_loop: retry after refresh also failed: {}", retry_err);
                                         }
                                     }

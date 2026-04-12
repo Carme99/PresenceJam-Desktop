@@ -82,6 +82,7 @@ export async function loadConfig(): Promise<AppConfig> {
       return cfg;
     } catch (e) {
       console.error('[CONFIG] loadConfig failed:', e);
+      configStore.set(defaultConfig);
       return defaultConfig;
     } finally {
       loadPromise = null;

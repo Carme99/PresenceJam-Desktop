@@ -138,6 +138,7 @@ pub fn start_spotify_auth(
     store.set("spotify_client_secret", serde_json::json!(client_secret));
     store.set("spotify_redirect_uri", serde_json::json!(redirect_uri));
     store.set("spotify_verifier", serde_json::json!(verifier));
+    store.set("spotify_csrf_state", serde_json::json!(csrf_state));
     store.save().map_err(|e| e.to_string())?;
     log::info!("[CMD] start_spotify_auth: persisted to store");
 
@@ -536,27 +537,28 @@ pub fn start_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> 
     Ok(())
 }
 
-#[tauri::command]
-pub fn stop_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> Result<(), String> {
-    log::info!("[CMD] stop_syncing: ENTRY");
-
-    polling::stop_polling(state.inner());
-    log::info!("[CMD] stop_syncing: polling stopped");
-
+fn stop_polling_and_join(state: &Arc<AppState>, context: &str) {
+    polling::stop_polling(state);
     {
         let mut handle_guard = state.polling_handle.write();
         if let Some(handle) = handle_guard.take() {
-            // For std::thread, we wait for it to finish (it exits when is_syncing=false)
             match handle.join() {
                 Ok(()) => {
-                    log::info!("[CMD] stop_syncing: polling thread finished");
+                    log::info!("[CMD] {}: polling thread finished", context);
                 }
                 Err(e) => {
-                    log::error!("[CMD] stop_syncing: polling thread panicked: {:?}", e);
+                    log::error!("[CMD] {}: polling thread panicked: {:?}", context, e);
                 }
             }
         }
     }
+}
+
+#[tauri::command]
+pub fn stop_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> Result<(), String> {
+    log::info!("[CMD] stop_syncing: ENTRY");
+
+    stop_polling_and_join(state.inner(), "stop_syncing");
 
     log::info!("[CMD] stop_syncing: EMIT sync-stopped event");
     let _ = app.emit("sync-stopped", ());
@@ -569,7 +571,6 @@ pub fn stop_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> R
 pub fn app_exit(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> Result<(), String> {
     log::info!("[CMD] app_exit: ENTRY");
 
-    // Stop polling first if running
     let is_syncing = {
         let guard = state.is_syncing.read();
         *guard
@@ -577,22 +578,7 @@ pub fn app_exit(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> Resul
 
     if is_syncing {
         log::info!("[CMD] app_exit: stopping polling first");
-        polling::stop_polling(state.inner());
-
-        // Wait for polling thread to finish
-        {
-            let mut handle_guard = state.polling_handle.write();
-            if let Some(handle) = handle_guard.take() {
-                match handle.join() {
-                    Ok(()) => {
-                        log::info!("[CMD] app_exit: polling thread finished");
-                    }
-                    Err(e) => {
-                        log::error!("[CMD] app_exit: polling thread panicked: {:?}", e);
-                    }
-                }
-            }
-        }
+        stop_polling_and_join(state.inner(), "app_exit");
     }
 
     log::info!("[CMD] app_exit: calling app.exit(0)");
