@@ -1,3 +1,4 @@
+use crate::profanity;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{Read, Write};
@@ -43,7 +44,7 @@ fn default_profanity_filter() -> bool {
 }
 
 fn default_profanity_placeholder() -> String {
-    "Currently Listening to Spotify".to_string()
+    profanity::safe_placeholder_default().to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

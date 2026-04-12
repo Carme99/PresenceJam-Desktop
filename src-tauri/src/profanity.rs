@@ -6,6 +6,10 @@ const PROFANITY_LIST: &[&str] = &[
 
 const SAFE_PLACEHOLDER_DEFAULT: &str = "Currently Listening to Spotify";
 
+pub fn safe_placeholder_default() -> &'static str {
+    SAFE_PLACEHOLDER_DEFAULT
+}
+
 fn collapse_repeated_chars(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     let mut prev = char::MAX;
@@ -42,7 +46,6 @@ fn normalize(text: &str) -> String {
             '7' => 't',
             '!' => 'i',
             '|' => 'i',
-            'x' => 's',
             _ => c,
         };
         result.push(normalized);
@@ -62,7 +65,7 @@ fn is_word_boundary(chars: &[char], start: usize, word_len: usize) -> bool {
     char_before_ok && char_after_ok
 }
 
-fn matches_at_pos(text: &[char], word: &[char], start: usize) -> bool {
+fn matches_at_pos(text: &[char], word: &[char], start: usize) -> Option<usize> {
     let mut si = start;
     let mut wi = 0;
 
@@ -74,11 +77,15 @@ fn matches_at_pos(text: &[char], word: &[char], start: usize) -> bool {
             si += 2;
             wi += 1;
         } else {
-            return false;
+            return None;
         }
     }
 
-    wi == word.len()
+    if wi == word.len() {
+        Some(si)
+    } else {
+        None
+    }
 }
 
 fn is_valid_suffix_word(s: &str) -> bool {
@@ -136,19 +143,19 @@ fn contains_profanity(text: &str) -> bool {
         }
 
         for start in 0..=(chars.len() - word_len) {
-            if !matches_at_pos(&chars, &word_chars, start) {
+            let Some(end) = matches_at_pos(&chars, &word_chars, start) else {
                 continue;
-            }
+            };
 
             let at_start = start == 0;
-            let at_end = start + word_len == chars.len();
+            let at_end = end >= chars.len();
 
             if at_end {
                 return true;
             }
 
-            let is_fucking_variant = word == "fuck" && start + word_len < chars.len() && {
-                let suffix: String = chars[start + word_len..].iter().collect();
+            let is_fucking_variant = word == "fuck" && end < chars.len() && {
+                let suffix: String = chars[end..].iter().collect();
                 suffix.starts_with("ing") || suffix.starts_with("er") || suffix.starts_with("ed")
             };
 
@@ -157,7 +164,7 @@ fn contains_profanity(text: &str) -> bool {
             }
 
             if at_start {
-                let suffix_start = start + word_len;
+                let suffix_start = end;
                 let suffix_len = chars.len() - suffix_start;
                 if suffix_len >= 4 {
                     let suffix: String = chars[suffix_start..].iter().collect();
@@ -168,7 +175,7 @@ fn contains_profanity(text: &str) -> bool {
                 return true;
             }
 
-            if is_word_boundary(&chars, start, word_len) {
+            if is_word_boundary(&chars, start, end - start) {
                 return true;
             }
         }

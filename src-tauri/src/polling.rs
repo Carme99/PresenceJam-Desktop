@@ -210,7 +210,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle) {
                             let placeholder = config
                                 .as_ref()
                                 .map(|c| c.teams.profanity_placeholder.as_str())
-                                .unwrap_or("Currently Listening to Spotify");
+                                .unwrap_or(profanity::safe_placeholder_default());
                             let final_status = if profanity_filter_enabled {
                                 profanity::filter_status(
                                     &status_message,
