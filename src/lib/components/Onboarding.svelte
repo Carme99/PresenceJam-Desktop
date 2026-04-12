@@ -60,12 +60,13 @@
     });
     
     console.log('[ONBOARDING] onMount: setting up cleanup');
-    return () => {
+    return async () => {
       console.log('[ONBOARDING] onDestroy: cleaning up listeners');
-      unlistenComplete.then(fn => fn());
-      unlistenFailed.then(fn => fn());
-      unlistenTeamsComplete.then(fn => fn());
-      unlistenTeamsFailed.then(fn => fn());
+      const [fn1, fn2, fn3, fn4] = await Promise.all([unlistenComplete, unlistenFailed, unlistenTeamsComplete, unlistenTeamsFailed]);
+      fn1();
+      fn2();
+      fn3();
+      fn4();
       console.log('[ONBOARDING] onDestroy: listeners cleaned up');
     };
   });
@@ -129,6 +130,10 @@
       const parsed = new URL(url);
       const code = parsed.searchParams.get('code');
       console.log('[ONBOARDING] extractCodeFromUrl: code=', code ? 'present' : 'null');
+      if (!code) {
+        console.log('[ONBOARDING] extractCodeFromUrl: no code in URL params');
+        return null;
+      }
       return code;
     } catch (e) {
       console.error('[ONBOARDING] extractCodeFromUrl: URL parse failed:', e);
@@ -196,6 +201,12 @@
     console.log('[ONBOARDING] finish: spotifyConnected=', spotifyConnected);
     console.log('[ONBOARDING] finish: teamsConnected=', teamsConnected);
     
+    if (!spotifyConnected || !teamsConnected) {
+      console.error('[ONBOARDING] finish: validation failed - spotifyConnected=', spotifyConnected, ', teamsConnected=', teamsConnected);
+      alert('Please connect both Spotify and Teams before finishing setup.');
+      return;
+    }
+    
     try {
       console.log('[ONBOARDING] finish: step 1 - building config');
       const cfg: AppConfig = {
@@ -207,12 +218,16 @@
         },
         teams: {
           status_format: statusFormat,
-          clear_on_pause: true
+          clear_on_pause: true,
+          profanity_filter: true,
+          profanity_placeholder: 'Currently Listening to Spotify',
+          launch_at_login: launchAtLogin,
+          start_minimized: false
         },
         polling: {
           default_interval_seconds: pollingInterval,
-          minimum_interval_seconds: 5,
-          max_interval_seconds: 10,
+          minimum_interval_seconds: 10,
+          max_interval_seconds: 60,
           expiry_buffer_seconds: 10
         },
         logging: {

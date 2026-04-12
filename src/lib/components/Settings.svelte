@@ -11,6 +11,7 @@
   let teamsStatusConnected = $state(false);
   let isSaving = $state(false);
   let saveMessage = $state('');
+  let saveTimeout: ReturnType<typeof setTimeout> | null = null;
 
   let previewArtist = $state('Radiohead');
   let previewTrack = $state('Karma Police');
@@ -45,7 +46,8 @@
     try {
       await saveConfig(localConfig);
       saveMessage = 'Settings saved!';
-      setTimeout(() => saveMessage = '', 2000);
+      if (saveTimeout) clearTimeout(saveTimeout);
+      saveTimeout = setTimeout(() => saveMessage = '', 2000);
     } catch (e) {
       saveMessage = 'Failed to save';
     }
@@ -218,7 +220,7 @@
         <input 
           id="launch-login"
           type="checkbox" 
-          bind:checked={localConfig.logging.enabled}
+          bind:checked={localConfig.teams.launch_at_login}
         />
       </div>
       <div class="toggle-row">
@@ -226,7 +228,7 @@
         <input 
           id="start-minimized"
           type="checkbox" 
-          bind:checked={localConfig.teams.clear_on_pause}
+          bind:checked={localConfig.teams.start_minimized}
         />
       </div>
     </section>

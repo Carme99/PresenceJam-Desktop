@@ -10,6 +10,7 @@
   let teamsConnected = $state(false);
   let currentTrack = $state<TrackInfo | null>(null);
   let statusPreview = $state('Not configured');
+  let displayError = $state('');
   let unlisten: (() => void)[] = [];
 
   onMount(async () => {
@@ -58,6 +59,8 @@
     console.log('[DASHBOARD] onMount: setting up error listener');
     unlisten.push(await listen('error', (event: any) => {
       console.error('[DASHBOARD] EVENT: error received:', event.payload);
+      displayError = String(event.payload);
+      setTimeout(() => displayError = '', 5000);
     }));
     
     console.log('[DASHBOARD] onMount: setting up toggle-pause listener');
@@ -154,6 +157,10 @@
     </div>
   </header>
 
+  {#if displayError}
+    <div class="error-banner">{displayError}</div>
+  {/if}
+
   <main>
     {#if !spotifyConnected || !teamsConnected}
       <div class="setup-card card">
@@ -228,6 +235,7 @@
   .icon-btn { background: transparent; border: 1px solid var(--border-color); border-radius: 8px; padding: 8px; font-size: 16px; cursor: pointer; }
   .icon-btn:hover { background: var(--bg-elevated); }
   .sync-btn { color: var(--color-accent); }
+  .error-banner { background: rgba(239,68,68,0.15); color: var(--color-error); padding: 12px 20px; text-align: center; font-size: 14px; border-bottom: 1px solid var(--color-error); }
   main { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; }
   .card { background: var(--bg-surface); border: 1px solid var(--border-color); border-radius: 12px; padding: 20px; }
   .track-card { display: flex; gap: 16px; align-items: flex-start; }
