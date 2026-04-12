@@ -7,21 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.3.4] - 2026-04-12
+
 ### Fixed
 
 - Memory leak: event listeners not cleaned up on component unmount (Onboarding)
 - Polling: 401 responses now trigger token refresh instead of silent failure
-- Config: default polling interval now correctly less than max interval (was 30 > 10)
+- Config: default max polling interval now 60s (was incorrectly set to 10s)
 - Config: atomic file writes prevent data loss on save failure
+- Config: Windows rename fix — removes destination file before rename to prevent failure when file exists
 - Auth: CSRF state now properly verified on Spotify OAuth callback
+- Auth: CSRF state persisted to store for crash recovery
 - Shutdown: polling thread now properly stopped on app quit
 - UI: buttons no longer allow double-click during async operations
-- Error messages now properly display instead of "[object Object]"
+- UI: error messages now properly display instead of "[object Object]"
+- Polling: stale error in retry path now correctly emitted to frontend
+- Polling: `get_spotify_credentials()` helper removes credential extraction duplication
+- Polling: `SpotifyApiError::RateLimited` errors get 60s backoff instead of 30s
 
 ### Security
 
 - CSRF protection now functional for Spotify OAuth flow
 - Credentials file writes now atomic (prevents corruption)
+
+## [2.3.3] - 2026-04-12
+
+### Fixed
+
+- Clear validationError when connections complete and fix log placement
+
+## [2.3.2] - 2026-04-12
+
+### Fixed
+
+- No functional changes — re-merged PR #4 (fix/bugfixes-2.3.1) onto updated main
+
+## [2.3.1] - 2026-04-11
+
+### Fixed
+
+- Proper async cleanup of event listeners in Onboarding (prevent memory leaks)
+- Validate connections before finishing onboarding
+- Correct toggle bindings in Settings.svelte
+- Align polling interval defaults with Rust backend
+- Display error events to user in Dashboard
+- Add validation in extractCodeFromUrl
+- Store setTimeout reference for proper cleanup in Settings
 
 ## [2.3.0] - 2026-04-12
 
@@ -99,7 +130,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - PowerShell script version — this is a full rewrite
 
-[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v2.2.0...HEAD
+[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v2.3.4...HEAD
+[2.3.4]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.3.4
+[2.3.3]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.3.3
+[2.3.2]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.3.2
+[2.3.1]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.3.1
+[2.3.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.3.0
 [2.2.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.2.0
 [2.1.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.1.0
 [2.0.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.0.0

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "PresenceJam",
-  "version": "2.3.0",
+  "version": "2.3.4",
   "identifier": "com.presencejam.app",
   "build": {
     "beforeDevCommand": "npm run dev",
