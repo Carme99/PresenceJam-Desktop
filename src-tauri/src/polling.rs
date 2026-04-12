@@ -17,6 +17,7 @@ const DEFAULT_INTERVAL_SECONDS: u64 = 30;
 const MAX_INTERVAL_SECONDS: u64 = 60;
 const MINIMUM_INTERVAL_SECONDS: u64 = 10;
 const ERROR_RETRY_INTERVAL_SECONDS: u64 = 30;
+const RATE_LIMIT_BACKOFF_SECONDS: u64 = 60;
 
 fn process_track(
     app: &AppHandle,
@@ -197,6 +198,13 @@ pub fn start_polling(
     Ok(handle)
 }
 
+fn get_spotify_credentials(config: &Option<crate::config::AppConfig>) -> (String, String) {
+    config
+        .as_ref()
+        .map(|c| (c.spotify.client_id.clone(), c.spotify.client_secret.clone()))
+        .unwrap_or_else(|| (String::new(), String::new()))
+}
+
 fn polling_loop(state: Arc<AppState>, app: AppHandle) {
     log::info!("[POLLING] polling_loop: STARTED");
     let mut last_track_key: Option<String> = None;
@@ -252,22 +260,15 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle) {
         log::info!("[POLLING] polling_loop: token_expired={}", token_expired);
 
         // Refresh token if needed
+        let (client_id, client_secret) = get_spotify_credentials(&config);
         let spotify_tokens = if token_expired {
             log::info!("[POLLING] polling_loop: Spotify token expired, refreshing...");
-            let client_id = config
-                .as_ref()
-                .map(|c| c.spotify.client_id.as_str())
-                .unwrap_or("");
-            let client_secret = config
-                .as_ref()
-                .map(|c| c.spotify.client_secret.as_str())
-                .unwrap_or("");
             log::info!(
                 "[POLLING] polling_loop: refreshing with client_id.len={}",
                 client_id.len()
             );
 
-            match refresh_spotify_token(&spotify_tokens, client_id, client_secret) {
+            match refresh_spotify_token(&spotify_tokens, &client_id, &client_secret) {
                 Ok(new_tokens) => {
                     log::info!("[POLLING] polling_loop: token refresh SUCCESS");
                     *state.spotify_tokens.write() = Some(new_tokens.clone());
@@ -330,18 +331,11 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle) {
                     e
                 );
 
-                // If token expired, attempt refresh and retry once
-                if matches!(e, SpotifyApiError::ExpiredToken) {
-                    log::info!("[POLLING] polling_loop: token expired, attempting refresh");
+                let mut final_err = e;
+                let mut backoff_secs = ERROR_RETRY_INTERVAL_SECONDS;
 
-                    let client_id = config
-                        .as_ref()
-                        .map(|c| c.spotify.client_id.as_str())
-                        .unwrap_or("");
-                    let client_secret = config
-                        .as_ref()
-                        .map(|c| c.spotify.client_secret.as_str())
-                        .unwrap_or("");
+                if matches!(final_err, SpotifyApiError::ExpiredToken) {
+                    log::info!("[POLLING] polling_loop: token expired, attempting refresh");
 
                     if !client_id.is_empty() && !client_secret.is_empty() {
                         let current_tokens = {
@@ -350,7 +344,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle) {
                         };
 
                         if let Some(tokens) = current_tokens {
-                            match refresh_spotify_token(&tokens, client_id, client_secret) {
+                            match refresh_spotify_token(&tokens, &client_id, &client_secret) {
                                 Ok(new_tokens) => {
                                     log::info!(
                                         "[POLLING] polling_loop: token refresh SUCCESS, retrying"
@@ -383,6 +377,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle) {
                                         }
                                         Err(retry_err) => {
                                             log::error!("[POLLING] polling_loop: retry after refresh also failed: {}", retry_err);
+                                            final_err = retry_err;
                                         }
                                     }
                                 }
@@ -391,21 +386,26 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle) {
                                         "[POLLING] polling_loop: token refresh failed: {}",
                                         refresh_err
                                     );
+                                    final_err = SpotifyApiError::Other(refresh_err.to_string());
                                 }
                             }
                         }
                     }
                 }
 
+                if matches!(final_err, SpotifyApiError::RateLimited) {
+                    backoff_secs = RATE_LIMIT_BACKOFF_SECONDS;
+                }
+
                 let _ = app.emit(
                     "error",
                     serde_json::json!({
                         "source": "spotify",
-                        "message": format!("Failed to get currently playing: {}", e)
+                        "message": format!("Failed to get currently playing: {}", final_err)
                     }),
                 );
                 log::info!("[POLLING] polling_loop: EMIT error event");
-                thread::sleep(StdDuration::from_secs(ERROR_RETRY_INTERVAL_SECONDS));
+                thread::sleep(StdDuration::from_secs(backoff_secs));
             }
         }
     }

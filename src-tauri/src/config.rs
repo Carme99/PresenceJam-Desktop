@@ -259,6 +259,16 @@ pub fn save_config(config: &AppConfig) -> Result<(), String> {
         )
     })?;
 
+    if path.exists() {
+        std::fs::remove_file(&path).map_err(|e| {
+            format!(
+                "Failed to remove existing config file '{}': {}",
+                path.display(),
+                e
+            )
+        })?;
+    }
+
     std::fs::rename(&temp_path, &path).map_err(|e| {
         format!(
             "Failed to rename config file to '{}': {}",
@@ -340,6 +350,16 @@ pub fn save_credentials(credentials: &Credentials) -> Result<(), String> {
             e
         )
     })?;
+
+    if path.exists() {
+        std::fs::remove_file(&path).map_err(|e| {
+            format!(
+                "Failed to remove existing credentials file '{}': {}",
+                path.display(),
+                e
+            )
+        })?;
+    }
 
     std::fs::rename(&temp_path, &path).map_err(|e| {
         format!(
