@@ -130,6 +130,10 @@
       const parsed = new URL(url);
       const code = parsed.searchParams.get('code');
       console.log('[ONBOARDING] extractCodeFromUrl: code=', code ? 'present' : 'null');
+      if (!code) {
+        console.log('[ONBOARDING] extractCodeFromUrl: no code in URL params');
+        return null;
+      }
       return code;
     } catch (e) {
       console.error('[ONBOARDING] extractCodeFromUrl: URL parse failed:', e);
