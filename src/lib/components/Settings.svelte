@@ -218,7 +218,7 @@
         <input 
           id="launch-login"
           type="checkbox" 
-          bind:checked={localConfig.logging.enabled}
+          bind:checked={localConfig.teams.launch_at_login}
         />
       </div>
       <div class="toggle-row">
@@ -226,7 +226,7 @@
         <input 
           id="start-minimized"
           type="checkbox" 
-          bind:checked={localConfig.teams.clear_on_pause}
+          bind:checked={localConfig.teams.start_minimized}
         />
       </div>
     </section>

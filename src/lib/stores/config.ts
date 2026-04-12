@@ -13,6 +13,8 @@ export interface TeamsConfig {
   clear_on_pause: boolean;
   profanity_filter: boolean;
   profanity_placeholder: string;
+  launch_at_login: boolean;
+  start_minimized: boolean;
 }
 
 export interface PollingConfig {
@@ -48,7 +50,9 @@ export const defaultConfig: AppConfig = {
     profanity_filter: true,
     // NOTE: The Rust backend (profanity::safe_placeholder_default) is the canonical source.
     // This default is only used if load_config fails. Both must stay in sync manually.
-    profanity_placeholder: 'Currently Listening to Spotify'
+    profanity_placeholder: 'Currently Listening to Spotify',
+    launch_at_login: false,
+    start_minimized: false
   },
   polling: {
     default_interval_seconds: 30,
