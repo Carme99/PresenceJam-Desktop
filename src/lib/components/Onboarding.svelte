@@ -60,12 +60,13 @@
     });
     
     console.log('[ONBOARDING] onMount: setting up cleanup');
-    return () => {
+    return async () => {
       console.log('[ONBOARDING] onDestroy: cleaning up listeners');
-      unlistenComplete.then(fn => fn());
-      unlistenFailed.then(fn => fn());
-      unlistenTeamsComplete.then(fn => fn());
-      unlistenTeamsFailed.then(fn => fn());
+      const [fn1, fn2, fn3, fn4] = await Promise.all([unlistenComplete, unlistenFailed, unlistenTeamsComplete, unlistenTeamsFailed]);
+      fn1();
+      fn2();
+      fn3();
+      fn4();
       console.log('[ONBOARDING] onDestroy: listeners cleaned up');
     };
   });
