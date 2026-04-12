@@ -222,8 +222,8 @@
         },
         polling: {
           default_interval_seconds: pollingInterval,
-          minimum_interval_seconds: 5,
-          max_interval_seconds: 10,
+          minimum_interval_seconds: 10,
+          max_interval_seconds: 60,
           expiry_buffer_seconds: 10
         },
         logging: {
