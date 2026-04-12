@@ -29,6 +29,8 @@ fn default_scopes() -> Vec<String> {
 pub struct TeamsConfig {
     #[serde(default = "default_status_format")]
     pub status_format: String,
+    #[serde(default = "default_clear_on_pause")]
+    pub clear_on_pause: bool,
     #[serde(default = "default_profanity_filter")]
     pub profanity_filter: bool,
     #[serde(default = "default_profanity_placeholder")]
@@ -37,6 +39,10 @@ pub struct TeamsConfig {
 
 fn default_status_format() -> String {
     "🎵 {artist} - {track} 🎧".to_string()
+}
+
+fn default_clear_on_pause() -> bool {
+    true
 }
 
 fn default_profanity_filter() -> bool {
@@ -124,6 +130,7 @@ impl Default for TeamsConfig {
     fn default() -> Self {
         Self {
             status_format: default_status_format(),
+            clear_on_pause: default_clear_on_pause(),
             profanity_filter: default_profanity_filter(),
             profanity_placeholder: default_profanity_placeholder(),
         }
@@ -309,10 +316,11 @@ mod tests {
         let config = AppConfig::default();
         assert_eq!(config.spotify.redirect_uri, "presencejam://callback");
         assert_eq!(config.teams.status_format, "🎵 {artist} - {track} 🎧");
+        assert!(config.teams.clear_on_pause);
         assert!(config.teams.profanity_filter);
         assert_eq!(
             config.teams.profanity_placeholder,
-            "Currently Listening to Spotify"
+            profanity::safe_placeholder_default()
         );
         assert_eq!(config.polling.default_interval_seconds, 30);
         assert!(config.logging.enabled);

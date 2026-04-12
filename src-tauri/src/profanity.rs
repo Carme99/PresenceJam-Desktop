@@ -73,9 +73,8 @@ fn matches_at_pos(text: &[char], word: &[char], start: usize) -> Option<usize> {
         if text[si] == word[wi] {
             si += 1;
             wi += 1;
-        } else if si + 1 < text.len() && text[si + 1] == word[wi] {
-            si += 2;
-            wi += 1;
+        } else if si > start && text[si] == text[si - 1] {
+            si += 1;
         } else {
             return None;
         }
@@ -151,7 +150,11 @@ fn contains_profanity(text: &str) -> bool {
             let at_end = end >= chars.len();
 
             if at_end {
-                return true;
+                let char_before_ok = start == 0 || !chars[start - 1].is_alphanumeric();
+                if char_before_ok {
+                    return true;
+                }
+                continue;
             }
 
             let is_fucking_variant = word == "fuck" && end < chars.len() && {
@@ -248,6 +251,15 @@ mod tests {
 
         let paused = apply_placeholder("Listening to ⏸️", false);
         assert_eq!(paused, "Listening to ⏸️");
+    }
+
+    #[test]
+    fn test_placeholder_emoji_token_substitution() {
+        let playing = apply_placeholder("Listening {emoji}", true);
+        assert_eq!(playing, "Listening 🎵");
+
+        let paused = apply_placeholder("Listening {emoji}", false);
+        assert_eq!(paused, "Listening ⏸️");
     }
 
     #[test]
