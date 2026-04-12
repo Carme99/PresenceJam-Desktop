@@ -597,6 +597,7 @@ pub fn app_exit(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> Resul
 
     log::info!("[CMD] app_exit: calling app.exit(0)");
     app.exit(0);
+    Ok(())
 }
 
 #[tauri::command]

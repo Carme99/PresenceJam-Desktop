@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
   import { currentView, type View } from '$lib/stores/app';
@@ -13,6 +13,7 @@
   onMount(() => {
     console.log('[PAGE] onMount: ENTRY');
     let unlistenTray: (() => void) | undefined;
+    let unlistenShutdown: (() => void) | undefined;
 
     (async () => {
       console.log('[PAGE] onMount: calling invoke is_onboarding_complete');
@@ -55,6 +56,9 @@
       } catch (e) {
         console.error('[PAGE] EVENT: app_exit FAILED:', e);
       }
+    }).then(fn => {
+      unlistenShutdown = fn;
+      console.log('[PAGE] onMount: app-shutdown listener registered');
     });
 
     return () => {
@@ -62,6 +66,10 @@
       if (unlistenTray) {
         unlistenTray();
         console.log('[PAGE] onDestroy: tray-click listener removed');
+      }
+      if (unlistenShutdown) {
+        unlistenShutdown();
+        console.log('[PAGE] onDestroy: app-shutdown listener removed');
       }
       console.log('[PAGE] onDestroy: EXIT');
     };
