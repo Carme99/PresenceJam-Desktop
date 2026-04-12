@@ -23,6 +23,7 @@
   let statusFormat = $state('🎵 {artist} - {track} 🎧');
   let launchAtLogin = $state(false);
   let pollingInterval = $state(30);
+  let validationError = $state('');
 
   onMount(() => {
     console.log('[ONBOARDING] onMount: ENTRY');
@@ -207,7 +208,7 @@
     
     if (!spotifyConnected || !teamsConnected) {
       console.error('[ONBOARDING] finish: validation failed - spotifyConnected=', spotifyConnected, ', teamsConnected=', teamsConnected);
-      alert('Please connect both Spotify and Teams before finishing setup.');
+      validationError = 'Please connect both Spotify and Teams before finishing setup.';
       return;
     }
     
@@ -381,6 +382,10 @@
         <label for="launch-at-login">Launch at login</label>
         <input id="launch-at-login" type="checkbox" bind:checked={launchAtLogin} />
       </div>
+      
+      {#if validationError}
+        <p class="error-message">{validationError}</p>
+      {/if}
       
       <button onclick={finish}>Finish</button>
       <button class="back" onclick={() => { step = 2; console.log('[ONBOARDING] step changed to 2'); }}>← Back</button>
