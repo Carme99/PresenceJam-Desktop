@@ -23,6 +23,7 @@
   let statusFormat = $state('🎵 {artist} - {track} 🎧');
   let launchAtLogin = $state(false);
   let pollingInterval = $state(30);
+  let validationError = $state('');
 
   onMount(() => {
     console.log('[ONBOARDING] onMount: ENTRY');
@@ -62,11 +63,15 @@
     console.log('[ONBOARDING] onMount: setting up cleanup');
     return async () => {
       console.log('[ONBOARDING] onDestroy: cleaning up listeners');
-      const [fn1, fn2, fn3, fn4] = await Promise.all([unlistenComplete, unlistenFailed, unlistenTeamsComplete, unlistenTeamsFailed]);
-      fn1();
-      fn2();
-      fn3();
-      fn4();
+      try {
+        const [fn1, fn2, fn3, fn4] = await Promise.all([unlistenComplete, unlistenFailed, unlistenTeamsComplete, unlistenTeamsFailed]);
+        fn1();
+        fn2();
+        fn3();
+        fn4();
+      } catch (e) {
+        console.error('[ONBOARDING] onDestroy: cleanup error:', e);
+      }
       console.log('[ONBOARDING] onDestroy: listeners cleaned up');
     };
   });
@@ -203,7 +208,7 @@
     
     if (!spotifyConnected || !teamsConnected) {
       console.error('[ONBOARDING] finish: validation failed - spotifyConnected=', spotifyConnected, ', teamsConnected=', teamsConnected);
-      alert('Please connect both Spotify and Teams before finishing setup.');
+      validationError = 'Please connect both Spotify and Teams before finishing setup.';
       return;
     }
     
@@ -377,6 +382,10 @@
         <label for="launch-at-login">Launch at login</label>
         <input id="launch-at-login" type="checkbox" bind:checked={launchAtLogin} />
       </div>
+      
+      {#if validationError}
+        <p class="error-message">{validationError}</p>
+      {/if}
       
       <button onclick={finish}>Finish</button>
       <button class="back" onclick={() => { step = 2; console.log('[ONBOARDING] step changed to 2'); }}>← Back</button>

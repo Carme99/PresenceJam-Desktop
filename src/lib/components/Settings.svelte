@@ -1,6 +1,6 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { currentView } from '$lib/stores/app';
   import { configStore, saveConfig, loadConfig, type AppConfig } from '$lib/stores/config';
   import { spotifyConnected } from '$lib/stores/spotify';
@@ -37,6 +37,13 @@
     } catch {
       isConnected = $spotifyConnected;
       teamsStatusConnected = $teamsConnected;
+    }
+  });
+
+  onDestroy(() => {
+    if (saveTimeout) {
+      clearTimeout(saveTimeout);
+      saveTimeout = null;
     }
   });
 

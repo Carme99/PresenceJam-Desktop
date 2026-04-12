@@ -11,7 +11,13 @@
   let currentTrack = $state<TrackInfo | null>(null);
   let statusPreview = $state('Not configured');
   let displayError = $state('');
+  let displayErrorTimeout: ReturnType<typeof setTimeout> | null = null;
   let unlisten: (() => void)[] = [];
+
+  onDestroy(() => {
+    unlisten.forEach(fn => fn());
+    if (displayErrorTimeout) clearTimeout(displayErrorTimeout);
+  });
 
   onMount(async () => {
     console.log('[DASHBOARD] onMount: ENTRY');
@@ -59,8 +65,9 @@
     console.log('[DASHBOARD] onMount: setting up error listener');
     unlisten.push(await listen('error', (event: any) => {
       console.error('[DASHBOARD] EVENT: error received:', event.payload);
+      if (displayErrorTimeout) clearTimeout(displayErrorTimeout);
       displayError = String(event.payload);
-      setTimeout(() => displayError = '', 5000);
+      displayErrorTimeout = setTimeout(() => { displayError = ''; displayErrorTimeout = null; }, 5000);
     }));
     
     console.log('[DASHBOARD] onMount: setting up toggle-pause listener');
@@ -82,12 +89,6 @@
     }));
     
     console.log('[DASHBOARD] onMount: EXIT');
-  });
-
-  onDestroy(() => {
-    console.log('[DASHBOARD] onDestroy: ENTRY');
-    unlisten.forEach(fn => fn());
-    console.log('[DASHBOARD] onDestroy: EXIT');
   });
 
   async function toggleSync() {
