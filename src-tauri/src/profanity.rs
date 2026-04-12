@@ -51,12 +51,14 @@ fn normalize(text: &str) -> String {
     collapse_repeated_chars(&result)
 }
 
-fn is_word_boundary(text: &str, pos: usize, word_len: usize) -> bool {
-    let bytes = text.as_bytes();
-    let at_start = pos == 0;
-    let at_end = pos + word_len >= bytes.len();
-    let char_before_ok = at_start || !bytes[pos - 1].is_ascii_alphanumeric();
-    let char_after_ok = at_end || !bytes[pos + word_len].is_ascii_alphanumeric();
+fn is_word_boundary(chars: &[char], start: usize, word_len: usize) -> bool {
+    let at_start = start == 0;
+
+    let char_before_ok = at_start || !chars[start - 1].is_alphanumeric();
+
+    let at_end = start + word_len == chars.len();
+    let char_after_ok = at_end || !chars[start + word_len].is_alphanumeric();
+
     char_before_ok && char_after_ok
 }
 
@@ -145,20 +147,20 @@ fn contains_profanity(text: &str) -> bool {
                 return true;
             }
 
-            let is_fucking_variant = word == "fuck"
-                && start + word_len < chars.len()
-                && (normalized[start + word_len..].starts_with("ing")
-                    || normalized[start + word_len..].starts_with("er")
-                    || normalized[start + word_len..].starts_with("ed"));
+            let is_fucking_variant = word == "fuck" && start + word_len < chars.len() && {
+                let suffix: String = chars[start + word_len..].iter().collect();
+                suffix.starts_with("ing") || suffix.starts_with("er") || suffix.starts_with("ed")
+            };
 
             if is_fucking_variant {
                 return true;
             }
 
             if at_start {
-                let suffix_len = chars.len() - word_len;
+                let suffix_start = start + word_len;
+                let suffix_len = chars.len() - suffix_start;
                 if suffix_len >= 4 {
-                    let suffix: String = chars[word_len..].iter().collect();
+                    let suffix: String = chars[suffix_start..].iter().collect();
                     if is_valid_suffix_word(&suffix) {
                         continue;
                     }
@@ -166,7 +168,7 @@ fn contains_profanity(text: &str) -> bool {
                 return true;
             }
 
-            if is_word_boundary(&normalized, start, word_len) {
+            if is_word_boundary(&chars, start, word_len) {
                 return true;
             }
         }
