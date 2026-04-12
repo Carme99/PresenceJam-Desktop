@@ -43,7 +43,7 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
                 let app_handle = app.clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_millis(500));
-                    log::info!("[TRAY] quit: forced exit fallback");
+                    log::info!("[TRAY] quit: forced exit fallback after app-shutdown");
                     let _ = app_handle.exit(0);
                 });
             }

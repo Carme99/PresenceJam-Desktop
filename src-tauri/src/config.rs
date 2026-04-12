@@ -227,55 +227,41 @@ pub fn load_config() -> Result<AppConfig, String> {
     Ok(config)
 }
 
+fn atomic_write_json(path: &std::path::Path, json: &str) -> Result<(), String> {
+    let temp_path = path.with_extension("tmp");
+
+    let mut file = fs::File::create(&temp_path).map_err(|e| {
+        format!(
+            "Failed to create temp file '{}': {}",
+            temp_path.display(),
+            e
+        )
+    })?;
+
+    file.write_all(json.as_bytes())
+        .map_err(|e| format!("Failed to write temp file '{}': {}", temp_path.display(), e))?;
+
+    file.sync_all()
+        .map_err(|e| format!("Failed to sync temp file '{}': {}", temp_path.display(), e))?;
+
+    if path.exists() {
+        std::fs::remove_file(path)
+            .map_err(|e| format!("Failed to remove existing file '{}': {}", path.display(), e))?;
+    }
+
+    std::fs::rename(&temp_path, path)
+        .map_err(|e| format!("Failed to rename temp file to '{}': {}", path.display(), e))?;
+
+    Ok(())
+}
+
 pub fn save_config(config: &AppConfig) -> Result<(), String> {
     let path = get_config_path()?;
 
     let json = serde_json::to_string_pretty(config)
         .map_err(|e| format!("Failed to serialize config to JSON: {}", e))?;
 
-    // Atomic write: write to temp file, sync, then rename
-    let temp_path = path.with_extension("tmp");
-    let mut file = fs::File::create(&temp_path).map_err(|e| {
-        format!(
-            "Failed to create temp config file '{}': {}",
-            temp_path.display(),
-            e
-        )
-    })?;
-
-    file.write_all(json.as_bytes()).map_err(|e| {
-        format!(
-            "Failed to write temp config file '{}': {}",
-            temp_path.display(),
-            e
-        )
-    })?;
-
-    file.sync_all().map_err(|e| {
-        format!(
-            "Failed to sync config file '{}': {}",
-            temp_path.display(),
-            e
-        )
-    })?;
-
-    if path.exists() {
-        std::fs::remove_file(&path).map_err(|e| {
-            format!(
-                "Failed to remove existing config file '{}': {}",
-                path.display(),
-                e
-            )
-        })?;
-    }
-
-    std::fs::rename(&temp_path, &path).map_err(|e| {
-        format!(
-            "Failed to rename config file to '{}': {}",
-            path.display(),
-            e
-        )
-    })?;
+    atomic_write_json(&path, &json)?;
 
     log::info!("Saved configuration to '{}'", path.display());
     Ok(())
@@ -325,49 +311,7 @@ pub fn save_credentials(credentials: &Credentials) -> Result<(), String> {
     let json = serde_json::to_string_pretty(credentials)
         .map_err(|e| format!("Failed to serialize credentials to JSON: {}", e))?;
 
-    // Atomic write: write to temp file, sync, then rename
-    let temp_path = path.with_extension("tmp");
-    let mut file = fs::File::create(&temp_path).map_err(|e| {
-        format!(
-            "Failed to create temp credentials file '{}': {}",
-            temp_path.display(),
-            e
-        )
-    })?;
-
-    file.write_all(json.as_bytes()).map_err(|e| {
-        format!(
-            "Failed to write temp credentials file '{}': {}",
-            temp_path.display(),
-            e
-        )
-    })?;
-
-    file.sync_all().map_err(|e| {
-        format!(
-            "Failed to sync credentials file '{}': {}",
-            temp_path.display(),
-            e
-        )
-    })?;
-
-    if path.exists() {
-        std::fs::remove_file(&path).map_err(|e| {
-            format!(
-                "Failed to remove existing credentials file '{}': {}",
-                path.display(),
-                e
-            )
-        })?;
-    }
-
-    std::fs::rename(&temp_path, &path).map_err(|e| {
-        format!(
-            "Failed to rename credentials file to '{}': {}",
-            path.display(),
-            e
-        )
-    })?;
+    atomic_write_json(&path, &json)?;
 
     log::info!("Saved credentials to '{}'", path.display());
     Ok(())

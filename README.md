@@ -1,4 +1,4 @@
-# PresenceJam 2.3
+# PresenceJam 2.3.4
 
 [![GitHub release (latest by date)](https://img.shields.io/github/v/release/Carme99/PresenceJam-Desktop?style=flat-square)](https://github.com/Carme99/PresenceJam-Desktop/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](https://opensource.org/licenses/MIT)
@@ -6,7 +6,7 @@
 [![Tauri](https://img.shields.io/badge/Tauri-2.0-ffc107?logo=tauri&style=flat-square)](https://tauri.app/)
 [![Svelte](https://img.shields.io/badge/Svelte-5-ff3e00?logo=svelte&style=flat-square)](https://svelte.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.6-3178c6?logo=typescript&style=flat-square)](https://www.typescriptlang.org/)
-[![macOS](https://img.shields.io/badge/macOS-2.3-ffffff?logo=apple&style=flat-square)](https://github.com/Carme99/PresenceJam-Desktop/releases)
+[![macOS](https://img.shields.io/badge/macOS-Apple_Silicon-333333?logo=apple&style=flat-square)](https://github.com/Carme99/PresenceJam-Desktop/releases)
 
 **Sync your Spotify playback to Microsoft Teams status automatically.**
 

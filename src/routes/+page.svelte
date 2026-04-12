@@ -45,12 +45,6 @@
     listen('app-shutdown', async () => {
       console.log('[PAGE] EVENT: app-shutdown received');
       try {
-        await invoke('stop_syncing');
-        console.log('[PAGE] EVENT: stop_syncing SUCCESS');
-      } catch (e) {
-        console.error('[PAGE] EVENT: stop_syncing FAILED:', e);
-      }
-      try {
         await invoke('app_exit');
         console.log('[PAGE] EVENT: app_exit SUCCESS');
       } catch (e) {

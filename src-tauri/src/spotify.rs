@@ -28,7 +28,6 @@ pub struct TrackInfo {
 #[derive(Debug)]
 pub enum SpotifyApiError {
     ExpiredToken,
-    NotPlaying,
     RateLimited,
     Other(String),
 }
@@ -37,7 +36,6 @@ impl std::fmt::Display for SpotifyApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SpotifyApiError::ExpiredToken => write!(f, "Access token expired"),
-            SpotifyApiError::NotPlaying => write!(f, "Not playing"),
             SpotifyApiError::RateLimited => write!(f, "Rate limited"),
             SpotifyApiError::Other(s) => write!(f, "{}", s),
         }
