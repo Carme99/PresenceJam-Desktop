@@ -196,6 +196,12 @@
     console.log('[ONBOARDING] finish: spotifyConnected=', spotifyConnected);
     console.log('[ONBOARDING] finish: teamsConnected=', teamsConnected);
     
+    if (!spotifyConnected || !teamsConnected) {
+      console.error('[ONBOARDING] finish: validation failed - spotifyConnected=', spotifyConnected, ', teamsConnected=', teamsConnected);
+      alert('Please connect both Spotify and Teams before finishing setup.');
+      return;
+    }
+    
     try {
       console.log('[ONBOARDING] finish: step 1 - building config');
       const cfg: AppConfig = {
@@ -207,7 +213,11 @@
         },
         teams: {
           status_format: statusFormat,
-          clear_on_pause: true
+          clear_on_pause: true,
+          profanity_filter: true,
+          profanity_placeholder: 'Currently Listening to Spotify',
+          launch_at_login: launchAtLogin,
+          start_minimized: false
         },
         polling: {
           default_interval_seconds: pollingInterval,
