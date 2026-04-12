@@ -94,6 +94,12 @@ pub fn start_spotify_auth(
     let challenge = crate::spotify::pkce_generate_challenge(&verifier);
     log::info!("[CMD] start_spotify_auth: challenge generated");
 
+    let csrf_state = crate::spotify::pkce_generate_verifier();
+    log::info!(
+        "[CMD] start_spotify_auth: state generated, len={}",
+        csrf_state.len()
+    );
+
     let auth_url = format!(
         "https://accounts.spotify.com/authorize\
          ?client_id={}\
@@ -101,10 +107,12 @@ pub fn start_spotify_auth(
          &redirect_uri={}\
          &code_challenge_method=S256\
          &code_challenge={}\
+         &state={}\
          &scope=user-read-currently-playing user-read-playback-state",
         client_id,
         urlencoding::encode(&redirect_uri),
-        urlencoding::encode(&challenge)
+        urlencoding::encode(&challenge),
+        urlencoding::encode(&csrf_state)
     );
     log::info!(
         "[CMD] start_spotify_auth: auth_url created, length={}",
@@ -116,6 +124,7 @@ pub fn start_spotify_auth(
         let mut pending = state.pending_spotify_auth.write();
         *pending = Some(PendingSpotifyAuth {
             verifier: verifier.clone(),
+            state: csrf_state.clone(),
             client_id: client_id.clone(),
             client_secret: client_secret.clone(),
             redirect_uri: redirect_uri.clone(),
@@ -554,6 +563,40 @@ pub fn stop_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> R
 
     log::info!("[CMD] stop_syncing: SUCCESS");
     Ok(())
+}
+
+#[tauri::command]
+pub fn app_exit(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> Result<(), String> {
+    log::info!("[CMD] app_exit: ENTRY");
+
+    // Stop polling first if running
+    let is_syncing = {
+        let guard = state.is_syncing.read();
+        *guard
+    };
+
+    if is_syncing {
+        log::info!("[CMD] app_exit: stopping polling first");
+        polling::stop_polling(state.inner());
+
+        // Wait for polling thread to finish
+        {
+            let mut handle_guard = state.polling_handle.write();
+            if let Some(handle) = handle_guard.take() {
+                match handle.join() {
+                    Ok(()) => {
+                        log::info!("[CMD] app_exit: polling thread finished");
+                    }
+                    Err(e) => {
+                        log::error!("[CMD] app_exit: polling thread panicked: {:?}", e);
+                    }
+                }
+            }
+        }
+    }
+
+    log::info!("[CMD] app_exit: calling app.exit(0)");
+    app.exit(0);
 }
 
 #[tauri::command]

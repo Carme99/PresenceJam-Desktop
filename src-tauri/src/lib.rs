@@ -6,6 +6,7 @@ use tauri::{Manager, Emitter, AppHandle};
 #[derive(Debug, Clone)]
 pub struct PendingSpotifyAuth {
     pub verifier: String,
+    pub state: String,
     pub client_id: String,
     pub client_secret: String,
     pub redirect_uri: String,
@@ -53,14 +54,14 @@ pub mod polling;
 pub mod tray;
 pub mod commands;
 
-async fn handle_spotify_callback(code: &str, app: &AppHandle) -> Result<(), String> {
+async fn handle_spotify_callback(code: &str, state_param: Option<&str>, app: &AppHandle) -> Result<(), String> {
     log::info!("[CALLBACK] handle_spotify_callback: ENTRY - code.len={}", code.len());
-    
-    let state = app.state::<Arc<AppState>>();
+
+    let app_state = app.state::<Arc<AppState>>();
     log::info!("[CALLBACK] handle_spotify_callback: got app state");
-    
+
     let pending = {
-        let mut guard = state.pending_spotify_auth.write();
+        let mut guard = app_state.pending_spotify_auth.write();
         log::info!("[CALLBACK] handle_spotify_callback: taking pending Spotify auth from state");
         guard.take().ok_or_else(|| {
             log::error!("[CALLBACK] handle_spotify_callback: No pending Spotify auth found");
@@ -68,6 +69,17 @@ async fn handle_spotify_callback(code: &str, app: &AppHandle) -> Result<(), Stri
         })?
     };
     log::info!("[CALLBACK] handle_spotify_callback: pending auth found - verifier.len={}", pending.verifier.len());
+
+    // Verify state matches to prevent CSRF attacks
+    if let Some(state_str) = state_param {
+        if state_str != pending.state {
+            log::error!("[CALLBACK] handle_spotify_callback: state mismatch - CSRF attack detected");
+            return Err("State mismatch - possible CSRF attack".to_string());
+        }
+        log::info!("[CALLBACK] handle_spotify_callback: state verified successfully");
+    } else {
+        log::warn!("[CALLBACK] handle_spotify_callback: no state parameter in callback URL");
+    }
     
     log::info!("[CALLBACK] handle_spotify_callback: calling complete_spotify_auth");
     let tokens = crate::spotify::complete_spotify_auth(
@@ -83,7 +95,7 @@ async fn handle_spotify_callback(code: &str, app: &AppHandle) -> Result<(), Stri
     crate::polling::save_spotify_tokens(app, &tokens)?;
     
     {
-        let mut guard = state.spotify_tokens.write();
+        let mut guard = app_state.spotify_tokens.write();
         *guard = Some(tokens.clone());
         log::info!("[CALLBACK] handle_spotify_callback: tokens stored in AppState");
     }
@@ -150,12 +162,14 @@ fn handle_deep_link(url: &str, app: AppHandle) {
             log::info!("[DEEP_LINK] handle_deep_link: path={}", path);
             
             let code = parsed.query_pairs().find(|(k, _)| k == "code").map(|(_, v)| v.to_string());
-            
+            let state_param = parsed.query_pairs().find(|(k, _)| k == "state").map(|(_, v)| v.to_string());
+
             if let Some(code_str) = code {
                 log::info!("[DEEP_LINK] handle_deep_link: code found - code.len={}", code_str.len());
                 let app_clone = app.clone();
                 let code_clone = code_str.clone();
-                
+                let state_clone = state_param.clone();
+
                 if path == "/teams-callback" {
                     log::info!("[DEEP_LINK] handle_deep_link: routing to Teams callback");
                     tauri::async_runtime::spawn(async move {
@@ -170,7 +184,7 @@ fn handle_deep_link(url: &str, app: AppHandle) {
                     log::info!("[DEEP_LINK] handle_deep_link: routing to Spotify callback");
                     tauri::async_runtime::spawn(async move {
                         log::info!("[DEEP_LINK] handle_deep_link: spawning Spotify callback handler");
-                        if let Err(e) = handle_spotify_callback(&code_clone, &app_clone).await {
+                        if let Err(e) = handle_spotify_callback(&code_clone, state_clone.as_deref(), &app_clone).await {
                             log::error!("[DEEP_LINK] handle_spotify_callback: FAILED - {}", e);
                             log::info!("[DEEP_LINK] handle_deep_link: EMIT spotify-auth-failed event");
                             let _ = app_clone.emit("spotify-auth-failed", e);
@@ -374,6 +388,7 @@ pub fn run() {
             commands::complete_onboarding,
             commands::reconnect_spotify,
             commands::reconnect_teams,
+            commands::app_exit,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

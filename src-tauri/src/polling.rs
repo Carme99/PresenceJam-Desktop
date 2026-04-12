@@ -374,15 +374,69 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle) {
                 thread::sleep(StdDuration::from_secs(DEFAULT_INTERVAL_SECONDS));
             }
             Err(e) => {
+                let err_str = e.to_string();
                 log::error!(
                     "[POLLING] polling_loop: Failed to get currently playing track: {}",
-                    e
+                    err_str
                 );
+
+                // If token expired (401), attempt refresh and retry once
+                if err_str.contains("expired") || err_str.contains("401") {
+                    log::info!("[POLLING] polling_loop: token may be expired, attempting refresh");
+
+                    let client_id = config
+                        .as_ref()
+                        .map(|c| c.spotify.client_id.as_str())
+                        .unwrap_or("");
+                    let client_secret = config
+                        .as_ref()
+                        .map(|c| c.spotify.client_secret.as_str())
+                        .unwrap_or("");
+
+                    if !client_id.is_empty() && !client_secret.is_empty() {
+                        let current_tokens = {
+                            let guard = state.spotify_tokens.read();
+                            guard.clone()
+                        };
+
+                        if let Some(tokens) = current_tokens {
+                            match refresh_spotify_token(&tokens, client_id, client_secret) {
+                                Ok(new_tokens) => {
+                                    log::info!(
+                                        "[POLLING] polling_loop: token refresh SUCCESS, retrying"
+                                    );
+                                    *state.spotify_tokens.write() = Some(new_tokens.clone());
+                                    let retry_token = new_tokens.access_token.clone();
+                                    match get_currently_playing(&retry_token) {
+                                        Ok(Some(_)) | Ok(None) => {
+                                            // Retry succeeded or no track, continue loop
+                                            thread::sleep(StdDuration::from_secs(
+                                                DEFAULT_INTERVAL_SECONDS,
+                                            ));
+                                            continue;
+                                        }
+                                        Err(_) => {
+                                            // Retry still failed, fall through to error emit
+                                            log::error!("[POLLING] polling_loop: retry after refresh also failed");
+                                        }
+                                    }
+                                }
+                                Err(refresh_err) => {
+                                    log::error!(
+                                        "[POLLING] polling_loop: token refresh failed: {}",
+                                        refresh_err
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+
                 let _ = app.emit(
                     "error",
                     serde_json::json!({
                         "source": "spotify",
-                        "message": format!("Failed to get currently playing: {}", e)
+                        "message": format!("Failed to get currently playing: {}", err_str)
                     }),
                 );
                 log::info!("[POLLING] polling_loop: EMIT error event");

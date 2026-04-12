@@ -40,6 +40,23 @@
       console.log('[PAGE] onMount: tray-click listener registered');
     });
 
+    console.log('[PAGE] onMount: setting up app-shutdown listener');
+    listen('app-shutdown', async () => {
+      console.log('[PAGE] EVENT: app-shutdown received');
+      try {
+        await invoke('stop_syncing');
+        console.log('[PAGE] EVENT: stop_syncing SUCCESS');
+      } catch (e) {
+        console.error('[PAGE] EVENT: stop_syncing FAILED:', e);
+      }
+      try {
+        await invoke('app_exit');
+        console.log('[PAGE] EVENT: app_exit SUCCESS');
+      } catch (e) {
+        console.error('[PAGE] EVENT: app_exit FAILED:', e);
+      }
+    });
+
     return () => {
       console.log('[PAGE] onDestroy: ENTRY');
       if (unlistenTray) {

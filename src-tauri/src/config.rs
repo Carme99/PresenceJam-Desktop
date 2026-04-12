@@ -74,7 +74,7 @@ fn default_min_interval_seconds() -> u64 {
 }
 
 fn default_max_interval_seconds() -> u64 {
-    10
+    60
 }
 
 fn default_expiry_buffer_seconds() -> u64 {
@@ -233,11 +233,39 @@ pub fn save_config(config: &AppConfig) -> Result<(), String> {
     let json = serde_json::to_string_pretty(config)
         .map_err(|e| format!("Failed to serialize config to JSON: {}", e))?;
 
-    let mut file = fs::File::create(&path)
-        .map_err(|e| format!("Failed to create config file '{}': {}", path.display(), e))?;
+    // Atomic write: write to temp file, sync, then rename
+    let temp_path = path.with_extension("tmp");
+    let mut file = fs::File::create(&temp_path).map_err(|e| {
+        format!(
+            "Failed to create temp config file '{}': {}",
+            temp_path.display(),
+            e
+        )
+    })?;
 
-    file.write_all(json.as_bytes())
-        .map_err(|e| format!("Failed to write config file '{}': {}", path.display(), e))?;
+    file.write_all(json.as_bytes()).map_err(|e| {
+        format!(
+            "Failed to write temp config file '{}': {}",
+            temp_path.display(),
+            e
+        )
+    })?;
+
+    file.sync_all().map_err(|e| {
+        format!(
+            "Failed to sync config file '{}': {}",
+            temp_path.display(),
+            e
+        )
+    })?;
+
+    std::fs::rename(&temp_path, &path).map_err(|e| {
+        format!(
+            "Failed to rename config file to '{}': {}",
+            path.display(),
+            e
+        )
+    })?;
 
     log::info!("Saved configuration to '{}'", path.display());
     Ok(())
@@ -287,17 +315,35 @@ pub fn save_credentials(credentials: &Credentials) -> Result<(), String> {
     let json = serde_json::to_string_pretty(credentials)
         .map_err(|e| format!("Failed to serialize credentials to JSON: {}", e))?;
 
-    let mut file = fs::File::create(&path).map_err(|e| {
+    // Atomic write: write to temp file, sync, then rename
+    let temp_path = path.with_extension("tmp");
+    let mut file = fs::File::create(&temp_path).map_err(|e| {
         format!(
-            "Failed to create credentials file '{}': {}",
-            path.display(),
+            "Failed to create temp credentials file '{}': {}",
+            temp_path.display(),
             e
         )
     })?;
 
     file.write_all(json.as_bytes()).map_err(|e| {
         format!(
-            "Failed to write credentials file '{}': {}",
+            "Failed to write temp credentials file '{}': {}",
+            temp_path.display(),
+            e
+        )
+    })?;
+
+    file.sync_all().map_err(|e| {
+        format!(
+            "Failed to sync credentials file '{}': {}",
+            temp_path.display(),
+            e
+        )
+    })?;
+
+    std::fs::rename(&temp_path, &path).map_err(|e| {
+        format!(
+            "Failed to rename credentials file to '{}': {}",
             path.display(),
             e
         )

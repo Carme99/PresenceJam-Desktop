@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Memory leak: event listeners not cleaned up on component unmount (Onboarding)
+- Polling: 401 responses now trigger token refresh instead of silent failure
+- Config: default polling interval now correctly less than max interval (was 30 > 10)
+- Config: atomic file writes prevent data loss on save failure
+- Auth: CSRF state now properly verified on Spotify OAuth callback
+- Shutdown: polling thread now properly stopped on app quit
+- UI: buttons no longer allow double-click during async operations
+- Error messages now properly display instead of "[object Object]"
+
+### Security
+
+- CSRF protection now functional for Spotify OAuth flow
+- Credentials file writes now atomic (prevents corruption)
+
 ## [2.3.0] - 2026-04-12
 
 ### Added

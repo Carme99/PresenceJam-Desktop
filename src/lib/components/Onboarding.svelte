@@ -1,7 +1,7 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { configStore, saveConfig, type AppConfig } from '$lib/stores/config';
   import { currentView } from '$lib/stores/app';
 
@@ -24,10 +24,13 @@
   let launchAtLogin = $state(false);
   let pollingInterval = $state(30);
   let validationError = $state('');
+  let isFinishing = $state(false);
 
-  onMount(() => {
+  let unlistenFns: (() => void)[] = [];
+
+  onMount(async () => {
     console.log('[ONBOARDING] onMount: ENTRY');
-    
+
     console.log('[ONBOARDING] onMount: setting up spotify-auth-complete listener');
     const unlistenComplete = listen('spotify-auth-complete', () => {
       console.log('[ONBOARDING] EVENT: spotify-auth-complete received');
@@ -36,14 +39,14 @@
       validationError = '';
       console.log('[ONBOARDING] EVENT: spotifyConnected=true, spotifyWaiting=false');
     });
-    
+
     console.log('[ONBOARDING] onMount: setting up spotify-auth-failed listener');
     const unlistenFailed = listen<string>('spotify-auth-failed', (event) => {
       console.error('[ONBOARDING] EVENT: spotify-auth-failed received:', event.payload);
       spotifyWaiting = false;
       console.log('[ONBOARDING] EVENT: spotifyWaiting=false (from failed)');
     });
-    
+
     console.log('[ONBOARDING] onMount: setting up teams-auth-complete listener');
     const unlistenTeamsComplete = listen('teams-auth-complete', () => {
       console.log('[ONBOARDING] EVENT: teams-auth-complete received');
@@ -53,7 +56,7 @@
       validationError = '';
       console.log('[ONBOARDING] EVENT: teamsConnected=true, teamsPolling=false, teamsAuthError=""');
     });
-    
+
     console.log('[ONBOARDING] onMount: setting up teams-auth-failed listener');
     const unlistenTeamsFailed = listen<string>('teams-auth-failed', (event) => {
       console.error('[ONBOARDING] EVENT: teams-auth-failed received:', event.payload);
@@ -61,21 +64,16 @@
       teamsAuthError = String(event.payload);
       console.log('[ONBOARDING] EVENT: teamsPolling=false, teamsAuthError set');
     });
-    
-    console.log('[ONBOARDING] onMount: setting up cleanup');
-    return async () => {
-      console.log('[ONBOARDING] onDestroy: cleaning up listeners');
-      try {
-        const [fn1, fn2, fn3, fn4] = await Promise.all([unlistenComplete, unlistenFailed, unlistenTeamsComplete, unlistenTeamsFailed]);
-        fn1();
-        fn2();
-        fn3();
-        fn4();
-        console.log('[ONBOARDING] onDestroy: listeners cleaned up');
-      } catch (e) {
-        console.error('[ONBOARDING] onDestroy: cleanup error:', e);
-      }
-    };
+
+    const [fn1, fn2, fn3, fn4] = await Promise.all([unlistenComplete, unlistenFailed, unlistenTeamsComplete, unlistenTeamsFailed]);
+    unlistenFns = [fn1, fn2, fn3, fn4];
+    console.log('[ONBOARDING] onMount: listeners registered');
+  });
+
+  onDestroy(() => {
+    console.log('[ONBOARDING] onDestroy: cleaning up listeners');
+    unlistenFns.forEach(fn => fn());
+    console.log('[ONBOARDING] onDestroy: listeners cleaned up');
   });
 
   async function connectSpotify() {
@@ -205,15 +203,17 @@
 
   async function finish() {
     console.log('[ONBOARDING] finish: ENTRY');
+    if (isFinishing) return;
     console.log('[ONBOARDING] finish: spotifyConnected=', spotifyConnected);
     console.log('[ONBOARDING] finish: teamsConnected=', teamsConnected);
-    
+
     if (!spotifyConnected || !teamsConnected) {
       console.error('[ONBOARDING] finish: validation failed - spotifyConnected=', spotifyConnected, ', teamsConnected=', teamsConnected);
       validationError = 'Please connect both Spotify and Teams before finishing setup.';
       return;
     }
-    
+
+    isFinishing = true;
     try {
       console.log('[ONBOARDING] finish: step 1 - building config');
       const cfg: AppConfig = {
@@ -244,11 +244,11 @@
         }
       };
       console.log('[ONBOARDING] finish: config built');
-      
+
       console.log('[ONBOARDING] finish: step 2 - calling saveConfig');
       await saveConfig(cfg);
       console.log('[ONBOARDING] finish: saveConfig SUCCESS');
-      
+
       console.log('[ONBOARDING] finish: step 3 - launchAtLogin=', launchAtLogin);
       if (launchAtLogin) {
         console.log('[ONBOARDING] finish: calling invoke set_autostart_enabled');
@@ -259,21 +259,23 @@
           console.error('[ONBOARDING] finish: set_autostart_enabled FAILED (non-critical):', e);
         }
       }
-      
+
       console.log('[ONBOARDING] finish: step 4 - calling invoke complete_onboarding');
       const result = await invoke('complete_onboarding');
       console.log('[ONBOARDING] finish: complete_onboarding SUCCESS, result=', result);
-      
+
       console.log('[ONBOARDING] finish: step 5 - switching to dashboard');
       currentView.set('dashboard');
       console.log('[ONBOARDING] finish: currentView=dashboard');
-      
+
       console.log('[ONBOARDING] finish: SUCCESS - all steps completed');
-    } catch (e) {
+    } catch (e: unknown) {
       console.error('[ONBOARDING] finish: FAILED:', e);
-      validationError = 'Setup failed: ' + e;
+      validationError = 'Setup failed: ' + (typeof e === 'string' ? e : (e as Error)?.message || String(e));
+    } finally {
+      isFinishing = false;
     }
-    
+
     console.log('[ONBOARDING] finish: EXIT');
   }
 </script>
@@ -389,7 +391,7 @@
         <p class="error-message">{validationError}</p>
       {/if}
       
-      <button onclick={finish}>Finish</button>
+      <button onclick={finish} disabled={isFinishing}>Finish</button>
       <button class="back" onclick={() => { step = 2; console.log('[ONBOARDING] step changed to 2'); }}>← Back</button>
     </div>
   {/if}

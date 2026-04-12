@@ -115,8 +115,8 @@ If a track or artist name contains profanity, PresenceJam replaces the entire st
 
 | What | Where | How |
 |------|-------|-----|
-| Spotify tokens | `tauri-plugin-store` | DPAPI-encrypted on Windows |
-| Teams tokens | `tauri-plugin-store` | DPAPI-encrypted on Windows |
+| Spotify tokens | `tauri-plugin-store` | Stored locally, encrypted at rest (platform keychain) |
+| Teams tokens | `tauri-plugin-store` | Stored locally, encrypted at rest (platform keychain) |
 | App config | `%APPDATA%\PresenceJam\config.json` | Plain JSON |
 | Credentials | `%APPDATA%\PresenceJam\credentials.json` | Plain JSON |
 | App logs | `%APPDATA%\PresenceJam\logs\` | Daily rotating, 30-day retention |

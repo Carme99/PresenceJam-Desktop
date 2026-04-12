@@ -69,17 +69,36 @@ export const defaultConfig: AppConfig = {
 
 export const configStore = writable<AppConfig>(defaultConfig);
 
+let loadPromise: Promise<AppConfig> | null = null;
+let savePromise: Promise<void> | null = null;
+
 export async function loadConfig(): Promise<AppConfig> {
-  try {
-    const cfg = await invoke<AppConfig>('load_config');
-    configStore.set(cfg);
-    return cfg;
-  } catch {
-    return defaultConfig;
-  }
+  if (loadPromise) return loadPromise;
+
+  loadPromise = (async () => {
+    try {
+      const cfg = await invoke<AppConfig>('load_config');
+      configStore.set(cfg);
+      return cfg;
+    } catch (e) {
+      console.error('[CONFIG] loadConfig failed:', e);
+      return defaultConfig;
+    } finally {
+      loadPromise = null;
+    }
+  })();
+
+  return loadPromise;
 }
 
 export async function saveConfig(cfg: AppConfig): Promise<void> {
-  await invoke('save_config', { config: cfg });
-  configStore.set(cfg);
+  if (savePromise) await savePromise;
+
+  savePromise = (async () => {
+    await invoke('save_config', { config: cfg });
+    configStore.set(cfg);
+    savePromise = null;
+  })();
+
+  await savePromise;
 }
