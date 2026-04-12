@@ -215,7 +215,11 @@ flowchart TD
     EXPIRED -->|No| TRACK_POLL[Poll Spotify<br/>/me/player/currently-playing]
     TRACK_POLL --> TRACK_CHANGED{Track<br/>Changed?}
     TRACK_CHANGED -->|No| SLEEP_SMART[Smart Sleep<br/>remaining - 5s buffer]
-    TRACK_CHANGED -->|Yes| UPDATE_TEAMS[Set Teams Status<br/>with formatted message]
+    TRACK_CHANGED -->|Yes| FORMAT_STATUS[Format Status<br/>from template]
+    FORMAT_STATUS --> PROFANITY_CHECK{Profanity<br/>Filter<br/>Enabled?}
+    PROFANITY_CHECK -->|Yes| FILTER_PROFANITY[Filter Status<br/>replace profane<br/>with placeholder]
+    PROFANITY_CHECK -->|No| UPDATE_TEAMS
+    FILTER_PROFANITY --> UPDATE_TEAMS[Set Teams Status<br/>with final message]
     UPDATE_TEAMS --> SLEEP_SMART
     SLEEP_SMART --> TOKEN_CHECK
     TRACK_POLL --> NO_TRACK{No Track<br/>Playing?}
@@ -223,6 +227,27 @@ flowchart TD
     NO_TRACK -->|No| TRACK_CHANGED
     CLEAR_STATUS --> SLEEP_30[Sleep 30s] --> TOKEN_CHECK
 ```
+
+### Profanity Filter
+
+The `profanity.rs` module screens the formatted status before it is sent to Teams. If profanity is detected, the status is replaced with a safe placeholder rather than exposing the profane content.
+
+**How it works:**
+
+1. `format_status()` produces the status string from the track template
+2. If `config.teams.profanity_filter` is enabled, `filter_status()` is called
+3. `contains_profanity()` normalizes the text and checks against a 25-word curated list
+4. If matched, the placeholder (with `{emoji}` resolved to 🎵 or ⏸️) replaces the status
+5. The replacement is logged, but the original profane content is **never written to logs**
+
+**Detection features:**
+- Leetspeak normalization (1→i, 3→e, $→s, @→a, 0→o, 5→s, 7→t, !→i, |→i)
+- Repeated-character collapse (shiiit → shiit, but not excessive repeats)
+- Word-boundary checks prevent false positives (class, assassin, cocktail, vacuum)
+- Special handling: "fucking", "fucked", "fucker" are detected as profane variants
+- Safe suffix words (tail, head, hand, etc.) allow compound words without false positives
+
+**TODO:** Currently filters the formatted status string. A future refactor should filter raw Spotify fields (track, artist, album) before formatting to prevent placeholder injection via custom templates with `{emoji}`.
 
 ### Smart Sleep Logic
 
@@ -306,6 +331,7 @@ PresenceJam-Desktop/
 │   │   ├── commands.rs               # All invoke() command handlers
 │   │   ├── config.rs                 # JSON config load/save, AppConfig struct
 │   │   ├── polling.rs                # Polling loop (thread::spawn)
+│   │   ├── profanity.rs             # Profanity filter module
 │   │   ├── spotify.rs                # Spotify Web API client
 │   │   ├── teams.rs                  # Microsoft Graph API client
 │   │   └── tray.rs                   # System tray setup

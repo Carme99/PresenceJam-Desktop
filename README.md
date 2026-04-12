@@ -1,4 +1,4 @@
-# PresenceJam 2.2
+# PresenceJam 2.3
 
 [![GitHub release (latest by date)](https://img.shields.io/github/v/release/Carme99/PresenceJam-Desktop?style=flat-square)](https://github.com/Carme99/PresenceJam-Desktop/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](https://opensource.org/licenses/MIT)
@@ -6,7 +6,7 @@
 [![Tauri](https://img.shields.io/badge/Tauri-2.0-ffc107?logo=tauri&style=flat-square)](https://tauri.app/)
 [![Svelte](https://img.shields.io/badge/Svelte-5-ff3e00?logo=svelte&style=flat-square)](https://svelte.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.6-3178c6?logo=typescript&style=flat-square)](https://www.typescriptlang.org/)
-[![macOS](https://img.shields.io/badge/macOS-2.2-ffffff?logo=apple&style=flat-square)](https://github.com/Carme99/PresenceJam-Desktop/releases)
+[![macOS](https://img.shields.io/badge/macOS-2.3-ffffff?logo=apple&style=flat-square)](https://github.com/Carme99/PresenceJam-Desktop/releases)
 
 **Sync your Spotify playback to Microsoft Teams status automatically.**
 
@@ -29,7 +29,7 @@ I had a weekend, some caffeine, and a vague memory of MSN Messenger's
 | ⚙️ **Configurable** | Custom status format, emoji, polling interval |
 | 🖥️ **System Tray** | Runs silently in the background |
 | 🚀 **Launch at Login** | Optional auto-start on Windows boot |
-| 🍎 **macOS Support** | Native Apple Silicon build |
+| 🛡️ **Profanity Filter** | Auto-detects and replaces profane track names with safe placeholder |
 
 ## How It Works
 
@@ -52,15 +52,15 @@ The app polls Spotify every few seconds while a track is playing. When the track
 |------|-------------|
 | Dashboard | Shows currently playing track, Teams connection status, and sync controls |
 | Onboarding | 3-step wizard: Spotify credentials → Microsoft auth → Customize settings |
-| Settings | Adjust status format, polling interval, launch-at-login |
+| Settings | Adjust status format, polling interval, profanity filter, launch-at-login |
 | Log Viewer | Scroll through the daily rotating log files |
 
 ## Downloads
 
 Download the latest release from [GitHub Releases](https://github.com/Carme99/PresenceJam-Desktop/releases):
 
-- `PresenceJam-2.2.0.msi` — Windows 10/11 installer (64-bit)
-- `PresenceJam-2.2.0-macos.dmg` — macOS installer (Apple Silicon)
+- `PresenceJam-2.3.0.msi` — Windows 10/11 installer (64-bit)
+- `PresenceJam-2.3.0-macos.dmg` — macOS installer (Apple Silicon)
 
 ## Quickstart
 
@@ -91,6 +91,25 @@ Customize how your Teams status looks using these placeholders:
 **Default:** `🎵 {artist} - {track} 🎧`
 
 **Example output:** `🎵 Daft Punk - One More Time 🎧`
+
+## Profanity Filter
+
+If a track or artist name contains profanity, PresenceJam replaces the entire status with a safe placeholder rather than displaying the profane content.
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `profanity_filter` | `true` | Enable/disable the filter |
+| `profanity_placeholder` | `Currently Listening to Spotify` | Placeholder text shown when content is filtered. Supports `{emoji}` (🎵 playing / ⏸️ paused) |
+
+**How detection works:**
+- 25-word curated profanity list
+- Leetspeak normalization: `1→i`, `3→e`, `$→s`, `@→a`, `0→o`, `5→s`, `7→t`, `!→i`, `|→i`
+- Repeated-character collapse: `shiiit` → `shiit` (but not excessive repeats)
+- Word-boundary detection avoids false positives (e.g., `class`, `cocktail`, `assassin`)
+- "fucking", "fucked", "fucker" variants are detected as profanity
+- Safe suffix words allow compounds like `cocktail` without blocking `cock`
+
+**Note:** The filter currently operates on the formatted status string. A future refactor may filter raw Spotify metadata before formatting to prevent placeholder injection via custom templates. See [ARCHITECTURE.md](./ARCHITECTURE.md) for details.
 
 ## Data & Privacy
 

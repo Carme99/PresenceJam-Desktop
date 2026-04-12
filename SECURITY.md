@@ -52,7 +52,8 @@ App settings are stored in plain JSON:
 
 These files contain:
 - Spotify Client ID and Client Secret (from your Spotify Developer app)
-- Status format template
+- Status format template (`status_format`)
+- Profanity filter settings (`profanity_filter`, `profanity_placeholder`)
 - Polling configuration
 - Logging preferences
 
@@ -70,6 +71,7 @@ Logs may contain:
 - Track titles and artist names (from Spotify API responses)
 - Timestamps and operational messages
 - Error details (including API error messages)
+- Redacted profanity filter events (the original profane status is **never** written to logs)
 
 Logs are **rotated daily** and **retained for 30 days** by default. You can reduce retention in settings.
 
@@ -143,6 +145,6 @@ For a more secure experience:
 PresenceJam is open source. You're encouraged to review the code yourself:
 
 - [GitHub Repository](https://github.com/Carme99/PresenceJam-Desktop)
-- Key security-sensitive files: `src-tauri/src/spotify.rs`, `src-tauri/src/teams.rs`, `src-tauri/src/polling.rs`
+- Key security-sensitive files: `src-tauri/src/spotify.rs`, `src-tauri/src/teams.rs`, `src-tauri/src/polling.rs`, `src-tauri/src/profanity.rs`
 
 Contributions that improve security are welcome.

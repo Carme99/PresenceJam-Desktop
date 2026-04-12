@@ -115,6 +115,30 @@ Before diving in, check these basics:
 **Fix:**
 This is a Teams limitation. PresenceJam sets the status to expire at track end time + 10 second buffer, but Teams may shorten this. This is normal Teams behavior.
 
+## Profanity Filter
+
+### My custom placeholder isn't showing
+
+1. In **Settings → Teams**, ensure **Profanity Filter** is toggled ON
+2. Check that **Placeholder** field is non-empty (whitespace-only falls back to default)
+3. If the placeholder contains `{emoji}`, it will be replaced with 🎵 (playing) or ⏸️ (paused)
+
+### A profane track isn't being filtered
+
+**Cause:** The filter currently operates on the formatted status string after the template is applied. If your template uses custom placeholders, the raw track metadata (artist/track/album) may not be fully covered.
+
+**Fix / Workaround:**
+This is a known architectural limitation. See the TODO note in [ARCHITECTURE.md](./ARCHITECTURE.md#profanity-filter). A future release will filter raw Spotify fields before formatting.
+
+### What's in the profanity word list?
+
+The list is in `src-tauri/src/profanity.rs` and covers common English profanity. Detection includes:
+- Leetspeak variants: `sh1t`, `$hit`, `d@mn`, `p1ss`, `n1gg3r`
+- Repeated-character variants: `shiiit`, `fuuuuck`
+- "fucking", "fucked", "fucker" variants
+
+False positives are prevented via word-boundary checks — words like `class`, `cocktail`, `assassin`, `vacuum`, `cumulative` are not flagged.
+
 ## Logs
 
 ### Where to find logs
