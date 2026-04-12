@@ -94,6 +94,12 @@ pub fn start_spotify_auth(
     let challenge = crate::spotify::pkce_generate_challenge(&verifier);
     log::info!("[CMD] start_spotify_auth: challenge generated");
 
+    let csrf_state = crate::spotify::pkce_generate_verifier();
+    log::info!(
+        "[CMD] start_spotify_auth: state generated, len={}",
+        csrf_state.len()
+    );
+
     let auth_url = format!(
         "https://accounts.spotify.com/authorize\
          ?client_id={}\
@@ -101,10 +107,12 @@ pub fn start_spotify_auth(
          &redirect_uri={}\
          &code_challenge_method=S256\
          &code_challenge={}\
+         &state={}\
          &scope=user-read-currently-playing user-read-playback-state",
         client_id,
         urlencoding::encode(&redirect_uri),
-        urlencoding::encode(&challenge)
+        urlencoding::encode(&challenge),
+        urlencoding::encode(&csrf_state)
     );
     log::info!(
         "[CMD] start_spotify_auth: auth_url created, length={}",
@@ -116,6 +124,7 @@ pub fn start_spotify_auth(
         let mut pending = state.pending_spotify_auth.write();
         *pending = Some(PendingSpotifyAuth {
             verifier: verifier.clone(),
+            state: csrf_state.clone(),
             client_id: client_id.clone(),
             client_secret: client_secret.clone(),
             redirect_uri: redirect_uri.clone(),
@@ -129,6 +138,7 @@ pub fn start_spotify_auth(
     store.set("spotify_client_secret", serde_json::json!(client_secret));
     store.set("spotify_redirect_uri", serde_json::json!(redirect_uri));
     store.set("spotify_verifier", serde_json::json!(verifier));
+    store.set("spotify_csrf_state", serde_json::json!(csrf_state));
     store.save().map_err(|e| e.to_string())?;
     log::info!("[CMD] start_spotify_auth: persisted to store");
 
@@ -527,32 +537,52 @@ pub fn start_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> 
     Ok(())
 }
 
-#[tauri::command]
-pub fn stop_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> Result<(), String> {
-    log::info!("[CMD] stop_syncing: ENTRY");
-
-    polling::stop_polling(state.inner());
-    log::info!("[CMD] stop_syncing: polling stopped");
-
+fn stop_polling_and_join(state: &Arc<AppState>, context: &str) {
+    polling::stop_polling(state);
     {
         let mut handle_guard = state.polling_handle.write();
         if let Some(handle) = handle_guard.take() {
-            // For std::thread, we wait for it to finish (it exits when is_syncing=false)
             match handle.join() {
                 Ok(()) => {
-                    log::info!("[CMD] stop_syncing: polling thread finished");
+                    log::info!("[CMD] {}: polling thread finished", context);
                 }
                 Err(e) => {
-                    log::error!("[CMD] stop_syncing: polling thread panicked: {:?}", e);
+                    log::error!("[CMD] {}: polling thread panicked: {:?}", context, e);
                 }
             }
         }
     }
+}
+
+#[tauri::command]
+pub fn stop_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> Result<(), String> {
+    log::info!("[CMD] stop_syncing: ENTRY");
+
+    stop_polling_and_join(state.inner(), "stop_syncing");
 
     log::info!("[CMD] stop_syncing: EMIT sync-stopped event");
     let _ = app.emit("sync-stopped", ());
 
     log::info!("[CMD] stop_syncing: SUCCESS");
+    Ok(())
+}
+
+#[tauri::command]
+pub fn app_exit(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> Result<(), String> {
+    log::info!("[CMD] app_exit: ENTRY");
+
+    let is_syncing = {
+        let guard = state.is_syncing.read();
+        *guard
+    };
+
+    if is_syncing {
+        log::info!("[CMD] app_exit: stopping polling first");
+        stop_polling_and_join(state.inner(), "app_exit");
+    }
+
+    log::info!("[CMD] app_exit: calling app.exit(0)");
+    app.exit(0);
     Ok(())
 }
 

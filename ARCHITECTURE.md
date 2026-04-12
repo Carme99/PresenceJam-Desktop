@@ -370,5 +370,5 @@ Multiple threads access this shared state via `RwLock`:
 | `currentView` | `'onboarding' \| 'dashboard' \| 'settings' \| 'logs'` | Active view |
 | `isSyncing` | `boolean` | Sync running/paused |
 | `appError` | `string \| null` | Current error message |
-| `currentTrack` | `TrackInfo \| null` | Currently playing track |
 | `configStore` | `AppConfig` | Full app config |
+| `currentTrack` (spotify.ts) | `TrackInfo \| null` | Currently playing track (managed as local component state) |

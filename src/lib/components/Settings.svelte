@@ -10,6 +10,8 @@
   let isConnected = $state(false);
   let teamsStatusConnected = $state(false);
   let isSaving = $state(false);
+  let reconnectingSpotify = $state(false);
+  let reconnectingTeams = $state(false);
   let saveMessage = $state('');
   let saveTimeout: ReturnType<typeof setTimeout> | null = null;
 
@@ -66,11 +68,23 @@
   }
 
   async function reconnectSpotify() {
-    await invoke('reconnect_spotify');
+    if (reconnectingSpotify) return;
+    reconnectingSpotify = true;
+    try {
+      await invoke('reconnect_spotify');
+    } finally {
+      reconnectingSpotify = false;
+    }
   }
 
   async function reconnectTeams() {
-    await invoke('reconnect_teams');
+    if (reconnectingTeams) return;
+    reconnectingTeams = true;
+    try {
+      await invoke('reconnect_teams');
+    } finally {
+      reconnectingTeams = false;
+    }
   }
 
   function goBack() {
@@ -110,7 +124,7 @@
       <div class="connection-row">
         {#if isConnected}
           <span class="badge success">Connected</span>
-          <button class="btn-secondary" onclick={reconnectSpotify}>Reconnect Spotify</button>
+          <button class="btn-secondary" onclick={reconnectSpotify} disabled={reconnectingSpotify}>Reconnect Spotify</button>
         {:else}
           <span class="badge warning">Not Connected</span>
         {/if}
@@ -123,7 +137,7 @@
       <div class="connection-row">
         {#if teamsStatusConnected}
           <span class="badge success">Connected</span>
-          <button class="btn-secondary" onclick={reconnectTeams}>Reconnect Teams</button>
+          <button class="btn-secondary" onclick={reconnectTeams} disabled={reconnectingTeams}>Reconnect Teams</button>
         {:else}
           <span class="badge warning">Not Connected</span>
         {/if}

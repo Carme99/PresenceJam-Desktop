@@ -6,6 +6,7 @@
   import type { TrackInfo } from '$lib/stores/spotify';
 
   let isSyncing = $state(false);
+  let isToggling = $state(false);
   let spotifyConnected = $state(false);
   let teamsConnected = $state(false);
   let currentTrack = $state<TrackInfo | null>(null);
@@ -72,19 +73,25 @@
     
     console.log('[DASHBOARD] onMount: setting up toggle-pause listener');
     unlisten.push(await listen('toggle-pause', async () => {
+      if (isToggling) return;
       console.log('[DASHBOARD] EVENT: toggle-pause received');
       console.log('[DASHBOARD] EVENT: isSyncing=', isSyncing);
-      
-      if (isSyncing) {
-        console.log('[DASHBOARD] EVENT: calling invoke stop_syncing');
-        await invoke('stop_syncing');
-        isSyncing = false;
-        console.log('[DASHBOARD] EVENT: isSyncing=false');
-      } else {
-        console.log('[DASHBOARD] EVENT: calling invoke start_syncing');
-        await invoke('start_syncing');
-        isSyncing = true;
-        console.log('[DASHBOARD] EVENT: isSyncing=true');
+
+      isToggling = true;
+      try {
+        if (isSyncing) {
+          console.log('[DASHBOARD] EVENT: calling invoke stop_syncing');
+          await invoke('stop_syncing');
+          isSyncing = false;
+          console.log('[DASHBOARD] EVENT: isSyncing=false');
+        } else {
+          console.log('[DASHBOARD] EVENT: calling invoke start_syncing');
+          await invoke('start_syncing');
+          isSyncing = true;
+          console.log('[DASHBOARD] EVENT: isSyncing=true');
+        }
+      } finally {
+        isToggling = false;
       }
     }));
     
@@ -92,21 +99,27 @@
   });
 
   async function toggleSync() {
+    if (isToggling) return;
     console.log('[DASHBOARD] toggleSync: ENTRY');
     console.log('[DASHBOARD] toggleSync: isSyncing=', isSyncing);
-    
-    if (isSyncing) {
-      console.log('[DASHBOARD] toggleSync: calling invoke stop_syncing');
-      await invoke('stop_syncing');
-      isSyncing = false;
-      console.log('[DASHBOARD] toggleSync: isSyncing=false');
-    } else {
-      console.log('[DASHBOARD] toggleSync: calling invoke start_syncing');
-      await invoke('start_syncing');
-      isSyncing = true;
-      console.log('[DASHBOARD] toggleSync: isSyncing=true');
+
+    isToggling = true;
+    try {
+      if (isSyncing) {
+        console.log('[DASHBOARD] toggleSync: calling invoke stop_syncing');
+        await invoke('stop_syncing');
+        isSyncing = false;
+        console.log('[DASHBOARD] toggleSync: isSyncing=false');
+      } else {
+        console.log('[DASHBOARD] toggleSync: calling invoke start_syncing');
+        await invoke('start_syncing');
+        isSyncing = true;
+        console.log('[DASHBOARD] toggleSync: isSyncing=true');
+      }
+    } finally {
+      isToggling = false;
     }
-    
+
     console.log('[DASHBOARD] toggleSync: EXIT');
   }
 
@@ -152,7 +165,7 @@
     <div class="header-right">
       <button class="icon-btn" onclick={openLogs} title="Logs">📋</button>
       <button class="icon-btn" onclick={openSettings} title="Settings">⚙️</button>
-      <button class="icon-btn sync-btn" onclick={toggleSync} title={isSyncing ? 'Pause' : 'Resume'}>
+      <button class="icon-btn sync-btn" onclick={toggleSync} disabled={isToggling} title={isSyncing ? 'Pause' : 'Resume'}>
         {isSyncing ? '⏸' : '▶'}
       </button>
     </div>

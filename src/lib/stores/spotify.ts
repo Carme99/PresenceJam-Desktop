@@ -18,4 +18,3 @@ export interface TrackInfo {
 
 export const spotifyConnected = writable(false);
 export const spotifyTokens = writable<SpotifyTokens | null>(null);
-export const currentTrack = writable<TrackInfo | null>(null);

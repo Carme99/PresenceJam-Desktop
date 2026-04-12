@@ -7,7 +7,8 @@ use tauri_plugin_store::StoreExt;
 
 use crate::profanity;
 use crate::spotify::{
-    format_status, get_currently_playing, is_token_expired, refresh_spotify_token, SpotifyTokens,
+    format_status, get_currently_playing, is_token_expired, refresh_spotify_token, SpotifyApiError,
+    SpotifyTokens,
 };
 use crate::teams::{clear_teams_status_message, set_teams_status_message, TeamsTokens};
 use crate::AppState;
@@ -16,6 +17,156 @@ const DEFAULT_INTERVAL_SECONDS: u64 = 30;
 const MAX_INTERVAL_SECONDS: u64 = 60;
 const MINIMUM_INTERVAL_SECONDS: u64 = 10;
 const ERROR_RETRY_INTERVAL_SECONDS: u64 = 30;
+const RATE_LIMIT_BACKOFF_SECONDS: u64 = 60;
+
+fn process_track(
+    app: &AppHandle,
+    state: &Arc<AppState>,
+    config: &Option<crate::config::AppConfig>,
+    track: &crate::spotify::TrackInfo,
+    last_track_key: &mut Option<String>,
+) -> u64 {
+    let track_key = format!("{} - {}", track.title, track.artist);
+    let changed = last_track_key.as_ref() != Some(&track_key);
+
+    if changed {
+        log::info!("[POLLING] process_track: new track detected, updating");
+        *last_track_key = Some(track_key);
+        *state.current_track.write() = Some(track.clone());
+
+        let _ = app.emit(
+            "spotify-track-changed",
+            serde_json::json!({
+                "title": track.title,
+                "artist": track.artist,
+                "album": track.album,
+                "album_art_url": track.album_art_url,
+                "is_playing": track.is_playing,
+                "progress_ms": track.progress_ms,
+                "duration_ms": track.duration_ms
+            }),
+        );
+    }
+
+    let teams_tokens = {
+        let guard = state.teams_tokens.read();
+        guard.clone()
+    };
+
+    if let Some(teams_tok) = teams_tokens {
+        if track.is_playing {
+            let status_format = config
+                .as_ref()
+                .map(|c| c.teams.status_format.as_str())
+                .unwrap_or("🎵 {artist} - {track} 🎧");
+            let status_message = format_status(track, status_format);
+            let profanity_filter_enabled = config
+                .as_ref()
+                .map(|c| c.teams.profanity_filter)
+                .unwrap_or(true);
+            let placeholder = config
+                .as_ref()
+                .map(|c| c.teams.profanity_placeholder.as_str())
+                .unwrap_or(profanity::safe_placeholder_default());
+            let final_status = if profanity_filter_enabled {
+                profanity::filter_status(&status_message, placeholder, track.is_playing)
+            } else {
+                status_message.clone()
+            };
+
+            let remaining_ms = track.duration_ms.saturating_sub(track.progress_ms);
+            let buffer_ms = config
+                .as_ref()
+                .map(|c| c.polling.expiry_buffer_seconds as u64)
+                .unwrap_or(10)
+                * 1000;
+            let expiry =
+                Utc::now() + chrono::Duration::milliseconds(remaining_ms as i64 + buffer_ms as i64);
+            let expiry_str = expiry.to_rfc3339();
+
+            match set_teams_status_message(
+                &teams_tok.access_token,
+                &final_status,
+                Some(&expiry_str),
+            ) {
+                Ok(_) => {
+                    let _ = app.emit(
+                        "presence-updated",
+                        serde_json::json!({
+                            "status": final_status,
+                            "timestamp": Utc::now().to_rfc3339()
+                        }),
+                    );
+                }
+                Err(e) => {
+                    log::error!("[POLLING] process_track: Failed to set Teams status: {}", e);
+                    let _ = app.emit(
+                        "error",
+                        serde_json::json!({
+                            "source": "teams",
+                            "message": format!("Failed to update status: {}", e)
+                        }),
+                    );
+                }
+            }
+        } else {
+            match clear_teams_status_message(&teams_tok.access_token) {
+                Ok(_) => {
+                    let _ = app.emit(
+                        "presence-cleared",
+                        serde_json::json!({ "timestamp": Utc::now().to_rfc3339() }),
+                    );
+                }
+                Err(e) => {
+                    log::error!(
+                        "[POLLING] process_track: Failed to clear Teams status: {}",
+                        e
+                    );
+                }
+            }
+        }
+    }
+
+    if track.is_playing {
+        let remaining_ms = track.duration_ms.saturating_sub(track.progress_ms);
+        let buffer_ms = 5000u64;
+        let remaining_secs = remaining_ms / 1000;
+        let sleep_secs = remaining_secs.saturating_sub(buffer_ms / 1000);
+        sleep_secs
+            .max(MINIMUM_INTERVAL_SECONDS)
+            .min(MAX_INTERVAL_SECONDS)
+    } else {
+        DEFAULT_INTERVAL_SECONDS
+    }
+}
+
+fn handle_no_track(app: &AppHandle, state: &Arc<AppState>, last_track_key: &mut Option<String>) {
+    if last_track_key.is_some() {
+        *last_track_key = None;
+        *state.current_track.write() = None;
+
+        let teams_tokens = {
+            let guard = state.teams_tokens.read();
+            guard.clone()
+        };
+        if let Some(teams_tok) = teams_tokens {
+            match clear_teams_status_message(&teams_tok.access_token) {
+                Ok(_) => {
+                    let _ = app.emit(
+                        "presence-cleared",
+                        serde_json::json!({ "timestamp": Utc::now().to_rfc3339() }),
+                    );
+                }
+                Err(e) => {
+                    log::error!(
+                        "[POLLING] handle_no_track: Failed to clear Teams status: {}",
+                        e
+                    );
+                }
+            }
+        }
+    }
+}
 
 pub fn start_polling(
     state: Arc<AppState>,
@@ -45,6 +196,13 @@ pub fn start_polling(
 
     log::info!("[POLLING] start_polling: SUCCESS - handle returned");
     Ok(handle)
+}
+
+fn get_spotify_credentials(config: &Option<crate::config::AppConfig>) -> (String, String) {
+    config
+        .as_ref()
+        .map(|c| (c.spotify.client_id.clone(), c.spotify.client_secret.clone()))
+        .unwrap_or_else(|| (String::new(), String::new()))
 }
 
 fn polling_loop(state: Arc<AppState>, app: AppHandle) {
@@ -102,22 +260,15 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle) {
         log::info!("[POLLING] polling_loop: token_expired={}", token_expired);
 
         // Refresh token if needed
+        let (client_id, client_secret) = get_spotify_credentials(&config);
         let spotify_tokens = if token_expired {
             log::info!("[POLLING] polling_loop: Spotify token expired, refreshing...");
-            let client_id = config
-                .as_ref()
-                .map(|c| c.spotify.client_id.as_str())
-                .unwrap_or("");
-            let client_secret = config
-                .as_ref()
-                .map(|c| c.spotify.client_secret.as_str())
-                .unwrap_or("");
             log::info!(
                 "[POLLING] polling_loop: refreshing with client_id.len={}",
                 client_id.len()
             );
 
-            match refresh_spotify_token(&spotify_tokens, client_id, client_secret) {
+            match refresh_spotify_token(&spotify_tokens, &client_id, &client_secret) {
                 Ok(new_tokens) => {
                     log::info!("[POLLING] polling_loop: token refresh SUCCESS");
                     *state.spotify_tokens.write() = Some(new_tokens.clone());
@@ -157,177 +308,8 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle) {
                     track.title,
                     track.artist
                 );
-                let track_key = format!("{} - {}", track.title, track.artist);
-
-                if last_track_key.as_ref() != Some(&track_key) {
-                    log::info!("[POLLING] polling_loop: new track detected, updating");
-                    last_track_key = Some(track_key.clone());
-                    *state.current_track.write() = Some(track.clone());
-
-                    log::info!("[POLLING] polling_loop: EMIT spotify-track-changed event");
-                    let _ = app.emit(
-                        "spotify-track-changed",
-                        serde_json::json!({
-                            "title": track.title,
-                            "artist": track.artist,
-                            "album": track.album,
-                            "album_art_url": track.album_art_url,
-                            "is_playing": track.is_playing,
-                            "progress_ms": track.progress_ms,
-                            "duration_ms": track.duration_ms
-                        }),
-                    );
-
-                    let teams_tokens = {
-                        let guard = state.teams_tokens.read();
-                        guard.clone()
-                    };
-                    log::info!(
-                        "[POLLING] polling_loop: teams_tokens: {}",
-                        if teams_tokens.is_some() {
-                            "Some"
-                        } else {
-                            "None"
-                        }
-                    );
-
-                    if let Some(teams_tok) = teams_tokens {
-                        if track.is_playing {
-                            log::info!(
-                                "[POLLING] polling_loop: track is playing, updating Teams status"
-                            );
-                            let status_format = config
-                                .as_ref()
-                                .map(|c| c.teams.status_format.as_str())
-                                .unwrap_or("🎵 {artist} - {track} 🎧");
-                            let status_message = format_status(&track, status_format);
-                            log::info!("[POLLING] polling_loop: status_message={}", status_message);
-
-                            let profanity_filter_enabled = config
-                                .as_ref()
-                                .map(|c| c.teams.profanity_filter)
-                                .unwrap_or(true);
-                            let placeholder = config
-                                .as_ref()
-                                .map(|c| c.teams.profanity_placeholder.as_str())
-                                .unwrap_or(profanity::safe_placeholder_default());
-
-                            // TODO(future): Currently filters the formatted status string. If filtering
-                            // raw Spotify fields is desired to avoid placeholder injection, refactor to
-                            // apply profanity detection on track metadata (artist/track/album) before
-                            // formatting, then use sanitized values in format_status or construct
-                            // final_status from sanitized pieces directly.
-                            let final_status = if profanity_filter_enabled {
-                                profanity::filter_status(
-                                    &status_message,
-                                    placeholder,
-                                    track.is_playing,
-                                )
-                            } else {
-                                status_message.clone()
-                            };
-                            if final_status != status_message {
-                                log::info!(
-                                    "[POLLING] profanity filter: status replaced (replaced=true) with placeholder '{}'",
-                                    final_status
-                                );
-                            }
-
-                            let remaining_ms = track.duration_ms.saturating_sub(track.progress_ms);
-                            let buffer_ms = config
-                                .as_ref()
-                                .map(|c| c.polling.expiry_buffer_seconds as u64)
-                                .unwrap_or(10)
-                                * 1000;
-                            let expiry = Utc::now()
-                                + chrono::Duration::milliseconds(
-                                    remaining_ms as i64 + buffer_ms as i64,
-                                );
-                            let expiry_str = expiry.to_rfc3339();
-                            log::info!("[POLLING] polling_loop: expiry={}", expiry_str);
-
-                            match set_teams_status_message(
-                                &teams_tok.access_token,
-                                &final_status,
-                                Some(&expiry_str),
-                            ) {
-                                Ok(_) => {
-                                    log::info!(
-                                        "[POLLING] polling_loop: Teams status updated: {}",
-                                        final_status
-                                    );
-                                    let _ = app.emit(
-                                        "presence-updated",
-                                        serde_json::json!({
-                                            "status": final_status,
-                                            "timestamp": Utc::now().to_rfc3339()
-                                        }),
-                                    );
-                                    log::info!(
-                                        "[POLLING] polling_loop: EMIT presence-updated event"
-                                    );
-                                }
-                                Err(e) => {
-                                    log::error!(
-                                        "[POLLING] polling_loop: Failed to set Teams status: {}",
-                                        e
-                                    );
-                                    let _ = app.emit(
-                                        "error",
-                                        serde_json::json!({
-                                            "source": "teams",
-                                            "message": format!("Failed to update status: {}", e)
-                                        }),
-                                    );
-                                    log::info!("[POLLING] polling_loop: EMIT error event");
-                                }
-                            }
-                        } else {
-                            log::info!(
-                                "[POLLING] polling_loop: track is paused, clearing Teams status"
-                            );
-                            match clear_teams_status_message(&teams_tok.access_token) {
-                                Ok(_) => {
-                                    log::info!("[POLLING] polling_loop: Teams status cleared");
-                                    let _ = app.emit(
-                                        "presence-cleared",
-                                        serde_json::json!({
-                                            "timestamp": Utc::now().to_rfc3339()
-                                        }),
-                                    );
-                                    log::info!(
-                                        "[POLLING] polling_loop: EMIT presence-cleared event"
-                                    );
-                                }
-                                Err(e) => {
-                                    log::error!(
-                                        "[POLLING] polling_loop: Failed to clear Teams status: {}",
-                                        e
-                                    );
-                                }
-                            }
-                        }
-                    } else {
-                        log::warn!(
-                            "[POLLING] polling_loop: No Teams tokens, skipping status update"
-                        );
-                    }
-                } else {
-                    log::info!("[POLLING] polling_loop: same track, no update needed");
-                }
-
-                // Calculate sleep duration
-                let sleep_duration = if track.is_playing {
-                    let remaining_ms = track.duration_ms.saturating_sub(track.progress_ms);
-                    let buffer_ms = 5000u64;
-                    let remaining_secs = remaining_ms / 1000;
-                    let sleep_secs = remaining_secs.saturating_sub(buffer_ms / 1000);
-                    sleep_secs
-                        .max(MINIMUM_INTERVAL_SECONDS)
-                        .min(MAX_INTERVAL_SECONDS)
-                } else {
-                    DEFAULT_INTERVAL_SECONDS
-                };
+                let sleep_duration =
+                    process_track(&app, &state, &config, &track, &mut last_track_key);
                 log::info!(
                     "[POLLING] polling_loop: sleeping for {} seconds",
                     sleep_duration
@@ -336,37 +318,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle) {
             }
             Ok(None) => {
                 log::info!("[POLLING] polling_loop: no track playing");
-
-                if last_track_key.is_some() {
-                    log::info!("[POLLING] polling_loop: was playing before, clearing state");
-                    last_track_key = None;
-                    *state.current_track.write() = None;
-
-                    let teams_tokens = {
-                        let guard = state.teams_tokens.read();
-                        guard.clone()
-                    };
-                    if let Some(teams_tok) = teams_tokens {
-                        log::info!("[POLLING] polling_loop: clearing Teams status");
-                        match clear_teams_status_message(&teams_tok.access_token) {
-                            Ok(_) => {
-                                log::info!("[POLLING] polling_loop: EMIT presence-cleared event");
-                                let _ = app.emit(
-                                    "presence-cleared",
-                                    serde_json::json!({
-                                        "timestamp": Utc::now().to_rfc3339()
-                                    }),
-                                );
-                            }
-                            Err(e) => {
-                                log::error!(
-                                    "[POLLING] polling_loop: Failed to clear Teams status: {}",
-                                    e
-                                );
-                            }
-                        }
-                    }
-                }
+                handle_no_track(&app, &state, &mut last_track_key);
                 log::info!(
                     "[POLLING] polling_loop: sleeping for {} seconds (no track)",
                     DEFAULT_INTERVAL_SECONDS
@@ -378,15 +330,82 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle) {
                     "[POLLING] polling_loop: Failed to get currently playing track: {}",
                     e
                 );
+
+                let mut final_err = e;
+                let mut backoff_secs = ERROR_RETRY_INTERVAL_SECONDS;
+
+                if matches!(final_err, SpotifyApiError::ExpiredToken) {
+                    log::info!("[POLLING] polling_loop: token expired, attempting refresh");
+
+                    if !client_id.is_empty() && !client_secret.is_empty() {
+                        let current_tokens = {
+                            let guard = state.spotify_tokens.read();
+                            guard.clone()
+                        };
+
+                        if let Some(tokens) = current_tokens {
+                            match refresh_spotify_token(&tokens, &client_id, &client_secret) {
+                                Ok(new_tokens) => {
+                                    log::info!(
+                                        "[POLLING] polling_loop: token refresh SUCCESS, retrying"
+                                    );
+                                    *state.spotify_tokens.write() = Some(new_tokens.clone());
+                                    let retry_token = new_tokens.access_token.clone();
+                                    match get_currently_playing(&retry_token) {
+                                        Ok(Some(track)) => {
+                                            log::info!(
+                                                "[POLLING] polling_loop: retry track found - {} by {}",
+                                                track.title,
+                                                track.artist
+                                            );
+                                            let _sleep = process_track(
+                                                &app,
+                                                &state,
+                                                &config,
+                                                &track,
+                                                &mut last_track_key,
+                                            );
+                                            continue;
+                                        }
+                                        Ok(None) => {
+                                            log::info!("[POLLING] polling_loop: retry no track");
+                                            handle_no_track(&app, &state, &mut last_track_key);
+                                            thread::sleep(StdDuration::from_secs(
+                                                DEFAULT_INTERVAL_SECONDS,
+                                            ));
+                                            continue;
+                                        }
+                                        Err(retry_err) => {
+                                            log::error!("[POLLING] polling_loop: retry after refresh also failed: {}", retry_err);
+                                            final_err = retry_err;
+                                        }
+                                    }
+                                }
+                                Err(refresh_err) => {
+                                    log::error!(
+                                        "[POLLING] polling_loop: token refresh failed: {}",
+                                        refresh_err
+                                    );
+                                    final_err = SpotifyApiError::Other(refresh_err.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if matches!(final_err, SpotifyApiError::RateLimited) {
+                    backoff_secs = RATE_LIMIT_BACKOFF_SECONDS;
+                }
+
                 let _ = app.emit(
                     "error",
                     serde_json::json!({
                         "source": "spotify",
-                        "message": format!("Failed to get currently playing: {}", e)
+                        "message": format!("Failed to get currently playing: {}", final_err)
                     }),
                 );
                 log::info!("[POLLING] polling_loop: EMIT error event");
-                thread::sleep(StdDuration::from_secs(ERROR_RETRY_INTERVAL_SECONDS));
+                thread::sleep(StdDuration::from_secs(backoff_secs));
             }
         }
     }

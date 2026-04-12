@@ -1,8 +1,7 @@
 use tauri::{
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem},
-    Manager,
-    Emitter,
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Emitter, Manager,
 };
 
 pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
@@ -40,7 +39,13 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
                 let _ = app.emit("toggle-pause", ());
             }
             "quit" => {
-                app.exit(0);
+                let _ = app.emit("app-shutdown", ());
+                let app_handle = app.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    log::info!("[TRAY] quit: forced exit fallback after app-shutdown");
+                    let _ = app_handle.exit(0);
+                });
             }
             _ => {}
         })
