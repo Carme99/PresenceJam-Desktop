@@ -31,3 +31,6 @@ logs/
 
 # Testing
 coverage/
+
+# Claude Code settings (local only, never commit)
+.claude/
