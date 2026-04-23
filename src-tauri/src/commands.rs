@@ -344,7 +344,10 @@ pub fn open_external_url(url: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn start_teams_auth_device_code(app: AppHandle) -> Result<DeviceCodeResponse, String> {
+pub fn start_teams_auth_device_code(
+    app: AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<DeviceCodeResponse, String> {
     log::info!("[CMD] start_teams_auth_device_code: ENTRY");
 
     let response = crate::teams::start_teams_auth_device_code()?;
@@ -359,6 +362,18 @@ pub fn start_teams_auth_device_code(app: AppHandle) -> Result<DeviceCodeResponse
     store.set("teams_device_code", serde_json::json!(response.device_code));
     store.save().map_err(|e| e.to_string())?;
     log::info!("[CMD] start_teams_auth_device_code: device code persisted to store");
+
+    // Populate pending_teams_auth so complete_teams_auth_manual and handle_teams_callback can work.
+    // See issue #8.
+    {
+        let mut pending = state.pending_teams_auth.write();
+        *pending = Some(crate::PendingTeamsAuth {
+            verifier: response.device_code.clone(),
+            client_id: crate::teams::MICROSOFT_GRAPH_CLIENT_ID.to_string(),
+            redirect_uri: "presencejam://callback".to_string(),
+        });
+    }
+    log::info!("[CMD] start_teams_auth_device_code: pending_teams_auth populated");
 
     log::info!("[CMD] start_teams_auth_device_code: SUCCESS");
     Ok(response)
@@ -772,15 +787,25 @@ pub fn get_current_track(
 }
 
 #[tauri::command]
-pub fn is_onboarding_complete() -> Result<bool, String> {
+pub fn is_onboarding_complete(state: tauri::State<'_, Arc<AppState>>) -> Result<bool, String> {
     log::info!("[CMD] is_onboarding_complete: ENTRY");
 
     let config = config::load_config()?;
-    let complete = !config.spotify.client_id.is_empty();
+    let spotify_configured = !config.spotify.client_id.is_empty();
+
+    // Check Teams tokens to verify Teams auth is complete.
+    // See issue #11.
+    let teams_configured = {
+        let guard = state.teams_tokens.read();
+        guard.is_some()
+    };
+
+    let complete = spotify_configured && teams_configured;
     log::info!(
-        "[CMD] is_onboarding_complete: result={} (client_id.len={})",
+        "[CMD] is_onboarding_complete: result={} (spotify={}, teams={})",
         complete,
-        config.spotify.client_id.len()
+        spotify_configured,
+        teams_configured
     );
 
     Ok(complete)
