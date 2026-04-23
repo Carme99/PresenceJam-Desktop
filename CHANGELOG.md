@@ -5,7 +5,24 @@ All notable changes to PresenceJam are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [2.3.5] - 2026-04-23
+
+### Fixed
+
+- Teams auth: `pending_teams_auth` now populated during device code flow, fixing `complete_teams_auth_manual` (closes #8)
+- Onboarding: `is_onboarding_complete` now checks both Spotify and Teams auth status (closes #11)
+- URL validation: `open_external_url` and `open_external` now reject non-http(s) schemes (closes #14)
+- Polling: retry intervals now include +/- 20% jitter to prevent thundering herd (closes #17)
+- Polling: HTTP requests have 10s timeout, stop_syncing bounded to 2s (partial fix for #10)
+
+### Security
+
+- CSP: replaced broad `*.microsoft.com` wildcard with explicit `login.microsoftonline.com` and `graph.microsoft.com` (closes #15)
+- URL commands: only http/https schemes allowed, preventing javascript: and file: attacks
+
+### Documentation
+
+- Token loading duplication in commands.rs documented as intentional (closes #16 - won't fix)
 
 ## [2.3.4] - 2026-04-12
 

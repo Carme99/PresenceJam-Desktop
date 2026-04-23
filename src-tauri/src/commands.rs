@@ -5,6 +5,22 @@ use crate::{polling, AppState, PendingSpotifyAuth};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_store::StoreExt;
+use url::Url;
+
+/// Validates that a URL uses http or https scheme.
+/// Returns the parsed URL on success, or an error string on failure.
+/// See issue #14.
+fn validate_http_url(url: &str) -> Result<Url, String> {
+    Url::parse(url).map_err(|_| "Invalid URL format".to_string()).and_then(|parsed| {
+        match parsed.scheme() {
+            "http" | "https" => Ok(parsed),
+            other => Err(format!(
+                "Invalid URL scheme '{}': only http/https allowed",
+                other
+            )),
+        }
+    })
+}
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SpotifyAuthResponse {
@@ -246,6 +262,10 @@ pub fn complete_spotify_auth_manual(
     Ok(tokens)
 }
 
+// NOTE: get_spotify_tokens and get_teams_tokens have similar structure but are
+// kept separate for clarity. The token types, store keys, and extraction logic differ
+// enough that extracting a generic helper would reduce readability without adding
+// much value. See issue #16.
 #[tauri::command]
 pub fn get_spotify_tokens(
     state: tauri::State<'_, Arc<AppState>>,
@@ -331,6 +351,10 @@ pub fn refresh_spotify(
 #[tauri::command]
 pub fn open_external_url(url: String) -> Result<(), String> {
     log::info!("[CMD] open_external_url: ENTRY - url.len={}", url.len());
+
+    // Validate URL scheme - only allow http/https. See issue #14.
+    validate_http_url(&url)?;
+
     match tauri_plugin_opener::open_url(&url, None::<&str>) {
         Ok(()) => {
             log::info!("[CMD] open_external_url: SUCCESS");
@@ -344,7 +368,10 @@ pub fn open_external_url(url: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn start_teams_auth_device_code(app: AppHandle) -> Result<DeviceCodeResponse, String> {
+pub fn start_teams_auth_device_code(
+    app: AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<DeviceCodeResponse, String> {
     log::info!("[CMD] start_teams_auth_device_code: ENTRY");
 
     let response = crate::teams::start_teams_auth_device_code()?;
@@ -359,6 +386,18 @@ pub fn start_teams_auth_device_code(app: AppHandle) -> Result<DeviceCodeResponse
     store.set("teams_device_code", serde_json::json!(response.device_code));
     store.save().map_err(|e| e.to_string())?;
     log::info!("[CMD] start_teams_auth_device_code: device code persisted to store");
+
+    // Populate pending_teams_auth so complete_teams_auth_manual and handle_teams_callback can work.
+    // See issue #8.
+    {
+        let mut pending = state.pending_teams_auth.write();
+        *pending = Some(crate::PendingTeamsAuth {
+            verifier: response.device_code.clone(),
+            client_id: crate::teams::MICROSOFT_GRAPH_CLIENT_ID.to_string(),
+            redirect_uri: "presencejam://callback".to_string(),
+        });
+    }
+    log::info!("[CMD] start_teams_auth_device_code: pending_teams_auth populated");
 
     log::info!("[CMD] start_teams_auth_device_code: SUCCESS");
     Ok(response)
@@ -542,12 +581,33 @@ fn stop_polling_and_join(state: &Arc<AppState>, context: &str) {
     {
         let mut handle_guard = state.polling_handle.write();
         if let Some(handle) = handle_guard.take() {
+            drop(handle_guard); // Release lock while waiting
+
+            // Give thread up to 2 seconds to finish cooperatively
+            let started = std::time::Instant::now();
+            while started.elapsed() < std::time::Duration::from_secs(2) {
+                if handle.is_finished() {
+                    match handle.join() {
+                        Ok(()) => {
+                            log::info!("[CMD] {}: polling thread ended", context);
+                        }
+                        Err(e) => {
+                            log::error!("[CMD] {}: polling thread panicked: {:?}", context, e);
+                        }
+                    }
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+
+            // Timeout reached - try one final join (may block briefly)
+            log::warn!("[CMD] {}: polling thread did not terminate within 2s, attempting final join", context);
             match handle.join() {
                 Ok(()) => {
-                    log::info!("[CMD] {}: polling thread finished", context);
+                    log::info!("[CMD] {}: polling thread ended (final join)", context);
                 }
                 Err(e) => {
-                    log::error!("[CMD] {}: polling thread panicked: {:?}", context, e);
+                    log::error!("[CMD] {}: polling thread panicked (final join): {:?}", context, e);
                 }
             }
         }
@@ -735,6 +795,9 @@ pub fn open_logs_folder(app: AppHandle) -> Result<(), String> {
 pub fn open_external(url: String) -> Result<(), String> {
     log::info!("[CMD] open_external: ENTRY - url.len={}", url.len());
 
+    // Validate URL scheme - only allow http/https. See issue #14.
+    validate_http_url(&url)?;
+
     match tauri_plugin_opener::open_url(&url, None::<&str>) {
         Ok(()) => {
             log::info!("[CMD] open_external: SUCCESS");
@@ -769,15 +832,25 @@ pub fn get_current_track(
 }
 
 #[tauri::command]
-pub fn is_onboarding_complete() -> Result<bool, String> {
+pub fn is_onboarding_complete(state: tauri::State<'_, Arc<AppState>>) -> Result<bool, String> {
     log::info!("[CMD] is_onboarding_complete: ENTRY");
 
     let config = config::load_config()?;
-    let complete = !config.spotify.client_id.is_empty();
+    let spotify_configured = !config.spotify.client_id.is_empty();
+
+    // Check Teams tokens to verify Teams auth is complete.
+    // See issue #11.
+    let teams_configured = {
+        let guard = state.teams_tokens.read();
+        guard.is_some()
+    };
+
+    let complete = spotify_configured && teams_configured;
     log::info!(
-        "[CMD] is_onboarding_complete: result={} (client_id.len={})",
+        "[CMD] is_onboarding_complete: result={} (spotify={}, teams={})",
         complete,
-        config.spotify.client_id.len()
+        spotify_configured,
+        teams_configured
     );
 
     Ok(complete)

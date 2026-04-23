@@ -1,4 +1,5 @@
 use chrono::Utc;
+use rand::Rng;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration as StdDuration;
@@ -18,6 +19,16 @@ const MAX_INTERVAL_SECONDS: u64 = 60;
 const MINIMUM_INTERVAL_SECONDS: u64 = 10;
 const ERROR_RETRY_INTERVAL_SECONDS: u64 = 30;
 const RATE_LIMIT_BACKOFF_SECONDS: u64 = 60;
+
+/// Adds +/- 20% jitter to retry intervals to prevent thundering herd.
+/// See issue #17.
+/// Uses thread-local RNG to avoid per-call initialization overhead.
+fn with_jitter(base_secs: u64) -> u64 {
+    let mut rng = rand::thread_rng();
+    let jitter_range = base_secs as f64 * 0.2;
+    let jitter = rng.gen_range(-jitter_range..=jitter_range);
+    (base_secs as f64 + jitter).max(1.0) as u64
+}
 
 fn process_track(
     app: &AppHandle,
@@ -250,7 +261,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle) {
             }
             None => {
                 log::warn!("[POLLING] polling_loop: No Spotify tokens available, waiting...");
-                thread::sleep(StdDuration::from_secs(ERROR_RETRY_INTERVAL_SECONDS));
+                thread::sleep(StdDuration::from_secs(with_jitter(ERROR_RETRY_INTERVAL_SECONDS)));
                 continue;
             }
         };
@@ -287,7 +298,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle) {
                         }),
                     );
                     log::info!("[POLLING] polling_loop: EMIT error event");
-                    thread::sleep(StdDuration::from_secs(ERROR_RETRY_INTERVAL_SECONDS));
+                    thread::sleep(StdDuration::from_secs(with_jitter(ERROR_RETRY_INTERVAL_SECONDS)));
                     continue;
                 }
             }
@@ -332,7 +343,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle) {
                 );
 
                 let mut final_err = e;
-                let mut backoff_secs = ERROR_RETRY_INTERVAL_SECONDS;
+                let mut backoff_secs = with_jitter(ERROR_RETRY_INTERVAL_SECONDS);
 
                 if matches!(final_err, SpotifyApiError::ExpiredToken) {
                     log::info!("[POLLING] polling_loop: token expired, attempting refresh");
@@ -394,7 +405,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle) {
                 }
 
                 if matches!(final_err, SpotifyApiError::RateLimited) {
-                    backoff_secs = RATE_LIMIT_BACKOFF_SECONDS;
+                    backoff_secs = with_jitter(RATE_LIMIT_BACKOFF_SECONDS);
                 }
 
                 let _ = app.emit(
