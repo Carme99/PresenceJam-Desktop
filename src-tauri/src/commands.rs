@@ -247,6 +247,10 @@ pub fn complete_spotify_auth_manual(
     Ok(tokens)
 }
 
+// NOTE: get_spotify_tokens and get_teams_tokens have similar structure but are
+// kept separate for clarity. The token types, store keys, and extraction logic differ
+// enough that extracting a generic helper would reduce readability without adding
+// much value. See issue #16.
 #[tauri::command]
 pub fn get_spotify_tokens(
     state: tauri::State<'_, Arc<AppState>>,
