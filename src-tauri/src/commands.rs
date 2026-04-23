@@ -7,6 +7,21 @@ use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_store::StoreExt;
 use url::Url;
 
+/// Validates that a URL uses http or https scheme.
+/// Returns the parsed URL on success, or an error string on failure.
+/// See issue #14.
+fn validate_http_url(url: &str) -> Result<Url, String> {
+    Url::parse(url).map_err(|_| "Invalid URL format".to_string()).and_then(|parsed| {
+        match parsed.scheme() {
+            "http" | "https" => Ok(parsed),
+            other => Err(format!(
+                "Invalid URL scheme '{}': only http/https allowed",
+                other
+            )),
+        }
+    })
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SpotifyAuthResponse {
     pub auth_url: String,
@@ -338,11 +353,7 @@ pub fn open_external_url(url: String) -> Result<(), String> {
     log::info!("[CMD] open_external_url: ENTRY - url.len={}", url.len());
 
     // Validate URL scheme - only allow http/https. See issue #14.
-    let parsed = Url::parse(&url).map_err(|_| "Invalid URL format".to_string())?;
-    match parsed.scheme() {
-        "http" | "https" => {}
-        other => return Err(format!("Invalid URL scheme '{}': only http/https allowed", other)),
-    }
+    validate_http_url(&url)?;
 
     match tauri_plugin_opener::open_url(&url, None::<&str>) {
         Ok(()) => {
@@ -570,17 +581,35 @@ fn stop_polling_and_join(state: &Arc<AppState>, context: &str) {
     {
         let mut handle_guard = state.polling_handle.write();
         if let Some(handle) = handle_guard.take() {
+            drop(handle_guard); // Release lock while waiting
+
             // Give thread up to 2 seconds to finish cooperatively
             let started = std::time::Instant::now();
             while started.elapsed() < std::time::Duration::from_secs(2) {
                 if handle.is_finished() {
-                    let _ = handle.join();
-                    log::info!("[CMD] {}: polling thread ended", context);
+                    match handle.join() {
+                        Ok(()) => {
+                            log::info!("[CMD] {}: polling thread ended", context);
+                        }
+                        Err(e) => {
+                            log::error!("[CMD] {}: polling thread panicked: {:?}", context, e);
+                        }
+                    }
                     return;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
-            log::warn!("[CMD] {}: polling thread did not terminate within 2s", context);
+
+            // Timeout reached - try one final join (may block briefly)
+            log::warn!("[CMD] {}: polling thread did not terminate within 2s, attempting final join", context);
+            match handle.join() {
+                Ok(()) => {
+                    log::info!("[CMD] {}: polling thread ended (final join)", context);
+                }
+                Err(e) => {
+                    log::error!("[CMD] {}: polling thread panicked (final join): {:?}", context, e);
+                }
+            }
         }
     }
 }
@@ -767,11 +796,7 @@ pub fn open_external(url: String) -> Result<(), String> {
     log::info!("[CMD] open_external: ENTRY - url.len={}", url.len());
 
     // Validate URL scheme - only allow http/https. See issue #14.
-    let parsed = Url::parse(&url).map_err(|_| "Invalid URL format".to_string())?;
-    match parsed.scheme() {
-        "http" | "https" => {}
-        other => return Err(format!("Invalid URL scheme '{}': only http/https allowed", other)),
-    }
+    validate_http_url(&url)?;
 
     match tauri_plugin_opener::open_url(&url, None::<&str>) {
         Ok(()) => {

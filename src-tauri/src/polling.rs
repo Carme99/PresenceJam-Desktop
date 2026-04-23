@@ -22,6 +22,7 @@ const RATE_LIMIT_BACKOFF_SECONDS: u64 = 60;
 
 /// Adds +/- 20% jitter to retry intervals to prevent thundering herd.
 /// See issue #17.
+/// Uses thread-local RNG to avoid per-call initialization overhead.
 fn with_jitter(base_secs: u64) -> u64 {
     let mut rng = rand::thread_rng();
     let jitter_range = base_secs as f64 * 0.2;
