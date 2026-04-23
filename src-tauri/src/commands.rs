@@ -5,6 +5,7 @@ use crate::{polling, AppState, PendingSpotifyAuth};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_store::StoreExt;
+use url::Url;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SpotifyAuthResponse {
@@ -331,6 +332,14 @@ pub fn refresh_spotify(
 #[tauri::command]
 pub fn open_external_url(url: String) -> Result<(), String> {
     log::info!("[CMD] open_external_url: ENTRY - url.len={}", url.len());
+
+    // Validate URL scheme - only allow http/https. See issue #14.
+    let parsed = Url::parse(&url).map_err(|_| "Invalid URL format".to_string())?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        other => return Err(format!("Invalid URL scheme '{}': only http/https allowed", other)),
+    }
+
     match tauri_plugin_opener::open_url(&url, None::<&str>) {
         Ok(()) => {
             log::info!("[CMD] open_external_url: SUCCESS");
@@ -752,6 +761,13 @@ pub fn open_logs_folder(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub fn open_external(url: String) -> Result<(), String> {
     log::info!("[CMD] open_external: ENTRY - url.len={}", url.len());
+
+    // Validate URL scheme - only allow http/https. See issue #14.
+    let parsed = Url::parse(&url).map_err(|_| "Invalid URL format".to_string())?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        other => return Err(format!("Invalid URL scheme '{}': only http/https allowed", other)),
+    }
 
     match tauri_plugin_opener::open_url(&url, None::<&str>) {
         Ok(()) => {
