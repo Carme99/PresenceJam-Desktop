@@ -542,14 +542,17 @@ fn stop_polling_and_join(state: &Arc<AppState>, context: &str) {
     {
         let mut handle_guard = state.polling_handle.write();
         if let Some(handle) = handle_guard.take() {
-            match handle.join() {
-                Ok(()) => {
-                    log::info!("[CMD] {}: polling thread finished", context);
+            // Give thread up to 2 seconds to finish cooperatively
+            let started = std::time::Instant::now();
+            while started.elapsed() < std::time::Duration::from_secs(2) {
+                if handle.is_finished() {
+                    let _ = handle.join();
+                    log::info!("[CMD] {}: polling thread ended", context);
+                    return;
                 }
-                Err(e) => {
-                    log::error!("[CMD] {}: polling thread panicked: {:?}", context, e);
-                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
             }
+            log::warn!("[CMD] {}: polling thread did not terminate within 2s", context);
         }
     }
 }

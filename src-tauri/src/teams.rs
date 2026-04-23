@@ -68,6 +68,7 @@ pub fn start_teams_auth_device_code() -> Result<DeviceCodeResponse, String> {
 
     let client = reqwest::blocking::Client::builder()
         .user_agent("PresenceJam/2.0")
+        .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
     log::info!("teams::start_teams_auth_device_code: client created");
@@ -142,6 +143,7 @@ pub fn start_teams_auth_device_code() -> Result<DeviceCodeResponse, String> {
 pub fn poll_teams_auth(device_code: &str) -> Result<TeamsTokens, String> {
     let client = reqwest::blocking::Client::builder()
         .user_agent("PresenceJam/2.0")
+        .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
     let start_time = std::time::Instant::now();
@@ -239,6 +241,7 @@ pub fn complete_teams_auth(
 ) -> Result<TeamsTokens, String> {
     let client = reqwest::blocking::Client::builder()
         .user_agent("PresenceJam/2.0")
+        .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
@@ -305,6 +308,7 @@ pub fn refresh_teams_token(tokens: &TeamsTokens) -> Result<TeamsTokens, String> 
 
     let client = reqwest::blocking::Client::builder()
         .user_agent("PresenceJam/2.0")
+        .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
@@ -397,7 +401,10 @@ pub fn set_teams_status_message(
     message: &str,
     expiry_datetime: Option<&str>,
 ) -> Result<(), String> {
-    let client = reqwest::blocking::Client::new();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
     let expiry = expiry_datetime.map(|dt| ExpiryDateTime {
         date_time: dt.to_string(),
@@ -443,7 +450,10 @@ pub fn set_teams_status_message(
 }
 
 pub fn clear_teams_status_message(access_token: &str) -> Result<(), String> {
-    let client = reqwest::blocking::Client::new();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
     let body = StatusMessageRequest {
         status_message: StatusMessageContent {
