@@ -7,9 +7,10 @@
   import Dashboard from '$lib/components/Dashboard.svelte';
   import Settings from '$lib/components/Settings.svelte';
   import LogViewer from '$lib/components/LogViewer.svelte';
+  import About from '$lib/components/About.svelte';
 
-  // Build timestamp - unique per build
-  const BUILD = '2.3.5.' + Math.floor(Date.now() / 1000);
+  // Build info — injected at build time via vite.config.js define
+  const BUILD = import.meta.env.__APP_BUILD__ || '2.3.6.unknown';
 
   let ready = $state(false);
   let unlisten: (() => void)[] = [];
@@ -66,6 +67,12 @@
       }
     }).then(fn => unlisten.push(fn));
 
+    console.log('[PAGE] onMount: setting up show-about listener');
+    listen('show-about', () => {
+      console.log('[PAGE] EVENT: show-about received');
+      currentView.set('about');
+    }).then(fn => unlisten.push(fn));
+
     return () => {
       console.log('[PAGE] onDestroy: ENTRY');
       unlisten.forEach(fn => fn());
@@ -90,6 +97,8 @@
       <Settings />
     {:else if $currentView === 'logs'}
       <LogViewer />
+    {:else if $currentView === 'about'}
+      <About />
     {/if}
     <div class="version">{BUILD}</div>
   </div>

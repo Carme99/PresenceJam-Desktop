@@ -21,7 +21,6 @@
     "core:menu:default",
     "core:menu:allow-new",
     "core:menu:allow-popup",
-    "core:menu:allow-set-as-app-menu",
     "core:event:default",
     "core:event:allow-emit",
     "core:event:allow-listen",

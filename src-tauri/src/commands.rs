@@ -964,16 +964,16 @@ pub fn reconnect_teams(
 }
 
 #[tauri::command]
-pub fn update_menu_state(
+pub fn update_tray_menu_state(
     app: AppHandle,
     is_syncing: bool,
     current_track: Option<TrackInfo>,
 ) -> Result<(), String> {
     log::info!(
-        "[CMD] update_menu_state: ENTRY - is_syncing={}",
+        "[CMD] update_tray_menu_state: ENTRY - is_syncing={}",
         is_syncing
     );
     tray::update_tray_menu(&app, is_syncing, current_track)?;
-    log::info!("[CMD] update_menu_state: SUCCESS");
+    log::info!("[CMD] update_tray_menu_state: SUCCESS");
     Ok(())
 }

@@ -156,7 +156,7 @@
   // Helper to update tray menu state
   async function updateMenuState() {
     try {
-      await invoke('update_menu_state', {
+      await invoke('update_tray_menu_state', {
         isSyncing: isSyncing,
         currentTrack: currentTrack
       });

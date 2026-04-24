@@ -1,28 +1,44 @@
 use tauri::{
-    menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder},
+    menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder},
     AppHandle, Emitter, Manager, WebviewWindow,
 };
 
+// Menu item IDs — shared between tray and app menu for consistency
+const ID_SETTINGS: &str = "settings";
+const ID_OPEN_LOGS: &str = "open_logs";
+const ID_QUIT: &str = "quit";
+const ID_SHOW_DASHBOARD: &str = "show_dashboard";
+const ID_SHOW_LOGS: &str = "show_logs";
+const ID_ABOUT: &str = "about";
+
+/// Show and focus the main window.
+fn show_and_focus_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
 /// Builds the application menu bar (macOS/Windows).
-/// This creates native File, View, and Help menus.
+/// This creates native File, Edit, View, and Help menus.
 pub fn setup_app_menu(app: &tauri::App, window: &WebviewWindow) -> Result<(), String> {
     // File menu
     let file_menu = SubmenuBuilder::new(app, "File")
         .item(
-            &MenuItemBuilder::with_id("settings", "Settings...")
+            &MenuItemBuilder::with_id(ID_SETTINGS, "Settings...")
                 .accelerator("CmdOrCtrl+,")
                 .build(app)
                 .map_err(|e| e.to_string())?,
         )
         .item(
-            &MenuItemBuilder::with_id("open_logs", "Open Logs Folder")
+            &MenuItemBuilder::with_id(ID_OPEN_LOGS, "Open Logs Folder")
                 .accelerator("CmdOrCtrl+Shift+L")
                 .build(app)
                 .map_err(|e| e.to_string())?,
         )
         .separator()
         .item(
-            &MenuItemBuilder::with_id("quit", "Quit PresenceJam")
+            &MenuItemBuilder::with_id(ID_QUIT, "Quit PresenceJam")
                 .accelerator("CmdOrCtrl+Q")
                 .build(app)
                 .map_err(|e| e.to_string())?,
@@ -30,16 +46,28 @@ pub fn setup_app_menu(app: &tauri::App, window: &WebviewWindow) -> Result<(), St
         .build()
         .map_err(|e| e.to_string())?;
 
+    // Edit menu (standard macOS clipboard shortcuts for text fields)
+    let edit_menu = SubmenuBuilder::new(app, "Edit")
+        .item(&PredefinedMenuItem::undo(app).map_err(|e| e.to_string())?)
+        .item(&PredefinedMenuItem::redo(app).map_err(|e| e.to_string())?)
+        .separator()
+        .item(&PredefinedMenuItem::cut(app).map_err(|e| e.to_string())?)
+        .item(&PredefinedMenuItem::copy(app).map_err(|e| e.to_string())?)
+        .item(&PredefinedMenuItem::paste(app).map_err(|e| e.to_string())?)
+        .item(&PredefinedMenuItem::select_all(app).map_err(|e| e.to_string())?)
+        .build()
+        .map_err(|e| e.to_string())?;
+
     // View menu
     let view_menu = SubmenuBuilder::new(app, "View")
         .item(
-            &MenuItemBuilder::with_id("show_dashboard", "Show Dashboard")
+            &MenuItemBuilder::with_id(ID_SHOW_DASHBOARD, "Show Dashboard")
                 .accelerator("CmdOrCtrl+1")
                 .build(app)
                 .map_err(|e| e.to_string())?,
         )
         .item(
-            &MenuItemBuilder::with_id("show_logs", "Show Logs")
+            &MenuItemBuilder::with_id(ID_SHOW_LOGS, "Show Logs")
                 .accelerator("CmdOrCtrl+2")
                 .build(app)
                 .map_err(|e| e.to_string())?,
@@ -48,9 +76,10 @@ pub fn setup_app_menu(app: &tauri::App, window: &WebviewWindow) -> Result<(), St
         .map_err(|e| e.to_string())?;
 
     // Help menu
+    // No accelerator for About — intentional (no standard macOS convention)
     let help_menu = SubmenuBuilder::new(app, "Help")
         .item(
-            &MenuItemBuilder::with_id("about", "About PresenceJam")
+            &MenuItemBuilder::with_id(ID_ABOUT, "About PresenceJam")
                 .build(app)
                 .map_err(|e| e.to_string())?,
         )
@@ -60,6 +89,7 @@ pub fn setup_app_menu(app: &tauri::App, window: &WebviewWindow) -> Result<(), St
     // Build the full menu bar
     let menu = MenuBuilder::new(app)
         .item(&file_menu)
+        .item(&edit_menu)
         .item(&view_menu)
         .item(&help_menu)
         .build()
@@ -77,19 +107,15 @@ pub fn setup_app_menu(app: &tauri::App, window: &WebviewWindow) -> Result<(), St
 
 /// Handle menu events from the app menu bar.
 pub fn handle_app_menu_event(app: &AppHandle, event_id: &str) {
-    log::info!("[MENU] handle_app_menu_event: event_id={}", event_id);
     match event_id {
-        "settings" => {
+        ID_SETTINGS => {
             let _ = app.emit("navigate", "settings");
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            show_and_focus_main_window(app);
         }
-        "open_logs" => {
+        ID_OPEN_LOGS => {
             let _ = app.emit("open-logs-folder", ());
         }
-        "quit" => {
+        ID_QUIT => {
             let _ = app.emit("app-shutdown", ());
             let app_handle = app.clone();
             std::thread::spawn(move || {
@@ -98,23 +124,19 @@ pub fn handle_app_menu_event(app: &AppHandle, event_id: &str) {
                 let _ = app_handle.exit(0);
             });
         }
-        "show_dashboard" => {
+        ID_SHOW_DASHBOARD => {
             let _ = app.emit("navigate", "dashboard");
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            show_and_focus_main_window(app);
         }
-        "show_logs" => {
+        ID_SHOW_LOGS => {
             let _ = app.emit("navigate", "logs");
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            show_and_focus_main_window(app);
         }
-        "about" => {
+        ID_ABOUT => {
             let _ = app.emit("show-about", ());
         }
-        _ => {}
+        _ => {
+            log::warn!("[MENU] handle_app_menu_event: unknown event_id={}", event_id);
+        }
     }
 }

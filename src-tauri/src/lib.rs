@@ -414,7 +414,7 @@ pub fn run() {
             commands::reconnect_spotify,
             commands::reconnect_teams,
             commands::app_exit,
-            commands::update_menu_state,
+            commands::update_tray_menu_state,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
