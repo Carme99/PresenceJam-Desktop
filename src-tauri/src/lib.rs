@@ -52,6 +52,7 @@ pub mod spotify;
 pub mod teams;
 pub mod polling;
 pub mod tray;
+pub mod menu;
 pub mod commands;
 
 async fn handle_spotify_callback(code: &str, state_param: Option<&str>, app: &AppHandle) -> Result<(), String> {
@@ -332,6 +333,29 @@ pub fn run() {
                     log::info!("[APP] setup: System tray initialized successfully");
                 }
 
+                // Setup application menu bar using window menu (not app menu)
+                // This ensures click events are properly routed via on_menu_event
+                log::info!("[APP] setup: setting up application menu");
+                if let Some(window) = app.get_webview_window("main") {
+                    if let Err(e) = menu::setup_app_menu(app, &window) {
+                        log::error!("[APP] setup: Failed to setup application menu: {}", e);
+                    } else {
+                        log::info!("[APP] setup: Application menu initialized successfully");
+                    }
+
+                    // Register menu event handler on the window
+                    // This is critical for macOS - window menus receive click events properly
+                    let app_handle = app.handle().clone();
+                    log::info!("[APP] setup: registering menu event handler on window");
+                    window.on_menu_event(move |_app, event| {
+                        let id = event.id().as_ref();
+                        log::info!("[APP] window.on_menu_event: id={}", id);
+                        menu::handle_app_menu_event(&app_handle, id);
+                    });
+                } else {
+                    log::error!("[APP] setup: could not get main window for menu");
+                }
+
                 // Check for deep links on startup
                 let start_urls = app.deep_link().get_current();
                 log::info!("[APP] setup: checking for start URLs");
@@ -390,6 +414,7 @@ pub fn run() {
             commands::reconnect_spotify,
             commands::reconnect_teams,
             commands::app_exit,
+            commands::update_menu_state,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

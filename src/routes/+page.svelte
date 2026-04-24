@@ -8,12 +8,14 @@
   import Settings from '$lib/components/Settings.svelte';
   import LogViewer from '$lib/components/LogViewer.svelte';
 
+  // Build timestamp - unique per build
+  const BUILD = '2.3.5.' + Math.floor(Date.now() / 1000);
+
   let ready = $state(false);
+  let unlisten: (() => void)[] = [];
 
   onMount(() => {
     console.log('[PAGE] onMount: ENTRY');
-    let unlistenTray: (() => void) | undefined;
-    let unlistenShutdown: (() => void) | undefined;
 
     (async () => {
       console.log('[PAGE] onMount: calling invoke is_onboarding_complete');
@@ -34,12 +36,8 @@
     console.log('[PAGE] onMount: setting up tray-click listener');
     listen('tray-click', () => {
       console.log('[PAGE] EVENT: tray-click received');
-      console.log('[PAGE] EVENT: calling invoke show_window');
       invoke('show_window');
-    }).then(fn => {
-      unlistenTray = fn;
-      console.log('[PAGE] onMount: tray-click listener registered');
-    });
+    }).then(fn => unlisten.push(fn));
 
     console.log('[PAGE] onMount: setting up app-shutdown listener');
     listen('app-shutdown', async () => {
@@ -50,21 +48,27 @@
       } catch (e) {
         console.error('[PAGE] EVENT: app_exit FAILED:', e);
       }
-    }).then(fn => {
-      unlistenShutdown = fn;
-      console.log('[PAGE] onMount: app-shutdown listener registered');
-    });
+    }).then(fn => unlisten.push(fn));
+
+    console.log('[PAGE] onMount: setting up navigate listener');
+    listen<string>('navigate', (event) => {
+      console.log('[PAGE] EVENT: navigate received:', event.payload);
+      currentView.set(event.payload as View);
+    }).then(fn => unlisten.push(fn));
+
+    console.log('[PAGE] onMount: setting up open-logs-folder listener');
+    listen('open-logs-folder', async () => {
+      console.log('[PAGE] EVENT: open-logs-folder received');
+      try {
+        await invoke('open_logs_folder');
+      } catch (e) {
+        console.error('[PAGE] EVENT: open_logs_folder FAILED:', e);
+      }
+    }).then(fn => unlisten.push(fn));
 
     return () => {
       console.log('[PAGE] onDestroy: ENTRY');
-      if (unlistenTray) {
-        unlistenTray();
-        console.log('[PAGE] onDestroy: tray-click listener removed');
-      }
-      if (unlistenShutdown) {
-        unlistenShutdown();
-        console.log('[PAGE] onDestroy: app-shutdown listener removed');
-      }
+      unlisten.forEach(fn => fn());
       console.log('[PAGE] onDestroy: EXIT');
     };
   });
@@ -76,14 +80,19 @@
   <div class="loading">
     <span>Loading...</span>
   </div>
-{:else if $currentView === 'onboarding'}
-  <Onboarding />
-{:else if $currentView === 'dashboard'}
-  <Dashboard />
-{:else if $currentView === 'settings'}
-  <Settings />
-{:else if $currentView === 'logs'}
-  <LogViewer />
+{:else}
+  <div class="app-container">
+    {#if $currentView === 'onboarding'}
+      <Onboarding />
+    {:else if $currentView === 'dashboard'}
+      <Dashboard />
+    {:else if $currentView === 'settings'}
+      <Settings />
+    {:else if $currentView === 'logs'}
+      <LogViewer />
+    {/if}
+    <div class="version">{BUILD}</div>
+  </div>
 {/if}
 
 <style>
@@ -95,5 +104,19 @@
     background: var(--bg-primary);
     color: var(--text-secondary);
     font-size: 16px;
+  }
+  .app-container {
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+  .version {
+    position: fixed;
+    bottom: 8px;
+    right: 12px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    opacity: 0.6;
+    pointer-events: none;
   }
 </style>

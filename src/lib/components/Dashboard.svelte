@@ -36,16 +36,18 @@
       spotifyConnected = status.spotify_connected;
       teamsConnected = status.teams_connected;
       currentTrack = status.current_track;
+      await updateMenuState();
     } catch (e) {
       console.error('[DASHBOARD] onMount: get_sync_status FAILED:', e);
     }
 
     console.log('[DASHBOARD] onMount: setting up spotify-track-changed listener');
-    unlisten.push(await listen('spotify-track-changed', (event: any) => {
+    unlisten.push(await listen('spotify-track-changed', async (event: any) => {
       console.log('[DASHBOARD] EVENT: spotify-track-changed received');
       console.log('[DASHBOARD] EVENT: track.title=', event.payload.title);
       console.log('[DASHBOARD] EVENT: track.artist=', event.payload.artist);
       currentTrack = event.payload;
+      await updateMenuState();
     }));
     
     console.log('[DASHBOARD] onMount: setting up presence-updated listener');
@@ -56,11 +58,12 @@
     }));
     
     console.log('[DASHBOARD] onMount: setting up presence-cleared listener');
-    unlisten.push(await listen('presence-cleared', () => {
+    unlisten.push(await listen('presence-cleared', async () => {
       console.log('[DASHBOARD] EVENT: presence-cleared received');
       currentTrack = null;
       statusPreview = 'No track playing';
       console.log('[DASHBOARD] EVENT: currentTrack=null, statusPreview="No track playing"');
+      await updateMenuState();
     }));
     
     console.log('[DASHBOARD] onMount: setting up error listener');
@@ -90,6 +93,7 @@
           isSyncing = true;
           console.log('[DASHBOARD] EVENT: isSyncing=true');
         }
+        await updateMenuState();
       } finally {
         isToggling = false;
       }
@@ -116,6 +120,7 @@
         isSyncing = true;
         console.log('[DASHBOARD] toggleSync: isSyncing=true');
       }
+      await updateMenuState();
     } finally {
       isToggling = false;
     }
@@ -147,6 +152,18 @@
       ? (currentTrack.progress_ms / currentTrack.duration_ms) * 100
       : 0
   );
+
+  // Helper to update tray menu state
+  async function updateMenuState() {
+    try {
+      await invoke('update_menu_state', {
+        isSyncing: isSyncing,
+        currentTrack: currentTrack
+      });
+    } catch (e) {
+      console.error('[DASHBOARD] updateMenuState failed:', e);
+    }
+  }
 </script>
 
 <div class="dashboard">

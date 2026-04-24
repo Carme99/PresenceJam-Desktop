@@ -5,6 +5,20 @@ All notable changes to PresenceJam are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.3.6] - 2026-04-24
+
+### Added
+
+- Application menu bar with File, View, Help menus (macOS/Windows)
+- Dynamic tray menu that updates based on sync state (Pause/Resume toggles automatically)
+- Build number displayed in bottom-right corner of app window
+- Left-click now opens tray menu (macOS)
+
+### Fixed
+
+- Duplicate tray icon: removed automatic tray icon from tauri.conf.json (was conflicting with manual setup)
+- Tray icon now properly displays in macOS menu bar
+
 ## [2.3.5] - 2026-04-23
 
 ### Fixed
