@@ -295,6 +295,24 @@ pub fn run() {
                 }
             }
 
+            // Restore pending Spotify auth from store (handles app restart during OAuth).
+            // If the app crashed/restarted after start_spotify_auth but before the callback
+            // arrived, the PKCE verifier and OAuth state are still in the store and must be
+            // restored to in-memory state for the deep-link callback to succeed.
+            match polling::restore_pending_spotify_auth(app.handle()) {
+                Ok(Some(auth)) => {
+                    let mut guard = state.pending_spotify_auth.write();
+                    *guard = Some(auth);
+                    log::info!("[APP] setup: pending Spotify auth restored from store");
+                }
+                Ok(None) => {
+                    log::info!("[APP] setup: no pending Spotify auth to restore");
+                }
+                Err(e) => {
+                    log::warn!("[APP] setup: failed to restore pending Spotify auth: {}", e);
+                }
+            }
+
             // Load Teams tokens into AppState
             match polling::load_teams_tokens(app.handle()) {
                 Ok(Some(tokens)) => {

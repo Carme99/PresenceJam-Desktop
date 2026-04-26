@@ -566,3 +566,99 @@ pub fn clear_teams_tokens(app: &AppHandle) -> Result<(), String> {
     log::info!("[POLLING] clear_teams_tokens: SUCCESS - tokens cleared from store");
     Ok(())
 }
+
+/// Loads pending Spotify auth from the store and clears the store keys.
+/// Called on app startup to restore pending auth state so that if the app
+/// restarted during OAuth, the deep-link callback can still succeed.
+/// See issue fix: Spotify auth broken after app restart during OAuth.
+pub fn restore_pending_spotify_auth(
+    app: &AppHandle,
+) -> Result<Option<crate::PendingSpotifyAuth>, String> {
+    log::info!("[POLLING] restore_pending_spotify_auth: ENTRY");
+
+    let store = app.store("tokens").map_err(|e| {
+        log::error!(
+            "[POLLING] restore_pending_spotify_auth: store open failed - {}",
+            e
+        );
+        e.to_string()
+    })?;
+
+    let verifier = match store.get("spotify_verifier") {
+        Some(v) => v.as_str().map(String::from),
+        None => None,
+    };
+    let csrf_state = match store.get("spotify_csrf_state") {
+        Some(v) => v.as_str().map(String::from),
+        None => None,
+    };
+    let client_id = match store.get("spotify_client_id") {
+        Some(v) => v.as_str().map(String::from),
+        None => None,
+    };
+    let client_secret = match store.get("spotify_client_secret") {
+        Some(v) => v.as_str().map(String::from),
+        None => None,
+    };
+    let redirect_uri = match store.get("spotify_redirect_uri") {
+        Some(v) => v.as_str().map(String::from),
+        None => None,
+    };
+
+    let Some(v) = verifier else {
+        log::info!(
+            "[POLLING] restore_pending_spotify_auth: no pending Spotify auth in store"
+        );
+        return Ok(None);
+    };
+    let Some(s) = csrf_state else {
+        log::warn!(
+            "[POLLING] restore_pending_spotify_auth: verifier present but state missing"
+        );
+        return Ok(None);
+    };
+    let Some(id) = client_id else {
+        log::warn!(
+            "[POLLING] restore_pending_spotify_auth: verifier/state present but client_id missing"
+        );
+        return Ok(None);
+    };
+    let Some(secret) = client_secret else {
+        log::warn!(
+            "[POLLING] restore_pending_spotify_auth: verifier/state/client_id present but client_secret missing"
+        );
+        return Ok(None);
+    };
+    let Some(uri) = redirect_uri else {
+        log::warn!(
+            "[POLLING] restore_pending_spotify_auth: missing redirect_uri"
+        );
+        return Ok(None);
+    };
+
+    // Clear the store keys now that we've restored them into memory.
+    // They should only live in one place at a time.
+    store.delete("spotify_verifier");
+    store.delete("spotify_csrf_state");
+    store.delete("spotify_client_id");
+    store.delete("spotify_client_secret");
+    store.delete("spotify_redirect_uri");
+    store.save().map_err(|e| {
+        log::error!(
+            "[POLLING] restore_pending_spotify_auth: failed to clear store keys - {}",
+            e
+        );
+        e.to_string()
+    })?;
+
+    log::info!(
+        "[POLLING] restore_pending_spotify_auth: SUCCESS - restored pending auth"
+    );
+    Ok(Some(crate::PendingSpotifyAuth {
+        verifier: v,
+        state: s,
+        client_id: id,
+        client_secret: secret,
+        redirect_uri: uri,
+    }))
+}
