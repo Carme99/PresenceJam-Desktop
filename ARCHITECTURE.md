@@ -157,6 +157,12 @@ sequenceDiagram
     App->>Config: load_config()
     Config-->>App: AppConfig
     App->>App: state.config = Some(cfg)
+    App->>Polling: restore_pending_spotify_auth()
+    Polling->>Store: get("spotify_*")
+    Store-->>Polling: pending auth | None
+    Polling-->>App: Some(PendingSpotifyAuth) | None
+    App->>App: state.pending_spotify_auth = Some(auth)
+    Note over App: deep-link callback can now succeed
     App->>Polling: load_spotify_tokens()
     Polling->>Store: get("spotify_tokens")
     Store-->>Polling: SpotifyTokens | None
@@ -172,6 +178,7 @@ sequenceDiagram
 This means:
 - **On first launch**, the app starts fresh and requires onboarding
 - **On subsequent launches**, the app auto-connects if valid tokens exist
+- **If app restarts during Spotify OAuth**, pending auth state is restored so the callback succeeds
 - **Reconnect** clears tokens from both memory and store, forcing re-auth
 
 ## Reconnect Flow
@@ -210,22 +217,27 @@ sequenceDiagram
 flowchart TD
     START[Start Syncing] --> TOKEN_CHECK{Spotify Tokens<br/>Available?}
     TOKEN_CHECK -->|No| WAIT_30[Sleep 30s] --> TOKEN_CHECK
-    TOKEN_CHECK -->|Yes| EXPIRED{Token<br/>Expired?}
-    EXPIRED -->|Yes| REFRESH[Refresh Spotify Token] --> TRACK_POLL
-    EXPIRED -->|No| TRACK_POLL[Poll Spotify<br/>/me/player/currently-playing]
+    TOKEN_CHECK -->|Yes| SPOTIFY_EXPIRED{Spotify Token<br/>Expired?}
+    SPOTIFY_EXPIRED -->|Yes| REFRESH_SPOTIFY[Refresh Spotify Token] --> TRACK_POLL
+    SPOTIFY_EXPIRED -->|No| TRACK_POLL[Poll Spotify<br/>/me/player/currently-playing]
     TRACK_POLL --> TRACK_CHANGED{Track<br/>Changed?}
     TRACK_CHANGED -->|No| SLEEP_SMART[Smart Sleep<br/>remaining - 5s buffer]
     TRACK_CHANGED -->|Yes| FORMAT_STATUS[Format Status<br/>from template]
     FORMAT_STATUS --> PROFANITY_CHECK{Profanity<br/>Filter<br/>Enabled?}
     PROFANITY_CHECK -->|Yes| FILTER_PROFANITY[Filter Status<br/>replace profane<br/>with placeholder]
-    PROFANITY_CHECK -->|No| UPDATE_TEAMS
-    FILTER_PROFANITY --> UPDATE_TEAMS[Set Teams Status<br/>with final message]
+    PROFANITY_CHECK -->|No| TEAMS_TOKEN_CHECK
+    FILTER_PROFANITY --> TEAMS_TOKEN_CHECK{Teams Token<br/>Expired?}
+    TEAMS_TOKEN_CHECK -->|Yes| REFRESH_TEAMS[Refresh Teams Token] --> UPDATE_TEAMS
+    TEAMS_TOKEN_CHECK -->|No| UPDATE_TEAMS[Set Teams Status<br/>with final message]
     UPDATE_TEAMS --> SLEEP_SMART
     SLEEP_SMART --> TOKEN_CHECK
     TRACK_POLL --> NO_TRACK{No Track<br/>Playing?}
-    NO_TRACK -->|Yes| CLEAR_STATUS[Clear Teams Status]
-    NO_TRACK -->|No| TRACK_CHANGED
+    NO_TRACK -->|Yes| CLEAR_CHECK{clear_on_pause?}
+    CLEAR_CHECK -->|Yes| CLEAR_STATUS[Clear Teams Status]
+    CLEAR_CHECK -->|No| PRESERVE_STATUS[Preserve Status]
     CLEAR_STATUS --> SLEEP_30[Sleep 30s] --> TOKEN_CHECK
+    PRESERVE_STATUS --> SLEEP_30
+    NO_TRACK -->|No| TRACK_CHANGED
 ```
 
 ### Profanity Filter
@@ -318,11 +330,13 @@ PresenceJam-Desktop/
 │   │   │   ├── Onboarding.svelte     # 3-step auth wizard
 │   │   │   ├── Settings.svelte        # Config editor
 │   │   │   └── LogViewer.svelte       # In-app log viewer
-│   │   └── stores/
-│   │       ├── app.ts                 # currentView, isSyncing, appError
-│   │       ├── config.ts               # configStore, saveConfig
-│   │       ├── spotify.ts              # Spotify token state
-│   │       └── teams.ts                # Teams token state
+│   │   ├── stores/
+│   │   │   ├── app.ts                 # currentView, isSyncing, appError
+│   │   │   ├── config.ts               # configStore, saveConfig
+│   │   │   ├── spotify.ts              # Spotify token state
+│   │   │   └── teams.ts                # Teams token state
+│   │   └── utils/
+│   │       └── dev.ts                  # devLog() conditional logger
 │   └── routes/
 │       └── +page.svelte               # SPA entry, routes to views
 ├── src-tauri/
@@ -353,6 +367,7 @@ PresenceJam-Desktop/
 pub struct AppState {
     pub spotify_tokens: RwLock<Option<SpotifyTokens>>,
     pub teams_tokens: RwLock<Option<TeamsTokens>>,
+    pub pending_spotify_auth: RwLock<Option<PendingSpotifyAuth>>,
     pub config: RwLock<Option<AppConfig>>,
     pub current_track: RwLock<Option<TrackInfo>>,
     pub is_syncing: RwLock<bool>,
