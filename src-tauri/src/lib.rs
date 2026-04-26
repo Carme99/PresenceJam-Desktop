@@ -350,6 +350,23 @@ pub fn run() {
                     log::info!("[APP] setup: System tray initialized successfully");
                 }
 
+                // Apply start_minimized: if configured, hide the window on startup.
+                // This is applied after tray setup so the app is fully initialized before
+                // being hidden. See issue fix: start_minimized config not wired (#6).
+                {
+                    let cfg_guard = state.config.read();
+                    if let Some(cfg) = cfg_guard.as_ref() {
+                        if cfg.teams.start_minimized {
+                            log::info!(
+                                "[APP] setup: start_minimized=true, hiding main window"
+                            );
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.hide();
+                            }
+                        }
+                    }
+                }
+
                 // Check for deep links on startup
                 let start_urls = app.deep_link().get_current();
                 log::info!("[APP] setup: checking for start URLs");

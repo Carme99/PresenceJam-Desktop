@@ -193,10 +193,28 @@ fn process_track(
     }
 }
 
-fn handle_no_track(app: &AppHandle, state: &Arc<AppState>, last_track_key: &mut Option<String>) {
+fn handle_no_track(
+    app: &AppHandle,
+    state: &Arc<AppState>,
+    config: &Option<crate::config::AppConfig>,
+    last_track_key: &mut Option<String>,
+) {
     if last_track_key.is_some() {
         *last_track_key = None;
         *state.current_track.write() = None;
+
+        // Respect clear_on_pause config — if disabled, do not clear the status.
+        // See issue fix: clear_on_pause config not wired (#7).
+        let should_clear = config
+            .as_ref()
+            .map(|c| c.teams.clear_on_pause)
+            .unwrap_or(true);
+        if !should_clear {
+            log::info!(
+                "[POLLING] handle_no_track: clear_on_pause=false, preserving Teams status"
+            );
+            return;
+        }
 
         let teams_tokens = {
             let guard = state.teams_tokens.read();
@@ -371,7 +389,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle) {
             }
             Ok(None) => {
                 log::info!("[POLLING] polling_loop: no track playing");
-                handle_no_track(&app, &state, &mut last_track_key);
+                handle_no_track(&app, &state, &config, &mut last_track_key);
                 log::info!(
                     "[POLLING] polling_loop: sleeping for {} seconds (no track)",
                     DEFAULT_INTERVAL_SECONDS
@@ -422,7 +440,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle) {
                                         }
                                         Ok(None) => {
                                             log::info!("[POLLING] polling_loop: retry no track");
-                                            handle_no_track(&app, &state, &mut last_track_key);
+                                            handle_no_track(&app, &state, &config, &mut last_track_key);
                                             thread::sleep(StdDuration::from_secs(
                                                 DEFAULT_INTERVAL_SECONDS,
                                             ));
