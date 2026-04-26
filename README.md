@@ -1,4 +1,4 @@
-# PresenceJam 2.3.6
+# PresenceJam 2.3.7
 
 [![GitHub release (latest by date)](https://img.shields.io/github/v/release/Carme99/PresenceJam-Desktop?style=flat-square)](https://github.com/Carme99/PresenceJam-Desktop/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](https://opensource.org/licenses/MIT)
@@ -59,8 +59,8 @@ The app polls Spotify every few seconds while a track is playing. When the track
 
 Download the latest release from [GitHub Releases](https://github.com/Carme99/PresenceJam-Desktop/releases):
 
-- `PresenceJam-2.3.6.msi` — Windows 10/11 installer (64-bit)
-- `PresenceJam-2.3.6-macos.dmg` — macOS installer (Apple Silicon)
+- `PresenceJam-2.3.7.msi` — Windows 10/11 installer (64-bit)
+- `PresenceJam-2.3.7-macos.dmg` — macOS installer (Apple Silicon)
 
 ## Quickstart
 
@@ -115,10 +115,10 @@ If a track or artist name contains profanity, PresenceJam replaces the entire st
 
 | What | Where | How |
 |------|-------|-----|
-| Spotify tokens | `tauri-plugin-store` | Stored locally in `credentials.json` with atomic writes |
-| Teams tokens | `tauri-plugin-store` | Stored locally in `credentials.json` with atomic writes |
+| Spotify tokens | `tauri-plugin-store` | Stored locally in `tokens.json` with atomic writes |
+| Teams tokens | `tauri-plugin-store` | Stored locally in `tokens.json` with atomic writes |
 | App config | `%APPDATA%\PresenceJam\config.json` | Plain JSON |
-| Credentials | `%APPDATA%\PresenceJam\credentials.json` | Plain JSON |
+| OAuth state | `%APPDATA%\PresenceJam\tokens.json` | Pending Spotify PKCE verifier/state (cleared after auth completes) |
 | App logs | `%APPDATA%\PresenceJam\logs\` | Daily rotating, 30-day retention |
 
 - **No telemetry.** Nothing is sent to any server except Spotify and Microsoft directly.

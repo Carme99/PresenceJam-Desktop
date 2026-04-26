@@ -48,13 +48,13 @@ pub fn setup_app_menu(app: &tauri::App, window: &WebviewWindow) -> Result<(), St
 
     // Edit menu (standard macOS clipboard shortcuts for text fields)
     let edit_menu = SubmenuBuilder::new(app, "Edit")
-        .item(&PredefinedMenuItem::undo(app).map_err(|e| e.to_string())?)
-        .item(&PredefinedMenuItem::redo(app).map_err(|e| e.to_string())?)
+        .item(&PredefinedMenuItem::undo(app, None).map_err(|e| e.to_string())?)
+        .item(&PredefinedMenuItem::redo(app, None).map_err(|e| e.to_string())?)
         .separator()
-        .item(&PredefinedMenuItem::cut(app).map_err(|e| e.to_string())?)
-        .item(&PredefinedMenuItem::copy(app).map_err(|e| e.to_string())?)
-        .item(&PredefinedMenuItem::paste(app).map_err(|e| e.to_string())?)
-        .item(&PredefinedMenuItem::select_all(app).map_err(|e| e.to_string())?)
+        .item(&PredefinedMenuItem::cut(app, None).map_err(|e| e.to_string())?)
+        .item(&PredefinedMenuItem::copy(app, None).map_err(|e| e.to_string())?)
+        .item(&PredefinedMenuItem::paste(app, None).map_err(|e| e.to_string())?)
+        .item(&PredefinedMenuItem::select_all(app, None).map_err(|e| e.to_string())?)
         .build()
         .map_err(|e| e.to_string())?;
 
