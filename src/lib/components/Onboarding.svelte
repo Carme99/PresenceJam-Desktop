@@ -76,6 +76,30 @@
   });
 
   async function connectSpotify() {
+    // Input validation: spotifyClientId and spotifyClientSecret are required.
+    // Spotify Client IDs are 32 characters (hex-encoded alphanumeric).
+    // Client secrets are typically 32 chars. Reject obviously wrong values early.
+    if (!spotifyClientId.trim()) {
+      console.error('[ONBOARDING] connectSpotify: validation failed - client_id is empty');
+      validationError = 'Spotify Client ID is required.';
+      return;
+    }
+    if (spotifyClientId.trim().length < 20) {
+      console.error('[ONBOARDING] connectSpotify: validation failed - client_id too short');
+      validationError = 'Spotify Client ID appears to be invalid (too short).';
+      return;
+    }
+    if (!spotifyClientSecret.trim()) {
+      console.error('[ONBOARDING] connectSpotify: validation failed - client_secret is empty');
+      validationError = 'Spotify Client Secret is required.';
+      return;
+    }
+    if (spotifyClientSecret.trim().length < 20) {
+      console.error('[ONBOARDING] connectSpotify: validation failed - client_secret too short');
+      validationError = 'Spotify Client Secret appears to be invalid (too short).';
+      return;
+    }
+
     console.log('[ONBOARDING] connectSpotify: ENTRY');
     console.log('[ONBOARDING] connectSpotify: spotifyClientId.length=', spotifyClientId.length);
     console.log('[ONBOARDING] connectSpotify: spotifyClientSecret.length=', spotifyClientSecret.length);
