@@ -35,9 +35,9 @@ pub struct TeamsConfig {
     pub profanity_filter: bool,
     #[serde(default = "default_profanity_placeholder")]
     pub profanity_placeholder: String,
-    #[serde(default)]
+    #[serde(default = "default_launch_at_login")]
     pub launch_at_login: bool,
-    #[serde(default)]
+    #[serde(default = "default_start_minimized")]
     pub start_minimized: bool,
 }
 
@@ -348,6 +348,8 @@ mod tests {
         );
         assert_eq!(config.polling.default_interval_seconds, 30);
         assert!(config.logging.enabled);
+        assert!(!config.teams.launch_at_login);
+        assert!(!config.teams.start_minimized);
     }
 
     #[test]

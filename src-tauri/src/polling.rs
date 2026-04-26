@@ -11,7 +11,10 @@ use crate::spotify::{
     format_status, get_currently_playing, is_token_expired, refresh_spotify_token, SpotifyApiError,
     SpotifyTokens,
 };
-use crate::teams::{clear_teams_status_message, is_teams_token_expired, refresh_teams_token, set_teams_status_message, TeamsTokens};
+use crate::teams::{
+    clear_teams_status_message, is_teams_token_expired, refresh_teams_token,
+    set_teams_status_message, TeamsTokens,
+};
 use crate::AppState;
 
 const DEFAULT_INTERVAL_SECONDS: u64 = 30;
@@ -69,23 +72,32 @@ fn process_track(
         // This mirrors the Spotify token refresh pattern and prevents silent auth
         // failures mid-session. See issue #4.
         let teams_tok = if is_teams_token_expired(&teams_tok) {
-            log::info!(
-                "[POLLING] process_track: Teams token expired, refreshing"
-            );
+            log::info!("[POLLING] process_track: Teams token expired, refreshing");
             match refresh_teams_token(&teams_tok) {
                 Ok(new_tokens) => {
-                    // Persist refreshed tokens to store
+                    // Persist refreshed tokens to store. Retry once on failure.
                     if let Err(e) = save_teams_tokens(app, &new_tokens) {
                         log::warn!(
-                            "[POLLING] process_track: failed to persist refreshed Teams tokens: {}",
+                            "[POLLING] process_track: failed to persist refreshed Teams tokens, retrying: {}",
                             e
                         );
+                        if let Err(retry_e) = save_teams_tokens(app, &new_tokens) {
+                            log::error!(
+                                "[POLLING] process_track: retry failed, Teams token in memory only: {}",
+                                retry_e
+                            );
+                            let _ = app.emit(
+                                "error",
+                                serde_json::json!({
+                                    "source": "teams",
+                                    "message": format!("Failed to save refreshed Teams token to disk: {}. Token is in memory only and will be lost on restart.", retry_e)
+                                }),
+                            );
+                        }
                     }
                     // Update in-memory state
                     *state.teams_tokens.write() = Some(new_tokens.clone());
-                    log::info!(
-                        "[POLLING] process_track: Teams token refreshed successfully"
-                    );
+                    log::info!("[POLLING] process_track: Teams token refreshed successfully");
                     new_tokens
                 }
                 Err(e) => {
@@ -204,15 +216,13 @@ fn handle_no_track(
         *state.current_track.write() = None;
 
         // Respect clear_on_pause config — if disabled, do not clear the status.
-        // See issue fix: clear_on_pause config not wired (#7).
+        // See issue fix: clear_on_pause config not wired (#6).
         let should_clear = config
             .as_ref()
             .map(|c| c.teams.clear_on_pause)
             .unwrap_or(true);
         if !should_clear {
-            log::info!(
-                "[POLLING] handle_no_track: clear_on_pause=false, preserving Teams status"
-            );
+            log::info!("[POLLING] handle_no_track: clear_on_pause=false, preserving Teams status");
             return;
         }
 
@@ -321,7 +331,9 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle) {
             }
             None => {
                 log::warn!("[POLLING] polling_loop: No Spotify tokens available, waiting...");
-                thread::sleep(StdDuration::from_secs(with_jitter(ERROR_RETRY_INTERVAL_SECONDS)));
+                thread::sleep(StdDuration::from_secs(with_jitter(
+                    ERROR_RETRY_INTERVAL_SECONDS,
+                )));
                 continue;
             }
         };
@@ -358,7 +370,9 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle) {
                         }),
                     );
                     log::info!("[POLLING] polling_loop: EMIT error event");
-                    thread::sleep(StdDuration::from_secs(with_jitter(ERROR_RETRY_INTERVAL_SECONDS)));
+                    thread::sleep(StdDuration::from_secs(with_jitter(
+                        ERROR_RETRY_INTERVAL_SECONDS,
+                    )));
                     continue;
                 }
             }
@@ -440,7 +454,12 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle) {
                                         }
                                         Ok(None) => {
                                             log::info!("[POLLING] polling_loop: retry no track");
-                                            handle_no_track(&app, &state, &config, &mut last_track_key);
+                                            handle_no_track(
+                                                &app,
+                                                &state,
+                                                &config,
+                                                &mut last_track_key,
+                                            );
                                             thread::sleep(StdDuration::from_secs(
                                                 DEFAULT_INTERVAL_SECONDS,
                                             ));
@@ -644,55 +663,59 @@ pub fn restore_pending_spotify_auth(
         e.to_string()
     })?;
 
-    let verifier = match store.get("spotify_verifier") {
-        Some(v) => v.as_str().map(String::from),
-        None => None,
-    };
-    let csrf_state = match store.get("spotify_csrf_state") {
-        Some(v) => v.as_str().map(String::from),
-        None => None,
-    };
-    let client_id = match store.get("spotify_client_id") {
-        Some(v) => v.as_str().map(String::from),
-        None => None,
-    };
-    let client_secret = match store.get("spotify_client_secret") {
-        Some(v) => v.as_str().map(String::from),
-        None => None,
-    };
-    let redirect_uri = match store.get("spotify_redirect_uri") {
-        Some(v) => v.as_str().map(String::from),
-        None => None,
-    };
+    let verifier = store
+        .get("spotify_verifier")
+        .and_then(|v| v.as_str().map(String::from));
+    let csrf_state = store
+        .get("spotify_csrf_state")
+        .and_then(|v| v.as_str().map(String::from));
+    let client_id = store
+        .get("spotify_client_id")
+        .and_then(|v| v.as_str().map(String::from));
+    let client_secret = store
+        .get("spotify_client_secret")
+        .and_then(|v| v.as_str().map(String::from));
+    let redirect_uri = store
+        .get("spotify_redirect_uri")
+        .and_then(|v| v.as_str().map(String::from));
 
     let Some(v) = verifier else {
-        log::info!(
-            "[POLLING] restore_pending_spotify_auth: no pending Spotify auth in store"
-        );
+        log::info!("[POLLING] restore_pending_spotify_auth: no pending Spotify auth in store");
         return Ok(None);
     };
     let Some(s) = csrf_state else {
-        log::warn!(
-            "[POLLING] restore_pending_spotify_auth: verifier present but state missing"
-        );
+        log::warn!("[POLLING] restore_pending_spotify_auth: verifier present but state missing");
+        // Clean up orphaned partial state before returning.
+        store.delete("spotify_verifier");
+        let _ = store.save();
         return Ok(None);
     };
     let Some(id) = client_id else {
         log::warn!(
             "[POLLING] restore_pending_spotify_auth: verifier/state present but client_id missing"
         );
+        store.delete("spotify_verifier");
+        store.delete("spotify_csrf_state");
+        let _ = store.save();
         return Ok(None);
     };
     let Some(secret) = client_secret else {
         log::warn!(
             "[POLLING] restore_pending_spotify_auth: verifier/state/client_id present but client_secret missing"
         );
+        store.delete("spotify_verifier");
+        store.delete("spotify_csrf_state");
+        store.delete("spotify_client_id");
+        let _ = store.save();
         return Ok(None);
     };
     let Some(uri) = redirect_uri else {
-        log::warn!(
-            "[POLLING] restore_pending_spotify_auth: missing redirect_uri"
-        );
+        log::warn!("[POLLING] restore_pending_spotify_auth: missing redirect_uri");
+        store.delete("spotify_verifier");
+        store.delete("spotify_csrf_state");
+        store.delete("spotify_client_id");
+        store.delete("spotify_client_secret");
+        let _ = store.save();
         return Ok(None);
     };
 
@@ -711,9 +734,7 @@ pub fn restore_pending_spotify_auth(
         e.to_string()
     })?;
 
-    log::info!(
-        "[POLLING] restore_pending_spotify_auth: SUCCESS - restored pending auth"
-    );
+    log::info!("[POLLING] restore_pending_spotify_auth: SUCCESS - restored pending auth");
     Ok(Some(crate::PendingSpotifyAuth {
         verifier: v,
         state: s,

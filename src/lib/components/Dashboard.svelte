@@ -27,11 +27,12 @@
     try {
       devLog('[DASHBOARD] onMount: calling invoke get_sync_status');
       const status = await invoke<any>('get_sync_status');
-      devLog('[DASHBOARD] onMount: get_sync_status SUCCESS');
-      devLog('[DASHBOARD] onMount: status.is_syncing=', status.is_syncing);
-      devLog('[DASHBOARD] onMount: status.spotify_connected=', status.spotify_connected);
-      devLog('[DASHBOARD] onMount: status.teams_connected=', status.teams_connected);
-      devLog('[DASHBOARD] onMount: status.current_track=', status.current_track ? status.current_track.title : 'null');
+      console.info('[DASHBOARD] initial sync status:', {
+        is_syncing: status.is_syncing,
+        spotify_connected: status.spotify_connected,
+        teams_connected: status.teams_connected,
+        current_track: status.current_track?.title ?? null
+      });
       
       isSyncing = status.is_syncing;
       spotifyConnected = status.spotify_connected;

@@ -77,17 +77,19 @@
   });
 
   async function connectSpotify() {
+    validationError = '';
+
     // Input validation: spotifyClientId and spotifyClientSecret are required.
-    // Spotify Client IDs are 32 characters (hex-encoded alphanumeric).
-    // Client secrets are typically 32 chars. Reject obviously wrong values early.
+    // Spotify Client IDs are 32 hex characters (e.g. "3abc...def0").
+    // Client secrets from the developer dashboard are typically 32+ chars.
     if (!spotifyClientId.trim()) {
       console.error('[ONBOARDING] connectSpotify: validation failed - client_id is empty');
       validationError = 'Spotify Client ID is required.';
       return;
     }
-    if (spotifyClientId.trim().length < 20) {
-      console.error('[ONBOARDING] connectSpotify: validation failed - client_id too short');
-      validationError = 'Spotify Client ID appears to be invalid (too short).';
+    if (spotifyClientId.trim().length !== 32 || !/^[0-9a-fA-F]{32}$/.test(spotifyClientId.trim())) {
+      console.error('[ONBOARDING] connectSpotify: validation failed - client_id format invalid');
+      validationError = 'Spotify Client ID must be exactly 32 hexadecimal characters.';
       return;
     }
     if (!spotifyClientSecret.trim()) {
@@ -95,15 +97,14 @@
       validationError = 'Spotify Client Secret is required.';
       return;
     }
-    if (spotifyClientSecret.trim().length < 20) {
+    if (spotifyClientSecret.trim().length < 32) {
       console.error('[ONBOARDING] connectSpotify: validation failed - client_secret too short');
-      validationError = 'Spotify Client Secret appears to be invalid (too short).';
+      validationError = 'Spotify Client Secret appears to be invalid (too short — must be at least 32 characters).';
       return;
     }
 
     devLog('[ONBOARDING] connectSpotify: ENTRY');
     devLog('[ONBOARDING] connectSpotify: spotifyClientId.length=', spotifyClientId.length);
-    devLog('[ONBOARDING] connectSpotify: spotifyClientSecret.length=', spotifyClientSecret.length);
     devLog('[ONBOARDING] connectSpotify: redirectUri=presencejam://callback');
     
     try {
@@ -327,7 +328,11 @@
         <label for="spotify-client-secret">Client Secret</label>
         <input id="spotify-client-secret" bind:value={spotifyClientSecret} type="password" placeholder="••••••••" />
       </div>
-      
+
+      {#if validationError}
+        <p class="error-message">{validationError}</p>
+      {/if}
+
       {#if !spotifyConnected && !spotifyWaiting}
         <button onclick={connectSpotify} disabled={!spotifyClientId || !spotifyClientSecret}>
           Connect Spotify
@@ -362,7 +367,11 @@
     <div class="step">
       <h2>Connect Microsoft Teams</h2>
       <p>Sign in with Microsoft to update your Teams presence.</p>
-      
+
+      {#if validationError}
+        <p class="error-message">{validationError}</p>
+      {/if}
+
       {#if !teamsConnected && !teamsUserCode}
         <button onclick={() => connectTeams()}>
           Sign in with Microsoft
