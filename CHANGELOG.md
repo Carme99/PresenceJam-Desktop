@@ -5,6 +5,20 @@ All notable changes to PresenceJam are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.3.7] - 2026-04-27
+
+### Fixed
+
+- Spotify auth: crash recovery now properly restores pending OAuth state from persistent store on app restart (fixes #1)
+- Teams auth: proactively refresh Teams token before use in polling loop to avoid 401 errors mid-session (fixes #4)
+- Config: `start_minimized` now properly wired — app window hides on startup when configured (fixes #7)
+- Config: `clear_on_pause` now functional — respects user setting when pausing Spotify playback (fixes #6)
+- Onboarding: Spotify client ID/secret now validated before initiating auth (min 20 chars) (fixes #19)
+
+### Developer
+
+- Frontend: replaced ~130 verbose `console.log` calls with `devLog()` utility that only outputs in development builds — production builds are no longer polluted with dev traces
+
 ## [2.3.5] - 2026-04-23
 
 ### Fixed
@@ -147,7 +161,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - PowerShell script version — this is a full rewrite
 
-[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v2.3.4...HEAD
+[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v2.3.7...HEAD
+[2.3.7]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.3.7
 [2.3.4]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.3.4
 [2.3.3]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.3.3
 [2.3.2]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.3.2
