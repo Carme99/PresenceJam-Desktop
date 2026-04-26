@@ -38,16 +38,18 @@
       spotifyConnected = status.spotify_connected;
       teamsConnected = status.teams_connected;
       currentTrack = status.current_track;
+      await updateMenuState();
     } catch (e) {
       console.error('[DASHBOARD] onMount: get_sync_status FAILED:', e);
     }
 
     devLog('[DASHBOARD] onMount: setting up spotify-track-changed listener');
-    unlisten.push(await listen('spotify-track-changed', (event: any) => {
+    unlisten.push(await listen('spotify-track-changed', async (event: any) => {
       devLog('[DASHBOARD] EVENT: spotify-track-changed received');
       devLog('[DASHBOARD] EVENT: track.title=', event.payload.title);
       devLog('[DASHBOARD] EVENT: track.artist=', event.payload.artist);
       currentTrack = event.payload;
+      await updateMenuState();
     }));
     
     devLog('[DASHBOARD] onMount: setting up presence-updated listener');
@@ -58,11 +60,12 @@
     }));
     
     devLog('[DASHBOARD] onMount: setting up presence-cleared listener');
-    unlisten.push(await listen('presence-cleared', () => {
+    unlisten.push(await listen('presence-cleared', async () => {
       devLog('[DASHBOARD] EVENT: presence-cleared received');
       currentTrack = null;
       statusPreview = 'No track playing';
       devLog('[DASHBOARD] EVENT: currentTrack=null, statusPreview="No track playing"');
+      await updateMenuState();
     }));
     
     devLog('[DASHBOARD] onMount: setting up error listener');
@@ -92,6 +95,7 @@
           isSyncing = true;
           devLog('[DASHBOARD] EVENT: isSyncing=true');
         }
+        await updateMenuState();
       } finally {
         isToggling = false;
       }
@@ -118,6 +122,7 @@
         isSyncing = true;
         devLog('[DASHBOARD] toggleSync: isSyncing=true');
       }
+      await updateMenuState();
     } finally {
       isToggling = false;
     }
@@ -149,6 +154,18 @@
       ? (currentTrack.progress_ms / currentTrack.duration_ms) * 100
       : 0
   );
+
+  // Helper to update tray menu state
+  async function updateMenuState() {
+    try {
+      await invoke('update_tray_menu_state', {
+        isSyncing: isSyncing,
+        currentTrack: currentTrack
+      });
+    } catch (e) {
+      console.error('[DASHBOARD] updateMenuState failed:', e);
+    }
+  }
 </script>
 
 <div class="dashboard">

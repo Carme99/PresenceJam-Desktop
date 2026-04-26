@@ -23,6 +23,27 @@ No changes yet.
 
 - Frontend: replaced ~130 verbose `console.log` calls with `devLog()` utility that only outputs in development builds — production builds are no longer polluted with dev traces
 
+## [2.3.6] - 2026-04-24
+
+### Added
+
+- Application menu bar with File, Edit, View, Help menus (macOS/Windows)
+- Dynamic tray menu that updates based on sync state (Pause/Resume toggles automatically)
+- Build number displayed in bottom-right corner of app window (injected at build time)
+- About dialog accessible from Help menu
+
+### Fixed
+
+- Duplicate tray icon: removed automatic tray icon from tauri.conf.json (was conflicting with manual setup)
+- Tray icon now properly displays in macOS menu bar
+- Left-click tray: now shows window via tray-click event (not automatic menu popup)
+- Tray menu label now refreshes after show/hide toggle
+- Back-to-back separators fixed when no track is playing
+
+### Changed
+
+- `update_menu_state` command renamed to `update_tray_menu_state` for clarity
+
 ## [2.3.5] - 2026-04-23
 
 ### Fixed
@@ -167,6 +188,8 @@ No changes yet.
 
 [Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v2.3.7...HEAD
 [2.3.7]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.3.7
+[2.3.6]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.3.6
+[2.3.5]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.3.5
 [2.3.4]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.3.4
 [2.3.3]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.3.3
 [2.3.2]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.3.2
