@@ -1,7 +1,7 @@
 use crate::config::{self, AppConfig};
 use crate::spotify::{SpotifyTokens, TrackInfo};
 use crate::teams::{DeviceCodeResponse, TeamsTokens};
-use crate::{polling, AppState, PendingSpotifyAuth};
+use crate::{polling, tray, AppState, PendingSpotifyAuth};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_store::StoreExt;
@@ -11,15 +11,15 @@ use url::Url;
 /// Returns the parsed URL on success, or an error string on failure.
 /// See issue #14.
 fn validate_http_url(url: &str) -> Result<Url, String> {
-    Url::parse(url)
-        .map_err(|_| "Invalid URL format".to_string())
-        .and_then(|parsed| match parsed.scheme() {
+    Url::parse(url).map_err(|_| "Invalid URL format".to_string()).and_then(|parsed| {
+        match parsed.scheme() {
             "http" | "https" => Ok(parsed),
             other => Err(format!(
                 "Invalid URL scheme '{}': only http/https allowed",
                 other
             )),
-        })
+        }
+    })
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -601,20 +601,13 @@ fn stop_polling_and_join(state: &Arc<AppState>, context: &str) {
             }
 
             // Timeout reached - try one final join (may block briefly)
-            log::warn!(
-                "[CMD] {}: polling thread did not terminate within 2s, attempting final join",
-                context
-            );
+            log::warn!("[CMD] {}: polling thread did not terminate within 2s, attempting final join", context);
             match handle.join() {
                 Ok(()) => {
                     log::info!("[CMD] {}: polling thread ended (final join)", context);
                 }
                 Err(e) => {
-                    log::error!(
-                        "[CMD] {}: polling thread panicked (final join): {:?}",
-                        context,
-                        e
-                    );
+                    log::error!("[CMD] {}: polling thread panicked (final join): {:?}", context, e);
                 }
             }
         }
@@ -967,5 +960,20 @@ pub fn reconnect_teams(
     }
 
     log::info!("[CMD] reconnect_teams: SUCCESS");
+    Ok(())
+}
+
+#[tauri::command]
+pub fn update_tray_menu_state(
+    app: AppHandle,
+    is_syncing: bool,
+    current_track: Option<TrackInfo>,
+) -> Result<(), String> {
+    log::info!(
+        "[CMD] update_tray_menu_state: ENTRY - is_syncing={}",
+        is_syncing
+    );
+    tray::update_tray_menu(&app, is_syncing, current_track)?;
+    log::info!("[CMD] update_tray_menu_state: SUCCESS");
     Ok(())
 }

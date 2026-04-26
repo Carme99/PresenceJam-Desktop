@@ -1,7 +1,7 @@
-use parking_lot::RwLock;
 use std::sync::Arc;
 use std::thread;
-use tauri::{AppHandle, Emitter, Manager};
+use parking_lot::RwLock;
+use tauri::{Manager, Emitter, AppHandle};
 
 #[derive(Debug, Clone)]
 pub struct PendingSpotifyAuth {
@@ -46,23 +46,17 @@ impl AppState {
     }
 }
 
-pub mod commands;
 pub mod config;
-pub mod polling;
 pub mod profanity;
 pub mod spotify;
 pub mod teams;
+pub mod polling;
 pub mod tray;
+pub mod menu;
+pub mod commands;
 
-async fn handle_spotify_callback(
-    code: &str,
-    state_param: Option<&str>,
-    app: &AppHandle,
-) -> Result<(), String> {
-    log::info!(
-        "[CALLBACK] handle_spotify_callback: ENTRY - code.len={}",
-        code.len()
-    );
+async fn handle_spotify_callback(code: &str, state_param: Option<&str>, app: &AppHandle) -> Result<(), String> {
+    log::info!("[CALLBACK] handle_spotify_callback: ENTRY - code.len={}", code.len());
 
     let app_state = app.state::<Arc<AppState>>();
     log::info!("[CALLBACK] handle_spotify_callback: got app state");
@@ -75,17 +69,12 @@ async fn handle_spotify_callback(
             "No pending Spotify auth".to_string()
         })?
     };
-    log::info!(
-        "[CALLBACK] handle_spotify_callback: pending auth found - verifier.len={}",
-        pending.verifier.len()
-    );
+    log::info!("[CALLBACK] handle_spotify_callback: pending auth found - verifier.len={}", pending.verifier.len());
 
     // Verify state matches to prevent CSRF attacks
     if let Some(state_str) = state_param {
         if state_str != pending.state {
-            log::error!(
-                "[CALLBACK] handle_spotify_callback: state mismatch - CSRF attack detected"
-            );
+            log::error!("[CALLBACK] handle_spotify_callback: state mismatch - CSRF attack detected");
             return Err("State mismatch - possible CSRF attack".to_string());
         }
         log::info!("[CALLBACK] handle_spotify_callback: state verified successfully");
@@ -93,7 +82,7 @@ async fn handle_spotify_callback(
         log::error!("[CALLBACK] handle_spotify_callback: missing state parameter in callback URL");
         return Err("Missing state parameter - possible CSRF attack".to_string());
     }
-
+    
     log::info!("[CALLBACK] handle_spotify_callback: calling complete_spotify_auth");
     let tokens = crate::spotify::complete_spotify_auth(
         code,
@@ -102,36 +91,30 @@ async fn handle_spotify_callback(
         &pending.client_secret,
         &pending.redirect_uri,
     )?;
-    log::info!(
-        "[CALLBACK] handle_spotify_callback: token exchange successful - access_token.len={}",
-        tokens.access_token.len()
-    );
-
+    log::info!("[CALLBACK] handle_spotify_callback: token exchange successful - access_token.len={}", tokens.access_token.len());
+    
     log::info!("[CALLBACK] handle_spotify_callback: saving tokens to store");
     crate::polling::save_spotify_tokens(app, &tokens)?;
-
+    
     {
         let mut guard = app_state.spotify_tokens.write();
         *guard = Some(tokens.clone());
         log::info!("[CALLBACK] handle_spotify_callback: tokens stored in AppState");
     }
-
+    
     log::info!("[CALLBACK] handle_spotify_callback: EMIT spotify-auth-complete event");
     let _ = app.emit("spotify-auth-complete", ());
-
+    
     log::info!("[CALLBACK] handle_spotify_callback: SUCCESS");
     Ok(())
 }
 
 async fn handle_teams_callback(code: &str, app: &AppHandle) -> Result<(), String> {
-    log::info!(
-        "[CALLBACK] handle_teams_callback: ENTRY - code.len={}",
-        code.len()
-    );
-
+    log::info!("[CALLBACK] handle_teams_callback: ENTRY - code.len={}", code.len());
+    
     let state = app.state::<Arc<AppState>>();
     log::info!("[CALLBACK] handle_teams_callback: got app state");
-
+    
     let pending = {
         let mut guard = state.pending_teams_auth.write();
         log::info!("[CALLBACK] handle_teams_callback: taking pending Teams auth from state");
@@ -141,7 +124,7 @@ async fn handle_teams_callback(code: &str, app: &AppHandle) -> Result<(), String
         })?
     };
     log::info!("[CALLBACK] handle_teams_callback: pending auth found");
-
+    
     log::info!("[CALLBACK] handle_teams_callback: calling complete_teams_auth");
     let tokens = crate::teams::complete_teams_auth(
         code,
@@ -149,54 +132,42 @@ async fn handle_teams_callback(code: &str, app: &AppHandle) -> Result<(), String
         &pending.client_id,
         &pending.redirect_uri,
     )?;
-    log::info!(
-        "[CALLBACK] handle_teams_callback: token exchange successful - access_token.len={}",
-        tokens.access_token.len()
-    );
-
+    log::info!("[CALLBACK] handle_teams_callback: token exchange successful - access_token.len={}", tokens.access_token.len());
+    
     log::info!("[CALLBACK] handle_teams_callback: saving tokens to store");
     crate::polling::save_teams_tokens(app, &tokens)?;
-
+    
     {
         let mut guard = state.teams_tokens.write();
         *guard = Some(tokens);
         log::info!("[CALLBACK] handle_teams_callback: tokens stored in AppState");
     }
-
+    
     log::info!("[CALLBACK] handle_teams_callback: EMIT teams-auth-complete event");
     let _ = app.emit("teams-auth-complete", ());
-
+    
     log::info!("[CALLBACK] handle_teams_callback: SUCCESS");
     Ok(())
 }
 
 fn handle_deep_link(url: &str, app: AppHandle) {
     log::info!("[DEEP_LINK] handle_deep_link: ENTRY - url={}", url);
-
+    
     if let Ok(parsed) = url::Url::parse(url) {
         log::info!("[DEEP_LINK] handle_deep_link: URL parsed successfully");
         let scheme = parsed.scheme();
         log::info!("[DEEP_LINK] handle_deep_link: scheme={}", scheme);
-
+        
         if scheme == "presencejam" {
             log::info!("[DEEP_LINK] handle_deep_link: recognized as presencejam scheme");
             let path = parsed.path();
             log::info!("[DEEP_LINK] handle_deep_link: path={}", path);
-
-            let code = parsed
-                .query_pairs()
-                .find(|(k, _)| k == "code")
-                .map(|(_, v)| v.to_string());
-            let state_param = parsed
-                .query_pairs()
-                .find(|(k, _)| k == "state")
-                .map(|(_, v)| v.to_string());
+            
+            let code = parsed.query_pairs().find(|(k, _)| k == "code").map(|(_, v)| v.to_string());
+            let state_param = parsed.query_pairs().find(|(k, _)| k == "state").map(|(_, v)| v.to_string());
 
             if let Some(code_str) = code {
-                log::info!(
-                    "[DEEP_LINK] handle_deep_link: code found - code.len={}",
-                    code_str.len()
-                );
+                log::info!("[DEEP_LINK] handle_deep_link: code found - code.len={}", code_str.len());
                 let app_clone = app.clone();
                 let code_clone = code_str.clone();
                 let state_clone = state_param.clone();
@@ -207,26 +178,17 @@ fn handle_deep_link(url: &str, app: AppHandle) {
                         log::info!("[DEEP_LINK] handle_deep_link: spawning Teams callback handler");
                         if let Err(e) = handle_teams_callback(&code_clone, &app_clone).await {
                             log::error!("[DEEP_LINK] handle_teams_callback: FAILED - {}", e);
-                            log::info!(
-                                "[DEEP_LINK] handle_deep_link: EMIT teams-auth-failed event"
-                            );
+                            log::info!("[DEEP_LINK] handle_deep_link: EMIT teams-auth-failed event");
                             let _ = app_clone.emit("teams-auth-failed", e);
                         }
                     });
                 } else {
                     log::info!("[DEEP_LINK] handle_deep_link: routing to Spotify callback");
                     tauri::async_runtime::spawn(async move {
-                        log::info!(
-                            "[DEEP_LINK] handle_deep_link: spawning Spotify callback handler"
-                        );
-                        if let Err(e) =
-                            handle_spotify_callback(&code_clone, state_clone.as_deref(), &app_clone)
-                                .await
-                        {
+                        log::info!("[DEEP_LINK] handle_deep_link: spawning Spotify callback handler");
+                        if let Err(e) = handle_spotify_callback(&code_clone, state_clone.as_deref(), &app_clone).await {
                             log::error!("[DEEP_LINK] handle_spotify_callback: FAILED - {}", e);
-                            log::info!(
-                                "[DEEP_LINK] handle_deep_link: EMIT spotify-auth-failed event"
-                            );
+                            log::info!("[DEEP_LINK] handle_deep_link: EMIT spotify-auth-failed event");
                             let _ = app_clone.emit("spotify-auth-failed", e);
                         }
                     });
@@ -245,7 +207,7 @@ fn handle_deep_link(url: &str, app: AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     log::info!("[APP] run: ENTRY");
-
+    
     let mut builder = tauri::Builder::default();
 
     #[cfg(desktop)]
@@ -253,10 +215,7 @@ pub fn run() {
         use tauri_plugin_single_instance::init as single_instance_init;
 
         builder = builder.plugin(single_instance_init(|_app, argv, _cwd| {
-            log::info!(
-                "[APP] single_instance: New instance opened with argv: {:?}",
-                argv
-            );
+            log::info!("[APP] single_instance: New instance opened with argv: {:?}", argv);
         }));
 
         builder = builder.plugin(tauri_plugin_deep_link::init());
@@ -271,18 +230,14 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--minimized"]),
         ))
-        .plugin(
-            tauri_plugin_log::Builder::new()
-                .target(tauri_plugin_log::Target::new(
-                    tauri_plugin_log::TargetKind::Stdout,
-                ))
-                .target(tauri_plugin_log::Target::new(
-                    tauri_plugin_log::TargetKind::LogDir {
-                        file_name: Some("PresenceJam".into()),
-                    },
-                ))
-                .build(),
-        )
+        .plugin(tauri_plugin_log::Builder::new()
+            .target(tauri_plugin_log::Target::new(
+                tauri_plugin_log::TargetKind::Stdout,
+            ))
+            .target(tauri_plugin_log::Target::new(
+                tauri_plugin_log::TargetKind::LogDir { file_name: Some("PresenceJam".into()) },
+            ))
+            .build())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_process::init())
@@ -296,19 +251,20 @@ pub fn run() {
                 } else {
                     "Unknown panic".to_string()
                 };
-
+                
                 let location = if let Some(loc) = panic_info.location() {
                     format!("{}:{}:{}", loc.file(), loc.line(), loc.column())
                 } else {
                     "unknown location".to_string()
                 };
-
+                
                 log::error!("[PANIC] {} at {}", msg, location);
                 eprintln!("[PANIC] {} at {}", msg, location);
             }));
+            
 
             log::info!("[APP] setup: ENTRY");
-
+            
             let state = Arc::new(AppState::new());
             app.manage(state.clone());
             log::info!("[APP] setup: AppState created and managed");
@@ -337,24 +293,6 @@ pub fn run() {
                 }
                 Err(e) => {
                     log::warn!("[APP] setup: failed to load spotify_tokens: {}", e);
-                }
-            }
-
-            // Restore pending Spotify auth from store (handles app restart during OAuth).
-            // If the app crashed/restarted after start_spotify_auth but before the callback
-            // arrived, the PKCE verifier and OAuth state are still in the store and must be
-            // restored to in-memory state for the deep-link callback to succeed.
-            match polling::restore_pending_spotify_auth(app.handle()) {
-                Ok(Some(auth)) => {
-                    let mut guard = state.pending_spotify_auth.write();
-                    *guard = Some(auth);
-                    log::info!("[APP] setup: pending Spotify auth restored from store");
-                }
-                Ok(None) => {
-                    log::info!("[APP] setup: no pending Spotify auth to restore");
-                }
-                Err(e) => {
-                    log::warn!("[APP] setup: failed to restore pending Spotify auth: {}", e);
                 }
             }
 
@@ -395,26 +333,27 @@ pub fn run() {
                     log::info!("[APP] setup: System tray initialized successfully");
                 }
 
-                // Apply launch_at_login and start_minimized from config.
-                // launch_at_login: register/unregister the OS autostart entry.
-                // start_minimized: hide the window on startup after tray is ready.
-                // See issue fix: launch_at_login wired (#7), start_minimized wired (#6).
-                {
-                    let cfg_guard = state.config.read();
-                    if let Some(cfg) = cfg_guard.as_ref() {
-                        if cfg.teams.launch_at_login {
-                            log::info!("[APP] setup: launch_at_login=true, enabling autostart");
-                            if let Err(e) = commands::set_autostart_enabled(app.handle().clone(), true) {
-                                log::warn!("[APP] setup: failed to enable autostart: {}", e);
-                            }
-                        }
-                        if cfg.teams.start_minimized {
-                            log::info!("[APP] setup: start_minimized=true, hiding main window");
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.hide();
-                            }
-                        }
+                // Setup application menu bar using window menu (not app menu)
+                // This ensures click events are properly routed via on_menu_event
+                log::info!("[APP] setup: setting up application menu");
+                if let Some(window) = app.get_webview_window("main") {
+                    if let Err(e) = menu::setup_app_menu(app, &window) {
+                        log::error!("[APP] setup: Failed to setup application menu: {}", e);
+                    } else {
+                        log::info!("[APP] setup: Application menu initialized successfully");
                     }
+
+                    // Register menu event handler on the window
+                    // This is critical for macOS - window menus receive click events properly
+                    let app_handle = app.handle().clone();
+                    log::info!("[APP] setup: registering menu event handler on window");
+                    window.on_menu_event(move |_app, event| {
+                        let id = event.id().as_ref();
+                        log::info!("[APP] window.on_menu_event: id={}", id);
+                        menu::handle_app_menu_event(&app_handle, id);
+                    });
+                } else {
+                    log::error!("[APP] setup: could not get main window for menu");
                 }
 
                 // Check for deep links on startup
@@ -475,6 +414,7 @@ pub fn run() {
             commands::reconnect_spotify,
             commands::reconnect_teams,
             commands::app_exit,
+            commands::update_tray_menu_state,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

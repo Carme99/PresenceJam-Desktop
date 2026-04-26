@@ -35,10 +35,6 @@ pub struct TeamsConfig {
     pub profanity_filter: bool,
     #[serde(default = "default_profanity_placeholder")]
     pub profanity_placeholder: String,
-    #[serde(default = "default_launch_at_login")]
-    pub launch_at_login: bool,
-    #[serde(default = "default_start_minimized")]
-    pub start_minimized: bool,
 }
 
 fn default_status_format() -> String {
@@ -55,14 +51,6 @@ fn default_profanity_filter() -> bool {
 
 fn default_profanity_placeholder() -> String {
     profanity::safe_placeholder_default().to_string()
-}
-
-fn default_launch_at_login() -> bool {
-    false
-}
-
-fn default_start_minimized() -> bool {
-    false
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,8 +133,6 @@ impl Default for TeamsConfig {
             clear_on_pause: default_clear_on_pause(),
             profanity_filter: default_profanity_filter(),
             profanity_placeholder: default_profanity_placeholder(),
-            launch_at_login: default_launch_at_login(),
-            start_minimized: default_start_minimized(),
         }
     }
 }
@@ -348,8 +334,6 @@ mod tests {
         );
         assert_eq!(config.polling.default_interval_seconds, 30);
         assert!(config.logging.enabled);
-        assert!(!config.teams.launch_at_login);
-        assert!(!config.teams.start_minimized);
     }
 
     #[test]

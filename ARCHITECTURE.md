@@ -27,6 +27,7 @@ graph TD
         SpotifyAPI["spotify.rs<br/>Spotify Web API"]
         TeamsAPI["teams.rs<br/>Microsoft Graph API"]
         Tray["tray.rs<br/>system tray"]
+        Menu["menu.rs<br/>application menu"]
     end
 
     subgraph Storage ["Storage"]
@@ -348,7 +349,8 @@ PresenceJam-Desktop/
 │   │   ├── profanity.rs             # Profanity filter module
 │   │   ├── spotify.rs                # Spotify Web API client
 │   │   ├── teams.rs                  # Microsoft Graph API client
-│   │   └── tray.rs                   # System tray setup
+│   │   ├── tray.rs                   # System tray setup
+│   │   └── menu.rs                   # Application menu bar
 │   ├── Cargo.toml                    # Rust dependencies
 │   ├── tauri.conf.json               # Tauri 2 config (window, deep-link, plugins)
 │   └── capabilities/

@@ -1,6 +1,6 @@
 import { writable } from 'svelte/store';
 
-export type View = 'onboarding' | 'dashboard' | 'settings' | 'logs';
+export type View = 'onboarding' | 'dashboard' | 'settings' | 'logs' | 'about';
 
 export const currentView = writable<View>('dashboard');
 export const isSyncing = writable(false);
