@@ -11,7 +11,7 @@ use crate::spotify::{
     format_status, get_currently_playing, is_token_expired, refresh_spotify_token, SpotifyApiError,
     SpotifyTokens,
 };
-use crate::teams::{clear_teams_status_message, set_teams_status_message, TeamsTokens};
+use crate::teams::{clear_teams_status_message, is_teams_token_expired, refresh_teams_token, set_teams_status_message, TeamsTokens};
 use crate::AppState;
 
 const DEFAULT_INTERVAL_SECONDS: u64 = 30;
@@ -65,6 +65,48 @@ fn process_track(
     };
 
     if let Some(teams_tok) = teams_tokens {
+        // Proactively refresh Teams token before use if within 60 seconds of expiry.
+        // This mirrors the Spotify token refresh pattern and prevents silent auth
+        // failures mid-session. See issue #4.
+        let teams_tok = if is_teams_token_expired(&teams_tok) {
+            log::info!(
+                "[POLLING] process_track: Teams token expired, refreshing"
+            );
+            match refresh_teams_token(&teams_tok) {
+                Ok(new_tokens) => {
+                    // Persist refreshed tokens to store
+                    if let Err(e) = save_teams_tokens(app, &new_tokens) {
+                        log::warn!(
+                            "[POLLING] process_track: failed to persist refreshed Teams tokens: {}",
+                            e
+                        );
+                    }
+                    // Update in-memory state
+                    *state.teams_tokens.write() = Some(new_tokens.clone());
+                    log::info!(
+                        "[POLLING] process_track: Teams token refreshed successfully"
+                    );
+                    new_tokens
+                }
+                Err(e) => {
+                    log::error!(
+                        "[POLLING] process_track: failed to refresh Teams token: {}",
+                        e
+                    );
+                    let _ = app.emit(
+                        "error",
+                        serde_json::json!({
+                            "source": "teams",
+                            "message": format!("Token refresh failed: {}. Please re-authenticate.", e)
+                        }),
+                    );
+                    return DEFAULT_INTERVAL_SECONDS;
+                }
+            }
+        } else {
+            teams_tok
+        };
+
         if track.is_playing {
             let status_format = config
                 .as_ref()

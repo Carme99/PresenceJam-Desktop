@@ -298,6 +298,12 @@ pub fn complete_teams_auth(
     })
 }
 
+/// Returns true if the Teams token is expired or will expire within 60 seconds.
+/// Uses the same 60-second buffer as the Spotify token expiration check.
+pub fn is_teams_token_expired(tokens: &TeamsTokens) -> bool {
+    Utc::now() >= tokens.expires_at - chrono::Duration::seconds(60)
+}
+
 pub fn refresh_teams_token(tokens: &TeamsTokens) -> Result<TeamsTokens, String> {
     let refresh_token = tokens
         .refresh_token
