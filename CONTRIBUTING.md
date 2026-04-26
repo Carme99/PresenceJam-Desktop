@@ -65,7 +65,8 @@ Types: `feat`, `fix`, `docs`, `test`, `refactor`, `chore`
 - Follow existing component patterns
 - Use existing stores for state management
 - Add TypeScript types for new interfaces
-- No `console.log` in production code
+- Use `devLog()` from `$lib/utils/dev` for debug logging — it is a no-op in production builds
+- `console.error` and `console.warn` are fine for actual errors that should always be visible
 
 ### Screenshots
 
@@ -78,19 +79,24 @@ PresenceJam-Desktop/
 ├── src/                          # Svelte frontend
 │   ├── lib/
 │   │   ├── components/           # UI components (Dashboard, Onboarding, Settings, LogViewer)
-│   │   └── stores/               # Svelte stores (app state, config, spotify)
+│   │   ├── stores/               # Svelte stores (app.ts, config.ts, spotify.ts, teams.ts)
+│   │   └── utils/                # Utilities (dev.ts — conditional dev logger)
 │   └── routes/                   # SvelteKit routes (+page.svelte)
 ├── src-tauri/
 │   ├── src/
-│   │   ├── lib.rs                # Tauri entry, command registration
-│   │   ├── commands.rs            # Invoke handlers
-│   │   ├── config.rs             # Config loading/saving
-│   │   ├── polling.rs            # Polling loop
+│   │   ├── lib.rs                # Tauri entry, command registration, AppState setup
+│   │   ├── main.rs               # Binary entry point
+│   │   ├── commands.rs           # Invoke handlers (all Tauri commands)
+│   │   ├── config.rs             # Config loading/saving, AppConfig struct
+│   │   ├── polling.rs            # Polling loop, token loading/saving, crash recovery
 │   │   ├── spotify.rs            # Spotify API client (PKCE auth, token refresh)
-│   │   ├── teams.rs              # Microsoft Teams API client (device code flow)
-│   │   └── tray.rs               # System tray setup
+│   │   ├── teams.rs             # Microsoft Teams API client (device code flow, token refresh)
+│   │   ├── profanity.rs         # Profanity filter module
+│   │   └── tray.rs              # System tray setup
 │   ├── Cargo.toml
-│   └── tauri.conf.json
+│   ├── tauri.conf.json
+│   └── capabilities/             # Tauri 2 permission grants
+│       └── default.json
 ├── package.json
 ├── svelte.config.js
 ├── vite.config.js
