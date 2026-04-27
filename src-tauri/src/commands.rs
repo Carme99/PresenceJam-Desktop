@@ -1,7 +1,7 @@
 use crate::config::{self, AppConfig};
 use crate::spotify::{SpotifyTokens, TrackInfo};
 use crate::teams::{DeviceCodeResponse, TeamsTokens};
-use crate::{polling, AppState, PendingSpotifyAuth};
+use crate::{polling, tray, AppState, PendingSpotifyAuth};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_store::StoreExt;
@@ -960,5 +960,20 @@ pub fn reconnect_teams(
     }
 
     log::info!("[CMD] reconnect_teams: SUCCESS");
+    Ok(())
+}
+
+#[tauri::command]
+pub fn update_tray_menu_state(
+    app: AppHandle,
+    is_syncing: bool,
+    current_track: Option<TrackInfo>,
+) -> Result<(), String> {
+    log::info!(
+        "[CMD] update_tray_menu_state: ENTRY - is_syncing={}",
+        is_syncing
+    );
+    tray::update_tray_menu(&app, is_syncing, current_track)?;
+    log::info!("[CMD] update_tray_menu_state: SUCCESS");
     Ok(())
 }

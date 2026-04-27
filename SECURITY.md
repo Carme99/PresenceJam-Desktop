@@ -34,12 +34,15 @@ Expected response time: within 7 days.
 
 ### Tokens
 
-| Token Type | Storage Location | Encryption |
+|| Token Type | Storage Location | Encryption ||
 |-----------|----------------|------------|
-| Spotify access/refresh tokens | `tauri-plugin-store` (tokens store) | DPAPI on Windows |
-| Teams access/refresh tokens | `tauri-plugin-store` (tokens store) | DPAPI on Windows |
+| Spotify access/refresh tokens | `tauri-plugin-store` (`tokens.json`) | DPAPI on Windows; Keychain on macOS |
+| Teams access/refresh tokens | `tauri-plugin-store` (`tokens.json`) | DPAPI on Windows; Keychain on macOS |
+| Spotify OAuth pending state (verifier, state) | `tauri-plugin-store` (`tokens.json`) | Same as tokens — cleared after auth completes |
 
 **DPAPI (Windows):** Tokens are encrypted using Windows Data Protection API, which binds encryption to the current Windows user account. This means tokens cannot be extracted or read by other user accounts on the same machine, or by someone who steals the hard drive but doesn't have your login credentials.
+
+**Keychain (macOS):** Tokens are stored in the macOS Keychain, tied to the current user account.
 
 ### Configuration
 
@@ -47,17 +50,19 @@ App settings are stored in plain JSON:
 
 ```
 %APPDATA%\PresenceJam\config.json
-%APPDATA%\PresenceJam\credentials.json
+%APPDATA%\PresenceJam\tokens.json
 ```
 
 These files contain:
-- Spotify Client ID and Client Secret (from your Spotify Developer app)
+- Spotify Client ID and Client Secret (from your Spotify Developer app) — stored **unencrypted** in `config.json`
+- Spotify access/refresh tokens — stored **encrypted** (DPAPI/Keychain) in `tokens.json` via tauri-plugin-store
+- Teams access/refresh tokens — stored **encrypted** (DPAPI/Keychain) in `tokens.json` via tauri-plugin-store
 - Status format template (`status_format`)
 - Profanity filter settings (`profanity_filter`, `profanity_placeholder`)
 - Polling configuration
 - Logging preferences
 
-**⚠️ These files are not encrypted.** If you share your machine with untrusted parties, consider revoking your Spotify app credentials when you're done using PresenceJam.
+**⚠️ The `config.json` file is not encrypted.** If you share your machine with untrusted parties, consider revoking your Spotify app credentials when you're done using PresenceJam. The `tokens.json` file is encrypted to your user account via DPAPI (Windows) or Keychain (macOS).
 
 ### Logs
 
