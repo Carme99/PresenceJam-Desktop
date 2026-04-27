@@ -1,6 +1,7 @@
 use chrono::Utc;
 use rand::Rng;
 use std::sync::Arc;
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration as StdDuration;
 use tauri::{AppHandle, Emitter};
@@ -185,6 +186,15 @@ pub fn start_polling(
 ) -> Result<thread::JoinHandle<()>, String> {
     log::info!("[POLLING] start_polling: ENTRY");
 
+    // Create interruptible stop channel so stop_syncing can wake the thread immediately.
+    // See issue #10 (Polling thread cannot be cancelled mid-request).
+    let (stop_tx, stop_rx) = mpsc::channel::<()>();
+
+    {
+        let mut tx_guard = state.stop_tx.write();
+        *tx_guard = Some(stop_tx);
+    }
+
     *state.is_syncing.write() = true;
     log::info!("[POLLING] start_polling: is_syncing flag set to true");
 
@@ -197,7 +207,7 @@ pub fn start_polling(
         .stack_size(1024 * 1024) // 1MB stack for safety
         .spawn(move || {
             log::info!("[POLLING] start_polling: thread started");
-            polling_loop(state_clone, app_clone);
+            polling_loop(state_clone, app_clone, stop_rx);
             log::info!("[POLLING] start_polling: thread ended");
         })
         .map_err(|e| {
@@ -216,17 +226,27 @@ fn get_spotify_credentials(config: &Option<crate::config::AppConfig>) -> (String
         .unwrap_or_else(|| (String::new(), String::new()))
 }
 
-fn polling_loop(state: Arc<AppState>, app: AppHandle) {
+fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()>) {
     log::info!("[POLLING] polling_loop: STARTED");
     let mut last_track_key: Option<String> = None;
 
     loop {
         log::info!("[POLLING] polling_loop: iteration start");
 
-        // Check if we should stop
+        // Check if we should stop — use interruptible channel so stop_syncing
+        // can wake the thread immediately instead of waiting for the sleep to expire.
+        // Also check the is_syncing flag for external stop requests.
+        match stop_rx.recv_timeout(StdDuration::ZERO) {
+            Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                log::info!("[POLLING] polling_loop: stop signal received, breaking loop");
+                break;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // Continue if no stop signal
+            }
+        }
         {
             let is_syncing = *state.is_syncing.read();
-            log::info!("[POLLING] polling_loop: is_syncing={}", is_syncing);
             if !is_syncing {
                 log::info!("[POLLING] polling_loop: is_syncing=false, breaking loop");
                 break;
@@ -261,7 +281,13 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle) {
             }
             None => {
                 log::warn!("[POLLING] polling_loop: No Spotify tokens available, waiting...");
-                thread::sleep(StdDuration::from_secs(with_jitter(ERROR_RETRY_INTERVAL_SECONDS)));
+                match stop_rx.recv_timeout(StdDuration::from_secs(with_jitter(ERROR_RETRY_INTERVAL_SECONDS))) {
+                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        log::info!("[POLLING] polling_loop: stop signal during no-token sleep, breaking");
+                        break;
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                }
                 continue;
             }
         };
@@ -298,8 +324,15 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle) {
                         }),
                     );
                     log::info!("[POLLING] polling_loop: EMIT error event");
-                    thread::sleep(StdDuration::from_secs(with_jitter(ERROR_RETRY_INTERVAL_SECONDS)));
-                    continue;
+                    match stop_rx.recv_timeout(StdDuration::from_secs(with_jitter(ERROR_RETRY_INTERVAL_SECONDS))) {
+                        Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                            log::info!("[POLLING] polling_loop: stop signal during error retry sleep, breaking");
+                            break;
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                            continue;
+                        }
+                    }
                 }
             }
         } else {
@@ -325,7 +358,16 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle) {
                     "[POLLING] polling_loop: sleeping for {} seconds",
                     sleep_duration
                 );
-                thread::sleep(StdDuration::from_secs(sleep_duration));
+                // Use interruptible sleep: wait for either a stop signal or timeout
+                match stop_rx.recv_timeout(StdDuration::from_secs(sleep_duration)) {
+                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        log::info!("[POLLING] polling_loop: stop signal during track sleep, breaking");
+                        break;
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        // Normal timeout — continue to next poll
+                    }
+                }
             }
             Ok(None) => {
                 log::info!("[POLLING] polling_loop: no track playing");
@@ -334,7 +376,13 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle) {
                     "[POLLING] polling_loop: sleeping for {} seconds (no track)",
                     DEFAULT_INTERVAL_SECONDS
                 );
-                thread::sleep(StdDuration::from_secs(DEFAULT_INTERVAL_SECONDS));
+                match stop_rx.recv_timeout(StdDuration::from_secs(DEFAULT_INTERVAL_SECONDS)) {
+                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        log::info!("[POLLING] polling_loop: stop signal during no-track sleep, breaking");
+                        break;
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                }
             }
             Err(e) => {
                 log::error!(
@@ -381,9 +429,13 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle) {
                                         Ok(None) => {
                                             log::info!("[POLLING] polling_loop: retry no track");
                                             handle_no_track(&app, &state, &mut last_track_key);
-                                            thread::sleep(StdDuration::from_secs(
-                                                DEFAULT_INTERVAL_SECONDS,
-                                            ));
+                                            match stop_rx.recv_timeout(StdDuration::from_secs(DEFAULT_INTERVAL_SECONDS)) {
+                                                Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                                                    log::info!("[POLLING] polling_loop: stop signal during retry no-track sleep, breaking");
+                                                    break;
+                                                }
+                                                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                                            }
                                             continue;
                                         }
                                         Err(retry_err) => {
@@ -416,7 +468,13 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle) {
                     }),
                 );
                 log::info!("[POLLING] polling_loop: EMIT error event");
-                thread::sleep(StdDuration::from_secs(backoff_secs));
+                match stop_rx.recv_timeout(StdDuration::from_secs(backoff_secs)) {
+                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        log::info!("[POLLING] polling_loop: stop signal during backoff sleep, breaking");
+                        break;
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                }
             }
         }
     }
@@ -426,8 +484,16 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle) {
 
 pub fn stop_polling(state: &AppState) {
     log::info!("[POLLING] stop_polling: ENTRY");
+
+    // Close the stop channel to immediately wake the polling thread from all
+    // recv_timeout calls. This prevents the up-to-30s freeze when stopping sync.
+    {
+        let mut tx_guard = state.stop_tx.write();
+        *tx_guard = None; // Drop the sender, closing the channel
+    }
+
     *state.is_syncing.write() = false;
-    log::info!("[POLLING] stop_polling: is_syncing set to false");
+    log::info!("[POLLING] stop_polling: stop channel closed and is_syncing set to false");
 }
 
 pub fn save_spotify_tokens(app: &AppHandle, tokens: &SpotifyTokens) -> Result<(), String> {

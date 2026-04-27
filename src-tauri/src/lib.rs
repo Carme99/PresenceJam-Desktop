@@ -1,3 +1,4 @@
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
 use parking_lot::RwLock;
@@ -28,6 +29,7 @@ pub struct AppState {
     pub polling_handle: RwLock<Option<thread::JoinHandle<()>>>,
     pub pending_spotify_auth: RwLock<Option<PendingSpotifyAuth>>,
     pub pending_teams_auth: RwLock<Option<PendingTeamsAuth>>,
+    pub stop_tx: RwLock<Option<mpsc::Sender<()>>>,
 }
 
 impl AppState {
@@ -42,6 +44,7 @@ impl AppState {
             polling_handle: RwLock::new(None),
             pending_spotify_auth: RwLock::new(None),
             pending_teams_auth: RwLock::new(None),
+            stop_tx: RwLock::new(None),
         }
     }
 }
