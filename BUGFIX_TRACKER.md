@@ -28,7 +28,7 @@ separately with a reference to its GitHub issue number.
 
 - [x] ~~Bug 5~~ — **`start_minimized` exists in TypeScript config but missing from Rust `TeamsConfig`**
 - [x] ~~Bug 6~~ — **`launch_at_login` in Settings binds to `localConfig.teams.launch_at_login` (wrong field)**
-- [ ] Bug 7 — `update_tray_menu` errors silently ignored; tray state can desync
+- [x] ~~Bug 7~~ — **`update_tray_menu` errors silently ignored; tray state can desync**
 
 ### Medium
 
@@ -36,21 +36,21 @@ separately with a reference to its GitHub issue number.
 - [x] ~~Bug 9~~ — **Windows deep link registration only runs in debug builds**
 - [x] ~~Bug 10+12~~ — **No token validation on startup; `is_onboarding_complete` returns false positives**
 - [x] ~~Bug 11~~ — **Initial tray menu always shows "Start Syncing" regardless of actual sync state**
-- [ ] Bug 13 — `progress_ms` not corrected by elapsed time
+- [x] ~~Bug 13~~ — **`progress_ms` not corrected by elapsed time**
 - [x] ~~Bug 14~~ — **TOCTOU in `start_syncing`**
-- [ ] Bug 15 — Placeholder OAuth URL in Onboarding.svelte manual auth section
+- [x] ~~Bug 15~~ — **Placeholder OAuth URL in Onboarding.svelte manual auth section**
 
 ### Low (nice to have)
 
-- [ ] Bug 16 — Frontend doesn't handle `sync-started`/`sync-stopped` events; `use_auto_refresh` store is dead code
-- [ ] Bug 17 — Teams status can flicker when track changes rapidly (no debounce)
-- [ ] Bug 18 — Redundant quit handler thread spawned alongside `on_window_event(CloseRequested)`
+- [x] ~~Bug 16~~ — **Frontend doesn't handle `sync-started`/`sync-stopped` events**
+- [x] ~~Bug 17~~ — **Teams status can flicker when track changes rapidly (no debounce)**
+- [x] ~~Bug 18~~ — **Redundant quit handler thread spawned alongside `on_window_event(CloseRequested)`**
 - [x] ~~Bug 19~~ — **Redundant `client_id` field in `refresh_spotify_token` request body (already in Basic auth)**
 - [ ] Bug 20 — `src/lib/stores/app.ts`, `spotify.ts`, `teams.ts` are unused dead stores
-- [ ] Bug 21 — `LogViewer.svelte` not wired to Rust log stream
-- [ ] Bug 22+23 — `pending_teams_auth` and `pending_spotify_auth` not persisted to store
+- [x] ~~Bug 21~~ — **`LogViewer.svelte` not wired to Rust log stream**
+- [x] ~~Bug 22+23~~ — **`pending_teams_auth` and `pending_spotify_auth` not persisted to store**
 - [x] ~~Bug 24+25~~ — **Initial tray menu shows no track info; tray not updated on track changes**
-- [ ] Bug 26 — `config.rs` load/save has potential concurrent access race
+- [x] ~~Bug 26~~ — **`config.rs` load/save has potential concurrent access race**
 
 ---
 
