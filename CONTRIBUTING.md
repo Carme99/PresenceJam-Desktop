@@ -70,40 +70,11 @@ Types: `feat`, `fix`, `docs`, `test`, `refactor`, `chore`
 
 ### Screenshots
 
-If your change affects the UI, please include a screenshot in the PR. Screenshots help with review and will eventually be added to the README.
+If your change affects the UI, please include a screenshot in the PR. Screenshots help reviewers verify the change and are added to the README as needed.
 
 ## Project Structure
 
-```
-PresenceJam-Desktop/
-├── src/                          # Svelte frontend
-│   ├── lib/
-│   │   ├── components/           # UI components (Dashboard, Onboarding, Settings, LogViewer)
-│   │   ├── stores/               # Svelte stores (app.ts, config.ts, spotify.ts, teams.ts)
-│   │   └── utils/                # Utilities (dev.ts — conditional dev logger)
-│   └── routes/                   # SvelteKit routes (+page.svelte)
-├── src-tauri/
-│   ├── src/
-│   │   ├── lib.rs                # Tauri entry, command registration, AppState setup
-│   │   ├── main.rs               # Binary entry point
-│   │   ├── commands.rs           # Invoke handlers (all Tauri commands)
-│   │   ├── config.rs             # Config loading/saving, AppConfig struct
-│   │   ├── polling.rs            # Polling loop, token loading/saving, crash recovery
-│   │   ├── spotify.rs            # Spotify API client (PKCE auth, token refresh)
-│   │   ├── teams.rs             # Microsoft Teams API client (device code flow, token refresh)
-│   │   ├── profanity.rs         # Profanity filter module
-│   │   └── tray.rs              # System tray setup
-│   ├── Cargo.toml
-│   ├── tauri.conf.json
-│   └── capabilities/             # Tauri 2 permission grants
-│       └── default.json
-├── package.json
-├── svelte.config.js
-├── vite.config.js
-├── CONTRIBUTING.md               # You are here
-├── CHANGELOG.md
-└── README.md
-```
+See [ARCHITECTURE.md](./ARCHITECTURE.md#directory-structure) for the full directory tree.
 
 ## Logging
 
