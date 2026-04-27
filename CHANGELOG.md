@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+No changes yet.
+
+## [2.4.0] - 2026-04-27
+
 ### Added
 
 - `SETUP.md` — First-time setup guide: installing the app, registering a Spotify Developer app, connecting Teams, file locations, uninstalling
@@ -21,8 +25,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Removed
 
 - `BUGFIX_TRACKER.md` — moved to GitHub Issues; no longer ships with the repo
-
-## [2.4.0] - 2026-04-27
 
 ### Fixed
 
