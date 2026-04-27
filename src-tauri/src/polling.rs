@@ -3,7 +3,7 @@ use rand::Rng;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration as StdDuration;
+use std::time::{Duration as StdDuration, Instant};
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_store::StoreExt;
 
@@ -37,7 +37,12 @@ fn process_track(
     config: &Option<crate::config::AppConfig>,
     track: &crate::spotify::TrackInfo,
     last_track_key: &mut Option<String>,
+    last_poll_instant: Instant,
 ) -> u64 {
+    // Bug 13: Correct progress_ms for elapsed time since last poll
+    let elapsed_ms = last_poll_instant.elapsed().as_millis() as u64;
+    let corrected_progress_ms = track.progress_ms.saturating_add(elapsed_ms);
+
     let track_key = format!("{} - {}", track.title, track.artist);
     let changed = last_track_key.as_ref() != Some(&track_key);
 
@@ -86,7 +91,7 @@ fn process_track(
                 status_message.clone()
             };
 
-            let remaining_ms = track.duration_ms.saturating_sub(track.progress_ms);
+            let remaining_ms = track.duration_ms.saturating_sub(corrected_progress_ms);
             let buffer_ms = config
                 .as_ref()
                 .map(|c| c.polling.expiry_buffer_seconds as u64)
@@ -146,7 +151,7 @@ fn process_track(
     }
 
     if track.is_playing {
-        let remaining_ms = track.duration_ms.saturating_sub(track.progress_ms);
+        let remaining_ms = track.duration_ms.saturating_sub(corrected_progress_ms);
         let buffer_ms = 5000u64;
         let remaining_secs = remaining_ms / 1000;
         let sleep_secs = remaining_secs.saturating_sub(buffer_ms / 1000);
@@ -352,6 +357,9 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
         let access_token = spotify_tokens.access_token.clone();
         log::info!("[POLLING] polling_loop: calling get_currently_playing");
 
+        // Bug 13: Capture instant before API call to correct progress_ms elapsed time
+        let last_poll_instant = Instant::now();
+
         // Get currently playing track (blocking call)
         let result = get_currently_playing(&access_token);
 
@@ -363,7 +371,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                     track.artist
                 );
                 let sleep_duration =
-                    process_track(&app, &state, &config, &track, &mut last_track_key);
+                    process_track(&app, &state, &config, &track, &mut last_track_key, last_poll_instant);
                 // Update tray menu with current sync state and track info (Bug 24+25 fix)
                 let is_syncing = *state.is_syncing.read();
                 let current_track = state.current_track.read().clone();
@@ -436,6 +444,8 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                                         log::warn!("[POLLING] polling_loop: failed to persist refreshed tokens: {}", e);
                                     }
                                     let retry_token = new_tokens.access_token.clone();
+                                            // Bug 13: Capture instant before API call to correct progress_ms elapsed time
+                                            let last_poll_instant = Instant::now();
                                     match get_currently_playing(&retry_token) {
                                         Ok(Some(track)) => {
                                             log::info!(
@@ -449,6 +459,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                                                 &config,
                                                 &track,
                                                 &mut last_track_key,
+                                                last_poll_instant,
                                             );
                                             continue;
                                         }

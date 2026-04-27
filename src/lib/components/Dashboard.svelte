@@ -100,7 +100,23 @@
         isToggling = false;
       }
     }));
-    
+
+    devLog('[DASHBOARD] onMount: setting up sync-started listener');
+    unlisten.push(await listen('sync-started', () => {
+      devLog('[DASHBOARD] EVENT: sync-started received');
+      isSyncing = true;
+      devLog('[DASHBOARD] EVENT: isSyncing=true');
+      updateMenuState();
+    }));
+
+    devLog('[DASHBOARD] onMount: setting up sync-stopped listener');
+    unlisten.push(await listen('sync-stopped', () => {
+      devLog('[DASHBOARD] EVENT: sync-stopped received');
+      isSyncing = false;
+      devLog('[DASHBOARD] EVENT: isSyncing=false');
+      updateMenuState();
+    }));
+
     devLog('[DASHBOARD] onMount: EXIT');
   });
 
