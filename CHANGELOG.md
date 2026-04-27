@@ -7,7 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-No changes yet.
+### Added
+
+- `SETUP.md` — First-time setup guide: installing the app, registering a Spotify Developer app, connecting Teams, file locations, uninstalling
+- `USAGE.md` — Day-to-day guide covering the system tray, dashboard, settings, log viewer, and common tasks
+
+### Changed
+
+- `README.md` rewritten as entry point — shorter, no duplication, links to all docs
+- `CONTRIBUTING.md` — project structure section removed (now in ARCHITECTURE.md), references updated
+- `CLAUDE.md` — stripped to conventions and key files only; duplicated tech stack and feature list removed
+
+### Removed
+
+- `BUGFIX_TRACKER.md` — moved to GitHub Issues; no longer ships with the repo
 
 ## [2.4.0] - 2026-04-27
 
