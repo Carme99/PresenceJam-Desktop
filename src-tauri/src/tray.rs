@@ -92,6 +92,16 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
     }
     TRAY.set(tray).map_err(|_| "Tray already initialized".to_string())?;
 
+    // Immediately update tray menu to reflect actual state (Bug 11 fix).
+    // Without this, the initial menu always shows "Pause Sync" regardless of actual
+    // sync state, and the menu doesn't show the current track if one is cached.
+    let state = app.state::<std::sync::Arc<crate::AppState>>();
+    let is_syncing = *state.is_syncing.read();
+    let current_track = state.current_track.read().clone();
+    if let Err(e) = update_tray_menu(app.handle(), is_syncing, current_track) {
+        log::warn!("[TRAY] setup_tray: failed to update initial tray menu: {}", e);
+    }
+
     log::info!("[TRAY] setup_tray: system tray initialized successfully");
     Ok(())
 }

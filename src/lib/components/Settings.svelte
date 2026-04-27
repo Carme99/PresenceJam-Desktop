@@ -238,10 +238,10 @@
       <h2>Startup</h2>
       <div class="toggle-row">
         <label for="launch-login">Launch at login</label>
-        <input 
+        <input
           id="launch-login"
-          type="checkbox" 
-          bind:checked={localConfig.teams.launch_at_login}
+          type="checkbox"
+          bind:checked={localConfig.autostart}
         />
       </div>
       <div class="toggle-row">

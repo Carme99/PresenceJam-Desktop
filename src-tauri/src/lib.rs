@@ -276,8 +276,16 @@ pub fn run() {
             match config::load_config() {
                 Ok(cfg) => {
                     let mut config_guard = state.config.write();
-                    *config_guard = Some(cfg);
+                    *config_guard = Some(cfg.clone());
                     log::info!("[APP] setup: config loaded into AppState");
+
+                    // Handle start_minimized setting
+                    if cfg.teams.start_minimized {
+                        log::info!("[APP] setup: start_minimized enabled, hiding window");
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.hide();
+                        }
+                    }
                 }
                 Err(e) => {
                     log::warn!("[APP] setup: no config found: {}", e);
@@ -318,7 +326,7 @@ pub fn run() {
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
 
-                #[cfg(any(windows, all(debug_assertions, windows)))]
+                #[cfg(windows)]
                 {
                     log::info!("[APP] setup: registering deep links");
                     if let Err(e) = app.deep_link().register_all() {

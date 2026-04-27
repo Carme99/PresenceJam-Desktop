@@ -145,7 +145,6 @@ pub fn refresh_spotify_token(
     let params = [
         ("grant_type", "refresh_token"),
         ("refresh_token", &tokens.refresh_token),
-        ("client_id", client_id),
     ];
 
     let response = client

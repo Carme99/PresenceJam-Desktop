@@ -35,10 +35,16 @@ pub struct TeamsConfig {
     pub profanity_filter: bool,
     #[serde(default = "default_profanity_placeholder")]
     pub profanity_placeholder: String,
+    #[serde(default)]
+    pub start_minimized: bool,
 }
 
 fn default_status_format() -> String {
     "🎵 {artist} - {track} 🎧".to_string()
+}
+
+fn default_start_minimized() -> bool {
+    false
 }
 
 fn default_clear_on_pause() -> bool {
@@ -113,6 +119,8 @@ pub struct AppConfig {
     pub polling: PollingConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
+    #[serde(default)]
+    pub autostart: bool,
 }
 
 impl Default for SpotifyConfig {
@@ -133,6 +141,7 @@ impl Default for TeamsConfig {
             clear_on_pause: default_clear_on_pause(),
             profanity_filter: default_profanity_filter(),
             profanity_placeholder: default_profanity_placeholder(),
+            start_minimized: default_start_minimized(),
         }
     }
 }
@@ -165,6 +174,7 @@ impl Default for AppConfig {
             teams: TeamsConfig::default(),
             polling: PollingConfig::default(),
             logging: LoggingConfig::default(),
+            autostart: false,
         }
     }
 }

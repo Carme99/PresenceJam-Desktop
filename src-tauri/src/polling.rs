@@ -13,7 +13,7 @@ use crate::spotify::{
     SpotifyTokens,
 };
 use crate::teams::{clear_teams_status_message, set_teams_status_message, TeamsTokens};
-use crate::AppState;
+use crate::{tray, AppState};
 
 const DEFAULT_INTERVAL_SECONDS: u64 = 30;
 const MAX_INTERVAL_SECONDS: u64 = 60;
@@ -127,7 +127,7 @@ fn process_track(
                     }
                 }
             }
-        } else {
+        } else if config.as_ref().map(|c| c.teams.clear_on_pause).unwrap_or(true) {
             match clear_teams_status_message(&teams_tok.access_token) {
                 Ok(_) => {
                     let _ = app.emit(
@@ -315,6 +315,10 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                 Ok(new_tokens) => {
                     log::info!("[POLLING] polling_loop: token refresh SUCCESS");
                     *state.spotify_tokens.write() = Some(new_tokens.clone());
+                    // Persist refreshed tokens to store so they survive app restarts
+                    if let Err(e) = save_spotify_tokens(&app, &new_tokens) {
+                        log::warn!("[POLLING] polling_loop: failed to persist refreshed tokens: {}", e);
+                    }
                     new_tokens
                 }
                 Err(e) => {
@@ -360,6 +364,12 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                 );
                 let sleep_duration =
                     process_track(&app, &state, &config, &track, &mut last_track_key);
+                // Update tray menu with current sync state and track info (Bug 24+25 fix)
+                let is_syncing = *state.is_syncing.read();
+                let current_track = state.current_track.read().clone();
+                if let Err(e) = tray::update_tray_menu(&app, is_syncing, current_track) {
+                    log::warn!("[POLLING] polling_loop: failed to update tray menu: {}", e);
+                }
                 log::info!(
                     "[POLLING] polling_loop: sleeping for {} seconds",
                     sleep_duration
@@ -378,6 +388,12 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
             Ok(None) => {
                 log::info!("[POLLING] polling_loop: no track playing");
                 handle_no_track(&app, &state, &mut last_track_key);
+                // Update tray menu with current sync state and track info (Bug 24+25 fix)
+                let is_syncing = *state.is_syncing.read();
+                let current_track = state.current_track.read().clone();
+                if let Err(e) = tray::update_tray_menu(&app, is_syncing, current_track) {
+                    log::warn!("[POLLING] polling_loop: failed to update tray menu: {}", e);
+                }
                 log::info!(
                     "[POLLING] polling_loop: sleeping for {} seconds (no track)",
                     DEFAULT_INTERVAL_SECONDS
@@ -415,6 +431,10 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                                         "[POLLING] polling_loop: token refresh SUCCESS, retrying"
                                     );
                                     *state.spotify_tokens.write() = Some(new_tokens.clone());
+                                    // Persist refreshed tokens so they survive app restarts
+                                    if let Err(e) = save_spotify_tokens(&app, &new_tokens) {
+                                        log::warn!("[POLLING] polling_loop: failed to persist refreshed tokens: {}", e);
+                                    }
                                     let retry_token = new_tokens.access_token.clone();
                                     match get_currently_playing(&retry_token) {
                                         Ok(Some(track)) => {

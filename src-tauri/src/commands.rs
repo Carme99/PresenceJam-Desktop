@@ -55,7 +55,7 @@ pub fn load_config() -> Result<AppConfig, String> {
 }
 
 #[tauri::command]
-pub fn save_config(config: AppConfig) -> Result<(), String> {
+pub fn save_config(app: AppHandle, config: AppConfig) -> Result<(), String> {
     log::info!(
         "[CMD] save_config: ENTRY - config.spotify.client_id.len={}",
         config.spotify.client_id.len()
@@ -63,6 +63,13 @@ pub fn save_config(config: AppConfig) -> Result<(), String> {
     match config::save_config(&config) {
         Ok(()) => {
             log::info!("[CMD] save_config: SUCCESS");
+            // Sync autostart state with the OS autostart manager
+            #[cfg(desktop)]
+            {
+                if let Err(e) = set_autostart_enabled(app, config.autostart) {
+                    log::warn!("[CMD] save_config: failed to sync autostart state: {}", e);
+                }
+            }
             Ok(())
         }
         Err(e) => {
@@ -543,25 +550,20 @@ pub fn refresh_teams(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> 
 pub fn start_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> Result<(), String> {
     log::info!("[CMD] start_syncing: ENTRY");
 
-    let is_syncing = {
-        let guard = state.is_syncing.read();
-        *guard
-    };
-    log::info!("[CMD] start_syncing: current is_syncing={}", is_syncing);
-
-    if is_syncing {
-        log::info!("[CMD] start_syncing: already syncing, returning early");
-        return Ok(());
+    // Acquire write lock first to prevent TOCTOU race with concurrent calls.
+    // See issue #14.
+    {
+        let mut is_syncing_guard = state.is_syncing.write();
+        if *is_syncing_guard {
+            log::info!("[CMD] start_syncing: already syncing, returning early");
+            return Ok(());
+        }
+        *is_syncing_guard = true;
+        log::info!("[CMD] start_syncing: is_syncing flag set to true");
     }
 
     let handle = polling::start_polling(Arc::clone(&state.inner()), app.clone())?;
     log::info!("[CMD] start_syncing: polling task spawned");
-
-    {
-        let mut is_syncing_guard = state.is_syncing.write();
-        *is_syncing_guard = true;
-        log::info!("[CMD] start_syncing: is_syncing flag set to true");
-    }
 
     {
         let mut handle_guard = state.polling_handle.write();
@@ -840,17 +842,34 @@ pub fn is_onboarding_complete(state: tauri::State<'_, Arc<AppState>>) -> Result<
 
     // Check Teams tokens to verify Teams auth is complete.
     // See issue #11.
-    let teams_configured = {
+    let (teams_configured, teams_valid) = {
         let guard = state.teams_tokens.read();
-        guard.is_some()
+        match guard.as_ref() {
+            Some(tokens) => (true, crate::teams::validate_teams_token(&tokens.access_token).is_ok()),
+            None => (false, false),
+        }
     };
 
-    let complete = spotify_configured && teams_configured;
+    let (spotify_valid, _spotify_token) = {
+        let guard = state.spotify_tokens.read();
+        match guard.as_ref() {
+            Some(tokens) => (crate::spotify::validate_spotify_token(&tokens.access_token).is_ok(), Some(tokens.clone())),
+            None => (false, None),
+        }
+    };
+
+    // Onboarding is complete only if:
+    // 1. Spotify is configured AND token validates (Bug 12 fix)
+    // 2. Teams is configured AND token validates
+    // See issues #10 and #12.
+    let complete = spotify_configured && spotify_valid && teams_configured && teams_valid;
     log::info!(
-        "[CMD] is_onboarding_complete: result={} (spotify={}, teams={})",
+        "[CMD] is_onboarding_complete: result={} (spotify_configured={}, spotify_valid={}, teams_configured={}, teams_valid={})",
         complete,
         spotify_configured,
-        teams_configured
+        spotify_valid,
+        teams_configured,
+        teams_valid
     );
 
     Ok(complete)
