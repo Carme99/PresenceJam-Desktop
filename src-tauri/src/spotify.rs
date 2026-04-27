@@ -288,3 +288,27 @@ pub fn format_status(track: &TrackInfo, format: &str) -> String {
 pub fn is_token_expired(tokens: &SpotifyTokens) -> bool {
     Utc::now() >= tokens.expires_at - chrono::Duration::seconds(60)
 }
+
+/// Validates that a Spotify access token is still functional by calling the
+/// currently-playing endpoint. Returns Ok(()) if the token works (200/204),
+/// Err(()) for permanent auth failures (401), and Err(()) for transient errors.
+pub fn validate_spotify_token(access_token: &str) -> Result<(), SpotifyApiError> {
+    let client = Client::new();
+    let response = client
+        .get("https://api.spotify.com/v1/me/player/currently-playing")
+        .header("Authorization", format!("Bearer {}", access_token))
+        .timeout(Duration::from_secs(10))
+        .send()
+        .map_err(|e| SpotifyApiError::Other(format!("request failed: {}", e)))?;
+
+    match response.status().as_u16() {
+        200 | 204 => Ok(()),
+        401 => Err(SpotifyApiError::ExpiredToken),
+        429 => Err(SpotifyApiError::RateLimited),
+        _ => Err(SpotifyApiError::Other(format!(
+            "unexpected status {}",
+            response.status()
+        ))),
+    }
+}
+

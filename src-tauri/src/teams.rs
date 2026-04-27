@@ -480,3 +480,26 @@ pub fn clear_teams_status_message(access_token: &str) -> Result<(), String> {
     log::info!("Successfully cleared Teams status message");
     Ok(())
 }
+
+/// Validates that a Teams access token is still functional by calling the
+/// presence endpoint. Returns Ok(()) if the token works (200), Err(()) for
+/// permanent auth failures (401/403).
+pub fn validate_teams_token(access_token: &str) -> Result<(), String> {
+    let client = build_teams_client()?;
+    let response = client
+        .get("https://graph.microsoft.com/v1.0/me/presence")
+        .header("Authorization", format!("Bearer {}", access_token))
+        .send()
+        .map_err(|e| format!("request failed: {}", e))?;
+
+    let status_code = response.status().as_u16();
+    match status_code {
+        200 => Ok(()),
+        401 | 403 => Err(format!("token invalid ({}), reconnect required", status_code)),
+        _ => {
+            let body = response.text().unwrap_or_default();
+            Err(format!("unexpected status {}: {}", status_code, body))
+        }
+    }
+}
+

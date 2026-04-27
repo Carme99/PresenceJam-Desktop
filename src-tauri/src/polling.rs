@@ -119,6 +119,12 @@ fn process_track(
                             "message": format!("Failed to update status: {}", e)
                         }),
                     );
+                    // Emit reconnect-required so the frontend knows to re-auth Teams
+                    let e_str = e.to_lowercase();
+                    if e_str.contains("unauthorized") || e_str.contains("forbidden") || e_str.contains("401") || e_str.contains("403") {
+                        log::warn!("[POLLING] process_track: Teams auth failure detected, emitting teams-reconnect-required");
+                        let _ = app.emit("teams-reconnect-required", ());
+                    }
                 }
             }
         } else {
@@ -449,6 +455,9 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                                         "[POLLING] polling_loop: token refresh failed: {}",
                                         refresh_err
                                     );
+                                    // Permanent failure after refresh retry — require re-auth
+                                    log::warn!("[POLLING] polling_loop: Spotify token refresh permanently failed, emitting spotify-reconnect-required");
+                                    let _ = app.emit("spotify-reconnect-required", ());
                                     final_err = SpotifyApiError::Other(refresh_err.to_string());
                                 }
                             }
@@ -495,6 +504,7 @@ pub fn stop_polling(state: &AppState) {
     *state.is_syncing.write() = false;
     log::info!("[POLLING] stop_polling: stop channel closed and is_syncing set to false");
 }
+
 
 pub fn save_spotify_tokens(app: &AppHandle, tokens: &SpotifyTokens) -> Result<(), String> {
     log::info!(
