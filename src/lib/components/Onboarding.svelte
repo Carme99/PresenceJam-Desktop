@@ -87,7 +87,7 @@
       validationError = 'Spotify Client ID is required.';
       return;
     }
-    if (spotifyClientId.trim().length !== 32 || !/^[0-9a-fA-F]{32}$/.test(spotifyClientId.trim())) {
+    if (!/^[A-Za-z0-9]{32}$/.test(spotifyClientId.trim())) {
       console.error('[ONBOARDING] connectSpotify: validation failed - client_id format invalid');
       validationError = 'Spotify Client ID must be exactly 32 hexadecimal characters.';
       return;
@@ -253,7 +253,6 @@
           clear_on_pause: true,
           profanity_filter: true,
           profanity_placeholder: 'Currently Listening to Spotify',
-          launch_at_login: launchAtLogin,
           start_minimized: false
         },
         polling: {
@@ -266,7 +265,8 @@
           enabled: true,
           log_level: 'Info',
           retention_days: 30
-        }
+        },
+        autostart: launchAtLogin
       };
       devLog('[ONBOARDING] finish: config built');
 
@@ -319,7 +319,18 @@
     <div class="step">
       <h2>Let's get started</h2>
       <p>PresenceJam syncs your Spotify playback to your Teams status.</p>
-      
+
+      <div class="instructions-box">
+        <h3>Create a Spotify App</h3>
+        <ol>
+          <li>Go to <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">https://developer.spotify.com/dashboard</a></li>
+          <li>Sign in and click <strong>Create App</strong></li>
+          <li>Add this redirect URI: <code>http://localhost:43210/callback</code></li>
+          <li>Fill in the app name and description, then save</li>
+          <li>Copy your <strong>Client ID</strong> and <strong>Client Secret</strong> from the app settings</li>
+        </ol>
+      </div>
+
       <div class="form-group">
         <label for="spotify-client-id">Client ID</label>
         <input id="spotify-client-id" bind:value={spotifyClientId} placeholder="3abc..." />
@@ -341,11 +352,11 @@
         <div class="waiting-box">
           <div class="spinner"></div>
           <p>Spotify login opened in your browser.</p>
-          <p class="hint">After you authorize, paste the full redirect URL below if the app doesn't detect it automatically.</p>
+          <p class="hint">After you authorize, Spotify will redirect you to a URL. Paste that full URL in the field below.</p>
           <div class="form-group">
             <input 
               bind:value={spotifyManualUrl} 
-              placeholder="Paste redirect URL here (e.g. http://localhost:7890/callback?code=XXX...)"
+              placeholder="Paste redirect URL here (e.g. http://localhost:43210/callback?code=XXX...)"
               onkeydown={(e) => e.key === 'Enter' && handleManualUrlPaste()}
             />
           </div>
@@ -525,6 +536,32 @@
   .back:hover { background: var(--bg-elevated); }
   .success-badge { display: flex; align-items: center; gap: 8px; color: var(--color-success); margin-bottom: 16px; font-weight: 500; }
   .error-message { color: var(--color-error); font-size: 13px; margin-top: 8px; padding: 8px; background: rgba(255,0,0,0.1); border-radius: 4px; }
+  .instructions-box {
+    background: var(--bg-elevated);
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 20px;
+    font-size: 14px;
+  }
+  .instructions-box h3 {
+    margin: 0 0 12px 0;
+    font-size: 15px;
+    font-weight: 600;
+  }
+  .instructions-box ol {
+    margin: 0;
+    padding-left: 20px;
+  }
+  .instructions-box li {
+    margin-bottom: 8px;
+    line-height: 1.5;
+  }
+  .instructions-box code {
+    background: var(--bg-base);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 13px;
+  }
   .device-code-box { background: var(--bg-elevated); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
   .code-display { font-size: 32px; font-weight: 700; letter-spacing: 4px; color: var(--color-accent); text-align: center; padding: 16px 0; }
   a { color: var(--color-accent); text-decoration: none; }

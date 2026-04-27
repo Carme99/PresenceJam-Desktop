@@ -1,22 +1,26 @@
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
 use parking_lot::RwLock;
 use tauri::{Manager, Emitter, AppHandle};
+use tauri_plugin_store::StoreExt;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct PendingSpotifyAuth {
     pub verifier: String,
     pub state: String,
     pub client_id: String,
     pub client_secret: String,
     pub redirect_uri: String,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct PendingTeamsAuth {
     pub verifier: String,
     pub client_id: String,
     pub redirect_uri: String,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
 pub struct AppState {
@@ -28,6 +32,7 @@ pub struct AppState {
     pub polling_handle: RwLock<Option<thread::JoinHandle<()>>>,
     pub pending_spotify_auth: RwLock<Option<PendingSpotifyAuth>>,
     pub pending_teams_auth: RwLock<Option<PendingTeamsAuth>>,
+    pub stop_tx: RwLock<Option<mpsc::Sender<()>>>,
 }
 
 impl AppState {
@@ -42,6 +47,7 @@ impl AppState {
             polling_handle: RwLock::new(None),
             pending_spotify_auth: RwLock::new(None),
             pending_teams_auth: RwLock::new(None),
+            stop_tx: RwLock::new(None),
         }
     }
 }
@@ -237,6 +243,9 @@ pub fn run() {
             .target(tauri_plugin_log::Target::new(
                 tauri_plugin_log::TargetKind::LogDir { file_name: Some("PresenceJam".into()) },
             ))
+            .target(tauri_plugin_log::Target::new(
+                tauri_plugin_log::TargetKind::Webview,
+            ))
             .build())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_http::init())
@@ -273,8 +282,16 @@ pub fn run() {
             match config::load_config() {
                 Ok(cfg) => {
                     let mut config_guard = state.config.write();
-                    *config_guard = Some(cfg);
+                    *config_guard = Some(cfg.clone());
                     log::info!("[APP] setup: config loaded into AppState");
+
+                    // Handle start_minimized setting
+                    if cfg.teams.start_minimized {
+                        log::info!("[APP] setup: start_minimized enabled, hiding window");
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.hide();
+                        }
+                    }
                 }
                 Err(e) => {
                     log::warn!("[APP] setup: no config found: {}", e);
@@ -311,11 +328,59 @@ pub fn run() {
                 }
             }
 
+            // Load pending Teams auth from store (for crash recovery during device code flow)
+            {
+                let store = app.store("tokens").map_err(|e| {
+                    log::warn!("[APP] setup: failed to open store for pending teams auth: {}", e);
+                    e
+                });
+                if let Ok(store) = store {
+                    if let Some(value) = store.get("pending_teams_auth") {
+                        if let Ok(pending) = serde_json::from_value::<crate::PendingTeamsAuth>(value.clone()) {
+                            // Check if not expired
+                            if pending.expires_at > chrono::Utc::now() {
+                                let mut guard = state.pending_teams_auth.write();
+                                *guard = Some(pending);
+                                log::info!("[APP] setup: pending_teams_auth loaded from store (not expired)");
+                            } else {
+                                log::info!("[APP] setup: pending_teams_auth expired, clearing from store");
+                                store.delete("pending_teams_auth");
+                                let _ = store.save();
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Load pending Spotify auth from store (for crash recovery during PKCE flow)
+            {
+                let store = app.store("tokens").map_err(|e| {
+                    log::warn!("[APP] setup: failed to open store for pending spotify auth: {}", e);
+                    e
+                });
+                if let Ok(store) = store {
+                    if let Some(value) = store.get("pending_spotify_auth") {
+                        if let Ok(pending) = serde_json::from_value::<crate::PendingSpotifyAuth>(value.clone()) {
+                            // Check if not expired
+                            if pending.expires_at > chrono::Utc::now() {
+                                let mut guard = state.pending_spotify_auth.write();
+                                *guard = Some(pending);
+                                log::info!("[APP] setup: pending_spotify_auth loaded from store (not expired)");
+                            } else {
+                                log::info!("[APP] setup: pending_spotify_auth expired, clearing from store");
+                                store.delete("pending_spotify_auth");
+                                let _ = store.save();
+                            }
+                        }
+                    }
+                }
+            }
+
             #[cfg(desktop)]
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
 
-                #[cfg(any(windows, all(debug_assertions, windows)))]
+                #[cfg(windows)]
                 {
                     log::info!("[APP] setup: registering deep links");
                     if let Err(e) = app.deep_link().register_all() {
@@ -415,6 +480,7 @@ pub fn run() {
             commands::reconnect_teams,
             commands::app_exit,
             commands::update_tray_menu_state,
+            commands::get_recent_logs,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
