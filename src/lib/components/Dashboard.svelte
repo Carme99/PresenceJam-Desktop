@@ -100,7 +100,6 @@
         isToggling = false;
       }
     }));
-
     devLog('[DASHBOARD] onMount: setting up sync-started listener');
     unlisten.push(await listen('sync-started', () => {
       devLog('[DASHBOARD] EVENT: sync-started received');
@@ -116,8 +115,6 @@
       devLog('[DASHBOARD] EVENT: isSyncing=false');
       updateMenuState();
     }));
-
-    devLog('[DASHBOARD] onMount: EXIT');
   });
 
   async function toggleSync() {
