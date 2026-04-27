@@ -20,6 +20,7 @@ const MAX_INTERVAL_SECONDS: u64 = 60;
 const MINIMUM_INTERVAL_SECONDS: u64 = 10;
 const ERROR_RETRY_INTERVAL_SECONDS: u64 = 30;
 const RATE_LIMIT_BACKOFF_SECONDS: u64 = 60;
+const DEBOUNCE_MS: u64 = 500;
 
 /// Adds +/- 20% jitter to retry intervals to prevent thundering herd.
 /// See issue #17.
@@ -38,6 +39,7 @@ fn process_track(
     track: &crate::spotify::TrackInfo,
     last_track_key: &mut Option<String>,
     last_poll_instant: Instant,
+    last_teams_update: &mut Option<Instant>,
 ) -> u64 {
     // Bug 13: Correct progress_ms for elapsed time since last poll
     let elapsed_ms = last_poll_instant.elapsed().as_millis() as u64;
@@ -70,8 +72,37 @@ fn process_track(
         guard.clone()
     };
 
+    // Bug 17: Debounce Teams API calls to prevent showing stale track info
+    // when skipping through tracks quickly. Skip the API call if:
+    // - The track changed, AND
+    // - Less than DEBOUNCE_MS has passed since the last Teams update
+    let should_skip_api_call = if changed {
+        if let Some(last_update) = last_teams_update {
+            (last_update.elapsed().as_millis() as u64) < DEBOUNCE_MS
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
     if let Some(teams_tok) = teams_tokens {
         if track.is_playing {
+            if should_skip_api_call {
+                log::info!(
+                    "[POLLING] process_track: debounce active, skipping Teams API call (changed={}, elapsed={}ms)",
+                    changed,
+                    last_teams_update.map(|i| i.elapsed().as_millis() as u64).unwrap_or(0)
+                );
+                // Still return a reasonable sleep duration based on track progress
+                let remaining_ms = track.duration_ms.saturating_sub(corrected_progress_ms);
+                let buffer_ms = 5000u64;
+                let remaining_secs = remaining_ms / 1000;
+                let sleep_secs = remaining_secs.saturating_sub(buffer_ms / 1000);
+                return sleep_secs
+                    .max(MINIMUM_INTERVAL_SECONDS)
+                    .min(MAX_INTERVAL_SECONDS);
+            }
             let status_format = config
                 .as_ref()
                 .map(|c| c.teams.status_format.as_str())
@@ -107,6 +138,7 @@ fn process_track(
                 Some(&expiry_str),
             ) {
                 Ok(_) => {
+                    *last_teams_update = Some(Instant::now());
                     let _ = app.emit(
                         "presence-updated",
                         serde_json::json!({
@@ -135,6 +167,7 @@ fn process_track(
         } else if config.as_ref().map(|c| c.teams.clear_on_pause).unwrap_or(true) {
             match clear_teams_status_message(&teams_tok.access_token) {
                 Ok(_) => {
+                    *last_teams_update = Some(Instant::now());
                     let _ = app.emit(
                         "presence-cleared",
                         serde_json::json!({ "timestamp": Utc::now().to_rfc3339() }),
@@ -240,6 +273,7 @@ fn get_spotify_credentials(config: &Option<crate::config::AppConfig>) -> (String
 fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()>) {
     log::info!("[POLLING] polling_loop: STARTED");
     let mut last_track_key: Option<String> = None;
+    let mut last_teams_update: Option<Instant> = None;
 
     loop {
         log::info!("[POLLING] polling_loop: iteration start");
@@ -371,7 +405,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                     track.artist
                 );
                 let sleep_duration =
-                    process_track(&app, &state, &config, &track, &mut last_track_key, last_poll_instant);
+                    process_track(&app, &state, &config, &track, &mut last_track_key, last_poll_instant, &mut last_teams_update);
                 // Update tray menu with current sync state and track info (Bug 24+25 fix)
                 let is_syncing = *state.is_syncing.read();
                 let current_track = state.current_track.read().clone();
@@ -460,6 +494,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                                                 &track,
                                                 &mut last_track_key,
                                                 last_poll_instant,
+                                                &mut last_teams_update,
                                             );
                                             continue;
                                         }
@@ -649,6 +684,8 @@ pub fn clear_spotify_tokens(app: &AppHandle) -> Result<(), String> {
     store.delete("spotify_client_secret");
     store.delete("spotify_redirect_uri");
     store.delete("spotify_verifier");
+    store.delete("spotify_csrf_state");
+    store.delete("pending_spotify_auth");
     store.save().map_err(|e| {
         log::error!("[POLLING] clear_spotify_tokens: save failed - {}", e);
         e.to_string()
@@ -666,6 +703,7 @@ pub fn clear_teams_tokens(app: &AppHandle) -> Result<(), String> {
     })?;
     store.delete("teams_tokens");
     store.delete("teams_device_code");
+    store.delete("pending_teams_auth");
     store.save().map_err(|e| {
         log::error!("[POLLING] clear_teams_tokens: save failed - {}", e);
         e.to_string()

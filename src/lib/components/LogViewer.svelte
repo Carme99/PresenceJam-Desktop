@@ -16,7 +16,14 @@
   let logContainer: HTMLDivElement;
 
   onMount(async () => {
-    unlisten.push(await listen<any>('log-entry', (event) => {
+    // Request cached log entries from Rust side
+    try {
+      await invoke('get_recent_logs');
+    } catch (e) {
+      console.error('Failed to get recent logs:', e);
+    }
+
+    unlisten.push(await listen<any>('log://log', (event) => {
       logs.push({
         timestamp: new Date().toLocaleTimeString(),
         level: event.payload.level || 'Info',

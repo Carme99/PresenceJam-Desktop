@@ -51,12 +51,9 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
             }
             ID_QUIT => {
                 let _ = app.emit("app-shutdown", ());
-                let app_handle = app.clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    log::info!("[TRAY] quit: forced exit fallback after app-shutdown");
-                    let _ = app_handle.exit(0);
-                });
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
+                }
             }
             // Menu items handled by app menu (settings, open_logs) also come through here
             ID_OPEN_SETTINGS => {
