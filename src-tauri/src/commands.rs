@@ -648,7 +648,16 @@ pub fn start_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> 
         log::info!("[CMD] start_syncing: is_syncing flag set to true");
     }
 
-    let handle = polling::start_polling(Arc::clone(&state.inner()), app.clone())?;
+    let handle = match polling::start_polling(Arc::clone(&state.inner()), app.clone()) {
+        Ok(h) => h,
+        Err(e) => {
+            // Roll back is_syncing flag since no handle was created
+            log::error!("[CMD] start_syncing: polling start failed - {}; rolling back is_syncing", e);
+            let mut guard = state.is_syncing.write();
+            *guard = false;
+            return Err(e);
+        }
+    };
     log::info!("[CMD] start_syncing: polling task spawned");
 
     {
@@ -926,28 +935,43 @@ pub fn is_onboarding_complete(state: tauri::State<'_, Arc<AppState>>) -> Result<
     let config = config::load_config()?;
     let spotify_configured = !config.spotify.client_id.is_empty();
 
-    // Check Teams tokens to verify Teams auth is complete.
-    // See issue #11.
+    // Check Teams tokens — only ExpiredToken (401/403) means invalid.
+    // RateLimited (429) and Transient (5xx, network) are temporary → treat as valid.
     let (teams_configured, teams_valid) = {
         let guard = state.teams_tokens.read();
         match guard.as_ref() {
-            Some(tokens) => (true, crate::teams::validate_teams_token(&tokens.access_token).is_ok()),
+            Some(tokens) => {
+                let valid = match crate::teams::validate_teams_token(&tokens.access_token) {
+                    Ok(()) => true,
+                    Err(crate::teams::TeamsApiError::ExpiredToken(_)) => false,
+                    Err(_) => true, // transient — still valid for onboarding
+                };
+                (true, valid)
+            }
             None => (false, false),
         }
     };
 
+    // Check Spotify tokens — only ExpiredToken means invalid.
+    // RateLimited and Other are transient → treat as valid.
     let (spotify_valid, _spotify_token) = {
         let guard = state.spotify_tokens.read();
         match guard.as_ref() {
-            Some(tokens) => (crate::spotify::validate_spotify_token(&tokens.access_token).is_ok(), Some(tokens.clone())),
+            Some(tokens) => {
+                let valid = match crate::spotify::validate_spotify_token(&tokens.access_token) {
+                    Ok(()) => true,
+                    Err(crate::spotify::SpotifyApiError::ExpiredToken) => false,
+                    Err(_) => true, // transient — still valid for onboarding
+                };
+                (valid, Some(tokens.clone()))
+            }
             None => (false, None),
         }
     };
 
     // Onboarding is complete only if:
-    // 1. Spotify is configured AND token validates (Bug 12 fix)
-    // 2. Teams is configured AND token validates
-    // See issues #10 and #12.
+    // 1. Spotify is configured AND token is not permanently expired
+    // 2. Teams is configured AND token is not permanently expired
     let complete = spotify_configured && spotify_valid && teams_configured && teams_valid;
     log::info!(
         "[CMD] is_onboarding_complete: result={} (spotify_configured={}, spotify_valid={}, teams_configured={}, teams_valid={})",

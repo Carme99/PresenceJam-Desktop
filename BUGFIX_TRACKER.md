@@ -152,7 +152,7 @@ into the Rust app.
 1. Add `autostart: bool` to `AppConfig` in `config.rs`  
 2. Bind Settings.svelte "Launch at login" to `localConfig.app.autostart`  
 3. In the save handler, call `app.autostart::set_enabled(config.autostart)` when the
-   autostart plugin is available (wrapped in `#[cfg(target.os = "macos")]` or platform-gated)  
+   autostart plugin is available (wrapped in `#[cfg(target_os = "macos")]` or platform-gated)  
 4. Load autostart state into `config.autostart` on startup
 
 **Files:** `src-tauri/src/config.rs`, `src-tauri/src/commands.rs`, `src/lib/components/Settings.svelte`

@@ -34,7 +34,7 @@ Expected response time: within 7 days.
 
 ### Tokens
 
-|| Token Type | Storage Location | Encryption ||
+| Token Type | Storage Location | Encryption |
 |-----------|----------------|------------|
 | Spotify access/refresh tokens | `tauri-plugin-store` (`tokens.json`) | DPAPI on Windows; Keychain on macOS |
 | Teams access/refresh tokens | `tauri-plugin-store` (`tokens.json`) | DPAPI on Windows; Keychain on macOS |

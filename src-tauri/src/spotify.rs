@@ -289,8 +289,16 @@ pub fn is_token_expired(tokens: &SpotifyTokens) -> bool {
 }
 
 /// Validates that a Spotify access token is still functional by calling the
-/// currently-playing endpoint. Returns Ok(()) if the token works (200/204),
-/// Err(()) for permanent auth failures (401), and Err(()) for transient errors.
+/// currently-playing endpoint.
+///
+/// Returns `Result<(), SpotifyApiError>`:
+/// - `Ok(())` — token works (200/204)
+/// - `Err(SpotifyApiError::ExpiredToken)` — permanent auth failure (401); re-auth required
+/// - `Err(SpotifyApiError::RateLimited)` — transient (429); treat as valid, retry after backoff
+/// - `Err(SpotifyApiError::Other)` — transient or non-retryable; treat as valid for onboarding
+///
+/// Callers should inspect `SpotifyApiError` variants to distinguish permanent failures
+/// (ExpiredToken) from transient errors (RateLimited, Other).
 pub fn validate_spotify_token(access_token: &str) -> Result<(), SpotifyApiError> {
     let client = Client::new();
     let response = client

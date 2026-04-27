@@ -60,25 +60,25 @@
       devLog('[PAGE] onMount: app-shutdown listener registered');
     });
 
-    console.log('[PAGE] onMount: setting up navigate listener');
+    devLog('[PAGE] onMount: setting up navigate listener');
     listen<string>('navigate', (event) => {
-      console.log('[PAGE] EVENT: navigate received:', event.payload);
+      devLog('[PAGE] EVENT: navigate received:', event.payload);
       currentView.set(event.payload as View);
     }).then(fn => unlisten.push(fn));
 
-    console.log('[PAGE] onMount: setting up open-logs-folder listener');
+    devLog('[PAGE] onMount: setting up open-logs-folder listener');
     listen('open-logs-folder', async () => {
-      console.log('[PAGE] EVENT: open-logs-folder received');
+      devLog('[PAGE] EVENT: open-logs-folder received');
       try {
         await invoke('open_logs_folder');
       } catch (e) {
-        console.error('[PAGE] EVENT: open_logs_folder FAILED:', e);
+        devLog.error('[PAGE] EVENT: open_logs_folder FAILED:', e);
       }
     }).then(fn => unlisten.push(fn));
 
-    console.log('[PAGE] onMount: setting up show-about listener');
+    devLog('[PAGE] onMount: setting up show-about listener');
     listen('show-about', () => {
-      console.log('[PAGE] EVENT: show-about received');
+      devLog('[PAGE] EVENT: show-about received');
       currentView.set('about');
     }).then(fn => unlisten.push(fn));
 
@@ -92,6 +92,9 @@
         unlistenShutdown();
         devLog('[PAGE] onDestroy: app-shutdown listener removed');
       }
+      unlisten.forEach(fn => fn());
+      unlisten = [];
+      devLog('[PAGE] onDestroy: all listeners cleaned up');
       devLog('[PAGE] onDestroy: EXIT');
     };
   });

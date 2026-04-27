@@ -16,18 +16,18 @@
   let logContainer: HTMLDivElement;
 
   onMount(async () => {
-    // Request cached log entries from Rust side
-    try {
-      await invoke('get_recent_logs');
-    } catch (e) {
-      console.error('Failed to get recent logs:', e);
-    }
+    // Note: get_recent_logs is a placeholder in v2 — tauri_plugin_log streams live via Webview
+    // The listener below handles all log entries in real-time.
 
     unlisten.push(await listen<any>('log://log', (event) => {
+      // Map numeric level (1=Trace, 2=Debug, 3=Info, 4=Warning, 5=Error) to string
+      const levelMap: Record<number, string> = { 1: 'Trace', 2: 'Debug', 3: 'Info', 4: 'Warning', 5: 'Error' };
+      const numericLevel = event.payload?.level;
+      const levelStr = typeof numericLevel === 'number' ? (levelMap[numericLevel] ?? 'Info') : (numericLevel ?? 'Info');
       logs.push({
         timestamp: new Date().toLocaleTimeString(),
-        level: event.payload.level || 'Info',
-        message: event.payload.message || ''
+        level: levelStr,
+        message: event.payload?.message || ''
       });
       if (logs.length > 500) logs.shift();
       if (logContainer) {

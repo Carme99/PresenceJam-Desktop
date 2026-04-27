@@ -8,6 +8,20 @@ use std::time::Duration as StdDuration;
 
 pub const MICROSOFT_GRAPH_CLIENT_ID: &str = "14d82eec-204b-4c2f-b7e8-296a70dab67e";
 
+/// Error type for Teams API operations.
+///区分 expired/unauthorized tokens vs transient errors.
+#[derive(Debug, Clone)]
+pub enum TeamsApiError {
+    /// Token is expired or invalid (401/403) — requires re-auth
+    ExpiredToken(u16),
+    /// Rate limited (429) — transient, retry after backoff
+    RateLimited,
+    /// Network error or other transient failure (5xx, send failure)
+    Transient(String),
+    /// Other non-retryable error
+    Other(u16, String),
+}
+
 /// Creates a reqwest blocking client with standard config (user agent + 10s timeout).
 /// Ensures consistent HTTP client settings across all Teams API calls.
 fn build_teams_client() -> Result<reqwest::blocking::Client, String> {
@@ -482,23 +496,32 @@ pub fn clear_teams_status_message(access_token: &str) -> Result<(), String> {
 }
 
 /// Validates that a Teams access token is still functional by calling the
-/// presence endpoint. Returns Ok(()) if the token works (200), Err(()) for
-/// permanent auth failures (401/403).
-pub fn validate_teams_token(access_token: &str) -> Result<(), String> {
-    let client = build_teams_client()?;
+/// presence endpoint. Returns Ok(()) if the token works (200), or Err(TeamsApiError)
+/// on failure. Callers should distinguish:
+///
+/// - `ExpiredToken` → permanent auth failure, re-auth required
+/// - `RateLimited` / `Transient` → temporary, treat as "valid enough" for onboarding
+/// - `Other` → non-retryable but onboarding may still proceed
+pub fn validate_teams_token(access_token: &str) -> Result<(), TeamsApiError> {
+    let client = build_teams_client().map_err(TeamsApiError::Transient)?;
     let response = client
         .get("https://graph.microsoft.com/v1.0/me/presence")
         .header("Authorization", format!("Bearer {}", access_token))
         .send()
-        .map_err(|e| format!("request failed: {}", e))?;
+        .map_err(|e| TeamsApiError::Transient(format!("request failed: {}", e)))?;
 
     let status_code = response.status().as_u16();
     match status_code {
         200 => Ok(()),
-        401 | 403 => Err(format!("token invalid ({}), reconnect required", status_code)),
+        401 | 403 => Err(TeamsApiError::ExpiredToken(status_code)),
+        429 => Err(TeamsApiError::RateLimited),
+        500..=599 => {
+            let body = response.text().unwrap_or_default();
+            Err(TeamsApiError::Transient(format!("server error {}: {}", status_code, body)))
+        }
         _ => {
             let body = response.text().unwrap_or_default();
-            Err(format!("unexpected status {}: {}", status_code, body))
+            Err(TeamsApiError::Other(status_code, body))
         }
     }
 }

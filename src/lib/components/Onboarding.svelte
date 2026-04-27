@@ -87,7 +87,7 @@
       validationError = 'Spotify Client ID is required.';
       return;
     }
-    if (spotifyClientId.trim().length !== 32 || !/^[0-9a-fA-F]{32}$/.test(spotifyClientId.trim())) {
+    if (!/^[A-Za-z0-9]{32}$/.test(spotifyClientId.trim())) {
       console.error('[ONBOARDING] connectSpotify: validation failed - client_id format invalid');
       validationError = 'Spotify Client ID must be exactly 32 hexadecimal characters.';
       return;
@@ -253,7 +253,6 @@
           clear_on_pause: true,
           profanity_filter: true,
           profanity_placeholder: 'Currently Listening to Spotify',
-          launch_at_login: launchAtLogin,
           start_minimized: false
         },
         polling: {
@@ -266,7 +265,8 @@
           enabled: true,
           log_level: 'Info',
           retention_days: 30
-        }
+        },
+        autostart: launchAtLogin
       };
       devLog('[ONBOARDING] finish: config built');
 

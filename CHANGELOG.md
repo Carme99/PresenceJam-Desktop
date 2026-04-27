@@ -39,18 +39,6 @@ No changes yet.
 
 - Frontend: removed unused `isSyncing` store from `app.ts` — stores are actively used, not dead code (note: Bug 20 stores are actually the navigation backbone and were correctly preserved)
 
-### Fixed
-
-- Spotify auth: crash recovery now properly restores pending OAuth state from persistent store on app restart (fixes #1)
-- Teams auth: proactively refresh Teams token before use in polling loop to avoid 401 errors mid-session (fixes #4)
-- Config: `start_minimized` now properly wired — app window hides on startup when configured (fixes #7)
-- Config: `clear_on_pause` now functional — respects user setting when pausing Spotify playback (fixes #6)
-- Onboarding: Spotify client ID/secret now validated before initiating auth (min 20 chars) (fixes #19)
-
-### Developer
-
-- Frontend: replaced ~130 verbose `console.log` calls with `devLog()` utility that only outputs in development builds — production builds are no longer polluted with dev traces
-
 ## [2.3.6] - 2026-04-24
 
 ### Added
