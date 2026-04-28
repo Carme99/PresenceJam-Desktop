@@ -14,8 +14,8 @@ Download the latest release from [GitHub Releases](https://github.com/Carme99/Pr
 
 | OS | File | Notes |
 |----|------|-------|
-| Windows | `PresenceJam-2.4.0.msi` | Run the installer, follow the prompts |
-| macOS | `PresenceJam-2.4.0-macos.dmg` | Drag PresenceJam to Applications |
+| Windows | `PresenceJam-2.4.1.msi` | Run the installer, follow the prompts |
+| macOS | `PresenceJam-2.4.1-macos.dmg` | Drag PresenceJam to Applications |
 
 The installer will create:
 - The app in your Applications/start menu

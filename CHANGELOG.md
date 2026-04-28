@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 No changes yet.
 
+## [2.4.1] - 2026-04-28
+
+### Fixed
+
+- Settings: reconnect buttons now properly trigger auth flow when clicked (were silently failing before)
+- Settings: show "Reconnecting..." state while auth is in progress
+- Polling: Teams token now auto-refreshes when expired (similar to existing Spotify behavior)
+- Dashboard: "Go to Setup" checks for both client_id AND client_secret before routing to reconnect vs onboarding
+- Reconnect: checks for both credentials before allowing reconnect; auto-start only when credentials exist
+- Version: corrected version strings to 2.4.1
+
 ## [2.4.0] - 2026-04-27
 
 ### Added

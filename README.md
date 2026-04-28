@@ -1,4 +1,4 @@
-# PresenceJam 2.4.0
+# PresenceJam 2.4.1
 
 Sync your Spotify playback to Microsoft Teams status automatically.
 
@@ -29,8 +29,8 @@ PresenceJam polls Spotify's Web API for your currently playing track and sets it
 
 Install the latest release from [GitHub Releases](https://github.com/Carme99/PresenceJam-Desktop/releases):
 
-- `PresenceJam-2.4.0.msi` — Windows 10/11 (64-bit)
-- `PresenceJam-2.4.0-macos.dmg` — macOS (Apple Silicon)
+- `PresenceJam-2.4.1.msi` — Windows 10/11 (64-bit)
+- `PresenceJam-2.4.1-macos.dmg` — macOS (Apple Silicon)
 
 ## Quickstart
 
