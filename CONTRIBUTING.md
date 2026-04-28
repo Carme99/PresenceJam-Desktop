@@ -65,39 +65,16 @@ Types: `feat`, `fix`, `docs`, `test`, `refactor`, `chore`
 - Follow existing component patterns
 - Use existing stores for state management
 - Add TypeScript types for new interfaces
-- No `console.log` in production code
+- Use `devLog()` from `$lib/utils/dev` for debug logging — it is a no-op in production builds
+- `console.error` and `console.warn` are fine for actual errors that should always be visible
 
 ### Screenshots
 
-If your change affects the UI, please include a screenshot in the PR. Screenshots help with review and will eventually be added to the README.
+If your change affects the UI, please include a screenshot in the PR. Screenshots help reviewers verify the change and are added to the README as needed.
 
 ## Project Structure
 
-```
-PresenceJam-Desktop/
-├── src/                          # Svelte frontend
-│   ├── lib/
-│   │   ├── components/           # UI components (Dashboard, Onboarding, Settings, LogViewer)
-│   │   └── stores/               # Svelte stores (app state, config, spotify)
-│   └── routes/                   # SvelteKit routes (+page.svelte)
-├── src-tauri/
-│   ├── src/
-│   │   ├── lib.rs                # Tauri entry, command registration
-│   │   ├── commands.rs            # Invoke handlers
-│   │   ├── config.rs             # Config loading/saving
-│   │   ├── polling.rs            # Polling loop
-│   │   ├── spotify.rs            # Spotify API client (PKCE auth, token refresh)
-│   │   ├── teams.rs              # Microsoft Teams API client (device code flow)
-│   │   └── tray.rs               # System tray setup
-│   ├── Cargo.toml
-│   └── tauri.conf.json
-├── package.json
-├── svelte.config.js
-├── vite.config.js
-├── CONTRIBUTING.md               # You are here
-├── CHANGELOG.md
-└── README.md
-```
+See [ARCHITECTURE.md](./ARCHITECTURE.md#directory-structure) for the full directory tree.
 
 ## Logging
 

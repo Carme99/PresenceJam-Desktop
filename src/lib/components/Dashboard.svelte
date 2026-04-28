@@ -4,6 +4,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { currentView } from '$lib/stores/app';
   import type { TrackInfo } from '$lib/stores/spotify';
+  import { devLog } from '$lib/utils/dev';
 
   let isSyncing = $state(false);
   let isToggling = $state(false);
@@ -21,49 +22,53 @@
   });
 
   onMount(async () => {
-    console.log('[DASHBOARD] onMount: ENTRY');
+    devLog('[DASHBOARD] onMount: ENTRY');
     
     try {
-      console.log('[DASHBOARD] onMount: calling invoke get_sync_status');
+      devLog('[DASHBOARD] onMount: calling invoke get_sync_status');
       const status = await invoke<any>('get_sync_status');
-      console.log('[DASHBOARD] onMount: get_sync_status SUCCESS');
-      console.log('[DASHBOARD] onMount: status.is_syncing=', status.is_syncing);
-      console.log('[DASHBOARD] onMount: status.spotify_connected=', status.spotify_connected);
-      console.log('[DASHBOARD] onMount: status.teams_connected=', status.teams_connected);
-      console.log('[DASHBOARD] onMount: status.current_track=', status.current_track ? status.current_track.title : 'null');
+      console.info('[DASHBOARD] initial sync status:', {
+        is_syncing: status.is_syncing,
+        spotify_connected: status.spotify_connected,
+        teams_connected: status.teams_connected,
+        current_track: status.current_track?.title ?? null
+      });
       
       isSyncing = status.is_syncing;
       spotifyConnected = status.spotify_connected;
       teamsConnected = status.teams_connected;
       currentTrack = status.current_track;
+      await updateMenuState();
     } catch (e) {
       console.error('[DASHBOARD] onMount: get_sync_status FAILED:', e);
     }
 
-    console.log('[DASHBOARD] onMount: setting up spotify-track-changed listener');
-    unlisten.push(await listen('spotify-track-changed', (event: any) => {
-      console.log('[DASHBOARD] EVENT: spotify-track-changed received');
-      console.log('[DASHBOARD] EVENT: track.title=', event.payload.title);
-      console.log('[DASHBOARD] EVENT: track.artist=', event.payload.artist);
+    devLog('[DASHBOARD] onMount: setting up spotify-track-changed listener');
+    unlisten.push(await listen('spotify-track-changed', async (event: any) => {
+      devLog('[DASHBOARD] EVENT: spotify-track-changed received');
+      devLog('[DASHBOARD] EVENT: track.title=', event.payload.title);
+      devLog('[DASHBOARD] EVENT: track.artist=', event.payload.artist);
       currentTrack = event.payload;
+      await updateMenuState();
     }));
     
-    console.log('[DASHBOARD] onMount: setting up presence-updated listener');
+    devLog('[DASHBOARD] onMount: setting up presence-updated listener');
     unlisten.push(await listen('presence-updated', (event: any) => {
-      console.log('[DASHBOARD] EVENT: presence-updated received');
-      console.log('[DASHBOARD] EVENT: status=', event.payload.status);
+      devLog('[DASHBOARD] EVENT: presence-updated received');
+      devLog('[DASHBOARD] EVENT: status=', event.payload.status);
       statusPreview = event.payload.status;
     }));
     
-    console.log('[DASHBOARD] onMount: setting up presence-cleared listener');
-    unlisten.push(await listen('presence-cleared', () => {
-      console.log('[DASHBOARD] EVENT: presence-cleared received');
+    devLog('[DASHBOARD] onMount: setting up presence-cleared listener');
+    unlisten.push(await listen('presence-cleared', async () => {
+      devLog('[DASHBOARD] EVENT: presence-cleared received');
       currentTrack = null;
       statusPreview = 'No track playing';
-      console.log('[DASHBOARD] EVENT: currentTrack=null, statusPreview="No track playing"');
+      devLog('[DASHBOARD] EVENT: currentTrack=null, statusPreview="No track playing"');
+      await updateMenuState();
     }));
     
-    console.log('[DASHBOARD] onMount: setting up error listener');
+    devLog('[DASHBOARD] onMount: setting up error listener');
     unlisten.push(await listen('error', (event: any) => {
       console.error('[DASHBOARD] EVENT: error received:', event.payload);
       if (displayErrorTimeout) clearTimeout(displayErrorTimeout);
@@ -71,68 +76,83 @@
       displayErrorTimeout = setTimeout(() => { displayError = ''; displayErrorTimeout = null; }, 5000);
     }));
     
-    console.log('[DASHBOARD] onMount: setting up toggle-pause listener');
+    devLog('[DASHBOARD] onMount: setting up toggle-pause listener');
     unlisten.push(await listen('toggle-pause', async () => {
       if (isToggling) return;
-      console.log('[DASHBOARD] EVENT: toggle-pause received');
-      console.log('[DASHBOARD] EVENT: isSyncing=', isSyncing);
+      devLog('[DASHBOARD] EVENT: toggle-pause received');
+      devLog('[DASHBOARD] EVENT: isSyncing=', isSyncing);
 
       isToggling = true;
       try {
         if (isSyncing) {
-          console.log('[DASHBOARD] EVENT: calling invoke stop_syncing');
+          devLog('[DASHBOARD] EVENT: calling invoke stop_syncing');
           await invoke('stop_syncing');
           isSyncing = false;
-          console.log('[DASHBOARD] EVENT: isSyncing=false');
+          devLog('[DASHBOARD] EVENT: isSyncing=false');
         } else {
-          console.log('[DASHBOARD] EVENT: calling invoke start_syncing');
+          devLog('[DASHBOARD] EVENT: calling invoke start_syncing');
           await invoke('start_syncing');
           isSyncing = true;
-          console.log('[DASHBOARD] EVENT: isSyncing=true');
+          devLog('[DASHBOARD] EVENT: isSyncing=true');
         }
+        await updateMenuState();
       } finally {
         isToggling = false;
       }
     }));
-    
-    console.log('[DASHBOARD] onMount: EXIT');
+    devLog('[DASHBOARD] onMount: setting up sync-started listener');
+    unlisten.push(await listen('sync-started', () => {
+      devLog('[DASHBOARD] EVENT: sync-started received');
+      isSyncing = true;
+      devLog('[DASHBOARD] EVENT: isSyncing=true');
+      updateMenuState();
+    }));
+
+    devLog('[DASHBOARD] onMount: setting up sync-stopped listener');
+    unlisten.push(await listen('sync-stopped', () => {
+      devLog('[DASHBOARD] EVENT: sync-stopped received');
+      isSyncing = false;
+      devLog('[DASHBOARD] EVENT: isSyncing=false');
+      updateMenuState();
+    }));
   });
 
   async function toggleSync() {
     if (isToggling) return;
-    console.log('[DASHBOARD] toggleSync: ENTRY');
-    console.log('[DASHBOARD] toggleSync: isSyncing=', isSyncing);
+    devLog('[DASHBOARD] toggleSync: ENTRY');
+    devLog('[DASHBOARD] toggleSync: isSyncing=', isSyncing);
 
     isToggling = true;
     try {
       if (isSyncing) {
-        console.log('[DASHBOARD] toggleSync: calling invoke stop_syncing');
+        devLog('[DASHBOARD] toggleSync: calling invoke stop_syncing');
         await invoke('stop_syncing');
         isSyncing = false;
-        console.log('[DASHBOARD] toggleSync: isSyncing=false');
+        devLog('[DASHBOARD] toggleSync: isSyncing=false');
       } else {
-        console.log('[DASHBOARD] toggleSync: calling invoke start_syncing');
+        devLog('[DASHBOARD] toggleSync: calling invoke start_syncing');
         await invoke('start_syncing');
         isSyncing = true;
-        console.log('[DASHBOARD] toggleSync: isSyncing=true');
+        devLog('[DASHBOARD] toggleSync: isSyncing=true');
       }
+      await updateMenuState();
     } finally {
       isToggling = false;
     }
 
-    console.log('[DASHBOARD] toggleSync: EXIT');
+    devLog('[DASHBOARD] toggleSync: EXIT');
   }
 
-  async function openSettings() {
-    console.log('[DASHBOARD] openSettings: ENTRY');
+  function openSettings() {
+    devLog('[DASHBOARD] openSettings: ENTRY');
     currentView.set('settings');
-    console.log('[DASHBOARD] openSettings: EXIT');
+    devLog('[DASHBOARD] openSettings: EXIT');
   }
 
-  async function openLogs() {
-    console.log('[DASHBOARD] openLogs: ENTRY');
+  function openLogs() {
+    devLog('[DASHBOARD] openLogs: ENTRY');
     currentView.set('logs');
-    console.log('[DASHBOARD] openLogs: EXIT');
+    devLog('[DASHBOARD] openLogs: EXIT');
   }
 
   function formatDuration(ms: number): string {
@@ -147,6 +167,18 @@
       ? (currentTrack.progress_ms / currentTrack.duration_ms) * 100
       : 0
   );
+
+  // Helper to update tray menu state
+  async function updateMenuState() {
+    try {
+      await invoke('update_tray_menu_state', {
+        isSyncing: isSyncing,
+        currentTrack: currentTrack
+      });
+    } catch (e) {
+      console.error('[DASHBOARD] updateMenuState failed:', e);
+    }
+  }
 </script>
 
 <div class="dashboard">
@@ -180,7 +212,7 @@
       <div class="setup-card card">
         <h2>Setup Required</h2>
         <p>Complete onboarding to connect Spotify and Teams.</p>
-        <button onclick={() => { console.log('[DASHBOARD] Go to Setup clicked'); currentView.set('onboarding'); }}>Go to Setup</button>
+        <button onclick={() => { devLog('[DASHBOARD] Go to Setup clicked'); currentView.set('onboarding'); }}>Go to Setup</button>
       </div>
     {:else if currentTrack}
       <div class="track-card card">

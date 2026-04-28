@@ -8,6 +8,30 @@ use std::time::Duration as StdDuration;
 
 pub const MICROSOFT_GRAPH_CLIENT_ID: &str = "14d82eec-204b-4c2f-b7e8-296a70dab67e";
 
+/// Error type for Teams API operations.
+///区分 expired/unauthorized tokens vs transient errors.
+#[derive(Debug, Clone)]
+pub enum TeamsApiError {
+    /// Token is expired or invalid (401/403) — requires re-auth
+    ExpiredToken(u16),
+    /// Rate limited (429) — transient, retry after backoff
+    RateLimited,
+    /// Network error or other transient failure (5xx, send failure)
+    Transient(String),
+    /// Other non-retryable error
+    Other(u16, String),
+}
+
+/// Creates a reqwest blocking client with standard config (user agent + 10s timeout).
+/// Ensures consistent HTTP client settings across all Teams API calls.
+fn build_teams_client() -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .user_agent("PresenceJam/2.0")
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))
+}
+
 pub fn pkce_generate_verifier() -> String {
     let mut bytes = [0u8; 64];
     rand::thread_rng().fill_bytes(&mut bytes);
@@ -66,10 +90,7 @@ struct TokenErrorResponse {
 pub fn start_teams_auth_device_code() -> Result<DeviceCodeResponse, String> {
     log::info!("teams::start_teams_auth_device_code: starting");
 
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("PresenceJam/2.0")
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+    let client = build_teams_client()?;
     log::info!("teams::start_teams_auth_device_code: client created");
 
     let params = [
@@ -140,10 +161,7 @@ pub fn start_teams_auth_device_code() -> Result<DeviceCodeResponse, String> {
 }
 
 pub fn poll_teams_auth(device_code: &str) -> Result<TeamsTokens, String> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("PresenceJam/2.0")
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+    let client = build_teams_client()?;
     let start_time = std::time::Instant::now();
     let timeout = StdDuration::from_secs(900);
 
@@ -237,10 +255,7 @@ pub fn complete_teams_auth(
     client_id: &str,
     redirect_uri: &str,
 ) -> Result<TeamsTokens, String> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("PresenceJam/2.0")
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+    let client = build_teams_client()?;
 
     let params = [
         ("grant_type", "authorization_code"),
@@ -303,10 +318,7 @@ pub fn refresh_teams_token(tokens: &TeamsTokens) -> Result<TeamsTokens, String> 
         .as_ref()
         .ok_or("No refresh token available. Please sign in again.")?;
 
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("PresenceJam/2.0")
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+    let client = build_teams_client()?;
 
     let params = [
         ("grant_type", "refresh_token"),
@@ -397,7 +409,7 @@ pub fn set_teams_status_message(
     message: &str,
     expiry_datetime: Option<&str>,
 ) -> Result<(), String> {
-    let client = reqwest::blocking::Client::new();
+    let client = build_teams_client()?;
 
     let expiry = expiry_datetime.map(|dt| ExpiryDateTime {
         date_time: dt.to_string(),
@@ -443,7 +455,7 @@ pub fn set_teams_status_message(
 }
 
 pub fn clear_teams_status_message(access_token: &str) -> Result<(), String> {
-    let client = reqwest::blocking::Client::new();
+    let client = build_teams_client()?;
 
     let body = StatusMessageRequest {
         status_message: StatusMessageContent {
@@ -482,3 +494,35 @@ pub fn clear_teams_status_message(access_token: &str) -> Result<(), String> {
     log::info!("Successfully cleared Teams status message");
     Ok(())
 }
+
+/// Validates that a Teams access token is still functional by calling the
+/// presence endpoint. Returns Ok(()) if the token works (200), or Err(TeamsApiError)
+/// on failure. Callers should distinguish:
+///
+/// - `ExpiredToken` → permanent auth failure, re-auth required
+/// - `RateLimited` / `Transient` → temporary, treat as "valid enough" for onboarding
+/// - `Other` → non-retryable but onboarding may still proceed
+pub fn validate_teams_token(access_token: &str) -> Result<(), TeamsApiError> {
+    let client = build_teams_client().map_err(TeamsApiError::Transient)?;
+    let response = client
+        .get("https://graph.microsoft.com/v1.0/me/presence")
+        .header("Authorization", format!("Bearer {}", access_token))
+        .send()
+        .map_err(|e| TeamsApiError::Transient(format!("request failed: {}", e)))?;
+
+    let status_code = response.status().as_u16();
+    match status_code {
+        200 => Ok(()),
+        401 | 403 => Err(TeamsApiError::ExpiredToken(status_code)),
+        429 => Err(TeamsApiError::RateLimited),
+        500..=599 => {
+            let body = response.text().unwrap_or_default();
+            Err(TeamsApiError::Transient(format!("server error {}: {}", status_code, body)))
+        }
+        _ => {
+            let body = response.text().unwrap_or_default();
+            Err(TeamsApiError::Other(status_code, body))
+        }
+    }
+}
+

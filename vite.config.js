@@ -8,6 +8,11 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig(async () => ({
   plugins: [sveltekit()],
 
+  define: {
+    // Injected at build time — version from package.json + timestamp
+    __APP_BUILD__: JSON.stringify(`2.3.6.${Date.now()}`),
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors

@@ -1,10 +1,36 @@
 use crate::config::{self, AppConfig};
 use crate::spotify::{SpotifyTokens, TrackInfo};
 use crate::teams::{DeviceCodeResponse, TeamsTokens};
-use crate::{polling, AppState, PendingSpotifyAuth};
+use crate::{polling, tray, AppState, PendingSpotifyAuth};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_store::StoreExt;
+use url::Url;
+
+#[tauri::command]
+pub fn get_recent_logs(_app: AppHandle) -> Result<(), String> {
+    log::info!("[CMD] get_recent_logs: ENTRY");
+    // Note: tauri_plugin_log v2 doesn't provide a way to retrieve cached log entries.
+    // Log entries are streamed to the frontend via the Webview target (log://log event).
+    // This command is kept for future use if such API becomes available.
+    log::info!("[CMD] get_recent_logs: SUCCESS");
+    Ok(())
+}
+
+/// Validates that a URL uses http or https scheme.
+/// Returns the parsed URL on success, or an error string on failure.
+/// See issue #14.
+fn validate_http_url(url: &str) -> Result<Url, String> {
+    Url::parse(url).map_err(|_| "Invalid URL format".to_string()).and_then(|parsed| {
+        match parsed.scheme() {
+            "http" | "https" => Ok(parsed),
+            other => Err(format!(
+                "Invalid URL scheme '{}': only http/https allowed",
+                other
+            )),
+        }
+    })
+}
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SpotifyAuthResponse {
@@ -39,21 +65,41 @@ pub fn load_config() -> Result<AppConfig, String> {
 }
 
 #[tauri::command]
-pub fn save_config(config: AppConfig) -> Result<(), String> {
+pub fn save_config(
+    app: AppHandle,
+    config: AppConfig,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<(), String> {
     log::info!(
         "[CMD] save_config: ENTRY - config.spotify.client_id.len={}",
         config.spotify.client_id.len()
     );
-    match config::save_config(&config) {
-        Ok(()) => {
-            log::info!("[CMD] save_config: SUCCESS");
-            Ok(())
-        }
-        Err(e) => {
-            log::error!("[CMD] save_config: FAILED - {}", e);
-            Err(e)
+
+    // Hold the write lock for the entire read-modify-write to prevent races
+    // with concurrent reads from the polling loop. See bug #26.
+    {
+        let mut config_guard = state.config.write();
+        match config::save_config(&config) {
+            Ok(()) => {
+                log::info!("[CMD] save_config: file saved successfully");
+                *config_guard = Some(config.clone());
+            }
+            Err(e) => {
+                log::error!("[CMD] save_config: FAILED - {}", e);
+                return Err(e);
+            }
         }
     }
+
+    // Sync autostart state with the OS autostart manager
+    #[cfg(desktop)]
+    {
+        if let Err(e) = set_autostart_enabled(app, config.autostart) {
+            log::warn!("[CMD] save_config: failed to sync autostart state: {}", e);
+        }
+    }
+    log::info!("[CMD] save_config: SUCCESS");
+    Ok(())
 }
 
 #[tauri::command]
@@ -119,6 +165,9 @@ pub fn start_spotify_auth(
         auth_url.len()
     );
 
+    // Spotify authorization codes expire in 10 minutes (600 seconds)
+    let expires_at = chrono::Utc::now() + chrono::Duration::seconds(600);
+
     // Store pending auth in AppState
     {
         let mut pending = state.pending_spotify_auth.write();
@@ -128,19 +177,26 @@ pub fn start_spotify_auth(
             client_id: client_id.clone(),
             client_secret: client_secret.clone(),
             redirect_uri: redirect_uri.clone(),
+            expires_at,
         });
         log::info!("[CMD] start_spotify_auth: stored pending auth in AppState");
     }
 
-    // Also persist to store for crash recovery
+    // Persist complete pending auth to store for crash recovery
     let store = app.store("tokens").map_err(|e| e.to_string())?;
-    store.set("spotify_client_id", serde_json::json!(client_id));
-    store.set("spotify_client_secret", serde_json::json!(client_secret));
-    store.set("spotify_redirect_uri", serde_json::json!(redirect_uri));
-    store.set("spotify_verifier", serde_json::json!(verifier));
-    store.set("spotify_csrf_state", serde_json::json!(csrf_state));
+    store.set(
+        "pending_spotify_auth",
+        serde_json::json!({
+            "verifier": verifier,
+            "state": csrf_state,
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "redirect_uri": redirect_uri,
+            "expires_at": expires_at.to_rfc3339(),
+        }),
+    );
     store.save().map_err(|e| e.to_string())?;
-    log::info!("[CMD] start_spotify_auth: persisted to store");
+    log::info!("[CMD] start_spotify_auth: pending auth persisted to store");
 
     if let Err(e) = tauri_plugin_opener::open_url(&auth_url, None::<&str>) {
         log::warn!("[CMD] start_spotify_auth: Failed to open browser: {}", e);
@@ -188,6 +244,16 @@ pub fn complete_spotify_auth(
         *tokens_guard = Some(tokens.clone());
         log::info!("[CMD] complete_spotify_auth: tokens stored in AppState");
     }
+
+    // Clear pending Spotify auth from store and AppState on success
+    {
+        let mut pending = state.pending_spotify_auth.write();
+        *pending = None;
+    }
+    let store = app.store("tokens").map_err(|e| e.to_string())?;
+    store.delete("pending_spotify_auth");
+    store.save().map_err(|e| e.to_string())?;
+    log::info!("[CMD] complete_spotify_auth: pending Spotify auth cleared from store");
 
     log::info!("[CMD] complete_spotify_auth: EMIT spotify-auth-complete event");
     let _ = app.emit("spotify-auth-complete", &tokens);
@@ -239,6 +305,16 @@ pub fn complete_spotify_auth_manual(
         log::info!("[CMD] complete_spotify_auth_manual: tokens stored in AppState");
     }
 
+    // Clear pending Spotify auth from store and AppState on success
+    {
+        let mut pending = state.pending_spotify_auth.write();
+        *pending = None;
+    }
+    let store = app.store("tokens").map_err(|e| e.to_string())?;
+    store.delete("pending_spotify_auth");
+    store.save().map_err(|e| e.to_string())?;
+    log::info!("[CMD] complete_spotify_auth_manual: pending Spotify auth cleared from store");
+
     log::info!("[CMD] complete_spotify_auth_manual: EMIT spotify-auth-complete event");
     let _ = app.emit("spotify-auth-complete", &tokens);
 
@@ -246,6 +322,10 @@ pub fn complete_spotify_auth_manual(
     Ok(tokens)
 }
 
+// NOTE: get_spotify_tokens and get_teams_tokens have similar structure but are
+// kept separate for clarity. The token types, store keys, and extraction logic differ
+// enough that extracting a generic helper would reduce readability without adding
+// much value. See issue #16.
 #[tauri::command]
 pub fn get_spotify_tokens(
     state: tauri::State<'_, Arc<AppState>>,
@@ -331,6 +411,10 @@ pub fn refresh_spotify(
 #[tauri::command]
 pub fn open_external_url(url: String) -> Result<(), String> {
     log::info!("[CMD] open_external_url: ENTRY - url.len={}", url.len());
+
+    // Validate URL scheme - only allow http/https. See issue #14.
+    validate_http_url(&url)?;
+
     match tauri_plugin_opener::open_url(&url, None::<&str>) {
         Ok(()) => {
             log::info!("[CMD] open_external_url: SUCCESS");
@@ -344,7 +428,10 @@ pub fn open_external_url(url: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn start_teams_auth_device_code(app: AppHandle) -> Result<DeviceCodeResponse, String> {
+pub fn start_teams_auth_device_code(
+    app: AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<DeviceCodeResponse, String> {
     log::info!("[CMD] start_teams_auth_device_code: ENTRY");
 
     let response = crate::teams::start_teams_auth_device_code()?;
@@ -355,10 +442,35 @@ pub fn start_teams_auth_device_code(app: AppHandle) -> Result<DeviceCodeResponse
         response.verification_url
     );
 
+    // Calculate expiry time (device codes typically expire in 900 seconds / 15 minutes)
+    let expires_at = chrono::Utc::now() + chrono::Duration::seconds(response.expires_in as i64);
+
     let store = app.store("tokens").map_err(|e| e.to_string())?;
     store.set("teams_device_code", serde_json::json!(response.device_code));
+    store.set(
+        "pending_teams_auth",
+        serde_json::json!({
+            "verifier": response.device_code,
+            "client_id": crate::teams::MICROSOFT_GRAPH_CLIENT_ID,
+            "redirect_uri": "presencejam://callback",
+            "expires_at": expires_at.to_rfc3339(),
+        }),
+    );
     store.save().map_err(|e| e.to_string())?;
-    log::info!("[CMD] start_teams_auth_device_code: device code persisted to store");
+    log::info!("[CMD] start_teams_auth_device_code: device code and pending auth persisted to store");
+
+    // Populate pending_teams_auth so complete_teams_auth_manual and handle_teams_callback can work.
+    // See issue #8.
+    {
+        let mut pending = state.pending_teams_auth.write();
+        *pending = Some(crate::PendingTeamsAuth {
+            verifier: response.device_code.clone(),
+            client_id: crate::teams::MICROSOFT_GRAPH_CLIENT_ID.to_string(),
+            redirect_uri: "presencejam://callback".to_string(),
+            expires_at,
+        });
+    }
+    log::info!("[CMD] start_teams_auth_device_code: pending_teams_auth populated");
 
     log::info!("[CMD] start_teams_auth_device_code: SUCCESS");
     Ok(response)
@@ -389,6 +501,16 @@ pub fn poll_teams_auth(
         *guard = Some(tokens.clone());
         log::info!("[CMD] poll_teams_auth: tokens stored in AppState");
     }
+
+    // Clear pending Teams auth from store and AppState on success
+    {
+        let mut pending = state.pending_teams_auth.write();
+        *pending = None;
+    }
+    let store = app.store("tokens").map_err(|e| e.to_string())?;
+    store.delete("pending_teams_auth");
+    store.save().map_err(|e| e.to_string())?;
+    log::info!("[CMD] poll_teams_auth: pending Teams auth cleared from store");
 
     log::info!("[CMD] poll_teams_auth: EMIT teams-auth-complete event");
     let _ = app.emit("teams-auth-complete", &tokens);
@@ -433,6 +555,16 @@ pub fn complete_teams_auth_manual(
         *guard = Some(tokens.clone());
         log::info!("[CMD] complete_teams_auth_manual: tokens stored in AppState");
     }
+
+    // Clear pending Teams auth from store and AppState on success
+    {
+        let mut pending = state.pending_teams_auth.write();
+        *pending = None;
+    }
+    let store = app.store("tokens").map_err(|e| e.to_string())?;
+    store.delete("pending_teams_auth");
+    store.save().map_err(|e| e.to_string())?;
+    log::info!("[CMD] complete_teams_auth_manual: pending Teams auth cleared from store");
 
     log::info!("[CMD] complete_teams_auth_manual: EMIT teams-auth-complete event");
     let _ = app.emit("teams-auth-complete", &tokens);
@@ -504,25 +636,29 @@ pub fn refresh_teams(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> 
 pub fn start_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> Result<(), String> {
     log::info!("[CMD] start_syncing: ENTRY");
 
-    let is_syncing = {
-        let guard = state.is_syncing.read();
-        *guard
-    };
-    log::info!("[CMD] start_syncing: current is_syncing={}", is_syncing);
-
-    if is_syncing {
-        log::info!("[CMD] start_syncing: already syncing, returning early");
-        return Ok(());
-    }
-
-    let handle = polling::start_polling(Arc::clone(&state.inner()), app.clone())?;
-    log::info!("[CMD] start_syncing: polling task spawned");
-
+    // Acquire write lock first to prevent TOCTOU race with concurrent calls.
+    // See issue #14.
     {
         let mut is_syncing_guard = state.is_syncing.write();
+        if *is_syncing_guard {
+            log::info!("[CMD] start_syncing: already syncing, returning early");
+            return Ok(());
+        }
         *is_syncing_guard = true;
         log::info!("[CMD] start_syncing: is_syncing flag set to true");
     }
+
+    let handle = match polling::start_polling(Arc::clone(&state.inner()), app.clone()) {
+        Ok(h) => h,
+        Err(e) => {
+            // Roll back is_syncing flag since no handle was created
+            log::error!("[CMD] start_syncing: polling start failed - {}; rolling back is_syncing", e);
+            let mut guard = state.is_syncing.write();
+            *guard = false;
+            return Err(e);
+        }
+    };
+    log::info!("[CMD] start_syncing: polling task spawned");
 
     {
         let mut handle_guard = state.polling_handle.write();
@@ -542,12 +678,33 @@ fn stop_polling_and_join(state: &Arc<AppState>, context: &str) {
     {
         let mut handle_guard = state.polling_handle.write();
         if let Some(handle) = handle_guard.take() {
+            drop(handle_guard); // Release lock while waiting
+
+            // Give thread up to 2 seconds to finish cooperatively
+            let started = std::time::Instant::now();
+            while started.elapsed() < std::time::Duration::from_secs(2) {
+                if handle.is_finished() {
+                    match handle.join() {
+                        Ok(()) => {
+                            log::info!("[CMD] {}: polling thread ended", context);
+                        }
+                        Err(e) => {
+                            log::error!("[CMD] {}: polling thread panicked: {:?}", context, e);
+                        }
+                    }
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+
+            // Timeout reached - try one final join (may block briefly)
+            log::warn!("[CMD] {}: polling thread did not terminate within 2s, attempting final join", context);
             match handle.join() {
                 Ok(()) => {
-                    log::info!("[CMD] {}: polling thread finished", context);
+                    log::info!("[CMD] {}: polling thread ended (final join)", context);
                 }
                 Err(e) => {
-                    log::error!("[CMD] {}: polling thread panicked: {:?}", context, e);
+                    log::error!("[CMD] {}: polling thread panicked (final join): {:?}", context, e);
                 }
             }
         }
@@ -735,6 +892,9 @@ pub fn open_logs_folder(app: AppHandle) -> Result<(), String> {
 pub fn open_external(url: String) -> Result<(), String> {
     log::info!("[CMD] open_external: ENTRY - url.len={}", url.len());
 
+    // Validate URL scheme - only allow http/https. See issue #14.
+    validate_http_url(&url)?;
+
     match tauri_plugin_opener::open_url(&url, None::<&str>) {
         Ok(()) => {
             log::info!("[CMD] open_external: SUCCESS");
@@ -769,15 +929,57 @@ pub fn get_current_track(
 }
 
 #[tauri::command]
-pub fn is_onboarding_complete() -> Result<bool, String> {
+pub fn is_onboarding_complete(state: tauri::State<'_, Arc<AppState>>) -> Result<bool, String> {
     log::info!("[CMD] is_onboarding_complete: ENTRY");
 
     let config = config::load_config()?;
-    let complete = !config.spotify.client_id.is_empty();
+    let spotify_configured = !config.spotify.client_id.is_empty();
+
+    // Check Teams tokens — only ExpiredToken (401/403) means invalid.
+    // RateLimited (429) and Transient (5xx, network) are temporary → treat as valid.
+    let (teams_configured, teams_valid) = {
+        let guard = state.teams_tokens.read();
+        match guard.as_ref() {
+            Some(tokens) => {
+                let valid = match crate::teams::validate_teams_token(&tokens.access_token) {
+                    Ok(()) => true,
+                    Err(crate::teams::TeamsApiError::ExpiredToken(_)) => false,
+                    Err(_) => true, // transient — still valid for onboarding
+                };
+                (true, valid)
+            }
+            None => (false, false),
+        }
+    };
+
+    // Check Spotify tokens — only ExpiredToken means invalid.
+    // RateLimited and Other are transient → treat as valid.
+    let (spotify_valid, _spotify_token) = {
+        let guard = state.spotify_tokens.read();
+        match guard.as_ref() {
+            Some(tokens) => {
+                let valid = match crate::spotify::validate_spotify_token(&tokens.access_token) {
+                    Ok(()) => true,
+                    Err(crate::spotify::SpotifyApiError::ExpiredToken) => false,
+                    Err(_) => true, // transient — still valid for onboarding
+                };
+                (valid, Some(tokens.clone()))
+            }
+            None => (false, None),
+        }
+    };
+
+    // Onboarding is complete only if:
+    // 1. Spotify is configured AND token is not permanently expired
+    // 2. Teams is configured AND token is not permanently expired
+    let complete = spotify_configured && spotify_valid && teams_configured && teams_valid;
     log::info!(
-        "[CMD] is_onboarding_complete: result={} (client_id.len={})",
+        "[CMD] is_onboarding_complete: result={} (spotify_configured={}, spotify_valid={}, teams_configured={}, teams_valid={})",
         complete,
-        config.spotify.client_id.len()
+        spotify_configured,
+        spotify_valid,
+        teams_configured,
+        teams_valid
     );
 
     Ok(complete)
@@ -887,5 +1089,20 @@ pub fn reconnect_teams(
     }
 
     log::info!("[CMD] reconnect_teams: SUCCESS");
+    Ok(())
+}
+
+#[tauri::command]
+pub fn update_tray_menu_state(
+    app: AppHandle,
+    is_syncing: bool,
+    current_track: Option<TrackInfo>,
+) -> Result<(), String> {
+    log::info!(
+        "[CMD] update_tray_menu_state: ENTRY - is_syncing={}",
+        is_syncing
+    );
+    tray::update_tray_menu(&app, is_syncing, current_track)?;
+    log::info!("[CMD] update_tray_menu_state: SUCCESS");
     Ok(())
 }

@@ -7,6 +7,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+No changes yet.
+
+## [2.4.0] - 2026-04-27
+
+### Added
+
+- `SETUP.md` — First-time setup guide: installing the app, registering a Spotify Developer app, connecting Teams, file locations, uninstalling
+- `USAGE.md` — Day-to-day guide covering the system tray, dashboard, settings, log viewer, and common tasks
+
+### Changed
+
+- `README.md` rewritten as entry point — shorter, no duplication, links to all docs
+- `CONTRIBUTING.md` — project structure section removed (now in ARCHITECTURE.md), references updated
+- `CLAUDE.md` — stripped to conventions and key files only; duplicated tech stack and feature list removed
+
+### Removed
+
+- `BUGFIX_TRACKER.md` — moved to GitHub Issues; no longer ships with the repo
+
+### Fixed
+
+- Polling: interruptible stop channel replaces thread::sleep — tray freeze on pause is now instant (fixes #10)
+- Polling: `get_sync_status` validates tokens via real API calls, emits reconnect-required events on failure (fixes #11, #12)
+- Config: `clear_on_pause` now respected — Teams status only cleared when Spotify pauses if user enabled it (fixes #4)
+- Config: `start_minimized` properly wired to Rust `TeamsConfig`, app window hides on startup when set (fixes #5)
+- Config: `launch_at_login` moved to `AppConfig.autostart`, binding fixed to `localConfig.autostart`, syncs to OS autostart manager (fixes #6)
+- Polling: refreshed Spotify tokens now persisted to tauri-plugin-store so they survive app restarts (fixes #8)
+- Deep links: Windows deep link registration now runs in release builds (was debug-only) (fixes #9)
+- Onboarding: `is_onboarding_complete` validates tokens via API calls instead of just checking presence (fixes #10, #12)
+- Tray: initial tray menu now reflects actual sync state via immediate `update_tray_menu` call (fixes #11)
+- Sync: `start_syncing` TOCTOU race fixed by acquiring write lock before checking `is_syncing` (fixes #14)
+- OAuth: redundant `client_id` removed from `refresh_spotify_token` form body (was doubled in Basic auth) (fixes #19)
+- Tray: tray menu updated after each track change via polling loop call to `update_tray_menu` (fixes #24, #25)
+- Tray: `update_tray_menu` errors now logged at warn! level instead of silently ignored (fixes #7)
+- Polling: `progress_ms` corrected by elapsed time since last poll to prevent stale position data (fixes #13)
+- Onboarding: placeholder OAuth URL replaced with real Spotify app setup instructions (fixes #15)
+- Frontend: Dashboard now handles `sync-started`/`sync-stopped` events from backend (fixes #16)
+- Polling: 500ms debounce added to prevent Teams status flicker on rapid track changes (fixes #17)
+- Quit: redundant quit handler thread removed — `on_window_event(CloseRequested)` handles it (fixes #18)
+- LogViewer: wired to `tauri_plugin_log` Webview target, listens on `log://log` event (fixes #21)
+- Auth: pending Spotify/Teams auth state persisted to store with expiry, recovered on startup (fixes #22, #23)
+- Config: `save_config` now holds config write lock for entire read-modify-write to prevent race (fixes #26)
+
+### Developer
+
+- Frontend: removed unused `isSyncing` store from `app.ts` — stores are actively used, not dead code (note: Bug 20 stores are actually the navigation backbone and were correctly preserved)
+
+## [2.3.6] - 2026-04-24
+
+### Added
+
+- Application menu bar with File, Edit, View, Help menus (macOS/Windows)
+- Dynamic tray menu that updates based on sync state (Pause/Resume toggles automatically)
+- Build number displayed in bottom-right corner of app window (injected at build time)
+- About dialog accessible from Help menu
+
+### Fixed
+
+- Duplicate tray icon: removed automatic tray icon from tauri.conf.json (was conflicting with manual setup)
+- Tray icon now properly displays in macOS menu bar
+- Left-click tray: now shows window via tray-click event (not automatic menu popup)
+- Tray menu label now refreshes after show/hide toggle
+- Back-to-back separators fixed when no track is playing
+
+### Changed
+
+- `update_menu_state` command renamed to `update_tray_menu_state` for clarity
+
+## [2.3.5] - 2026-04-23
+
+### Fixed
+
+- Teams auth: `pending_teams_auth` now populated during device code flow, fixing `complete_teams_auth_manual` (closes #8)
+- Onboarding: `is_onboarding_complete` now checks both Spotify and Teams auth status (closes #11)
+- URL validation: `open_external_url` and `open_external` now reject non-http(s) schemes (closes #14)
+- Polling: retry intervals now include +/- 20% jitter to prevent thundering herd (closes #17)
+- Polling: HTTP requests have 10s timeout, stop_syncing bounded to 2s (partial fix for #10)
+
+### Security
+
+- CSP: replaced broad `*.microsoft.com` wildcard with explicit `login.microsoftonline.com` and `graph.microsoft.com` (closes #15)
+- URL commands: only http/https schemes allowed, preventing javascript: and file: attacks
+
+### Documentation
+
+- Token loading duplication in commands.rs documented as intentional (closes #16 - won't fix)
+
 ## [2.3.4] - 2026-04-12
 
 ### Fixed
@@ -130,7 +217,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - PowerShell script version — this is a full rewrite
 
-[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v2.3.4...HEAD
+[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v2.3.7...HEAD
+[2.3.7]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.3.7
+[2.3.6]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.3.6
+[2.3.5]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.3.5
 [2.3.4]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.3.4
 [2.3.3]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.3.3
 [2.3.2]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.3.2
