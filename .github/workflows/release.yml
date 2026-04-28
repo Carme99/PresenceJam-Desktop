@@ -102,7 +102,7 @@ jobs:
           artifacts: artifacts/**/*
           draft: false
           prerelease: false
+          allowUpdates: true
           generateReleaseNotes: true
-          updateOnlyUnreleased: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
