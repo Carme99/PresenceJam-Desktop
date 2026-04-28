@@ -12,7 +12,7 @@ use crate::spotify::{
     format_status, get_currently_playing, is_token_expired, refresh_spotify_token, SpotifyApiError,
     SpotifyTokens,
 };
-use crate::teams::{clear_teams_status_message, set_teams_status_message, TeamsTokens};
+use crate::teams::{clear_teams_status_message, refresh_teams_token, set_teams_status_message, TeamsTokens};
 use crate::{tray, AppState};
 
 const DEFAULT_INTERVAL_SECONDS: u64 = 30;
@@ -70,6 +70,35 @@ fn process_track(
     let teams_tokens = {
         let guard = state.teams_tokens.read();
         guard.clone()
+    };
+
+    // Check if Teams token is expired and refresh if needed (similar to Spotify token refresh)
+    let teams_tokens = if let Some(ref tok) = teams_tokens {
+        let expired = Utc::now() >= tok.expires_at - chrono::Duration::seconds(60);
+        if expired {
+            log::info!("[POLLING] process_track: Teams token expired, refreshing...");
+            match refresh_teams_token(tok) {
+                Ok(new_tokens) => {
+                    log::info!("[POLLING] process_track: Teams token refresh SUCCESS");
+                    *state.teams_tokens.write() = Some(new_tokens.clone());
+                    if let Err(e) = save_teams_tokens(app, &new_tokens) {
+                        log::warn!("[POLLING] process_track: failed to persist refreshed teams tokens: {}", e);
+                    }
+                    Some(new_tokens)
+                }
+                Err(e) => {
+                    log::error!("[POLLING] process_track: Failed to refresh Teams token: {}", e);
+                    // Clear the tokens so we don't keep trying with expired ones
+                    *state.teams_tokens.write() = None;
+                    let _ = app.emit("teams-reconnect-required", ());
+                    None
+                }
+            }
+        } else {
+            teams_tokens
+        }
+    } else {
+        teams_tokens
     };
 
     // Bug 17: Debounce Teams API calls to prevent showing stale track info
