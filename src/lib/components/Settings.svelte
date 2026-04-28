@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
+  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { onMount, onDestroy } from 'svelte';
   import { currentView } from '$lib/stores/app';
   import { configStore, saveConfig, loadConfig, type AppConfig } from '$lib/stores/config';
@@ -14,6 +15,8 @@
   let reconnectingTeams = $state(false);
   let saveMessage = $state('');
   let saveTimeout: ReturnType<typeof setTimeout> | null = null;
+  let spotifyAuthWaiting = $state(false);
+  let teamsAuthWaiting = $state(false);
 
   let previewArtist = $state('Radiohead');
   let previewTrack = $state('Karma Police');
@@ -28,10 +31,12 @@
       .replace('{emoji}', previewEmoji)
   );
 
+  let unlistenFns: UnlistenFn[] = [];
+
   onMount(async () => {
     await loadConfig();
     localConfig = JSON.parse(JSON.stringify($configStore));
-    
+
     try {
       const syncStatus = await invoke<any>('get_sync_status');
       isConnected = syncStatus.spotify_connected ?? false;
@@ -40,12 +45,73 @@
       isConnected = $spotifyConnected;
       teamsStatusConnected = $teamsConnected;
     }
+
+    // Listen for reconnect-required events (emitted when backend clears tokens and needs re-auth)
+    unlistenFns.push(await listen('spotify-reconnect-required', async () => {
+      console.log('[SETTINGS] spotify-reconnect-required received');
+      spotifyAuthWaiting = true;
+      reconnectingSpotify = true;
+      try {
+        await invoke('start_spotify_auth', {
+          clientId: localConfig.spotify.client_id,
+          clientSecret: localConfig.spotify.client_secret,
+          redirectUri: 'presencejam://callback'
+        });
+      } catch (e) {
+        console.error('[SETTINGS] start_spotify_auth failed:', e);
+        spotifyAuthWaiting = false;
+        reconnectingSpotify = false;
+      }
+    }));
+
+    unlistenFns.push(await listen('teams-reconnect-required', async () => {
+      console.log('[SETTINGS] teams-reconnect-required received');
+      teamsAuthWaiting = true;
+      reconnectingTeams = true;
+      try {
+        await invoke('start_teams_auth_device_code');
+      } catch (e) {
+        console.error('[SETTINGS] start_teams_auth_device_code failed:', e);
+        teamsAuthWaiting = false;
+        reconnectingTeams = false;
+      }
+    }));
+
+    // Listen for auth completion events
+    unlistenFns.push(await listen('spotify-auth-complete', () => {
+      console.log('[SETTINGS] spotify-auth-complete received');
+      spotifyAuthWaiting = false;
+      reconnectingSpotify = false;
+      isConnected = true;
+    }));
+
+    unlistenFns.push(await listen('spotify-auth-failed', (event) => {
+      console.error('[SETTINGS] spotify-auth-failed:', event.payload);
+      spotifyAuthWaiting = false;
+      reconnectingSpotify = false;
+    }));
+
+    unlistenFns.push(await listen('teams-auth-complete', () => {
+      console.log('[SETTINGS] teams-auth-complete received');
+      teamsAuthWaiting = false;
+      reconnectingTeams = false;
+      teamsStatusConnected = true;
+    }));
+
+    unlistenFns.push(await listen('teams-auth-failed', (event) => {
+      console.error('[SETTINGS] teams-auth-failed:', event.payload);
+      teamsAuthWaiting = false;
+      reconnectingTeams = false;
+    }));
   });
 
   onDestroy(() => {
     if (saveTimeout) {
       clearTimeout(saveTimeout);
       saveTimeout = null;
+    }
+    for (const unlisten of unlistenFns) {
+      unlisten();
     }
   });
 
@@ -68,12 +134,12 @@
   }
 
   async function reconnectSpotify() {
-    if (reconnectingSpotify) return;
+    if (reconnectingSpotify || !localConfig.spotify.client_id) return;
     reconnectingSpotify = true;
     try {
       await invoke('reconnect_spotify');
     } finally {
-      reconnectingSpotify = false;
+      // Note: reconnectingSpotify is reset when spotify-auth-complete or spotify-auth-failed is received
     }
   }
 
@@ -83,7 +149,7 @@
     try {
       await invoke('reconnect_teams');
     } finally {
-      reconnectingTeams = false;
+      // Note: reconnectingTeams is reset when teams-auth-complete or teams-auth-failed is received
     }
   }
 
@@ -122,9 +188,12 @@
         />
       </div>
       <div class="connection-row">
-        {#if isConnected}
+        {#if isConnected && !spotifyAuthWaiting}
           <span class="badge success">Connected</span>
           <button class="btn-secondary" onclick={reconnectSpotify} disabled={reconnectingSpotify}>Reconnect Spotify</button>
+        {:else if spotifyAuthWaiting}
+          <span class="badge warning">Reconnecting...</span>
+          <span class="hint">Complete auth in browser</span>
         {:else}
           <span class="badge warning">Not Connected</span>
         {/if}
@@ -135,9 +204,12 @@
       <h2>Microsoft Teams</h2>
       <p class="hint">Teams authentication uses your Microsoft 365 account. No additional configuration required.</p>
       <div class="connection-row">
-        {#if teamsStatusConnected}
+        {#if teamsStatusConnected && !teamsAuthWaiting}
           <span class="badge success">Connected</span>
           <button class="btn-secondary" onclick={reconnectTeams} disabled={reconnectingTeams}>Reconnect Teams</button>
+        {:else if teamsAuthWaiting}
+          <span class="badge warning">Reconnecting...</span>
+          <span class="hint">Complete auth in browser</span>
         {:else}
           <span class="badge warning">Not Connected</span>
         {/if}

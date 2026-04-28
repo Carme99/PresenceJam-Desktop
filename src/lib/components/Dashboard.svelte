@@ -3,6 +3,7 @@
   import { listen } from '@tauri-apps/api/event';
   import { onMount, onDestroy } from 'svelte';
   import { currentView } from '$lib/stores/app';
+  import { configStore, loadConfig } from '$lib/stores/config';
   import type { TrackInfo } from '$lib/stores/spotify';
   import { devLog } from '$lib/utils/dev';
 
@@ -155,6 +156,26 @@
     devLog('[DASHBOARD] openLogs: EXIT');
   }
 
+  async function goToSetup() {
+    devLog('[DASHBOARD] goToSetup: ENTRY');
+    await loadConfig();
+    const hasSpotifyCredentials =
+      $configStore.spotify.client_id && $configStore.spotify.client_id.trim() !== ''
+      && $configStore.spotify.client_secret && $configStore.spotify.client_secret.trim() !== '';
+    devLog('[DASHBOARD] goToSetup: hasSpotifyCredentials=', hasSpotifyCredentials);
+
+    if (hasSpotifyCredentials) {
+      // Credentials exist, go to simplified reconnect flow
+      devLog('[DASHBOARD] goToSetup: navigating to reconnect');
+      currentView.set('reconnect');
+    } else {
+      // Missing credentials, need full onboarding
+      devLog('[DASHBOARD] goToSetup: navigating to onboarding');
+      currentView.set('onboarding');
+    }
+    devLog('[DASHBOARD] goToSetup: EXIT');
+  }
+
   function formatDuration(ms: number): string {
     const secs = Math.floor(ms / 1000);
     const mins = Math.floor(secs / 60);
@@ -212,7 +233,7 @@
       <div class="setup-card card">
         <h2>Setup Required</h2>
         <p>Complete onboarding to connect Spotify and Teams.</p>
-        <button onclick={() => { devLog('[DASHBOARD] Go to Setup clicked'); currentView.set('onboarding'); }}>Go to Setup</button>
+        <button onclick={goToSetup}>Go to Setup</button>
       </div>
     {:else if currentTrack}
       <div class="track-card card">

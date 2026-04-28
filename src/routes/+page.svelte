@@ -9,9 +9,10 @@
   import LogViewer from '$lib/components/LogViewer.svelte';
   import { devLog } from '$lib/utils/dev';
   import About from '$lib/components/About.svelte';
+  import Reconnect from '$lib/components/Reconnect.svelte';
 
   // Build info — injected at build time via vite.config.js define
-  const BUILD = import.meta.env.__APP_BUILD__ || '2.3.6.unknown';
+  const BUILD = import.meta.env.__APP_BUILD__ || '2.4.1.unknown';
 
   let ready = $state(false);
   let unlisten: (() => void)[] = [];
@@ -72,7 +73,7 @@
       try {
         await invoke('open_logs_folder');
       } catch (e) {
-        devLog.error('[PAGE] EVENT: open_logs_folder FAILED:', e);
+        console.error('[PAGE] EVENT: open_logs_folder FAILED:', e);
       }
     }).then(fn => unlisten.push(fn));
 
@@ -118,6 +119,8 @@
       <LogViewer />
     {:else if $currentView === 'about'}
       <About />
+    {:else if $currentView === 'reconnect'}
+      <Reconnect />
     {/if}
     <div class="version">{BUILD}</div>
   </div>
