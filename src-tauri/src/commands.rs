@@ -1018,11 +1018,15 @@ pub fn complete_onboarding(
         start_syncing(state, app)?;
         log::info!("[CMD] complete_onboarding: sync started successfully");
     } else {
-        log::warn!(
-            "[CMD] complete_onboarding: missing tokens, not starting sync (spotify={}, teams={})",
+        log::error!(
+            "[CMD] complete_onboarding: missing tokens, cannot start sync (spotify={}, teams={})",
             has_spotify,
             has_teams
         );
+        return Err(format!(
+            "Missing tokens: spotify={}, teams={}",
+            has_spotify, has_teams
+        ));
     }
 
     log::info!("[CMD] complete_onboarding: SUCCESS");
