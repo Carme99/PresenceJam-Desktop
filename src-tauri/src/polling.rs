@@ -317,6 +317,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
     let mut last_track_key: Option<String> = None;
     let mut last_teams_update: Option<Instant> = None;
     let mut is_first_poll = true;
+    let mut transient_failure_count: u8 = 0;
 
     loop {
         log::info!("[POLLING] polling_loop: iteration start");
@@ -449,6 +450,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                 );
                 let sleep_duration =
                     process_track(&app, &state, &config, &track, &mut last_track_key, last_poll_instant, &mut last_teams_update, is_first_poll);
+                transient_failure_count = 0;
                 // Update tray menu with current sync state and track info (Bug 24+25 fix)
                 let is_syncing = *state.is_syncing.read();
                 let current_track = state.current_track.read().clone();
@@ -553,6 +555,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                                                 }
                                                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                                             }
+                                            transient_failure_count = 0;
                                             continue;
                                         }
                                         Err(retry_err) => {
@@ -578,6 +581,14 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
 
                 if matches!(final_err, SpotifyApiError::RateLimited) {
                     backoff_secs = with_jitter(RATE_LIMIT_BACKOFF_SECONDS);
+                }
+
+                // After 5 consecutive transient failures, exit and require reconnect
+                transient_failure_count += 1;
+                if transient_failure_count >= 5 {
+                    log::error!("[POLLING] polling_loop: 5 consecutive transient failures, exiting and requiring reconnect");
+                    let _ = app.emit("reconnect-required", ());
+                    break;
                 }
 
                 let _ = app.emit(
