@@ -40,6 +40,7 @@ fn process_track(
     last_track_key: &mut Option<String>,
     last_poll_instant: Instant,
     last_teams_update: &mut Option<Instant>,
+    is_first_poll: bool,
 ) -> u64 {
     // Bug 13: Correct progress_ms for elapsed time since last poll
     let elapsed_ms = last_poll_instant.elapsed().as_millis() as u64;
@@ -194,7 +195,8 @@ fn process_track(
                 }
             }
         } else if config.as_ref().map(|c| c.teams.clear_on_pause).unwrap_or(true) {
-            match clear_teams_status_message(&teams_tok.access_token) {
+            if !is_first_poll {
+            match clear_teams_status_message(&teams_tok.access_token, "") {
                 Ok(_) => {
                     *last_teams_update = Some(Instant::now());
                     let _ = app.emit(
@@ -210,6 +212,7 @@ fn process_track(
                 }
             }
         }
+            }
     }
 
     if track.is_playing {
@@ -235,7 +238,7 @@ fn handle_no_track(app: &AppHandle, state: &Arc<AppState>, last_track_key: &mut 
             guard.clone()
         };
         if let Some(teams_tok) = teams_tokens {
-            match clear_teams_status_message(&teams_tok.access_token) {
+            match clear_teams_status_message(&teams_tok.access_token, "🎵 Nothing playing on Spotify") {
                 Ok(_) => {
                     let _ = app.emit(
                         "presence-cleared",
@@ -303,6 +306,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
     log::info!("[POLLING] polling_loop: STARTED");
     let mut last_track_key: Option<String> = None;
     let mut last_teams_update: Option<Instant> = None;
+    let mut is_first_poll = true;
 
     loop {
         log::info!("[POLLING] polling_loop: iteration start");
@@ -434,7 +438,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                     track.artist
                 );
                 let sleep_duration =
-                    process_track(&app, &state, &config, &track, &mut last_track_key, last_poll_instant, &mut last_teams_update);
+                    process_track(&app, &state, &config, &track, &mut last_track_key, last_poll_instant, &mut last_teams_update, is_first_poll);
                 // Update tray menu with current sync state and track info (Bug 24+25 fix)
                 let is_syncing = *state.is_syncing.read();
                 let current_track = state.current_track.read().clone();
@@ -459,6 +463,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
             Ok(None) => {
                 log::info!("[POLLING] polling_loop: no track playing");
                 handle_no_track(&app, &state, &mut last_track_key);
+                is_first_poll = false;
                 // Update tray menu with current sync state and track info (Bug 24+25 fix)
                 let is_syncing = *state.is_syncing.read();
                 let current_track = state.current_track.read().clone();
@@ -524,6 +529,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                                                 &mut last_track_key,
                                                 last_poll_instant,
                                                 &mut last_teams_update,
+                                                is_first_poll,
                                             );
                                             continue;
                                         }
