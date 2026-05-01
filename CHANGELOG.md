@@ -7,7 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-No changes yet.
+### Fixed
+
+- **B1: Flicker on startup** — `handle_no_track` now skips on first poll to avoid clearing Teams status before any track was ever set; sends "🎵 Nothing playing on Spotify" instead of empty string
+- **B3: "Unknown" status message** — `clear_teams_status_message` now receives a human-readable placeholder text instead of empty string
+- **B4: Duplicate polling thread** — `start_polling` now guards against spawning a duplicate thread using a `stop_tx.is_some()` check in addition to the `is_syncing` lock
+- **is_onboarding_complete: Non-401 errors treated as valid** — RateLimited (429) → valid; all other errors → invalid (was incorrectly treating all errors as valid)
+- **complete_onboarding: Missing tokens accepted** — now returns error if Spotify or Teams tokens are missing instead of always succeeding
+- **refresh_spotify: State updated after persistence** — AppState tokens now updated before persistence; if persistence fails the error is returned rather than silently consumed
+- **onboarding Teams auth: stale error not cleared** — `connectTeams` now clears `teamsAuthError` before starting new auth; `pollTeamsAuth` now guards against empty `teamsDeviceCode`
+- **R2: Infinite retry on transient failures** — polling loop now tracks `transient_failure_count` (max 5); after 5 consecutive 5xx/network failures, exits and emits reconnect-required event
+- **R5: Polling thread panic kills loop silently** — `start_polling` now wraps the polling loop in `panic::catch_unwind`; emits `polling-thread-panicked` event on panic
+- **R7: Empty client_id/client_secret accepted** — `start_spotify_auth` now rejects empty credentials early with a clear error
+- **Redirect URI: wrong URL in onboarding instructions** — onboarding step 3 now says `presencejam://callback` instead of `http://localhost:43210/callback`
+- **HTTP body errors silently dropped** — `unwrap_or_default()` on `response.text()` in `spotify.rs` and `teams.rs` now properly propagated as errors instead of discarded
+- **Spotify auth errors silently swallowed** — `handleManualUrlPaste` and `connectSpotify` now display errors to user via `spotifyAuthError`; stale errors cleared on retry
+
+### Security (assessed — no code changes)
+
+- **S2: CSP unsafe-inline** — required for Svelte scoped styles; cannot be removed without rearchitecting CSS handling
+- **S3: redirect_uri sent from frontend** — always sends `presencejam://callback` which is in the allowlist; defended
+- **S4: OAuth scopes hardcoded** — validated by Spotify's OAuth server at runtime; low risk for desktop app
+- **L1: Teams device code flow CSRF** — device code flow is CSRF-resistant per NIST 800-63C; not applicable
+- **L2: PKCE verifier in tauri-plugin-store** — store uses OS keychain encryption (DPAPI/Keychain); acceptable
+- **L3: open_logs_folder file://** — path is `app_log_dir()` (OS-controlled app directory); not user-controlled
+
+### Already correct (confirmed)
+
+- **R3: pending_auth lost on crash** — already wired in `lib.rs`; auth state survives page reload
+- **R4: profanity_filter not wired** — already confirmed wired; `process_track` calls `filter_profanity()`
+- **R6: polling drift** — both Spotify and Teams polled in same single loop; cannot drift independently
 
 ## [2.4.1] - 2026-04-28
 
