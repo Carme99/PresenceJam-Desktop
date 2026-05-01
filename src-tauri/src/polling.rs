@@ -293,7 +293,15 @@ pub fn start_polling(
         .stack_size(1024 * 1024) // 1MB stack for safety
         .spawn(move || {
             log::info!("[POLLING] start_polling: thread started");
-            polling_loop(state_clone, app_clone, stop_rx);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                polling_loop(state_clone, app_clone, stop_rx);
+            }));
+            if let Err(panic_info) = result {
+                log::error!(
+                    "[POLLING] start_polling: polling_loop panicked: {:?}",
+                    panic_info
+                );
+            }
             log::info!("[POLLING] start_polling: thread ended");
         })
         .map_err(|e| {
