@@ -13,6 +13,7 @@
   let spotifyUsername = $state('');
   let spotifyManualUrl = $state('');
   let spotifyWaiting = $state(false);
+  let spotifyAuthError = $state('');
 
   let teamsUserCode = $state('');
   let teamsVerificationUrl = $state('');
@@ -37,15 +38,17 @@
       devLog('[ONBOARDING] EVENT: spotify-auth-complete received');
       spotifyConnected = true;
       spotifyWaiting = false;
+      spotifyAuthError = '';
       validationError = '';
-      devLog('[ONBOARDING] EVENT: spotifyConnected=true, spotifyWaiting=false');
+      devLog('[ONBOARDING] EVENT: spotifyConnected=true, spotifyWaiting=false, spotifyAuthError=""');
     });
 
     devLog('[ONBOARDING] onMount: setting up spotify-auth-failed listener');
     const fn2 = await listen<string>('spotify-auth-failed', (event) => {
       console.error('[ONBOARDING] EVENT: spotify-auth-failed received:', event.payload);
       spotifyWaiting = false;
-      devLog('[ONBOARDING] EVENT: spotifyWaiting=false (from failed)');
+      spotifyAuthError = String(event.payload);
+      devLog('[ONBOARDING] EVENT: spotifyWaiting=false, spotifyAuthError set');
     });
 
     devLog('[ONBOARDING] onMount: setting up teams-auth-complete listener');
@@ -192,6 +195,7 @@
       devLog('[ONBOARDING] connectTeams: open_external_url SUCCESS');
     } catch (e) {
       console.error('[ONBOARDING] connectTeams: FAILED:', e);
+      teamsAuthError = 'Failed to start Teams sign-in. Please try again.';
     }
     
     devLog('[ONBOARDING] connectTeams: EXIT');
@@ -325,7 +329,7 @@
         <ol>
           <li>Go to <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">https://developer.spotify.com/dashboard</a></li>
           <li>Sign in and click <strong>Create App</strong></li>
-          <li>Add this redirect URI: <code>http://localhost:43210/callback</code></li>
+          <li>Add this redirect URI: <code>presencejam://callback</code></li>
           <li>Fill in the app name and description, then save</li>
           <li>Copy your <strong>Client ID</strong> and <strong>Client Secret</strong> from the app settings</li>
         </ol>
@@ -356,7 +360,7 @@
           <div class="form-group">
             <input 
               bind:value={spotifyManualUrl} 
-              placeholder="Paste redirect URL here (e.g. http://localhost:43210/callback?code=XXX...)"
+              placeholder="Paste redirect URL here (e.g. presencejam://callback?code=***"
               onkeydown={(e) => e.key === 'Enter' && handleManualUrlPaste()}
             />
           </div>
@@ -366,6 +370,9 @@
           <button class="back" onclick={() => { spotifyWaiting = false; }}>
             Cancel
           </button>
+          {#if spotifyAuthError}
+            <p class="error-message">{spotifyAuthError}</p>
+          {/if}
         </div>
       {:else}
         <div class="success-badge">
