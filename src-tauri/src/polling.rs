@@ -262,6 +262,16 @@ pub fn start_polling(
 ) -> Result<thread::JoinHandle<()>, String> {
     log::info!("[POLLING] start_polling: ENTRY");
 
+    // Guard against spawning duplicate polling thread
+    {
+        let is_syncing = *state.is_syncing.read();
+        if is_syncing {
+            log::warn!("[POLLING] start_polling: polling already running, returning early");
+            return Err("Polling is already running".to_string());
+        }
+    }
+
+
     // Create interruptible stop channel so stop_syncing can wake the thread immediately.
     // See issue #10 (Polling thread cannot be cancelled mid-request).
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
