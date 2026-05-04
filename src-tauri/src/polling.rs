@@ -312,7 +312,7 @@ pub fn start_polling(
                         "[POLLING] start_polling: polling_loop panicked with non-string payload"
                     );
                 }
-                let _ = app.emit("polling-thread-panicked", ());
+                let _ = app.emit("polling-thread-panicked", serde_json::json!(null));
             }
             log::info!("[POLLING] start_polling: thread ended");
         })

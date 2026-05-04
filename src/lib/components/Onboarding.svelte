@@ -123,8 +123,8 @@
     } catch (e) {
       console.error('[ONBOARDING] connectSpotify: invoke FAILED:', e);
       spotifyWaiting = false;
-      spotifyAuthError = String(e);
-      devLog('[ONBOARDING] connectSpotify: spotifyWaiting=false (from error)');
+      spotifyAuthError = e instanceof Error ? e.message : String(e);
+      devLog('[ONBOARDING] connectSpotify: spotifyWaiting=false, spotifyAuthError set');
     }
     
     devLog('[ONBOARDING] connectSpotify: EXIT');
