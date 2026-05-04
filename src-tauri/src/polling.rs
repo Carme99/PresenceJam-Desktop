@@ -262,15 +262,21 @@ pub fn start_polling(
 ) -> Result<thread::JoinHandle<()>, String> {
     log::info!("[POLLING] start_polling: ENTRY");
 
-    // Guard against spawning duplicate polling thread
+    // Guard against spawning duplicate polling thread.
+    // Acquire write lock for the full check-and-set to make it atomic.
+    // This mirrors commands.rs:start_syncing which also holds the write lock
+    // across its atomic check-and-set. The polling loop only reads is_syncing
+    // (via is_syncing.read()) so concurrent read access is unaffected.
     {
-        let is_syncing = *state.is_syncing.read();
-        if is_syncing {
+        let mut is_syncing_guard = state.is_syncing.write();
+        if *is_syncing_guard {
             log::warn!("[POLLING] start_polling: polling already running, returning early");
             return Err("Polling is already running".to_string());
         }
+        *is_syncing_guard = true;
     }
 
+    log::info!("[POLLING] start_polling: is_syncing flag set to true");
 
     // Create interruptible stop channel so stop_syncing can wake the thread immediately.
     // See issue #10 (Polling thread cannot be cancelled mid-request).
@@ -280,9 +286,6 @@ pub fn start_polling(
         let mut tx_guard = state.stop_tx.write();
         *tx_guard = Some(stop_tx);
     }
-
-    *state.is_syncing.write() = true;
-    log::info!("[POLLING] start_polling: is_syncing flag set to true");
 
     // Clone Arc for the thread
     let state_clone = Arc::clone(&state);
