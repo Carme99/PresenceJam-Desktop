@@ -17,7 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **refresh_spotify: State updated after persistence** — AppState tokens now updated before persistence; if persistence fails the error is returned rather than silently consumed
 - **onboarding Teams auth: stale error not cleared** — `connectTeams` now clears `teamsAuthError` before starting new auth; `pollTeamsAuth` now guards against empty `teamsDeviceCode`
 - **R2: Infinite retry on transient failures** — polling loop now tracks `transient_failure_count` (max 5); after 5 consecutive 5xx/network failures, exits and emits reconnect-required event
-- **R5: Polling thread panic kills loop silently** — `start_polling` now wraps the polling loop in `panic::catch_unwind`; emits `polling-thread-panicked` event on panic
+- **R5: Polling thread panic kills loop silently** — `start_polling` now wraps the polling loop in `panic::catch_unwind` with proper downcast logging; emits `polling-thread-panicked` event on panic so the frontend can react
+- **is_first_poll never flipped on track-playing first poll** — `is_first_poll` flag now reset to `false` on `Ok(Some(track))` path as well, ensuring `clear_on_pause` guard fires correctly from the first poll onward
+- **transient_failure_count incremented for non-transient errors** — counter now only increments for `RateLimited` and `ExpiredToken` variants; auth/Other errors are non-transient and do not contribute to the retry limit
+- **transient_failure_count not reset on Ok(None)** — counter now resets to 0 in the `Ok(None)` arm so any successful poll (even with no track) breaks the failure streak
+- **Auth errors not displayed to user in connectSpotify** — `connectSpotify` catch block now sets `spotifyAuthError` so backend errors like missing credentials are visible to users
+- **Missing closing paren in redirect URL placeholder** — `Onboarding.svelte` redirect URL input placeholder now correctly ends with `...)"` instead of truncated `"`
 - **R7: Empty client_id/client_secret accepted** — `start_spotify_auth` now rejects empty credentials early with a clear error
 - **Redirect URI: wrong URL in onboarding instructions** — onboarding step 3 now says `presencejam://callback` instead of `http://localhost:43210/callback`
 - **HTTP body errors silently dropped** — `unwrap_or_default()` on `response.text()` in `spotify.rs` and `teams.rs` now properly propagated as errors instead of discarded

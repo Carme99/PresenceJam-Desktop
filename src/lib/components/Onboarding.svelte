@@ -123,6 +123,7 @@
     } catch (e) {
       console.error('[ONBOARDING] connectSpotify: invoke FAILED:', e);
       spotifyWaiting = false;
+      spotifyAuthError = String(e);
       devLog('[ONBOARDING] connectSpotify: spotifyWaiting=false (from error)');
     }
     
@@ -360,7 +361,7 @@
           <div class="form-group">
             <input 
               bind:value={spotifyManualUrl} 
-              placeholder="Paste redirect URL here (e.g. presencejam://callback?code=***"
+              placeholder="Paste redirect URL here (e.g. presencejam://callback?code=***...)"
               onkeydown={(e) => e.key === 'Enter' && handleManualUrlPaste()}
             />
           </div>

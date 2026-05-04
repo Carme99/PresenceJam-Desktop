@@ -297,10 +297,22 @@ pub fn start_polling(
                 polling_loop(state_clone, app_clone, stop_rx);
             }));
             if let Err(panic_info) = result {
-                log::error!(
-                    "[POLLING] start_polling: polling_loop panicked: {:?}",
-                    panic_info
-                );
+                if let Some(s) = panic_info.downcast_ref::<&str>() {
+                    log::error!(
+                        "[POLLING] start_polling: polling_loop panicked with &str: {}",
+                        s
+                    );
+                } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                    log::error!(
+                        "[POLLING] start_polling: polling_loop panicked with String: {}",
+                        s
+                    );
+                } else {
+                    log::error!(
+                        "[POLLING] start_polling: polling_loop panicked with non-string payload"
+                    );
+                }
+                let _ = app.emit("polling-thread-panicked", ());
             }
             log::info!("[POLLING] start_polling: thread ended");
         })
@@ -459,6 +471,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                 let sleep_duration =
                     process_track(&app, &state, &config, &track, &mut last_track_key, last_poll_instant, &mut last_teams_update, is_first_poll);
                 transient_failure_count = 0;
+                is_first_poll = false;
                 // Update tray menu with current sync state and track info (Bug 24+25 fix)
                 let is_syncing = *state.is_syncing.read();
                 let current_track = state.current_track.read().clone();
@@ -483,6 +496,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
             Ok(None) => {
                 log::info!("[POLLING] polling_loop: no track playing");
                 handle_no_track(&app, &state, &mut last_track_key);
+                transient_failure_count = 0;
                 is_first_poll = false;
                 // Update tray menu with current sync state and track info (Bug 24+25 fix)
                 let is_syncing = *state.is_syncing.read();
@@ -551,6 +565,8 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                                                 &mut last_teams_update,
                                                 is_first_poll,
                                             );
+                                            transient_failure_count = 0;
+                                            is_first_poll = false;
                                             continue;
                                         }
                                         Ok(None) => {
@@ -564,6 +580,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                                                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                                             }
                                             transient_failure_count = 0;
+                                            is_first_poll = false;
                                             continue;
                                         }
                                         Err(retry_err) => {
@@ -591,8 +608,15 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                     backoff_secs = with_jitter(RATE_LIMIT_BACKOFF_SECONDS);
                 }
 
+                // Only count truly transient errors toward the retry limit.
+                // ExpiredToken triggers a refresh/retry above; if we reach here the
+                // retry failed — still count it as transient so the loop can give up.
+                // Auth/Other errors are non-transient and do not contribute.
+                if matches!(final_err, SpotifyApiError::RateLimited | SpotifyApiError::ExpiredToken) {
+                    transient_failure_count += 1;
+                }
+
                 // After 5 consecutive transient failures, exit and require reconnect
-                transient_failure_count += 1;
                 if transient_failure_count >= 5 {
                     log::error!("[POLLING] polling_loop: 5 consecutive transient failures, exiting and requiring reconnect");
                     let _ = app.emit("reconnect-required", ());
