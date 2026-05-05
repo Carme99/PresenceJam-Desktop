@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **is_first_poll guard brace placement** — tightened indentation of the `if !is_first_poll` block around `clear_teams_status_message` in `process_track` so the control flow is readable
+- **Inconsistent event payload conventions** — standardised all polling-path event emissions (`reconnect-required`, `spotify-reconnect-required`, `teams-reconnect-required`) to use `serde_json::json!(null)` instead of bare `()` tuples, matching the existing `polling-thread-panicked` payload shape
+- **is_syncing wedge on spawn failure** — `start_polling` now resets `is_syncing` and clears `stop_tx` in the `map_err` path when `thread::Builder::spawn` fails, preventing future `start_polling` calls from being permanently rejected
+
 - **B1: Flicker on startup** — `handle_no_track` now skips on first poll to avoid clearing Teams status before any track was ever set; sends "🎵 Nothing playing on Spotify" instead of empty string
 - **B3: "Unknown" status message** — `clear_teams_status_message` now receives a human-readable placeholder text instead of empty string
 - **B4: Duplicate polling thread** — `start_polling` now guards against spawning a duplicate thread using a `stop_tx.is_some()` check in addition to the `is_syncing` lock

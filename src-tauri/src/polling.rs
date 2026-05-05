@@ -91,7 +91,7 @@ fn process_track(
                     log::error!("[POLLING] process_track: Failed to refresh Teams token: {}", e);
                     // Clear the tokens so we don't keep trying with expired ones
                     *state.teams_tokens.write() = None;
-                    let _ = app.emit("teams-reconnect-required", ());
+                    let _ = app.emit("teams-reconnect-required", serde_json::json!(null));
                     None
                 }
             }
@@ -190,29 +190,29 @@ fn process_track(
                     let e_str = e.to_lowercase();
                     if e_str.contains("unauthorized") || e_str.contains("forbidden") || e_str.contains("401") || e_str.contains("403") {
                         log::warn!("[POLLING] process_track: Teams auth failure detected, emitting teams-reconnect-required");
-                        let _ = app.emit("teams-reconnect-required", ());
+                        let _ = app.emit("teams-reconnect-required", serde_json::json!(null));
                     }
                 }
             }
         } else if config.as_ref().map(|c| c.teams.clear_on_pause).unwrap_or(true) {
             if !is_first_poll {
-            match clear_teams_status_message(&teams_tok.access_token, "") {
-                Ok(_) => {
-                    *last_teams_update = Some(Instant::now());
-                    let _ = app.emit(
-                        "presence-cleared",
-                        serde_json::json!({ "timestamp": Utc::now().to_rfc3339() }),
-                    );
-                }
-                Err(e) => {
-                    log::error!(
-                        "[POLLING] process_track: Failed to clear Teams status: {}",
-                        e
-                    );
+                match clear_teams_status_message(&teams_tok.access_token, "") {
+                    Ok(_) => {
+                        *last_teams_update = Some(Instant::now());
+                        let _ = app.emit(
+                            "presence-cleared",
+                            serde_json::json!({ "timestamp": Utc::now().to_rfc3339() }),
+                        );
+                    }
+                    Err(e) => {
+                        log::error!(
+                            "[POLLING] process_track: Failed to clear Teams status: {}",
+                            e
+                        );
+                    }
                 }
             }
         }
-            }
     }
 
     if track.is_playing {
@@ -321,6 +321,10 @@ pub fn start_polling(
         })
         .map_err(|e| {
             log::error!("[POLLING] start_polling: thread spawn failed - {}", e);
+            // Reset is_syncing so future start_polling calls are not permanently wedged.
+            *state.is_syncing.write() = false;
+            // Also clean up the stop channel sender we just stored.
+            *state.stop_tx.write() = None;
             format!("Failed to spawn polling thread: {}", e)
         })?;
 
@@ -599,7 +603,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                                     );
                                     // Permanent failure after refresh retry — require re-auth
                                     log::warn!("[POLLING] polling_loop: Spotify token refresh permanently failed, emitting spotify-reconnect-required");
-                                    let _ = app.emit("spotify-reconnect-required", ());
+                                    let _ = app.emit("spotify-reconnect-required", serde_json::json!(null));
                                     final_err = SpotifyApiError::Other(refresh_err.to_string());
                                 }
                             }
@@ -622,7 +626,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                 // After 5 consecutive transient failures, exit and require reconnect
                 if transient_failure_count >= 5 {
                     log::error!("[POLLING] polling_loop: 5 consecutive transient failures, exiting and requiring reconnect");
-                    let _ = app.emit("reconnect-required", ());
+                    let _ = app.emit("reconnect-required", serde_json::json!(null));
                     break;
                 }
 
