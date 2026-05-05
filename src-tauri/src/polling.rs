@@ -40,6 +40,7 @@ fn process_track(
     last_track_key: &mut Option<String>,
     last_poll_instant: Instant,
     last_teams_update: &mut Option<Instant>,
+    is_first_poll: bool,
 ) -> u64 {
     // Bug 13: Correct progress_ms for elapsed time since last poll
     let elapsed_ms = last_poll_instant.elapsed().as_millis() as u64;
@@ -90,7 +91,7 @@ fn process_track(
                     log::error!("[POLLING] process_track: Failed to refresh Teams token: {}", e);
                     // Clear the tokens so we don't keep trying with expired ones
                     *state.teams_tokens.write() = None;
-                    let _ = app.emit("teams-reconnect-required", ());
+                    let _ = app.emit("teams-reconnect-required", serde_json::json!(null));
                     None
                 }
             }
@@ -189,24 +190,26 @@ fn process_track(
                     let e_str = e.to_lowercase();
                     if e_str.contains("unauthorized") || e_str.contains("forbidden") || e_str.contains("401") || e_str.contains("403") {
                         log::warn!("[POLLING] process_track: Teams auth failure detected, emitting teams-reconnect-required");
-                        let _ = app.emit("teams-reconnect-required", ());
+                        let _ = app.emit("teams-reconnect-required", serde_json::json!(null));
                     }
                 }
             }
         } else if config.as_ref().map(|c| c.teams.clear_on_pause).unwrap_or(true) {
-            match clear_teams_status_message(&teams_tok.access_token) {
-                Ok(_) => {
-                    *last_teams_update = Some(Instant::now());
-                    let _ = app.emit(
-                        "presence-cleared",
-                        serde_json::json!({ "timestamp": Utc::now().to_rfc3339() }),
-                    );
-                }
-                Err(e) => {
-                    log::error!(
-                        "[POLLING] process_track: Failed to clear Teams status: {}",
-                        e
-                    );
+            if !is_first_poll {
+                match clear_teams_status_message(&teams_tok.access_token, "") {
+                    Ok(_) => {
+                        *last_teams_update = Some(Instant::now());
+                        let _ = app.emit(
+                            "presence-cleared",
+                            serde_json::json!({ "timestamp": Utc::now().to_rfc3339() }),
+                        );
+                    }
+                    Err(e) => {
+                        log::error!(
+                            "[POLLING] process_track: Failed to clear Teams status: {}",
+                            e
+                        );
+                    }
                 }
             }
         }
@@ -235,7 +238,7 @@ fn handle_no_track(app: &AppHandle, state: &Arc<AppState>, last_track_key: &mut 
             guard.clone()
         };
         if let Some(teams_tok) = teams_tokens {
-            match clear_teams_status_message(&teams_tok.access_token) {
+            match clear_teams_status_message(&teams_tok.access_token, "🎵 Nothing playing on Spotify") {
                 Ok(_) => {
                     let _ = app.emit(
                         "presence-cleared",
@@ -259,6 +262,22 @@ pub fn start_polling(
 ) -> Result<thread::JoinHandle<()>, String> {
     log::info!("[POLLING] start_polling: ENTRY");
 
+    // Guard against spawning duplicate polling thread.
+    // Acquire write lock for the full check-and-set to make it atomic.
+    // This mirrors commands.rs:start_syncing which also holds the write lock
+    // across its atomic check-and-set. The polling loop only reads is_syncing
+    // (via is_syncing.read()) so concurrent read access is unaffected.
+    {
+        let mut is_syncing_guard = state.is_syncing.write();
+        if *is_syncing_guard {
+            log::warn!("[POLLING] start_polling: polling already running, returning early");
+            return Err("Polling is already running".to_string());
+        }
+        *is_syncing_guard = true;
+    }
+
+    log::info!("[POLLING] start_polling: is_syncing flag set to true");
+
     // Create interruptible stop channel so stop_syncing can wake the thread immediately.
     // See issue #10 (Polling thread cannot be cancelled mid-request).
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
@@ -267,9 +286,6 @@ pub fn start_polling(
         let mut tx_guard = state.stop_tx.write();
         *tx_guard = Some(stop_tx);
     }
-
-    *state.is_syncing.write() = true;
-    log::info!("[POLLING] start_polling: is_syncing flag set to true");
 
     // Clone Arc for the thread
     let state_clone = Arc::clone(&state);
@@ -280,11 +296,35 @@ pub fn start_polling(
         .stack_size(1024 * 1024) // 1MB stack for safety
         .spawn(move || {
             log::info!("[POLLING] start_polling: thread started");
-            polling_loop(state_clone, app_clone, stop_rx);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                polling_loop(state_clone, app_clone, stop_rx);
+            }));
+            if let Err(panic_info) = result {
+                if let Some(s) = panic_info.downcast_ref::<&str>() {
+                    log::error!(
+                        "[POLLING] start_polling: polling_loop panicked with &str: {}",
+                        s
+                    );
+                } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                    log::error!(
+                        "[POLLING] start_polling: polling_loop panicked with String: {}",
+                        s
+                    );
+                } else {
+                    log::error!(
+                        "[POLLING] start_polling: polling_loop panicked with non-string payload"
+                    );
+                }
+                let _ = app.emit("polling-thread-panicked", serde_json::json!(null));
+            }
             log::info!("[POLLING] start_polling: thread ended");
         })
         .map_err(|e| {
             log::error!("[POLLING] start_polling: thread spawn failed - {}", e);
+            // Reset is_syncing so future start_polling calls are not permanently wedged.
+            *state.is_syncing.write() = false;
+            // Also clean up the stop channel sender we just stored.
+            *state.stop_tx.write() = None;
             format!("Failed to spawn polling thread: {}", e)
         })?;
 
@@ -303,6 +343,8 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
     log::info!("[POLLING] polling_loop: STARTED");
     let mut last_track_key: Option<String> = None;
     let mut last_teams_update: Option<Instant> = None;
+    let mut is_first_poll = true;
+    let mut transient_failure_count: u8 = 0;
 
     loop {
         log::info!("[POLLING] polling_loop: iteration start");
@@ -434,7 +476,9 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                     track.artist
                 );
                 let sleep_duration =
-                    process_track(&app, &state, &config, &track, &mut last_track_key, last_poll_instant, &mut last_teams_update);
+                    process_track(&app, &state, &config, &track, &mut last_track_key, last_poll_instant, &mut last_teams_update, is_first_poll);
+                transient_failure_count = 0;
+                is_first_poll = false;
                 // Update tray menu with current sync state and track info (Bug 24+25 fix)
                 let is_syncing = *state.is_syncing.read();
                 let current_track = state.current_track.read().clone();
@@ -459,6 +503,8 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
             Ok(None) => {
                 log::info!("[POLLING] polling_loop: no track playing");
                 handle_no_track(&app, &state, &mut last_track_key);
+                transient_failure_count = 0;
+                is_first_poll = false;
                 // Update tray menu with current sync state and track info (Bug 24+25 fix)
                 let is_syncing = *state.is_syncing.read();
                 let current_track = state.current_track.read().clone();
@@ -524,7 +570,10 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                                                 &mut last_track_key,
                                                 last_poll_instant,
                                                 &mut last_teams_update,
+                                                is_first_poll,
                                             );
+                                            transient_failure_count = 0;
+                                            is_first_poll = false;
                                             continue;
                                         }
                                         Ok(None) => {
@@ -537,6 +586,8 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                                                 }
                                                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                                             }
+                                            transient_failure_count = 0;
+                                            is_first_poll = false;
                                             continue;
                                         }
                                         Err(retry_err) => {
@@ -552,7 +603,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                                     );
                                     // Permanent failure after refresh retry — require re-auth
                                     log::warn!("[POLLING] polling_loop: Spotify token refresh permanently failed, emitting spotify-reconnect-required");
-                                    let _ = app.emit("spotify-reconnect-required", ());
+                                    let _ = app.emit("spotify-reconnect-required", serde_json::json!(null));
                                     final_err = SpotifyApiError::Other(refresh_err.to_string());
                                 }
                             }
@@ -562,6 +613,21 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
 
                 if matches!(final_err, SpotifyApiError::RateLimited) {
                     backoff_secs = with_jitter(RATE_LIMIT_BACKOFF_SECONDS);
+                }
+
+                // Only count truly transient errors toward the retry limit.
+                // ExpiredToken triggers a refresh/retry above; if we reach here the
+                // retry failed — still count it as transient so the loop can give up.
+                // Auth/Other errors are non-transient and do not contribute.
+                if matches!(final_err, SpotifyApiError::RateLimited | SpotifyApiError::ExpiredToken) {
+                    transient_failure_count += 1;
+                }
+
+                // After 5 consecutive transient failures, exit and require reconnect
+                if transient_failure_count >= 5 {
+                    log::error!("[POLLING] polling_loop: 5 consecutive transient failures, exiting and requiring reconnect");
+                    let _ = app.emit("reconnect-required", serde_json::json!(null));
+                    break;
                 }
 
                 let _ = app.emit(

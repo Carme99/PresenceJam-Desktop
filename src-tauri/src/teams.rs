@@ -454,13 +454,13 @@ pub fn set_teams_status_message(
     Ok(())
 }
 
-pub fn clear_teams_status_message(access_token: &str) -> Result<(), String> {
+pub fn clear_teams_status_message(access_token: &str, placeholder: &str) -> Result<(), String> {
     let client = build_teams_client()?;
 
     let body = StatusMessageRequest {
         status_message: StatusMessageContent {
             message: MessageContent {
-                content: String::new(),
+                content: placeholder.to_string(),
                 content_type: "text".to_string(),
             },
             expiry_date_time: None,

@@ -304,8 +304,10 @@ sequenceDiagram
 | `presence-updated` | `{status, timestamp}` | Teams status successfully updated |
 | `presence-cleared` | `{timestamp}` | Teams status cleared |
 | `error` | `{source, message}` | Any API error (Spotify, Teams, or auth) |
-| `spotify-reconnect-required` | — | User clicked reconnect for Spotify |
-| `teams-reconnect-required` | — | User clicked reconnect for Teams |
+| `spotify-reconnect-required` | `null` | Spotify token expired or auth failure requiring re-auth |
+| `teams-reconnect-required` | `null` | Teams token expired or auth failure requiring re-auth |
+| `reconnect-required` | `null` | Transient failure retry limit exhausted, polling loop exiting |
+| `polling-thread-panicked` | `null` | Polling thread panicked and was caught by `catch_unwind` |
 | `tray-click` | — | User clicks tray icon |
 | `toggle-pause` | — | User clicks Pause in tray menu |
 
