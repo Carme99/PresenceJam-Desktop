@@ -1,0 +1,16 @@
+# Created using wingetcreate 1.12.8.0
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
+
+PackageIdentifier: PresenceJam.PresenceJam
+PackageVersion: 2.4.2
+InstallerType: wix
+UpgradeBehavior: install
+AppsAndFeaturesEntries:
+- UpgradeCode: '{72C2B806-ED84-559F-8C03-E31D5D972139}'
+Installers:
+- Architecture: x64
+  InstallerUrl: https://github.com/Carme99/PresenceJam-Desktop/releases/download/v2.4.2/PresenceJam_2.4.2_x64_en-US.msi
+  InstallerSha256: 9C6F1863C33338E54B9EC79DFBC21D1EF123021FED544440B944C1F8E8E262CA
+ManifestType: installer
+ManifestVersion: 1.12.0
+ReleaseDate: 2026-05-05

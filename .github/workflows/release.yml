@@ -106,3 +106,19 @@ jobs:
           generateReleaseNotes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  winget:
+    needs: release
+    runs-on: windows-latest
+    steps:
+      - name: Submit to winget
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          $url = "https://github.com/Carme99/PresenceJam-Desktop/releases/download/${{ github.ref_name }}/PresenceJam_${version}_x64_en-US.msi"
+          iwr https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
+          .\wingetcreate.exe update PresenceJam.PresenceJam `
+            --version $version `
+            --urls $url `
+            --submit `
+            --token ${{ secrets.WINGET_TOKEN }}
+        shell: pwsh
