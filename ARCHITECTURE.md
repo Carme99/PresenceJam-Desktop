@@ -8,7 +8,7 @@ PresenceJam is a Tauri 2 desktop application with:
 
 - **Frontend:** Svelte 5 + TypeScript (SPA mode via `@sveltejs/adapter-static`)
 - **Backend:** Rust (Tauri 2 command handlers + polling thread)
-- **Storage:** `tauri-plugin-store` for tokens, JSON files for config
+- **Storage:** `tauri-plugin-store` for all persistent data (tokens + config)
 - **Auth:** Spotify PKCE OAuth 2.0 + Microsoft Teams Device Code flow
 - **Platform:** Windows + macOS (single-instance enforcement, system tray, DPAPI token encryption on Windows, Keychain on macOS)
 
@@ -18,7 +18,7 @@ PresenceJam is a Tauri 2 desktop application with:
 graph TD
     subgraph Frontend ["Frontend (Svelte)"]
         UI["+page.svelte<br/>Dashboard / Onboarding<br/>Settings / LogViewer"]
-        Stores["Stores<br/>app.ts, config.ts<br/>spotify.ts, teams.ts"]
+        Stores["Stores<br/>app.ts, config.ts<br/>spotify.ts (interfaces)<br/>teams.ts (interfaces)"]
     end
 
     subgraph Backend ["Backend (Rust / Tauri)"]
@@ -336,8 +336,8 @@ PresenceJam-Desktop/
 │   │   ├── stores/
 │   │   │   ├── app.ts                 # currentView, isSyncing, appError
 │   │   │   ├── config.ts               # configStore, saveConfig
-│   │   │   ├── spotify.ts              # Spotify token state
-│   │   │   └── teams.ts                # Teams token state
+│   │   │   ├── spotify.ts              # interfaces only (SpotifyTokens, TrackInfo)
+│   │   │   └── teams.ts                # interfaces only (TeamsTokens)
 │   │   └── utils/
 │   │       └── dev.ts                  # devLog() conditional logger
 │   └── routes/
@@ -390,4 +390,3 @@ Multiple threads access this shared state via `RwLock`:
 | `isSyncing` | `boolean` | Sync running/paused |
 | `appError` | `string \| null` | Current error message |
 | `configStore` | `AppConfig` | Full app config |
-| `currentTrack` (spotify.ts) | `TrackInfo \| null` | Currently playing track (managed as local component state) |
