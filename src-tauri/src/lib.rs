@@ -402,6 +402,26 @@ pub fn run() {
                     }
                 }
 
+                // Clean up stale temp files from previous crashes
+                log::info!("[APP] setup: cleaning up stale config temp files");
+                if let Ok(config_dir) = crate::config::config_dir() {
+                    if let Ok(entries) = std::fs::read_dir(&config_dir) {
+                        for entry in entries.flatten() {
+                            if entry
+                                .path()
+                                .extension()
+                                .map_or(false, |e| e == "tmp")
+                            {
+                                let _ = std::fs::remove_file(entry.path());
+                                log::info!(
+                                    "[APP] setup: removed stale temp file: {}",
+                                    entry.path().display()
+                                );
+                            }
+                        }
+                    }
+                }
+
                 // Setup system tray
                 log::info!("[APP] setup: setting up system tray");
                 if let Err(e) = tray::setup_tray(app) {
