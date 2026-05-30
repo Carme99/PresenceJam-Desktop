@@ -196,7 +196,7 @@ fn process_track(
             }
         } else if config.as_ref().map(|c| c.teams.clear_on_pause).unwrap_or(true) {
             if !is_first_poll {
-                match clear_teams_status_message(&teams_tok.access_token, "") {
+                match clear_teams_status_message(&teams_tok.access_token, "🎵 Paused") {
                     Ok(_) => {
                         *last_teams_update = Some(Instant::now());
                         let _ = app.emit(
@@ -315,7 +315,10 @@ pub fn start_polling(
                         "[POLLING] start_polling: polling_loop panicked with non-string payload"
                     );
                 }
-                let _ = app.emit("polling-thread-panicked", serde_json::json!(null));
+                let _ = app_clone.emit("polling-thread-panicked", serde_json::json!(null));
+                // Reset state so a panic doesn't wedge the app in "syncing"
+                *state.is_syncing.write() = false;
+                *state.stop_tx.write() = None;
             }
             log::info!("[POLLING] start_polling: thread ended");
         })

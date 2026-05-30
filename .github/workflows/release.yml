@@ -115,6 +115,6 @@ jobs:
     steps:
       - uses: vedantmgoyal2009/winget-releaser@v2
         with:
-          identifier: Carme99.PresenceJam
+          identifier: PresenceJam.PresenceJam
           token: ${{ secrets.WINGET_TOKEN }}
           release-tag: ${{ github.ref_name }}
