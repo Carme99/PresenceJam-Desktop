@@ -4,8 +4,6 @@
   import { onMount, onDestroy } from 'svelte';
   import { currentView } from '$lib/stores/app';
   import { configStore, saveConfig, loadConfig, type AppConfig } from '$lib/stores/config';
-  import { spotifyConnected } from '$lib/stores/spotify';
-  import { teamsConnected } from '$lib/stores/teams';
 
   let localConfig = $state<AppConfig>({ ...$configStore });
   let isConnected = $state(false);
@@ -42,8 +40,7 @@
       isConnected = syncStatus.spotify_connected ?? false;
       teamsStatusConnected = syncStatus.teams_connected ?? false;
     } catch {
-      isConnected = $spotifyConnected;
-      teamsStatusConnected = $teamsConnected;
+      // get_sync_status failed, use local state defaults
     }
 
     // Listen for reconnect-required events (emitted when backend clears tokens and needs re-auth)

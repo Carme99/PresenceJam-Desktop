@@ -129,9 +129,7 @@ fn process_track(
                 let buffer_ms = 5000u64;
                 let remaining_secs = remaining_ms / 1000;
                 let sleep_secs = remaining_secs.saturating_sub(buffer_ms / 1000);
-                return sleep_secs
-                    .max(MINIMUM_INTERVAL_SECONDS)
-                    .min(MAX_INTERVAL_SECONDS);
+                return sleep_secs.clamp(MINIMUM_INTERVAL_SECONDS, MAX_INTERVAL_SECONDS);
             }
             let status_format = config
                 .as_ref()
@@ -196,7 +194,7 @@ fn process_track(
             }
         } else if config.as_ref().map(|c| c.teams.clear_on_pause).unwrap_or(true) {
             if !is_first_poll {
-                match clear_teams_status_message(&teams_tok.access_token, "") {
+                match clear_teams_status_message(&teams_tok.access_token, "🎵 Paused") {
                     Ok(_) => {
                         *last_teams_update = Some(Instant::now());
                         let _ = app.emit(
@@ -220,9 +218,7 @@ fn process_track(
         let buffer_ms = 5000u64;
         let remaining_secs = remaining_ms / 1000;
         let sleep_secs = remaining_secs.saturating_sub(buffer_ms / 1000);
-        sleep_secs
-            .max(MINIMUM_INTERVAL_SECONDS)
-            .min(MAX_INTERVAL_SECONDS)
+        sleep_secs.clamp(MINIMUM_INTERVAL_SECONDS, MAX_INTERVAL_SECONDS)
     } else {
         DEFAULT_INTERVAL_SECONDS
     }
@@ -296,6 +292,9 @@ pub fn start_polling(
         .stack_size(1024 * 1024) // 1MB stack for safety
         .spawn(move || {
             log::info!("[POLLING] start_polling: thread started");
+            // SAFETY: polling_loop only uses parking_lot::RwLock, which does not
+            // poison on panic (unlike std::sync::RwLock). Even if the polling
+            // thread panics, the AppState locks remain usable by the main thread.
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 polling_loop(state_clone, app_clone, stop_rx);
             }));
@@ -668,7 +667,7 @@ pub fn stop_polling(state: &AppState) {
 
 
 pub fn save_spotify_tokens(app: &AppHandle, tokens: &SpotifyTokens) -> Result<(), String> {
-    log::info!(
+    log::debug!(
         "[POLLING] save_spotify_tokens: ENTRY - access_token.len={}",
         tokens.access_token.len()
     );
@@ -718,7 +717,7 @@ pub fn load_spotify_tokens(app: &AppHandle) -> Result<Option<SpotifyTokens>, Str
 }
 
 pub fn save_teams_tokens(app: &AppHandle, tokens: &TeamsTokens) -> Result<(), String> {
-    log::info!(
+    log::debug!(
         "[POLLING] save_teams_tokens: ENTRY - access_token.len={}",
         tokens.access_token.len()
     );

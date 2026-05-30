@@ -184,15 +184,38 @@ pub fn update_tray_menu(
             e.to_string()
         })?;
 
-    let separator1 = PredefinedMenuItem::separator(app).map_err(|e| {
-        log::warn!("[TRAY] update_tray_menu: failed to build separator1: {}", e);
-        e.to_string()
-    })?;
-    // separator2 inserted only when track is added (see below)
-    let separator3 = PredefinedMenuItem::separator(app).map_err(|e| {
-        log::warn!("[TRAY] update_tray_menu: failed to build separator3: {}", e);
-        e.to_string()
-    })?;
+    // Build menu with optional track info
+    let mut menu_builder = MenuBuilder::new(app).items(&[&show_hide, &pause_resume]);
+
+    // Add current track item if playing — insert separator before track
+    if let Some(track) = &current_track {
+        if track.is_playing {
+            let separator_before_track = PredefinedMenuItem::separator(app).map_err(|e| {
+                log::warn!("[TRAY] update_tray_menu: failed to build separator_before_track: {}", e);
+                e.to_string()
+            })?;
+            let track_item = MenuItemBuilder::with_id(
+                ID_CURRENT_TRACK,
+                format!("🎵 {} - {}", track.artist, track.title),
+            )
+            .enabled(false)
+            .build(app)
+            .map_err(|e| {
+                log::warn!("[TRAY] update_tray_menu: failed to build track_item: {}", e);
+                e.to_string()
+            })?;
+            menu_builder = menu_builder.item(&separator_before_track).item(&track_item);
+        }
+    }
+
+    // Add separator after track section only if track is present
+    if current_track.as_ref().map(|t| t.is_playing).unwrap_or(false) {
+        let separator_after_track = PredefinedMenuItem::separator(app).map_err(|e| {
+            log::warn!("[TRAY] update_tray_menu: failed to build separator_after_track: {}", e);
+            e.to_string()
+        })?;
+        menu_builder = menu_builder.item(&separator_after_track);
+    }
 
     let open_settings = MenuItemBuilder::with_id(ID_OPEN_SETTINGS, "Open Settings")
         .build(app)
@@ -215,32 +238,8 @@ pub fn update_tray_menu(
             e.to_string()
         })?;
 
-    // Build menu with optional track info
-    let mut menu_builder = MenuBuilder::new(app).items(&[&show_hide, &pause_resume, &separator1]);
-
-    // Add current track item if playing — insert separator2 here too
-    if let Some(track) = &current_track {
-        if track.is_playing {
-            let separator2 = PredefinedMenuItem::separator(app).map_err(|e| {
-                log::warn!("[TRAY] update_tray_menu: failed to build separator2: {}", e);
-                e.to_string()
-            })?;
-            let track_item = MenuItemBuilder::with_id(
-                ID_CURRENT_TRACK,
-                format!("🎵 {} - {}", track.artist, track.title),
-            )
-            .enabled(false)
-            .build(app)
-            .map_err(|e| {
-                log::warn!("[TRAY] update_tray_menu: failed to build track_item: {}", e);
-                e.to_string()
-            })?;
-            menu_builder = menu_builder.item(&track_item).item(&separator2);
-        }
-    }
-
     let menu = menu_builder
-        .items(&[&open_settings, &open_logs, &separator3, &quit])
+        .items(&[&open_settings, &open_logs, &quit])
         .build()
         .map_err(|e| {
             log::warn!("[TRAY] update_tray_menu: failed to build menu: {}", e);

@@ -26,7 +26,7 @@ pub enum TeamsApiError {
 /// Ensures consistent HTTP client settings across all Teams API calls.
 fn build_teams_client() -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
-        .user_agent("PresenceJam/2.0")
+        .user_agent(format!("PresenceJam/{}", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))
@@ -210,7 +210,7 @@ pub fn poll_teams_auth(device_code: &str) -> Result<TeamsTokens, String> {
             });
         }
 
-        let error_resp: TokenErrorResponse = serde_json::from_str(&raw_body).map_err(|e| {
+        let error_resp: TokenErrorResponse = serde_json::from_str(&raw_body).map_err(|e | {
             format!(
                 "Failed to parse error response: {} (body was: {})",
                 e, raw_body
@@ -371,7 +371,8 @@ pub fn refresh_teams_token(tokens: &TeamsTokens) -> Result<TeamsTokens, String> 
 
     Ok(TeamsTokens {
         access_token: token_resp.access_token,
-        refresh_token: token_resp.refresh_token,
+        refresh_token: token_resp.refresh_token
+            .or_else(|| tokens.refresh_token.clone()),
         expires_at,
     })
 }

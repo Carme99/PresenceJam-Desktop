@@ -63,24 +63,12 @@ fn default_profanity_placeholder() -> String {
 pub struct PollingConfig {
     #[serde(default = "default_interval_seconds")]
     pub default_interval_seconds: u64,
-    #[serde(default = "default_min_interval_seconds")]
-    pub minimum_interval_seconds: u64,
-    #[serde(default = "default_max_interval_seconds")]
-    pub max_interval_seconds: u64,
     #[serde(default = "default_expiry_buffer_seconds")]
     pub expiry_buffer_seconds: u64,
 }
 
 fn default_interval_seconds() -> u64 {
     30
-}
-
-fn default_min_interval_seconds() -> u64 {
-    5
-}
-
-fn default_max_interval_seconds() -> u64 {
-    60
 }
 
 fn default_expiry_buffer_seconds() -> u64 {
@@ -111,6 +99,8 @@ fn default_retention_days() -> u32 {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
+    #[serde(default = "default_config_version")]
+    pub config_version: u32,
     #[serde(default)]
     pub spotify: SpotifyConfig,
     #[serde(default)]
@@ -121,6 +111,10 @@ pub struct AppConfig {
     pub logging: LoggingConfig,
     #[serde(default)]
     pub autostart: bool,
+}
+
+fn default_config_version() -> u32 {
+    1
 }
 
 impl Default for SpotifyConfig {
@@ -150,8 +144,6 @@ impl Default for PollingConfig {
     fn default() -> Self {
         Self {
             default_interval_seconds: default_interval_seconds(),
-            minimum_interval_seconds: default_min_interval_seconds(),
-            max_interval_seconds: default_max_interval_seconds(),
             expiry_buffer_seconds: default_expiry_buffer_seconds(),
         }
     }
@@ -170,6 +162,7 @@ impl Default for LoggingConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            config_version: default_config_version(),
             spotify: SpotifyConfig::default(),
             teams: TeamsConfig::default(),
             polling: PollingConfig::default(),
@@ -177,13 +170,6 @@ impl Default for AppConfig {
             autostart: false,
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Credentials {
-    pub access_token: String,
-    pub refresh_token: String,
-    pub expires_at: i64,
 }
 
 pub fn config_dir() -> Result<PathBuf, String> {
@@ -210,6 +196,39 @@ pub fn config_dir() -> Result<PathBuf, String> {
 pub fn get_config_path() -> Result<PathBuf, String> {
     let dir = config_dir()?;
     Ok(dir.join("config.json"))
+}
+
+/// Deletes log files older than `retention_days` from the app log directory.
+/// Called during setup to enforce the configured retention policy.
+/// See issue #22.
+pub fn enforce_log_retention(retention_days: u32) {
+    let Some(log_dir) = dirs::cache_dir().map(|d| d.join("PresenceJam")) else {
+        log::warn!("[CONFIG] enforce_log_retention: failed to get cache dir");
+        return;
+    };
+
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(retention_days as i64);
+    let entries = match std::fs::read_dir(&log_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else { continue };
+        let Ok(modified) = metadata.modified() else { continue };
+        let modified_time: chrono::DateTime<chrono::Utc> = modified.into();
+        if modified_time < cutoff {
+            let _ = std::fs::remove_file(&path);
+            log::info!(
+                "[CONFIG] enforce_log_retention: deleted old log file: {}",
+                path.display()
+            );
+        }
+    }
 }
 
 pub fn load_config() -> Result<AppConfig, String> {
@@ -254,13 +273,28 @@ fn atomic_write_json(path: &std::path::Path, json: &str) -> Result<(), String> {
     file.sync_all()
         .map_err(|e| format!("Failed to sync temp file '{}': {}", temp_path.display(), e))?;
 
-    if path.exists() {
-        std::fs::remove_file(path)
-            .map_err(|e| format!("Failed to remove existing file '{}': {}", path.display(), e))?;
+    #[cfg(unix)]
+    {
+        std::fs::rename(&temp_path, path)
+            .map_err(|e| format!("Failed to rename temp file to '{}': {}", path.display(), e))?;
     }
 
-    std::fs::rename(&temp_path, path)
-        .map_err(|e| format!("Failed to rename temp file to '{}': {}", path.display(), e))?;
+    #[cfg(windows)]
+    {
+        if path.exists() {
+            let backup = path.with_extension("bak");
+            std::fs::rename(path, &backup)
+                .map_err(|e| format!("Failed to backup existing file: {}", e))?;
+            if let Err(e) = std::fs::rename(&temp_path, path) {
+                let _ = std::fs::rename(&backup, path);
+                return Err(format!("Failed to rename temp file: {}", e));
+            }
+            let _ = std::fs::remove_file(&backup);
+        } else {
+            std::fs::rename(&temp_path, path)
+                .map_err(|e| format!("Failed to rename temp file to '{}': {}", path.display(), e))?;
+        }
+    }
 
     Ok(())
 }
@@ -274,56 +308,6 @@ pub fn save_config(config: &AppConfig) -> Result<(), String> {
     atomic_write_json(&path, &json)?;
 
     log::info!("Saved configuration to '{}'", path.display());
-    Ok(())
-}
-
-pub fn load_credentials() -> Result<Credentials, String> {
-    let dir = config_dir()?;
-    let path = dir.join("credentials.json");
-
-    if !path.exists() {
-        return Err("Credentials file not found".to_string());
-    }
-
-    let mut file = fs::File::open(&path).map_err(|e| {
-        format!(
-            "Failed to open credentials file '{}': {}",
-            path.display(),
-            e
-        )
-    })?;
-
-    let mut contents = String::new();
-    file.read_to_string(&mut contents).map_err(|e| {
-        format!(
-            "Failed to read credentials file '{}': {}",
-            path.display(),
-            e
-        )
-    })?;
-
-    let credentials: Credentials = serde_json::from_str(&contents).map_err(|e| {
-        format!(
-            "Failed to parse credentials file '{}': {}",
-            path.display(),
-            e
-        )
-    })?;
-
-    log::info!("Loaded credentials from '{}'", path.display());
-    Ok(credentials)
-}
-
-pub fn save_credentials(credentials: &Credentials) -> Result<(), String> {
-    let dir = config_dir()?;
-    let path = dir.join("credentials.json");
-
-    let json = serde_json::to_string_pretty(credentials)
-        .map_err(|e| format!("Failed to serialize credentials to JSON: {}", e))?;
-
-    atomic_write_json(&path, &json)?;
-
-    log::info!("Saved credentials to '{}'", path.display());
     Ok(())
 }
 

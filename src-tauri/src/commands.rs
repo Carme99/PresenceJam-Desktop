@@ -236,7 +236,7 @@ pub fn complete_spotify_auth(
         &client_secret,
         &redirect_uri,
     )?;
-    log::info!(
+    log::debug!(
         "[CMD] complete_spotify_auth: token exchange successful - access_token.len={}",
         tokens.access_token.len()
     );
@@ -287,7 +287,7 @@ pub fn complete_spotify_auth_manual(
             "No pending Spotify auth. Please start auth again.".to_string()
         })?
     };
-    log::info!(
+    log::debug!(
         "[CMD] complete_spotify_auth_manual: pending auth found - verifier.len={}",
         pending.verifier.len()
     );
@@ -351,7 +351,7 @@ pub fn get_spotify_tokens(
 
     let loaded = polling::load_spotify_tokens(&app)?;
     if let Some(tokens) = &loaded {
-        log::info!(
+        log::debug!(
             "[CMD] get_spotify_tokens: loaded from store - access_token.len={}",
             tokens.access_token.len()
         );
@@ -493,7 +493,7 @@ pub fn poll_teams_auth(
     );
 
     let tokens = crate::teams::poll_teams_auth(&device_code)?;
-    log::info!(
+    log::debug!(
         "[CMD] poll_teams_auth: poll successful - access_token.len={}",
         tokens.access_token.len()
     );
@@ -598,7 +598,7 @@ pub fn get_teams_tokens(
 
     let loaded = polling::load_teams_tokens(&app)?;
     if let Some(tokens) = &loaded {
-        log::info!(
+        log::debug!(
             "[CMD] get_teams_tokens: loaded from store - access_token.len={}",
             tokens.access_token.len()
         );
@@ -653,7 +653,7 @@ pub fn start_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> 
         log::info!("[CMD] start_syncing: is_syncing flag set to true");
     }
 
-    let handle = match polling::start_polling(Arc::clone(&state.inner()), app.clone()) {
+    let handle = match polling::start_polling(Arc::clone(state.inner()), app.clone()) {
         Ok(h) => h,
         Err(e) => {
             // Roll back is_syncing flag since no handle was created

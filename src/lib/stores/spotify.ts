@@ -16,5 +16,3 @@ export interface TrackInfo {
   duration_ms: number;
 }
 
-export const spotifyConnected = writable(false);
-export const spotifyTokens = writable<SpotifyTokens | null>(null);

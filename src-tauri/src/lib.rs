@@ -70,12 +70,18 @@ async fn handle_spotify_callback(code: &str, state_param: Option<&str>, app: &Ap
     let pending = {
         let mut guard = app_state.pending_spotify_auth.write();
         log::info!("[CALLBACK] handle_spotify_callback: taking pending Spotify auth from state");
-        guard.take().ok_or_else(|| {
+        let pending = guard.take().ok_or_else(|| {
             log::error!("[CALLBACK] handle_spotify_callback: No pending Spotify auth found");
             "No pending Spotify auth".to_string()
-        })?
+        })?;
+        // Check if pending auth has expired
+        if chrono::Utc::now() > pending.expires_at {
+            log::warn!("[CALLBACK] handle_spotify_callback: pending Spotify auth expired");
+            return Err("Spotify auth expired. Please try again.".to_string());
+        }
+        pending
     };
-    log::info!("[CALLBACK] handle_spotify_callback: pending auth found - verifier.len={}", pending.verifier.len());
+    log::debug!("[CALLBACK] handle_spotify_callback: pending auth found - verifier.len={}", pending.verifier.len());
 
     // Verify state matches to prevent CSRF attacks
     if let Some(state_str) = state_param {
@@ -97,7 +103,7 @@ async fn handle_spotify_callback(code: &str, state_param: Option<&str>, app: &Ap
         &pending.client_secret,
         &pending.redirect_uri,
     )?;
-    log::info!("[CALLBACK] handle_spotify_callback: token exchange successful - access_token.len={}", tokens.access_token.len());
+    log::debug!("[CALLBACK] handle_spotify_callback: token exchange successful - access_token.len={}", tokens.access_token.len());
     
     log::info!("[CALLBACK] handle_spotify_callback: saving tokens to store");
     crate::polling::save_spotify_tokens(app, &tokens)?;
@@ -124,10 +130,16 @@ async fn handle_teams_callback(code: &str, app: &AppHandle) -> Result<(), String
     let pending = {
         let mut guard = state.pending_teams_auth.write();
         log::info!("[CALLBACK] handle_teams_callback: taking pending Teams auth from state");
-        guard.take().ok_or_else(|| {
+        let pending = guard.take().ok_or_else(|| {
             log::error!("[CALLBACK] handle_teams_callback: No pending Teams auth found");
             "No pending Teams auth".to_string()
-        })?
+        })?;
+        // Check if pending auth has expired
+        if chrono::Utc::now() > pending.expires_at {
+            log::warn!("[CALLBACK] handle_teams_callback: pending Teams auth expired");
+            return Err("Teams auth expired. Please try again.".to_string());
+        }
+        pending
     };
     log::info!("[CALLBACK] handle_teams_callback: pending auth found");
     
@@ -138,7 +150,7 @@ async fn handle_teams_callback(code: &str, app: &AppHandle) -> Result<(), String
         &pending.client_id,
         &pending.redirect_uri,
     )?;
-    log::info!("[CALLBACK] handle_teams_callback: token exchange successful - access_token.len={}", tokens.access_token.len());
+    log::debug!("[CALLBACK] handle_teams_callback: token exchange successful - access_token.len={}", tokens.access_token.len());
     
     log::info!("[CALLBACK] handle_teams_callback: saving tokens to store");
     crate::polling::save_teams_tokens(app, &tokens)?;
