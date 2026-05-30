@@ -315,7 +315,8 @@ pub fn start_polling(
                         "[POLLING] start_polling: polling_loop panicked with non-string payload"
                     );
                 }
-                let _ = app_clone.emit("polling-thread-panicked", serde_json::json!(null));
+                // app_clone is moved into polling_loop above, so use app here
+                let _ = app.emit("polling-thread-panicked", serde_json::json!(null));
                 // Reset state so a panic doesn't wedge the app in "syncing"
                 *state.is_syncing.write() = false;
                 *state.stop_tx.write() = None;
