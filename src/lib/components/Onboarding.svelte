@@ -153,7 +153,6 @@
       }
     } catch (e) {
       console.error('[ONBOARDING] handleManualUrlPaste: FAILED:', e);
-      spotifyAuthError = String(e);
     }
     
     devLog('[ONBOARDING] handleManualUrlPaste: EXIT');

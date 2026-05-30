@@ -6,3 +6,5 @@ export interface TeamsTokens {
   expires_at: string;
 }
 
+export const teamsConnected = writable(false);
+export const teamsTokens = writable<TeamsTokens | null>(null);

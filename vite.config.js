@@ -1,4 +1,3 @@
-import pkg from './package.json' with { type: 'json' };
 import { defineConfig } from "vite";
 import { sveltekit } from "@sveltejs/kit/vite";
 
@@ -11,7 +10,7 @@ export default defineConfig(async () => ({
 
   define: {
     // Injected at build time — version from package.json + timestamp
-    __APP_BUILD__: JSON.stringify(`${pkg.version}.${Date.now()}`),
+    __APP_BUILD__: JSON.stringify(`2.4.1.${Date.now()}`),
   },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`

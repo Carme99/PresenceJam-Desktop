@@ -167,80 +167,80 @@ pub fn update_tray_menu(
         "Show Window"
     };
 
-    // Build all items, collecting errors instead of aborting on the first failure.
-    // A partial menu is better than a stale one.
-    let mut menu_builder = MenuBuilder::new(app);
+    let show_hide = MenuItemBuilder::with_id(ID_SHOW_HIDE, show_hide_label)
+        .build(app)
+        .map_err(|e| {
+            log::warn!("[TRAY] update_tray_menu: failed to build show_hide menu item: {}", e);
+            e.to_string()
+        })?;
 
-    macro_rules! try_add_item {
-        ($builder:expr, $item:expr, $name:expr) => {
-            match $item {
-                Ok(item) => $builder = $builder.item(&item),
-                Err(e) => log::warn!("[TRAY] update_tray_menu: failed to build {}: {}", $name, e),
-            }
-        };
-    }
+    // Pause/Resume label based on sync state
+    let pause_resume_id = if is_syncing { ID_PAUSE_SYNC } else { ID_RESUME_SYNC };
+    let pause_resume_label = if is_syncing { "Pause Sync" } else { "Resume Sync" };
+    let pause_resume = MenuItemBuilder::with_id(pause_resume_id, pause_resume_label)
+        .build(app)
+        .map_err(|e| {
+            log::warn!("[TRAY] update_tray_menu: failed to build pause_resume menu item: {}", e);
+            e.to_string()
+        })?;
 
-    try_add_item!(
-        menu_builder,
-        MenuItemBuilder::with_id(ID_SHOW_HIDE, show_hide_label).build(app),
-        "show_hide"
-    );
-    try_add_item!(
-        menu_builder,
-        MenuItemBuilder::with_id(
-            if is_syncing { ID_PAUSE_SYNC } else { ID_RESUME_SYNC },
-            if is_syncing { "Pause Sync" } else { "Resume Sync" },
-        )
-        .build(app),
-        "pause_resume"
-    );
+    let separator1 = PredefinedMenuItem::separator(app).map_err(|e| {
+        log::warn!("[TRAY] update_tray_menu: failed to build separator1: {}", e);
+        e.to_string()
+    })?;
+    // separator2 inserted only when track is added (see below)
+    let separator3 = PredefinedMenuItem::separator(app).map_err(|e| {
+        log::warn!("[TRAY] update_tray_menu: failed to build separator3: {}", e);
+        e.to_string()
+    })?;
 
-    // Optionally add current track info
+    let open_settings = MenuItemBuilder::with_id(ID_OPEN_SETTINGS, "Open Settings")
+        .build(app)
+        .map_err(|e| {
+            log::warn!("[TRAY] update_tray_menu: failed to build open_settings menu item: {}", e);
+            e.to_string()
+        })?;
+
+    let open_logs = MenuItemBuilder::with_id(ID_OPEN_LOGS, "Open Logs Folder")
+        .build(app)
+        .map_err(|e| {
+            log::warn!("[TRAY] update_tray_menu: failed to build open_logs menu item: {}", e);
+            e.to_string()
+        })?;
+
+    let quit = MenuItemBuilder::with_id(ID_QUIT, "Quit")
+        .build(app)
+        .map_err(|e| {
+            log::warn!("[TRAY] update_tray_menu: failed to build quit menu item: {}", e);
+            e.to_string()
+        })?;
+
+    // Build menu with optional track info
+    let mut menu_builder = MenuBuilder::new(app).items(&[&show_hide, &pause_resume, &separator1]);
+
+    // Add current track item if playing — insert separator2 here too
     if let Some(track) = &current_track {
         if track.is_playing {
-            if let Ok(sep) = PredefinedMenuItem::separator(app) {
-                menu_builder = menu_builder.item(&sep);
-            } else {
-                log::warn!("[TRAY] update_tray_menu: failed to build separator_before_track");
-            }
-            try_add_item!(
-                menu_builder,
-                MenuItemBuilder::with_id(
-                    ID_CURRENT_TRACK,
-                    format!("🎵 {} - {}", track.artist, track.title),
-                )
-                .enabled(false)
-                .build(app),
-                "track_item"
-            );
+            let separator2 = PredefinedMenuItem::separator(app).map_err(|e| {
+                log::warn!("[TRAY] update_tray_menu: failed to build separator2: {}", e);
+                e.to_string()
+            })?;
+            let track_item = MenuItemBuilder::with_id(
+                ID_CURRENT_TRACK,
+                format!("🎵 {} - {}", track.artist, track.title),
+            )
+            .enabled(false)
+            .build(app)
+            .map_err(|e| {
+                log::warn!("[TRAY] update_tray_menu: failed to build track_item: {}", e);
+                e.to_string()
+            })?;
+            menu_builder = menu_builder.item(&track_item).item(&separator2);
         }
     }
-
-    if current_track.as_ref().map(|t| t.is_playing).unwrap_or(false) {
-        if let Ok(sep) = PredefinedMenuItem::separator(app) {
-            menu_builder = menu_builder.item(&sep);
-        } else {
-            log::warn!("[TRAY] update_tray_menu: failed to build separator_after_track");
-        }
-    }
-
-    try_add_item!(
-        menu_builder,
-        MenuItemBuilder::with_id(ID_OPEN_SETTINGS, "Open Settings").build(app),
-        "open_settings"
-    );
-    try_add_item!(
-        menu_builder,
-        MenuItemBuilder::with_id(ID_OPEN_LOGS, "Open Logs Folder").build(app),
-        "open_logs"
-    );
-    try_add_item!(
-        menu_builder,
-        MenuItemBuilder::with_id(ID_QUIT, "Quit").build(app),
-        "quit"
-    );
 
     let menu = menu_builder
+        .items(&[&open_settings, &open_logs, &separator3, &quit])
         .build()
         .map_err(|e| {
             log::warn!("[TRAY] update_tray_menu: failed to build menu: {}", e);
