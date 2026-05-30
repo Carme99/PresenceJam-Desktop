@@ -121,7 +121,9 @@ pub fn handle_app_menu_event(app: &AppHandle, event_id: &str) {
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 log::info!("[MENU] quit: forced exit fallback");
-                let _ = app_handle.exit(0);
+                if let Err(e) = app_handle.exit(0) {
+                    log::error!("[MENU] quit: forced exit failed: {}", e);
+                }
             });
         }
         ID_SHOW_DASHBOARD => {

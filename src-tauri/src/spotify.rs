@@ -55,34 +55,6 @@ pub fn pkce_generate_challenge(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(hash)
 }
 
-pub fn start_spotify_auth(client_id: &str, redirect_uri: &str) -> Result<(String, String), String> {
-    let verifier = pkce_generate_verifier();
-    let challenge = pkce_generate_challenge(&verifier);
-
-    let state = pkce_generate_verifier();
-
-    let auth_url = format!(
-        "https://accounts.spotify.com/authorize?\
-         client_id={}\
-         &response_type=code\
-         &redirect_uri={}\
-         &code_challenge_method=S256\
-         &code_challenge={}\
-         &state={}\
-         &scope=user-read-currently-playing user-read-playback-state",
-        client_id,
-        urlencoding::encode(redirect_uri),
-        urlencoding::encode(&challenge),
-        urlencoding::encode(&state)
-    );
-
-    log::info!("Opening Spotify auth URL: {}", auth_url);
-    tauri_plugin_opener::open_url(&auth_url, None::<&str>)
-        .map_err(|e| format!("Failed to open browser: {}", e))?;
-
-    Ok((challenge, verifier))
-}
-
 pub fn complete_spotify_auth(
     code: &str,
     code_verifier: &str,
