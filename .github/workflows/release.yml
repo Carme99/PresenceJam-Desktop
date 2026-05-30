@@ -106,3 +106,15 @@ jobs:
           generateReleaseNotes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  winget:
+    needs: release
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: vedantmgoyal2009/winget-releaser@v2
+        with:
+          identifier: Carme99.PresenceJam
+          token: ${{ secrets.WINGET_TOKEN }}
+          release-tag: ${{ github.ref_name }}
