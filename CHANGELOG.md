@@ -5,6 +5,46 @@ All notable changes to PresenceJam are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.5.0] - 2026-05-30
+
+### Fixed
+
+- Teams refresh token rotation — now preserves existing refresh token when Microsoft doesn't return a new one
+- Config atomic write on Windows — uses backup-and-rename pattern instead of unsafe remove-then-rename
+- Polling config defaults aligned between TypeScript (10s) and Rust (was 5s, now 10s)
+- Manual URL paste error now displays to user instead of silently spinning
+- Polling config interval fields removed (were dead code — engine uses hardcoded constants)
+- Over-permissioned Tauri capabilities — 5 unused permissions removed
+- Version string in vite.config.js now reads from package.json dynamically
+- Clippy warnings fixed (needless_borrow, manual_clamp x2)
+- Quit handler now logs exit failure instead of silently discarding Result
+- Stale config.tmp files cleaned up on startup
+- Auth callback expiry now checked at callback time (defense-in-depth)
+- Token length removed from production logs (downgraded to debug)
+- Clear-on-pause now sends "🎵 Paused" placeholder instead of empty string
+- Tray menu builds partial menu on item failure instead of aborting entirely
+- npm audit: 5 vulnerabilities fixed (2 high, 2 moderate, 1 low)
+
+### Improved
+
+- Tray menu separator logic simplified — no double separators when idle
+- User-Agent now reports actual app version from CARGO_PKG_VERSION
+- Auth callback expiry check added for both Spotify and Teams
+- AssertUnwindSafe in polling loop now has safety comment
+- Log retention enforcement added — deletes logs older than configured retention_days
+
+### Removed
+
+- Dead Credentials struct and load/save functions (~132 lines)
+- Dead start_spotify_auth() function (unused — command generates its own PKCE)
+- Dead frontend token stores (spotifyTokens, teamsConnected) and unused Settings imports
+
+### Security
+
+- Capabilities reduced to minimum required permissions
+- Token metadata no longer logged at info level
+
+
 ## [2.4.2] - 2026-05-05
 
 ### Fixed
@@ -266,7 +306,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - PowerShell script version — this is a full rewrite
 
-[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v2.3.7...HEAD
+[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v2.5.0...HEAD
+[2.5.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.5.0
 [2.3.7]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.3.7
 [2.3.6]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.3.6
 [2.3.5]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.3.5
