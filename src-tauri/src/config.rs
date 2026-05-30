@@ -179,13 +179,6 @@ impl Default for AppConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Credentials {
-    pub access_token: String,
-    pub refresh_token: String,
-    pub expires_at: i64,
-}
-
 pub fn config_dir() -> Result<PathBuf, String> {
     let base_dir = dirs::config_dir().ok_or_else(|| {
         "Failed to get config directory: dirs::config_dir() returned None".to_string()
@@ -274,56 +267,6 @@ pub fn save_config(config: &AppConfig) -> Result<(), String> {
     atomic_write_json(&path, &json)?;
 
     log::info!("Saved configuration to '{}'", path.display());
-    Ok(())
-}
-
-pub fn load_credentials() -> Result<Credentials, String> {
-    let dir = config_dir()?;
-    let path = dir.join("credentials.json");
-
-    if !path.exists() {
-        return Err("Credentials file not found".to_string());
-    }
-
-    let mut file = fs::File::open(&path).map_err(|e| {
-        format!(
-            "Failed to open credentials file '{}': {}",
-            path.display(),
-            e
-        )
-    })?;
-
-    let mut contents = String::new();
-    file.read_to_string(&mut contents).map_err(|e| {
-        format!(
-            "Failed to read credentials file '{}': {}",
-            path.display(),
-            e
-        )
-    })?;
-
-    let credentials: Credentials = serde_json::from_str(&contents).map_err(|e| {
-        format!(
-            "Failed to parse credentials file '{}': {}",
-            path.display(),
-            e
-        )
-    })?;
-
-    log::info!("Loaded credentials from '{}'", path.display());
-    Ok(credentials)
-}
-
-pub fn save_credentials(credentials: &Credentials) -> Result<(), String> {
-    let dir = config_dir()?;
-    let path = dir.join("credentials.json");
-
-    let json = serde_json::to_string_pretty(credentials)
-        .map_err(|e| format!("Failed to serialize credentials to JSON: {}", e))?;
-
-    atomic_write_json(&path, &json)?;
-
-    log::info!("Saved credentials to '{}'", path.display());
     Ok(())
 }
 
