@@ -210,7 +210,7 @@ pub fn poll_teams_auth(device_code: &str) -> Result<TeamsTokens, String> {
             });
         }
 
-        let error_resp: TokenErrorResponse = serde_json::from_str(&raw_body).map_err(|e | {
+        let error_resp: TokenErrorResponse = serde_json::from_str(&raw_body).map_err(|e| {
             format!(
                 "Failed to parse error response: {} (body was: {})",
                 e, raw_body
