@@ -164,6 +164,11 @@ fn process_track(
 
     if let Some(teams_tok) = teams_tokens {
         if track.is_playing {
+            // Resuming playback — reset the pause-backoff counter before the
+            // debounce early-return below, so a track that resumes inside the
+            // 500ms debounce window doesn't carry a stale backoff level into
+            // the next pause cycle.
+            *consecutive_pauses = 0;
             if should_skip_api_call {
                 log::info!(
                     "[POLLING] process_track: debounce active, skipping Teams API call (changed={}, elapsed={}ms)",
@@ -267,9 +272,9 @@ fn process_track(
     }
 
     if track.is_playing {
-        // Resuming playback — reset the pause-backoff counter so future
-        // pauses start at 30s, not at whatever stale value we carried.
-        *consecutive_pauses = 0;
+        // The consecutive_pauses counter was already reset earlier in
+        // process_track (top of the is_playing branch inside the teams_tokens
+        // block) so the debounce early-return can't leave it stale.
         let remaining_ms = track.duration_ms.saturating_sub(corrected_progress_ms);
         let buffer_ms = 5000u64;
         let remaining_secs = remaining_ms / 1000;
