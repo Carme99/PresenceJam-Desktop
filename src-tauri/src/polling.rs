@@ -425,13 +425,36 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                 client_id.len()
             );
 
+            // Snapshot the access token before refresh so we can detect a
+            // concurrent writer (e.g. user clicked Reconnect) that mutated
+            // state between our read and our eventual write.
+            let pre_refresh_access_token = spotify_tokens.access_token.clone();
+
             match refresh_spotify_token(&spotify_tokens, &client_id, &client_secret) {
                 Ok(new_tokens) => {
                     log::info!("[POLLING] polling_loop: token refresh SUCCESS");
-                    *state.spotify_tokens.write() = Some(new_tokens.clone());
-                    // Persist refreshed tokens to store so they survive app restarts
-                    if let Err(e) = save_spotify_tokens(&app, &new_tokens) {
-                        log::warn!("[POLLING] polling_loop: failed to persist refreshed tokens: {}", e);
+                    // CAS: only commit if state still holds the access token
+                    // we refreshed from. If state changed during the refresh
+                    // (e.g. user clicked Reconnect), discard the result.
+                    let committed = {
+                        let mut guard = state.spotify_tokens.write();
+                        if guard.as_ref().map(|t| &t.access_token)
+                            == Some(&pre_refresh_access_token)
+                        {
+                            *guard = Some(new_tokens.clone());
+                            true
+                        } else {
+                            log::warn!(
+                                "[POLLING] polling_loop: spotify state changed during refresh, discarding result"
+                            );
+                            false
+                        }
+                    };
+                    if committed {
+                        // Persist refreshed tokens to store so they survive app restarts
+                        if let Err(e) = save_spotify_tokens(&app, &new_tokens) {
+                            log::warn!("[POLLING] polling_loop: failed to persist refreshed tokens: {}", e);
+                        }
                     }
                     new_tokens
                 }
