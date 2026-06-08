@@ -2,6 +2,7 @@ use crate::config::{self, AppConfig};
 use crate::spotify::{SpotifyTokens, TrackInfo};
 use crate::teams::{DeviceCodeResponse, TeamsTokens};
 use crate::{polling, tray, AppState, PendingSpotifyAuth};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_store::StoreExt;
@@ -644,12 +645,18 @@ pub fn start_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> 
     // Acquire write lock first to prevent TOCTOU race with concurrent calls.
     // See issue #14.
     {
-        let mut is_syncing_guard = state.is_syncing.write();
-        if *is_syncing_guard {
+        // Use compare_exchange for an atomic check-and-set: replaces the
+        // previous RwLock write guard. AcqRel on success preserves the
+        // happens-before relationship with subsequent reads of is_syncing
+        // (e.g. the polling loop and tray).
+        if state
+            .is_syncing
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
             log::info!("[CMD] start_syncing: already syncing, returning early");
             return Ok(());
         }
-        *is_syncing_guard = true;
         log::info!("[CMD] start_syncing: is_syncing flag set to true");
     }
 
@@ -658,8 +665,7 @@ pub fn start_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> 
         Err(e) => {
             // Roll back is_syncing flag since no handle was created
             log::error!("[CMD] start_syncing: polling start failed - {}; rolling back is_syncing", e);
-            let mut guard = state.is_syncing.write();
-            *guard = false;
+            state.is_syncing.store(false, Ordering::Release);
             return Err(e);
         }
     };
@@ -733,10 +739,7 @@ pub fn stop_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> R
 pub fn app_exit(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> Result<(), String> {
     log::info!("[CMD] app_exit: ENTRY");
 
-    let is_syncing = {
-        let guard = state.is_syncing.read();
-        *guard
-    };
+    let is_syncing = state.is_syncing.load(Ordering::Acquire);
 
     if is_syncing {
         log::info!("[CMD] app_exit: stopping polling first");
@@ -752,10 +755,7 @@ pub fn app_exit(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> Resul
 pub fn get_sync_status(state: tauri::State<'_, Arc<AppState>>) -> Result<SyncStatus, String> {
     log::info!("[CMD] get_sync_status: ENTRY");
 
-    let is_syncing = {
-        let guard = state.is_syncing.read();
-        *guard
-    };
+    let is_syncing = state.is_syncing.load(Ordering::Acquire);
 
     let current_track = {
         let guard = state.current_track.read();

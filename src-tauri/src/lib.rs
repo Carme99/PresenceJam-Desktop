@@ -1,4 +1,5 @@
 use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use parking_lot::RwLock;
@@ -28,7 +29,7 @@ pub struct AppState {
     pub spotify_tokens: RwLock<Option<crate::spotify::SpotifyTokens>>,
     pub teams_tokens: RwLock<Option<crate::teams::TeamsTokens>>,
     pub current_track: RwLock<Option<crate::spotify::TrackInfo>>,
-    pub is_syncing: RwLock<bool>,
+    pub is_syncing: AtomicBool,
     pub polling_handle: RwLock<Option<thread::JoinHandle<()>>>,
     pub pending_spotify_auth: RwLock<Option<PendingSpotifyAuth>>,
     pub pending_teams_auth: RwLock<Option<PendingTeamsAuth>>,
@@ -43,7 +44,7 @@ impl AppState {
             spotify_tokens: RwLock::new(None),
             teams_tokens: RwLock::new(None),
             current_track: RwLock::new(None),
-            is_syncing: RwLock::new(false),
+            is_syncing: AtomicBool::new(false),
             polling_handle: RwLock::new(None),
             pending_spotify_auth: RwLock::new(None),
             pending_teams_auth: RwLock::new(None),
@@ -76,6 +77,16 @@ async fn handle_spotify_callback(code: &str, state_param: Option<&str>, app: &Ap
         })?
     };
     log::info!("[CALLBACK] handle_spotify_callback: pending auth found - verifier.len={}", pending.verifier.len());
+
+    // Re-check expiry at submit time. The expiry was set on creation
+    // (lib.rs setup, or commands.rs::start_spotify_auth) but only
+    // consulted on disk-load. If the OS suspended the process for
+    // >10 minutes, the auth code may now be rejected by Spotify as
+    // expired. See issue #34.
+    if pending.expires_at < chrono::Utc::now() {
+        log::error!("[CALLBACK] handle_spotify_callback: auth state expired at submit time");
+        return Err("Auth state expired — please try signing in again.".to_string());
+    }
 
     // Verify state matches to prevent CSRF attacks
     if let Some(state_str) = state_param {
@@ -130,6 +141,14 @@ async fn handle_teams_callback(code: &str, app: &AppHandle) -> Result<(), String
         })?
     };
     log::info!("[CALLBACK] handle_teams_callback: pending auth found");
+
+    // Re-check expiry at submit time. Mirrors the Spotify fix above;
+    // a long OS suspend can land us past the device-code TTL.
+    // See issue #34.
+    if pending.expires_at < chrono::Utc::now() {
+        log::error!("[CALLBACK] handle_teams_callback: auth state expired at submit time");
+        return Err("Auth state expired — please try signing in again.".to_string());
+    }
     
     log::info!("[CALLBACK] handle_teams_callback: calling complete_teams_auth");
     let tokens = crate::teams::complete_teams_auth(
