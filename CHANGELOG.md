@@ -36,6 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - chore(deps): drop unused tokio dependency (#30, PR #44)
 - chore(build): commit Cargo.lock for reproducible builds (#31, PR #44)
 
+### Cleanup (outstanding issues)
+- chore(security): migrate Spotify client_secret to OS keychain (closes #9, PR #49)
+- chore(logging): demote entry/exit logs to debug level (closes #12, PR #49)
+- fix(config): remove retention_days from Rust/TS (closes #13, PR #49)
+- refactor(commands): consolidate get_*_tokens via shared helper (closes #16, PR #49)
+
 ### Notes
 - GitHub issues: #9 (keychain migration) remains open and is deferred
 
