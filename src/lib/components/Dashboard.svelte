@@ -159,9 +159,12 @@
   async function goToSetup() {
     devLog('[DASHBOARD] goToSetup: ENTRY');
     await loadConfig();
-    const hasSpotifyCredentials =
-      $configStore.spotify.client_id && $configStore.spotify.client_id.trim() !== ''
-      && $configStore.spotify.client_secret && $configStore.spotify.client_secret.trim() !== '';
+    // The client_secret now lives in the OS keychain. We check both the
+    // config (client_id) and the keychain (client_secret). See issue #9.
+    const hasClientId = !!$configStore.spotify.client_id
+      && $configStore.spotify.client_id.trim() !== '';
+    const hasClientSecret = await invoke<boolean>('is_spotify_client_secret_set');
+    const hasSpotifyCredentials = hasClientId && hasClientSecret;
     devLog('[DASHBOARD] goToSetup: hasSpotifyCredentials=', hasSpotifyCredentials);
 
     if (hasSpotifyCredentials) {

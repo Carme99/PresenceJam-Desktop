@@ -21,10 +21,13 @@
     devLog('[RECONNECT] onMount: ENTRY');
     await loadConfig();
 
-    needsSpotify = !$configStore.spotify.client_id
-      || $configStore.spotify.client_id.trim() === ''
-      || !$configStore.spotify.client_secret
-      || $configStore.spotify.client_secret.trim() === '';
+    // The client_secret no longer lives in the config — it lives in the OS
+    // keychain. We check both client_id (in config) and the keychain
+    // presence. See issue #9.
+    const hasClientId = !!$configStore.spotify.client_id
+      && $configStore.spotify.client_id.trim() !== '';
+    const hasClientSecret = await invoke<boolean>('is_spotify_client_secret_set');
+    needsSpotify = !hasClientId || !hasClientSecret;
     needsTeams = false; // Teams uses device code flow which typically auto-refreshes
 
     devLog('[RECONNECT] needsSpotify=', needsSpotify, 'needsTeams=', needsTeams);
@@ -71,12 +74,22 @@
   async function reconnectSpotify() {
     if (spotifyAuthWaiting || spotifyDone || needsSpotify) return;
     devLog('[RECONNECT] reconnectSpotify: ENTRY');
+    // Re-check the keychain: the user may have wiped it since the page
+    // loaded. If the secret is gone we cannot complete the auth flow
+    // without re-onboarding, so bail. See issue #9.
+    const hasSecret = await invoke<boolean>('is_spotify_client_secret_set');
+    if (!hasSecret) {
+      devLog('[RECONNECT] reconnectSpotify: keychain empty, redirecting to onboarding');
+      needsSpotify = true;
+      return;
+    }
     spotifyAuthWaiting = true;
     spotifyError = '';
     try {
       await invoke('start_spotify_auth', {
         clientId: $configStore.spotify.client_id,
-        clientSecret: $configStore.spotify.client_secret,
+        // clientSecret is read from the keychain on the backend.
+        clientSecret: '',
         redirectUri: 'presencejam://callback'
       });
     } catch (e) {

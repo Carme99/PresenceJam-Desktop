@@ -102,6 +102,15 @@ pub fn save_config(
     Ok(())
 }
 
+/// Returns true iff the Spotify `client_secret` is currently stored in the
+/// OS keychain. The frontend uses this to decide whether the user can
+/// reconnect (keychain populated) or must re-enter the secret via
+/// Onboarding (keychain empty). See issue #9.
+#[tauri::command]
+pub fn is_spotify_client_secret_set() -> bool {
+    crate::keychain::has_spotify_client_secret()
+}
+
 #[tauri::command]
 pub fn get_config_dir() -> Result<String, String> {
     log::info!("[CMD] get_config_dir: ENTRY");
@@ -173,14 +182,19 @@ pub fn start_spotify_auth(
     // Spotify authorization codes expire in 10 minutes (600 seconds)
     let expires_at = chrono::Utc::now() + chrono::Duration::seconds(600);
 
-    // Store pending auth in AppState
+    // Store the client_secret in the OS keychain. This is the only place the
+    // secret is persisted from this point forward; it is intentionally NOT
+    // included in `pending_spotify_auth` (AppState or store). See issue #9.
+    crate::keychain::store_spotify_client_secret(&client_secret)?;
+    log::info!("[CMD] start_spotify_auth: client_secret stored in keychain");
+
+    // Store pending auth in AppState (without the secret)
     {
         let mut pending = state.pending_spotify_auth.write();
         *pending = Some(PendingSpotifyAuth {
             verifier: verifier.clone(),
             state: csrf_state.clone(),
             client_id: client_id.clone(),
-            client_secret: client_secret.clone(),
             redirect_uri: redirect_uri.clone(),
             expires_at,
         });
@@ -188,6 +202,7 @@ pub fn start_spotify_auth(
     }
 
     // Persist complete pending auth to store for crash recovery
+    // (no client_secret — it's in the keychain)
     let store = app.store("tokens").map_err(|e| e.to_string())?;
     store.set(
         "pending_spotify_auth",
@@ -195,7 +210,6 @@ pub fn start_spotify_auth(
             "verifier": verifier,
             "state": csrf_state,
             "client_id": client_id,
-            "client_secret": client_secret,
             "redirect_uri": redirect_uri,
             "expires_at": expires_at.to_rfc3339(),
         }),
@@ -218,7 +232,6 @@ pub fn complete_spotify_auth(
     code: String,
     verifier: String,
     client_id: String,
-    client_secret: String,
     redirect_uri: String,
     app: AppHandle,
     state: tauri::State<'_, Arc<AppState>>,
@@ -228,6 +241,11 @@ pub fn complete_spotify_auth(
         code.len(),
         verifier.len()
     );
+
+    // The client_secret is no longer accepted as a parameter — it is read
+    // from the OS keychain. See issue #9. The keychain entry is populated
+    // by `start_spotify_auth` (the normal flow) and survives a crash.
+    let client_secret = crate::keychain::get_spotify_client_secret()?;
 
     let tokens = crate::spotify::complete_spotify_auth(
         &code,
@@ -292,11 +310,15 @@ pub fn complete_spotify_auth_manual(
         pending.verifier.len()
     );
 
+    // Read the client_secret from the keychain (it was placed there by
+    // `start_spotify_auth` — see issue #9).
+    let client_secret = crate::keychain::get_spotify_client_secret()?;
+
     let tokens = crate::spotify::complete_spotify_auth(
         &code,
         &pending.verifier,
         &pending.client_id,
-        &pending.client_secret,
+        &client_secret,
         &pending.redirect_uri,
     )?;
     log::info!("[CMD] complete_spotify_auth_manual: token exchange successful");
@@ -380,14 +402,10 @@ pub fn refresh_spotify(
             log::error!("[CMD] refresh_spotify: Spotify client ID not found in store");
             "Spotify client ID not found".to_string()
         })?;
-    let client_secret = store
-        .get("spotify_client_secret")
-        .and_then(|v| v.as_str().map(String::from))
-        .ok_or_else(|| {
-            log::error!("[CMD] refresh_spotify: Spotify client secret not found in store");
-            "Spotify client secret not found".to_string()
-        })?;
-    log::info!("[CMD] refresh_spotify: credentials loaded from store");
+    // Client secret now lives in the OS keychain (see issue #9); it is no
+    // longer persisted to the store.
+    let client_secret = crate::keychain::get_spotify_client_secret()?;
+    log::info!("[CMD] refresh_spotify: credentials loaded (id from store, secret from keychain)");
 
     let current_tokens = {
         let guard = state.spotify_tokens.read();
@@ -1052,6 +1070,16 @@ pub fn reconnect_spotify(
     if let Err(e) = polling::clear_spotify_tokens(&app) {
         log::warn!(
             "[CMD] reconnect_spotify: failed to clear persisted tokens - {}",
+            e
+        );
+    }
+
+    // Clear the client_secret from the OS keychain (see issue #9).
+    // Best-effort: don't fail the disconnect if the keychain entry is
+    // already gone or unavailable.
+    if let Err(e) = crate::keychain::delete_spotify_client_secret() {
+        log::warn!(
+            "[CMD] reconnect_spotify: failed to clear keychain entry - {}",
             e
         );
     }

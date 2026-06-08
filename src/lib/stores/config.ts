@@ -3,7 +3,13 @@ import { invoke } from '@tauri-apps/api/core';
 
 export interface SpotifyConfig {
   client_id: string;
-  client_secret: string;
+  /**
+   * True iff the Spotify `client_secret` is currently stored in the OS
+   * keychain. This is a derived/display field — it is populated by
+   * `load_config` (and not persisted to disk). The actual secret lives
+   * in the keychain, not in `config.json`. See issue #9.
+   */
+  client_secret_set: boolean;
   redirect_uri: string;
   scopes: string[];
 }
@@ -40,7 +46,7 @@ export interface AppConfig {
 export const defaultConfig: AppConfig = {
   spotify: {
     client_id: '',
-    client_secret: '',
+    client_secret_set: false,
     redirect_uri: 'presencejam://callback',
     scopes: ['user-read-currently-playing', 'user-read-playback-state']
   },

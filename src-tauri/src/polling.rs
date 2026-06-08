@@ -336,11 +336,19 @@ pub fn start_polling(
     Ok(handle)
 }
 
+/// Returns the (client_id, client_secret) pair needed to call Spotify APIs.
+///
+/// The `client_id` is read from the in-memory AppState config. The
+/// `client_secret` is read from the OS keychain (see issue #9). If the
+/// keychain entry is missing, the returned `client_secret` is an empty
+/// string — callers should treat that as a "user must re-onboard" signal.
 fn get_spotify_credentials(config: &Option<crate::config::AppConfig>) -> (String, String) {
-    config
+    let client_id = config
         .as_ref()
-        .map(|c| (c.spotify.client_id.clone(), c.spotify.client_secret.clone()))
-        .unwrap_or_else(|| (String::new(), String::new()))
+        .map(|c| c.spotify.client_id.clone())
+        .unwrap_or_default();
+    let client_secret = crate::keychain::get_spotify_client_secret().unwrap_or_default();
+    (client_id, client_secret)
 }
 
 fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()>) {
@@ -780,6 +788,8 @@ pub fn clear_spotify_tokens(app: &AppHandle) -> Result<(), String> {
     })?;
     store.delete("spotify_tokens");
     store.delete("spotify_client_id");
+    // `spotify_client_secret` is no longer persisted to the store — the
+    // secret now lives in the OS keychain. See issue #9.
     store.delete("spotify_client_secret");
     store.delete("spotify_redirect_uri");
     store.delete("spotify_verifier");
@@ -789,7 +799,16 @@ pub fn clear_spotify_tokens(app: &AppHandle) -> Result<(), String> {
         log::error!("[POLLING] clear_spotify_tokens: save failed - {}", e);
         e.to_string()
     })?;
-    log::info!("[POLLING] clear_spotify_tokens: SUCCESS - tokens cleared from store");
+
+    // Best-effort: also clear the keychain entry. If the keychain is
+    // unavailable (e.g. headless CI), we don't fail the whole call.
+    if let Err(e) = crate::keychain::delete_spotify_client_secret() {
+        log::warn!(
+            "[POLLING] clear_spotify_tokens: failed to clear keychain entry - {}",
+            e
+        );
+    }
+    log::info!("[POLLING] clear_spotify_tokens: SUCCESS - tokens cleared from store and keychain");
     Ok(())
 }
 

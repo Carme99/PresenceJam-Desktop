@@ -52,9 +52,19 @@
       spotifyAuthWaiting = true;
       reconnectingSpotify = true;
       try {
+        // The client_secret is no longer in the config — it lives in the OS
+        // keychain (set during Onboarding). Re-auth needs the keychain
+        // entry to still be present. If it isn't, redirect the user back
+        // to Onboarding. See issue #9.
+        const hasSecret = await invoke<boolean>('is_spotify_client_secret_set');
+        if (!hasSecret) {
+          console.warn('[SETTINGS] spotify-reconnect-required: keychain empty, redirecting to onboarding');
+          currentView.set('onboarding');
+          return;
+        }
         await invoke('start_spotify_auth', {
           clientId: localConfig.spotify.client_id,
-          clientSecret: localConfig.spotify.client_secret,
+          clientSecret: '',
           redirectUri: 'presencejam://callback'
         });
       } catch (e) {
@@ -156,6 +166,13 @@
   function goBack() {
     currentView.set('dashboard');
   }
+
+  function goToOnboarding() {
+    // Used by the Spotify Client Secret hint when the keychain entry is
+    // missing. Re-running Onboarding places a fresh secret in the keychain.
+    // See issue #9.
+    currentView.set('onboarding');
+  }
 </script>
 
 <div class="settings">
@@ -169,23 +186,24 @@
       <h2>Spotify</h2>
       <div class="form-group">
         <label for="spotify-client-id">Client ID</label>
-        <input 
+        <input
           id="spotify-client-id"
-          type="text" 
+          type="text"
           bind:value={localConfig.spotify.client_id}
           readonly={isConnected}
           placeholder="Enter Spotify Client ID"
         />
       </div>
       <div class="form-group">
-        <label for="spotify-client-secret">Client Secret</label>
-        <input 
-          id="spotify-client-secret"
-          type="password" 
-          bind:value={localConfig.spotify.client_secret}
-          readonly={isConnected}
-          placeholder={isConnected ? '••••••••' : 'Enter Spotify Client Secret'}
-        />
+        <label>Client Secret</label>
+        <p class="hint">
+          {#if localConfig.spotify.client_secret_set}
+            Stored securely in your operating system's keychain. To replace
+            it, run Onboarding again.
+          {:else}
+            Not configured. <button type="button" class="btn-link" onclick={goToOnboarding}>Run Onboarding</button> to set up Spotify.
+          {/if}
+        </p>
       </div>
       <div class="connection-row">
         {#if isConnected && !spotifyAuthWaiting}
@@ -482,6 +500,21 @@
   .btn-secondary:hover {
     background: var(--bg-surface);
     border-color: var(--color-accent);
+  }
+
+  .btn-link {
+    background: transparent;
+    border: none;
+    color: var(--color-accent);
+    padding: 0;
+    width: auto;
+    text-decoration: underline;
+    cursor: pointer;
+    font: inherit;
+  }
+
+  .btn-link:hover {
+    opacity: 0.85;
   }
 
   button {

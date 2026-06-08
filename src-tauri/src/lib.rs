@@ -10,7 +10,10 @@ pub struct PendingSpotifyAuth {
     pub verifier: String,
     pub state: String,
     pub client_id: String,
-    pub client_secret: String,
+    // NOTE: `client_secret` is intentionally absent. The secret lives in the
+    // OS keychain (see `keychain::store_spotify_client_secret`) and is read
+    // back at token-exchange time. Storing it here would defeat the purpose
+    // of the keychain migration. See issue #9.
     pub redirect_uri: String,
     pub expires_at: chrono::DateTime<chrono::Utc>,
 }
@@ -53,6 +56,7 @@ impl AppState {
 }
 
 pub mod config;
+pub mod keychain;
 pub mod profanity;
 pub mod spotify;
 pub mod teams;
@@ -88,13 +92,18 @@ async fn handle_spotify_callback(code: &str, state_param: Option<&str>, app: &Ap
         log::error!("[CALLBACK] handle_spotify_callback: missing state parameter in callback URL");
         return Err("Missing state parameter - possible CSRF attack".to_string());
     }
-    
+
+    // Fetch the client_secret from the OS keychain. It was placed there by
+    // `start_spotify_auth` and is never persisted to disk. See issue #9.
+    log::info!("[CALLBACK] handle_spotify_callback: reading client_secret from keychain");
+    let client_secret = crate::keychain::get_spotify_client_secret()?;
+
     log::info!("[CALLBACK] handle_spotify_callback: calling complete_spotify_auth");
     let tokens = crate::spotify::complete_spotify_auth(
         code,
         &pending.verifier,
         &pending.client_id,
-        &pending.client_secret,
+        &client_secret,
         &pending.redirect_uri,
     )?;
     log::info!("[CALLBACK] handle_spotify_callback: token exchange successful - access_token.len={}", tokens.access_token.len());
@@ -453,6 +462,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::load_config,
             commands::save_config,
+            commands::is_spotify_client_secret_set,
             commands::get_config_dir,
             commands::start_spotify_auth,
             commands::complete_spotify_auth,
