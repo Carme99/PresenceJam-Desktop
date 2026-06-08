@@ -5,6 +5,40 @@ All notable changes to PresenceJam are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.5.1] - 2026-06-08
+
+### Security
+- fix(security): use HTTPS for Authenticode timestampUrl (#28, PR #44)
+- chore(security): strip 12+ unused Tauri capabilities (#29, PR #44)
+
+### Fixed
+- fix(race): Spotify token-refresh lost-update race (#35, PR #43)
+- fix(race): Teams token-refresh lost-update race (#36, PR #43)
+- fix(race): apply CAS guard to 401-retry refresh (#PR #43)
+- fix(polling): close if_committed block in 401-retry CAS guard (PR #43 follow-up)
+- fix(config): wire polling interval config fields; remove dead retention_days (#37, PR #45)
+- fix(polling): thread configured default_interval_seconds into pause_backoff (PR #45 follow-up)
+- fix(polling): reset consecutive_pauses before debounce early-return on track resume (PR #45 follow-up)
+- fix(ux): is_first_poll guard prevents legitimate presence-clearing on app start (#39, PR #45)
+- fix(lifecycle): wire polling-thread-panicked and reconnect-required listeners in frontend (#33, PR #44)
+- fix(oauth): re-check pending auth expiry at submit time (#34, PR #44)
+- fix(perf): use spawn_blocking for OAuth callback HTTP calls (#42, PR #46)
+- fix(perf): distinguish panic from cancellation in spawn_blocking error messages (PR #46 follow-up)
+
+### Changed
+- refactor(state): use AtomicBool for is_syncing flag (#32, PR #44)
+- refactor(cmd): make is_onboarding_complete async with 30s result cache (#41, PR #47)
+- perf(api): pause-aware exponential backoff in polling loop (#38, PR #45)
+- perf(api): validate_*_token checks local expires_at before network call (#40, PR #45)
+- refactor(cmd): extract ONBOARDING_CACHE_TTL as a named constant (PR #47 follow-up)
+
+### Chore
+- chore(deps): drop unused tokio dependency (#30, PR #44)
+- chore(build): commit Cargo.lock for reproducible builds (#31, PR #44)
+
+### Notes
+- GitHub issues: #9 (keychain migration) remains open and is deferred
+
 ## [2.5.0] - 2026-05-30
 
 ### Fixed
