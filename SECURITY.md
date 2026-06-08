@@ -84,6 +84,7 @@ Logs may contain:
 
 Logs are written to the `tauri-plugin-log` default log directory. **Log retention/rotation is currently managed by the logging plugin defaults and is not user-configurable.** A previous version of this document claimed logs were "rotated daily and retained for 30 days"; that claim has been removed because no rotation code exists in the application — the v2.5.0 `logging.retention_days` config field was a no-op and has been removed in v2.5.1.
 
+
 ## Network Security
 
 All API communication happens over **HTTPS/TLS**:

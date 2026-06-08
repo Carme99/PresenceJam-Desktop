@@ -2,14 +2,22 @@ use crate::config::{self, AppConfig};
 use crate::spotify::{SpotifyTokens, TrackInfo};
 use crate::teams::{DeviceCodeResponse, TeamsTokens};
 use crate::{polling, tray, AppState, PendingSpotifyAuth};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_store::StoreExt;
 use url::Url;
 
+/// TTL for the `is_onboarding_complete` result cache. The front-end remounts this
+/// command on every Onboarding view enter, and the upstream HTTPS calls can take
+/// up to 20s in the worst case (token validation against Spotify/Graph APIs), so
+/// a short cache is needed to avoid hammering the upstream APIs.
+const ONBOARDING_CACHE_TTL: Duration = Duration::from_secs(30);
+
 #[tauri::command]
 pub fn get_recent_logs(_app: AppHandle) -> Result<(), String> {
-    log::info!("[CMD] get_recent_logs: ENTRY");
+    log::debug!("[CMD] get_recent_logs: ENTRY");
     // Note: tauri_plugin_log v2 doesn't provide a way to retrieve cached log entries.
     // Log entries are streamed to the frontend via the Webview target (log://log event).
     // This command is kept for future use if such API becomes available.
@@ -48,7 +56,7 @@ pub struct SyncStatus {
 
 #[tauri::command]
 pub fn load_config() -> Result<AppConfig, String> {
-    log::info!("[CMD] load_config: ENTRY");
+    log::debug!("[CMD] load_config: ENTRY");
     match config::load_config() {
         Ok(cfg) => {
             log::info!(
@@ -102,9 +110,18 @@ pub fn save_config(
     Ok(())
 }
 
+/// Returns true iff the Spotify `client_secret` is currently stored in the
+/// OS keychain. The frontend uses this to decide whether the user can
+/// reconnect (keychain populated) or must re-enter the secret via
+/// Onboarding (keychain empty). See issue #9.
+#[tauri::command]
+pub fn is_spotify_client_secret_set() -> bool {
+    crate::keychain::has_spotify_client_secret()
+}
+
 #[tauri::command]
 pub fn get_config_dir() -> Result<String, String> {
-    log::info!("[CMD] get_config_dir: ENTRY");
+    log::debug!("[CMD] get_config_dir: ENTRY");
     match config::config_dir().map(|p| p.to_string_lossy().to_string()) {
         Ok(path) => {
             log::info!("[CMD] get_config_dir: SUCCESS - path={}", path);
@@ -173,14 +190,19 @@ pub fn start_spotify_auth(
     // Spotify authorization codes expire in 10 minutes (600 seconds)
     let expires_at = chrono::Utc::now() + chrono::Duration::seconds(600);
 
-    // Store pending auth in AppState
+    // Store the client_secret in the OS keychain. This is the only place the
+    // secret is persisted from this point forward; it is intentionally NOT
+    // included in `pending_spotify_auth` (AppState or store). See issue #9.
+    crate::keychain::store_spotify_client_secret(&client_secret)?;
+    log::info!("[CMD] start_spotify_auth: client_secret stored in keychain");
+
+    // Store pending auth in AppState (without the secret)
     {
         let mut pending = state.pending_spotify_auth.write();
         *pending = Some(PendingSpotifyAuth {
             verifier: verifier.clone(),
             state: csrf_state.clone(),
             client_id: client_id.clone(),
-            client_secret: client_secret.clone(),
             redirect_uri: redirect_uri.clone(),
             expires_at,
         });
@@ -188,6 +210,7 @@ pub fn start_spotify_auth(
     }
 
     // Persist complete pending auth to store for crash recovery
+    // (no client_secret — it's in the keychain)
     let store = app.store("tokens").map_err(|e| e.to_string())?;
     store.set(
         "pending_spotify_auth",
@@ -195,7 +218,6 @@ pub fn start_spotify_auth(
             "verifier": verifier,
             "state": csrf_state,
             "client_id": client_id,
-            "client_secret": client_secret,
             "redirect_uri": redirect_uri,
             "expires_at": expires_at.to_rfc3339(),
         }),
@@ -218,7 +240,6 @@ pub fn complete_spotify_auth(
     code: String,
     verifier: String,
     client_id: String,
-    client_secret: String,
     redirect_uri: String,
     app: AppHandle,
     state: tauri::State<'_, Arc<AppState>>,
@@ -228,6 +249,11 @@ pub fn complete_spotify_auth(
         code.len(),
         verifier.len()
     );
+
+    // The client_secret is no longer accepted as a parameter — it is read
+    // from the OS keychain. See issue #9. The keychain entry is populated
+    // by `start_spotify_auth` (the normal flow) and survives a crash.
+    let client_secret = crate::keychain::get_spotify_client_secret()?;
 
     let tokens = crate::spotify::complete_spotify_auth(
         &code,
@@ -292,11 +318,15 @@ pub fn complete_spotify_auth_manual(
         pending.verifier.len()
     );
 
+    // Read the client_secret from the keychain (it was placed there by
+    // `start_spotify_auth` — see issue #9).
+    let client_secret = crate::keychain::get_spotify_client_secret()?;
+
     let tokens = crate::spotify::complete_spotify_auth(
         &code,
         &pending.verifier,
         &pending.client_id,
-        &pending.client_secret,
+        &client_secret,
         &pending.redirect_uri,
     )?;
     log::info!("[CMD] complete_spotify_auth_manual: token exchange successful");
@@ -327,40 +357,20 @@ pub fn complete_spotify_auth_manual(
     Ok(tokens)
 }
 
-// NOTE: get_spotify_tokens and get_teams_tokens have similar structure but are
-// kept separate for clarity. The token types, store keys, and extraction logic differ
-// enough that extracting a generic helper would reduce readability without adding
-// much value. See issue #16.
+// See issue #16: the cache-first, store-fallback pattern is shared by both
+// `get_spotify_tokens` and `get_teams_tokens`. The shared logic lives in
+// `crate::token_cache::get_cached_or_load`.
 #[tauri::command]
 pub fn get_spotify_tokens(
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<Option<SpotifyTokens>, String> {
-    log::info!("[CMD] get_spotify_tokens: ENTRY");
-
-    let state_tokens = {
-        let guard = state.spotify_tokens.read();
-        guard.clone()
-    };
-
-    if state_tokens.is_some() {
-        log::info!("[CMD] get_spotify_tokens: found tokens in AppState");
-        return Ok(state_tokens);
-    }
-    log::info!("[CMD] get_spotify_tokens: not in AppState, checking store");
-
-    let loaded = polling::load_spotify_tokens(&app)?;
-    if let Some(tokens) = &loaded {
-        log::info!(
-            "[CMD] get_spotify_tokens: loaded from store - access_token.len={}",
-            tokens.access_token.len()
-        );
-        let mut guard = state.spotify_tokens.write();
-        *guard = Some(tokens.clone());
-    } else {
-        log::info!("[CMD] get_spotify_tokens: no tokens found in store");
-    }
-    Ok(loaded)
+    log::debug!("[CMD] get_spotify_tokens: ENTRY");
+    crate::token_cache::get_cached_or_load(
+        &state.spotify_tokens,
+        "[CMD] get_spotify_tokens",
+        || polling::load_spotify_tokens(&app),
+    )
 }
 
 #[tauri::command]
@@ -368,7 +378,7 @@ pub fn refresh_spotify(
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<(), String> {
-    log::info!("[CMD] refresh_spotify: ENTRY");
+    log::debug!("[CMD] refresh_spotify: ENTRY");
 
     let store = app.store("tokens").map_err(|e| e.to_string())?;
     log::info!("[CMD] refresh_spotify: store opened");
@@ -380,14 +390,10 @@ pub fn refresh_spotify(
             log::error!("[CMD] refresh_spotify: Spotify client ID not found in store");
             "Spotify client ID not found".to_string()
         })?;
-    let client_secret = store
-        .get("spotify_client_secret")
-        .and_then(|v| v.as_str().map(String::from))
-        .ok_or_else(|| {
-            log::error!("[CMD] refresh_spotify: Spotify client secret not found in store");
-            "Spotify client secret not found".to_string()
-        })?;
-    log::info!("[CMD] refresh_spotify: credentials loaded from store");
+    // Client secret now lives in the OS keychain (see issue #9); it is no
+    // longer persisted to the store.
+    let client_secret = crate::keychain::get_spotify_client_secret()?;
+    log::info!("[CMD] refresh_spotify: credentials loaded (id from store, secret from keychain)");
 
     let current_tokens = {
         let guard = state.spotify_tokens.read();
@@ -402,20 +408,35 @@ pub fn refresh_spotify(
         crate::spotify::refresh_spotify_token(&current_tokens, &client_id, &client_secret)?;
     log::info!("[CMD] refresh_spotify: new tokens received");
 
-    polling::save_spotify_tokens(&app, &new_tokens)?;
-
-    {
+    // CAS: only commit if state still holds the access token we refreshed
+    // from. If state changed during the refresh (e.g. user clicked
+    // Reconnect from another command), discard the result.
+    let pre_refresh_access_token = current_tokens.access_token.clone();
+    let committed = {
         let mut guard = state.spotify_tokens.write();
-        *guard = Some(new_tokens);
+        if guard.as_ref().map(|t| &t.access_token) == Some(&pre_refresh_access_token) {
+            *guard = Some(new_tokens.clone());
+            true
+        } else {
+            log::warn!(
+                "[CMD] refresh_spotify: state changed during refresh, discarding result"
+            );
+            false
+        }
+    };
+    if committed {
+        polling::save_spotify_tokens(&app, &new_tokens)?;
+        log::info!("[CMD] refresh_spotify: SUCCESS (state updated and persisted)");
+    } else {
+        log::info!("[CMD] refresh_spotify: NOOP (concurrent state change; not persisted)");
     }
 
-    log::info!("[CMD] refresh_spotify: SUCCESS");
     Ok(())
 }
 
 #[tauri::command]
 pub fn open_external_url(url: String) -> Result<(), String> {
-    log::info!("[CMD] open_external_url: ENTRY - url.len={}", url.len());
+    log::debug!("[CMD] open_external_url: ENTRY - url.len={}", url.len());
 
     // Validate URL scheme - only allow http/https. See issue #14.
     validate_http_url(&url)?;
@@ -437,7 +458,7 @@ pub fn start_teams_auth_device_code(
     app: AppHandle,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<DeviceCodeResponse, String> {
-    log::info!("[CMD] start_teams_auth_device_code: ENTRY");
+    log::debug!("[CMD] start_teams_auth_device_code: ENTRY");
 
     let response = crate::teams::start_teams_auth_device_code()?;
     log::info!("[CMD] start_teams_auth_device_code: got device code response");
@@ -583,36 +604,17 @@ pub fn get_teams_tokens(
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<Option<TeamsTokens>, String> {
-    log::info!("[CMD] get_teams_tokens: ENTRY");
-
-    let state_tokens = {
-        let guard = state.teams_tokens.read();
-        guard.clone()
-    };
-
-    if state_tokens.is_some() {
-        log::info!("[CMD] get_teams_tokens: found tokens in AppState");
-        return Ok(state_tokens);
-    }
-    log::info!("[CMD] get_teams_tokens: not in AppState, checking store");
-
-    let loaded = polling::load_teams_tokens(&app)?;
-    if let Some(tokens) = &loaded {
-        log::info!(
-            "[CMD] get_teams_tokens: loaded from store - access_token.len={}",
-            tokens.access_token.len()
-        );
-        let mut guard = state.teams_tokens.write();
-        *guard = Some(tokens.clone());
-    } else {
-        log::info!("[CMD] get_teams_tokens: no tokens found in store");
-    }
-    Ok(loaded)
+    log::debug!("[CMD] get_teams_tokens: ENTRY");
+    crate::token_cache::get_cached_or_load(
+        &state.teams_tokens,
+        "[CMD] get_teams_tokens",
+        || polling::load_teams_tokens(&app),
+    )
 }
 
 #[tauri::command]
 pub fn refresh_teams(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> Result<(), String> {
-    log::info!("[CMD] refresh_teams: ENTRY");
+    log::debug!("[CMD] refresh_teams: ENTRY");
 
     let current_tokens = {
         let guard = state.teams_tokens.read();
@@ -626,30 +628,51 @@ pub fn refresh_teams(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> 
     let new_tokens = crate::teams::refresh_teams_token(&current_tokens)?;
     log::info!("[CMD] refresh_teams: new tokens received");
 
-    polling::save_teams_tokens(&app, &new_tokens)?;
-
-    {
+    // CAS: only commit if state still holds the access token we refreshed
+    // from. If state changed during the refresh (e.g. user clicked
+    // Reconnect from another command), discard the result.
+    let pre_refresh_access_token = current_tokens.access_token.clone();
+    let committed = {
         let mut guard = state.teams_tokens.write();
-        *guard = Some(new_tokens);
+        if guard.as_ref().map(|t| &t.access_token) == Some(&pre_refresh_access_token) {
+            *guard = Some(new_tokens.clone());
+            true
+        } else {
+            log::warn!(
+                "[CMD] refresh_teams: state changed during refresh, discarding result"
+            );
+            false
+        }
+    };
+    if committed {
+        polling::save_teams_tokens(&app, &new_tokens)?;
+        log::info!("[CMD] refresh_teams: SUCCESS (state updated and persisted)");
+    } else {
+        log::info!("[CMD] refresh_teams: NOOP (concurrent state change; not persisted)");
     }
 
-    log::info!("[CMD] refresh_teams: SUCCESS");
     Ok(())
 }
 
 #[tauri::command]
 pub fn start_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> Result<(), String> {
-    log::info!("[CMD] start_syncing: ENTRY");
+    log::debug!("[CMD] start_syncing: ENTRY");
 
     // Acquire write lock first to prevent TOCTOU race with concurrent calls.
     // See issue #14.
     {
-        let mut is_syncing_guard = state.is_syncing.write();
-        if *is_syncing_guard {
+        // Use compare_exchange for an atomic check-and-set: replaces the
+        // previous RwLock write guard. AcqRel on success preserves the
+        // happens-before relationship with subsequent reads of is_syncing
+        // (e.g. the polling loop and tray).
+        if state
+            .is_syncing
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
             log::info!("[CMD] start_syncing: already syncing, returning early");
             return Ok(());
         }
-        *is_syncing_guard = true;
         log::info!("[CMD] start_syncing: is_syncing flag set to true");
     }
 
@@ -658,8 +681,7 @@ pub fn start_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> 
         Err(e) => {
             // Roll back is_syncing flag since no handle was created
             log::error!("[CMD] start_syncing: polling start failed - {}; rolling back is_syncing", e);
-            let mut guard = state.is_syncing.write();
-            *guard = false;
+            state.is_syncing.store(false, Ordering::Release);
             return Err(e);
         }
     };
@@ -718,7 +740,7 @@ fn stop_polling_and_join(state: &Arc<AppState>, context: &str) {
 
 #[tauri::command]
 pub fn stop_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> Result<(), String> {
-    log::info!("[CMD] stop_syncing: ENTRY");
+    log::debug!("[CMD] stop_syncing: ENTRY");
 
     stop_polling_and_join(state.inner(), "stop_syncing");
 
@@ -731,12 +753,9 @@ pub fn stop_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> R
 
 #[tauri::command]
 pub fn app_exit(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> Result<(), String> {
-    log::info!("[CMD] app_exit: ENTRY");
+    log::debug!("[CMD] app_exit: ENTRY");
 
-    let is_syncing = {
-        let guard = state.is_syncing.read();
-        *guard
-    };
+    let is_syncing = state.is_syncing.load(Ordering::Acquire);
 
     if is_syncing {
         log::info!("[CMD] app_exit: stopping polling first");
@@ -750,12 +769,9 @@ pub fn app_exit(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> Resul
 
 #[tauri::command]
 pub fn get_sync_status(state: tauri::State<'_, Arc<AppState>>) -> Result<SyncStatus, String> {
-    log::info!("[CMD] get_sync_status: ENTRY");
+    log::debug!("[CMD] get_sync_status: ENTRY");
 
-    let is_syncing = {
-        let guard = state.is_syncing.read();
-        *guard
-    };
+    let is_syncing = state.is_syncing.load(Ordering::Acquire);
 
     let current_track = {
         let guard = state.current_track.read();
@@ -794,7 +810,7 @@ pub fn get_sync_status(state: tauri::State<'_, Arc<AppState>>) -> Result<SyncSta
 
 #[tauri::command]
 pub fn show_window(app: AppHandle) -> Result<(), String> {
-    log::info!("[CMD] show_window: ENTRY");
+    log::debug!("[CMD] show_window: ENTRY");
 
     if let Some(window) = app.get_webview_window("main") {
         log::info!("[CMD] show_window: window found, showing and focusing");
@@ -810,7 +826,7 @@ pub fn show_window(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub fn hide_window(app: AppHandle) -> Result<(), String> {
-    log::info!("[CMD] hide_window: ENTRY");
+    log::debug!("[CMD] hide_window: ENTRY");
 
     if let Some(window) = app.get_webview_window("main") {
         log::info!("[CMD] hide_window: window found, hiding");
@@ -825,7 +841,7 @@ pub fn hide_window(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub fn get_autostart_enabled(app: AppHandle) -> Result<bool, String> {
-    log::info!("[CMD] get_autostart_enabled: ENTRY");
+    log::debug!("[CMD] get_autostart_enabled: ENTRY");
 
     let autolaunch_manager = app.state::<tauri_plugin_autostart::AutoLaunchManager>();
     match autolaunch_manager.is_enabled() {
@@ -842,7 +858,7 @@ pub fn get_autostart_enabled(app: AppHandle) -> Result<bool, String> {
 
 #[tauri::command]
 pub fn set_autostart_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
-    log::info!("[CMD] set_autostart_enabled: ENTRY - enabled={}", enabled);
+    log::debug!("[CMD] set_autostart_enabled: ENTRY - enabled={}", enabled);
 
     let autolaunch_manager = app.state::<tauri_plugin_autostart::AutoLaunchManager>();
     if enabled {
@@ -872,7 +888,7 @@ pub fn set_autostart_enabled(app: AppHandle, enabled: bool) -> Result<(), String
 
 #[tauri::command]
 pub fn open_logs_folder(app: AppHandle) -> Result<(), String> {
-    log::info!("[CMD] open_logs_folder: ENTRY");
+    log::debug!("[CMD] open_logs_folder: ENTRY");
 
     let logs_path = app.path().app_log_dir().map_err(|e| {
         log::error!("[CMD] open_logs_folder: failed to get log dir - {}", e);
@@ -895,7 +911,7 @@ pub fn open_logs_folder(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub fn open_external(url: String) -> Result<(), String> {
-    log::info!("[CMD] open_external: ENTRY - url.len={}", url.len());
+    log::debug!("[CMD] open_external: ENTRY - url.len={}", url.len());
 
     // Validate URL scheme - only allow http/https. See issue #14.
     validate_http_url(&url)?;
@@ -916,7 +932,7 @@ pub fn open_external(url: String) -> Result<(), String> {
 pub fn get_current_track(
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<Option<TrackInfo>, String> {
-    log::info!("[CMD] get_current_track: ENTRY");
+    log::debug!("[CMD] get_current_track: ENTRY");
 
     let guard = state.current_track.read();
     let track = guard.clone();
@@ -933,10 +949,57 @@ pub fn get_current_track(
     Ok(track)
 }
 
+/// Onboarding check: `true` if both Spotify and Teams are configured and have a non-expired
+/// token. Network errors (5xx, 429) are treated as "still valid" (transient) so a flaky
+/// network doesn't bounce the user back into the onboarding flow.
+///
+/// Result is cached on `AppState.onboarding_cache` for [`ONBOARDING_CACHE_TTL`] —
+/// the front-end remounts this command on every Onboarding view enter, and the
+/// upstream HTTPS calls can take up to 20s in the worst case (token validation
+/// against Spotify/Graph APIs).
 #[tauri::command]
-pub fn is_onboarding_complete(state: tauri::State<'_, Arc<AppState>>) -> Result<bool, String> {
-    log::info!("[CMD] is_onboarding_complete: ENTRY");
+pub async fn is_onboarding_complete(
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<bool, String> {
+    log::debug!("[CMD] is_onboarding_complete: ENTRY");
 
+
+    // Cache hit — return immediately.
+    {
+        let guard = state.onboarding_cache.lock();
+        if let Some((ts, result)) = *guard {
+            if ts.elapsed() < ONBOARDING_CACHE_TTL {
+                log::info!(
+                    "[CMD] is_onboarding_complete: cache HIT (age={:.2}s, result={})",
+                    ts.elapsed().as_secs_f32(),
+                    result
+                );
+                return Ok(result);
+            }
+        }
+    }
+
+    // Cache miss — run the actual validation on a blocking thread (HTTPS round-trips).
+    let state_clone: Arc<AppState> = Arc::clone(&state);
+    let result =
+        tauri::async_runtime::spawn_blocking(move || is_onboarding_complete_impl(&state_clone))
+            .await
+            .map_err(|e| format!("is_onboarding_complete task panicked: {}", e))??;
+
+    // Store result in cache. We cache both `true` and `false` outcomes — a recent "complete"
+    // result is just as valid as a recent "incomplete" one for the 30s window.
+    *state.onboarding_cache.lock() = Some((Instant::now(), result));
+    log::info!(
+        "[CMD] is_onboarding_complete: cache MISS, stored fresh result={}",
+        result
+    );
+    Ok(result)
+}
+
+/// Blocking implementation of the onboarding check. Run via `spawn_blocking` from
+/// `is_onboarding_complete` so the async runtime can keep serving other commands while
+/// the HTTPS round-trips to Spotify/Graph complete.
+fn is_onboarding_complete_impl(state: &Arc<AppState>) -> Result<bool, String> {
     let config = config::load_config()?;
     let spotify_configured = !config.spotify.client_id.is_empty();
 
@@ -946,7 +1009,7 @@ pub fn is_onboarding_complete(state: tauri::State<'_, Arc<AppState>>) -> Result<
         let guard = state.teams_tokens.read();
         match guard.as_ref() {
             Some(tokens) => {
-                let valid = match crate::teams::validate_teams_token(&tokens.access_token) {
+                let valid = match crate::teams::validate_teams_token(tokens) {
                     Ok(()) => true,
                     Err(crate::teams::TeamsApiError::ExpiredToken(_)) => false,
                     Err(_) => true, // transient — still valid for onboarding
@@ -963,7 +1026,7 @@ pub fn is_onboarding_complete(state: tauri::State<'_, Arc<AppState>>) -> Result<
         let guard = state.spotify_tokens.read();
         match guard.as_ref() {
             Some(tokens) => {
-                let valid = match crate::spotify::validate_spotify_token(&tokens.access_token) {
+                let valid = match crate::spotify::validate_spotify_token(tokens) {
                     Ok(()) => true,
                     Err(crate::spotify::SpotifyApiError::ExpiredToken) => false,
                     Err(_) => true, // transient — still valid for onboarding
@@ -995,7 +1058,7 @@ pub fn complete_onboarding(
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<(), String> {
-    log::info!("[CMD] complete_onboarding: ENTRY");
+    log::debug!("[CMD] complete_onboarding: ENTRY");
 
     let has_spotify = {
         let guard = state.spotify_tokens.read();
@@ -1038,7 +1101,7 @@ pub fn reconnect_spotify(
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<(), String> {
-    log::info!("[CMD] reconnect_spotify: ENTRY");
+    log::debug!("[CMD] reconnect_spotify: ENTRY");
 
     // Clear Spotify tokens from state
     *state.spotify_tokens.write() = None;
@@ -1052,6 +1115,16 @@ pub fn reconnect_spotify(
     if let Err(e) = polling::clear_spotify_tokens(&app) {
         log::warn!(
             "[CMD] reconnect_spotify: failed to clear persisted tokens - {}",
+            e
+        );
+    }
+
+    // Clear the client_secret from the OS keychain (see issue #9).
+    // Best-effort: don't fail the disconnect if the keychain entry is
+    // already gone or unavailable.
+    if let Err(e) = crate::keychain::delete_spotify_client_secret() {
+        log::warn!(
+            "[CMD] reconnect_spotify: failed to clear keychain entry - {}",
             e
         );
     }
@@ -1072,7 +1145,7 @@ pub fn reconnect_teams(
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<(), String> {
-    log::info!("[CMD] reconnect_teams: ENTRY");
+    log::debug!("[CMD] reconnect_teams: ENTRY");
 
     // Clear Teams tokens from state
     *state.teams_tokens.write() = None;

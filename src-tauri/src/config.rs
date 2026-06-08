@@ -7,7 +7,12 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpotifyConfig {
     pub client_id: String,
-    pub client_secret: String,
+    /// True iff the Spotify `client_secret` is currently stored in the OS
+    /// keychain. This is a derived/display field — it is populated by
+    /// `load_config` (and not persisted to disk). The actual secret lives
+    /// in the keychain, not in `config.json`. See issue #9.
+    #[serde(default)]
+    pub client_secret_set: bool,
     #[serde(default = "default_redirect_uri")]
     pub redirect_uri: String,
     #[serde(default = "default_scopes")]
@@ -93,8 +98,6 @@ pub struct LoggingConfig {
     pub enabled: bool,
     #[serde(default = "default_log_level")]
     pub log_level: String,
-    #[serde(default = "default_retention_days")]
-    pub retention_days: u32,
 }
 
 fn default_logging_enabled() -> bool {
@@ -103,10 +106,6 @@ fn default_logging_enabled() -> bool {
 
 fn default_log_level() -> String {
     "Info".to_string()
-}
-
-fn default_retention_days() -> u32 {
-    30
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,7 +126,7 @@ impl Default for SpotifyConfig {
     fn default() -> Self {
         Self {
             client_id: String::new(),
-            client_secret: String::new(),
+            client_secret_set: false,
             redirect_uri: default_redirect_uri(),
             scopes: default_scopes(),
         }
@@ -162,7 +161,6 @@ impl Default for LoggingConfig {
         Self {
             enabled: default_logging_enabled(),
             log_level: default_log_level(),
-            retention_days: default_retention_days(),
         }
     }
 }
@@ -213,7 +211,7 @@ pub fn load_config() -> Result<AppConfig, String> {
             "Config file not found at '{}', using defaults",
             path.display()
         );
-        return Ok(AppConfig::default());
+        return Ok(with_keychain_flags(AppConfig::default()));
     }
 
     let mut file = fs::File::open(&path)
@@ -227,7 +225,16 @@ pub fn load_config() -> Result<AppConfig, String> {
         .map_err(|e| format!("Failed to parse config file '{}': {}", path.display(), e))?;
 
     log::info!("Loaded configuration from '{}'", path.display());
-    Ok(config)
+    Ok(with_keychain_flags(config))
+}
+
+/// Populate derived/display fields that are not persisted to disk.
+///
+/// Currently this only covers `spotify.client_secret_set`, which reflects
+/// whether the OS keychain holds a Spotify client secret. See issue #9.
+fn with_keychain_flags(mut config: AppConfig) -> AppConfig {
+    config.spotify.client_secret_set = crate::keychain::has_spotify_client_secret();
+    config
 }
 
 fn atomic_write_json(path: &std::path::Path, json: &str) -> Result<(), String> {

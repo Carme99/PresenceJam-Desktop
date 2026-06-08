@@ -1,5 +1,6 @@
 use chrono::Utc;
 use rand::Rng;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
@@ -15,12 +16,58 @@ use crate::spotify::{
 use crate::teams::{clear_teams_status_message, refresh_teams_token, set_teams_status_message, TeamsTokens};
 use crate::{tray, AppState};
 
-const DEFAULT_INTERVAL_SECONDS: u64 = 30;
-const MAX_INTERVAL_SECONDS: u64 = 60;
-const MINIMUM_INTERVAL_SECONDS: u64 = 10;
 const ERROR_RETRY_INTERVAL_SECONDS: u64 = 30;
 const RATE_LIMIT_BACKOFF_SECONDS: u64 = 60;
 const DEBOUNCE_MS: u64 = 500;
+
+/// Read the configured default poll interval (with a hard fallback).
+fn config_default_interval(config: &Option<crate::config::AppConfig>) -> u64 {
+    config
+        .as_ref()
+        .map(|c| c.polling.default_interval_seconds)
+        .unwrap_or(30)
+}
+
+/// Read the configured minimum poll interval (with a hard fallback).
+fn config_minimum_interval(config: &Option<crate::config::AppConfig>) -> u64 {
+    config
+        .as_ref()
+        .map(|c| c.polling.minimum_interval_seconds)
+        .unwrap_or(5)
+}
+
+/// Read the configured maximum poll interval (with a hard fallback).
+fn config_maximum_interval(config: &Option<crate::config::AppConfig>) -> u64 {
+    config
+        .as_ref()
+        .map(|c| c.polling.max_interval_seconds)
+        .unwrap_or(60)
+}
+
+/// Pause-aware exponential backoff. When the user has paused Spotify (or has
+/// nothing playing at all), the polling loop would otherwise hammer the
+/// currently-playing endpoint every `default_secs` for hours. This grows the
+/// sleep on consecutive empty/paused responses: `default_secs` → 2× → 4× → 300s
+/// (cap).
+///
+/// The first arm returns the configured default so the user's Settings value
+/// (`AppConfig.polling.default_interval_seconds`) actually takes effect at
+/// runtime. Arms 1 and 2 double and quadruple, but are clamped to the same
+/// 300s ceiling to keep the cap behaviour stable for users with large
+/// configured defaults.
+///
+/// The counter is reset to 0 the moment we see a non-paused, non-empty
+/// response, so resuming playback immediately goes back to the normal cadence.
+///
+/// See issue #38.
+fn pause_backoff(consecutive_pauses: u8, default_secs: u64) -> u64 {
+    match consecutive_pauses {
+        0 => default_secs,
+        1 => default_secs.saturating_mul(2).min(300),
+        2 => default_secs.saturating_mul(4).min(300),
+        _ => 300,
+    }
+}
 
 /// Adds +/- 20% jitter to retry intervals to prevent thundering herd.
 /// See issue #17.
@@ -40,7 +87,7 @@ fn process_track(
     last_track_key: &mut Option<String>,
     last_poll_instant: Instant,
     last_teams_update: &mut Option<Instant>,
-    is_first_poll: bool,
+    consecutive_pauses: &mut u8,
 ) -> u64 {
     // Bug 13: Correct progress_ms for elapsed time since last poll
     let elapsed_ms = last_poll_instant.elapsed().as_millis() as u64;
@@ -78,14 +125,47 @@ fn process_track(
         let expired = Utc::now() >= tok.expires_at - chrono::Duration::seconds(60);
         if expired {
             log::info!("[POLLING] process_track: Teams token expired, refreshing...");
+
+            // Snapshot the access token before refresh so we can detect a
+            // concurrent writer (e.g. user clicked Reconnect) that mutated
+            // state between our read and our eventual write.
+            let pre_refresh_access_token = tok.access_token.clone();
+
             match refresh_teams_token(tok) {
                 Ok(new_tokens) => {
                     log::info!("[POLLING] process_track: Teams token refresh SUCCESS");
-                    *state.teams_tokens.write() = Some(new_tokens.clone());
-                    if let Err(e) = save_teams_tokens(app, &new_tokens) {
-                        log::warn!("[POLLING] process_track: failed to persist refreshed teams tokens: {}", e);
+                    // CAS: only commit if state still holds the access token
+                    // we refreshed from. If state changed during the refresh
+                    // (e.g. user clicked Reconnect), discard the result.
+                    let committed = {
+                        let mut guard = state.teams_tokens.write();
+                        if guard.as_ref().map(|t| &t.access_token)
+                            == Some(&pre_refresh_access_token)
+                        {
+                            *guard = Some(new_tokens.clone());
+                            true
+                        } else {
+                            log::warn!(
+                                "[POLLING] process_track: teams state changed during refresh, discarding result"
+                            );
+                            false
+                        }
+                    };
+                    if committed {
+                        if let Err(e) = save_teams_tokens(app, &new_tokens) {
+                            log::warn!("[POLLING] process_track: failed to persist refreshed teams tokens: {}", e);
+                        }
+                        Some(new_tokens)
+                    } else {
+                        // CAS failed: a concurrent writer (Reconnect, a winning
+                        // refresh_teams command) mutated state. Re-read the
+                        // in-memory state and return that. If it's None, the
+                        // outer `if let Some(teams_tok)` correctly skips the
+                        // Teams API call. If it's Some(other), a different
+                        // writer won the race and we use those tokens instead
+                        // of the discarded refresh.
+                        state.teams_tokens.read().clone()
                     }
-                    Some(new_tokens)
                 }
                 Err(e) => {
                     log::error!("[POLLING] process_track: Failed to refresh Teams token: {}", e);
@@ -118,8 +198,13 @@ fn process_track(
 
     if let Some(teams_tok) = teams_tokens {
         if track.is_playing {
+            // Resuming playback — reset the pause-backoff counter before the
+            // debounce early-return below, so a track that resumes inside the
+            // 500ms debounce window doesn't carry a stale backoff level into
+            // the next pause cycle.
+            *consecutive_pauses = 0;
             if should_skip_api_call {
-                log::info!(
+                log::debug!(
                     "[POLLING] process_track: debounce active, skipping Teams API call (changed={}, elapsed={}ms)",
                     changed,
                     last_teams_update.map(|i| i.elapsed().as_millis() as u64).unwrap_or(0)
@@ -130,8 +215,8 @@ fn process_track(
                 let remaining_secs = remaining_ms / 1000;
                 let sleep_secs = remaining_secs.saturating_sub(buffer_ms / 1000);
                 return sleep_secs
-                    .max(MINIMUM_INTERVAL_SECONDS)
-                    .min(MAX_INTERVAL_SECONDS);
+                    .max(config_minimum_interval(config))
+                    .min(config_maximum_interval(config));
             }
             let status_format = config
                 .as_ref()
@@ -195,36 +280,48 @@ fn process_track(
                 }
             }
         } else if config.as_ref().map(|c| c.teams.clear_on_pause).unwrap_or(true) {
-            if !is_first_poll {
-                match clear_teams_status_message(&teams_tok.access_token, "🎵 Paused") {
-                    Ok(_) => {
-                        *last_teams_update = Some(Instant::now());
-                        let _ = app.emit(
-                            "presence-cleared",
-                            serde_json::json!({ "timestamp": Utc::now().to_rfc3339() }),
-                        );
-                    }
-                    Err(e) => {
-                        log::error!(
-                            "[POLLING] process_track: Failed to clear Teams status: {}",
-                            e
-                        );
-                    }
+            // Issue #39: removed the `is_first_poll` guard. It was preventing
+            // legitimate status-clearing on app start for the first 30s when
+            // the user opens PresenceJam while Spotify is already paused.
+            // The (small) risk of wiping a status the user set manually before
+            // opening the app is acceptable: a stale \"now playing\" status
+            // is a worse UX than a missing \"paused\" status, and the user can
+            // just hit play/pause to re-sync.
+            match clear_teams_status_message(&teams_tok.access_token, "🎵 Paused") {
+                Ok(_) => {
+                    *last_teams_update = Some(Instant::now());
+                    let _ = app.emit(
+                        "presence-cleared",
+                        serde_json::json!({ "timestamp": Utc::now().to_rfc3339() }),
+                    );
+                }
+                Err(e) => {
+                    log::error!(
+                        "[POLLING] process_track: Failed to clear Teams status: {}",
+                        e
+                    );
                 }
             }
         }
     }
 
     if track.is_playing {
+        // The consecutive_pauses counter was already reset earlier in
+        // process_track (top of the is_playing branch inside the teams_tokens
+        // block) so the debounce early-return can't leave it stale.
         let remaining_ms = track.duration_ms.saturating_sub(corrected_progress_ms);
         let buffer_ms = 5000u64;
         let remaining_secs = remaining_ms / 1000;
         let sleep_secs = remaining_secs.saturating_sub(buffer_ms / 1000);
         sleep_secs
-            .max(MINIMUM_INTERVAL_SECONDS)
-            .min(MAX_INTERVAL_SECONDS)
+            .max(config_minimum_interval(config))
+            .min(config_maximum_interval(config))
     } else {
-        DEFAULT_INTERVAL_SECONDS
+        // Track present but paused — grow the sleep on consecutive pauses
+        // so a paused user doesn't trigger 720 calls/day.
+        let sleep = pause_backoff(*consecutive_pauses, config_default_interval(config));
+        *consecutive_pauses = consecutive_pauses.saturating_add(1).min(4);
+        sleep
     }
 }
 
@@ -263,17 +360,21 @@ pub fn start_polling(
     log::info!("[POLLING] start_polling: ENTRY");
 
     // Guard against spawning duplicate polling thread.
-    // Acquire write lock for the full check-and-set to make it atomic.
-    // This mirrors commands.rs:start_syncing which also holds the write lock
-    // across its atomic check-and-set. The polling loop only reads is_syncing
-    // (via is_syncing.read()) so concurrent read access is unaffected.
+    // Use compare_exchange for an atomic check-and-set: replaces the
+    // previous RwLock write guard. AcqRel on success preserves the
+    // happens-before relationship with subsequent reads of is_syncing
+    // (e.g. the polling loop and tray).
+    // This mirrors commands.rs:start_syncing which uses the same
+    // compare_exchange. The polling loop only reads is_syncing
+    // (via is_syncing.load(Acquire)) so concurrent read access is
+    // unaffected.
+    if state
+        .is_syncing
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
     {
-        let mut is_syncing_guard = state.is_syncing.write();
-        if *is_syncing_guard {
-            log::warn!("[POLLING] start_polling: polling already running, returning early");
-            return Err("Polling is already running".to_string());
-        }
-        *is_syncing_guard = true;
+        log::warn!("[POLLING] start_polling: polling already running, returning early");
+        return Err("Polling is already running".to_string());
     }
 
     log::info!("[POLLING] start_polling: is_syncing flag set to true");
@@ -318,7 +419,7 @@ pub fn start_polling(
                 // app_clone is moved into polling_loop above, so use app here
                 let _ = app.emit("polling-thread-panicked", serde_json::json!(null));
                 // Reset state so a panic doesn't wedge the app in "syncing"
-                *state.is_syncing.write() = false;
+                state.is_syncing.store(false, Ordering::Release);
                 *state.stop_tx.write() = None;
             }
             log::info!("[POLLING] start_polling: thread ended");
@@ -326,7 +427,7 @@ pub fn start_polling(
         .map_err(|e| {
             log::error!("[POLLING] start_polling: thread spawn failed - {}", e);
             // Reset is_syncing so future start_polling calls are not permanently wedged.
-            *state.is_syncing.write() = false;
+            state.is_syncing.store(false, Ordering::Release);
             // Also clean up the stop channel sender we just stored.
             *state.stop_tx.write() = None;
             format!("Failed to spawn polling thread: {}", e)
@@ -336,22 +437,33 @@ pub fn start_polling(
     Ok(handle)
 }
 
+/// Returns the (client_id, client_secret) pair needed to call Spotify APIs.
+///
+/// The `client_id` is read from the in-memory AppState config. The
+/// `client_secret` is read from the OS keychain (see issue #9). If the
+/// keychain entry is missing, the returned `client_secret` is an empty
+/// string — callers should treat that as a "user must re-onboard" signal.
 fn get_spotify_credentials(config: &Option<crate::config::AppConfig>) -> (String, String) {
-    config
+    let client_id = config
         .as_ref()
-        .map(|c| (c.spotify.client_id.clone(), c.spotify.client_secret.clone()))
-        .unwrap_or_else(|| (String::new(), String::new()))
+        .map(|c| c.spotify.client_id.clone())
+        .unwrap_or_default();
+    let client_secret = crate::keychain::get_spotify_client_secret().unwrap_or_default();
+    (client_id, client_secret)
 }
 
 fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()>) {
     log::info!("[POLLING] polling_loop: STARTED");
     let mut last_track_key: Option<String> = None;
     let mut last_teams_update: Option<Instant> = None;
-    let mut is_first_poll = true;
     let mut transient_failure_count: u8 = 0;
+    // Tracks consecutive empty/paused responses so we can widen the poll
+    // interval (30→60→120→300s) instead of hammering the API on a paused user.
+    // See issue #38.
+    let mut consecutive_pauses: u8 = 0;
 
     loop {
-        log::info!("[POLLING] polling_loop: iteration start");
+        log::debug!("[POLLING] polling_loop: iteration start");
 
         // Check if we should stop — use interruptible channel so stop_syncing
         // can wake the thread immediately instead of waiting for the sleep to expire.
@@ -366,7 +478,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
             }
         }
         {
-            let is_syncing = *state.is_syncing.read();
+            let is_syncing = state.is_syncing.load(Ordering::Acquire);
             if !is_syncing {
                 log::info!("[POLLING] polling_loop: is_syncing=false, breaking loop");
                 break;
@@ -378,14 +490,14 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
             let guard = state.config.read();
             guard.clone()
         };
-        log::info!("[POLLING] polling_loop: config loaded");
+        log::debug!("[POLLING] polling_loop: config loaded");
 
         // Get Spotify tokens
         let spotify_tokens = {
             let guard = state.spotify_tokens.read();
             guard.clone()
         };
-        log::info!(
+        log::debug!(
             "[POLLING] polling_loop: spotify_tokens: {}",
             if spotify_tokens.is_some() {
                 "Some"
@@ -396,7 +508,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
 
         let spotify_tokens = match spotify_tokens {
             Some(t) => {
-                log::info!("[POLLING] polling_loop: using existing Spotify tokens");
+                log::debug!("[POLLING] polling_loop: using existing Spotify tokens");
                 t
             }
             None => {
@@ -414,7 +526,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
 
         // Check if token expired
         let token_expired = is_token_expired(&spotify_tokens);
-        log::info!("[POLLING] polling_loop: token_expired={}", token_expired);
+        log::debug!("[POLLING] polling_loop: token_expired={}", token_expired);
 
         // Refresh token if needed
         let (client_id, client_secret) = get_spotify_credentials(&config);
@@ -425,15 +537,63 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                 client_id.len()
             );
 
+            // Snapshot the access token before refresh so we can detect a
+            // concurrent writer (e.g. user clicked Reconnect) that mutated
+            // state between our read and our eventual write.
+            let pre_refresh_access_token = spotify_tokens.access_token.clone();
+
             match refresh_spotify_token(&spotify_tokens, &client_id, &client_secret) {
                 Ok(new_tokens) => {
                     log::info!("[POLLING] polling_loop: token refresh SUCCESS");
-                    *state.spotify_tokens.write() = Some(new_tokens.clone());
-                    // Persist refreshed tokens to store so they survive app restarts
-                    if let Err(e) = save_spotify_tokens(&app, &new_tokens) {
-                        log::warn!("[POLLING] polling_loop: failed to persist refreshed tokens: {}", e);
+                    // CAS: only commit if state still holds the access token
+                    // we refreshed from. If state changed during the refresh
+                    // (e.g. user clicked Reconnect), discard the result.
+                    let committed = {
+                        let mut guard = state.spotify_tokens.write();
+                        if guard.as_ref().map(|t| &t.access_token)
+                            == Some(&pre_refresh_access_token)
+                        {
+                            *guard = Some(new_tokens.clone());
+                            true
+                        } else {
+                            log::warn!(
+                                "[POLLING] polling_loop: spotify state changed during refresh, discarding result"
+                            );
+                            false
+                        }
+                    };
+                    if committed {
+                        // Persist refreshed tokens to store so they survive app restarts
+                        if let Err(e) = save_spotify_tokens(&app, &new_tokens) {
+                            log::warn!("[POLLING] polling_loop: failed to persist refreshed tokens: {}", e);
+                        }
+                        new_tokens
+                    } else {
+                        // CAS failed: re-read in-memory state. If a different
+                        // writer won the race (e.g. refresh_spotify command
+                        // raced with us), use their tokens. If state was
+                        // cleared (Reconnect), short-circuit and re-poll on
+                        // the next iteration rather than using the discarded
+                        // refresh — the caller dereferences spotify_tokens
+                        // unconditionally a few lines below.
+                        match state.spotify_tokens.read().clone() {
+                            Some(t) => t,
+                            None => {
+                                log::info!(
+                                    "[POLLING] polling_loop: state cleared during refresh, waiting and re-polling"
+                                );
+                                match stop_rx.recv_timeout(StdDuration::from_secs(with_jitter(ERROR_RETRY_INTERVAL_SECONDS))) {
+                                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                                        log::info!("[POLLING] polling_loop: stop signal during CAS-fail sleep, breaking");
+                                        break;
+                                    }
+                                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
                     }
-                    new_tokens
                 }
                 Err(e) => {
                     log::error!(
@@ -464,7 +624,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
         };
 
         let access_token = spotify_tokens.access_token.clone();
-        log::info!("[POLLING] polling_loop: calling get_currently_playing");
+        log::debug!("[POLLING] polling_loop: calling get_currently_playing");
 
         // Bug 13: Capture instant before API call to correct progress_ms elapsed time
         let last_poll_instant = Instant::now();
@@ -480,16 +640,15 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                     track.artist
                 );
                 let sleep_duration =
-                    process_track(&app, &state, &config, &track, &mut last_track_key, last_poll_instant, &mut last_teams_update, is_first_poll);
+                    process_track(&app, &state, &config, &track, &mut last_track_key, last_poll_instant, &mut last_teams_update, &mut consecutive_pauses);
                 transient_failure_count = 0;
-                is_first_poll = false;
                 // Update tray menu with current sync state and track info (Bug 24+25 fix)
-                let is_syncing = *state.is_syncing.read();
+                let is_syncing = state.is_syncing.load(Ordering::Acquire);
                 let current_track = state.current_track.read().clone();
                 if let Err(e) = tray::update_tray_menu(&app, is_syncing, current_track) {
                     log::warn!("[POLLING] polling_loop: failed to update tray menu: {}", e);
                 }
-                log::info!(
+                log::debug!(
                     "[POLLING] polling_loop: sleeping for {} seconds",
                     sleep_duration
                 );
@@ -508,18 +667,22 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                 log::info!("[POLLING] polling_loop: no track playing");
                 handle_no_track(&app, &state, &mut last_track_key);
                 transient_failure_count = 0;
-                is_first_poll = false;
                 // Update tray menu with current sync state and track info (Bug 24+25 fix)
-                let is_syncing = *state.is_syncing.read();
+                let is_syncing = state.is_syncing.load(Ordering::Acquire);
                 let current_track = state.current_track.read().clone();
                 if let Err(e) = tray::update_tray_menu(&app, is_syncing, current_track) {
                     log::warn!("[POLLING] polling_loop: failed to update tray menu: {}", e);
                 }
+                // Apply pause-aware exponential backoff: default→2×→4×→300s.
+                // The counter is reset by process_track on the first playing track.
+                let no_track_sleep = pause_backoff(consecutive_pauses, config_default_interval(&config));
+                consecutive_pauses = consecutive_pauses.saturating_add(1).min(4);
                 log::info!(
+
                     "[POLLING] polling_loop: sleeping for {} seconds (no track)",
-                    DEFAULT_INTERVAL_SECONDS
+                    no_track_sleep
                 );
-                match stop_rx.recv_timeout(StdDuration::from_secs(DEFAULT_INTERVAL_SECONDS)) {
+                match stop_rx.recv_timeout(StdDuration::from_secs(no_track_sleep)) {
                     Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                         log::info!("[POLLING] polling_loop: stop signal during no-track sleep, breaking");
                         break;
@@ -546,20 +709,44 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                         };
 
                         if let Some(tokens) = current_tokens {
+                            // Snapshot the access token before refresh so we can
+                            // detect a concurrent writer (e.g. user clicked
+                            // Reconnect, or the refresh_spotify command) that
+                            // mutated state between our read and the write below.
+                            let pre_refresh_access_token = tokens.access_token.clone();
+
                             match refresh_spotify_token(&tokens, &client_id, &client_secret) {
                                 Ok(new_tokens) => {
                                     log::info!(
                                         "[POLLING] polling_loop: token refresh SUCCESS, retrying"
                                     );
-                                    *state.spotify_tokens.write() = Some(new_tokens.clone());
-                                    // Persist refreshed tokens so they survive app restarts
-                                    if let Err(e) = save_spotify_tokens(&app, &new_tokens) {
-                                        log::warn!("[POLLING] polling_loop: failed to persist refreshed tokens: {}", e);
-                                    }
-                                    let retry_token = new_tokens.access_token.clone();
-                                            // Bug 13: Capture instant before API call to correct progress_ms elapsed time
-                                            let last_poll_instant = Instant::now();
-                                    match get_currently_playing(&retry_token) {
+                                    // CAS: only commit if state still holds the
+                                    // access token we refreshed from. If state
+                                    // changed during the refresh (e.g. user
+                                    // clicked Reconnect), discard the result.
+                                    let committed = {
+                                        let mut guard = state.spotify_tokens.write();
+                                        if guard.as_ref().map(|t| &t.access_token)
+                                            == Some(&pre_refresh_access_token)
+                                        {
+                                            *guard = Some(new_tokens.clone());
+                                            true
+                                        } else {
+                                            log::warn!(
+                                                "[POLLING] polling_loop: 401-retry: spotify state changed during refresh, discarding result"
+                                            );
+                                            false
+                                        }
+                                    };
+                                    if committed {
+                                        // Persist refreshed tokens so they survive app restarts
+                                        if let Err(e) = save_spotify_tokens(&app, &new_tokens) {
+                                            log::warn!("[POLLING] polling_loop: failed to persist refreshed tokens: {}", e);
+                                        }
+                                        let retry_token = new_tokens.access_token.clone();
+                                                // Bug 13: Capture instant before API call to correct progress_ms elapsed time
+                                                let last_poll_instant = Instant::now();
+                                        match get_currently_playing(&retry_token) {
                                         Ok(Some(track)) => {
                                             log::info!(
                                                 "[POLLING] polling_loop: retry track found - {} by {}",
@@ -574,16 +761,17 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                                                 &mut last_track_key,
                                                 last_poll_instant,
                                                 &mut last_teams_update,
-                                                is_first_poll,
+                                                &mut consecutive_pauses,
                                             );
                                             transient_failure_count = 0;
-                                            is_first_poll = false;
                                             continue;
                                         }
                                         Ok(None) => {
                                             log::info!("[POLLING] polling_loop: retry no track");
                                             handle_no_track(&app, &state, &mut last_track_key);
-                                            match stop_rx.recv_timeout(StdDuration::from_secs(DEFAULT_INTERVAL_SECONDS)) {
+                                            let retry_no_track_sleep = pause_backoff(consecutive_pauses, config_default_interval(&config));
+                                            consecutive_pauses = consecutive_pauses.saturating_add(1).min(4);
+                                            match stop_rx.recv_timeout(StdDuration::from_secs(retry_no_track_sleep)) {
                                                 Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                                                     log::info!("[POLLING] polling_loop: stop signal during retry no-track sleep, breaking");
                                                     break;
@@ -591,7 +779,6 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                                                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                                             }
                                             transient_failure_count = 0;
-                                            is_first_poll = false;
                                             continue;
                                         }
                                         Err(retry_err) => {
@@ -599,6 +786,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                                             final_err = retry_err;
                                         }
                                     }
+                                    } // close if committed
                                 }
                                 Err(refresh_err) => {
                                     log::error!(
@@ -666,7 +854,7 @@ pub fn stop_polling(state: &AppState) {
         *tx_guard = None; // Drop the sender, closing the channel
     }
 
-    *state.is_syncing.write() = false;
+    state.is_syncing.store(false, Ordering::Release);
     log::info!("[POLLING] stop_polling: stop channel closed and is_syncing set to false");
 }
 
@@ -780,6 +968,8 @@ pub fn clear_spotify_tokens(app: &AppHandle) -> Result<(), String> {
     })?;
     store.delete("spotify_tokens");
     store.delete("spotify_client_id");
+    // `spotify_client_secret` is no longer persisted to the store — the
+    // secret now lives in the OS keychain. See issue #9.
     store.delete("spotify_client_secret");
     store.delete("spotify_redirect_uri");
     store.delete("spotify_verifier");
@@ -789,7 +979,16 @@ pub fn clear_spotify_tokens(app: &AppHandle) -> Result<(), String> {
         log::error!("[POLLING] clear_spotify_tokens: save failed - {}", e);
         e.to_string()
     })?;
-    log::info!("[POLLING] clear_spotify_tokens: SUCCESS - tokens cleared from store");
+
+    // Best-effort: also clear the keychain entry. If the keychain is
+    // unavailable (e.g. headless CI), we don't fail the whole call.
+    if let Err(e) = crate::keychain::delete_spotify_client_secret() {
+        log::warn!(
+            "[POLLING] clear_spotify_tokens: failed to clear keychain entry - {}",
+            e
+        );
+    }
+    log::info!("[POLLING] clear_spotify_tokens: SUCCESS - tokens cleared from store and keychain");
     Ok(())
 }
 
@@ -809,4 +1008,41 @@ pub fn clear_teams_tokens(app: &AppHandle) -> Result<(), String> {
     })?;
     log::info!("[POLLING] clear_teams_tokens: SUCCESS - tokens cleared from store");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pause_backoff_grows_then_caps() {
+        // With default 30s: 0→30, 1→60, 2→120, 3→300 (cap), 4→300 (cap)
+        assert_eq!(pause_backoff(0, 30), 30);
+        assert_eq!(pause_backoff(1, 30), 60);
+        assert_eq!(pause_backoff(2, 30), 120);
+        assert_eq!(pause_backoff(3, 30), 300);
+        assert_eq!(pause_backoff(4, 30), 300);
+        assert_eq!(pause_backoff(255, 30), 300); // any larger counter stays capped
+    }
+
+    #[test]
+    fn test_pause_backoff_uses_configured_default() {
+        // The 0 arm must use the configured default, not a hard-coded 30.
+        // A user who sets default_interval_seconds=45 should see 45s for the
+        // first backoff arm — proves the config is actually wired through.
+        assert_eq!(pause_backoff(0, 45), 45);
+        // Subsequent arms grow from 45: 45*2=90, 45*4=180, then cap at 300.
+        assert_eq!(pause_backoff(1, 45), 90);
+        assert_eq!(pause_backoff(2, 45), 180);
+        assert_eq!(pause_backoff(3, 45), 300);
+    }
+
+    #[test]
+    fn test_pause_backoff_caps_with_large_default() {
+        // With a large configured default (e.g. user sets 200s), the doubling
+        // arms must be clamped to 300 so the cap behaviour is preserved.
+        assert_eq!(pause_backoff(0, 200), 200); // 0 arm returns the default uncapped
+        assert_eq!(pause_backoff(1, 200), 300); // 200*2=400 → cap
+        assert_eq!(pause_backoff(2, 200), 300); // 200*4=800 → cap
+    }
 }
