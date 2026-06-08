@@ -343,7 +343,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - PowerShell script version — this is a full rewrite
 
-[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v2.5.0...HEAD
+[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v2.6.0...HEAD
+[2.6.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.6.0
 [2.5.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.5.0
 [2.3.7]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.3.7
 [2.3.6]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.3.6
