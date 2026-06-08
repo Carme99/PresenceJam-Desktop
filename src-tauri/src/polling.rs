@@ -704,6 +704,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                                             final_err = retry_err;
                                         }
                                     }
+                                    } // close if committed
                                 }
                                 Err(refresh_err) => {
                                     log::error!(
