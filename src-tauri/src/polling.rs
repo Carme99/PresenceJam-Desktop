@@ -1,5 +1,6 @@
 use chrono::Utc;
 use rand::Rng;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
@@ -263,17 +264,21 @@ pub fn start_polling(
     log::info!("[POLLING] start_polling: ENTRY");
 
     // Guard against spawning duplicate polling thread.
-    // Acquire write lock for the full check-and-set to make it atomic.
-    // This mirrors commands.rs:start_syncing which also holds the write lock
-    // across its atomic check-and-set. The polling loop only reads is_syncing
-    // (via is_syncing.read()) so concurrent read access is unaffected.
+    // Use compare_exchange for an atomic check-and-set: replaces the
+    // previous RwLock write guard. AcqRel on success preserves the
+    // happens-before relationship with subsequent reads of is_syncing
+    // (e.g. the polling loop and tray).
+    // This mirrors commands.rs:start_syncing which uses the same
+    // compare_exchange. The polling loop only reads is_syncing
+    // (via is_syncing.load(Acquire)) so concurrent read access is
+    // unaffected.
+    if state
+        .is_syncing
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
     {
-        let mut is_syncing_guard = state.is_syncing.write();
-        if *is_syncing_guard {
-            log::warn!("[POLLING] start_polling: polling already running, returning early");
-            return Err("Polling is already running".to_string());
-        }
-        *is_syncing_guard = true;
+        log::warn!("[POLLING] start_polling: polling already running, returning early");
+        return Err("Polling is already running".to_string());
     }
 
     log::info!("[POLLING] start_polling: is_syncing flag set to true");
@@ -318,7 +323,7 @@ pub fn start_polling(
                 // app_clone is moved into polling_loop above, so use app here
                 let _ = app.emit("polling-thread-panicked", serde_json::json!(null));
                 // Reset state so a panic doesn't wedge the app in "syncing"
-                *state.is_syncing.write() = false;
+                state.is_syncing.store(false, Ordering::Release);
                 *state.stop_tx.write() = None;
             }
             log::info!("[POLLING] start_polling: thread ended");
@@ -326,7 +331,7 @@ pub fn start_polling(
         .map_err(|e| {
             log::error!("[POLLING] start_polling: thread spawn failed - {}", e);
             // Reset is_syncing so future start_polling calls are not permanently wedged.
-            *state.is_syncing.write() = false;
+            state.is_syncing.store(false, Ordering::Release);
             // Also clean up the stop channel sender we just stored.
             *state.stop_tx.write() = None;
             format!("Failed to spawn polling thread: {}", e)
@@ -366,7 +371,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
             }
         }
         {
-            let is_syncing = *state.is_syncing.read();
+            let is_syncing = state.is_syncing.load(Ordering::Acquire);
             if !is_syncing {
                 log::info!("[POLLING] polling_loop: is_syncing=false, breaking loop");
                 break;
@@ -484,7 +489,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                 transient_failure_count = 0;
                 is_first_poll = false;
                 // Update tray menu with current sync state and track info (Bug 24+25 fix)
-                let is_syncing = *state.is_syncing.read();
+                let is_syncing = state.is_syncing.load(Ordering::Acquire);
                 let current_track = state.current_track.read().clone();
                 if let Err(e) = tray::update_tray_menu(&app, is_syncing, current_track) {
                     log::warn!("[POLLING] polling_loop: failed to update tray menu: {}", e);
@@ -510,7 +515,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                 transient_failure_count = 0;
                 is_first_poll = false;
                 // Update tray menu with current sync state and track info (Bug 24+25 fix)
-                let is_syncing = *state.is_syncing.read();
+                let is_syncing = state.is_syncing.load(Ordering::Acquire);
                 let current_track = state.current_track.read().clone();
                 if let Err(e) = tray::update_tray_menu(&app, is_syncing, current_track) {
                     log::warn!("[POLLING] polling_loop: failed to update tray menu: {}", e);
@@ -666,7 +671,7 @@ pub fn stop_polling(state: &AppState) {
         *tx_guard = None; // Drop the sender, closing the channel
     }
 
-    *state.is_syncing.write() = false;
+    state.is_syncing.store(false, Ordering::Release);
     log::info!("[POLLING] stop_polling: stop channel closed and is_syncing set to false");
 }
 
