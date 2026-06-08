@@ -108,8 +108,17 @@ fn process_track(
                         if let Err(e) = save_teams_tokens(app, &new_tokens) {
                             log::warn!("[POLLING] process_track: failed to persist refreshed teams tokens: {}", e);
                         }
+                        Some(new_tokens)
+                    } else {
+                        // CAS failed: a concurrent writer (Reconnect, a winning
+                        // refresh_teams command) mutated state. Re-read the
+                        // in-memory state and return that. If it's None, the
+                        // outer `if let Some(teams_tok)` correctly skips the
+                        // Teams API call. If it's Some(other), a different
+                        // writer won the race and we use those tokens instead
+                        // of the discarded refresh.
+                        state.teams_tokens.read().clone()
                     }
-                    Some(new_tokens)
                 }
                 Err(e) => {
                     log::error!("[POLLING] process_track: Failed to refresh Teams token: {}", e);
@@ -479,8 +488,33 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                         if let Err(e) = save_spotify_tokens(&app, &new_tokens) {
                             log::warn!("[POLLING] polling_loop: failed to persist refreshed tokens: {}", e);
                         }
+                        new_tokens
+                    } else {
+                        // CAS failed: re-read in-memory state. If a different
+                        // writer won the race (e.g. refresh_spotify command
+                        // raced with us), use their tokens. If state was
+                        // cleared (Reconnect), short-circuit and re-poll on
+                        // the next iteration rather than using the discarded
+                        // refresh — the caller dereferences spotify_tokens
+                        // unconditionally a few lines below.
+                        match state.spotify_tokens.read().clone() {
+                            Some(t) => t,
+                            None => {
+                                log::info!(
+                                    "[POLLING] polling_loop: state cleared during refresh, waiting and re-polling"
+                                );
+                                match stop_rx.recv_timeout(StdDuration::from_secs(with_jitter(ERROR_RETRY_INTERVAL_SECONDS))) {
+                                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                                        log::info!("[POLLING] polling_loop: stop signal during CAS-fail sleep, breaking");
+                                        break;
+                                    }
+                                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
                     }
-                    new_tokens
                 }
                 Err(e) => {
                     log::error!(
