@@ -42,9 +42,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - fix(config): remove retention_days from Rust/TS (closes #13, PR #49)
 - refactor(commands): consolidate get_*_tokens via shared helper (closes #16, PR #49)
 
-### Notes
-- GitHub issues: #9 (keychain migration) remains open and is deferred
-
 ## [2.5.0] - 2026-05-30
 
 ### Fixed
