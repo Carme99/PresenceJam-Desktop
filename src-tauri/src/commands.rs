@@ -403,14 +403,29 @@ pub fn refresh_spotify(
         crate::spotify::refresh_spotify_token(&current_tokens, &client_id, &client_secret)?;
     log::info!("[CMD] refresh_spotify: new tokens received");
 
-    polling::save_spotify_tokens(&app, &new_tokens)?;
-
-    {
+    // CAS: only commit if state still holds the access token we refreshed
+    // from. If state changed during the refresh (e.g. user clicked
+    // Reconnect from another command), discard the result.
+    let pre_refresh_access_token = current_tokens.access_token.clone();
+    let committed = {
         let mut guard = state.spotify_tokens.write();
-        *guard = Some(new_tokens);
+        if guard.as_ref().map(|t| &t.access_token) == Some(&pre_refresh_access_token) {
+            *guard = Some(new_tokens.clone());
+            true
+        } else {
+            log::warn!(
+                "[CMD] refresh_spotify: state changed during refresh, discarding result"
+            );
+            false
+        }
+    };
+    if committed {
+        polling::save_spotify_tokens(&app, &new_tokens)?;
+        log::info!("[CMD] refresh_spotify: SUCCESS (state updated and persisted)");
+    } else {
+        log::info!("[CMD] refresh_spotify: NOOP (concurrent state change; not persisted)");
     }
 
-    log::info!("[CMD] refresh_spotify: SUCCESS");
     Ok(())
 }
 
@@ -627,14 +642,29 @@ pub fn refresh_teams(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> 
     let new_tokens = crate::teams::refresh_teams_token(&current_tokens)?;
     log::info!("[CMD] refresh_teams: new tokens received");
 
-    polling::save_teams_tokens(&app, &new_tokens)?;
-
-    {
+    // CAS: only commit if state still holds the access token we refreshed
+    // from. If state changed during the refresh (e.g. user clicked
+    // Reconnect from another command), discard the result.
+    let pre_refresh_access_token = current_tokens.access_token.clone();
+    let committed = {
         let mut guard = state.teams_tokens.write();
-        *guard = Some(new_tokens);
+        if guard.as_ref().map(|t| &t.access_token) == Some(&pre_refresh_access_token) {
+            *guard = Some(new_tokens.clone());
+            true
+        } else {
+            log::warn!(
+                "[CMD] refresh_teams: state changed during refresh, discarding result"
+            );
+            false
+        }
+    };
+    if committed {
+        polling::save_teams_tokens(&app, &new_tokens)?;
+        log::info!("[CMD] refresh_teams: SUCCESS (state updated and persisted)");
+    } else {
+        log::info!("[CMD] refresh_teams: NOOP (concurrent state change; not persisted)");
     }
 
-    log::info!("[CMD] refresh_teams: SUCCESS");
     Ok(())
 }
 
