@@ -1,5 +1,5 @@
 use std::sync::mpsc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
@@ -116,7 +116,24 @@ async fn handle_spotify_callback(code: &str, state_param: Option<&str>, app: &Ap
     let client_secret = crate::keychain::get_spotify_client_secret()?;
 
     log::info!("[CALLBACK] handle_spotify_callback: calling complete_spotify_auth (on blocking pool)");
-    // The HTTP round-trip uses reqwest::blocking internally;
+    // The HTTP round-trip uses reqwest::blocking internally; offload it to
+    // Tauri's blocking pool so we don't pin an async worker for the full call.
+    let code = code.to_string();
+    let verifier = pending.verifier.clone();
+    let client_id = pending.client_id.clone();
+    let client_secret = client_secret.clone();
+    let redirect_uri = pending.redirect_uri.clone();
+    let tokens = tauri::async_runtime::spawn_blocking(move || {
+        crate::spotify::complete_spotify_auth(
+            &code,
+            &verifier,
+            &client_id,
+            &client_secret,
+            &redirect_uri,
+        )
+    })
+    .await
+    .map_err(|e| format!("Spotify OAuth callback task failed: {}", e))??;
     log::info!("[CALLBACK] handle_spotify_callback: token exchange successful - access_token.len={}", tokens.access_token.len());
     
     log::info!("[CALLBACK] handle_spotify_callback: saving tokens to store");
@@ -175,13 +192,7 @@ async fn handle_teams_callback(code: &str, app: &AppHandle) -> Result<(), String
         )
     })
     .await
-    .map_err(|e| {
-        if e.is_panic() {
-            format!("Teams OAuth callback task panicked: {}", e)
-        } else {
-            format!("Teams OAuth callback task was cancelled or failed: {}", e)
-        }
-    })??;
+    .map_err(|e| format!("Teams OAuth callback task failed: {}", e))??;
     log::info!("[CALLBACK] handle_teams_callback: token exchange successful - access_token.len={}", tokens.access_token.len());
     
     log::info!("[CALLBACK] handle_teams_callback: saving tokens to store");

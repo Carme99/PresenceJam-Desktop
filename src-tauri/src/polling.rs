@@ -390,6 +390,7 @@ pub fn start_polling(
 
     // Clone Arc for the thread
     let state_clone = Arc::clone(&state);
+    let state_for_cleanup = Arc::clone(&state);
     let app_clone = app.clone();
 
     let handle = thread::Builder::new()
@@ -419,8 +420,8 @@ pub fn start_polling(
                 // app_clone is moved into polling_loop above, so use app here
                 let _ = app.emit("polling-thread-panicked", serde_json::json!(null));
                 // Reset state so a panic doesn't wedge the app in "syncing"
-                state.is_syncing.store(false, Ordering::Release);
-                *state.stop_tx.write() = None;
+                state_for_cleanup.is_syncing.store(false, Ordering::Release);
+                *state_for_cleanup.stop_tx.write() = None;
             }
             log::info!("[POLLING] start_polling: thread ended");
         })
