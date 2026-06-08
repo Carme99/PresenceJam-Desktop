@@ -627,20 +627,44 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                         };
 
                         if let Some(tokens) = current_tokens {
+                            // Snapshot the access token before refresh so we can
+                            // detect a concurrent writer (e.g. user clicked
+                            // Reconnect, or the refresh_spotify command) that
+                            // mutated state between our read and the write below.
+                            let pre_refresh_access_token = tokens.access_token.clone();
+
                             match refresh_spotify_token(&tokens, &client_id, &client_secret) {
                                 Ok(new_tokens) => {
                                     log::info!(
                                         "[POLLING] polling_loop: token refresh SUCCESS, retrying"
                                     );
-                                    *state.spotify_tokens.write() = Some(new_tokens.clone());
-                                    // Persist refreshed tokens so they survive app restarts
-                                    if let Err(e) = save_spotify_tokens(&app, &new_tokens) {
-                                        log::warn!("[POLLING] polling_loop: failed to persist refreshed tokens: {}", e);
-                                    }
-                                    let retry_token = new_tokens.access_token.clone();
-                                            // Bug 13: Capture instant before API call to correct progress_ms elapsed time
-                                            let last_poll_instant = Instant::now();
-                                    match get_currently_playing(&retry_token) {
+                                    // CAS: only commit if state still holds the
+                                    // access token we refreshed from. If state
+                                    // changed during the refresh (e.g. user
+                                    // clicked Reconnect), discard the result.
+                                    let committed = {
+                                        let mut guard = state.spotify_tokens.write();
+                                        if guard.as_ref().map(|t| &t.access_token)
+                                            == Some(&pre_refresh_access_token)
+                                        {
+                                            *guard = Some(new_tokens.clone());
+                                            true
+                                        } else {
+                                            log::warn!(
+                                                "[POLLING] polling_loop: 401-retry: spotify state changed during refresh, discarding result"
+                                            );
+                                            false
+                                        }
+                                    };
+                                    if committed {
+                                        // Persist refreshed tokens so they survive app restarts
+                                        if let Err(e) = save_spotify_tokens(&app, &new_tokens) {
+                                            log::warn!("[POLLING] polling_loop: failed to persist refreshed tokens: {}", e);
+                                        }
+                                        let retry_token = new_tokens.access_token.clone();
+                                                // Bug 13: Capture instant before API call to correct progress_ms elapsed time
+                                                let last_poll_instant = Instant::now();
+                                        match get_currently_playing(&retry_token) {
                                         Ok(Some(track)) => {
                                             log::info!(
                                                 "[POLLING] polling_loop: retry track found - {} by {}",
