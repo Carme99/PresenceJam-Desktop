@@ -45,18 +45,25 @@ fn config_maximum_interval(config: &Option<crate::config::AppConfig>) -> u64 {
 
 /// Pause-aware exponential backoff. When the user has paused Spotify (or has
 /// nothing playing at all), the polling loop would otherwise hammer the
-/// currently-playing endpoint every 30s for hours. This grows the sleep on
-/// consecutive empty/paused responses: 30s → 60s → 120s → 300s (cap).
+/// currently-playing endpoint every `default_secs` for hours. This grows the
+/// sleep on consecutive empty/paused responses: `default_secs` → 2× → 4× → 300s
+/// (cap).
+///
+/// The first arm returns the configured default so the user's Settings value
+/// (`AppConfig.polling.default_interval_seconds`) actually takes effect at
+/// runtime. Arms 1 and 2 double and quadruple, but are clamped to the same
+/// 300s ceiling to keep the cap behaviour stable for users with large
+/// configured defaults.
 ///
 /// The counter is reset to 0 the moment we see a non-paused, non-empty
 /// response, so resuming playback immediately goes back to the normal cadence.
 ///
 /// See issue #38.
-fn pause_backoff(consecutive_pauses: u8) -> u64 {
+fn pause_backoff(consecutive_pauses: u8, default_secs: u64) -> u64 {
     match consecutive_pauses {
-        0 => 30,
-        1 => 60,
-        2 => 120,
+        0 => default_secs,
+        1 => default_secs.saturating_mul(2).min(300),
+        2 => default_secs.saturating_mul(4).min(300),
         _ => 300,
     }
 }
@@ -273,7 +280,7 @@ fn process_track(
     } else {
         // Track present but paused — grow the sleep on consecutive pauses
         // so a paused user doesn't trigger 720 calls/day.
-        let sleep = pause_backoff(*consecutive_pauses);
+        let sleep = pause_backoff(*consecutive_pauses, config_default_interval(config));
         *consecutive_pauses = consecutive_pauses.saturating_add(1).min(4);
         sleep
     }
@@ -567,9 +574,9 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                 if let Err(e) = tray::update_tray_menu(&app, is_syncing, current_track) {
                     log::warn!("[POLLING] polling_loop: failed to update tray menu: {}", e);
                 }
-                // Apply pause-aware exponential backoff: 30→60→120→300s.
+                // Apply pause-aware exponential backoff: default→2×→4×→300s.
                 // The counter is reset by process_track on the first playing track.
-                let no_track_sleep = pause_backoff(consecutive_pauses);
+                let no_track_sleep = pause_backoff(consecutive_pauses, config_default_interval(&config));
                 consecutive_pauses = consecutive_pauses.saturating_add(1).min(4);
                 log::info!(
                     "[POLLING] polling_loop: sleeping for {} seconds (no track)",
@@ -638,7 +645,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                                         Ok(None) => {
                                             log::info!("[POLLING] polling_loop: retry no track");
                                             handle_no_track(&app, &state, &mut last_track_key);
-                                            let retry_no_track_sleep = pause_backoff(consecutive_pauses);
+                                            let retry_no_track_sleep = pause_backoff(consecutive_pauses, config_default_interval(&config));
                                             consecutive_pauses = consecutive_pauses.saturating_add(1).min(4);
                                             match stop_rx.recv_timeout(StdDuration::from_secs(retry_no_track_sleep)) {
                                                 Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -873,12 +880,33 @@ mod tests {
 
     #[test]
     fn test_pause_backoff_grows_then_caps() {
-        // 0 → 30s, 1 → 60s, 2 → 120s, 3 → 300s (cap), 4 → 300s (cap)
-        assert_eq!(pause_backoff(0), 30);
-        assert_eq!(pause_backoff(1), 60);
-        assert_eq!(pause_backoff(2), 120);
-        assert_eq!(pause_backoff(3), 300);
-        assert_eq!(pause_backoff(4), 300);
-        assert_eq!(pause_backoff(255), 300); // any larger counter stays capped
+        // With default 30s: 0→30, 1→60, 2→120, 3→300 (cap), 4→300 (cap)
+        assert_eq!(pause_backoff(0, 30), 30);
+        assert_eq!(pause_backoff(1, 30), 60);
+        assert_eq!(pause_backoff(2, 30), 120);
+        assert_eq!(pause_backoff(3, 30), 300);
+        assert_eq!(pause_backoff(4, 30), 300);
+        assert_eq!(pause_backoff(255, 30), 300); // any larger counter stays capped
+    }
+
+    #[test]
+    fn test_pause_backoff_uses_configured_default() {
+        // The 0 arm must use the configured default, not a hard-coded 30.
+        // A user who sets default_interval_seconds=45 should see 45s for the
+        // first backoff arm — proves the config is actually wired through.
+        assert_eq!(pause_backoff(0, 45), 45);
+        // Subsequent arms grow from 45: 45*2=90, 45*4=180, then cap at 300.
+        assert_eq!(pause_backoff(1, 45), 90);
+        assert_eq!(pause_backoff(2, 45), 180);
+        assert_eq!(pause_backoff(3, 45), 300);
+    }
+
+    #[test]
+    fn test_pause_backoff_caps_with_large_default() {
+        // With a large configured default (e.g. user sets 200s), the doubling
+        // arms must be clamped to 300 so the cap behaviour is preserved.
+        assert_eq!(pause_backoff(0, 200), 200); // 0 arm returns the default uncapped
+        assert_eq!(pause_backoff(1, 200), 300); // 200*2=400 → cap
+        assert_eq!(pause_backoff(2, 200), 300); // 200*4=800 → cap
     }
 }
