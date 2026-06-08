@@ -15,12 +15,33 @@ use crate::spotify::{
 use crate::teams::{clear_teams_status_message, refresh_teams_token, set_teams_status_message, TeamsTokens};
 use crate::{tray, AppState};
 
-const DEFAULT_INTERVAL_SECONDS: u64 = 30;
-const MAX_INTERVAL_SECONDS: u64 = 60;
-const MINIMUM_INTERVAL_SECONDS: u64 = 10;
 const ERROR_RETRY_INTERVAL_SECONDS: u64 = 30;
 const RATE_LIMIT_BACKOFF_SECONDS: u64 = 60;
 const DEBOUNCE_MS: u64 = 500;
+
+/// Read the configured default poll interval (with a hard fallback).
+fn config_default_interval(config: &Option<crate::config::AppConfig>) -> u64 {
+    config
+        .as_ref()
+        .map(|c| c.polling.default_interval_seconds)
+        .unwrap_or(30)
+}
+
+/// Read the configured minimum poll interval (with a hard fallback).
+fn config_minimum_interval(config: &Option<crate::config::AppConfig>) -> u64 {
+    config
+        .as_ref()
+        .map(|c| c.polling.minimum_interval_seconds)
+        .unwrap_or(5)
+}
+
+/// Read the configured maximum poll interval (with a hard fallback).
+fn config_maximum_interval(config: &Option<crate::config::AppConfig>) -> u64 {
+    config
+        .as_ref()
+        .map(|c| c.polling.max_interval_seconds)
+        .unwrap_or(60)
+}
 
 /// Adds +/- 20% jitter to retry intervals to prevent thundering herd.
 /// See issue #17.
@@ -130,8 +151,8 @@ fn process_track(
                 let remaining_secs = remaining_ms / 1000;
                 let sleep_secs = remaining_secs.saturating_sub(buffer_ms / 1000);
                 return sleep_secs
-                    .max(MINIMUM_INTERVAL_SECONDS)
-                    .min(MAX_INTERVAL_SECONDS);
+                    .max(config_minimum_interval(config))
+                    .min(config_maximum_interval(config));
             }
             let status_format = config
                 .as_ref()
@@ -221,10 +242,10 @@ fn process_track(
         let remaining_secs = remaining_ms / 1000;
         let sleep_secs = remaining_secs.saturating_sub(buffer_ms / 1000);
         sleep_secs
-            .max(MINIMUM_INTERVAL_SECONDS)
-            .min(MAX_INTERVAL_SECONDS)
+            .max(config_minimum_interval(config))
+            .min(config_maximum_interval(config))
     } else {
-        DEFAULT_INTERVAL_SECONDS
+        config_default_interval(config)
     }
 }
 
@@ -517,9 +538,9 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                 }
                 log::info!(
                     "[POLLING] polling_loop: sleeping for {} seconds (no track)",
-                    DEFAULT_INTERVAL_SECONDS
+                    config_default_interval(&config)
                 );
-                match stop_rx.recv_timeout(StdDuration::from_secs(DEFAULT_INTERVAL_SECONDS)) {
+                match stop_rx.recv_timeout(StdDuration::from_secs(config_default_interval(&config))) {
                     Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                         log::info!("[POLLING] polling_loop: stop signal during no-track sleep, breaking");
                         break;
@@ -583,7 +604,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                                         Ok(None) => {
                                             log::info!("[POLLING] polling_loop: retry no track");
                                             handle_no_track(&app, &state, &mut last_track_key);
-                                            match stop_rx.recv_timeout(StdDuration::from_secs(DEFAULT_INTERVAL_SECONDS)) {
+                                            match stop_rx.recv_timeout(StdDuration::from_secs(config_default_interval(&config))) {
                                                 Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                                                     log::info!("[POLLING] polling_loop: stop signal during retry no-track sleep, breaking");
                                                     break;

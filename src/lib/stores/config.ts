@@ -26,7 +26,6 @@ export interface PollingConfig {
 export interface LoggingConfig {
   enabled: boolean;
   log_level: string;
-  retention_days: number;
 }
 
 export interface AppConfig {
@@ -61,8 +60,7 @@ export const defaultConfig: AppConfig = {
   },
   logging: {
     enabled: true,
-    log_level: 'Info',
-    retention_days: 30
+    log_level: 'Info'
   },
   autostart: false
 };

@@ -268,8 +268,7 @@
         },
         logging: {
           enabled: true,
-          log_level: 'Info',
-          retention_days: 30
+          log_level: 'Info'
         },
         autostart: launchAtLogin
       };
