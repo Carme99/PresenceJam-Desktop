@@ -1,7 +1,8 @@
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
-use parking_lot::RwLock;
+use std::time::Instant;
+use parking_lot::{Mutex, RwLock};
 use tauri::{Manager, Emitter, AppHandle};
 use tauri_plugin_store::StoreExt;
 
@@ -33,6 +34,10 @@ pub struct AppState {
     pub pending_spotify_auth: RwLock<Option<PendingSpotifyAuth>>,
     pub pending_teams_auth: RwLock<Option<PendingTeamsAuth>>,
     pub stop_tx: RwLock<Option<mpsc::Sender<()>>>,
+    /// 30s result cache for `is_onboarding_complete` — see commands.rs.
+    /// `Some((ts, result))` means a successful or failed validation ran at `ts` and produced `result`.
+    /// `None` means the cache is cold (or older than 30s and was cleared).
+    pub onboarding_cache: Mutex<Option<(Instant, bool)>>,
 }
 
 impl AppState {
@@ -48,6 +53,7 @@ impl AppState {
             pending_spotify_auth: RwLock::new(None),
             pending_teams_auth: RwLock::new(None),
             stop_tx: RwLock::new(None),
+            onboarding_cache: Mutex::new(None),
         }
     }
 }
