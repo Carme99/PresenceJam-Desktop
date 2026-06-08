@@ -78,12 +78,36 @@ fn process_track(
         let expired = Utc::now() >= tok.expires_at - chrono::Duration::seconds(60);
         if expired {
             log::info!("[POLLING] process_track: Teams token expired, refreshing...");
+
+            // Snapshot the access token before refresh so we can detect a
+            // concurrent writer (e.g. user clicked Reconnect) that mutated
+            // state between our read and our eventual write.
+            let pre_refresh_access_token = tok.access_token.clone();
+
             match refresh_teams_token(tok) {
                 Ok(new_tokens) => {
                     log::info!("[POLLING] process_track: Teams token refresh SUCCESS");
-                    *state.teams_tokens.write() = Some(new_tokens.clone());
-                    if let Err(e) = save_teams_tokens(app, &new_tokens) {
-                        log::warn!("[POLLING] process_track: failed to persist refreshed teams tokens: {}", e);
+                    // CAS: only commit if state still holds the access token
+                    // we refreshed from. If state changed during the refresh
+                    // (e.g. user clicked Reconnect), discard the result.
+                    let committed = {
+                        let mut guard = state.teams_tokens.write();
+                        if guard.as_ref().map(|t| &t.access_token)
+                            == Some(&pre_refresh_access_token)
+                        {
+                            *guard = Some(new_tokens.clone());
+                            true
+                        } else {
+                            log::warn!(
+                                "[POLLING] process_track: teams state changed during refresh, discarding result"
+                            );
+                            false
+                        }
+                    };
+                    if committed {
+                        if let Err(e) = save_teams_tokens(app, &new_tokens) {
+                            log::warn!("[POLLING] process_track: failed to persist refreshed teams tokens: {}", e);
+                        }
                     }
                     Some(new_tokens)
                 }
