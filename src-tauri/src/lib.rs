@@ -107,7 +107,13 @@ async fn handle_spotify_callback(code: &str, state_param: Option<&str>, app: &Ap
         )
     })
     .await
-    .map_err(|e| format!("Spotify OAuth callback task panicked: {}", e))??;
+    .map_err(|e| {
+        if e.is_panic() {
+            format!("Spotify OAuth callback task panicked: {}", e)
+        } else {
+            format!("Spotify OAuth callback task was cancelled or failed: {}", e)
+        }
+    })??;
     log::info!("[CALLBACK] handle_spotify_callback: token exchange successful - access_token.len={}", tokens.access_token.len());
     
     log::info!("[CALLBACK] handle_spotify_callback: saving tokens to store");
@@ -158,7 +164,13 @@ async fn handle_teams_callback(code: &str, app: &AppHandle) -> Result<(), String
         )
     })
     .await
-    .map_err(|e| format!("Teams OAuth callback task panicked: {}", e))??;
+    .map_err(|e| {
+        if e.is_panic() {
+            format!("Teams OAuth callback task panicked: {}", e)
+        } else {
+            format!("Teams OAuth callback task was cancelled or failed: {}", e)
+        }
+    })??;
     log::info!("[CALLBACK] handle_teams_callback: token exchange successful - access_token.len={}", tokens.access_token.len());
     
     log::info!("[CALLBACK] handle_teams_callback: saving tokens to store");
