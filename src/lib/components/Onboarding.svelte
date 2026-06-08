@@ -246,10 +246,13 @@
     isFinishing = true;
     try {
       devLog('[ONBOARDING] finish: step 1 - building config');
+      // The Spotify client_secret is sent once to `start_spotify_auth`
+      // (which writes it to the OS keychain) and is NOT included in the
+      // config saved to disk. See issue #9.
       const cfg: AppConfig = {
         spotify: {
           client_id: spotifyClientId,
-          client_secret: spotifyClientSecret,
+          client_secret_set: true,
           redirect_uri: 'presencejam://callback',
           scopes: ['user-read-currently-playing', 'user-read-playback-state']
         },
