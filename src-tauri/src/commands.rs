@@ -349,40 +349,20 @@ pub fn complete_spotify_auth_manual(
     Ok(tokens)
 }
 
-// NOTE: get_spotify_tokens and get_teams_tokens have similar structure but are
-// kept separate for clarity. The token types, store keys, and extraction logic differ
-// enough that extracting a generic helper would reduce readability without adding
-// much value. See issue #16.
+// See issue #16: the cache-first, store-fallback pattern is shared by both
+// `get_spotify_tokens` and `get_teams_tokens`. The shared logic lives in
+// `crate::token_cache::get_cached_or_load`.
 #[tauri::command]
 pub fn get_spotify_tokens(
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<Option<SpotifyTokens>, String> {
     log::debug!("[CMD] get_spotify_tokens: ENTRY");
-
-    let state_tokens = {
-        let guard = state.spotify_tokens.read();
-        guard.clone()
-    };
-
-    if state_tokens.is_some() {
-        log::info!("[CMD] get_spotify_tokens: found tokens in AppState");
-        return Ok(state_tokens);
-    }
-    log::info!("[CMD] get_spotify_tokens: not in AppState, checking store");
-
-    let loaded = polling::load_spotify_tokens(&app)?;
-    if let Some(tokens) = &loaded {
-        log::info!(
-            "[CMD] get_spotify_tokens: loaded from store - access_token.len={}",
-            tokens.access_token.len()
-        );
-        let mut guard = state.spotify_tokens.write();
-        *guard = Some(tokens.clone());
-    } else {
-        log::info!("[CMD] get_spotify_tokens: no tokens found in store");
-    }
-    Ok(loaded)
+    crate::token_cache::get_cached_or_load(
+        &state.spotify_tokens,
+        "[CMD] get_spotify_tokens",
+        || polling::load_spotify_tokens(&app),
+    )
 }
 
 #[tauri::command]
@@ -602,30 +582,11 @@ pub fn get_teams_tokens(
     app: AppHandle,
 ) -> Result<Option<TeamsTokens>, String> {
     log::debug!("[CMD] get_teams_tokens: ENTRY");
-
-    let state_tokens = {
-        let guard = state.teams_tokens.read();
-        guard.clone()
-    };
-
-    if state_tokens.is_some() {
-        log::info!("[CMD] get_teams_tokens: found tokens in AppState");
-        return Ok(state_tokens);
-    }
-    log::info!("[CMD] get_teams_tokens: not in AppState, checking store");
-
-    let loaded = polling::load_teams_tokens(&app)?;
-    if let Some(tokens) = &loaded {
-        log::info!(
-            "[CMD] get_teams_tokens: loaded from store - access_token.len={}",
-            tokens.access_token.len()
-        );
-        let mut guard = state.teams_tokens.write();
-        *guard = Some(tokens.clone());
-    } else {
-        log::info!("[CMD] get_teams_tokens: no tokens found in store");
-    }
-    Ok(loaded)
+    crate::token_cache::get_cached_or_load(
+        &state.teams_tokens,
+        "[CMD] get_teams_tokens",
+        || polling::load_teams_tokens(&app),
+    )
 }
 
 #[tauri::command]

@@ -61,6 +61,7 @@ pub mod profanity;
 pub mod spotify;
 pub mod teams;
 pub mod polling;
+pub mod token_cache;
 pub mod tray;
 pub mod menu;
 pub mod commands;
