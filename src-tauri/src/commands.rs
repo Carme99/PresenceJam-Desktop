@@ -8,6 +8,12 @@ use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_store::StoreExt;
 use url::Url;
 
+/// TTL for the `is_onboarding_complete` result cache. The front-end remounts this
+/// command on every Onboarding view enter, and the upstream HTTPS calls can take
+/// up to 20s in the worst case (token validation against Spotify/Graph APIs), so
+/// a short cache is needed to avoid hammering the upstream APIs.
+const ONBOARDING_CACHE_TTL: Duration = Duration::from_secs(30);
+
 #[tauri::command]
 pub fn get_recent_logs(_app: AppHandle) -> Result<(), String> {
     log::info!("[CMD] get_recent_logs: ENTRY");
@@ -938,9 +944,10 @@ pub fn get_current_track(
 /// token. Network errors (5xx, 429) are treated as "still valid" (transient) so a flaky
 /// network doesn't bounce the user back into the onboarding flow.
 ///
-/// Result is cached on `AppState.onboarding_cache` for 30s — the front-end remounts this
-/// command on every Onboarding view enter, and the upstream HTTPS calls can take up to
-/// 20s in the worst case (token validation against Spotify/Graph APIs).
+/// Result is cached on `AppState.onboarding_cache` for [`ONBOARDING_CACHE_TTL`] —
+/// the front-end remounts this command on every Onboarding view enter, and the
+/// upstream HTTPS calls can take up to 20s in the worst case (token validation
+/// against Spotify/Graph APIs).
 #[tauri::command]
 pub async fn is_onboarding_complete(
     state: tauri::State<'_, Arc<AppState>>,
@@ -951,7 +958,7 @@ pub async fn is_onboarding_complete(
     {
         let guard = state.onboarding_cache.lock();
         if let Some((ts, result)) = *guard {
-            if ts.elapsed() < Duration::from_secs(30) {
+            if ts.elapsed() < ONBOARDING_CACHE_TTL {
                 log::info!(
                     "[CMD] is_onboarding_complete: cache HIT (age={:.2}s, result={})",
                     ts.elapsed().as_secs_f32(),
