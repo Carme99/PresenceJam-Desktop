@@ -420,11 +420,11 @@ pub fn refresh_spotify(
     };
     if committed {
         polling::save_spotify_tokens(&app, &new_tokens)?;
+        log::info!("[CMD] refresh_spotify: SUCCESS (state updated and persisted)");
     } else {
-        log::info!("[CMD] refresh_spotify: SKIP persist, state changed");
+        log::info!("[CMD] refresh_spotify: NOOP (concurrent state change; not persisted)");
     }
 
-    log::info!("[CMD] refresh_spotify: SUCCESS");
     Ok(())
 }
 
@@ -659,11 +659,11 @@ pub fn refresh_teams(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> 
     };
     if committed {
         polling::save_teams_tokens(&app, &new_tokens)?;
+        log::info!("[CMD] refresh_teams: SUCCESS (state updated and persisted)");
     } else {
-        log::info!("[CMD] refresh_teams: SKIP persist, state changed");
+        log::info!("[CMD] refresh_teams: NOOP (concurrent state change; not persisted)");
     }
 
-    log::info!("[CMD] refresh_teams: SUCCESS");
     Ok(())
 }
 
