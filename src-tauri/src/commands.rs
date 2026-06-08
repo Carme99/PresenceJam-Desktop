@@ -2,10 +2,18 @@ use crate::config::{self, AppConfig};
 use crate::spotify::{SpotifyTokens, TrackInfo};
 use crate::teams::{DeviceCodeResponse, TeamsTokens};
 use crate::{polling, tray, AppState, PendingSpotifyAuth};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_store::StoreExt;
 use url::Url;
+
+/// TTL for the `is_onboarding_complete` result cache. The front-end remounts this
+/// command on every Onboarding view enter, and the upstream HTTPS calls can take
+/// up to 20s in the worst case (token validation against Spotify/Graph APIs), so
+/// a short cache is needed to avoid hammering the upstream APIs.
+const ONBOARDING_CACHE_TTL: Duration = Duration::from_secs(30);
 
 #[tauri::command]
 pub fn get_recent_logs(_app: AppHandle) -> Result<(), String> {
@@ -400,14 +408,29 @@ pub fn refresh_spotify(
         crate::spotify::refresh_spotify_token(&current_tokens, &client_id, &client_secret)?;
     log::info!("[CMD] refresh_spotify: new tokens received");
 
-    polling::save_spotify_tokens(&app, &new_tokens)?;
-
-    {
+    // CAS: only commit if state still holds the access token we refreshed
+    // from. If state changed during the refresh (e.g. user clicked
+    // Reconnect from another command), discard the result.
+    let pre_refresh_access_token = current_tokens.access_token.clone();
+    let committed = {
         let mut guard = state.spotify_tokens.write();
-        *guard = Some(new_tokens);
+        if guard.as_ref().map(|t| &t.access_token) == Some(&pre_refresh_access_token) {
+            *guard = Some(new_tokens.clone());
+            true
+        } else {
+            log::warn!(
+                "[CMD] refresh_spotify: state changed during refresh, discarding result"
+            );
+            false
+        }
+    };
+    if committed {
+        polling::save_spotify_tokens(&app, &new_tokens)?;
+        log::info!("[CMD] refresh_spotify: SUCCESS (state updated and persisted)");
+    } else {
+        log::info!("[CMD] refresh_spotify: NOOP (concurrent state change; not persisted)");
     }
 
-    log::info!("[CMD] refresh_spotify: SUCCESS");
     Ok(())
 }
 
@@ -605,14 +628,29 @@ pub fn refresh_teams(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> 
     let new_tokens = crate::teams::refresh_teams_token(&current_tokens)?;
     log::info!("[CMD] refresh_teams: new tokens received");
 
-    polling::save_teams_tokens(&app, &new_tokens)?;
-
-    {
+    // CAS: only commit if state still holds the access token we refreshed
+    // from. If state changed during the refresh (e.g. user clicked
+    // Reconnect from another command), discard the result.
+    let pre_refresh_access_token = current_tokens.access_token.clone();
+    let committed = {
         let mut guard = state.teams_tokens.write();
-        *guard = Some(new_tokens);
+        if guard.as_ref().map(|t| &t.access_token) == Some(&pre_refresh_access_token) {
+            *guard = Some(new_tokens.clone());
+            true
+        } else {
+            log::warn!(
+                "[CMD] refresh_teams: state changed during refresh, discarding result"
+            );
+            false
+        }
+    };
+    if committed {
+        polling::save_teams_tokens(&app, &new_tokens)?;
+        log::info!("[CMD] refresh_teams: SUCCESS (state updated and persisted)");
+    } else {
+        log::info!("[CMD] refresh_teams: NOOP (concurrent state change; not persisted)");
     }
 
-    log::info!("[CMD] refresh_teams: SUCCESS");
     Ok(())
 }
 
@@ -623,12 +661,18 @@ pub fn start_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> 
     // Acquire write lock first to prevent TOCTOU race with concurrent calls.
     // See issue #14.
     {
-        let mut is_syncing_guard = state.is_syncing.write();
-        if *is_syncing_guard {
+        // Use compare_exchange for an atomic check-and-set: replaces the
+        // previous RwLock write guard. AcqRel on success preserves the
+        // happens-before relationship with subsequent reads of is_syncing
+        // (e.g. the polling loop and tray).
+        if state
+            .is_syncing
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
             log::info!("[CMD] start_syncing: already syncing, returning early");
             return Ok(());
         }
-        *is_syncing_guard = true;
         log::info!("[CMD] start_syncing: is_syncing flag set to true");
     }
 
@@ -637,8 +681,7 @@ pub fn start_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> 
         Err(e) => {
             // Roll back is_syncing flag since no handle was created
             log::error!("[CMD] start_syncing: polling start failed - {}; rolling back is_syncing", e);
-            let mut guard = state.is_syncing.write();
-            *guard = false;
+            state.is_syncing.store(false, Ordering::Release);
             return Err(e);
         }
     };
@@ -712,10 +755,7 @@ pub fn stop_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> R
 pub fn app_exit(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> Result<(), String> {
     log::debug!("[CMD] app_exit: ENTRY");
 
-    let is_syncing = {
-        let guard = state.is_syncing.read();
-        *guard
-    };
+    let is_syncing = state.is_syncing.load(Ordering::Acquire);
 
     if is_syncing {
         log::info!("[CMD] app_exit: stopping polling first");
@@ -731,10 +771,7 @@ pub fn app_exit(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> Resul
 pub fn get_sync_status(state: tauri::State<'_, Arc<AppState>>) -> Result<SyncStatus, String> {
     log::debug!("[CMD] get_sync_status: ENTRY");
 
-    let is_syncing = {
-        let guard = state.is_syncing.read();
-        *guard
-    };
+    let is_syncing = state.is_syncing.load(Ordering::Acquire);
 
     let current_track = {
         let guard = state.current_track.read();
@@ -912,10 +949,57 @@ pub fn get_current_track(
     Ok(track)
 }
 
+/// Onboarding check: `true` if both Spotify and Teams are configured and have a non-expired
+/// token. Network errors (5xx, 429) are treated as "still valid" (transient) so a flaky
+/// network doesn't bounce the user back into the onboarding flow.
+///
+/// Result is cached on `AppState.onboarding_cache` for [`ONBOARDING_CACHE_TTL`] —
+/// the front-end remounts this command on every Onboarding view enter, and the
+/// upstream HTTPS calls can take up to 20s in the worst case (token validation
+/// against Spotify/Graph APIs).
 #[tauri::command]
-pub fn is_onboarding_complete(state: tauri::State<'_, Arc<AppState>>) -> Result<bool, String> {
+pub async fn is_onboarding_complete(
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<bool, String> {
     log::debug!("[CMD] is_onboarding_complete: ENTRY");
 
+
+    // Cache hit — return immediately.
+    {
+        let guard = state.onboarding_cache.lock();
+        if let Some((ts, result)) = *guard {
+            if ts.elapsed() < ONBOARDING_CACHE_TTL {
+                log::info!(
+                    "[CMD] is_onboarding_complete: cache HIT (age={:.2}s, result={})",
+                    ts.elapsed().as_secs_f32(),
+                    result
+                );
+                return Ok(result);
+            }
+        }
+    }
+
+    // Cache miss — run the actual validation on a blocking thread (HTTPS round-trips).
+    let state_clone: Arc<AppState> = Arc::clone(&state);
+    let result =
+        tauri::async_runtime::spawn_blocking(move || is_onboarding_complete_impl(&state_clone))
+            .await
+            .map_err(|e| format!("is_onboarding_complete task panicked: {}", e))??;
+
+    // Store result in cache. We cache both `true` and `false` outcomes — a recent "complete"
+    // result is just as valid as a recent "incomplete" one for the 30s window.
+    *state.onboarding_cache.lock() = Some((Instant::now(), result));
+    log::info!(
+        "[CMD] is_onboarding_complete: cache MISS, stored fresh result={}",
+        result
+    );
+    Ok(result)
+}
+
+/// Blocking implementation of the onboarding check. Run via `spawn_blocking` from
+/// `is_onboarding_complete` so the async runtime can keep serving other commands while
+/// the HTTPS round-trips to Spotify/Graph complete.
+fn is_onboarding_complete_impl(state: &Arc<AppState>) -> Result<bool, String> {
     let config = config::load_config()?;
     let spotify_configured = !config.spotify.client_id.is_empty();
 
@@ -925,7 +1009,7 @@ pub fn is_onboarding_complete(state: tauri::State<'_, Arc<AppState>>) -> Result<
         let guard = state.teams_tokens.read();
         match guard.as_ref() {
             Some(tokens) => {
-                let valid = match crate::teams::validate_teams_token(&tokens.access_token) {
+                let valid = match crate::teams::validate_teams_token(tokens) {
                     Ok(()) => true,
                     Err(crate::teams::TeamsApiError::ExpiredToken(_)) => false,
                     Err(_) => true, // transient — still valid for onboarding
@@ -942,7 +1026,7 @@ pub fn is_onboarding_complete(state: tauri::State<'_, Arc<AppState>>) -> Result<
         let guard = state.spotify_tokens.read();
         match guard.as_ref() {
             Some(tokens) => {
-                let valid = match crate::spotify::validate_spotify_token(&tokens.access_token) {
+                let valid = match crate::spotify::validate_spotify_token(tokens) {
                     Ok(()) => true,
                     Err(crate::spotify::SpotifyApiError::ExpiredToken) => false,
                     Err(_) => true, // transient — still valid for onboarding

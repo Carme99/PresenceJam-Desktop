@@ -260,22 +260,34 @@ pub fn is_token_expired(tokens: &SpotifyTokens) -> bool {
     Utc::now() >= tokens.expires_at - chrono::Duration::seconds(60)
 }
 
-/// Validates that a Spotify access token is still functional by calling the
-/// currently-playing endpoint.
+/// Validates that a Spotify access token is still functional.
+///
+/// Short-circuits on the local `expires_at` field when the token is clearly
+/// still good (more than 60s of lifetime remaining), so the typical
+/// Onboarding mount doesn't pay for a network round-trip. Only when the
+/// token is on the refresh boundary (or already past it) do we make a real
+/// HTTP call to confirm.
 ///
 /// Returns `Result<(), SpotifyApiError>`:
-/// - `Ok(())` — token works (200/204)
+/// - `Ok(())` — token works (locally valid OR 200/204)
 /// - `Err(SpotifyApiError::ExpiredToken)` — permanent auth failure (401); re-auth required
 /// - `Err(SpotifyApiError::RateLimited)` — transient (429); treat as valid, retry after backoff
 /// - `Err(SpotifyApiError::Other)` — transient or non-retryable; treat as valid for onboarding
 ///
 /// Callers should inspect `SpotifyApiError` variants to distinguish permanent failures
 /// (ExpiredToken) from transient errors (RateLimited, Other).
-pub fn validate_spotify_token(access_token: &str) -> Result<(), SpotifyApiError> {
+pub fn validate_spotify_token(tokens: &SpotifyTokens) -> Result<(), SpotifyApiError> {
+    // Local pre-check: if the token clearly has plenty of life left, skip
+    // the network call. is_token_expired() uses the same 60s window the
+    // refresh path uses, so we mirror that exact heuristic here.
+    if !is_token_expired(tokens) {
+        return Ok(());
+    }
+
     let client = Client::new();
     let response = client
         .get("https://api.spotify.com/v1/me/player/currently-playing")
-        .header("Authorization", format!("Bearer {}", access_token))
+        .header("Authorization", format!("Bearer {}", tokens.access_token))
         .timeout(Duration::from_secs(10))
         .send()
         .map_err(|e| SpotifyApiError::Other(format!("request failed: {}", e)))?;

@@ -116,6 +116,34 @@
       devLog('[DASHBOARD] EVENT: isSyncing=false');
       updateMenuState();
     }));
+
+    devLog('[DASHBOARD] onMount: setting up polling-thread-panicked listener');
+    unlisten.push(await listen('polling-thread-panicked', () => {
+      // Rust side resets is_syncing in polling.rs:321, but the JS-side
+      // mirror (this rune) was not being flipped — UI would stay
+      // "Syncing" forever after a thread panic. See issue #33.
+      devLog('[DASHBOARD] EVENT: polling-thread-panicked received');
+      isSyncing = false;
+      devLog('[DASHBOARD] EVENT: isSyncing=false (panic recovery)');
+      if (displayErrorTimeout) clearTimeout(displayErrorTimeout);
+      displayError = 'Sync stopped unexpectedly. Please restart PresenceJam.';
+      displayErrorTimeout = setTimeout(() => { displayError = ''; displayErrorTimeout = null; }, 5000);
+      updateMenuState();
+    }));
+
+    devLog('[DASHBOARD] onMount: setting up reconnect-required listener');
+    unlisten.push(await listen('reconnect-required', () => {
+      // Generic reconnect signal from polling.rs:633 (e.g. when the
+      // auth refresh loop has been failing for too long). The
+      // provider-specific events (spotify-reconnect-required,
+      // teams-reconnect-required) are handled in Settings.svelte;
+      // this is the catch-all that takes the user to the reconnect view.
+      devLog('[DASHBOARD] EVENT: reconnect-required received');
+      isSyncing = false;
+      devLog('[DASHBOARD] EVENT: isSyncing=false (reconnect)');
+      currentView.set('reconnect');
+      updateMenuState();
+    }));
   });
 
   async function toggleSync() {

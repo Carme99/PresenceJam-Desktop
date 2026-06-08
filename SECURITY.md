@@ -78,7 +78,9 @@ Logs may contain:
 - Error details (including API error messages)
 - Redacted profanity filter events (the original profane status is **never** written to logs)
 
-Logs are **rotated daily** and **retained for 30 days** by default. You can reduce retention in settings.
+Logs are **rotated daily** and **retained for 30 days** by default.
+<!-- TODO: doc-sweep — `logging.retention_days` was removed in #37; clarify the
+     actual rotation/retention behavior once `tauri-plugin-log` rotation is wired up. -->
 
 ## Network Security
 

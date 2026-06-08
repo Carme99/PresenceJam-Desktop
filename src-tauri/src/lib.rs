@@ -1,7 +1,9 @@
 use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use parking_lot::RwLock;
+use std::time::Instant;
+use parking_lot::{Mutex, RwLock};
 use tauri::{Manager, Emitter, AppHandle};
 use tauri_plugin_store::StoreExt;
 
@@ -31,11 +33,15 @@ pub struct AppState {
     pub spotify_tokens: RwLock<Option<crate::spotify::SpotifyTokens>>,
     pub teams_tokens: RwLock<Option<crate::teams::TeamsTokens>>,
     pub current_track: RwLock<Option<crate::spotify::TrackInfo>>,
-    pub is_syncing: RwLock<bool>,
+    pub is_syncing: AtomicBool,
     pub polling_handle: RwLock<Option<thread::JoinHandle<()>>>,
     pub pending_spotify_auth: RwLock<Option<PendingSpotifyAuth>>,
     pub pending_teams_auth: RwLock<Option<PendingTeamsAuth>>,
     pub stop_tx: RwLock<Option<mpsc::Sender<()>>>,
+    /// 30s result cache for `is_onboarding_complete` — see commands.rs.
+    /// `Some((ts, result))` means a successful or failed validation ran at `ts` and produced `result`.
+    /// `None` means the cache is cold (or older than 30s and was cleared).
+    pub onboarding_cache: Mutex<Option<(Instant, bool)>>,
 }
 
 impl AppState {
@@ -46,11 +52,12 @@ impl AppState {
             spotify_tokens: RwLock::new(None),
             teams_tokens: RwLock::new(None),
             current_track: RwLock::new(None),
-            is_syncing: RwLock::new(false),
+            is_syncing: AtomicBool::new(false),
             polling_handle: RwLock::new(None),
             pending_spotify_auth: RwLock::new(None),
             pending_teams_auth: RwLock::new(None),
             stop_tx: RwLock::new(None),
+            onboarding_cache: Mutex::new(None),
         }
     }
 }
@@ -82,6 +89,16 @@ async fn handle_spotify_callback(code: &str, state_param: Option<&str>, app: &Ap
     };
     log::info!("[CALLBACK] handle_spotify_callback: pending auth found - verifier.len={}", pending.verifier.len());
 
+    // Re-check expiry at submit time. The expiry was set on creation
+    // (lib.rs setup, or commands.rs::start_spotify_auth) but only
+    // consulted on disk-load. If the OS suspended the process for
+    // >10 minutes, the auth code may now be rejected by Spotify as
+    // expired. See issue #34.
+    if pending.expires_at < chrono::Utc::now() {
+        log::error!("[CALLBACK] handle_spotify_callback: auth state expired at submit time");
+        return Err("Auth state expired — please try signing in again.".to_string());
+    }
+
     // Verify state matches to prevent CSRF attacks
     if let Some(state_str) = state_param {
         if state_str != pending.state {
@@ -93,20 +110,13 @@ async fn handle_spotify_callback(code: &str, state_param: Option<&str>, app: &Ap
         log::error!("[CALLBACK] handle_spotify_callback: missing state parameter in callback URL");
         return Err("Missing state parameter - possible CSRF attack".to_string());
     }
-
     // Fetch the client_secret from the OS keychain. It was placed there by
     // `start_spotify_auth` and is never persisted to disk. See issue #9.
     log::info!("[CALLBACK] handle_spotify_callback: reading client_secret from keychain");
     let client_secret = crate::keychain::get_spotify_client_secret()?;
 
-    log::info!("[CALLBACK] handle_spotify_callback: calling complete_spotify_auth");
-    let tokens = crate::spotify::complete_spotify_auth(
-        code,
-        &pending.verifier,
-        &pending.client_id,
-        &client_secret,
-        &pending.redirect_uri,
-    )?;
+    log::info!("[CALLBACK] handle_spotify_callback: calling complete_spotify_auth (on blocking pool)");
+    // The HTTP round-trip uses reqwest::blocking internally;
     log::info!("[CALLBACK] handle_spotify_callback: token exchange successful - access_token.len={}", tokens.access_token.len());
     
     log::info!("[CALLBACK] handle_spotify_callback: saving tokens to store");
@@ -140,14 +150,38 @@ async fn handle_teams_callback(code: &str, app: &AppHandle) -> Result<(), String
         })?
     };
     log::info!("[CALLBACK] handle_teams_callback: pending auth found");
+
+    // Re-check expiry at submit time. Mirrors the Spotify fix above;
+    // a long OS suspend can land us past the device-code TTL.
+    // See issue #34.
+    if pending.expires_at < chrono::Utc::now() {
+        log::error!("[CALLBACK] handle_teams_callback: auth state expired at submit time");
+        return Err("Auth state expired — please try signing in again.".to_string());
+    }
     
-    log::info!("[CALLBACK] handle_teams_callback: calling complete_teams_auth");
-    let tokens = crate::teams::complete_teams_auth(
-        code,
-        &pending.verifier,
-        &pending.client_id,
-        &pending.redirect_uri,
-    )?;
+    log::info!("[CALLBACK] handle_teams_callback: calling complete_teams_auth (on blocking pool)");
+    // The HTTP round-trip uses reqwest::blocking internally; offload it to
+    // Tauri's blocking pool so we don't pin an async worker for the full call.
+    let code = code.to_string();
+    let verifier = pending.verifier.clone();
+    let client_id = pending.client_id.clone();
+    let redirect_uri = pending.redirect_uri.clone();
+    let tokens = tauri::async_runtime::spawn_blocking(move || {
+        crate::teams::complete_teams_auth(
+            &code,
+            &verifier,
+            &client_id,
+            &redirect_uri,
+        )
+    })
+    .await
+    .map_err(|e| {
+        if e.is_panic() {
+            format!("Teams OAuth callback task panicked: {}", e)
+        } else {
+            format!("Teams OAuth callback task was cancelled or failed: {}", e)
+        }
+    })??;
     log::info!("[CALLBACK] handle_teams_callback: token exchange successful - access_token.len={}", tokens.access_token.len());
     
     log::info!("[CALLBACK] handle_teams_callback: saving tokens to store");
