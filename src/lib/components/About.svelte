@@ -1,7 +1,7 @@
 <script lang="ts">
   import { currentView } from '$lib/stores/app';
 
-  const BUILD = import.meta.env.__APP_BUILD__ || '2.5.1';
+  const BUILD = import.meta.env.__APP_BUILD__ || '2.6.0';
 
   function goBack() {
     currentView.set('dashboard');
