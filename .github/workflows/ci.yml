@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main, master]
+
+# Read-only: this workflow only checks out the PR head and runs builds.
+# No secrets required.
+permissions:
+  contents: read
+
+# Cancel in-progress runs for the same PR when new commits are pushed.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Frontend: catches Svelte/TS build errors. Mirrors the npm ci + npm run build
+  # steps from release.yml. Cached via actions/setup-node cache: 'npm'.
+  frontend:
+    name: Frontend (npm build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+  # Rust: cargo check on all targets (lib + bins + tests + benches) catches
+  # type errors, borrow errors, missing imports, and broken test code.
+  # Does NOT run tests (CI is for compile-time feedback, not correctness).
+  # Frontend build is required because src-tauri/src/lib.rs uses
+  # tauri::generate_context!() which embeds build/ via include_dir! at
+  # compile time, even during cargo check.
+  rust:
+    name: Rust (cargo check)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Cargo check (all targets)
+        env:
+          CARGO_INCREMENTAL: 0
+        run: cargo check --manifest-path src-tauri/Cargo.toml --all-targets
+
+  # Clippy: same scope as cargo check but with lint enforcement.
+  # Treats warnings as errors so noisy/deprecated lints can't sneak in.
+  # Same frontend build dependency as the rust job.
+  rust-clippy:
+    name: Rust clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Cargo clippy (deny warnings)
+        env:
+          CARGO_INCREMENTAL: 0
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
