@@ -276,7 +276,18 @@ sleep_secs.max(MINIMUM_INTERVAL_SECONDS).min(MAX_INTERVAL_SECONDS)
 This means:
 - **No API calls** while you're listening to a 4-minute track (~240 seconds of silence)
 - **Polling resumes immediately** when the track changes
-- **Minimum 10 seconds** between polls (configurable)
+- **Minimum 10 seconds** between polls
+
+### Pause-Aware Backoff (PR #45)
+
+When Spotify repeatedly returns no track (`Ok(None)` — paused or idle), the polling loop lengthens its sleep interval to avoid burning API quota:
+
+- 1st consecutive no-track poll: sleep `default_interval_seconds` (30 s, configurable in `config.toml`)
+- 2nd consecutive: 60 s
+- 3rd consecutive: 120 s
+- 4th+ consecutive: 300 s (5 min cap)
+
+The counter resets to zero the moment a track is observed again, and `consecutive_pauses` is also reset before the debounce early-return when a track resumes after a pause streak. With this backoff, six hours of paused Spotify drops from ~720 calls/day to ~25 — a ~28× reduction.
 
 ## Event Bus
 
@@ -369,18 +380,26 @@ PresenceJam-Desktop/
 
 ```rust
 pub struct AppState {
+    pub config: RwLock<Option<AppConfig>>,
     pub spotify_tokens: RwLock<Option<SpotifyTokens>>,
     pub teams_tokens: RwLock<Option<TeamsTokens>>,
-    pub pending_spotify_auth: RwLock<Option<PendingSpotifyAuth>>,
-    pub config: RwLock<Option<AppConfig>>,
     pub current_track: RwLock<Option<TrackInfo>>,
-    pub is_syncing: RwLock<bool>,
+    pub is_syncing: AtomicBool,                              // PR #44: was RwLock<bool>
+    pub polling_handle: Mutex<Option<JoinHandle<()>>>,
+    pub pending_spotify_auth: RwLock<Option<PendingSpotifyAuth>>,
+    pub pending_teams_auth: RwLock<Option<PendingTeamsAuth>>,
+    pub stop_tx: Mutex<Option<Sender<()>>>,
+    pub onboarding_cache: parking_lot::Mutex<Option<(Instant, bool)>>, // PR #47: 30s cache
 }
 ```
 
-Multiple threads access this shared state via `RwLock`:
+Multiple threads access this shared state:
 - `polling.rs` thread writes to `spotify_tokens`, `teams_tokens`, `current_track`, `is_syncing`
 - `commands.rs` handlers read/write via `tauri::State<AppState>`
+- `is_syncing` uses `AtomicBool` for lock-free reads/writes (PR #44)
+- `onboarding_cache` (added in PR #47) holds a `(timestamp, result)` pair under a `parking_lot::Mutex` so `is_onboarding_complete` can serve cached results for 30 s without re-hitting Spotify/Teams
+
+**Token-refresh concurrency (PR #43):** Both `polling.rs` and `commands.rs` can refresh the same `*_tokens` field. To avoid the lost-update race where a second writer overwrites a freshly-cleared state, all token-refresh paths use a compare-and-swap (CAS) guard: re-read the field under the write lock, only commit the new tokens if the `access_token` matches the pre-refresh snapshot, otherwise discard the refresh result. This pattern is applied to Spotify tokens, Teams tokens, and the 401-retry path.
 
 ### Frontend Stores
 
