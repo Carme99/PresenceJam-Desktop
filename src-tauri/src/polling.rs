@@ -43,6 +43,24 @@ fn config_maximum_interval(config: &Option<crate::config::AppConfig>) -> u64 {
         .unwrap_or(60)
 }
 
+/// Pause-aware exponential backoff. When the user has paused Spotify (or has
+/// nothing playing at all), the polling loop would otherwise hammer the
+/// currently-playing endpoint every 30s for hours. This grows the sleep on
+/// consecutive empty/paused responses: 30s → 60s → 120s → 300s (cap).
+///
+/// The counter is reset to 0 the moment we see a non-paused, non-empty
+/// response, so resuming playback immediately goes back to the normal cadence.
+///
+/// See issue #38.
+fn pause_backoff(consecutive_pauses: u8) -> u64 {
+    match consecutive_pauses {
+        0 => 30,
+        1 => 60,
+        2 => 120,
+        _ => 300,
+    }
+}
+
 /// Adds +/- 20% jitter to retry intervals to prevent thundering herd.
 /// See issue #17.
 /// Uses thread-local RNG to avoid per-call initialization overhead.
@@ -62,6 +80,7 @@ fn process_track(
     last_poll_instant: Instant,
     last_teams_update: &mut Option<Instant>,
     is_first_poll: bool,
+    consecutive_pauses: &mut u8,
 ) -> u64 {
     // Bug 13: Correct progress_ms for elapsed time since last poll
     let elapsed_ms = last_poll_instant.elapsed().as_millis() as u64;
@@ -237,6 +256,9 @@ fn process_track(
     }
 
     if track.is_playing {
+        // Resuming playback — reset the pause-backoff counter so future
+        // pauses start at 30s, not at whatever stale value we carried.
+        *consecutive_pauses = 0;
         let remaining_ms = track.duration_ms.saturating_sub(corrected_progress_ms);
         let buffer_ms = 5000u64;
         let remaining_secs = remaining_ms / 1000;
@@ -245,7 +267,11 @@ fn process_track(
             .max(config_minimum_interval(config))
             .min(config_maximum_interval(config))
     } else {
-        config_default_interval(config)
+        // Track present but paused — grow the sleep on consecutive pauses
+        // so a paused user doesn't trigger 720 calls/day.
+        let sleep = pause_backoff(*consecutive_pauses);
+        *consecutive_pauses = consecutive_pauses.saturating_add(1).min(4);
+        sleep
     }
 }
 
@@ -370,6 +396,10 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
     let mut last_teams_update: Option<Instant> = None;
     let mut is_first_poll = true;
     let mut transient_failure_count: u8 = 0;
+    // Tracks consecutive empty/paused responses so we can widen the poll
+    // interval (30→60→120→300s) instead of hammering the API on a paused user.
+    // See issue #38.
+    let mut consecutive_pauses: u8 = 0;
 
     loop {
         log::info!("[POLLING] polling_loop: iteration start");
@@ -501,7 +531,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                     track.artist
                 );
                 let sleep_duration =
-                    process_track(&app, &state, &config, &track, &mut last_track_key, last_poll_instant, &mut last_teams_update, is_first_poll);
+                    process_track(&app, &state, &config, &track, &mut last_track_key, last_poll_instant, &mut last_teams_update, is_first_poll, &mut consecutive_pauses);
                 transient_failure_count = 0;
                 is_first_poll = false;
                 // Update tray menu with current sync state and track info (Bug 24+25 fix)
@@ -536,11 +566,15 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                 if let Err(e) = tray::update_tray_menu(&app, is_syncing, current_track) {
                     log::warn!("[POLLING] polling_loop: failed to update tray menu: {}", e);
                 }
+                // Apply pause-aware exponential backoff: 30→60→120→300s.
+                // The counter is reset by process_track on the first playing track.
+                let no_track_sleep = pause_backoff(consecutive_pauses);
+                consecutive_pauses = consecutive_pauses.saturating_add(1).min(4);
                 log::info!(
                     "[POLLING] polling_loop: sleeping for {} seconds (no track)",
-                    config_default_interval(&config)
+                    no_track_sleep
                 );
-                match stop_rx.recv_timeout(StdDuration::from_secs(config_default_interval(&config))) {
+                match stop_rx.recv_timeout(StdDuration::from_secs(no_track_sleep)) {
                     Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                         log::info!("[POLLING] polling_loop: stop signal during no-track sleep, breaking");
                         break;
@@ -596,6 +630,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                                                 last_poll_instant,
                                                 &mut last_teams_update,
                                                 is_first_poll,
+                                                &mut consecutive_pauses,
                                             );
                                             transient_failure_count = 0;
                                             is_first_poll = false;
@@ -604,7 +639,9 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                                         Ok(None) => {
                                             log::info!("[POLLING] polling_loop: retry no track");
                                             handle_no_track(&app, &state, &mut last_track_key);
-                                            match stop_rx.recv_timeout(StdDuration::from_secs(config_default_interval(&config))) {
+                                            let retry_no_track_sleep = pause_backoff(consecutive_pauses);
+                                            consecutive_pauses = consecutive_pauses.saturating_add(1).min(4);
+                                            match stop_rx.recv_timeout(StdDuration::from_secs(retry_no_track_sleep)) {
                                                 Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                                                     log::info!("[POLLING] polling_loop: stop signal during retry no-track sleep, breaking");
                                                     break;
@@ -830,4 +867,20 @@ pub fn clear_teams_tokens(app: &AppHandle) -> Result<(), String> {
     })?;
     log::info!("[POLLING] clear_teams_tokens: SUCCESS - tokens cleared from store");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pause_backoff_grows_then_caps() {
+        // 0 → 30s, 1 → 60s, 2 → 120s, 3 → 300s (cap), 4 → 300s (cap)
+        assert_eq!(pause_backoff(0), 30);
+        assert_eq!(pause_backoff(1), 60);
+        assert_eq!(pause_backoff(2), 120);
+        assert_eq!(pause_backoff(3), 300);
+        assert_eq!(pause_backoff(4), 300);
+        assert_eq!(pause_backoff(255), 300); // any larger counter stays capped
+    }
 }
