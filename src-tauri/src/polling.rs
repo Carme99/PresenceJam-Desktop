@@ -79,7 +79,6 @@ fn process_track(
     last_track_key: &mut Option<String>,
     last_poll_instant: Instant,
     last_teams_update: &mut Option<Instant>,
-    is_first_poll: bool,
     consecutive_pauses: &mut u8,
 ) -> u64 {
     // Bug 13: Correct progress_ms for elapsed time since last poll
@@ -235,21 +234,26 @@ fn process_track(
                 }
             }
         } else if config.as_ref().map(|c| c.teams.clear_on_pause).unwrap_or(true) {
-            if !is_first_poll {
-                match clear_teams_status_message(&teams_tok.access_token, "🎵 Paused") {
-                    Ok(_) => {
-                        *last_teams_update = Some(Instant::now());
-                        let _ = app.emit(
-                            "presence-cleared",
-                            serde_json::json!({ "timestamp": Utc::now().to_rfc3339() }),
-                        );
-                    }
-                    Err(e) => {
-                        log::error!(
-                            "[POLLING] process_track: Failed to clear Teams status: {}",
-                            e
-                        );
-                    }
+            // Issue #39: removed the `is_first_poll` guard. It was preventing
+            // legitimate status-clearing on app start for the first 30s when
+            // the user opens PresenceJam while Spotify is already paused.
+            // The (small) risk of wiping a status the user set manually before
+            // opening the app is acceptable: a stale \"now playing\" status
+            // is a worse UX than a missing \"paused\" status, and the user can
+            // just hit play/pause to re-sync.
+            match clear_teams_status_message(&teams_tok.access_token, "🎵 Paused") {
+                Ok(_) => {
+                    *last_teams_update = Some(Instant::now());
+                    let _ = app.emit(
+                        "presence-cleared",
+                        serde_json::json!({ "timestamp": Utc::now().to_rfc3339() }),
+                    );
+                }
+                Err(e) => {
+                    log::error!(
+                        "[POLLING] process_track: Failed to clear Teams status: {}",
+                        e
+                    );
                 }
             }
         }
@@ -394,7 +398,6 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
     log::info!("[POLLING] polling_loop: STARTED");
     let mut last_track_key: Option<String> = None;
     let mut last_teams_update: Option<Instant> = None;
-    let mut is_first_poll = true;
     let mut transient_failure_count: u8 = 0;
     // Tracks consecutive empty/paused responses so we can widen the poll
     // interval (30→60→120→300s) instead of hammering the API on a paused user.
@@ -531,9 +534,8 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                     track.artist
                 );
                 let sleep_duration =
-                    process_track(&app, &state, &config, &track, &mut last_track_key, last_poll_instant, &mut last_teams_update, is_first_poll, &mut consecutive_pauses);
+                    process_track(&app, &state, &config, &track, &mut last_track_key, last_poll_instant, &mut last_teams_update, &mut consecutive_pauses);
                 transient_failure_count = 0;
-                is_first_poll = false;
                 // Update tray menu with current sync state and track info (Bug 24+25 fix)
                 let is_syncing = *state.is_syncing.read();
                 let current_track = state.current_track.read().clone();
@@ -559,7 +561,6 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                 log::info!("[POLLING] polling_loop: no track playing");
                 handle_no_track(&app, &state, &mut last_track_key);
                 transient_failure_count = 0;
-                is_first_poll = false;
                 // Update tray menu with current sync state and track info (Bug 24+25 fix)
                 let is_syncing = *state.is_syncing.read();
                 let current_track = state.current_track.read().clone();
@@ -629,11 +630,9 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                                                 &mut last_track_key,
                                                 last_poll_instant,
                                                 &mut last_teams_update,
-                                                is_first_poll,
                                                 &mut consecutive_pauses,
                                             );
                                             transient_failure_count = 0;
-                                            is_first_poll = false;
                                             continue;
                                         }
                                         Ok(None) => {
@@ -649,7 +648,6 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                                                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                                             }
                                             transient_failure_count = 0;
-                                            is_first_poll = false;
                                             continue;
                                         }
                                         Err(retry_err) => {
