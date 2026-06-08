@@ -495,18 +495,31 @@ pub fn clear_teams_status_message(access_token: &str, placeholder: &str) -> Resu
     Ok(())
 }
 
-/// Validates that a Teams access token is still functional by calling the
-/// presence endpoint. Returns Ok(()) if the token works (200), or Err(TeamsApiError)
-/// on failure. Callers should distinguish:
+/// Validates that a Teams access token is still functional.
+///
+/// Short-circuits on the local `expires_at` field when the token is clearly
+/// still good (more than 60s of lifetime remaining), so the typical
+/// Onboarding mount doesn't pay for a network round-trip. Only when the
+/// token is on the refresh boundary (or already past it) do we make a real
+/// HTTP call to confirm.
+///
+/// Returns Ok(()) if the token works (locally valid OR 200), or
+/// Err(TeamsApiError) on failure. Callers should distinguish:
 ///
 /// - `ExpiredToken` → permanent auth failure, re-auth required
 /// - `RateLimited` / `Transient` → temporary, treat as "valid enough" for onboarding
 /// - `Other` → non-retryable but onboarding may still proceed
-pub fn validate_teams_token(access_token: &str) -> Result<(), TeamsApiError> {
+pub fn validate_teams_token(tokens: &TeamsTokens) -> Result<(), TeamsApiError> {
+    // Local pre-check: if the token clearly has plenty of life left, skip
+    // the network call. Mirrors the 60s refresh window used elsewhere.
+    if Utc::now() < tokens.expires_at - chrono::Duration::seconds(60) {
+        return Ok(());
+    }
+
     let client = build_teams_client().map_err(TeamsApiError::Transient)?;
     let response = client
         .get("https://graph.microsoft.com/v1.0/me/presence")
-        .header("Authorization", format!("Bearer {}", access_token))
+        .header("Authorization", format!("Bearer {}", tokens.access_token))
         .send()
         .map_err(|e| TeamsApiError::Transient(format!("request failed: {}", e)))?;
 

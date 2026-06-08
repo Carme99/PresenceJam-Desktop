@@ -946,7 +946,7 @@ pub fn is_onboarding_complete(state: tauri::State<'_, Arc<AppState>>) -> Result<
         let guard = state.teams_tokens.read();
         match guard.as_ref() {
             Some(tokens) => {
-                let valid = match crate::teams::validate_teams_token(&tokens.access_token) {
+                let valid = match crate::teams::validate_teams_token(tokens) {
                     Ok(()) => true,
                     Err(crate::teams::TeamsApiError::ExpiredToken(_)) => false,
                     Err(_) => true, // transient — still valid for onboarding
@@ -963,7 +963,7 @@ pub fn is_onboarding_complete(state: tauri::State<'_, Arc<AppState>>) -> Result<
         let guard = state.spotify_tokens.read();
         match guard.as_ref() {
             Some(tokens) => {
-                let valid = match crate::spotify::validate_spotify_token(&tokens.access_token) {
+                let valid = match crate::spotify::validate_spotify_token(tokens) {
                     Ok(()) => true,
                     Err(crate::spotify::SpotifyApiError::ExpiredToken) => false,
                     Err(_) => true, // transient — still valid for onboarding
