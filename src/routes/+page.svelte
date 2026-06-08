@@ -12,7 +12,7 @@
   import Reconnect from '$lib/components/Reconnect.svelte';
 
   // Build info — injected at build time via vite.config.js define
-  const BUILD = import.meta.env.__APP_BUILD__ || '2.5.1';
+  const BUILD = import.meta.env.__APP_BUILD__ || '2.6.0';
 
   let ready = $state(false);
   let unlisten: (() => void)[] = [];

@@ -40,7 +40,7 @@ Expected response time: within 7 days.
 | Teams access/refresh tokens | `tauri-plugin-store` (`tokens.json`) | DPAPI on Windows; Keychain on macOS |
 | Spotify OAuth pending state (verifier, state) | `tauri-plugin-store` (`tokens.json`) | Same as tokens — cleared after auth completes |
 
-**Pending-state expiry (v2.5.1):** Each pending-auth record carries an `expires_at` timestamp. The expiry is now re-checked at submit time (i.e. when the deep-link callback is delivered), not only at startup when the record is first loaded from disk. A pending-auth record older than the configured TTL is treated as expired and discarded before the code is sent to Spotify, preventing stale OAuth codes from reaching the token endpoint and surfacing as a generic 400.
+**Pending-state expiry (v2.6.0):** Each pending-auth record carries an `expires_at` timestamp. The expiry is now re-checked at submit time (i.e. when the deep-link callback is delivered), not only at startup when the record is first loaded from disk. A pending-auth record older than the configured TTL is treated as expired and discarded before the code is sent to Spotify, preventing stale OAuth codes from reaching the token endpoint and surfacing as a generic 400.
 
 **DPAPI (Windows):** Tokens are encrypted using Windows Data Protection API, which binds encryption to the current Windows user account. This means tokens cannot be extracted or read by other user accounts on the same machine, or by someone who steals the hard drive but doesn't have your login credentials.
 
@@ -66,7 +66,7 @@ These files contain:
 
 **⚠️ The `config.json` file is not encrypted.** If you share your machine with untrusted parties, consider revoking your Spotify app credentials when you're done using PresenceJam. The `tokens.json` file is encrypted to your user account via DPAPI (Windows) or Keychain (macOS).
 
-> **Status:** A previous version of this document implied `config.json` was encrypted. As of v2.5.1, the Spotify `client_secret` is still stored in **plaintext** in `config.json`. Migration to OS-keychain storage for the secret is tracked separately in [issue #9](https://github.com/Carme99/PresenceJam-Desktop/issues/9) and is **deferred** to a future release.
+> **Status:** As of v2.6.0, the Spotify `client_secret` is stored in the **OS keychain** (macOS Keychain, Windows Credential Manager, or Linux Secret Service via the `keyring` crate) rather than in `config.json`. This supersedes the plaintext-storage approach used through v2.5.0 and earlier; on first run after upgrading, users will be prompted to re-authenticate Spotify so the secret can be migrated. `tokens.json` (access/refresh tokens) was already encrypted to the user account via DPAPI/Keychain in earlier versions.
 
 ### Logs
 
@@ -82,7 +82,7 @@ Logs may contain:
 - Error details (including API error messages)
 - Redacted profanity filter events (the original profane status is **never** written to logs)
 
-Logs are written to the `tauri-plugin-log` default log directory. **Log retention/rotation is currently managed by the logging plugin defaults and is not user-configurable.** A previous version of this document claimed logs were "rotated daily and retained for 30 days"; that claim has been removed because no rotation code exists in the application — the v2.5.0 `logging.retention_days` config field was a no-op and has been removed in v2.5.1.
+Logs are written to the `tauri-plugin-log` default log directory. **Log retention/rotation is currently managed by the logging plugin defaults and is not user-configurable.** A previous version of this document claimed logs were "rotated daily and retained for 30 days"; that claim has been removed because no rotation code exists in the application — the v2.5.0 `logging.retention_days` config field was a no-op and has been removed in v2.6.0.
 
 
 ## Network Security
