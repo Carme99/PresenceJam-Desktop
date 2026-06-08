@@ -1,6 +1,21 @@
 import { writable } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
 
+// ---------------------------------------------------------------------------
+// IMPORTANT: Defaults in this file are FALLBACK-ONLY.
+//
+// The Rust backend (`src-tauri/src/config.rs`) is the source of truth for
+// the runtime config values. The fields here mirror them for first-render
+// and disconnected-frontend scenarios only — `loadConfig()` overwrites
+// them on startup by calling the Rust `load_config` command.
+//
+// If you change a default in Rust, change it here too. Drift between the
+// two layers causes silent UX bugs (e.g. a Settings slider that the
+// backend ignores, or a UI default that the backend immediately
+// overwrites). The long-term fix is to generate this file from Rust
+// via a build script (see GH issue #13).
+// ---------------------------------------------------------------------------
+
 export interface SpotifyConfig {
   client_id: string;
   /**
@@ -32,7 +47,9 @@ export interface PollingConfig {
 export interface LoggingConfig {
   enabled: boolean;
   log_level: string;
-  retention_days: number;
+  // NOTE: `retention_days` was removed in this commit. The field existed in
+  // both Rust and TS but was never read at runtime — see review finding C5
+  // (two critical config fields are no-ops) and GH issue #13.
 }
 
 export interface AppConfig {
@@ -67,8 +84,7 @@ export const defaultConfig: AppConfig = {
   },
   logging: {
     enabled: true,
-    log_level: 'Info',
-    retention_days: 30
+    log_level: 'Info'
   },
   autostart: false
 };
