@@ -9,7 +9,7 @@ use url::Url;
 
 #[tauri::command]
 pub fn get_recent_logs(_app: AppHandle) -> Result<(), String> {
-    log::info!("[CMD] get_recent_logs: ENTRY");
+    log::debug!("[CMD] get_recent_logs: ENTRY");
     // Note: tauri_plugin_log v2 doesn't provide a way to retrieve cached log entries.
     // Log entries are streamed to the frontend via the Webview target (log://log event).
     // This command is kept for future use if such API becomes available.
@@ -48,7 +48,7 @@ pub struct SyncStatus {
 
 #[tauri::command]
 pub fn load_config() -> Result<AppConfig, String> {
-    log::info!("[CMD] load_config: ENTRY");
+    log::debug!("[CMD] load_config: ENTRY");
     match config::load_config() {
         Ok(cfg) => {
             log::info!(
@@ -113,7 +113,7 @@ pub fn is_spotify_client_secret_set() -> bool {
 
 #[tauri::command]
 pub fn get_config_dir() -> Result<String, String> {
-    log::info!("[CMD] get_config_dir: ENTRY");
+    log::debug!("[CMD] get_config_dir: ENTRY");
     match config::config_dir().map(|p| p.to_string_lossy().to_string()) {
         Ok(path) => {
             log::info!("[CMD] get_config_dir: SUCCESS - path={}", path);
@@ -358,7 +358,7 @@ pub fn get_spotify_tokens(
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<Option<SpotifyTokens>, String> {
-    log::info!("[CMD] get_spotify_tokens: ENTRY");
+    log::debug!("[CMD] get_spotify_tokens: ENTRY");
 
     let state_tokens = {
         let guard = state.spotify_tokens.read();
@@ -390,7 +390,7 @@ pub fn refresh_spotify(
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<(), String> {
-    log::info!("[CMD] refresh_spotify: ENTRY");
+    log::debug!("[CMD] refresh_spotify: ENTRY");
 
     let store = app.store("tokens").map_err(|e| e.to_string())?;
     log::info!("[CMD] refresh_spotify: store opened");
@@ -433,7 +433,7 @@ pub fn refresh_spotify(
 
 #[tauri::command]
 pub fn open_external_url(url: String) -> Result<(), String> {
-    log::info!("[CMD] open_external_url: ENTRY - url.len={}", url.len());
+    log::debug!("[CMD] open_external_url: ENTRY - url.len={}", url.len());
 
     // Validate URL scheme - only allow http/https. See issue #14.
     validate_http_url(&url)?;
@@ -455,7 +455,7 @@ pub fn start_teams_auth_device_code(
     app: AppHandle,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<DeviceCodeResponse, String> {
-    log::info!("[CMD] start_teams_auth_device_code: ENTRY");
+    log::debug!("[CMD] start_teams_auth_device_code: ENTRY");
 
     let response = crate::teams::start_teams_auth_device_code()?;
     log::info!("[CMD] start_teams_auth_device_code: got device code response");
@@ -601,7 +601,7 @@ pub fn get_teams_tokens(
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<Option<TeamsTokens>, String> {
-    log::info!("[CMD] get_teams_tokens: ENTRY");
+    log::debug!("[CMD] get_teams_tokens: ENTRY");
 
     let state_tokens = {
         let guard = state.teams_tokens.read();
@@ -630,7 +630,7 @@ pub fn get_teams_tokens(
 
 #[tauri::command]
 pub fn refresh_teams(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> Result<(), String> {
-    log::info!("[CMD] refresh_teams: ENTRY");
+    log::debug!("[CMD] refresh_teams: ENTRY");
 
     let current_tokens = {
         let guard = state.teams_tokens.read();
@@ -657,7 +657,7 @@ pub fn refresh_teams(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> 
 
 #[tauri::command]
 pub fn start_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> Result<(), String> {
-    log::info!("[CMD] start_syncing: ENTRY");
+    log::debug!("[CMD] start_syncing: ENTRY");
 
     // Acquire write lock first to prevent TOCTOU race with concurrent calls.
     // See issue #14.
@@ -736,7 +736,7 @@ fn stop_polling_and_join(state: &Arc<AppState>, context: &str) {
 
 #[tauri::command]
 pub fn stop_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> Result<(), String> {
-    log::info!("[CMD] stop_syncing: ENTRY");
+    log::debug!("[CMD] stop_syncing: ENTRY");
 
     stop_polling_and_join(state.inner(), "stop_syncing");
 
@@ -749,7 +749,7 @@ pub fn stop_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> R
 
 #[tauri::command]
 pub fn app_exit(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> Result<(), String> {
-    log::info!("[CMD] app_exit: ENTRY");
+    log::debug!("[CMD] app_exit: ENTRY");
 
     let is_syncing = {
         let guard = state.is_syncing.read();
@@ -768,7 +768,7 @@ pub fn app_exit(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> Resul
 
 #[tauri::command]
 pub fn get_sync_status(state: tauri::State<'_, Arc<AppState>>) -> Result<SyncStatus, String> {
-    log::info!("[CMD] get_sync_status: ENTRY");
+    log::debug!("[CMD] get_sync_status: ENTRY");
 
     let is_syncing = {
         let guard = state.is_syncing.read();
@@ -812,7 +812,7 @@ pub fn get_sync_status(state: tauri::State<'_, Arc<AppState>>) -> Result<SyncSta
 
 #[tauri::command]
 pub fn show_window(app: AppHandle) -> Result<(), String> {
-    log::info!("[CMD] show_window: ENTRY");
+    log::debug!("[CMD] show_window: ENTRY");
 
     if let Some(window) = app.get_webview_window("main") {
         log::info!("[CMD] show_window: window found, showing and focusing");
@@ -828,7 +828,7 @@ pub fn show_window(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub fn hide_window(app: AppHandle) -> Result<(), String> {
-    log::info!("[CMD] hide_window: ENTRY");
+    log::debug!("[CMD] hide_window: ENTRY");
 
     if let Some(window) = app.get_webview_window("main") {
         log::info!("[CMD] hide_window: window found, hiding");
@@ -843,7 +843,7 @@ pub fn hide_window(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub fn get_autostart_enabled(app: AppHandle) -> Result<bool, String> {
-    log::info!("[CMD] get_autostart_enabled: ENTRY");
+    log::debug!("[CMD] get_autostart_enabled: ENTRY");
 
     let autolaunch_manager = app.state::<tauri_plugin_autostart::AutoLaunchManager>();
     match autolaunch_manager.is_enabled() {
@@ -860,7 +860,7 @@ pub fn get_autostart_enabled(app: AppHandle) -> Result<bool, String> {
 
 #[tauri::command]
 pub fn set_autostart_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
-    log::info!("[CMD] set_autostart_enabled: ENTRY - enabled={}", enabled);
+    log::debug!("[CMD] set_autostart_enabled: ENTRY - enabled={}", enabled);
 
     let autolaunch_manager = app.state::<tauri_plugin_autostart::AutoLaunchManager>();
     if enabled {
@@ -890,7 +890,7 @@ pub fn set_autostart_enabled(app: AppHandle, enabled: bool) -> Result<(), String
 
 #[tauri::command]
 pub fn open_logs_folder(app: AppHandle) -> Result<(), String> {
-    log::info!("[CMD] open_logs_folder: ENTRY");
+    log::debug!("[CMD] open_logs_folder: ENTRY");
 
     let logs_path = app.path().app_log_dir().map_err(|e| {
         log::error!("[CMD] open_logs_folder: failed to get log dir - {}", e);
@@ -913,7 +913,7 @@ pub fn open_logs_folder(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub fn open_external(url: String) -> Result<(), String> {
-    log::info!("[CMD] open_external: ENTRY - url.len={}", url.len());
+    log::debug!("[CMD] open_external: ENTRY - url.len={}", url.len());
 
     // Validate URL scheme - only allow http/https. See issue #14.
     validate_http_url(&url)?;
@@ -934,7 +934,7 @@ pub fn open_external(url: String) -> Result<(), String> {
 pub fn get_current_track(
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<Option<TrackInfo>, String> {
-    log::info!("[CMD] get_current_track: ENTRY");
+    log::debug!("[CMD] get_current_track: ENTRY");
 
     let guard = state.current_track.read();
     let track = guard.clone();
@@ -953,7 +953,7 @@ pub fn get_current_track(
 
 #[tauri::command]
 pub fn is_onboarding_complete(state: tauri::State<'_, Arc<AppState>>) -> Result<bool, String> {
-    log::info!("[CMD] is_onboarding_complete: ENTRY");
+    log::debug!("[CMD] is_onboarding_complete: ENTRY");
 
     let config = config::load_config()?;
     let spotify_configured = !config.spotify.client_id.is_empty();
@@ -1013,7 +1013,7 @@ pub fn complete_onboarding(
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<(), String> {
-    log::info!("[CMD] complete_onboarding: ENTRY");
+    log::debug!("[CMD] complete_onboarding: ENTRY");
 
     let has_spotify = {
         let guard = state.spotify_tokens.read();
@@ -1056,7 +1056,7 @@ pub fn reconnect_spotify(
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<(), String> {
-    log::info!("[CMD] reconnect_spotify: ENTRY");
+    log::debug!("[CMD] reconnect_spotify: ENTRY");
 
     // Clear Spotify tokens from state
     *state.spotify_tokens.write() = None;
@@ -1100,7 +1100,7 @@ pub fn reconnect_teams(
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<(), String> {
-    log::info!("[CMD] reconnect_teams: ENTRY");
+    log::debug!("[CMD] reconnect_teams: ENTRY");
 
     // Clear Teams tokens from state
     *state.teams_tokens.write() = None;

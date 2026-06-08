@@ -119,7 +119,7 @@ fn process_track(
     if let Some(teams_tok) = teams_tokens {
         if track.is_playing {
             if should_skip_api_call {
-                log::info!(
+                log::debug!(
                     "[POLLING] process_track: debounce active, skipping Teams API call (changed={}, elapsed={}ms)",
                     changed,
                     last_teams_update.map(|i| i.elapsed().as_millis() as u64).unwrap_or(0)
@@ -359,7 +359,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
     let mut transient_failure_count: u8 = 0;
 
     loop {
-        log::info!("[POLLING] polling_loop: iteration start");
+        log::debug!("[POLLING] polling_loop: iteration start");
 
         // Check if we should stop — use interruptible channel so stop_syncing
         // can wake the thread immediately instead of waiting for the sleep to expire.
@@ -386,14 +386,14 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
             let guard = state.config.read();
             guard.clone()
         };
-        log::info!("[POLLING] polling_loop: config loaded");
+        log::debug!("[POLLING] polling_loop: config loaded");
 
         // Get Spotify tokens
         let spotify_tokens = {
             let guard = state.spotify_tokens.read();
             guard.clone()
         };
-        log::info!(
+        log::debug!(
             "[POLLING] polling_loop: spotify_tokens: {}",
             if spotify_tokens.is_some() {
                 "Some"
@@ -404,7 +404,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
 
         let spotify_tokens = match spotify_tokens {
             Some(t) => {
-                log::info!("[POLLING] polling_loop: using existing Spotify tokens");
+                log::debug!("[POLLING] polling_loop: using existing Spotify tokens");
                 t
             }
             None => {
@@ -422,7 +422,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
 
         // Check if token expired
         let token_expired = is_token_expired(&spotify_tokens);
-        log::info!("[POLLING] polling_loop: token_expired={}", token_expired);
+        log::debug!("[POLLING] polling_loop: token_expired={}", token_expired);
 
         // Refresh token if needed
         let (client_id, client_secret) = get_spotify_credentials(&config);
@@ -472,7 +472,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
         };
 
         let access_token = spotify_tokens.access_token.clone();
-        log::info!("[POLLING] polling_loop: calling get_currently_playing");
+        log::debug!("[POLLING] polling_loop: calling get_currently_playing");
 
         // Bug 13: Capture instant before API call to correct progress_ms elapsed time
         let last_poll_instant = Instant::now();
@@ -497,7 +497,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                 if let Err(e) = tray::update_tray_menu(&app, is_syncing, current_track) {
                     log::warn!("[POLLING] polling_loop: failed to update tray menu: {}", e);
                 }
-                log::info!(
+                log::debug!(
                     "[POLLING] polling_loop: sleeping for {} seconds",
                     sleep_duration
                 );
@@ -523,7 +523,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                 if let Err(e) = tray::update_tray_menu(&app, is_syncing, current_track) {
                     log::warn!("[POLLING] polling_loop: failed to update tray menu: {}", e);
                 }
-                log::info!(
+                log::debug!(
                     "[POLLING] polling_loop: sleeping for {} seconds (no track)",
                     DEFAULT_INTERVAL_SECONDS
                 );

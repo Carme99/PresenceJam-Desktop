@@ -66,7 +66,7 @@ pub mod menu;
 pub mod commands;
 
 async fn handle_spotify_callback(code: &str, state_param: Option<&str>, app: &AppHandle) -> Result<(), String> {
-    log::info!("[CALLBACK] handle_spotify_callback: ENTRY - code.len={}", code.len());
+    log::debug!("[CALLBACK] handle_spotify_callback: ENTRY - code.len={}", code.len());
 
     let app_state = app.state::<Arc<AppState>>();
     log::info!("[CALLBACK] handle_spotify_callback: got app state");
@@ -125,7 +125,7 @@ async fn handle_spotify_callback(code: &str, state_param: Option<&str>, app: &Ap
 }
 
 async fn handle_teams_callback(code: &str, app: &AppHandle) -> Result<(), String> {
-    log::info!("[CALLBACK] handle_teams_callback: ENTRY - code.len={}", code.len());
+    log::debug!("[CALLBACK] handle_teams_callback: ENTRY - code.len={}", code.len());
     
     let state = app.state::<Arc<AppState>>();
     log::info!("[CALLBACK] handle_teams_callback: got app state");
@@ -166,7 +166,7 @@ async fn handle_teams_callback(code: &str, app: &AppHandle) -> Result<(), String
 }
 
 fn handle_deep_link(url: &str, app: AppHandle) {
-    log::info!("[DEEP_LINK] handle_deep_link: ENTRY - url={}", url);
+    log::debug!("[DEEP_LINK] handle_deep_link: ENTRY - url={}", url);
     
     if let Ok(parsed) = url::Url::parse(url) {
         log::info!("[DEEP_LINK] handle_deep_link: URL parsed successfully");
