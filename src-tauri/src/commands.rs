@@ -4,9 +4,16 @@ use crate::teams::{DeviceCodeResponse, TeamsTokens};
 use crate::{polling, tray, AppState, PendingSpotifyAuth};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_store::StoreExt;
 use url::Url;
+
+/// TTL for the `is_onboarding_complete` result cache. The front-end remounts this
+/// command on every Onboarding view enter, and the upstream HTTPS calls can take
+/// up to 20s in the worst case (token validation against Spotify/Graph APIs), so
+/// a short cache is needed to avoid hammering the upstream APIs.
+const ONBOARDING_CACHE_TTL: Duration = Duration::from_secs(30);
 
 #[tauri::command]
 pub fn get_recent_logs(_app: AppHandle) -> Result<(), String> {
@@ -963,10 +970,56 @@ pub fn get_current_track(
     Ok(track)
 }
 
+/// Onboarding check: `true` if both Spotify and Teams are configured and have a non-expired
+/// token. Network errors (5xx, 429) are treated as "still valid" (transient) so a flaky
+/// network doesn't bounce the user back into the onboarding flow.
+///
+/// Result is cached on `AppState.onboarding_cache` for [`ONBOARDING_CACHE_TTL`] —
+/// the front-end remounts this command on every Onboarding view enter, and the
+/// upstream HTTPS calls can take up to 20s in the worst case (token validation
+/// against Spotify/Graph APIs).
 #[tauri::command]
-pub fn is_onboarding_complete(state: tauri::State<'_, Arc<AppState>>) -> Result<bool, String> {
+pub async fn is_onboarding_complete(
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<bool, String> {
     log::info!("[CMD] is_onboarding_complete: ENTRY");
 
+    // Cache hit — return immediately.
+    {
+        let guard = state.onboarding_cache.lock();
+        if let Some((ts, result)) = *guard {
+            if ts.elapsed() < ONBOARDING_CACHE_TTL {
+                log::info!(
+                    "[CMD] is_onboarding_complete: cache HIT (age={:.2}s, result={})",
+                    ts.elapsed().as_secs_f32(),
+                    result
+                );
+                return Ok(result);
+            }
+        }
+    }
+
+    // Cache miss — run the actual validation on a blocking thread (HTTPS round-trips).
+    let state_clone: Arc<AppState> = Arc::clone(&state);
+    let result =
+        tauri::async_runtime::spawn_blocking(move || is_onboarding_complete_impl(&state_clone))
+            .await
+            .map_err(|e| format!("is_onboarding_complete task panicked: {}", e))??;
+
+    // Store result in cache. We cache both `true` and `false` outcomes — a recent "complete"
+    // result is just as valid as a recent "incomplete" one for the 30s window.
+    *state.onboarding_cache.lock() = Some((Instant::now(), result));
+    log::info!(
+        "[CMD] is_onboarding_complete: cache MISS, stored fresh result={}",
+        result
+    );
+    Ok(result)
+}
+
+/// Blocking implementation of the onboarding check. Run via `spawn_blocking` from
+/// `is_onboarding_complete` so the async runtime can keep serving other commands while
+/// the HTTPS round-trips to Spotify/Graph complete.
+fn is_onboarding_complete_impl(state: &Arc<AppState>) -> Result<bool, String> {
     let config = config::load_config()?;
     let spotify_configured = !config.spotify.client_id.is_empty();
 
