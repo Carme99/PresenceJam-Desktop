@@ -93,8 +93,6 @@ pub struct LoggingConfig {
     pub enabled: bool,
     #[serde(default = "default_log_level")]
     pub log_level: String,
-    #[serde(default = "default_retention_days")]
-    pub retention_days: u32,
 }
 
 fn default_logging_enabled() -> bool {
@@ -103,10 +101,6 @@ fn default_logging_enabled() -> bool {
 
 fn default_log_level() -> String {
     "Info".to_string()
-}
-
-fn default_retention_days() -> u32 {
-    30
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,7 +156,6 @@ impl Default for LoggingConfig {
         Self {
             enabled: default_logging_enabled(),
             log_level: default_log_level(),
-            retention_days: default_retention_days(),
         }
     }
 }
