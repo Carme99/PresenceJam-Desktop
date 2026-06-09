@@ -5,6 +5,11 @@ All notable changes to PresenceJam are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.6.2] - 2026-06-09
+
+### Chore
+- chore(release): re-submit to winget. v2.6.1 winget submission got rejected at validation because the manifest pointed to the v2.6.0-named MSI (deleted when the v2.6.1 MSI was uploaded). The winget-releaser action's `komac update` skips on ANY existing PR for the version (open or closed), so closing the broken PR didn't help — only a version bump produces a fresh submission. No source changes; identical binaries as v2.6.1.
+
 ## [2.6.1] - 2026-06-09
 
 ### Fixed
@@ -351,7 +356,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - PowerShell script version — this is a full rewrite
 
-[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v2.6.1...HEAD
+[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v2.6.2...HEAD
+[2.6.2]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.6.2
 [2.6.1]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.6.1
 [2.6.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.6.0
 [2.5.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.5.0
