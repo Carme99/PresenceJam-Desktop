@@ -47,10 +47,7 @@ export interface PollingConfig {
 export interface LoggingConfig {
   enabled: boolean;
   log_level: string;
-  // NOTE: `retention_days` was removed in this commit. The field existed in
-  // both Rust and TS but was never read at runtime — see review finding C5
-  // (two critical config fields are no-ops) and GH issue #13.
-
+  // retention_days removed (was a no-op) — see GH #13
 }
 
 export interface AppConfig {
