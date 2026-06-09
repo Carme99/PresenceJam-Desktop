@@ -43,6 +43,10 @@ jobs:
   # Frontend build is required because src-tauri/src/lib.rs uses
   # tauri::generate_context!() which embeds build/ via include_dir! at
   # compile time, even during cargo check.
+  # Tauri on Linux pulls in glib-sys/webkit2gtk-sys/etc. via FFI bindings,
+  # so the runner needs the GTK + webkit2gtk system headers and pkg-config
+  # to satisfy the build scripts. release.yml doesn't need this because
+  # it only builds on macOS/Windows — no Linux job there.
   rust:
     name: Rust (cargo check)
     runs-on: ubuntu-latest
@@ -59,6 +63,18 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            pkg-config \
+            build-essential
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -79,6 +95,10 @@ jobs:
   # Clippy: same scope as cargo check but with lint enforcement.
   # Treats warnings as errors so noisy/deprecated lints can't sneak in.
   # Same frontend build dependency as the rust job.
+  # Tauri on Linux pulls in glib-sys/webkit2gtk-sys/etc. via FFI bindings,
+  # so the runner needs the GTK + webkit2gtk system headers and pkg-config
+  # to satisfy the build scripts. release.yml doesn't need this because
+  # it only builds on macOS/Windows — no Linux job there.
   rust-clippy:
     name: Rust clippy
     runs-on: ubuntu-latest
@@ -97,6 +117,18 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            pkg-config \
+            build-essential
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
