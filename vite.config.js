@@ -10,8 +10,14 @@ export default defineConfig(async () => ({
   plugins: [sveltekit()],
 
   define: {
-    // Injected at build time — version from package.json + timestamp
-    __APP_BUILD__: JSON.stringify(`${pkg.version}.${Date.now()}`),
+    // Injected at build time — version from package.json + ISO build date.
+    // Rendered in the About panel and the main page footer as e.g.
+    // "2.6.1 (2026-06-09)". Replaced the previous "version.unix-ms"
+    // format which produced an unreadable "2.6.0.1749350400000" in
+    // the UI (PR-time code review flagged the upstream smell).
+    __APP_BUILD__: JSON.stringify(
+      `${pkg.version} (${new Date().toISOString().slice(0, 10)})`
+    ),
   },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`

@@ -5,6 +5,14 @@ All notable changes to PresenceJam are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.6.1] - 2026-06-09
+
+### Fixed
+- fix(ui): show build date in About panel as ISO date instead of Unix epoch milliseconds. The previous `${pkg.version}.${Date.now()}` format produced strings like `2.6.0.1749350400000` in the About panel; now shows `2.6.1 (2026-06-09)`.
+
+### Chore
+- chore(docs): condense the stale `retention_days` historical NOTE in `src/lib/stores/config.ts` from 4 lines to 1. Field was removed in v2.6.0 (PR #49, GH #13); the 4-line block was carrying its own weight as removed code rather than a note.
+
 ## [2.6.0] - 2026-06-08
 
 ### Security
@@ -343,7 +351,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - PowerShell script version — this is a full rewrite
 
-[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v2.6.0...HEAD
+[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v2.6.1...HEAD
+[2.6.1]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.6.1
 [2.6.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.6.0
 [2.5.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.5.0
 [2.3.7]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.3.7
