@@ -676,7 +676,7 @@ pub fn start_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> 
         log::info!("[CMD] start_syncing: is_syncing flag set to true");
     }
 
-    let handle = match polling::start_polling(Arc::clone(&state.inner()), app.clone()) {
+    let handle = match polling::start_polling(Arc::clone(state.inner()), app.clone()) {
         Ok(h) => h,
         Err(e) => {
             // Roll back is_syncing flag since no handle was created
