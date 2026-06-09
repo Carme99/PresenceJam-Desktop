@@ -107,6 +107,95 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # ------------------------------------------------------------------
+  # Homebrew tap update (carme99/homebrew-tap)
+  # ------------------------------------------------------------------
+  # Runs after the GitHub Release is published so the DMG is available
+  # at a stable URL. Pulls the artifact, computes its SHA256, and
+  # updates the presence-jam formula in the tap.
+  #
+  # Required GitHub Actions secret (must be set in the repo's secrets
+  # before the next v* tag push):
+  #   HOMEBREW_TAP_TOKEN    classic PAT or fine-grained token with
+  #                         contents:write on carme99/homebrew-tap.
+  #                         (A fine-grained PAT scoped only to that
+  #                         repo is the safer choice.)
+  #
+  # The job is self-bootstrapping: if presence-jam.rb doesn't exist
+  # in the tap yet, it creates it. If it does, it updates version /
+  # url / sha256. A no-op if the formula is already at the same
+  # version (so re-running the workflow doesn't churn git history).
+  homebrew:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download macOS DMG artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: PresenceJam-${{ github.ref_name }}-macos.dmg
+          path: dist/
+
+      - name: Compute SHA256 of the DMG
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          if [ ! -f PresenceJam-macos.dmg ]; then
+            echo "::error::PresenceJam-macos.dmg not found in artifact. Did the macOS build step succeed?"
+            exit 1
+          fi
+          sha256sum PresenceJam-macos.dmg | tee sha256.txt
+          echo "Computed SHA256 for ${{ github.ref_name }}"
+
+      - name: Update Homebrew formula in carme99/homebrew-tap
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${HOMEBREW_TAP_TOKEN:-}" ]; then
+            echo "::error::HOMEBREW_TAP_TOKEN must be set as a repository secret. See PR description for setup steps."
+            exit 1
+          fi
+
+          VERSION="${GITHUB_REF_NAME#v}"  # strip leading 'v'
+          DMG_URL="https://github.com/Carme99/PresenceJam-Desktop/releases/download/${GITHUB_REF_NAME}/PresenceJam-macos.dmg"
+          SHA=$(awk '{print $1}' dist/sha256.txt)
+          echo "Updating tap formula to v${VERSION} (sha256=${SHA})"
+
+          # Render the formula from the template in homebrew/presence-jam.rb
+          # by substituting the placeholders. The template is checked in
+          # so the formula content is reviewable in normal diffs and doesn't
+          # live inside the workflow YAML.
+          sed -e "s|__URL__|${DMG_URL}|g" \
+              -e "s|__SHA256__|${SHA}|g" \
+              -e "s|__VERSION__|${VERSION}|g" \
+              homebrew/presence-jam.rb > presence-jam.rb.rendered
+
+          # Shallow clone the tap with the token embedded in the URL.
+          git clone --depth 1 --branch main \
+            "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/carme99/homebrew-tap.git" \
+            tap
+          cd tap
+
+          # If the formula is already at this version, nothing to do.
+          if [ -f presence-jam.rb ]; then
+            CURRENT_VERSION=$(grep -E '^  version ' presence-jam.rb | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+            if [ "${CURRENT_VERSION}" = "${VERSION}" ]; then
+              echo "Formula is already at v${VERSION}, no change"
+              exit 0
+            fi
+            echo "Formula currently at v${CURRENT_VERSION}, updating to v${VERSION}"
+          else
+            echo "Formula does not exist yet, creating it"
+          fi
+
+          cp ../presence-jam.rb.rendered presence-jam.rb
+          git config user.name "Nova"
+          git config user.email "nova@lee-lab.local"
+          git add presence-jam.rb
+          git commit -m "presence-jam: bump to v${VERSION}"
+          git push origin main
+          echo "Tap updated: carme99/homebrew-tap presence-jam.rb -> v${VERSION}"
+
   winget:
     needs: release
     runs-on: windows-latest
