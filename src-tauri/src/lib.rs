@@ -62,6 +62,13 @@ impl AppState {
     }
 }
 
+impl Default for AppState {
+    fn default() -> Self {
+        // Routes through `new()` so the AppState creation log line still fires.
+        Self::new()
+    }
+}
+
 pub mod config;
 pub mod keychain;
 pub mod profanity;

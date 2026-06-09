@@ -79,6 +79,13 @@ fn with_jitter(base_secs: u64) -> u64 {
     (base_secs as f64 + jitter).max(1.0) as u64
 }
 
+// process_track is intentionally a single helper that owns the per-poll
+// mutable state in one place. Threading the same fields through every
+// call site would either duplicate them across the polling loop or
+// require a new "PollContext" struct that mirrors the existing parameter
+// list. The signature has grown because the polling loop has grown;
+// refactoring is a separate concern from PR-time CI hygiene.
+#[allow(clippy::too_many_arguments)]
 fn process_track(
     app: &AppHandle,
     state: &Arc<AppState>,
@@ -240,7 +247,7 @@ fn process_track(
             let remaining_ms = track.duration_ms.saturating_sub(corrected_progress_ms);
             let buffer_ms = config
                 .as_ref()
-                .map(|c| c.polling.expiry_buffer_seconds as u64)
+                .map(|c| c.polling.expiry_buffer_seconds)
                 .unwrap_or(10)
                 * 1000;
             let expiry =

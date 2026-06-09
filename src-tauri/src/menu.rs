@@ -122,8 +122,13 @@ pub fn handle_app_menu_event(app: &AppHandle, event_id: &str) {
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 log::info!("[MENU] quit: forced exit fallback");
                 // let _ suppresses unused_must_use lint cross-platform
-                // (returns Result on Unix/macOS, () on Windows)
-                let _ = app_handle.exit(0);
+                // (returns Result on Unix/macOS, () on Windows).
+                // The `let_unit_value` allow is needed because clippy reads
+                // the `let _ = unit_or_result;` pattern as a no-op let.
+                #[allow(clippy::let_unit_value)]
+                {
+                    let _ = app_handle.exit(0);
+                }
             });
         }
         ID_SHOW_DASHBOARD => {

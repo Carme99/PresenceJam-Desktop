@@ -1,0 +1,153 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main, master]
+
+# Read-only: this workflow only checks out the PR head and runs builds.
+# No secrets required.
+permissions:
+  contents: read
+
+# Cancel in-progress runs for the same PR when new commits are pushed.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Frontend: catches Svelte/TS build errors. Mirrors the npm ci + npm run build
+  # steps from release.yml. Cached via actions/setup-node cache: 'npm'.
+  frontend:
+    name: Frontend (npm build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+  # Rust: cargo check on all targets (lib + bins + tests + benches) catches
+  # type errors, borrow errors, missing imports, and broken test code.
+  # Does NOT run tests (CI is for compile-time feedback, not correctness).
+  # Frontend build is required because src-tauri/src/lib.rs uses
+  # tauri::generate_context!() which embeds build/ via include_dir! at
+  # compile time, even during cargo check.
+  # Tauri on Linux pulls in glib-sys/webkit2gtk-sys/etc. via FFI bindings,
+  # so the runner needs the GTK + webkit2gtk system headers and pkg-config
+  # to satisfy the build scripts. release.yml doesn't need this because
+  # it only builds on macOS/Windows — no Linux job there.
+  rust:
+    name: Rust (cargo check)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e  # 1.96
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            pkg-config \
+            build-essential
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Cargo check (all targets)
+        env:
+          CARGO_INCREMENTAL: 0
+        run: cargo check --manifest-path src-tauri/Cargo.toml --all-targets
+
+  # Clippy: same scope as cargo check but with lint enforcement.
+  # Treats warnings as errors so noisy/deprecated lints can't sneak in.
+  # Same frontend build dependency as the rust job.
+  # Tauri on Linux pulls in glib-sys/webkit2gtk-sys/etc. via FFI bindings,
+  # so the runner needs the GTK + webkit2gtk system headers and pkg-config
+  # to satisfy the build scripts. release.yml doesn't need this because
+  # it only builds on macOS/Windows — no Linux job there.
+  rust-clippy:
+    name: Rust clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e  # 1.96
+        with:
+          components: clippy
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            pkg-config \
+            build-essential
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Cargo clippy (deny warnings)
+        env:
+          CARGO_INCREMENTAL: 0
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings

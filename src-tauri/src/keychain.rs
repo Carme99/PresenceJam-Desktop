@@ -48,7 +48,7 @@ pub fn get_spotify_client_secret() -> Result<String, String> {
 /// after a successful existence check), `Ok(false)` if it is missing.
 pub fn has_spotify_client_secret() -> bool {
     match keyring::Entry::new(KEYRING_SERVICE, SPOTIFY_CLIENT_SECRET_USER) {
-        Ok(entry) => matches!(entry.get_password(), Ok(_)),
+        Ok(entry) => entry.get_password().is_ok(),
         Err(_) => false,
     }
 }

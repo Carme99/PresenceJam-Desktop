@@ -165,6 +165,11 @@ impl Default for LoggingConfig {
     }
 }
 
+// `Default::default()` can't be derived because `LoggingConfig` uses
+// `default_*()` helper functions to seed its fields with non-`Default`
+// values (a default log level, a default "enabled" flag). The helper
+// calls are intentional, not a candidate for `#[derive(Default)]`.
+#[allow(clippy::derivable_impls)]
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
