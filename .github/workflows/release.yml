@@ -61,9 +61,11 @@ jobs:
       # macOS code signing + notarization (issue #54)
       # ------------------------------------------------------------------
       # Required GitHub Actions secrets (must be set before the next
-      # v* tag is pushed — see PR description for setup):
+      # v* tag is pushed — see docs/SIGNING_SETUP.md for setup):
       #   APPLE_CERTIFICATE              base64-encoded .p12 Developer ID Application cert
       #   APPLE_CERTIFICATE_PASSWORD     password for the .p12
+      #   APPLE_KEYCHAIN_PASSWORD        any random string — locks the temp keychain the
+      #                                   workflow creates on the runner (not the .p12 password)
       #   APPLE_SIGNING_IDENTITY         "Developer ID Application: <Name> (<TeamID>)"
       #   APPLE_ID                       Apple ID email (for notarytool)
       #   APPLE_PASSWORD                 app-specific password (appleid.apple.com → App-Specific Passwords)
@@ -90,7 +92,9 @@ jobs:
           security list-keychain -d user -s "$KEYCHAIN_PATH"
           security default-keychain -s "$KEYCHAIN_PATH"
           TMP_P12="$RUNNER_TEMP/cert.p12"
-          echo -n "$APPLE_CERTIFICATE" | base64 --decode > "$TMP_P12"
+          # `base64 -D` is the BSD form on macOS; GNU `base64` uses `-d`.
+          # The macOS runner image uses BSD userland.
+          echo -n "$APPLE_CERTIFICATE" | base64 -D > "$TMP_P12"
           security import "$TMP_P12" -k "$KEYCHAIN_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" -A -T /usr/bin/codesign -T /usr/bin/security
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           rm -f "$TMP_P12"
@@ -110,7 +114,10 @@ jobs:
             exit 1
           fi
           # Locate the unsigned DMG that tauri build produced.
-          DMG_PATH=$(find src-tauri/target/${{ matrix.target }}/release/bundle -name "*.dmg" -maxdepth 3 -print -quit)
+          # macOS's BSD `find` does not support `-maxdepth`, so use the
+          # same plain pattern as the existing "Package macOS artifact"
+          # step below.
+          DMG_PATH=$(find src-tauri/target/${{ matrix.target }}/release/bundle -name "*.dmg" 2>/dev/null | head -1)
           if [ -z "$DMG_PATH" ]; then
             echo "::error::No DMG found under src-tauri/target/${{ matrix.target }}/release/bundle — did tauri build succeed?"
             exit 1
@@ -183,7 +190,7 @@ jobs:
           $pfxPath = Join-Path $env:RUNNER_TEMP 'codesign.pfx'
           [System.IO.File]::WriteAllBytes($pfxPath, [System.Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
           Write-Host "Signing $($msi.FullName) with signtool..."
-          & signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f $pfxPath /p $env:WINDOWS_CERTIFICATE_PASSWORD $msi.FullName
+          & signtool sign /fd SHA256 /tr https://timestamp.digicert.com /td SHA256 /f $pfxPath /p $env:WINDOWS_CERTIFICATE_PASSWORD $msi.FullName
           if ($LASTEXITCODE -ne 0) { Write-Error "signtool exited $LASTEXITCODE"; exit $LASTEXITCODE }
           Write-Host "Verifying signature..."
           & signtool verify /pa $msi.FullName
