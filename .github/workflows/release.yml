@@ -35,6 +35,15 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # Cargo cache mirrors the PR-time ci.yml setup (PR #55). Cuts the
+      # release build from ~50 min cold compile to ~15-20 min warm.
+      # First release on a fresh runner is still cold; subsequent
+      # tag pushes benefit.
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
       - name: Setup Rust target
         if: matrix.target != ''
         run: rustup target add ${{ matrix.target }}
@@ -209,6 +218,14 @@ jobs:
     permissions:
       contents: write
     steps:
+      # The winget-releaser action does not update open PRs — if a PR
+      # already exists for this version, it silently skips. This is
+      # a footgun: if the manifest becomes stale (e.g. the underlying
+      # MSI was re-uploaded with a different filename), the broken
+      # PR blocks the package from being re-submitted. The current
+      # workaround when this happens: close the open PR, then push
+      # a new tag (or force-move the existing tag) to re-fire this
+      # job, which sees no open PR and creates a fresh one.
       - uses: vedantmgoyal2009/winget-releaser@v2
         with:
           identifier: PresenceJam.PresenceJam
