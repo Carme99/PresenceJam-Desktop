@@ -366,25 +366,13 @@ pub fn start_polling(
 ) -> Result<thread::JoinHandle<()>, String> {
     log::info!("[POLLING] start_polling: ENTRY");
 
-    // Guard against spawning duplicate polling thread.
-    // Use compare_exchange for an atomic check-and-set: replaces the
-    // previous RwLock write guard. AcqRel on success preserves the
-    // happens-before relationship with subsequent reads of is_syncing
-    // (e.g. the polling loop and tray).
-    // This mirrors commands.rs:start_syncing which uses the same
-    // compare_exchange. The polling loop only reads is_syncing
-    // (via is_syncing.load(Acquire)) so concurrent read access is
-    // unaffected.
-    if state
-        .is_syncing
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        log::warn!("[POLLING] start_polling: polling already running, returning early");
-        return Err("Polling is already running".to_string());
-    }
-
-    log::info!("[POLLING] start_polling: is_syncing flag set to true");
+    // Ownership model: commands::start_syncing claims the is_syncing flag
+    // before calling polling::start_polling. This function is a pure
+    // thread-spawner — it trusts the caller has already claimed the flag
+    // and does NOT do a second compare_exchange. The flag is released
+    // only by stop_syncing (on clean exit) or by the panic handler below
+    // (on crash). This removes the double-claim race that caused every
+    // first-run onboarding to fail with "Polling is already running".
 
     // Create interruptible stop channel so stop_syncing can wake the thread immediately.
     // See issue #10 (Polling thread cannot be cancelled mid-request).
