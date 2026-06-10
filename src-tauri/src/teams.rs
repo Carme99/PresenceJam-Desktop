@@ -146,13 +146,14 @@ pub fn start_teams_auth_device_code() -> Result<DeviceCodeResponse, String> {
     })?;
     log::info!(
         "teams::start_teams_auth_device_code: raw response body: {}",
-        raw_body
+        truncate_for_log(&raw_body)
     );
 
     if !status.is_success() {
         return Err(format!(
             "Device code request failed with status {}: {}",
-            status, raw_body
+            status,
+            truncate_for_log(&raw_body)
         ));
     }
 
@@ -234,7 +235,7 @@ pub fn poll_teams_auth(device_code: &str) -> Result<TeamsTokens, String> {
         let error_resp: TokenErrorResponse = serde_json::from_str(&raw_body).map_err(|e| {
             format!(
                 "Failed to parse error response: {} (body was: {})",
-                e, raw_body
+                e, truncate_for_log(&raw_body)
             )
         })?;
 
@@ -263,7 +264,7 @@ pub fn poll_teams_auth(device_code: &str) -> Result<TeamsTokens, String> {
                     "Authentication failed: {} - {} (raw body: {})",
                     error_resp.error,
                     error_resp.error_description.unwrap_or_default(),
-                    raw_body
+                    truncate_for_log(&raw_body)
                 ));
             }
         }
@@ -302,9 +303,13 @@ pub fn complete_teams_auth(
         log::error!(
             "complete_teams_auth: token request failed with status {}: {}",
             status,
-            raw_body
+            truncate_for_log(&raw_body)
         );
-        return Err(format!("Token request failed: {} - {}", status, raw_body));
+        return Err(format!(
+            "Token request failed: {} - {}",
+            status,
+            truncate_for_log(&raw_body)
+        ));
     }
 
     #[derive(Deserialize)]
@@ -320,7 +325,7 @@ pub fn complete_teams_auth(
     let token_resp: TokenResponse = serde_json::from_str(&raw_body).map_err(|e| {
         format!(
             "Failed to parse token response: {} (body was: {})",
-            e, raw_body
+            e, truncate_for_log(&raw_body)
         )
     })?;
 
@@ -363,26 +368,26 @@ pub fn refresh_teams_token(tokens: &TeamsTokens) -> Result<TeamsTokens, String> 
         log::error!(
             "refresh_teams_token: refresh request failed with status {}: {}",
             status,
-            raw_body
+            truncate_for_log(&raw_body)
         );
         let error_resp: TokenErrorResponse = serde_json::from_str(&raw_body).map_err(|e| {
             format!(
                 "Failed to parse error response: {} (body was: {})",
-                e, raw_body
+                e, truncate_for_log(&raw_body)
             )
         })?;
         return Err(format!(
             "Failed to refresh token: {} - {} (raw body: {})",
             error_resp.error,
             error_resp.error_description.unwrap_or_default(),
-            raw_body
+            truncate_for_log(&raw_body)
         ));
     }
 
     let token_resp: TokenResponse = serde_json::from_str(&raw_body).map_err(|e| {
         format!(
             "Failed to parse token response: {} (body was: {})",
-            e, raw_body
+            e, truncate_for_log(&raw_body)
         )
     })?;
 
