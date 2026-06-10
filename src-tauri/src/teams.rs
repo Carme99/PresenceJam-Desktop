@@ -8,6 +8,17 @@ use std::time::Duration as StdDuration;
 
 pub const MICROSOFT_GRAPH_CLIENT_ID: &str = "14d82eec-204b-4c2f-b7e8-296a70dab67e";
 
+/// Truncates a string for safe logging: returns first 256 chars + `(…NB total)`
+/// if the body exceeds 256 bytes. Prevents large credential blobs (tokens,
+/// refresh tokens) from being written to log files at debug level.
+fn truncate_for_log(body: &str) -> String {
+    if body.len() <= 256 {
+        body.to_string()
+    } else {
+        format!("{}(…{} total)", &body[..256], body.len())
+    }
+}
+
 /// Error type for Teams API operations.
 ///区分 expired/unauthorized tokens vs transient errors.
 #[derive(Debug, Clone)]
@@ -138,7 +149,7 @@ pub fn start_teams_auth_device_code() -> Result<DeviceCodeResponse, String> {
     let raw: DeviceCodeResponseRaw = serde_json::from_str(&raw_body).map_err(|e| {
         format!(
             "Failed to parse device code response: {} (body was: {})",
-            e, raw_body
+            e, truncate_for_log(&raw_body)
         )
     })?;
     log::info!("teams::start_teams_auth_device_code: parsed response");
@@ -188,13 +199,13 @@ pub fn poll_teams_auth(device_code: &str) -> Result<TeamsTokens, String> {
         let raw_body = response
             .text()
             .map_err(|e| format!("Failed to read response body: {}", e))?;
-        log::debug!("poll_teams_auth: status={}, body={}", status, raw_body);
+        log::debug!("poll_teams_auth: status={}, body={}", status, truncate_for_log(&raw_body));
 
         if status.is_success() {
             let token_resp: TokenResponse = serde_json::from_str(&raw_body).map_err(|e| {
                 format!(
                     "Failed to parse token response: {} (body was: {})",
-                    e, raw_body
+                    e, truncate_for_log(&raw_body)
                 )
             })?;
 
