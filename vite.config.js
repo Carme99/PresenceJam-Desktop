@@ -15,7 +15,13 @@ export default defineConfig(async () => ({
     // "2.6.1 (2026-06-09)". Replaced the previous "version.unix-ms"
     // format which produced an unreadable "2.6.0.1749350400000" in
     // the UI (PR-time code review flagged the upstream smell).
-    __APP_BUILD__: JSON.stringify(
+    //
+    // Use the path-based key `import.meta.env.VITE_APP_BUILD` so esbuild's
+    // define plugin matches the member-expression access in the consumer
+    // (the bare-token `__APP_BUILD__` define only matches top-level
+    // identifier uses, not the `import.meta.env.__APP_BUILD__` member
+    // expression the Svelte consumer actually reads).
+    "import.meta.env.VITE_APP_BUILD": JSON.stringify(
       `${pkg.version} (${new Date().toISOString().slice(0, 10)})`
     ),
   },
