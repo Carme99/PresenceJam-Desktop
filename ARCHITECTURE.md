@@ -384,7 +384,7 @@ pub struct AppState {
     pub spotify_tokens: RwLock<Option<SpotifyTokens>>,
     pub teams_tokens: RwLock<Option<TeamsTokens>>,
     pub current_track: RwLock<Option<TrackInfo>>,
-    pub is_syncing: AtomicBool,                              // PR #44: was RwLock<bool>
+    pub is_syncing: AtomicBool,                              // PR #44: was RwLock<bool>; v2.6.3: sole claimer is commands::start_syncing (see #60)
     pub polling_handle: Mutex<Option<JoinHandle<()>>>,
     pub pending_spotify_auth: RwLock<Option<PendingSpotifyAuth>>,
     pub pending_teams_auth: RwLock<Option<PendingTeamsAuth>>,
@@ -397,6 +397,7 @@ Multiple threads access this shared state:
 - `polling.rs` thread writes to `spotify_tokens`, `teams_tokens`, `current_track`, `is_syncing`
 - `commands.rs` handlers read/write via `tauri::State<AppState>`
 - `is_syncing` uses `AtomicBool` for lock-free reads/writes (PR #44)
+- `is_syncing` ownership (v2.6.3, fixes #60): `commands::start_syncing` is the **sole claimer** of the flag. It does the `compare_exchange(false, true, …)` and only then calls `polling::start_polling`, which is a pure thread-spawner that does **not** touch the flag. The polling loop reads `is_syncing` under `load()` to decide whether to keep iterating. `stop_syncing` flips it `false` on clean exit; the panic handler inside `polling::start_polling` resets it on crash; the spawn-failure `map_err` block resets it if `thread::Builder::spawn()` returns `Err`. **Do not add a second CAS to `is_syncing` from anywhere else** — that was the v2.6.0–v2.6.2 bug that blocked first-run onboarding (every Finish click after a successful Spotify + Teams auth hit "Polling is already running"). A source-grep regression guard (`test_start_polling_does_not_claim_is_syncing`) fails the build if a `compare_exchange(` is reintroduced inside `polling::start_polling`.
 - `onboarding_cache` (added in PR #47) holds a `(timestamp, result)` pair under a `parking_lot::Mutex` so `is_onboarding_complete` can serve cached results for 30 s without re-hitting Spotify/Teams
 
 **Token-refresh concurrency (PR #43):** Both `polling.rs` and `commands.rs` can refresh the same `*_tokens` field. To avoid the lost-update race where a second writer overwrites a freshly-cleared state, all token-refresh paths use a compare-and-swap (CAS) guard: re-read the field under the write lock, only commit the new tokens if the `access_token` matches the pre-refresh snapshot, otherwise discard the refresh result. This pattern is applied to Spotify tokens, Teams tokens, and the 401-retry path.
