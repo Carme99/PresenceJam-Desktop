@@ -609,26 +609,35 @@ mod tests {
 
     #[test]
     fn test_truncate_cuts_inside_multibyte_sequence() {
-        // 256 ASCII chars + 1 four-byte emoji = 260 bytes, 257 chars.
-        // Now the char count exceeds 256, so the helper must truncate
-        // at a char boundary. The byte index of the 257th char is
-        // 256 (the start of the emoji's UTF-8 sequence). Old code
-        // `&body[..256]` would have sliced between the 256th 'a' and
-        // the emoji at byte 256 — which is a char boundary, so this
-        // exact case wouldn't have panicked. To force the panic, we'd
-        // need a multi-byte char straddling byte 256, which means the
-        // body must start with non-ASCII. Use 1 four-byte char + 256
-        // ASCII chars (= 260 bytes, 257 chars). Char index 256 is
-        // ASCII (the second ASCII char), byte index 4. Truncate there
-        // and verify the output includes the emoji as a complete char.
+        // Body: 1 four-byte emoji followed by 256 ASCII 'a' chars.
+        // Total: 260 bytes, 257 chars.
+        //
+        // Char count (257) exceeds 256, so the helper must truncate.
+        // `body.char_indices().nth(256)` is the 257th char (the 256th
+        // 'a', 0-indexed), which starts at byte 259 — so `cut = 259`
+        // and `&body[..259]` keeps the emoji plus the first 255 'a's
+        // (256 chars), then the helper appends the `(…260 total)`
+        // byte-count suffix.
+        //
+        // Note on the test name: the cut lands at an ASCII char
+        // boundary *after* the multibyte codepoint, not literally
+        // *inside* the multibyte sequence. The old `&body[..256]`
+        // implementation would have sliced at byte 256 — also a char
+        // boundary in this body (between 'a' chars) — so this exact
+        // input would not have panicked under the old code. The test
+        // name is preserved for git-blame continuity, but its real
+        // value is exercising the truncation path with a multibyte
+        // char in the body and asserting the emoji is preserved as a
+        // complete char (i.e. the helper does not produce a half-
+        // codepoint on this input either).
         let body: String = "\u{1F600}".to_string() + &"a".repeat(256);
         assert_eq!(body.len(), 260);
         assert_eq!(body.chars().count(), 257);
 
         let truncated = truncate_for_log(&body);
 
-        // Must not panic. Output should contain the emoji (preserved
-        // as a complete char) and end with the byte count.
+        // Output must start with the emoji (preserved as a complete
+        // char) and end with the byte count.
         assert!(truncated.starts_with("\u{1F600}"));
         assert!(truncated.ends_with("(…260 total)"));
     }
