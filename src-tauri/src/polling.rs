@@ -1041,4 +1041,36 @@ mod tests {
         assert_eq!(pause_backoff(1, 200), 300); // 200*2=400 → cap
         assert_eq!(pause_backoff(2, 200), 300); // 200*4=800 → cap
     }
+
+    #[test]
+    fn test_start_polling_does_not_claim_is_syncing() {
+        // Regression guard: prior implementations of polling::start_polling
+        // did a compare_exchange on is_syncing that always lost when called
+        // from commands::start_syncing (which had already claimed the flag).
+        // Result: "Polling is already running" error after every fresh
+        // install. The fix moved the CAS ownership to the command layer.
+        // This test catches a future contributor re-adding the CAS to
+        // start_polling — see issue #60.
+        //
+        // We grep for `.compare_exchange(` (with the leading dot and
+        // opening paren) rather than the bare word, because the
+        // ownership-model comment in this function mentions
+        // "compare_exchange" by name to document what is NOT happening
+        // here. The method-call form is the only shape that would
+        // actually do the CAS.
+        let source = include_str!("polling.rs");
+        let body = source
+            .split("pub fn start_polling(")
+            .nth(1)
+            .and_then(|s| {
+                s.split("log::info!(\"[POLLING] start_polling: SUCCESS")
+                    .next()
+            })
+            .unwrap_or("");
+        assert!(
+            !body.contains(".compare_exchange("),
+            "polling::start_polling must not CAS is_syncing — \
+             commands::start_syncing owns the flag. See issue #60."
+        );
+    }
 }
