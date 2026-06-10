@@ -1,6 +1,6 @@
 [package]
 name = "presence-jam"
-version = "2.6.2"
+version = "2.6.3"
 description = "Syncs Spotify playback to Microsoft Teams status"
 authors = ["Jack Lee"]
 edition = "2021"

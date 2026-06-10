@@ -8,6 +8,27 @@ use std::time::Duration as StdDuration;
 
 pub const MICROSOFT_GRAPH_CLIENT_ID: &str = "14d82eec-204b-4c2f-b7e8-296a70dab67e";
 
+/// Truncates a string for safe logging. Returns the body unchanged if it
+/// fits in 256 chars; otherwise returns the first 256 chars (cut at a
+/// UTF-8 char boundary) plus `(…NB total)` where NB is the byte count.
+///
+/// Prevents large credential blobs (Microsoft Graph access_token +
+/// refresh_token, ~3.5KB, ~77min lifetime) from being written to log
+/// files at `debug!` level — see issue #62.
+fn truncate_for_log(body: &str) -> String {
+    if body.chars().count() > 256 {
+        // Find the byte index of the 256th char (char-boundary-safe).
+        let cut = body
+            .char_indices()
+            .nth(256)
+            .map(|(i, _)| i)
+            .unwrap_or(body.len());
+        format!("{}(…{} total)", &body[..cut], body.len())
+    } else {
+        body.to_string()
+    }
+}
+
 /// Error type for Teams API operations.
 ///区分 expired/unauthorized tokens vs transient errors.
 #[derive(Debug, Clone)]
@@ -125,20 +146,21 @@ pub fn start_teams_auth_device_code() -> Result<DeviceCodeResponse, String> {
     })?;
     log::info!(
         "teams::start_teams_auth_device_code: raw response body: {}",
-        raw_body
+        truncate_for_log(&raw_body)
     );
 
     if !status.is_success() {
         return Err(format!(
             "Device code request failed with status {}: {}",
-            status, raw_body
+            status,
+            truncate_for_log(&raw_body)
         ));
     }
 
     let raw: DeviceCodeResponseRaw = serde_json::from_str(&raw_body).map_err(|e| {
         format!(
             "Failed to parse device code response: {} (body was: {})",
-            e, raw_body
+            e, truncate_for_log(&raw_body)
         )
     })?;
     log::info!("teams::start_teams_auth_device_code: parsed response");
@@ -188,13 +210,13 @@ pub fn poll_teams_auth(device_code: &str) -> Result<TeamsTokens, String> {
         let raw_body = response
             .text()
             .map_err(|e| format!("Failed to read response body: {}", e))?;
-        log::debug!("poll_teams_auth: status={}, body={}", status, raw_body);
+        log::debug!("poll_teams_auth: status={}, body={}", status, truncate_for_log(&raw_body));
 
         if status.is_success() {
             let token_resp: TokenResponse = serde_json::from_str(&raw_body).map_err(|e| {
                 format!(
                     "Failed to parse token response: {} (body was: {})",
-                    e, raw_body
+                    e, truncate_for_log(&raw_body)
                 )
             })?;
 
@@ -213,7 +235,7 @@ pub fn poll_teams_auth(device_code: &str) -> Result<TeamsTokens, String> {
         let error_resp: TokenErrorResponse = serde_json::from_str(&raw_body).map_err(|e| {
             format!(
                 "Failed to parse error response: {} (body was: {})",
-                e, raw_body
+                e, truncate_for_log(&raw_body)
             )
         })?;
 
@@ -242,7 +264,7 @@ pub fn poll_teams_auth(device_code: &str) -> Result<TeamsTokens, String> {
                     "Authentication failed: {} - {} (raw body: {})",
                     error_resp.error,
                     error_resp.error_description.unwrap_or_default(),
-                    raw_body
+                    truncate_for_log(&raw_body)
                 ));
             }
         }
@@ -281,9 +303,13 @@ pub fn complete_teams_auth(
         log::error!(
             "complete_teams_auth: token request failed with status {}: {}",
             status,
-            raw_body
+            truncate_for_log(&raw_body)
         );
-        return Err(format!("Token request failed: {} - {}", status, raw_body));
+        return Err(format!(
+            "Token request failed: {} - {}",
+            status,
+            truncate_for_log(&raw_body)
+        ));
     }
 
     #[derive(Deserialize)]
@@ -299,7 +325,7 @@ pub fn complete_teams_auth(
     let token_resp: TokenResponse = serde_json::from_str(&raw_body).map_err(|e| {
         format!(
             "Failed to parse token response: {} (body was: {})",
-            e, raw_body
+            e, truncate_for_log(&raw_body)
         )
     })?;
 
@@ -342,26 +368,26 @@ pub fn refresh_teams_token(tokens: &TeamsTokens) -> Result<TeamsTokens, String> 
         log::error!(
             "refresh_teams_token: refresh request failed with status {}: {}",
             status,
-            raw_body
+            truncate_for_log(&raw_body)
         );
         let error_resp: TokenErrorResponse = serde_json::from_str(&raw_body).map_err(|e| {
             format!(
                 "Failed to parse error response: {} (body was: {})",
-                e, raw_body
+                e, truncate_for_log(&raw_body)
             )
         })?;
         return Err(format!(
             "Failed to refresh token: {} - {} (raw body: {})",
             error_resp.error,
             error_resp.error_description.unwrap_or_default(),
-            raw_body
+            truncate_for_log(&raw_body)
         ));
     }
 
     let token_resp: TokenResponse = serde_json::from_str(&raw_body).map_err(|e| {
         format!(
             "Failed to parse token response: {} (body was: {})",
-            e, raw_body
+            e, truncate_for_log(&raw_body)
         )
     })?;
 
@@ -536,6 +562,84 @@ pub fn validate_teams_token(tokens: &TeamsTokens) -> Result<(), TeamsApiError> {
             let body = response.text().unwrap_or_default();
             Err(TeamsApiError::Other(status_code, body))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_for_log;
+
+    #[test]
+    fn test_truncate_under_limit() {
+        let body = "short body".to_string();
+        assert_eq!(truncate_for_log(&body), body);
+    }
+
+    #[test]
+    fn test_truncate_ascii_at_boundary() {
+        // 256 ASCII chars exactly — at the limit, not over.
+        // The helper takes "the first 256 chars", and the body has exactly
+        // 256 chars (0-indexed chars 0..=255), so the count check is `> 256`
+        // which is false and the body is returned unchanged.
+        let body: String = "a".repeat(256);
+        assert_eq!(truncate_for_log(&body), body);
+    }
+
+    #[test]
+    fn test_truncate_handles_multibyte_codepoint_at_boundary() {
+        // 255 ASCII chars + 1 four-byte emoji = 259 bytes total.
+        // The 256th char is the emoji (char count goes 0..=255 ASCII,
+        // index 255 is the emoji). The byte index of the 256th char is
+        // 255 (right after the last 'a'), which is the start of the
+        // emoji's 4-byte UTF-8 sequence — a char boundary.
+        // The old `&body[..256]` implementation would have sliced inside
+        // the emoji (byte 255..=258) and panicked on non-ASCII bytes 255.
+        let body: String = "a".repeat(255) + "\u{1F600}"; // grinning face
+        assert_eq!(body.len(), 259);
+        assert_eq!(body.chars().count(), 256);
+
+        let truncated = truncate_for_log(&body);
+
+        // Must not panic. The body is exactly 256 chars, so the
+        // `chars().count() > 256` check is false and the body is
+        // returned unchanged — this proves the boundary case is
+        // handled correctly when the emoji lands at char 256.
+        assert_eq!(truncated, body);
+    }
+
+    #[test]
+    fn test_truncate_cuts_inside_multibyte_sequence() {
+        // Body: 1 four-byte emoji followed by 256 ASCII 'a' chars.
+        // Total: 260 bytes, 257 chars.
+        //
+        // Char count (257) exceeds 256, so the helper must truncate.
+        // `body.char_indices().nth(256)` is the 257th char (the 256th
+        // 'a', 0-indexed), which starts at byte 259 — so `cut = 259`
+        // and `&body[..259]` keeps the emoji plus the first 255 'a's
+        // (256 chars), then the helper appends the `(…260 total)`
+        // byte-count suffix.
+        //
+        // Note on the test name: the cut lands at an ASCII char
+        // boundary *after* the multibyte codepoint, not literally
+        // *inside* the multibyte sequence. The old `&body[..256]`
+        // implementation would have sliced at byte 256 — also a char
+        // boundary in this body (between 'a' chars) — so this exact
+        // input would not have panicked under the old code. The test
+        // name is preserved for git-blame continuity, but its real
+        // value is exercising the truncation path with a multibyte
+        // char in the body and asserting the emoji is preserved as a
+        // complete char (i.e. the helper does not produce a half-
+        // codepoint on this input either).
+        let body: String = "\u{1F600}".to_string() + &"a".repeat(256);
+        assert_eq!(body.len(), 260);
+        assert_eq!(body.chars().count(), 257);
+
+        let truncated = truncate_for_log(&body);
+
+        // Output must start with the emoji (preserved as a complete
+        // char) and end with the byte count.
+        assert!(truncated.starts_with("\u{1F600}"));
+        assert!(truncated.ends_with("(…260 total)"));
     }
 }
 

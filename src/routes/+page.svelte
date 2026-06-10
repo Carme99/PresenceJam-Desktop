@@ -12,7 +12,11 @@
   import Reconnect from '$lib/components/Reconnect.svelte';
 
   // Build info — injected at build time via vite.config.js define
-  const BUILD = import.meta.env.__APP_BUILD__ || '2.6.0';
+  // (mirrors the consumer in About.svelte; the vite define key is the
+  // path-based `import.meta.env.VITE_APP_BUILD`, not the bare token
+  // `__APP_BUILD__` that esbuild's define plugin can't match against a
+  // member expression).
+  const BUILD = import.meta.env.VITE_APP_BUILD ?? 'dev build';
 
   let ready = $state(false);
   let unlisten: (() => void)[] = [];

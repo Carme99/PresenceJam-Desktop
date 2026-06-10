@@ -366,25 +366,13 @@ pub fn start_polling(
 ) -> Result<thread::JoinHandle<()>, String> {
     log::info!("[POLLING] start_polling: ENTRY");
 
-    // Guard against spawning duplicate polling thread.
-    // Use compare_exchange for an atomic check-and-set: replaces the
-    // previous RwLock write guard. AcqRel on success preserves the
-    // happens-before relationship with subsequent reads of is_syncing
-    // (e.g. the polling loop and tray).
-    // This mirrors commands.rs:start_syncing which uses the same
-    // compare_exchange. The polling loop only reads is_syncing
-    // (via is_syncing.load(Acquire)) so concurrent read access is
-    // unaffected.
-    if state
-        .is_syncing
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        log::warn!("[POLLING] start_polling: polling already running, returning early");
-        return Err("Polling is already running".to_string());
-    }
-
-    log::info!("[POLLING] start_polling: is_syncing flag set to true");
+    // Ownership model: commands::start_syncing claims the is_syncing flag
+    // before calling polling::start_polling. This function is a pure
+    // thread-spawner — it trusts the caller has already claimed the flag
+    // and does NOT do a second compare_exchange. The flag is released
+    // only by stop_syncing (on clean exit) or by the panic handler below
+    // (on crash). This removes the double-claim race that caused every
+    // first-run onboarding to fail with "Polling is already running".
 
     // Create interruptible stop channel so stop_syncing can wake the thread immediately.
     // See issue #10 (Polling thread cannot be cancelled mid-request).
@@ -426,10 +414,23 @@ pub fn start_polling(
                 }
                 // app_clone is moved into polling_loop above, so use app here
                 let _ = app.emit("polling-thread-panicked", serde_json::json!(null));
-                // Reset state so a panic doesn't wedge the app in "syncing"
-                state_for_cleanup.is_syncing.store(false, Ordering::Release);
-                *state_for_cleanup.stop_tx.write() = None;
             }
+            // Release sync state on ALL thread exits (panic OR normal return).
+            // If polling_loop returns on its own (e.g., the 5-transient-failures
+            // backoff path breaks the loop), the flag would otherwise stay true
+            // and the next start_syncing call would short-circuit as "already
+            // syncing" with no live thread. The load() guard avoids double-
+            // resetting if stop_syncing has already cleared the flag. stop_tx
+            // is unconditionally cleared because it was created at the top of
+            // this function and is only ever set by us.
+            if state_for_cleanup.is_syncing.load(Ordering::Acquire) {
+                log::warn!(
+                    "[POLLING] start_polling: polling thread exited without stop_syncing; \
+                     cleaning up sync state"
+                );
+                state_for_cleanup.is_syncing.store(false, Ordering::Release);
+            }
+            *state_for_cleanup.stop_tx.write() = None;
             log::info!("[POLLING] start_polling: thread ended");
         })
         .map_err(|e| {
@@ -1052,5 +1053,37 @@ mod tests {
         assert_eq!(pause_backoff(0, 200), 200); // 0 arm returns the default uncapped
         assert_eq!(pause_backoff(1, 200), 300); // 200*2=400 → cap
         assert_eq!(pause_backoff(2, 200), 300); // 200*4=800 → cap
+    }
+
+    #[test]
+    fn test_start_polling_does_not_claim_is_syncing() {
+        // Regression guard: prior implementations of polling::start_polling
+        // did a compare_exchange on is_syncing that always lost when called
+        // from commands::start_syncing (which had already claimed the flag).
+        // Result: "Polling is already running" error after every fresh
+        // install. The fix moved the CAS ownership to the command layer.
+        // This test catches a future contributor re-adding the CAS to
+        // start_polling — see issue #60.
+        //
+        // We grep for `.compare_exchange(` (with the leading dot and
+        // opening paren) rather than the bare word, because the
+        // ownership-model comment in this function mentions
+        // "compare_exchange" by name to document what is NOT happening
+        // here. The method-call form is the only shape that would
+        // actually do the CAS.
+        let source = include_str!("polling.rs");
+        let body = source
+            .split("pub fn start_polling(")
+            .nth(1)
+            .and_then(|s| {
+                s.split("log::info!(\"[POLLING] start_polling: SUCCESS")
+                    .next()
+            })
+            .unwrap_or("");
+        assert!(
+            !body.contains(".compare_exchange("),
+            "polling::start_polling must not CAS is_syncing — \
+             commands::start_syncing owns the flag. See issue #60."
+        );
     }
 }

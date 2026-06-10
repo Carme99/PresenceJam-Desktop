@@ -861,29 +861,30 @@ pub fn set_autostart_enabled(app: AppHandle, enabled: bool) -> Result<(), String
     log::debug!("[CMD] set_autostart_enabled: ENTRY - enabled={}", enabled);
 
     let autolaunch_manager = app.state::<tauri_plugin_autostart::AutoLaunchManager>();
-    if enabled {
-        match autolaunch_manager.enable() {
-            Ok(()) => {
-                log::info!("[CMD] set_autostart_enabled: enable SUCCESS");
-                Ok(())
-            }
-            Err(e) => {
-                log::error!("[CMD] set_autostart_enabled: enable FAILED - {}", e);
-                Err(e.to_string())
-            }
-        }
-    } else {
-        match autolaunch_manager.disable() {
-            Ok(()) => {
-                log::info!("[CMD] set_autostart_enabled: disable SUCCESS");
-                Ok(())
-            }
-            Err(e) => {
-                log::error!("[CMD] set_autostart_enabled: disable FAILED - {}", e);
-                Err(e.to_string())
-            }
-        }
+    let is_enabled = autolaunch_manager.is_enabled().map_err(|e| {
+        log::error!("[CMD] set_autostart_enabled: is_enabled check FAILED - {}", e);
+        e.to_string()
+    })?;
+
+    if is_enabled == enabled {
+        log::info!("[CMD] set_autostart_enabled: already in desired state (enabled={}), no-op", enabled);
+        return Ok(());
     }
+
+    if enabled {
+        autolaunch_manager.enable().map_err(|e| {
+            log::error!("[CMD] set_autostart_enabled: enable FAILED - {}", e);
+            e.to_string()
+        })?;
+        log::info!("[CMD] set_autostart_enabled: enable SUCCESS");
+    } else {
+        autolaunch_manager.disable().map_err(|e| {
+            log::error!("[CMD] set_autostart_enabled: disable FAILED - {}", e);
+            e.to_string()
+        })?;
+        log::info!("[CMD] set_autostart_enabled: disable SUCCESS");
+    }
+    Ok(())
 }
 
 #[tauri::command]

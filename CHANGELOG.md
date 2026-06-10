@@ -5,6 +5,16 @@ All notable changes to PresenceJam are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.6.3] - 2026-06-10
+
+### Fixed
+- fix(race): drop the double-claim on `is_syncing` between `commands::start_syncing` and `polling::start_polling`. Fresh installs could not complete onboarding — every Finish click after a successful Spotify + Teams auth hit `"Polling is already running"` and rolled back to no-sync state. `commands::start_syncing` is now the **sole claimer** of the flag; `polling::start_polling` is a pure thread-spawner that trusts its caller. A source-grep regression guard (`test_start_polling_does_not_claim_is_syncing`) catches a re-introduced `compare_exchange` inside `start_polling`. Closes #60.
+- fix(autostart): gate `disable()` on `is_enabled()` to swallow the "key not present" case. On Windows, `RegDeleteValueW` on a missing Run-key entry returned `os error 2` on every `save_config` call when autostart was never enabled (or was removed externally). The plugin no-op path now returns `Ok(())` with an `info!` log and never calls the registry. Closes #61.
+- fix(security): truncate the Microsoft Graph token-poll body in debug logs. The full token response (access_token + refresh_token, ~3.5 KB, ~77 min lifetime, `Presence.ReadWrite` + 50+ scopes) was previously written to the log file at `debug!` level. The `truncate_for_log` helper now records only the first 256 chars + byte count — enough to recognise the error envelope shape, not the credential. The truncation is applied at every `raw_body` interpolation in `teams.rs`: the three success-path debug logs, the three `info!`-level request-body logs, and the eight user-facing error format strings used by token parse failures, device-code failures, and unknown error fallbacks. A second pass hardened the helper against the UTF-8 panic risk at byte 256 (now cuts at a char boundary via `char_indices().nth(256)`), with four unit tests covering the under-limit, ASCII-boundary, multibyte-boundary, and truncation cases. Closes #62.
+- fix(ui): make the build version reflect the actual build in both the About panel and the main page footer. The Vite `define` used a bare `__APP_BUILD__` token that esbuild's `define` plugin only matches as a top-level identifier; the consumers read `import.meta.env.__APP_BUILD__` (a member expression), which esbuild never matched against the bare-token define. Result: both surfaces had been hardcoded-fallback'd since 2.6.0 (the v2.6.1 "fix" was a prettier fallback string, not a real fix). Switched to the canonical `import.meta.env.VITE_APP_BUILD` path-based define, swapped `||` for `??` in both consumers (so an empty version doesn't fall through to the dev-build label), and used `'dev build'` as the footer fallback (more honest than the previous hardcoded `'2.6.0'`). The build version is also logged to the DevTools console at boot for faster stale-install triage. Closes #63.
+
+Closes #60 #61 #62 #63
+
 ## [2.6.2] - 2026-06-09
 
 ### Chore
