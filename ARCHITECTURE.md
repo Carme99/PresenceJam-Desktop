@@ -385,10 +385,10 @@ pub struct AppState {
     pub teams_tokens: RwLock<Option<TeamsTokens>>,
     pub current_track: RwLock<Option<TrackInfo>>,
     pub is_syncing: AtomicBool,                              // PR #44: was RwLock<bool>; v2.6.3: sole claimer is commands::start_syncing (see #60)
-    pub polling_handle: Mutex<Option<JoinHandle<()>>>,
+    pub polling_handle: RwLock<Option<JoinHandle<()>>>,
     pub pending_spotify_auth: RwLock<Option<PendingSpotifyAuth>>,
     pub pending_teams_auth: RwLock<Option<PendingTeamsAuth>>,
-    pub stop_tx: Mutex<Option<Sender<()>>>,
+    pub stop_tx: RwLock<Option<Sender<()>>>,
     pub onboarding_cache: parking_lot::Mutex<Option<(Instant, bool)>>, // PR #47: 30s cache
 }
 ```
