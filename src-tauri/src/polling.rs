@@ -414,10 +414,23 @@ pub fn start_polling(
                 }
                 // app_clone is moved into polling_loop above, so use app here
                 let _ = app.emit("polling-thread-panicked", serde_json::json!(null));
-                // Reset state so a panic doesn't wedge the app in "syncing"
-                state_for_cleanup.is_syncing.store(false, Ordering::Release);
-                *state_for_cleanup.stop_tx.write() = None;
             }
+            // Release sync state on ALL thread exits (panic OR normal return).
+            // If polling_loop returns on its own (e.g., the 5-transient-failures
+            // backoff path breaks the loop), the flag would otherwise stay true
+            // and the next start_syncing call would short-circuit as "already
+            // syncing" with no live thread. The load() guard avoids double-
+            // resetting if stop_syncing has already cleared the flag. stop_tx
+            // is unconditionally cleared because it was created at the top of
+            // this function and is only ever set by us.
+            if state_for_cleanup.is_syncing.load(Ordering::Acquire) {
+                log::warn!(
+                    "[POLLING] start_polling: polling thread exited without stop_syncing; \
+                     cleaning up sync state"
+                );
+                state_for_cleanup.is_syncing.store(false, Ordering::Release);
+            }
+            *state_for_cleanup.stop_tx.write() = None;
             log::info!("[POLLING] start_polling: thread ended");
         })
         .map_err(|e| {
