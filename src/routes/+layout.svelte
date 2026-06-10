@@ -1,6 +1,7 @@
 <script>
   import '../app.css';
-  console.info(`PresenceJam build: ${import.meta.env.VITE_APP_BUILD ?? 'dev build'}`);
+  import { devLog } from '$lib/utils/dev';
+  devLog(`[LAYOUT] PresenceJam build: ${import.meta.env.VITE_APP_BUILD ?? 'dev build'}`);
 </script>
 
 <slot />
