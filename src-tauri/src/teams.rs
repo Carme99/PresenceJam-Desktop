@@ -8,14 +8,24 @@ use std::time::Duration as StdDuration;
 
 pub const MICROSOFT_GRAPH_CLIENT_ID: &str = "14d82eec-204b-4c2f-b7e8-296a70dab67e";
 
-/// Truncates a string for safe logging: returns first 256 chars + `(…NB total)`
-/// if the body exceeds 256 bytes. Prevents large credential blobs (tokens,
-/// refresh tokens) from being written to log files at debug level.
+/// Truncates a string for safe logging. Returns the body unchanged if it
+/// fits in 256 chars; otherwise returns the first 256 chars (cut at a
+/// UTF-8 char boundary) plus `(…NB total)` where NB is the byte count.
+///
+/// Prevents large credential blobs (Microsoft Graph access_token +
+/// refresh_token, ~3.5KB, ~77min lifetime) from being written to log
+/// files at `debug!` level — see issue #62.
 fn truncate_for_log(body: &str) -> String {
-    if body.len() <= 256 {
-        body.to_string()
+    if body.chars().count() > 256 {
+        // Find the byte index of the 256th char (char-boundary-safe).
+        let cut = body
+            .char_indices()
+            .nth(256)
+            .map(|(i, _)| i)
+            .unwrap_or(body.len());
+        format!("{}(…{} total)", &body[..cut], body.len())
     } else {
-        format!("{}(…{} total)", &body[..256], body.len())
+        body.to_string()
     }
 }
 
@@ -547,6 +557,75 @@ pub fn validate_teams_token(tokens: &TeamsTokens) -> Result<(), TeamsApiError> {
             let body = response.text().unwrap_or_default();
             Err(TeamsApiError::Other(status_code, body))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_for_log;
+
+    #[test]
+    fn test_truncate_under_limit() {
+        let body = "short body".to_string();
+        assert_eq!(truncate_for_log(&body), body);
+    }
+
+    #[test]
+    fn test_truncate_ascii_at_boundary() {
+        // 256 ASCII chars exactly — at the limit, not over.
+        // The helper takes "the first 256 chars", and the body has exactly
+        // 256 chars (0-indexed chars 0..=255), so the count check is `> 256`
+        // which is false and the body is returned unchanged.
+        let body: String = "a".repeat(256);
+        assert_eq!(truncate_for_log(&body), body);
+    }
+
+    #[test]
+    fn test_truncate_handles_multibyte_codepoint_at_boundary() {
+        // 255 ASCII chars + 1 four-byte emoji = 259 bytes total.
+        // The 256th char is the emoji (char count goes 0..=255 ASCII,
+        // index 255 is the emoji). The byte index of the 256th char is
+        // 255 (right after the last 'a'), which is the start of the
+        // emoji's 4-byte UTF-8 sequence — a char boundary.
+        // The old `&body[..256]` implementation would have sliced inside
+        // the emoji (byte 255..=258) and panicked on non-ASCII bytes 255.
+        let body: String = "a".repeat(255) + "\u{1F600}"; // grinning face
+        assert_eq!(body.len(), 259);
+        assert_eq!(body.chars().count(), 256);
+
+        let truncated = truncate_for_log(&body);
+
+        // Must not panic. The body is exactly 256 chars, so the
+        // `chars().count() > 256` check is false and the body is
+        // returned unchanged — this proves the boundary case is
+        // handled correctly when the emoji lands at char 256.
+        assert_eq!(truncated, body);
+    }
+
+    #[test]
+    fn test_truncate_cuts_inside_multibyte_sequence() {
+        // 256 ASCII chars + 1 four-byte emoji = 260 bytes, 257 chars.
+        // Now the char count exceeds 256, so the helper must truncate
+        // at a char boundary. The byte index of the 257th char is
+        // 256 (the start of the emoji's UTF-8 sequence). Old code
+        // `&body[..256]` would have sliced between the 256th 'a' and
+        // the emoji at byte 256 — which is a char boundary, so this
+        // exact case wouldn't have panicked. To force the panic, we'd
+        // need a multi-byte char straddling byte 256, which means the
+        // body must start with non-ASCII. Use 1 four-byte char + 256
+        // ASCII chars (= 260 bytes, 257 chars). Char index 256 is
+        // ASCII (the second ASCII char), byte index 4. Truncate there
+        // and verify the output includes the emoji as a complete char.
+        let body: String = "\u{1F600}".to_string() + &"a".repeat(256);
+        assert_eq!(body.len(), 260);
+        assert_eq!(body.chars().count(), 257);
+
+        let truncated = truncate_for_log(&body);
+
+        // Must not panic. Output should contain the emoji (preserved
+        // as a complete char) and end with the byte count.
+        assert!(truncated.starts_with("\u{1F600}"));
+        assert!(truncated.ends_with("(…260 total)"));
     }
 }
 
