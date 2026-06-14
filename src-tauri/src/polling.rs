@@ -456,7 +456,13 @@ fn get_spotify_credentials(config: &Option<crate::config::AppConfig>) -> (String
         .as_ref()
         .map(|c| c.spotify.client_id.clone())
         .unwrap_or_default();
-    let client_secret = crate::keychain::get_spotify_client_secret().unwrap_or_default();
+    // Issue #69: use the cache-only peek to avoid hitting the OS keychain
+    // on every polling iteration. A cold cache (user hasn't onboarded)
+    // is handled by the existing `.unwrap_or_default()` fallback — the
+    // first call will get an empty secret, the API will return 401, and
+    // the existing 401-retry path will surface a reconnect-required
+    // event to the user.
+    let client_secret = crate::keychain::peek_spotify_client_secret().unwrap_or_default();
     (client_id, client_secret)
 }
 

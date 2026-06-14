@@ -142,6 +142,29 @@ fn build_initial_menu(app: &tauri::App) -> Result<tauri::menu::Menu<tauri::Wry>,
         .map_err(|e| e.to_string())
 }
 
+/// Snapshot of the last tray-menu state, used for the dedup guard in
+/// `update_tray_menu` (issue #71). The polling thread calls
+/// `update_tray_menu` on every successful poll; the menu only needs to
+/// change when `is_syncing` or the current track's title/is_playing
+/// change.
+type TrayStateSnapshot = (bool, Option<String>);
+
+static LAST_TRAY_STATE: std::sync::OnceLock<parking_lot::Mutex<Option<TrayStateSnapshot>>> =
+    std::sync::OnceLock::new();
+
+fn last_tray_state() -> &'static parking_lot::Mutex<Option<TrayStateSnapshot>> {
+    LAST_TRAY_STATE.get_or_init(|| parking_lot::Mutex::new(None))
+}
+
+/// Module-level mutex that serialises the two writers to the tray
+/// (polling thread and frontend command). Issue #71.
+static TRAY_WRITE_LOCK: std::sync::OnceLock<parking_lot::Mutex<()>> =
+    std::sync::OnceLock::new();
+
+fn tray_write_lock() -> &'static parking_lot::Mutex<()> {
+    TRAY_WRITE_LOCK.get_or_init(|| parking_lot::Mutex::new(()))
+}
+
 /// Rebuilds the tray menu with current state.
 /// Called by menu.rs when sync state or track changes.
 pub fn update_tray_menu(
@@ -156,6 +179,27 @@ pub fn update_tray_menu(
             return Err("Tray not initialized".to_string());
         }
     };
+
+    // Issue #71: dedup guard. The polling thread calls this on every
+    // successful poll; the menu only needs rebuilding when is_syncing or
+    // the track's title/is_playing actually changes.
+    let track_key = current_track
+        .as_ref()
+        .filter(|t| t.is_playing)
+        .map(|t| format!("{}|{}", t.artist, t.title));
+    {
+        let mut last = last_tray_state().lock();
+        if last.as_ref() == Some(&(is_syncing, track_key.clone())) {
+            // No-op: menu state hasn't changed.
+            return Ok(());
+        }
+        *last = Some((is_syncing, track_key));
+    }
+
+    // Issue #71: serialise the two writers. Acquiring before the long
+    // menu build means the polling thread and the frontend command
+    // never interleave a `set_menu` call.
+    let _write_guard = tray_write_lock().lock();
 
     // Determine Show/Hide label based on window visibility
     let show_hide_label = if let Some(window) = app.get_webview_window("main") {

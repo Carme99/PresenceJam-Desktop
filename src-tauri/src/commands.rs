@@ -515,19 +515,29 @@ pub fn refresh_teams(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> 
 pub fn start_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> Result<(), String> {
     log::debug!("[CMD] start_syncing: ENTRY");
 
-    // Acquire write lock first to prevent TOCTOU race with concurrent calls.
-    // See issue #14.
+    // Issue #69: drain any previous polling thread BEFORE claiming the
+    // is_syncing flag. Without this, a fast Stop+Start cycle (within the
+    // 2s stop_polling_and_join budget) can leave a stale thread running
+    // while a new one starts — both read state.spotify_tokens, both call
+    // the Spotify/Graph APIs, both rebuild the tray menu.
+    //
+    // Only drain if a thread is actually running; the common case
+    // (start_syncing from a fresh app start) skips this entirely.
+    if state.is_syncing.load(Ordering::Acquire) {
+        log::info!("[CMD] start_syncing: previous thread still running; draining");
+        stop_polling_and_join(state.inner(), "start_syncing_drain");
+    }
+
+    // Use compare_exchange for an atomic check-and-set. AcqRel on
+    // success preserves the happens-before relationship with subsequent
+    // reads of is_syncing (e.g. the polling loop and tray).
     {
-        // Use compare_exchange for an atomic check-and-set: replaces the
-        // previous RwLock write guard. AcqRel on success preserves the
-        // happens-before relationship with subsequent reads of is_syncing
-        // (e.g. the polling loop and tray).
         if state
             .is_syncing
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
-            log::info!("[CMD] start_syncing: already syncing, returning early");
+            log::info!("[CMD] start_syncing: already syncing (race lost), returning early");
             return Ok(());
         }
         log::info!("[CMD] start_syncing: is_syncing flag set to true");

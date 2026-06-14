@@ -8,38 +8,76 @@
 //! text via `tauri-plugin-store` and inside `config.json`. The first run
 //! after this change will need the user to re-enter the secret via
 //! Onboarding. See issue #9.
+//!
+//! Caching: the secret is held in a process-wide `RwLock<Option<String>>`
+//! after the first read, so the polling thread (which calls
+//! `peek_spotify_client_secret` on every 30s iteration) does not hit the
+//! OS keychain on the happy path. Issue #69.
+
+use std::sync::OnceLock;
 
 const KEYRING_SERVICE: &str = "presencejam";
 const SPOTIFY_CLIENT_SECRET_USER: &str = "spotify_client_secret";
 
+static CACHE: OnceLock<parking_lot::RwLock<Option<String>>> = OnceLock::new();
+
+fn cache() -> &'static parking_lot::RwLock<Option<String>> {
+    CACHE.get_or_init(|| parking_lot::RwLock::new(None))
+}
+
 /// Persist the Spotify `client_secret` in the OS keychain.
 ///
-/// Overwrites any existing entry for `(KEYRING_SERVICE, SPOTIFY_CLIENT_SECRET_USER)`.
+/// Overwrites any existing entry for `(KEYRING_SERVICE, SPOTIFY_CLIENT_SECRET_USER)`
+/// and updates the in-process cache.
 pub fn store_spotify_client_secret(secret: &str) -> Result<(), String> {
     let entry = keyring::Entry::new(KEYRING_SERVICE, SPOTIFY_CLIENT_SECRET_USER)
         .map_err(|e| format!("Failed to open keychain entry: {}", e))?;
     entry
         .set_password(secret)
         .map_err(|e| format!("Failed to write Spotify client secret to keychain: {}", e))?;
-    log::info!("[KEYCHAIN] Stored Spotify client_secret in OS keychain");
+    *cache().write() = Some(secret.to_string());
+    log::info!("[KEYCHAIN] Stored Spotify client_secret in OS keychain (cache updated)");
     Ok(())
 }
 
-/// Read the Spotify `client_secret` from the OS keychain.
+/// Read the Spotify `client_secret`. Fast path: returns the in-process
+/// cache without touching the keychain. Slow path: reads from the OS
+/// keychain and populates the cache for subsequent calls.
 ///
-/// Returns an error if the entry is missing — the caller should treat this
-/// as a "user must re-onboard" signal, not a fatal error.
+/// Returns an error if the entry is missing — the caller should treat
+/// this as a "user must re-onboard" signal, not a fatal error.
 pub fn get_spotify_client_secret() -> Result<String, String> {
+    // Fast path: cache hit
+    {
+        let r = cache().read();
+        if let Some(s) = r.as_ref() {
+            return Ok(s.clone());
+        }
+    }
+    // Slow path: read from OS keychain
     let entry = keyring::Entry::new(KEYRING_SERVICE, SPOTIFY_CLIENT_SECRET_USER)
         .map_err(|e| format!("Failed to open keychain entry: {}", e))?;
-    match entry.get_password() {
-        Ok(secret) => Ok(secret),
-        Err(keyring::Error::NoEntry) => Err(
-            "Spotify client secret not found in keychain. Please re-enter via Onboarding."
-                .to_string(),
-        ),
-        Err(e) => Err(format!("Failed to read Spotify client secret from keychain: {}", e)),
-    }
+    let secret = match entry.get_password() {
+        Ok(s) => s,
+        Err(keyring::Error::NoEntry) => {
+            return Err(
+                "Spotify client secret not found in keychain. Please re-enter via Onboarding."
+                    .to_string(),
+            );
+        }
+        Err(e) => return Err(format!("Failed to read Spotify client secret from keychain: {}", e)),
+    };
+    // Populate cache for next call
+    *cache().write() = Some(secret.clone());
+    log::info!("[KEYCHAIN] Loaded Spotify client_secret from OS keychain (cache populated)");
+    Ok(secret)
+}
+
+/// Read the Spotify `client_secret` from the cache only — no OS keychain
+/// call. Returns `None` if the cache is cold. Used by the polling thread
+/// to avoid the keychain prompt on every iteration. See issue #69.
+pub fn peek_spotify_client_secret() -> Option<String> {
+    cache().read().clone()
 }
 
 /// Check whether the Spotify `client_secret` is present in the OS keychain.
@@ -47,28 +85,35 @@ pub fn get_spotify_client_secret() -> Result<String, String> {
 /// Returns `Ok(true)` if the entry exists (even if read fails for other reasons
 /// after a successful existence check), `Ok(false)` if it is missing.
 pub fn has_spotify_client_secret() -> bool {
+    // Cache hit is authoritative if populated
+    if cache().read().is_some() {
+        return true;
+    }
     match keyring::Entry::new(KEYRING_SERVICE, SPOTIFY_CLIENT_SECRET_USER) {
         Ok(entry) => entry.get_password().is_ok(),
         Err(_) => false,
     }
 }
 
-/// Remove the Spotify `client_secret` from the OS keychain.
-///
-/// Called on user disconnect / reconnect to wipe the secret.
+/// Remove the Spotify `client_secret` from the OS keychain and clear the
+/// in-process cache. Called on user disconnect / reconnect to wipe the
+/// secret.
 pub fn delete_spotify_client_secret() -> Result<(), String> {
     let entry = keyring::Entry::new(KEYRING_SERVICE, SPOTIFY_CLIENT_SECRET_USER)
         .map_err(|e| format!("Failed to open keychain entry: {}", e))?;
     match entry.delete_credential() {
         Ok(()) => {
-            log::info!("[KEYCHAIN] Deleted Spotify client_secret from OS keychain");
+            *cache().write() = None;
+            log::info!("[KEYCHAIN] Deleted Spotify client_secret from OS keychain (cache cleared)");
             Ok(())
         }
         Err(keyring::Error::NoEntry) => {
-            // Already gone — treat as success.
-            log::info!("[KEYCHAIN] Spotify client_secret not in keychain (already cleared)");
+            *cache().write() = None;
+            log::info!("[KEYCHAIN] Spotify client_secret not in keychain (cache cleared)");
             Ok(())
         }
-        Err(e) => Err(format!("Failed to delete Spotify client secret from keychain: {}", e)),
+        Err(e) => {
+            Err(format!("Failed to delete Spotify client secret from keychain: {}", e))
+        }
     }
 }

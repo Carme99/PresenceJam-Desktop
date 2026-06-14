@@ -362,6 +362,16 @@ pub fn run() {
             app.manage(state.clone());
             log::info!("[APP] setup: AppState created and managed");
 
+            // Issue #69: prime the keychain cache once at app start so the
+            // polling thread's first iteration doesn't hit the keychain
+            // (and on macOS, doesn't show a keychain prompt mid-poll).
+            // We do this early so the cache is warm before any
+            // `start_syncing` call.
+            match crate::keychain::get_spotify_client_secret() {
+                Ok(_) => log::info!("[APP] setup: keychain cache primed (Spotify client_secret present)"),
+                Err(_) => log::info!("[APP] setup: keychain cache empty (no Spotify client_secret yet — user must Onboard)"),
+            }
+
             // Load config into AppState
             match config::load_config() {
                 Ok(cfg) => {
