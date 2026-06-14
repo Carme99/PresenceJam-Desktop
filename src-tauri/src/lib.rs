@@ -5,7 +5,6 @@ use std::thread;
 use std::time::Instant;
 use parking_lot::{Mutex, RwLock};
 use tauri::{Manager, Emitter, AppHandle};
-use tauri_plugin_store::StoreExt;
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct PendingSpotifyAuth {
@@ -75,7 +74,7 @@ pub mod profanity;
 pub mod spotify;
 pub mod teams;
 pub mod polling;
-pub mod token_cache;
+pub mod token_io;
 pub mod tray;
 pub mod menu;
 pub mod commands;
@@ -142,16 +141,19 @@ async fn handle_spotify_callback(code: &str, state_param: Option<&str>, app: &Ap
     .await
     .map_err(|e| format!("Spotify OAuth callback task failed: {}", e))??;
     log::info!("[CALLBACK] handle_spotify_callback: token exchange successful - access_token.len={}", tokens.access_token.len());
-    
-    log::info!("[CALLBACK] handle_spotify_callback: saving tokens to store");
-    crate::polling::save_spotify_tokens(app, &tokens)?;
-    
+
     {
         let mut guard = app_state.spotify_tokens.write();
         *guard = Some(tokens.clone());
         log::info!("[CALLBACK] handle_spotify_callback: tokens stored in AppState");
     }
-    
+    token_io::persist_tokens(&app_state, app)?;
+    log::info!("[CALLBACK] handle_spotify_callback: tokens persisted atomically");
+
+    // Issue #70: invalidate the onboarding cache.
+    *app_state.onboarding_cache.lock() = None;
+    log::info!("[CALLBACK] handle_spotify_callback: onboarding_cache invalidated");
+
     log::info!("[CALLBACK] handle_spotify_callback: EMIT spotify-auth-complete event");
     let _ = app.emit("spotify-auth-complete", ());
     
@@ -201,16 +203,19 @@ async fn handle_teams_callback(code: &str, app: &AppHandle) -> Result<(), String
     .await
     .map_err(|e| format!("Teams OAuth callback task failed: {}", e))??;
     log::info!("[CALLBACK] handle_teams_callback: token exchange successful - access_token.len={}", tokens.access_token.len());
-    
-    log::info!("[CALLBACK] handle_teams_callback: saving tokens to store");
-    crate::polling::save_teams_tokens(app, &tokens)?;
-    
+
     {
         let mut guard = state.teams_tokens.write();
         *guard = Some(tokens);
         log::info!("[CALLBACK] handle_teams_callback: tokens stored in AppState");
     }
-    
+    token_io::persist_tokens(&state, app)?;
+    log::info!("[CALLBACK] handle_teams_callback: tokens persisted atomically");
+
+    // Issue #70: invalidate the onboarding cache.
+    *state.onboarding_cache.lock() = None;
+    log::info!("[CALLBACK] handle_teams_callback: onboarding_cache invalidated");
+
     log::info!("[CALLBACK] handle_teams_callback: EMIT teams-auth-complete event");
     let _ = app.emit("teams-auth-complete", ());
     
@@ -354,90 +359,41 @@ pub fn run() {
                             let _ = window.hide();
                         }
                     }
+
                 }
+
                 Err(e) => {
                     log::warn!("[APP] setup: no config found: {}", e);
                 }
             }
 
-            // Load Spotify tokens into AppState
-            match polling::load_spotify_tokens(app.handle()) {
-                Ok(Some(tokens)) => {
-                    let mut guard = state.spotify_tokens.write();
-                    *guard = Some(tokens);
-                    log::info!("[APP] setup: spotify_tokens loaded into AppState");
-                }
-                Ok(None) => {
-                    log::info!("[APP] setup: no spotify_tokens found");
-                }
-                Err(e) => {
-                    log::warn!("[APP] setup: failed to load spotify_tokens: {}", e);
-                }
-            }
-
-            // Load Teams tokens into AppState
-            match polling::load_teams_tokens(app.handle()) {
-                Ok(Some(tokens)) => {
-                    let mut guard = state.teams_tokens.write();
-                    *guard = Some(tokens);
-                    log::info!("[APP] setup: teams_tokens loaded into AppState");
-                }
-                Ok(None) => {
-                    log::info!("[APP] setup: no teams_tokens found");
-                }
-                Err(e) => {
-                    log::warn!("[APP] setup: failed to load teams_tokens: {}", e);
-                }
-            }
-
-            // Load pending Teams auth from store (for crash recovery during device code flow)
-            {
-                let store = app.store("tokens").map_err(|e| {
-                    log::warn!("[APP] setup: failed to open store for pending teams auth: {}", e);
-                    e
-                });
-                if let Ok(store) = store {
-                    if let Some(value) = store.get("pending_teams_auth") {
-                        if let Ok(pending) = serde_json::from_value::<crate::PendingTeamsAuth>(value.clone()) {
-                            // Check if not expired
-                            if pending.expires_at > chrono::Utc::now() {
-                                let mut guard = state.pending_teams_auth.write();
-                                *guard = Some(pending);
-                                log::info!("[APP] setup: pending_teams_auth loaded from store (not expired)");
-                            } else {
-                                log::info!("[APP] setup: pending_teams_auth expired, clearing from store");
-                                store.delete("pending_teams_auth");
-                                let _ = store.save();
-                            }
-                        }
+            // Load persisted tokens (Spotify + Teams) into AppState. We bypass
+            // `tauri-plugin-store` for the tokens file and read it directly
+            // as JSON from `<app-config-dir>/PresenceJam/tokens.json`. See
+            // issue #65.
+            //
+            // The pending_*_auth blobs (PKCE verifier, device code) are no
+            // longer persisted to disk; the user re-starts the auth flow
+            // after a crash mid-OAuth (cheap UX, and the disk leak is gone).
+            match token_io::read_tokens_at(app.handle()) {
+                Ok(tf) => {
+                    if let Some(st) = tf.spotify_tokens {
+                        *state.spotify_tokens.write() = Some(st);
+                        log::info!("[APP] setup: spotify_tokens loaded into AppState");
+                    } else {
+                        log::info!("[APP] setup: no spotify_tokens in tokens.json");
+                    }
+                    if let Some(tt) = tf.teams_tokens {
+                        *state.teams_tokens.write() = Some(tt);
+                        log::info!("[APP] setup: teams_tokens loaded into AppState");
+                    } else {
+                        log::info!("[APP] setup: no teams_tokens in tokens.json");
                     }
                 }
-            }
-
-            // Load pending Spotify auth from store (for crash recovery during PKCE flow)
-            {
-                let store = app.store("tokens").map_err(|e| {
-                    log::warn!("[APP] setup: failed to open store for pending spotify auth: {}", e);
-                    e
-                });
-                if let Ok(store) = store {
-                    if let Some(value) = store.get("pending_spotify_auth") {
-                        if let Ok(pending) = serde_json::from_value::<crate::PendingSpotifyAuth>(value.clone()) {
-                            // Check if not expired
-                            if pending.expires_at > chrono::Utc::now() {
-                                let mut guard = state.pending_spotify_auth.write();
-                                *guard = Some(pending);
-                                log::info!("[APP] setup: pending_spotify_auth loaded from store (not expired)");
-                            } else {
-                                log::info!("[APP] setup: pending_spotify_auth expired, clearing from store");
-                                store.delete("pending_spotify_auth");
-                                let _ = store.save();
-                            }
-                        }
-                    }
+                Err(e) => {
+                    log::warn!("[APP] setup: failed to load tokens.json: {}", e);
                 }
             }
-
             #[cfg(desktop)]
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
@@ -516,34 +472,26 @@ pub fn run() {
             commands::load_config,
             commands::save_config,
             commands::is_spotify_client_secret_set,
-            commands::get_config_dir,
             commands::start_spotify_auth,
             commands::complete_spotify_auth,
             commands::complete_spotify_auth_manual,
-            commands::get_spotify_tokens,
             commands::refresh_spotify,
             commands::start_teams_auth_device_code,
             commands::poll_teams_auth,
-            commands::get_teams_tokens,
             commands::refresh_teams,
             commands::start_syncing,
             commands::stop_syncing,
             commands::get_sync_status,
             commands::show_window,
-            commands::hide_window,
-            commands::get_autostart_enabled,
             commands::set_autostart_enabled,
             commands::open_logs_folder,
-            commands::open_external,
             commands::open_external_url,
-            commands::get_current_track,
             commands::is_onboarding_complete,
             commands::complete_onboarding,
             commands::reconnect_spotify,
             commands::reconnect_teams,
             commands::app_exit,
             commands::update_tray_menu_state,
-            commands::get_recent_logs,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
