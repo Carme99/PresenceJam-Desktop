@@ -5,6 +5,25 @@ All notable changes to PresenceJam are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.6.4] - 2026-06-14
+
+### Security
+- **security: tokens.json security boundary (#65).** Dropped `"store:default"` from `capabilities/default.json` — the webview no longer has any path to the tokens file. Deleted the `get_spotify_tokens` and `get_teams_tokens` Tauri commands (registered but unused, and a token-exfil endpoint in waiting). Stopped persisting `pending_spotify_auth.verifier` and `pending_teams_auth.verifier` (PKCE verifier + Teams device code) to disk — both are 10–15 min bearer credentials that filesystem-level attackers could read. Replaced `tauri-plugin-store` token I/O with a new `token_io` module that writes `<app-config-dir>/PresenceJam/tokens.json` **atomically** using temp-file + rename + fsync (mirroring the `config::save_config` pattern). A process kill mid-write can no longer corrupt the tokens file and bounce the user back through Onboarding.
+- **security: backend input validation at IPC boundary (#67).** Moved the Spotify `client_id` (`^[A-Za-z0-9]{32}$`) and `client_secret` (≥32 chars) regex checks from the frontend to `start_spotify_auth` — a devtools-pasted `invoke()` with arbitrary strings was previously accepted. Hardened `validate_http_url` to reject URLs with no host and with `userinfo` (`user:pass@`). Deleted the non-manual `complete_spotify_auth` command — it accepted `verifier`/`client_id`/`redirect_uri` from the webview unverified, and the manual variant covers all real flows.
+- **security: dead Tauri commands + frontend stores removed (#77).** Deleted 7 commands that were registered but never invoked: `open_external` (alias of `open_external_url`), `hide_window`, `get_autostart_enabled`, `get_recent_logs`, `get_config_dir`, `get_current_track`, `complete_teams_auth_manual`. The frontend stores `spotify.ts` and `teams.ts` (writables that nothing ever wrote) are still present — see follow-up below.
+
+### Fixed
+- **fix: polling state machine races (#69).** `start_syncing` now drains the previous polling thread via `stop_polling_and_join` **before** claiming the `is_syncing` flag. A fast Stop+Start cycle (within the 2s stop budget) can no longer leave a stale thread running while a new one starts. The OS keychain is no longer hit on every polling iteration: `keychain::get_spotify_client_secret` now caches the secret in a module-level `OnceLock<RwLock<Option<String>>>`, and the polling thread's hot path uses a new `peek_spotify_client_secret` (cache-only). The cache is primed once at app start, eliminating the macOS keychain prompt mid-poll.
+- **fix: onboarding cache was never invalidated (#70).** The 30s result cache for `is_onboarding_complete` is now cleared in every token-mutating command (`complete_spotify_auth_manual`, `poll_teams_auth`, `complete_teams_auth_manual`, `reconnect_spotify`, `reconnect_teams`, `handle_spotify_callback`, `handle_teams_callback`). The user is no longer told "onboarding not complete" for up to 30s after a successful reconnect.
+- **fix: tray menu concurrent rebuilds (#71).** `update_tray_menu` now skips the full menu rebuild if `is_syncing` and the current track key haven't changed (the polling thread called this on every successful poll; the menu only needs to change when the state actually changes). A module-level `Mutex<()>` serialises the two writers (polling thread + frontend command) so a `set_menu` from one never interleaves with the other.
+
+### Deferred
+- **#66 (deep-link hijack) was deliberately not fully fixed in this release.** A per-launch UUID in the redirect URI path was the proposed defence, but Spotify requires exact redirect-URI match in the registered app — a path component breaks the OAuth round-trip. A full fix needs per-launch custom-scheme registration (OS-specific: Windows registry, macOS `LSSetDefaultHandlerForURLScheme`, Linux XDG MIME). The threat is **partially mitigated** by #65: a foreign app that intercepts `presencejam://callback?code=***` can read the code, but cannot exchange it for tokens — the PKCE verifier is in `AppState` only, not on disk, and not exposed via any IPC. Tracked for a follow-up release.
+
+### Follow-ups (not addressed here)
+- Delete `src/lib/stores/spotify.ts` and `src/lib/stores/teams.ts` (writables that nothing writes). The verifier flagged these as still present; they're cosmetic dead code at this point, not a security risk. Tracked separately.
+- Update `Settings.svelte:7-8` to drop the `import { spotifyConnected } from '$lib/stores/spotify'` and the dead `isConnected = $spotifyConnected` fallback in the catch block. Tracked separately.
+
 ## [2.6.3] - 2026-06-10
 
 ### Fixed
