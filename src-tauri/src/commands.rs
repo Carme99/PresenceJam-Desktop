@@ -16,19 +16,56 @@ use url::Url;
 const ONBOARDING_CACHE_TTL: Duration = Duration::from_secs(30);
 
 
-/// Validates that a URL uses http or https scheme.
-/// Returns the parsed URL on success, or an error string on failure.
-/// See issue #14.
+/// Validates that a URL uses http or https scheme, has a host, and
+/// contains no userinfo (the `user:pass@` form). Returns the parsed URL
+/// on success, or an error string on failure. See issue #67.
 fn validate_http_url(url: &str) -> Result<Url, String> {
-    Url::parse(url).map_err(|_| "Invalid URL format".to_string()).and_then(|parsed| {
-        match parsed.scheme() {
-            "http" | "https" => Ok(parsed),
-            other => Err(format!(
-                "Invalid URL scheme '{}': only http/https allowed",
-                other
-            )),
-        }
-    })
+    Url::parse(url)
+        .map_err(|_| "Invalid URL format".to_string())
+        .and_then(|parsed| {
+            match parsed.scheme() {
+                "http" | "https" => {}
+                other => {
+                    return Err(format!(
+                        "Invalid URL scheme '{}': only http/https allowed",
+                        other
+                    ));
+                }
+            }
+            if parsed.host_str().map(str::is_empty).unwrap_or(true) {
+                return Err("URL has no host".to_string());
+            }
+            if !parsed.username().is_empty() || parsed.password().is_some() {
+                return Err("URL has userinfo (user:pass@) — disallowed".to_string());
+            }
+            Ok(parsed)
+        })
+}
+
+/// Validates a Spotify client_id (32 alphanumeric chars).
+/// See issue #67.
+fn validate_spotify_client_id(id: &str) -> Result<(), String> {
+    if id.len() != 32
+        || !id.chars().all(|c| c.is_ascii_alphanumeric())
+    {
+        return Err(format!(
+            "Invalid client_id: must be 32 alphanumeric characters (got len={})",
+            id.len()
+        ));
+    }
+    Ok(())
+}
+
+/// Validates a Spotify client_secret (>= 32 chars, non-empty).
+/// See issue #67.
+fn validate_spotify_client_secret(secret: &str) -> Result<(), String> {
+    if secret.len() < 32 {
+        return Err(format!(
+            "Invalid client_secret: must be at least 32 characters (got len={})",
+            secret.len()
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -130,6 +167,13 @@ pub fn start_spotify_auth(
         return Err("client_id and client_secret are required".to_string());
     }
 
+    // Issue #67: validate the inputs at the IPC boundary, not just in
+    // the frontend. The frontend regex was a UX nicety, not a security
+    // boundary — a devtools-pasted invoke() with arbitrary strings was
+    // accepted before this check.
+    validate_spotify_client_id(&client_id)?;
+    validate_spotify_client_secret(&client_secret)?;
+
     let verifier = crate::spotify::pkce_generate_verifier();
     log::info!(
         "[CMD] start_spotify_auth: verifier generated, len={}",
@@ -199,86 +243,6 @@ pub fn start_spotify_auth(
     Ok(())
 }
 
-#[tauri::command]
-pub fn complete_spotify_auth(
-    code: String,
-    verifier: String,
-    client_id: String,
-    redirect_uri: String,
-    app: AppHandle,
-    state: tauri::State<'_, Arc<AppState>>,
-) -> Result<SpotifyTokens, String> {
-    log::info!(
-        "[CMD] complete_spotify_auth: ENTRY - code.len={}, verifier.len={}",
-        code.len(),
-        verifier.len()
-    );
-
-    // Issue #67: the `verifier`, `client_id`, and `redirect_uri` parameters
-    // are no longer trusted from the webview. We verify them against the
-    // pending auth in AppState, and reject the call if no pending auth
-    // exists. The non-manual variant is now an alias of the manual
-    // variant's contract.
-    let pending = {
-        let mut guard = state.pending_spotify_auth.write();
-        match guard.take() {
-            Some(p) => {
-                if p.verifier != verifier || p.client_id != client_id || p.redirect_uri != redirect_uri {
-                    log::error!(
-                        "[CMD] complete_spotify_auth: param mismatch (expected client_id={}, got {}; expected redirect_uri={}, got {})",
-                        p.client_id, client_id, p.redirect_uri, redirect_uri
-                    );
-                    return Err("Auth parameters do not match pending auth. Please start auth again.".to_string());
-                }
-                if p.expires_at < chrono::Utc::now() {
-                    log::error!("[CMD] complete_spotify_auth: pending auth expired");
-                    return Err("Pending auth expired. Please start auth again.".to_string());
-                }
-                p
-            }
-            None => {
-                log::error!("[CMD] complete_spotify_auth: no pending Spotify auth in state");
-                return Err("No pending Spotify auth. Please start auth again.".to_string());
-            }
-        }
-    };
-
-    // The client_secret is no longer accepted as a parameter — it is read
-    // from the OS keychain. See issue #9. The keychain entry is populated
-    // by `start_spotify_auth` (the normal flow) and survives a crash.
-    let client_secret = crate::keychain::get_spotify_client_secret()?;
-
-    let tokens = crate::spotify::complete_spotify_auth(
-        &code,
-        &pending.verifier,
-        &pending.client_id,
-        &client_secret,
-        &pending.redirect_uri,
-    )?;
-    log::info!(
-        "[CMD] complete_spotify_auth: token exchange successful - access_token.len={}",
-        tokens.access_token.len()
-    );
-
-    {
-        let mut tokens_guard = state.spotify_tokens.write();
-        *tokens_guard = Some(tokens.clone());
-        log::info!("[CMD] complete_spotify_auth: tokens stored in AppState");
-    }
-    token_io::persist_tokens(state.inner(), &app)?;
-    log::info!("[CMD] complete_spotify_auth: tokens persisted atomically");
-
-    // Issue #70: invalidate the onboarding cache so a successful auth is
-    // immediately reflected by `is_onboarding_complete`.
-    *state.onboarding_cache.lock() = None;
-    log::info!("[CMD] complete_spotify_auth: onboarding_cache invalidated");
-
-    log::info!("[CMD] complete_spotify_auth: EMIT spotify-auth-complete event");
-    let _ = app.emit("spotify-auth-complete", &tokens);
-
-    log::info!("[CMD] complete_spotify_auth: SUCCESS");
-    Ok(tokens)
-}
 
 #[tauri::command]
 pub fn complete_spotify_auth_manual(

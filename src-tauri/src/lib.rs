@@ -79,7 +79,11 @@ pub mod tray;
 pub mod menu;
 pub mod commands;
 
-async fn handle_spotify_callback(code: &str, state_param: Option<&str>, app: &AppHandle) -> Result<(), String> {
+async fn handle_spotify_callback(
+    code: &str,
+    state_param: Option<&str>,
+    app: &AppHandle,
+) -> Result<(), String> {
     log::debug!("[CALLBACK] handle_spotify_callback: ENTRY - code.len={}", code.len());
 
     let app_state = app.state::<Arc<AppState>>();
@@ -116,6 +120,9 @@ async fn handle_spotify_callback(code: &str, state_param: Option<&str>, app: &Ap
         log::error!("[CALLBACK] handle_spotify_callback: missing state parameter in callback URL");
         return Err("Missing state parameter - possible CSRF attack".to_string());
     }
+    // Note on #66: deep-link interception by another app is mitigated by
+    // the verifier being in AppState only (#65). A full fix needs per-launch
+    // custom-scheme registration (OS-specific) and is tracked in issue #66.
     // Fetch the client_secret from the OS keychain. It was placed there by
     // `start_spotify_auth` and is never persisted to disk. See issue #9.
     log::info!("[CALLBACK] handle_spotify_callback: reading client_secret from keychain");
@@ -235,7 +242,7 @@ fn handle_deep_link(url: &str, app: AppHandle) {
             log::info!("[DEEP_LINK] handle_deep_link: recognized as presencejam scheme");
             let path = parsed.path();
             log::info!("[DEEP_LINK] handle_deep_link: path={}", path);
-            
+
             let code = parsed.query_pairs().find(|(k, _)| k == "code").map(|(_, v)| v.to_string());
             let state_param = parsed.query_pairs().find(|(k, _)| k == "state").map(|(_, v)| v.to_string());
 
@@ -256,6 +263,16 @@ fn handle_deep_link(url: &str, app: AppHandle) {
                         }
                     });
                 } else {
+                    // Issue #66 (deferred): a per-launch UUID in the redirect
+                    // URI path would defend against another app pre-registering
+                    // the `presencejam://` scheme. Spotify requires exact
+                    // redirect-URI match in the registered app, so a path
+                    // component breaks the OAuth round-trip. A full fix needs
+                    // per-launch custom-scheme registration (OS-specific).
+                    // For now, the verifier-in-memory fix from #65 means an
+                    // interceptor can read the `code` but cannot exchange it
+                    // for tokens — the verifier is in our AppState, not on
+                    // disk and not exposed via IPC.
                     log::info!("[DEEP_LINK] handle_deep_link: routing to Spotify callback");
                     tauri::async_runtime::spawn(async move {
                         log::info!("[DEEP_LINK] handle_deep_link: spawning Spotify callback handler");
@@ -473,7 +490,6 @@ pub fn run() {
             commands::save_config,
             commands::is_spotify_client_secret_set,
             commands::start_spotify_auth,
-            commands::complete_spotify_auth,
             commands::complete_spotify_auth_manual,
             commands::refresh_spotify,
             commands::start_teams_auth_device_code,
