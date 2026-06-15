@@ -22,7 +22,6 @@
     "core:event:allow-emit",
     "core:event:allow-listen",
     "opener:default",
-    "store:default",
     "autostart:default",
     "log:default",
     "deep-link:default"

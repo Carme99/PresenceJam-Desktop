@@ -6,14 +6,13 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration as StdDuration, Instant};
 use tauri::{AppHandle, Emitter};
-use tauri_plugin_store::StoreExt;
 
 use crate::profanity;
 use crate::spotify::{
     format_status, get_currently_playing, is_token_expired, refresh_spotify_token, SpotifyApiError,
-    SpotifyTokens,
 };
-use crate::teams::{clear_teams_status_message, refresh_teams_token, set_teams_status_message, TeamsTokens};
+use crate::teams::{clear_teams_status_message, refresh_teams_token, set_teams_status_message};
+use crate::token_io;
 use crate::{tray, AppState};
 
 const ERROR_RETRY_INTERVAL_SECONDS: u64 = 30;
@@ -159,7 +158,7 @@ fn process_track(
                         }
                     };
                     if committed {
-                        if let Err(e) = save_teams_tokens(app, &new_tokens) {
+                        if let Err(e) = token_io::persist_tokens(state, app) {
                             log::warn!("[POLLING] process_track: failed to persist refreshed teams tokens: {}", e);
                         }
                         Some(new_tokens)
@@ -457,7 +456,13 @@ fn get_spotify_credentials(config: &Option<crate::config::AppConfig>) -> (String
         .as_ref()
         .map(|c| c.spotify.client_id.clone())
         .unwrap_or_default();
-    let client_secret = crate::keychain::get_spotify_client_secret().unwrap_or_default();
+    // Issue #69: use the cache-only peek to avoid hitting the OS keychain
+    // on every polling iteration. A cold cache (user hasn't onboarded)
+    // is handled by the existing `.unwrap_or_default()` fallback — the
+    // first call will get an empty secret, the API will return 401, and
+    // the existing 401-retry path will surface a reconnect-required
+    // event to the user.
+    let client_secret = crate::keychain::peek_spotify_client_secret().unwrap_or_default();
     (client_id, client_secret)
 }
 
@@ -572,8 +577,8 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                         }
                     };
                     if committed {
-                        // Persist refreshed tokens to store so they survive app restarts
-                        if let Err(e) = save_spotify_tokens(&app, &new_tokens) {
+                        // Persist refreshed tokens to disk so they survive app restarts
+                        if let Err(e) = token_io::persist_tokens(&state, &app) {
                             log::warn!("[POLLING] polling_loop: failed to persist refreshed tokens: {}", e);
                         }
                         new_tokens
@@ -749,7 +754,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                                     };
                                     if committed {
                                         // Persist refreshed tokens so they survive app restarts
-                                        if let Err(e) = save_spotify_tokens(&app, &new_tokens) {
+                                        if let Err(e) = token_io::persist_tokens(&state, &app) {
                                             log::warn!("[POLLING] polling_loop: failed to persist refreshed tokens: {}", e);
                                         }
                                         let retry_token = new_tokens.access_token.clone();
@@ -868,156 +873,11 @@ pub fn stop_polling(state: &AppState) {
 }
 
 
-pub fn save_spotify_tokens(app: &AppHandle, tokens: &SpotifyTokens) -> Result<(), String> {
-    log::info!(
-        "[POLLING] save_spotify_tokens: ENTRY - access_token.len={}",
-        tokens.access_token.len()
-    );
 
-    let store = app.store("tokens").map_err(|e| {
-        log::error!("[POLLING] save_spotify_tokens: store open failed - {}", e);
-        e.to_string()
-    })?;
-    store.set(
-        "spotify_tokens",
-        serde_json::to_value(tokens).map_err(|e| {
-            log::error!("[POLLING] save_spotify_tokens: serialize failed - {}", e);
-            e.to_string()
-        })?,
-    );
-    store.save().map_err(|e| {
-        log::error!("[POLLING] save_spotify_tokens: save failed - {}", e);
-        e.to_string()
-    })?;
-    log::info!("[POLLING] save_spotify_tokens: SUCCESS");
-    Ok(())
-}
 
-pub fn load_spotify_tokens(app: &AppHandle) -> Result<Option<SpotifyTokens>, String> {
-    log::info!("[POLLING] load_spotify_tokens: ENTRY");
 
-    let store = app.store("tokens").map_err(|e| {
-        log::error!("[POLLING] load_spotify_tokens: store open failed - {}", e);
-        e.to_string()
-    })?;
-    let value = store.get("spotify_tokens");
 
-    match value {
-        Some(v) => {
-            let tokens: SpotifyTokens = serde_json::from_value(v.clone()).map_err(|e| {
-                log::error!("[POLLING] load_spotify_tokens: deserialize failed - {}", e);
-                e.to_string()
-            })?;
-            log::info!("[POLLING] load_spotify_tokens: SUCCESS - tokens loaded");
-            Ok(Some(tokens))
-        }
-        None => {
-            log::info!("[POLLING] load_spotify_tokens: no tokens in store");
-            Ok(None)
-        }
-    }
-}
 
-pub fn save_teams_tokens(app: &AppHandle, tokens: &TeamsTokens) -> Result<(), String> {
-    log::info!(
-        "[POLLING] save_teams_tokens: ENTRY - access_token.len={}",
-        tokens.access_token.len()
-    );
-
-    let store = app.store("tokens").map_err(|e| {
-        log::error!("[POLLING] save_teams_tokens: store open failed - {}", e);
-        e.to_string()
-    })?;
-    store.set(
-        "teams_tokens",
-        serde_json::to_value(tokens).map_err(|e| {
-            log::error!("[POLLING] save_teams_tokens: serialize failed - {}", e);
-            e.to_string()
-        })?,
-    );
-    store.save().map_err(|e| {
-        log::error!("[POLLING] save_teams_tokens: save failed - {}", e);
-        e.to_string()
-    })?;
-    log::info!("[POLLING] save_teams_tokens: SUCCESS");
-    Ok(())
-}
-
-pub fn load_teams_tokens(app: &AppHandle) -> Result<Option<TeamsTokens>, String> {
-    log::info!("[POLLING] load_teams_tokens: ENTRY");
-
-    let store = app.store("tokens").map_err(|e| {
-        log::error!("[POLLING] load_teams_tokens: store open failed - {}", e);
-        e.to_string()
-    })?;
-    let value = store.get("teams_tokens");
-
-    match value {
-        Some(v) => {
-            let tokens: TeamsTokens = serde_json::from_value(v.clone()).map_err(|e| {
-                log::error!("[POLLING] load_teams_tokens: deserialize failed - {}", e);
-                e.to_string()
-            })?;
-            log::info!("[POLLING] load_teams_tokens: SUCCESS - tokens loaded");
-            Ok(Some(tokens))
-        }
-        None => {
-            log::info!("[POLLING] load_teams_tokens: no tokens in store");
-            Ok(None)
-        }
-    }
-}
-
-pub fn clear_spotify_tokens(app: &AppHandle) -> Result<(), String> {
-    log::info!("[POLLING] clear_spotify_tokens: ENTRY");
-
-    let store = app.store("tokens").map_err(|e| {
-        log::error!("[POLLING] clear_spotify_tokens: store open failed - {}", e);
-        e.to_string()
-    })?;
-    store.delete("spotify_tokens");
-    store.delete("spotify_client_id");
-    // `spotify_client_secret` is no longer persisted to the store — the
-    // secret now lives in the OS keychain. See issue #9.
-    store.delete("spotify_client_secret");
-    store.delete("spotify_redirect_uri");
-    store.delete("spotify_verifier");
-    store.delete("spotify_csrf_state");
-    store.delete("pending_spotify_auth");
-    store.save().map_err(|e| {
-        log::error!("[POLLING] clear_spotify_tokens: save failed - {}", e);
-        e.to_string()
-    })?;
-
-    // Best-effort: also clear the keychain entry. If the keychain is
-    // unavailable (e.g. headless CI), we don't fail the whole call.
-    if let Err(e) = crate::keychain::delete_spotify_client_secret() {
-        log::warn!(
-            "[POLLING] clear_spotify_tokens: failed to clear keychain entry - {}",
-            e
-        );
-    }
-    log::info!("[POLLING] clear_spotify_tokens: SUCCESS - tokens cleared from store and keychain");
-    Ok(())
-}
-
-pub fn clear_teams_tokens(app: &AppHandle) -> Result<(), String> {
-    log::info!("[POLLING] clear_teams_tokens: ENTRY");
-
-    let store = app.store("tokens").map_err(|e| {
-        log::error!("[POLLING] clear_teams_tokens: store open failed - {}", e);
-        e.to_string()
-    })?;
-    store.delete("teams_tokens");
-    store.delete("teams_device_code");
-    store.delete("pending_teams_auth");
-    store.save().map_err(|e| {
-        log::error!("[POLLING] clear_teams_tokens: save failed - {}", e);
-        e.to_string()
-    })?;
-    log::info!("[POLLING] clear_teams_tokens: SUCCESS - tokens cleared from store");
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests {
