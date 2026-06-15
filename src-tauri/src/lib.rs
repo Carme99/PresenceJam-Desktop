@@ -369,7 +369,13 @@ pub fn run() {
             // `start_syncing` call.
             match crate::keychain::get_spotify_client_secret() {
                 Ok(_) => log::info!("[APP] setup: keychain cache primed (Spotify client_secret present)"),
-                Err(_) => log::info!("[APP] setup: keychain cache empty (no Spotify client_secret yet — user must Onboard)"),
+                Err(e) => {
+                    // Log the underlying reason at debug level for troubleshooting
+                    // (locked keychain, permission denied, keyring daemon down, etc.)
+                    // without cluttering info-level output for the common new-user path.
+                    log::debug!("[APP] setup: keychain access failed: {}", e);
+                    log::info!("[APP] setup: keychain cache empty (no Spotify client_secret yet — user must Onboard)");
+                }
             }
 
             // Load config into AppState

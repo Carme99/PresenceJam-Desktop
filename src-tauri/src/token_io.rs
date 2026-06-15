@@ -52,8 +52,11 @@ pub fn tokens_file_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join("tokens.json"))
 }
 
-/// Read tokens from disk, returning a default `TokensFile` if the file
-/// does not exist, is empty, or fails to deserialize (graceful recovery).
+/// Read tokens from disk. Returns a default `TokensFile` if the file
+/// does not exist or is empty. Returns `Err(...)` if the file exists
+/// and is non-empty but cannot be deserialised; the caller in `lib::run`
+/// setup logs the error and continues with default state, matching the
+/// previous `tauri-plugin-store` path's behaviour.
 pub fn read_tokens_at(app: &tauri::AppHandle) -> Result<TokensFile, String> {
     let path = tokens_file_path(app)?;
     if !path.exists() {
