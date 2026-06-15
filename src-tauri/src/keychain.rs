@@ -82,13 +82,14 @@ pub fn peek_spotify_client_secret() -> Option<String> {
 
 /// Check whether the Spotify `client_secret` is present in the OS keychain.
 ///
-/// Returns `Ok(true)` if the entry exists (even if read fails for other reasons
-/// after a successful existence check), `Ok(false)` if it is missing.
+/// This consults the keychain directly and does not use the in-process
+/// cache, so it reflects the current keychain state even if the entry
+/// was deleted while the app is running (e.g. via the macOS Keychain
+/// Access app, the Windows Credential Manager UI, or `secret-tool` on
+/// Linux). Called from `is_spotify_client_secret_set` (user-action
+/// gated) and from `config::with_keychain_flags` (called only on
+/// config load), both of which are off the polling hot path.
 pub fn has_spotify_client_secret() -> bool {
-    // Cache hit is authoritative if populated
-    if cache().read().is_some() {
-        return true;
-    }
     match keyring::Entry::new(KEYRING_SERVICE, SPOTIFY_CLIENT_SECRET_USER) {
         Ok(entry) => entry.get_password().is_ok(),
         Err(_) => false,

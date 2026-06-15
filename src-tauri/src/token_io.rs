@@ -15,7 +15,6 @@
 
 use crate::spotify::SpotifyTokens;
 use crate::teams::TeamsTokens;
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
@@ -153,9 +152,11 @@ pub fn persist_tokens(state: &Arc<crate::AppState>, app: &tauri::AppHandle) -> R
     write_tokens_atomic(&path, &contents)
 }
 
-/// Delete the tokens file. Used by `reconnect_spotify` / `reconnect_teams`
-/// to fully clear persisted credentials. Best-effort: a missing file is
-/// not an error.
+/// Delete the tokens file. Reserved for future reconnect flows that need
+/// to fully wipe persisted credentials. Currently unused — re-introduce
+/// when reconnect_spotify / reconnect_teams need to clear state without
+/// going through the empty-TokensFile write path.
+#[allow(dead_code)]
 pub fn clear_tokens_file(app: &tauri::AppHandle) -> Result<(), String> {
     let path = tokens_file_path(app)?;
     if path.exists() {
@@ -166,26 +167,6 @@ pub fn clear_tokens_file(app: &tauri::AppHandle) -> Result<(), String> {
         log::info!("[TOKEN_IO] clear_tokens_file: nothing to delete at {}", path.display());
     }
     Ok(())
-}
-
-/// Generate a fresh v4 UUID as a 36-character hyphenated string (e.g.
-/// `f47ac10b-58cc-4372-a567-0e02b2c3d479`). Uses the OS CSPRNG via the
-/// `rand` crate's `OsRng`. Used as the per-launch path component for the
-/// `presencejam://` deep-link scheme (see issue #66).
-pub fn generate_launch_uuid() -> String {
-    let mut bytes = [0u8; 16];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
-    // Set version (4) and variant (RFC 4122) bits per RFC 4122 §4.4
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0], bytes[1], bytes[2], bytes[3],
-        bytes[4], bytes[5],
-        bytes[6], bytes[7],
-        bytes[8], bytes[9],
-        bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
-    )
 }
 
 #[cfg(test)]
@@ -273,27 +254,5 @@ mod tests {
         fs::write(&path, "{not valid json").unwrap();
         assert!(read_tokens_inner(&path).is_err());
         let _ = fs::remove_file(&path);
-    }
-
-    #[test]
-    fn launch_uuid_is_unique_and_well_formed() {
-        let a = generate_launch_uuid();
-        let b = generate_launch_uuid();
-        // Two consecutive UUIDs should be distinct
-        assert_ne!(a, b);
-        // Should be in the canonical 8-4-4-4-12 hyphenated form
-        assert_eq!(a.len(), 36);
-        let parts: Vec<&str> = a.split('-').collect();
-        assert_eq!(parts.len(), 5);
-        assert_eq!(parts[0].len(), 8);
-        assert_eq!(parts[1].len(), 4);
-        assert_eq!(parts[2].len(), 4);
-        assert_eq!(parts[3].len(), 4);
-        assert_eq!(parts[4].len(), 12);
-        // Version nibble should be 4
-        assert_eq!(parts[2].chars().next(), Some('4'));
-        // Variant nibble should be 8, 9, a, or b
-        let c = parts[3].chars().next().unwrap();
-        assert!(matches!(c, '8' | '9' | 'a' | 'b'));
     }
 }
