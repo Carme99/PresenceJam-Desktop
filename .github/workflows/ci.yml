@@ -39,6 +39,11 @@ jobs:
       - name: Build frontend
         run: npm run build
 
+      # Type-check Svelte/TS via svelte-check. Runs after Build frontend so the
+      # generated $types and .svelte-kit output are in place.
+      - name: Svelte/TS type check (npm run check)
+        run: npm run check
+
   # Rust: cargo check on all targets (lib + bins + tests + benches) catches
   # type errors, borrow errors, missing imports, and broken test code.
   # Does NOT run tests (CI is for compile-time feedback, not correctness).
@@ -95,6 +100,13 @@ jobs:
         env:
           CARGO_INCREMENTAL: 0
         run: cargo check --manifest-path src-tauri/Cargo.toml --all-targets
+
+      # Runs the Rust unit-test suite. Reuses the cached build from the Cargo
+      # check step above so this is incremental rather than a cold rebuild.
+      - name: Cargo test (all targets)
+        env:
+          CARGO_INCREMENTAL: 0
+        run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets
 
   # Clippy: same scope as cargo check but with lint enforcement.
   # Treats warnings as errors so noisy/deprecated lints can't sneak in.
