@@ -6,17 +6,17 @@
   import { configStore, saveConfig, loadConfig, type AppConfig } from '$lib/stores/config';
   import { spotifyConnected } from '$lib/stores/spotify';
   import { teamsConnected } from '$lib/stores/teams';
+  import { authFlow, setSpotifyPhase, setTeamsPhase } from '$lib/stores/authFlow.svelte';
+  import { useAuthListeners } from '$lib/utils/useAuthListeners';
 
   let localConfig = $state<AppConfig>({ ...$configStore });
   let isConnected = $state(false);
   let teamsStatusConnected = $state(false);
   let isSaving = $state(false);
-  let reconnectingSpotify = $state(false);
-  let reconnectingTeams = $state(false);
   let saveMessage = $state('');
   let saveTimeout: ReturnType<typeof setTimeout> | null = null;
-  let spotifyAuthWaiting = $state(false);
-  let teamsAuthWaiting = $state(false);
+  let spotifyAuthWaiting = $derived(authFlow.spotify.phase === 'waiting');
+  let teamsAuthWaiting = $derived(authFlow.teams.phase === 'waiting');
 
   let previewArtist = $state('Radiohead');
   let previewTrack = $state('Karma Police');
@@ -32,6 +32,7 @@
   );
 
   let unlistenFns: UnlistenFn[] = [];
+  let unlistenAuth: (() => void) | null = null;
 
   onMount(async () => {
     await loadConfig();
@@ -49,8 +50,7 @@
     // Listen for reconnect-required events (emitted when backend clears tokens and needs re-auth)
     unlistenFns.push(await listen('spotify-reconnect-required', async () => {
       console.log('[SETTINGS] spotify-reconnect-required received');
-      spotifyAuthWaiting = true;
-      reconnectingSpotify = true;
+      setSpotifyPhase('waiting');
       try {
         // The client_secret is no longer in the config — it lives in the OS
         // keychain (set during Onboarding). Re-auth needs the keychain
@@ -69,50 +69,42 @@
         });
       } catch (e) {
         console.error('[SETTINGS] start_spotify_auth failed:', e);
-        spotifyAuthWaiting = false;
-        reconnectingSpotify = false;
+        setSpotifyPhase('error', String(e));
       }
     }));
 
     unlistenFns.push(await listen('teams-reconnect-required', async () => {
       console.log('[SETTINGS] teams-reconnect-required received');
-      teamsAuthWaiting = true;
-      reconnectingTeams = true;
+      setTeamsPhase('waiting');
       try {
         await invoke('start_teams_auth_device_code');
       } catch (e) {
         console.error('[SETTINGS] start_teams_auth_device_code failed:', e);
-        teamsAuthWaiting = false;
-        reconnectingTeams = false;
+        setTeamsPhase('error', String(e));
       }
     }));
 
-    // Listen for auth completion events
-    unlistenFns.push(await listen('spotify-auth-complete', () => {
-      console.log('[SETTINGS] spotify-auth-complete received');
-      spotifyAuthWaiting = false;
-      reconnectingSpotify = false;
-      isConnected = true;
-    }));
-
-    unlistenFns.push(await listen('spotify-auth-failed', (event) => {
-      console.error('[SETTINGS] spotify-auth-failed:', event.payload);
-      spotifyAuthWaiting = false;
-      reconnectingSpotify = false;
-    }));
-
-    unlistenFns.push(await listen('teams-auth-complete', () => {
-      console.log('[SETTINGS] teams-auth-complete received');
-      teamsAuthWaiting = false;
-      reconnectingTeams = false;
-      teamsStatusConnected = true;
-    }));
-
-    unlistenFns.push(await listen('teams-auth-failed', (event) => {
-      console.error('[SETTINGS] teams-auth-failed:', event.payload);
-      teamsAuthWaiting = false;
-      reconnectingTeams = false;
-    }));
+    // Auth completion/failure events via the shared helper.
+    unlistenAuth = await useAuthListeners({
+      onSpotifyComplete: () => {
+        console.log('[SETTINGS] spotify-auth-complete received');
+        setSpotifyPhase('done');
+        isConnected = true;
+      },
+      onSpotifyFailed: (payload) => {
+        console.error('[SETTINGS] spotify-auth-failed:', payload);
+        setSpotifyPhase('error', String(payload));
+      },
+      onTeamsComplete: () => {
+        console.log('[SETTINGS] teams-auth-complete received');
+        setTeamsPhase('done');
+        teamsStatusConnected = true;
+      },
+      onTeamsFailed: (payload) => {
+        console.error('[SETTINGS] teams-auth-failed:', payload);
+        setTeamsPhase('error', String(payload));
+      }
+    });
   });
 
   onDestroy(() => {
@@ -123,6 +115,7 @@
     for (const unlisten of unlistenFns) {
       unlisten();
     }
+    if (unlistenAuth) unlistenAuth();
   });
 
   async function handleSave() {
@@ -144,22 +137,24 @@
   }
 
   async function reconnectSpotify() {
-    if (reconnectingSpotify || !localConfig.spotify.client_id) return;
-    reconnectingSpotify = true;
+    if (spotifyAuthWaiting || !localConfig.spotify.client_id) return;
+    setSpotifyPhase('waiting');
     try {
       await invoke('reconnect_spotify');
-    } finally {
-      // Note: reconnectingSpotify is reset when spotify-auth-complete or spotify-auth-failed is received
+    } catch (e) {
+      console.error('[SETTINGS] reconnect_spotify failed:', e);
+      setSpotifyPhase('error', String(e));
     }
   }
 
   async function reconnectTeams() {
-    if (reconnectingTeams) return;
-    reconnectingTeams = true;
+    if (teamsAuthWaiting) return;
+    setTeamsPhase('waiting');
     try {
       await invoke('reconnect_teams');
-    } finally {
-      // Note: reconnectingTeams is reset when teams-auth-complete or teams-auth-failed is received
+    } catch (e) {
+      console.error('[SETTINGS] reconnect_teams failed:', e);
+      setTeamsPhase('error', String(e));
     }
   }
 
@@ -208,7 +203,7 @@
       <div class="connection-row">
         {#if isConnected && !spotifyAuthWaiting}
           <span class="badge success">Connected</span>
-          <button class="btn-secondary" onclick={reconnectSpotify} disabled={reconnectingSpotify}>Reconnect Spotify</button>
+          <button class="btn-secondary" onclick={reconnectSpotify} disabled={spotifyAuthWaiting}>Reconnect Spotify</button>
         {:else if spotifyAuthWaiting}
           <span class="badge warning">Reconnecting...</span>
           <span class="hint">Complete auth in browser</span>
@@ -224,7 +219,7 @@
       <div class="connection-row">
         {#if teamsStatusConnected && !teamsAuthWaiting}
           <span class="badge success">Connected</span>
-          <button class="btn-secondary" onclick={reconnectTeams} disabled={reconnectingTeams}>Reconnect Teams</button>
+          <button class="btn-secondary" onclick={reconnectTeams} disabled={teamsAuthWaiting}>Reconnect Teams</button>
         {:else if teamsAuthWaiting}
           <span class="badge warning">Reconnecting...</span>
           <span class="hint">Complete auth in browser</span>
