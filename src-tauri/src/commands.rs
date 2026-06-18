@@ -15,7 +15,6 @@ use url::Url;
 /// a short cache is needed to avoid hammering the upstream APIs.
 const ONBOARDING_CACHE_TTL: Duration = Duration::from_secs(30);
 
-
 /// Validates that a URL uses http or https scheme, has a host, and
 /// contains no userinfo (the `user:pass@` form). Returns the parsed URL
 /// on success, or an error string on failure. See issue #67.
@@ -45,9 +44,7 @@ fn validate_http_url(url: &str) -> Result<Url, String> {
 /// Validates a Spotify client_id (32 alphanumeric chars).
 /// See issue #67.
 fn validate_spotify_client_id(id: &str) -> Result<(), String> {
-    if id.len() != 32
-        || !id.chars().all(|c| c.is_ascii_alphanumeric())
-    {
+    if id.len() != 32 || !id.chars().all(|c| c.is_ascii_alphanumeric()) {
         return Err(format!(
             "Invalid client_id: must be 32 alphanumeric characters (got len={})",
             id.len()
@@ -147,7 +144,6 @@ pub fn is_spotify_client_secret_set() -> bool {
     crate::keychain::has_spotify_client_secret()
 }
 
-
 #[tauri::command]
 pub fn start_spotify_auth(
     client_id: String,
@@ -242,7 +238,6 @@ pub fn start_spotify_auth(
     log::info!("[CMD] start_spotify_auth: SUCCESS - Spotify auth started");
     Ok(())
 }
-
 
 #[tauri::command]
 pub fn complete_spotify_auth_manual(
@@ -354,9 +349,7 @@ pub fn refresh_spotify(
             *guard = Some(new_tokens.clone());
             true
         } else {
-            log::warn!(
-                "[CMD] refresh_spotify: state changed during refresh, discarding result"
-            );
+            log::warn!("[CMD] refresh_spotify: state changed during refresh, discarding result");
             false
         }
     };
@@ -495,9 +488,7 @@ pub fn refresh_teams(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> 
             *guard = Some(new_tokens.clone());
             true
         } else {
-            log::warn!(
-                "[CMD] refresh_teams: state changed during refresh, discarding result"
-            );
+            log::warn!("[CMD] refresh_teams: state changed during refresh, discarding result");
             false
         }
     };
@@ -547,7 +538,10 @@ pub fn start_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> 
         Ok(h) => h,
         Err(e) => {
             // Roll back is_syncing flag since no handle was created
-            log::error!("[CMD] start_syncing: polling start failed - {}; rolling back is_syncing", e);
+            log::error!(
+                "[CMD] start_syncing: polling start failed - {}; rolling back is_syncing",
+                e
+            );
             state.is_syncing.store(false, Ordering::Release);
             return Err(e);
         }
@@ -592,13 +586,20 @@ fn stop_polling_and_join(state: &Arc<AppState>, context: &str) {
             }
 
             // Timeout reached - try one final join (may block briefly)
-            log::warn!("[CMD] {}: polling thread did not terminate within 2s, attempting final join", context);
+            log::warn!(
+                "[CMD] {}: polling thread did not terminate within 2s, attempting final join",
+                context
+            );
             match handle.join() {
                 Ok(()) => {
                     log::info!("[CMD] {}: polling thread ended (final join)", context);
                 }
                 Err(e) => {
-                    log::error!("[CMD] {}: polling thread panicked (final join): {:?}", context, e);
+                    log::error!(
+                        "[CMD] {}: polling thread panicked (final join): {:?}",
+                        context,
+                        e
+                    );
                 }
             }
         }
@@ -691,20 +692,24 @@ pub fn show_window(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-
-
 #[tauri::command]
 pub fn set_autostart_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
     log::debug!("[CMD] set_autostart_enabled: ENTRY - enabled={}", enabled);
 
     let autolaunch_manager = app.state::<tauri_plugin_autostart::AutoLaunchManager>();
     let is_enabled = autolaunch_manager.is_enabled().map_err(|e| {
-        log::error!("[CMD] set_autostart_enabled: is_enabled check FAILED - {}", e);
+        log::error!(
+            "[CMD] set_autostart_enabled: is_enabled check FAILED - {}",
+            e
+        );
         e.to_string()
     })?;
 
     if is_enabled == enabled {
-        log::info!("[CMD] set_autostart_enabled: already in desired state (enabled={}), no-op", enabled);
+        log::info!(
+            "[CMD] set_autostart_enabled: already in desired state (enabled={}), no-op",
+            enabled
+        );
         return Ok(());
     }
 
@@ -753,6 +758,19 @@ pub fn open_logs_folder(app: AppHandle) -> Result<(), String> {
 // `get_sync_status`. Both dead commands were byte-for-byte duplicates of
 // live paths.
 
+/// Renders a status-format template against a sample track so the Svelte
+/// Settings page can show a live preview without needing a real playing
+/// track. Keeps the Rust `format_status` as the single source of truth for
+/// the `{artist}` / `{track}` / `{album}` / `{emoji}` substitution rules.
+/// See issue #74.
+#[tauri::command]
+pub fn preview_status(format: String) -> String {
+    log::debug!("[CMD] preview_status: ENTRY - format.len={}", format.len());
+    let result = crate::spotify::preview_status_with_sample(&format);
+    log::debug!("[CMD] preview_status: SUCCESS");
+    result
+}
+
 /// Onboarding check: `true` if both Spotify and Teams are configured and have a non-expired
 /// token. Network errors (5xx, 429) are treated as "still valid" (transient) so a flaky
 /// network doesn't bounce the user back into the onboarding flow.
@@ -766,7 +784,6 @@ pub async fn is_onboarding_complete(
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<bool, String> {
     log::debug!("[CMD] is_onboarding_complete: ENTRY");
-
 
     // Cache hit — return immediately.
     {

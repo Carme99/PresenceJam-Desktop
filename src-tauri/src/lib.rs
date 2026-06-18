@@ -1,10 +1,10 @@
-use std::sync::mpsc;
+use parking_lot::{Mutex, RwLock};
 use std::sync::atomic::AtomicBool;
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
-use parking_lot::{Mutex, RwLock};
-use tauri::{Manager, Emitter, AppHandle};
+use tauri::{AppHandle, Emitter, Manager};
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct PendingSpotifyAuth {
@@ -68,23 +68,26 @@ impl Default for AppState {
     }
 }
 
+pub mod commands;
 pub mod config;
 pub mod keychain;
+pub mod menu;
+pub mod polling;
 pub mod profanity;
 pub mod spotify;
 pub mod teams;
-pub mod polling;
 pub mod token_io;
 pub mod tray;
-pub mod menu;
-pub mod commands;
 
 async fn handle_spotify_callback(
     code: &str,
     state_param: Option<&str>,
     app: &AppHandle,
 ) -> Result<(), String> {
-    log::debug!("[CALLBACK] handle_spotify_callback: ENTRY - code.len={}", code.len());
+    log::debug!(
+        "[CALLBACK] handle_spotify_callback: ENTRY - code.len={}",
+        code.len()
+    );
 
     let app_state = app.state::<Arc<AppState>>();
     log::info!("[CALLBACK] handle_spotify_callback: got app state");
@@ -97,7 +100,10 @@ async fn handle_spotify_callback(
             "No pending Spotify auth".to_string()
         })?
     };
-    log::info!("[CALLBACK] handle_spotify_callback: pending auth found - verifier.len={}", pending.verifier.len());
+    log::info!(
+        "[CALLBACK] handle_spotify_callback: pending auth found - verifier.len={}",
+        pending.verifier.len()
+    );
 
     // Re-check expiry at submit time. The expiry was set on creation
     // (lib.rs setup, or commands.rs::start_spotify_auth) but only
@@ -112,7 +118,9 @@ async fn handle_spotify_callback(
     // Verify state matches to prevent CSRF attacks
     if let Some(state_str) = state_param {
         if state_str != pending.state {
-            log::error!("[CALLBACK] handle_spotify_callback: state mismatch - CSRF attack detected");
+            log::error!(
+                "[CALLBACK] handle_spotify_callback: state mismatch - CSRF attack detected"
+            );
             return Err("State mismatch - possible CSRF attack".to_string());
         }
         log::info!("[CALLBACK] handle_spotify_callback: state verified successfully");
@@ -128,7 +136,9 @@ async fn handle_spotify_callback(
     log::info!("[CALLBACK] handle_spotify_callback: reading client_secret from keychain");
     let client_secret = crate::keychain::get_spotify_client_secret()?;
 
-    log::info!("[CALLBACK] handle_spotify_callback: calling complete_spotify_auth (on blocking pool)");
+    log::info!(
+        "[CALLBACK] handle_spotify_callback: calling complete_spotify_auth (on blocking pool)"
+    );
     // The HTTP round-trip uses reqwest::blocking internally; offload it to
     // Tauri's blocking pool so we don't pin an async worker for the full call.
     let code = code.to_string();
@@ -147,7 +157,10 @@ async fn handle_spotify_callback(
     })
     .await
     .map_err(|e| format!("Spotify OAuth callback task failed: {}", e))??;
-    log::info!("[CALLBACK] handle_spotify_callback: token exchange successful - access_token.len={}", tokens.access_token.len());
+    log::info!(
+        "[CALLBACK] handle_spotify_callback: token exchange successful - access_token.len={}",
+        tokens.access_token.len()
+    );
 
     {
         let mut guard = app_state.spotify_tokens.write();
@@ -163,17 +176,20 @@ async fn handle_spotify_callback(
 
     log::info!("[CALLBACK] handle_spotify_callback: EMIT spotify-auth-complete event");
     let _ = app.emit("spotify-auth-complete", ());
-    
+
     log::info!("[CALLBACK] handle_spotify_callback: SUCCESS");
     Ok(())
 }
 
 async fn handle_teams_callback(code: &str, app: &AppHandle) -> Result<(), String> {
-    log::debug!("[CALLBACK] handle_teams_callback: ENTRY - code.len={}", code.len());
-    
+    log::debug!(
+        "[CALLBACK] handle_teams_callback: ENTRY - code.len={}",
+        code.len()
+    );
+
     let state = app.state::<Arc<AppState>>();
     log::info!("[CALLBACK] handle_teams_callback: got app state");
-    
+
     let pending = {
         let mut guard = state.pending_teams_auth.write();
         log::info!("[CALLBACK] handle_teams_callback: taking pending Teams auth from state");
@@ -191,7 +207,7 @@ async fn handle_teams_callback(code: &str, app: &AppHandle) -> Result<(), String
         log::error!("[CALLBACK] handle_teams_callback: auth state expired at submit time");
         return Err("Auth state expired — please try signing in again.".to_string());
     }
-    
+
     log::info!("[CALLBACK] handle_teams_callback: calling complete_teams_auth (on blocking pool)");
     // The HTTP round-trip uses reqwest::blocking internally; offload it to
     // Tauri's blocking pool so we don't pin an async worker for the full call.
@@ -200,16 +216,14 @@ async fn handle_teams_callback(code: &str, app: &AppHandle) -> Result<(), String
     let client_id = pending.client_id.clone();
     let redirect_uri = pending.redirect_uri.clone();
     let tokens = tauri::async_runtime::spawn_blocking(move || {
-        crate::teams::complete_teams_auth(
-            &code,
-            &verifier,
-            &client_id,
-            &redirect_uri,
-        )
+        crate::teams::complete_teams_auth(&code, &verifier, &client_id, &redirect_uri)
     })
     .await
     .map_err(|e| format!("Teams OAuth callback task failed: {}", e))??;
-    log::info!("[CALLBACK] handle_teams_callback: token exchange successful - access_token.len={}", tokens.access_token.len());
+    log::info!(
+        "[CALLBACK] handle_teams_callback: token exchange successful - access_token.len={}",
+        tokens.access_token.len()
+    );
 
     {
         let mut guard = state.teams_tokens.write();
@@ -225,29 +239,38 @@ async fn handle_teams_callback(code: &str, app: &AppHandle) -> Result<(), String
 
     log::info!("[CALLBACK] handle_teams_callback: EMIT teams-auth-complete event");
     let _ = app.emit("teams-auth-complete", ());
-    
+
     log::info!("[CALLBACK] handle_teams_callback: SUCCESS");
     Ok(())
 }
 
 fn handle_deep_link(url: &str, app: AppHandle) {
     log::debug!("[DEEP_LINK] handle_deep_link: ENTRY - url={}", url);
-    
+
     if let Ok(parsed) = url::Url::parse(url) {
         log::info!("[DEEP_LINK] handle_deep_link: URL parsed successfully");
         let scheme = parsed.scheme();
         log::info!("[DEEP_LINK] handle_deep_link: scheme={}", scheme);
-        
+
         if scheme == "presencejam" {
             log::info!("[DEEP_LINK] handle_deep_link: recognized as presencejam scheme");
             let path = parsed.path();
             log::info!("[DEEP_LINK] handle_deep_link: path={}", path);
 
-            let code = parsed.query_pairs().find(|(k, _)| k == "code").map(|(_, v)| v.to_string());
-            let state_param = parsed.query_pairs().find(|(k, _)| k == "state").map(|(_, v)| v.to_string());
+            let code = parsed
+                .query_pairs()
+                .find(|(k, _)| k == "code")
+                .map(|(_, v)| v.to_string());
+            let state_param = parsed
+                .query_pairs()
+                .find(|(k, _)| k == "state")
+                .map(|(_, v)| v.to_string());
 
             if let Some(code_str) = code {
-                log::info!("[DEEP_LINK] handle_deep_link: code found - code.len={}", code_str.len());
+                log::info!(
+                    "[DEEP_LINK] handle_deep_link: code found - code.len={}",
+                    code_str.len()
+                );
                 let app_clone = app.clone();
                 let code_clone = code_str.clone();
                 let state_clone = state_param.clone();
@@ -258,7 +281,9 @@ fn handle_deep_link(url: &str, app: AppHandle) {
                         log::info!("[DEEP_LINK] handle_deep_link: spawning Teams callback handler");
                         if let Err(e) = handle_teams_callback(&code_clone, &app_clone).await {
                             log::error!("[DEEP_LINK] handle_teams_callback: FAILED - {}", e);
-                            log::info!("[DEEP_LINK] handle_deep_link: EMIT teams-auth-failed event");
+                            log::info!(
+                                "[DEEP_LINK] handle_deep_link: EMIT teams-auth-failed event"
+                            );
                             let _ = app_clone.emit("teams-auth-failed", e);
                         }
                     });
@@ -275,10 +300,17 @@ fn handle_deep_link(url: &str, app: AppHandle) {
                     // disk and not exposed via IPC.
                     log::info!("[DEEP_LINK] handle_deep_link: routing to Spotify callback");
                     tauri::async_runtime::spawn(async move {
-                        log::info!("[DEEP_LINK] handle_deep_link: spawning Spotify callback handler");
-                        if let Err(e) = handle_spotify_callback(&code_clone, state_clone.as_deref(), &app_clone).await {
+                        log::info!(
+                            "[DEEP_LINK] handle_deep_link: spawning Spotify callback handler"
+                        );
+                        if let Err(e) =
+                            handle_spotify_callback(&code_clone, state_clone.as_deref(), &app_clone)
+                                .await
+                        {
                             log::error!("[DEEP_LINK] handle_spotify_callback: FAILED - {}", e);
-                            log::info!("[DEEP_LINK] handle_deep_link: EMIT spotify-auth-failed event");
+                            log::info!(
+                                "[DEEP_LINK] handle_deep_link: EMIT spotify-auth-failed event"
+                            );
                             let _ = app_clone.emit("spotify-auth-failed", e);
                         }
                     });
@@ -297,7 +329,7 @@ fn handle_deep_link(url: &str, app: AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     log::info!("[APP] run: ENTRY");
-    
+
     let mut builder = tauri::Builder::default();
 
     #[cfg(desktop)]
@@ -305,7 +337,10 @@ pub fn run() {
         use tauri_plugin_single_instance::init as single_instance_init;
 
         builder = builder.plugin(single_instance_init(|_app, argv, _cwd| {
-            log::info!("[APP] single_instance: New instance opened with argv: {:?}", argv);
+            log::info!(
+                "[APP] single_instance: New instance opened with argv: {:?}",
+                argv
+            );
         }));
 
         builder = builder.plugin(tauri_plugin_deep_link::init());
@@ -524,6 +559,7 @@ pub fn run() {
             commands::reconnect_teams,
             commands::app_exit,
             commands::update_tray_menu_state,
+            commands::preview_status,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
