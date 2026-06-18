@@ -24,23 +24,23 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
         with:
           node-version: 20
           cache: 'npm'
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
 
       # Cargo cache mirrors the PR-time ci.yml setup (PR #55). Cuts the
       # release build from ~50 min cold compile to ~15-20 min warm.
       # First release on a fresh runner is still cold; subsequent
       # tag pushes benefit.
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
         with:
           workspaces: src-tauri -> target
 
@@ -89,7 +89,7 @@ jobs:
           Copy-Item $msi.FullName "PresenceJam-${{ github.ref_name }}.msi"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: ${{ matrix.artifact_name }}
           path: |
@@ -101,12 +101,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
           path: artifacts
 
       - name: Create GitHub Release
-        uses: ncipollo/release-action@v1
+        uses: ncipollo/release-action@339a81892b84b4eeb0f6e744e4574d79d0d9b8dd  # v1.21.0
         with:
           artifacts: artifacts/**/*
           draft: false
@@ -143,10 +143,10 @@ jobs:
       # GitHub Release, but the source tree on the runner only
       # contains what was checked out at workflow-start.
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
 
       - name: Download macOS DMG artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
           name: PresenceJam-${{ github.ref_name }}-macos.dmg
           path: dist/
@@ -187,6 +187,10 @@ jobs:
               homebrew/presence-jam.rb > presence-jam.rb.rendered
 
           # Shallow clone the tap with the token embedded in the URL.
+          # SECURITY: HOMEBREW_TAP_TOKEN must be a fine-grained PAT scoped ONLY to
+          # carme99/homebrew-tap with contents:write. A classic PAT gives full
+          # access to every repo under the Carme99 GitHub account.
+          # Rotate on a 90-day cadence. See docs: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens
           git clone --depth 1 --branch main \
             "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/carme99/homebrew-tap.git" \
             tap
@@ -226,7 +230,13 @@ jobs:
       # workaround when this happens: close the open PR, then push
       # a new tag (or force-move the existing tag) to re-fire this
       # job, which sees no open PR and creates a fresh one.
-      - uses: vedantmgoyal2009/winget-releaser@v2
+      # SECURITY: WINGET_TOKEN must be a fine-grained PAT scoped ONLY to
+      # microsoft/winget-pkgs with contents:write (and pull_requests:write
+      # if the action creates PRs against that repo). A classic PAT or
+      # broader-scoped token grants unnecessary access to every repo the
+      # token owner can reach. Rotate on a 90-day cadence.
+      # See docs: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens
+      - uses: vedantmgoyal2009/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e  # v2
         with:
           identifier: PresenceJam.PresenceJam
           token: ${{ secrets.WINGET_TOKEN }}
