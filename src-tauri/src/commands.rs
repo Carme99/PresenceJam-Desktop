@@ -174,16 +174,16 @@ pub fn start_spotify_auth(
     validate_spotify_client_id(&client_id)?;
     validate_spotify_client_secret(&client_secret)?;
 
-    let verifier = crate::spotify::pkce_generate_verifier();
+    let verifier = crate::pkce::generate_verifier();
     log::info!(
         "[CMD] start_spotify_auth: verifier generated, len={}",
         verifier.len()
     );
 
-    let challenge = crate::spotify::pkce_generate_challenge(&verifier);
+    let challenge = crate::pkce::generate_challenge(&verifier);
     log::info!("[CMD] start_spotify_auth: challenge generated");
 
-    let csrf_state = crate::spotify::pkce_generate_verifier();
+    let csrf_state = crate::pkce::generate_verifier();
     log::info!(
         "[CMD] start_spotify_auth: state generated, len={}",
         csrf_state.len()

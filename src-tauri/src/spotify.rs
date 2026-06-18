@@ -1,10 +1,6 @@
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use base64::Engine;
 use chrono::{DateTime, Utc};
-use rand::RngCore;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,19 +36,6 @@ impl std::fmt::Display for SpotifyApiError {
             SpotifyApiError::Other(s) => write!(f, "{}", s),
         }
     }
-}
-
-pub fn pkce_generate_verifier() -> String {
-    let mut bytes = [0u8; 64];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    URL_SAFE_NO_PAD.encode(bytes)
-}
-
-pub fn pkce_generate_challenge(verifier: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(verifier.as_bytes());
-    let hash = hasher.finalize();
-    URL_SAFE_NO_PAD.encode(hash)
 }
 
 pub fn complete_spotify_auth(

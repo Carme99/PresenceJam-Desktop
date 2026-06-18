@@ -70,10 +70,11 @@ impl Default for AppState {
 
 pub mod config;
 pub mod keychain;
+pub mod pkce;
+pub mod polling;
 pub mod profanity;
 pub mod spotify;
 pub mod teams;
-pub mod polling;
 pub mod token_io;
 pub mod tray;
 pub mod menu;

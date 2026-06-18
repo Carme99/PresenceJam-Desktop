@@ -1,8 +1,5 @@
-use base64::Engine;
 use chrono::Utc;
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use sha2::Digest;
 use std::thread;
 use std::time::Duration as StdDuration;
 
@@ -51,19 +48,6 @@ fn build_teams_client() -> Result<reqwest::blocking::Client, String> {
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))
-}
-
-pub fn pkce_generate_verifier() -> String {
-    let mut bytes = [0u8; 64];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
-}
-
-pub fn pkce_generate_challenge(verifier: &str) -> String {
-    let mut hasher = sha2::Sha256::new();
-    hasher.update(verifier.as_bytes());
-    let hash = hasher.finalize();
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hash)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
