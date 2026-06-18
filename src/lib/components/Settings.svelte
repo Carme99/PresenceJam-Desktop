@@ -18,18 +18,21 @@
   let spotifyAuthWaiting = $state(false);
   let teamsAuthWaiting = $state(false);
 
-  let previewArtist = $state('Radiohead');
-  let previewTrack = $state('Karma Police');
-  let previewAlbum = $state('OK Computer');
-  let previewEmoji = $state('🎵');
+  let previewText = $state('');
 
-  let preview = $derived(
-    localConfig.teams.status_format
-      .replace('{artist}', previewArtist)
-      .replace('{track}', previewTrack)
-      .replace('{album}', previewAlbum)
-      .replace('{emoji}', previewEmoji)
-  );
+  // Live preview of the status format template. We delegate the
+  // placeholder substitution to Rust (`preview_status`) so the Svelte
+  // preview and the runtime polling loop share one implementation —
+  // see issue #74. `$effect` updates `previewText` whenever the user
+  // edits the format string. Using `$effect` over an `await` inside
+  // `$derived` avoids a per-keystroke loading flash and keeps the
+  // template a plain `{previewText}` interpolation.
+  $effect(() => {
+    const format = localConfig.teams.status_format;
+    invoke<string>('preview_status', { format }).then((v) => {
+      previewText = v;
+    });
+  });
 
   let unlistenFns: UnlistenFn[] = [];
 
@@ -247,7 +250,7 @@
       </div>
       <div class="form-group">
         <label for="live-preview">Live Preview</label>
-        <div id="live-preview" class="preview-box">{preview}</div>
+        <div id="live-preview" class="preview-box">{previewText}</div>
       </div>
       <p class="hint">
         Available placeholders: <code>{'{artist}'}</code>, <code>{'{track}'}</code>, <code>{'{album}'}</code>, <code>{'{emoji}'}</code>
