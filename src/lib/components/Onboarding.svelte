@@ -1,26 +1,27 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
-  import { listen } from '@tauri-apps/api/event';
   import { onMount, onDestroy } from 'svelte';
   import { configStore, saveConfig, type AppConfig } from '$lib/stores/config';
   import { currentView } from '$lib/stores/app';
+  import { authFlow, setSpotifyPhase, setTeamsPhase } from '$lib/stores/authFlow.svelte';
+  import { useAuthListeners } from '$lib/utils/useAuthListeners';
   import { devLog } from '$lib/utils/dev';
 
   let step = $state(1);
   let spotifyClientId = $state('');
   let spotifyClientSecret = $state('');
-  let spotifyConnected = $state(false);
+  let spotifyConnected = $derived(authFlow.spotify.phase === 'done');
   let spotifyUsername = $state('');
   let spotifyManualUrl = $state('');
-  let spotifyWaiting = $state(false);
-  let spotifyAuthError = $state('');
+  let spotifyWaiting = $derived(authFlow.spotify.phase === 'waiting');
+  let spotifyAuthError = $derived(authFlow.spotify.error ?? '');
 
   let teamsUserCode = $state('');
   let teamsVerificationUrl = $state('');
   let teamsDeviceCode = $state('');
-  let teamsConnected = $state(false);
-  let teamsPolling = $state(false);
-  let teamsAuthError = $state('');
+  let teamsConnected = $derived(authFlow.teams.phase === 'done');
+  let teamsPolling = $derived(authFlow.teams.phase === 'waiting');
+  let teamsAuthError = $derived(authFlow.teams.error ?? '');
 
   let statusFormat = $state('🎵 {artist} - {track} 🎧');
   let launchAtLogin = $state(false);
@@ -28,54 +29,41 @@
   let validationError = $state('');
   let isFinishing = $state(false);
 
-  let unlistenFns: (() => void)[] = [];
+  let unlisten: (() => void) | null = null;
 
   onMount(async () => {
     devLog('[ONBOARDING] onMount: ENTRY');
 
-    devLog('[ONBOARDING] onMount: setting up spotify-auth-complete listener');
-    const fn1 = await listen('spotify-auth-complete', () => {
-      devLog('[ONBOARDING] EVENT: spotify-auth-complete received');
-      spotifyConnected = true;
-      spotifyWaiting = false;
-      spotifyAuthError = '';
-      validationError = '';
-      devLog('[ONBOARDING] EVENT: spotifyConnected=true, spotifyWaiting=false, spotifyAuthError=""');
+    unlisten = await useAuthListeners({
+      onSpotifyComplete: () => {
+        devLog('[ONBOARDING] EVENT: spotify-auth-complete received');
+        setSpotifyPhase('done');
+        validationError = '';
+        devLog('[ONBOARDING] EVENT: setSpotifyPhase(done), validationError cleared');
+      },
+      onSpotifyFailed: (payload) => {
+        console.error('[ONBOARDING] EVENT: spotify-auth-failed received:', payload);
+        setSpotifyPhase('error', String(payload));
+        devLog('[ONBOARDING] EVENT: setSpotifyPhase(error)');
+      },
+      onTeamsComplete: () => {
+        devLog('[ONBOARDING] EVENT: teams-auth-complete received');
+        setTeamsPhase('done');
+        validationError = '';
+        devLog('[ONBOARDING] EVENT: setTeamsPhase(done), validationError cleared');
+      },
+      onTeamsFailed: (payload) => {
+        console.error('[ONBOARDING] EVENT: teams-auth-failed received:', payload);
+        setTeamsPhase('error', String(payload));
+        devLog('[ONBOARDING] EVENT: setTeamsPhase(error)');
+      }
     });
-
-    devLog('[ONBOARDING] onMount: setting up spotify-auth-failed listener');
-    const fn2 = await listen<string>('spotify-auth-failed', (event) => {
-      console.error('[ONBOARDING] EVENT: spotify-auth-failed received:', event.payload);
-      spotifyWaiting = false;
-      spotifyAuthError = String(event.payload);
-      devLog('[ONBOARDING] EVENT: spotifyWaiting=false, spotifyAuthError set');
-    });
-
-    devLog('[ONBOARDING] onMount: setting up teams-auth-complete listener');
-    const fn3 = await listen('teams-auth-complete', () => {
-      devLog('[ONBOARDING] EVENT: teams-auth-complete received');
-      teamsConnected = true;
-      teamsPolling = false;
-      teamsAuthError = '';
-      validationError = '';
-      devLog('[ONBOARDING] EVENT: teamsConnected=true, teamsPolling=false, teamsAuthError=""');
-    });
-
-    devLog('[ONBOARDING] onMount: setting up teams-auth-failed listener');
-    const fn4 = await listen<string>('teams-auth-failed', (event) => {
-      console.error('[ONBOARDING] EVENT: teams-auth-failed received:', event.payload);
-      teamsPolling = false;
-      teamsAuthError = String(event.payload);
-      devLog('[ONBOARDING] EVENT: teamsPolling=false, teamsAuthError set');
-    });
-
-    unlistenFns = [fn1, fn2, fn3, fn4];
     devLog('[ONBOARDING] onMount: listeners registered');
   });
 
   onDestroy(() => {
     devLog('[ONBOARDING] onDestroy: cleaning up listeners');
-    unlistenFns.forEach(fn => fn());
+    if (unlisten) unlisten();
     devLog('[ONBOARDING] onDestroy: listeners cleaned up');
   });
 
@@ -118,13 +106,12 @@
         redirectUri: 'presencejam://callback'
       });
       devLog('[ONBOARDING] connectSpotify: invoke SUCCESS');
-      spotifyWaiting = true;
-      devLog('[ONBOARDING] connectSpotify: spotifyWaiting=true');
+      setSpotifyPhase('waiting');
+      devLog('[ONBOARDING] connectSpotify: setSpotifyPhase(waiting)');
     } catch (e) {
       console.error('[ONBOARDING] connectSpotify: invoke FAILED:', e);
-      spotifyWaiting = false;
-      spotifyAuthError = e instanceof Error ? e.message : String(e);
-      devLog('[ONBOARDING] connectSpotify: spotifyWaiting=false, spotifyAuthError set');
+      setSpotifyPhase('error', e instanceof Error ? e.message : String(e));
+      devLog('[ONBOARDING] connectSpotify: setSpotifyPhase(error)');
     }
     
     devLog('[ONBOARDING] connectSpotify: EXIT');
@@ -144,9 +131,8 @@
         devLog('[ONBOARDING] handleManualUrlPaste: invoke SUCCESS, tokens=', tokens ? 'present' : 'null');
         
         if (tokens) {
-          spotifyConnected = true;
-          spotifyWaiting = false;
-          devLog('[ONBOARDING] handleManualUrlPaste: spotifyConnected=true, spotifyWaiting=false');
+          setSpotifyPhase('done');
+          devLog('[ONBOARDING] handleManualUrlPaste: setSpotifyPhase(done)');
         }
       } else {
         devLog('[ONBOARDING] handleManualUrlPaste: no code extracted');
@@ -196,7 +182,7 @@
       devLog('[ONBOARDING] connectTeams: open_external_url SUCCESS');
     } catch (e) {
       console.error('[ONBOARDING] connectTeams: FAILED:', e);
-      teamsAuthError = 'Failed to start Teams sign-in. Please try again.';
+      setTeamsPhase('error', 'Failed to start Teams sign-in. Please try again.');
     }
     
     devLog('[ONBOARDING] connectTeams: EXIT');
@@ -204,11 +190,10 @@
 
   async function pollTeamsAuth() {
     devLog('[ONBOARDING] pollTeamsAuth: ENTRY');
-    teamsAuthError = '';
+    setTeamsPhase('waiting');
     
     try {
-      teamsPolling = true;
-      devLog('[ONBOARDING] pollTeamsAuth: teamsPolling=true');
+      devLog('[ONBOARDING] pollTeamsAuth: setTeamsPhase(waiting)');
       devLog('[ONBOARDING] pollTeamsAuth: calling invoke poll_teams_auth');
       devLog('[ONBOARDING] pollTeamsAuth: deviceCode.length=', teamsDeviceCode.length);
       
@@ -216,16 +201,13 @@
       devLog('[ONBOARDING] pollTeamsAuth: invoke SUCCESS, tokens=', tokens ? 'present' : 'null');
       
       if (tokens) {
-        teamsConnected = true;
-        teamsPolling = false;
-        teamsAuthError = '';
-        devLog('[ONBOARDING] pollTeamsAuth: teamsConnected=true, teamsPolling=false');
+        setTeamsPhase('done');
+        devLog('[ONBOARDING] pollTeamsAuth: setTeamsPhase(done)');
       }
     } catch (e) {
       console.error('[ONBOARDING] pollTeamsAuth: FAILED:', e);
-      teamsAuthError = String(e);
-      teamsPolling = false;
-      devLog('[ONBOARDING] pollTeamsAuth: teamsAuthError set, teamsPolling=false');
+      setTeamsPhase('error', String(e));
+      devLog('[ONBOARDING] pollTeamsAuth: setTeamsPhase(error)');
     }
     
     devLog('[ONBOARDING] pollTeamsAuth: EXIT');
@@ -370,7 +352,7 @@
           <button onclick={handleManualUrlPaste} disabled={!spotifyManualUrl}>
             Submit URL
           </button>
-          <button class="back" onclick={() => { spotifyWaiting = false; }}>
+          <button class="back" onclick={() => { setSpotifyPhase('idle'); }}>
             Cancel
           </button>
           {#if spotifyAuthError}
