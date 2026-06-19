@@ -72,6 +72,7 @@ pub mod commands;
 pub mod config;
 pub mod keychain;
 pub mod menu;
+pub mod pkce;
 pub mod polling;
 pub mod profanity;
 pub mod spotify;
