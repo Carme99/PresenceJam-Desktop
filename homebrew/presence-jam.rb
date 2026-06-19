@@ -6,22 +6,34 @@ class PresenceJam < Formula
   version "__VERSION__"
   license "MIT"
 
-  # Tauri-built macOS DMG. The Tauri 2.x bundler wraps the .app bundle
-  # in an outer `PresenceJam/` subfolder (along with an `Applications`
-  # symlink for the drag-to-install UX), so the mount-root layout is:
+  # Tauri-built macOS DMG. The HFS+ mount layout has been inconsistent
+  # across releases and brew versions. The actual HFS+ root on a Linux
+  # test-mount of the v2.7.1 DMG contains PresenceJam.app/ directly
+  # (verified via dmg2img + hfsplus mount), but brew on Jack's macOS
+  # failed both `prefix.install "PresenceJam.app"` and
+  # `prefix.install "PresenceJam/PresenceJam.app"` with Errno::ENOENT.
   #
-  #   /Volumes/PresenceJam/         (the volume, --volname PresenceJam)
-  #     PresenceJam/                (outer subfolder, Tauri bundler quirk)
-  #       PresenceJam.app/          ← what we want
-  #       Applications              (symlink to /Applications)
-  #
-  # Verified by extracting the v2.7.1 DMG with 7z — the .app is one
-  # level deeper than the original formula expected. The original
-  # `prefix.install "PresenceJam.app"` failed with `Errno::ENOENT`
-  # because it was looking at the buildpath root, not the subfolder.
+  # This fix probes for the .app at both the documented layouts using
+  # absolute paths from `buildpath` (cwd-independent), and if neither
+  # matches, prints the actual buildpath contents as a diagnostic.
+  # See carme99/homebrew-tap commit 4de3650 for the matched layout.
 
   def install
-    prefix.install "PresenceJam/PresenceJam.app"
+    candidates = [
+      buildpath/"PresenceJam.app",
+      buildpath/"PresenceJam/PresenceJam.app",
+    ]
+    app_path = candidates.find(&:directory?)
+    unless app_path
+      odie <<~EOS
+        PresenceJam.app not found at #{buildpath}.
+        Buildpath contents:
+        #{Dir.glob("#{buildpath}/*").map { |p| "  #{p}" }.join("\n")}
+        Expected one of:
+          #{candidates.join("\n          ")}
+      EOS
+    end
+    prefix.install app_path
   end
 
   test do
