@@ -65,9 +65,8 @@
           currentView.set('onboarding');
           return;
         }
-        await invoke('start_spotify_auth', {
+        await invoke('start_spotify_reconnect', {
           clientId: localConfig.spotify.client_id,
-          clientSecret: '',
           redirectUri: 'presencejam://callback'
         });
       } catch (e) {

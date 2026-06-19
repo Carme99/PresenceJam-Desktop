@@ -144,6 +144,81 @@ pub fn is_spotify_client_secret_set() -> bool {
     crate::keychain::has_spotify_client_secret()
 }
 
+/// Common PKCE OAuth flow for Spotify authorization. Builds the auth
+/// URL, generates verifier/challenge/state, stores the pending auth
+/// in AppState (in-memory only — never persisted), and opens the
+/// browser. Does NOT touch the keychain — that's the caller's job.
+///
+/// Used by both `start_spotify_auth` (initial onboarding, writes
+/// secret to keychain) and `start_spotify_reconnect` (keychain
+/// already populated, reads from it).
+fn run_spotify_oauth_flow(
+    client_id: String,
+    redirect_uri: String,
+    state: &tauri::State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    let verifier = crate::pkce::generate_verifier();
+    log::info!(
+        "[CMD] run_spotify_oauth_flow: verifier generated, len={}",
+        verifier.len()
+    );
+
+    let challenge = crate::pkce::generate_challenge(&verifier);
+    log::info!("[CMD] run_spotify_oauth_flow: challenge generated");
+
+    let csrf_state = crate::pkce::generate_verifier();
+    log::info!(
+        "[CMD] run_spotify_oauth_flow: state generated, len={}",
+        csrf_state.len()
+    );
+
+    let auth_url = format!(
+        "https://accounts.spotify.com/authorize\
+         ?client_id={}\
+         &response_type=code\
+         &redirect_uri={}\
+         &code_challenge_method=S256\
+         &code_challenge={}\
+         &state={}\
+         &scope=user-read-currently-playing user-read-playback-state",
+        client_id,
+        urlencoding::encode(&redirect_uri),
+        urlencoding::encode(&challenge),
+        urlencoding::encode(&csrf_state)
+    );
+    log::info!(
+        "[CMD] run_spotify_oauth_flow: auth_url created, length={}",
+        auth_url.len()
+    );
+
+    // Spotify authorization codes expire in 10 minutes (600 seconds)
+    let expires_at = chrono::Utc::now() + chrono::Duration::seconds(600);
+
+    // Store pending auth in AppState only. We deliberately do NOT persist
+    // the PKCE verifier to disk — it's a 10-minute bearer credential and
+    // disk persistence leaks it to filesystem-level attackers. See issue
+    // #65 / HIGH #3.
+    {
+        let mut pending = state.pending_spotify_auth.write();
+        *pending = Some(PendingSpotifyAuth {
+            verifier,
+            state: csrf_state,
+            client_id,
+            redirect_uri,
+            expires_at,
+        });
+        log::info!("[CMD] run_spotify_oauth_flow: stored pending auth in AppState (in-memory only)");
+    }
+
+    if let Err(e) = tauri_plugin_opener::open_url(&auth_url, None::<&str>) {
+        log::warn!("[CMD] run_spotify_oauth_flow: Failed to open browser: {}", e);
+    } else {
+        log::info!("[CMD] run_spotify_oauth_flow: Browser opened successfully");
+    }
+
+    Ok(())
+}
+
 #[tauri::command]
 pub fn start_spotify_auth(
     client_id: String,
@@ -170,72 +245,61 @@ pub fn start_spotify_auth(
     validate_spotify_client_id(&client_id)?;
     validate_spotify_client_secret(&client_secret)?;
 
-    let verifier = crate::pkce::generate_verifier();
-    log::info!(
-        "[CMD] start_spotify_auth: verifier generated, len={}",
-        verifier.len()
-    );
-
-    let challenge = crate::pkce::generate_challenge(&verifier);
-    log::info!("[CMD] start_spotify_auth: challenge generated");
-
-    let csrf_state = crate::pkce::generate_verifier();
-    log::info!(
-        "[CMD] start_spotify_auth: state generated, len={}",
-        csrf_state.len()
-    );
-
-    let auth_url = format!(
-        "https://accounts.spotify.com/authorize\
-         ?client_id={}\
-         &response_type=code\
-         &redirect_uri={}\
-         &code_challenge_method=S256\
-         &code_challenge={}\
-         &state={}\
-         &scope=user-read-currently-playing user-read-playback-state",
-        client_id,
-        urlencoding::encode(&redirect_uri),
-        urlencoding::encode(&challenge),
-        urlencoding::encode(&csrf_state)
-    );
-    log::info!(
-        "[CMD] start_spotify_auth: auth_url created, length={}",
-        auth_url.len()
-    );
-
-    // Spotify authorization codes expire in 10 minutes (600 seconds)
-    let expires_at = chrono::Utc::now() + chrono::Duration::seconds(600);
-
     // Store the client_secret in the OS keychain. This is the only place the
     // secret is persisted from this point forward; it is intentionally NOT
     // included in `pending_spotify_auth` (AppState or store). See issue #9.
     crate::keychain::store_spotify_client_secret(&client_secret)?;
     log::info!("[CMD] start_spotify_auth: client_secret stored in keychain");
 
-    // Store pending auth in AppState only. We deliberately do NOT persist
-    // the PKCE verifier to disk — it's a 10-minute bearer credential and
-    // disk persistence leaks it to filesystem-level attackers. See issue
-    // #65 / HIGH #3.
-    {
-        let mut pending = state.pending_spotify_auth.write();
-        *pending = Some(PendingSpotifyAuth {
-            verifier,
-            state: csrf_state,
-            client_id,
-            redirect_uri,
-            expires_at,
-        });
-        log::info!("[CMD] start_spotify_auth: stored pending auth in AppState (in-memory only)");
-    }
-
-    if let Err(e) = tauri_plugin_opener::open_url(&auth_url, None::<&str>) {
-        log::warn!("[CMD] start_spotify_auth: Failed to open browser: {}", e);
-    } else {
-        log::info!("[CMD] start_spotify_auth: Browser opened successfully");
-    }
+    run_spotify_oauth_flow(client_id, redirect_uri, &state)?;
 
     log::info!("[CMD] start_spotify_auth: SUCCESS - Spotify auth started");
+    Ok(())
+}
+
+/// Reconnect Spotify by reading the existing `client_secret` from the
+/// OS keychain (set during Onboarding). The frontend already verifies
+/// the keychain entry via `is_spotify_client_secret_set` before calling
+/// this; if it's missing the user is redirected to Onboarding instead.
+///
+/// Replaces the previous pattern of calling `start_spotify_auth` with
+/// `clientSecret: ''`, which the #67 validator correctly rejected
+/// (and which would have overwritten the existing keychain entry with
+/// an empty string). See issues #9, #67, and the v2.6.4 verifier report.
+#[tauri::command]
+pub fn start_spotify_reconnect(
+    client_id: String,
+    redirect_uri: String,
+    _app: AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    log::info!(
+        "[CMD] start_spotify_reconnect: ENTRY - client_id.len={}, redirect_uri={}",
+        client_id.len(),
+        redirect_uri
+    );
+
+    if client_id.is_empty() {
+        log::error!("[CMD] start_spotify_reconnect: client_id is empty");
+        return Err("client_id is required".to_string());
+    }
+
+    // Read the existing secret from the keychain. This will return an
+    // error if the entry is missing (e.g., user cleared the keychain
+    // after Onboarding), in which case the frontend should redirect to
+    // Onboarding rather than retry.
+    let client_secret = crate::keychain::get_spotify_client_secret()?;
+    log::info!("[CMD] start_spotify_reconnect: client_secret loaded from keychain");
+
+    // #67 validation: client_id format only — we never validate the
+    // secret here because it's already in the keychain (validated at
+    // Onboarding time).
+    validate_spotify_client_id(&client_id)?;
+    let _ = client_secret; // suppress unused warning; presence proves the keychain is populated
+
+    run_spotify_oauth_flow(client_id, redirect_uri, &state)?;
+
+    log::info!("[CMD] start_spotify_reconnect: SUCCESS - Spotify reconnect started");
     Ok(())
 }
 
