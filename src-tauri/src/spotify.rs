@@ -229,6 +229,15 @@ pub fn get_currently_playing(access_token: &str) -> Result<Option<TrackInfo>, Sp
     }
 }
 
+/// Single source of truth for status-format placeholder substitution.
+///
+/// Substitutes `{artist}`, `{track}`, `{album}`, and `{emoji}` in the
+/// given `format` string. The `{emoji}` placeholder resolves to `🎵` when
+/// the track is playing and `⏸️` when paused.
+///
+/// Both the runtime polling loop (`polling::poll_once`) and the Svelte
+/// live preview (Settings.svelte via the `preview_status` Tauri command)
+/// must call this — see issue #74.
 pub fn format_status(track: &TrackInfo, format: &str) -> String {
     let emoji = if track.is_playing { "🎵" } else { "⏸️" };
 
@@ -237,6 +246,22 @@ pub fn format_status(track: &TrackInfo, format: &str) -> String {
         .replace("{track}", &track.title)
         .replace("{album}", &track.album)
         .replace("{emoji}", emoji)
+}
+
+/// Renders `format` against a sample TrackInfo so the Svelte Settings page
+/// can show a live preview without holding a real playing track. Picked up
+/// by the `preview_status` Tauri command. See issue #74.
+pub fn preview_status_with_sample(format: &str) -> String {
+    let sample = TrackInfo {
+        title: "Sample Track".to_string(),
+        artist: "Sample Artist".to_string(),
+        album: "Sample Album".to_string(),
+        album_art_url: String::new(),
+        is_playing: true,
+        progress_ms: 0,
+        duration_ms: 0,
+    };
+    format_status(&sample, format)
 }
 
 pub fn is_token_expired(tokens: &SpotifyTokens) -> bool {
@@ -286,3 +311,59 @@ pub fn validate_spotify_token(tokens: &SpotifyTokens) -> Result<(), SpotifyApiEr
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_track(title: &str, artist: &str, album: &str, is_playing: bool) -> TrackInfo {
+        TrackInfo {
+            title: title.to_string(),
+            artist: artist.to_string(),
+            album: album.to_string(),
+            album_art_url: String::new(),
+            is_playing,
+            progress_ms: 0,
+            duration_ms: 0,
+        }
+    }
+
+    #[test]
+    fn format_status_substitutes_all_placeholders_when_playing() {
+        let track = make_track("Karma Police", "Radiohead", "OK Computer", true);
+        let result = format_status(&track, "{emoji} {artist} - {track} ({album}) {emoji}");
+        assert_eq!(result, "🎵 Radiohead - Karma Police (OK Computer) 🎵");
+    }
+
+    #[test]
+    fn format_status_uses_pause_emoji_when_paused() {
+        let track = make_track("Karma Police", "Radiohead", "OK Computer", false);
+        let result = format_status(&track, "{artist} - {track} {emoji}");
+        assert_eq!(result, "Radiohead - Karma Police ⏸️");
+    }
+
+    #[test]
+    fn format_status_leaves_unrecognized_placeholders_alone() {
+        let track = make_track("x", "y", "z", true);
+        let result = format_status(&track, "{artist} {not_a_placeholder} {track}");
+        assert_eq!(result, "y {not_a_placeholder} x");
+    }
+
+    #[test]
+    fn format_status_works_with_no_placeholders() {
+        let track = make_track("x", "y", "z", true);
+        let result = format_status(&track, "Static text only");
+        assert_eq!(result, "Static text only");
+    }
+
+    #[test]
+    fn format_status_empty_format_returns_empty() {
+        let track = make_track("x", "y", "z", true);
+        assert_eq!(format_status(&track, ""), "");
+    }
+
+    #[test]
+    fn preview_status_with_sample_uses_sample_values_and_playing_emoji() {
+        let result = preview_status_with_sample("{emoji} {artist} - {track} ({album}) {emoji}");
+        assert_eq!(result, "🎵 Sample Artist - Sample Track (Sample Album) 🎵");
+    }
+}

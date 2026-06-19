@@ -1,21 +1,16 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
-  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { onMount, onDestroy } from 'svelte';
   import { currentView } from '$lib/stores/app';
   import { configStore, loadConfig, type AppConfig } from '$lib/stores/config';
+  import { authFlow, setSpotifyPhase, setTeamsPhase } from '$lib/stores/authFlow.svelte';
+  import { useAuthListeners } from '$lib/utils/useAuthListeners';
   import { devLog } from '$lib/utils/dev';
-
-  let spotifyAuthWaiting = $state(false);
-  let teamsAuthWaiting = $state(false);
-  let spotifyError = $state('');
-  let teamsError = $state('');
-  let spotifyDone = $state(false);
-  let teamsDone = $state(false);
-  let unlistenFns: UnlistenFn[] = [];
 
   let needsSpotify = $state(false);
   let needsTeams = $state(false);
+
+  let unlisten: (() => void) | null = null;
 
   onMount(async () => {
     devLog('[RECONNECT] onMount: ENTRY');
@@ -32,47 +27,37 @@
 
     devLog('[RECONNECT] needsSpotify=', needsSpotify, 'needsTeams=', needsTeams);
 
-    // Listen for auth completion events
-    unlistenFns.push(await listen('spotify-auth-complete', () => {
-      devLog('[RECONNECT] EVENT: spotify-auth-complete received');
-      spotifyAuthWaiting = false;
-      spotifyDone = true;
-      spotifyError = '';
-    }));
-
-    unlistenFns.push(await listen('spotify-auth-failed', (event) => {
-      devLog('[RECONNECT] EVENT: spotify-auth-failed:', event.payload);
-      spotifyAuthWaiting = false;
-      spotifyError = String(event.payload);
-    }));
-
-    unlistenFns.push(await listen('teams-auth-complete', () => {
-      devLog('[RECONNECT] EVENT: teams-auth-complete received');
-      teamsAuthWaiting = false;
-      teamsDone = true;
-      teamsError = '';
-    }));
-
-    unlistenFns.push(await listen('teams-auth-failed', (event) => {
-      devLog('[RECONNECT] EVENT: teams-auth-failed:', event.payload);
-      teamsAuthWaiting = false;
-      teamsError = String(event.payload);
-    }));
+    unlisten = await useAuthListeners({
+      onSpotifyComplete: () => {
+        devLog('[RECONNECT] EVENT: spotify-auth-complete received');
+        setSpotifyPhase('done');
+      },
+      onSpotifyFailed: (payload) => {
+        devLog('[RECONNECT] EVENT: spotify-auth-failed:', payload);
+        setSpotifyPhase('error', String(payload));
+      },
+      onTeamsComplete: () => {
+        devLog('[RECONNECT] EVENT: teams-auth-complete received');
+        setTeamsPhase('done');
+      },
+      onTeamsFailed: (payload) => {
+        devLog('[RECONNECT] EVENT: teams-auth-failed:', payload);
+        setTeamsPhase('error', String(payload));
+      }
+    });
 
     // Auto-start Spotify reconnect only if credentials exist
-    if (!needsSpotify && !spotifyDone && !spotifyAuthWaiting) {
+    if (!needsSpotify && authFlow.spotify.phase !== 'done' && authFlow.spotify.phase !== 'waiting') {
       await reconnectSpotify();
     }
   });
 
   onDestroy(() => {
-    for (const unlisten of unlistenFns) {
-      unlisten();
-    }
+    if (unlisten) unlisten();
   });
 
   async function reconnectSpotify() {
-    if (spotifyAuthWaiting || spotifyDone || needsSpotify) return;
+    if (authFlow.spotify.phase === 'waiting' || authFlow.spotify.phase === 'done' || needsSpotify) return;
     devLog('[RECONNECT] reconnectSpotify: ENTRY');
     // Re-check the keychain: the user may have wiped it since the page
     // loaded. If the secret is gone we cannot complete the auth flow
@@ -83,8 +68,7 @@
       needsSpotify = true;
       return;
     }
-    spotifyAuthWaiting = true;
-    spotifyError = '';
+    setSpotifyPhase('waiting');
     try {
       await invoke('start_spotify_auth', {
         clientId: $configStore.spotify.client_id,
@@ -94,8 +78,7 @@
       });
     } catch (e) {
       devLog('[RECONNECT] reconnectSpotify: invoke failed:', e);
-      spotifyAuthWaiting = false;
-      spotifyError = String(e);
+      setSpotifyPhase('error', String(e));
     }
   }
 
@@ -121,7 +104,7 @@
 
     <section class="card">
       <h2>Spotify</h2>
-      {#if spotifyDone}
+      {#if authFlow.spotify.phase === 'done'}
         <div class="status success">
           <span class="badge success">Connected</span>
           <span>Spotify reconnected successfully</span>
@@ -131,16 +114,16 @@
           <span class="badge error">Missing Credentials</span>
           <span>Spotify credentials are not configured</span>
         </div>
-      {:else if spotifyAuthWaiting}
+      {:else if authFlow.spotify.phase === 'waiting'}
         <div class="status waiting">
           <span class="badge warning">Waiting...</span>
           <span>Complete authentication in the opened browser</span>
         </div>
         <p class="hint">If the browser didn't open automatically, check your default browser and complete the Spotify authorization.</p>
-      {:else if spotifyError}
+      {:else if authFlow.spotify.error}
         <div class="status error">
           <span class="badge error">Failed</span>
-          <span>{spotifyError}</span>
+          <span>{authFlow.spotify.error}</span>
         </div>
         <button class="btn-primary" onclick={reconnectSpotify}>Try Again</button>
       {:else}
@@ -149,7 +132,7 @@
       {/if}
     </section>
 
-    {#if spotifyDone}
+    {#if authFlow.spotify.phase === 'done'}
       <div class="actions">
         <button class="btn-full" onclick={goToDashboard}>
           Back to Dashboard
