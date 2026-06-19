@@ -5,6 +5,25 @@ All notable changes to PresenceJam are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.7.0] - 2026-06-19
+
+### Refactor
+- **refactor: dedup auth-listener setup across 3 Svelte components (#73).** Extracted a shared `useAuthListeners()` helper and an `authFlow` Svelte 5 reactive store to deduplicate the 4-event listener block (spotify-auth-complete/failed, teams-auth-complete/failed) across `Onboarding.svelte`, `Settings.svelte`, and `Reconnect.svelte`.
+- **refactor: single source of truth for status-format placeholder substitution (#74).** Moved the placeholder substitution for the status-format template into Rust so the Svelte live preview and the runtime polling loop share one implementation.
+- **refactor: extract pkce module, dedup helpers (#75).** Extracted the PKCE challenge/verifier generation logic from `spotify.rs` into a dedicated `pkce.rs` module.
+
+### CI/Build
+- **ci: pin third-party action SHAs and document token scoping (#68).** All third-party GitHub Actions are now pinned to full-length commit SHAs instead of version tags. Documented the required token scopes for `HOMEBREW_TAP_TOKEN` and `WINGET_TOKEN`.
+- **ci: run cargo test and npm check on PRs (#81).** Added a `ci.yml` workflow that runs `cargo test`, `cargo clippy`, and `npm run check` (Svelte type-check) on every PR.
+
+### Deferred
+- **#66 (deep-link hijack)** remains deferred to v2.7.1. Per-launch custom-scheme registration (OS-specific) is required for the full fix. Partial mitigation from #65 (PKCE verifier in `AppState` only) is still in place.
+
+### Follow-ups (not addressed here)
+- **#71 (tray Show/Hide label regression).** The menu label doesn't update after clicking "Hide Window" — the dedup key omits `window.is_visible()`. Tracked separately.
+- **Reconnect Spotify flow.** `Reconnect.svelte` and `Settings.svelte` pass `clientSecret: ''` which the #67 validator rejects. Pre-existing bug, not introduced by this release.
+- **Frontend dead stores.** `src/lib/stores/spotify.ts` and `src/lib/stores/teams.ts` are still present. Tracked separately.
+
 ## [2.6.4] - 2026-06-14
 
 ### Security
