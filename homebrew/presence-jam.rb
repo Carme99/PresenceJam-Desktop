@@ -6,23 +6,28 @@ class PresenceJam < Formula
   version "__VERSION__"
   license "MIT"
 
-  # Tauri-built macOS DMG. brew mounts the DMG and then cd's INTO the
-  # .app bundle, setting buildpath = the .app bundle itself (e.g.
-  # /private/tmp/presence-jam-XXXXXXXX-XXXXX/PresenceJam.app/).
-  # The .app's contents (Contents/MacOS, Contents/Resources,
-  # Contents/Info.plist) sit directly at buildpath.
+  # Tauri-built macOS DMG. brew mounts the DMG, extracts the .app
+  # bundle to a temp dir, and chdirs INTO the .app — so the
+  # formula's `buildpath` IS the .app bundle itself, with the
+  # bundle's contents (Contents/MacOS, Contents/Resources,
+  # Contents/Info.plist) sitting directly at buildpath.
   #
-  # Diagnosed by adding diagnostic output on v2.7.1: brew reported
-  # buildpath contents as just "Contents/". The original formula
-  # tried `prefix.install "PresenceJam.app"` which would have looked
-  # for buildpath/PresenceJam.app — i.e. inside the bundle.
-  # Unsurprisingly, ENOENT. The fix is to install the entire
-  # buildpath (the .app bundle itself) into the keg.
-  #
-  # See carme99/homebrew-tap commit 531c6da for the matched fix.
+  # Earlier attempts:
+  #   - prefix.install "PresenceJam.app"             → buildpath/PresenceJam.app doesn't exist
+  #   - prefix.install "PresenceJam/PresenceJam.app"  → same reason
+  #   - prefix.install buildpath                      → Errno::ENOENT @ dir_initialize
+  # Final form: FileUtils.cp_r with explicit string paths. Verifies
+  # buildpath exists first so a clear error surfaces if the layout
+  # ever changes. See carme99/homebrew-tap commit 71777f3.
 
   def install
-    prefix.install buildpath
+    raise "buildpath not set" unless buildpath
+    raise "buildpath does not exist: #{buildpath}" unless buildpath.exist?
+    raise "buildpath is not a directory: #{buildpath}" unless buildpath.directory?
+
+    # buildpath is the .app bundle. Install it as prefix/PresenceJam.app.
+    dest = prefix / buildpath.basename
+    FileUtils.cp_r buildpath.to_s, dest.to_s
   end
 
   test do
