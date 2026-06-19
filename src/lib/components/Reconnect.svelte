@@ -70,10 +70,11 @@
     }
     setSpotifyPhase('waiting');
     try {
-      await invoke('start_spotify_auth', {
+      // Use the dedicated reconnect IPC — reads client_secret from the
+      // OS keychain (set during Onboarding) instead of overwriting it
+      // with an empty string. See issues #9, #67.
+      await invoke('start_spotify_reconnect', {
         clientId: $configStore.spotify.client_id,
-        // clientSecret is read from the keychain on the backend.
-        clientSecret: '',
         redirectUri: 'presencejam://callback'
       });
     } catch (e) {

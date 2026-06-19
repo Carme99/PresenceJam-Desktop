@@ -542,6 +542,7 @@ pub fn run() {
             commands::save_config,
             commands::is_spotify_client_secret_set,
             commands::start_spotify_auth,
+            commands::start_spotify_reconnect,
             commands::complete_spotify_auth_manual,
             commands::refresh_spotify,
             commands::start_teams_auth_device_code,
