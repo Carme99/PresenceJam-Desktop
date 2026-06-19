@@ -5,6 +5,11 @@ All notable changes to PresenceJam are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.7.1] - 2026-06-19
+
+### Fixed
+- **fix: Reconnect Spotify flow was permanently broken (#88).** `Reconnect.svelte` and `Settings.svelte` were calling `start_spotify_auth` with `clientSecret: ''`, expecting the backend to read from the keychain. The #67 validator (≥32 chars) correctly rejected the empty string, so the Reconnect button was non-functional in shipped v2.6.4 / v2.7.0 builds. Fix: new `start_spotify_reconnect(client_id, redirect_uri)` IPC that reads the existing `client_secret` from the OS keychain and runs the same PKCE flow. The shared OAuth flow was extracted into a private `run_spotify_oauth_flow` helper so `start_spotify_auth` (writes secret to keychain) and `start_spotify_reconnect` (reads from keychain) share one implementation.
+
 ## [2.7.0] - 2026-06-19
 
 ### Refactor
