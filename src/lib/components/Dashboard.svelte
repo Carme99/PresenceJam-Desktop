@@ -4,7 +4,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { currentView } from '$lib/stores/app';
   import { configStore, loadConfig } from '$lib/stores/config';
-  import type { TrackInfo } from '$lib/stores/spotify';
+  import type { TrackInfo } from '$lib/types';
   import { devLog } from '$lib/utils/dev';
 
   let isSyncing = $state(false);
