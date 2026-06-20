@@ -71,7 +71,7 @@
           redirectUri: 'presencejam://callback'
         });
       } catch (e) {
-        console.error('[SETTINGS] start_spotify_auth failed:', e);
+        console.error('[SETTINGS] start_spotify_reconnect failed:', e);
         setSpotifyPhase('error', String(e));
       }
     }));
