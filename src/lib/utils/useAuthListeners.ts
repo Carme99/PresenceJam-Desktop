@@ -1,6 +1,5 @@
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import type { SpotifyTokens } from '$lib/stores/spotify';
-import type { TeamsTokens } from '$lib/stores/teams';
+import type { SpotifyTokens, TeamsTokens } from '$lib/types';
 
 export interface AuthListeners {
   onSpotifyComplete: (payload: SpotifyTokens | null) => void;

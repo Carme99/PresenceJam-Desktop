@@ -4,8 +4,6 @@
   import { onMount, onDestroy } from 'svelte';
   import { currentView } from '$lib/stores/app';
   import { configStore, saveConfig, loadConfig, type AppConfig } from '$lib/stores/config';
-  import { spotifyConnected } from '$lib/stores/spotify';
-  import { teamsConnected } from '$lib/stores/teams';
   import { authFlow, setSpotifyPhase, setTeamsPhase } from '$lib/stores/authFlow.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
 
@@ -46,8 +44,11 @@
       isConnected = syncStatus.spotify_connected ?? false;
       teamsStatusConnected = syncStatus.teams_connected ?? false;
     } catch {
-      isConnected = $spotifyConnected;
-      teamsStatusConnected = $teamsConnected;
+      // `get_sync_status` failure means the backend hasn't reported
+      // connection state yet — default to disconnected and let the
+      // auth-complete/failed listeners update these on first event.
+      isConnected = false;
+      teamsStatusConnected = false;
     }
 
     // Listen for reconnect-required events (emitted when backend clears tokens and needs re-auth)
