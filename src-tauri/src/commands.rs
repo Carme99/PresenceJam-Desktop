@@ -287,15 +287,16 @@ pub fn start_spotify_reconnect(
     // Read the existing secret from the keychain. This will return an
     // error if the entry is missing (e.g., user cleared the keychain
     // after Onboarding), in which case the frontend should redirect to
-    // Onboarding rather than retry.
-    let client_secret = crate::keychain::get_spotify_client_secret()?;
+    // Onboarding rather than retry. The `_` prefix tells the compiler
+    // we intentionally discard the value here — its presence (and the
+    // `?` above) proves the keychain entry exists.
+    let _client_secret = crate::keychain::get_spotify_client_secret()?;
     log::info!("[CMD] start_spotify_reconnect: client_secret loaded from keychain");
 
     // #67 validation: client_id format only — we never validate the
     // secret here because it's already in the keychain (validated at
     // Onboarding time).
     validate_spotify_client_id(&client_id)?;
-    let _ = client_secret; // suppress unused warning; presence proves the keychain is populated
 
     run_spotify_oauth_flow(client_id, redirect_uri, &state)?;
 
