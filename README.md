@@ -29,8 +29,38 @@ PresenceJam polls Spotify's Web API for your currently playing track and sets it
 
 Install the latest release from [GitHub Releases](https://github.com/Carme99/PresenceJam-Desktop/releases):
 
-- `PresenceJam-2.6.0.msi` — Windows 10/11 (64-bit)
-- `PresenceJam-2.6.0-macos.dmg` — macOS (Apple Silicon)
+- `PresenceJam-2.7.1.msi` — Windows 10/11 (64-bit)
+- `PresenceJam-2.7.1-macos.dmg` — macOS (Apple Silicon)
+- `PresenceJam-2.7.1-linux-amd64.deb` — Debian / Ubuntu / Mint / popOS (64-bit)
+- `PresenceJam-2.7.1-linux-amd64.AppImage` — any modern Linux (64-bit, no install)
+
+### Linux install
+
+**Debian / Ubuntu / Mint / popOS** (one-time):
+
+```bash
+sudo apt install ./PresenceJam-2.7.1-linux-amd64.deb
+# or if apt refuses the local path:
+sudo dpkg -i PresenceJam-2.7.1-linux-amd64.deb && sudo apt-get install -f
+```
+
+**AppImage** (any distro, no install required):
+
+```bash
+chmod +x PresenceJam-2.7.1-linux-amd64.AppImage
+./PresenceJam-2.7.1-linux-amd64.AppImage
+```
+
+For autostart with an AppImage, see the [Tauri Linux docs](https://tauri.app/distribute/linux/) — a `.desktop` file in `~/.local/share/applications/` plus the binary in `~/.local/bin/` is the standard pattern.
+
+### macOS first-run note
+
+The macOS DMG is currently **unsigned** (Apple Developer Program enrollment is not in scope — see issue #90). On first open, macOS shows "unidentified developer". To open:
+
+- Right-click the app → **Open** (confirms once), or
+- System Settings → Privacy & Security → **Open Anyway**
+
+Subsequent opens work without the prompt.
 
 ## Quickstart
 
