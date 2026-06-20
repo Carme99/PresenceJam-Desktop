@@ -5,6 +5,20 @@ All notable changes to PresenceJam are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.7.2] - 2026-06-20
+
+### Fixed
+- **fix(v2.7.2): verifier-flagged nits + release-hygiene catch (#92).** `Settings.svelte:73` log tag rename (`[SETTINGS] start_spotify_auth failed:` → `[SETTINGS] start_spotify_reconnect failed:`) — the catch block is for the reconnect-required listener (added in v2.7.1), not the original auth. `commands.rs:298` idiomatic `let _ = client_secret;` → `_client_secret` at declaration. `Cargo.lock` presence-jam version 2.7.0 → 2.7.1 (missed by the v2.7.1 release commit 856b613).
+
+### Changed
+- **chore(v2.7.2): a11y fix + project-wide rustfmt pass (#93).** `Settings.svelte:195` orphan `<label>` (no associated control — the client secret is stored in the keychain) changed to `<span class="form-label">` with a matching CSS rule. Project-wide rustfmt cleanup (was failing on `lib.rs:389/393/396` trailing whitespace — pre-existing rustfmt 1.9.0 internal bug; once stripped, rustfmt's backlog of legitimate reformatting was unblocked). Mechanical reformatting only: import reordering, long log/if/chain calls broken to multi-line. `cargo fmt --check` is now clean for the first time.
+
+### Refactor
+- **refactor: delete frontend dead stores, extract shared types (#91).** `src/lib/stores/spotify.ts` and `src/lib/stores/teams.ts` were writable stores that nothing ever wrote to. They also exported three type definitions (`SpotifyTokens`, `TrackInfo`, `TeamsTokens`) used in 4+ places. Extracted the types to new `src/lib/types.ts` and deleted the dead writables. `Settings.svelte` catch-block fallback (`isConnected = $spotifyConnected`) was always reading the never-written `false` default — replaced with explicit defaults.
+
+### CI/Build
+- **feat(ci): add Linux (.deb + .AppImage) to release matrix (#94).** Release workflow now builds Debian/Ubuntu (.deb) and AppImage artifacts alongside the existing macOS DMG and Windows MSI. `ubuntu-22.04` runner; Tauri 2's `tauri build` produces both formats in one invocation. No signing required on Linux (unlike macOS Gatekeeper / Windows SmartScreen). Skipped: .rpm, flatpak, snap, arm64. README updated with install instructions and the macOS unsigned-DMG Gatekeeper workaround note.
+
 ## [2.7.1] - 2026-06-19
 
 ### Fixed
