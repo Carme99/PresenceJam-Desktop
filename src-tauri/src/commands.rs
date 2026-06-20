@@ -207,11 +207,16 @@ fn run_spotify_oauth_flow(
             redirect_uri,
             expires_at,
         });
-        log::info!("[CMD] run_spotify_oauth_flow: stored pending auth in AppState (in-memory only)");
+        log::info!(
+            "[CMD] run_spotify_oauth_flow: stored pending auth in AppState (in-memory only)"
+        );
     }
 
     if let Err(e) = tauri_plugin_opener::open_url(&auth_url, None::<&str>) {
-        log::warn!("[CMD] run_spotify_oauth_flow: Failed to open browser: {}", e);
+        log::warn!(
+            "[CMD] run_spotify_oauth_flow: Failed to open browser: {}",
+            e
+        );
     } else {
         log::info!("[CMD] run_spotify_oauth_flow: Browser opened successfully");
     }

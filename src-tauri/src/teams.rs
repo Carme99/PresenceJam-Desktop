@@ -144,7 +144,8 @@ pub fn start_teams_auth_device_code() -> Result<DeviceCodeResponse, String> {
     let raw: DeviceCodeResponseRaw = serde_json::from_str(&raw_body).map_err(|e| {
         format!(
             "Failed to parse device code response: {} (body was: {})",
-            e, truncate_for_log(&raw_body)
+            e,
+            truncate_for_log(&raw_body)
         )
     })?;
     log::info!("teams::start_teams_auth_device_code: parsed response");
@@ -194,13 +195,18 @@ pub fn poll_teams_auth(device_code: &str) -> Result<TeamsTokens, String> {
         let raw_body = response
             .text()
             .map_err(|e| format!("Failed to read response body: {}", e))?;
-        log::debug!("poll_teams_auth: status={}, body={}", status, truncate_for_log(&raw_body));
+        log::debug!(
+            "poll_teams_auth: status={}, body={}",
+            status,
+            truncate_for_log(&raw_body)
+        );
 
         if status.is_success() {
             let token_resp: TokenResponse = serde_json::from_str(&raw_body).map_err(|e| {
                 format!(
                     "Failed to parse token response: {} (body was: {})",
-                    e, truncate_for_log(&raw_body)
+                    e,
+                    truncate_for_log(&raw_body)
                 )
             })?;
 
@@ -219,7 +225,8 @@ pub fn poll_teams_auth(device_code: &str) -> Result<TeamsTokens, String> {
         let error_resp: TokenErrorResponse = serde_json::from_str(&raw_body).map_err(|e| {
             format!(
                 "Failed to parse error response: {} (body was: {})",
-                e, truncate_for_log(&raw_body)
+                e,
+                truncate_for_log(&raw_body)
             )
         })?;
 
@@ -309,7 +316,8 @@ pub fn complete_teams_auth(
     let token_resp: TokenResponse = serde_json::from_str(&raw_body).map_err(|e| {
         format!(
             "Failed to parse token response: {} (body was: {})",
-            e, truncate_for_log(&raw_body)
+            e,
+            truncate_for_log(&raw_body)
         )
     })?;
 
@@ -357,7 +365,8 @@ pub fn refresh_teams_token(tokens: &TeamsTokens) -> Result<TeamsTokens, String> 
         let error_resp: TokenErrorResponse = serde_json::from_str(&raw_body).map_err(|e| {
             format!(
                 "Failed to parse error response: {} (body was: {})",
-                e, truncate_for_log(&raw_body)
+                e,
+                truncate_for_log(&raw_body)
             )
         })?;
         return Err(format!(
@@ -371,7 +380,8 @@ pub fn refresh_teams_token(tokens: &TeamsTokens) -> Result<TeamsTokens, String> 
     let token_resp: TokenResponse = serde_json::from_str(&raw_body).map_err(|e| {
         format!(
             "Failed to parse token response: {} (body was: {})",
-            e, truncate_for_log(&raw_body)
+            e,
+            truncate_for_log(&raw_body)
         )
     })?;
 
@@ -540,7 +550,10 @@ pub fn validate_teams_token(tokens: &TeamsTokens) -> Result<(), TeamsApiError> {
         429 => Err(TeamsApiError::RateLimited),
         500..=599 => {
             let body = response.text().unwrap_or_default();
-            Err(TeamsApiError::Transient(format!("server error {}: {}", status_code, body)))
+            Err(TeamsApiError::Transient(format!(
+                "server error {}: {}",
+                status_code, body
+            )))
         }
         _ => {
             let body = response.text().unwrap_or_default();
@@ -626,4 +639,3 @@ mod tests {
         assert!(truncated.ends_with("(…260 total)"));
     }
 }
-

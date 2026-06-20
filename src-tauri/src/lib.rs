@@ -380,20 +380,20 @@ pub fn run() {
                 } else {
                     "Unknown panic".to_string()
                 };
-                
+
                 let location = if let Some(loc) = panic_info.location() {
                     format!("{}:{}:{}", loc.file(), loc.line(), loc.column())
                 } else {
                     "unknown location".to_string()
                 };
-                
+
                 log::error!("[PANIC] {} at {}", msg, location);
                 eprintln!("[PANIC] {} at {}", msg, location);
             }));
-            
+
 
             log::info!("[APP] setup: ENTRY");
-            
+
             let state = Arc::new(AppState::new());
             app.manage(state.clone());
             log::info!("[APP] setup: AppState created and managed");

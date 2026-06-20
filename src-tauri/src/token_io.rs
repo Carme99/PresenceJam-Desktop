@@ -60,12 +60,14 @@ pub fn tokens_file_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 pub fn read_tokens_at(app: &tauri::AppHandle) -> Result<TokensFile, String> {
     let path = tokens_file_path(app)?;
     if !path.exists() {
-        log::info!("[TOKEN_IO] read_tokens_at: no file at {}, returning default", path.display());
+        log::info!(
+            "[TOKEN_IO] read_tokens_at: no file at {}, returning default",
+            path.display()
+        );
         return Ok(TokensFile::default());
     }
-    let s = fs::read_to_string(&path).map_err(|e| {
-        format!("Failed to read tokens file '{}': {}", path.display(), e)
-    })?;
+    let s = fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read tokens file '{}': {}", path.display(), e))?;
     if s.trim().is_empty() {
         log::info!("[TOKEN_IO] read_tokens_at: file is empty, returning default");
         return Ok(TokensFile::default());
@@ -97,9 +99,9 @@ pub fn read_tokens_at(app: &tauri::AppHandle) -> Result<TokensFile, String> {
 /// Windows for same-volume renames), so a process kill mid-write cannot
 /// leave a half-written file. The pattern mirrors `config::save_config`.
 pub fn write_tokens_atomic(path: &PathBuf, contents: &TokensFile) -> Result<(), String> {
-    let dir = path.parent().ok_or_else(|| {
-        format!("tokens path '{}' has no parent dir", path.display())
-    })?;
+    let dir = path
+        .parent()
+        .ok_or_else(|| format!("tokens path '{}' has no parent dir", path.display()))?;
     if !dir.exists() {
         fs::create_dir_all(dir)
             .map_err(|e| format!("Failed to create dir '{}': {}", dir.display(), e))?;
@@ -167,7 +169,10 @@ pub fn clear_tokens_file(app: &tauri::AppHandle) -> Result<(), String> {
             .map_err(|e| format!("Failed to delete tokens file '{}': {}", path.display(), e))?;
         log::info!("[TOKEN_IO] clear_tokens_file: deleted {}", path.display());
     } else {
-        log::info!("[TOKEN_IO] clear_tokens_file: nothing to delete at {}", path.display());
+        log::info!(
+            "[TOKEN_IO] clear_tokens_file: nothing to delete at {}",
+            path.display()
+        );
     }
     Ok(())
 }

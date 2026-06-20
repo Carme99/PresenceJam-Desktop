@@ -192,7 +192,7 @@
         />
       </div>
       <div class="form-group">
-        <label>Client Secret</label>
+        <span class="form-label">Client Secret</span>
         <p class="hint">
           {#if localConfig.spotify.client_secret_set}
             Stored securely in your operating system's keychain. To replace
@@ -420,7 +420,8 @@
     margin-bottom: 0;
   }
 
-  .form-group label {
+  .form-group label,
+  .form-group .form-label {
     display: block;
     margin-bottom: 6px;
     font-size: 13px;

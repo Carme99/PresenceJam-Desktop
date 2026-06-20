@@ -98,7 +98,8 @@ pub fn setup_app_menu(app: &tauri::App, window: &WebviewWindow) -> Result<(), St
     // Set as the window menu on macOS (appears in menu bar)
     // Using window.set_menu() instead of app.set_menu() to ensure
     // click events are properly routed through on_menu_event
-    window.set_menu(menu)
+    window
+        .set_menu(menu)
         .map_err(|e| format!("Failed to set window menu: {}", e))?;
 
     log::info!("[MENU] setup_app_menu: window menu bar created successfully");
@@ -143,7 +144,10 @@ pub fn handle_app_menu_event(app: &AppHandle, event_id: &str) {
             let _ = app.emit("show-about", ());
         }
         _ => {
-            log::warn!("[MENU] handle_app_menu_event: unknown event_id={}", event_id);
+            log::warn!(
+                "[MENU] handle_app_menu_event: unknown event_id={}",
+                event_id
+            );
         }
     }
 }
