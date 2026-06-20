@@ -18,9 +18,17 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact_name: PresenceJam-${{ github.ref_name }}-macos.dmg
+            bundle_path: PresenceJam-macos.dmg
           - os: windows-latest
             target: ''
             artifact_name: PresenceJam-${{ github.ref_name }}.msi
+            bundle_path: src-tauri/target/release/bundle/msi/*.msi
+          - os: ubuntu-22.04
+            target: ''
+            artifact_name: PresenceJam-${{ github.ref_name }}-linux-amd64
+            bundle_path: |
+              PresenceJam-linux-amd64.deb
+              PresenceJam-linux-amd64.AppImage
 
     steps:
       - name: Checkout repository
@@ -66,6 +74,30 @@ jobs:
           CARGO_INCREMENTAL: 0
         run: npx tauri build
 
+      # Tauri on Linux pulls in glib-sys/webkit2gtk-sys/etc. via FFI
+      # bindings, so the Ubuntu runner needs the GTK + webkit2gtk system
+      # headers and pkg-config. Mirrors the pr-time ci.yml setup. The
+      # Linux build produces both .deb (Debian package) and .AppImage
+      # (universal single-file binary) in one `tauri build` invocation.
+      - name: Install Linux system dependencies
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            pkg-config \
+            build-essential
+
+      - name: Build Tauri (Linux)
+        if: matrix.os == 'ubuntu-22.04'
+        env:
+          CARGO_INCREMENTAL: 0
+        run: npx tauri build
+
       - name: Debug macOS bundle
         if: matrix.os == 'macos-latest'
         run: |
@@ -88,12 +120,34 @@ jobs:
           $msi = Get-ChildItem "src-tauri/target/release/bundle/msi" -Filter "*.msi" | Select-Object -First 1
           Copy-Item $msi.FullName "PresenceJam-${{ github.ref_name }}.msi"
 
+      # Linux artifacts are named like `presence-jam_2.7.2_amd64.deb` by
+      # Tauri's bundler. Rename to the project-standard format used by
+      # the macOS and Windows steps (PresenceJam-<version>-<os>.ext) and
+      # drop the .AppImage alongside.
+      - name: Package Linux artifacts
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          set -euo pipefail
+          DEB=$(find src-tauri/target/release/bundle/deb -name "*.deb" | head -1)
+          APPIMAGE=$(find src-tauri/target/release/bundle/appimage -name "*.AppImage" | head -1)
+          if [ -z "$DEB" ] || [ -z "$APPIMAGE" ]; then
+            echo "::error::Expected one .deb in bundle/deb/ and one .AppImage in bundle/appimage/"
+            echo "bundle/deb/:"
+            ls -la src-tauri/target/release/bundle/deb/ 2>&1 || echo "(missing)"
+            echo "bundle/appimage/:"
+            ls -la src-tauri/target/release/bundle/appimage/ 2>&1 || echo "(missing)"
+            exit 1
+          fi
+          cp "$DEB" "PresenceJam-linux-amd64.deb"
+          cp "$APPIMAGE" "PresenceJam-linux-amd64.AppImage"
+          echo "Packaged:"
+          ls -la PresenceJam-linux-amd64.*
+
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: ${{ matrix.artifact_name }}
-          path: |
-            ${{ matrix.os == 'macos-latest' && 'PresenceJam-macos.dmg' || 'src-tauri/target/release/bundle/msi/*.msi' }}
+          path: ${{ matrix.bundle_path }}
           if-no-files-found: error
 
   release:
