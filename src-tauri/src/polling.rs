@@ -1,8 +1,8 @@
 use chrono::Utc;
 use rand::Rng;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration as StdDuration, Instant};
 use tauri::{AppHandle, Emitter};
@@ -174,7 +174,10 @@ fn process_track(
                     }
                 }
                 Err(e) => {
-                    log::error!("[POLLING] process_track: Failed to refresh Teams token: {}", e);
+                    log::error!(
+                        "[POLLING] process_track: Failed to refresh Teams token: {}",
+                        e
+                    );
                     // Clear the tokens so we don't keep trying with expired ones
                     *state.teams_tokens.write() = None;
                     let _ = app.emit("teams-reconnect-required", serde_json::json!(null));
@@ -279,13 +282,21 @@ fn process_track(
                     );
                     // Emit reconnect-required so the frontend knows to re-auth Teams
                     let e_str = e.to_lowercase();
-                    if e_str.contains("unauthorized") || e_str.contains("forbidden") || e_str.contains("401") || e_str.contains("403") {
+                    if e_str.contains("unauthorized")
+                        || e_str.contains("forbidden")
+                        || e_str.contains("401")
+                        || e_str.contains("403")
+                    {
                         log::warn!("[POLLING] process_track: Teams auth failure detected, emitting teams-reconnect-required");
                         let _ = app.emit("teams-reconnect-required", serde_json::json!(null));
                     }
                 }
             }
-        } else if config.as_ref().map(|c| c.teams.clear_on_pause).unwrap_or(true) {
+        } else if config
+            .as_ref()
+            .map(|c| c.teams.clear_on_pause)
+            .unwrap_or(true)
+        {
             // Issue #39: removed the `is_first_poll` guard. It was preventing
             // legitimate status-clearing on app start for the first 30s when
             // the user opens PresenceJam while Spotify is already paused.
@@ -341,7 +352,10 @@ fn handle_no_track(app: &AppHandle, state: &Arc<AppState>, last_track_key: &mut 
             guard.clone()
         };
         if let Some(teams_tok) = teams_tokens {
-            match clear_teams_status_message(&teams_tok.access_token, "🎵 Nothing playing on Spotify") {
+            match clear_teams_status_message(
+                &teams_tok.access_token,
+                "🎵 Nothing playing on Spotify",
+            ) {
                 Ok(_) => {
                     let _ = app.emit(
                         "presence-cleared",
@@ -527,9 +541,13 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
             }
             None => {
                 log::warn!("[POLLING] polling_loop: No Spotify tokens available, waiting...");
-                match stop_rx.recv_timeout(StdDuration::from_secs(with_jitter(ERROR_RETRY_INTERVAL_SECONDS))) {
+                match stop_rx.recv_timeout(StdDuration::from_secs(with_jitter(
+                    ERROR_RETRY_INTERVAL_SECONDS,
+                ))) {
                     Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                        log::info!("[POLLING] polling_loop: stop signal during no-token sleep, breaking");
+                        log::info!(
+                            "[POLLING] polling_loop: stop signal during no-token sleep, breaking"
+                        );
                         break;
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
@@ -579,7 +597,10 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                     if committed {
                         // Persist refreshed tokens to disk so they survive app restarts
                         if let Err(e) = token_io::persist_tokens(&state, &app) {
-                            log::warn!("[POLLING] polling_loop: failed to persist refreshed tokens: {}", e);
+                            log::warn!(
+                                "[POLLING] polling_loop: failed to persist refreshed tokens: {}",
+                                e
+                            );
                         }
                         new_tokens
                     } else {
@@ -596,8 +617,11 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                                 log::info!(
                                     "[POLLING] polling_loop: state cleared during refresh, waiting and re-polling"
                                 );
-                                match stop_rx.recv_timeout(StdDuration::from_secs(with_jitter(ERROR_RETRY_INTERVAL_SECONDS))) {
-                                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                                match stop_rx.recv_timeout(StdDuration::from_secs(with_jitter(
+                                    ERROR_RETRY_INTERVAL_SECONDS,
+                                ))) {
+                                    Ok(())
+                                    | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                                         log::info!("[POLLING] polling_loop: stop signal during CAS-fail sleep, breaking");
                                         break;
                                     }
@@ -622,7 +646,9 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                         }),
                     );
                     log::info!("[POLLING] polling_loop: EMIT error event");
-                    match stop_rx.recv_timeout(StdDuration::from_secs(with_jitter(ERROR_RETRY_INTERVAL_SECONDS))) {
+                    match stop_rx.recv_timeout(StdDuration::from_secs(with_jitter(
+                        ERROR_RETRY_INTERVAL_SECONDS,
+                    ))) {
                         Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                             log::info!("[POLLING] polling_loop: stop signal during error retry sleep, breaking");
                             break;
@@ -653,8 +679,16 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                     track.title,
                     track.artist
                 );
-                let sleep_duration =
-                    process_track(&app, &state, &config, &track, &mut last_track_key, last_poll_instant, &mut last_teams_update, &mut consecutive_pauses);
+                let sleep_duration = process_track(
+                    &app,
+                    &state,
+                    &config,
+                    &track,
+                    &mut last_track_key,
+                    last_poll_instant,
+                    &mut last_teams_update,
+                    &mut consecutive_pauses,
+                );
                 transient_failure_count = 0;
                 // Update tray menu with current sync state and track info (Bug 24+25 fix)
                 let is_syncing = state.is_syncing.load(Ordering::Acquire);
@@ -669,7 +703,9 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                 // Use interruptible sleep: wait for either a stop signal or timeout
                 match stop_rx.recv_timeout(StdDuration::from_secs(sleep_duration)) {
                     Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                        log::info!("[POLLING] polling_loop: stop signal during track sleep, breaking");
+                        log::info!(
+                            "[POLLING] polling_loop: stop signal during track sleep, breaking"
+                        );
                         break;
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
@@ -689,16 +725,18 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                 }
                 // Apply pause-aware exponential backoff: default→2×→4×→300s.
                 // The counter is reset by process_track on the first playing track.
-                let no_track_sleep = pause_backoff(consecutive_pauses, config_default_interval(&config));
+                let no_track_sleep =
+                    pause_backoff(consecutive_pauses, config_default_interval(&config));
                 consecutive_pauses = consecutive_pauses.saturating_add(1).min(4);
                 log::info!(
-
                     "[POLLING] polling_loop: sleeping for {} seconds (no track)",
                     no_track_sleep
                 );
                 match stop_rx.recv_timeout(StdDuration::from_secs(no_track_sleep)) {
                     Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                        log::info!("[POLLING] polling_loop: stop signal during no-track sleep, breaking");
+                        log::info!(
+                            "[POLLING] polling_loop: stop signal during no-track sleep, breaking"
+                        );
                         break;
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
@@ -758,48 +796,54 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                                             log::warn!("[POLLING] polling_loop: failed to persist refreshed tokens: {}", e);
                                         }
                                         let retry_token = new_tokens.access_token.clone();
-                                                // Bug 13: Capture instant before API call to correct progress_ms elapsed time
-                                                let last_poll_instant = Instant::now();
+                                        // Bug 13: Capture instant before API call to correct progress_ms elapsed time
+                                        let last_poll_instant = Instant::now();
                                         match get_currently_playing(&retry_token) {
-                                        Ok(Some(track)) => {
-                                            log::info!(
+                                            Ok(Some(track)) => {
+                                                log::info!(
                                                 "[POLLING] polling_loop: retry track found - {} by {}",
                                                 track.title,
                                                 track.artist
                                             );
-                                            let _sleep = process_track(
-                                                &app,
-                                                &state,
-                                                &config,
-                                                &track,
-                                                &mut last_track_key,
-                                                last_poll_instant,
-                                                &mut last_teams_update,
-                                                &mut consecutive_pauses,
-                                            );
-                                            transient_failure_count = 0;
-                                            continue;
-                                        }
-                                        Ok(None) => {
-                                            log::info!("[POLLING] polling_loop: retry no track");
-                                            handle_no_track(&app, &state, &mut last_track_key);
-                                            let retry_no_track_sleep = pause_backoff(consecutive_pauses, config_default_interval(&config));
-                                            consecutive_pauses = consecutive_pauses.saturating_add(1).min(4);
-                                            match stop_rx.recv_timeout(StdDuration::from_secs(retry_no_track_sleep)) {
+                                                let _sleep = process_track(
+                                                    &app,
+                                                    &state,
+                                                    &config,
+                                                    &track,
+                                                    &mut last_track_key,
+                                                    last_poll_instant,
+                                                    &mut last_teams_update,
+                                                    &mut consecutive_pauses,
+                                                );
+                                                transient_failure_count = 0;
+                                                continue;
+                                            }
+                                            Ok(None) => {
+                                                log::info!(
+                                                    "[POLLING] polling_loop: retry no track"
+                                                );
+                                                handle_no_track(&app, &state, &mut last_track_key);
+                                                let retry_no_track_sleep = pause_backoff(
+                                                    consecutive_pauses,
+                                                    config_default_interval(&config),
+                                                );
+                                                consecutive_pauses =
+                                                    consecutive_pauses.saturating_add(1).min(4);
+                                                match stop_rx.recv_timeout(StdDuration::from_secs(retry_no_track_sleep)) {
                                                 Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                                                     log::info!("[POLLING] polling_loop: stop signal during retry no-track sleep, breaking");
                                                     break;
                                                 }
                                                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                                             }
-                                            transient_failure_count = 0;
-                                            continue;
+                                                transient_failure_count = 0;
+                                                continue;
+                                            }
+                                            Err(retry_err) => {
+                                                log::error!("[POLLING] polling_loop: retry after refresh also failed: {}", retry_err);
+                                                final_err = retry_err;
+                                            }
                                         }
-                                        Err(retry_err) => {
-                                            log::error!("[POLLING] polling_loop: retry after refresh also failed: {}", retry_err);
-                                            final_err = retry_err;
-                                        }
-                                    }
                                     } // close if committed
                                 }
                                 Err(refresh_err) => {
@@ -809,7 +853,10 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                                     );
                                     // Permanent failure after refresh retry — require re-auth
                                     log::warn!("[POLLING] polling_loop: Spotify token refresh permanently failed, emitting spotify-reconnect-required");
-                                    let _ = app.emit("spotify-reconnect-required", serde_json::json!(null));
+                                    let _ = app.emit(
+                                        "spotify-reconnect-required",
+                                        serde_json::json!(null),
+                                    );
                                     final_err = SpotifyApiError::Other(refresh_err.to_string());
                                 }
                             }
@@ -825,7 +872,10 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                 // ExpiredToken triggers a refresh/retry above; if we reach here the
                 // retry failed — still count it as transient so the loop can give up.
                 // Auth/Other errors are non-transient and do not contribute.
-                if matches!(final_err, SpotifyApiError::RateLimited | SpotifyApiError::ExpiredToken) {
+                if matches!(
+                    final_err,
+                    SpotifyApiError::RateLimited | SpotifyApiError::ExpiredToken
+                ) {
                     transient_failure_count += 1;
                 }
 
@@ -846,7 +896,9 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                 log::info!("[POLLING] polling_loop: EMIT error event");
                 match stop_rx.recv_timeout(StdDuration::from_secs(backoff_secs)) {
                     Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                        log::info!("[POLLING] polling_loop: stop signal during backoff sleep, breaking");
+                        log::info!(
+                            "[POLLING] polling_loop: stop signal during backoff sleep, breaking"
+                        );
                         break;
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
@@ -871,13 +923,6 @@ pub fn stop_polling(state: &AppState) {
     state.is_syncing.store(false, Ordering::Release);
     log::info!("[POLLING] stop_polling: stop channel closed and is_syncing set to false");
 }
-
-
-
-
-
-
-
 
 #[cfg(test)]
 mod tests {

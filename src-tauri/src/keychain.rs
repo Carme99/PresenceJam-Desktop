@@ -65,7 +65,12 @@ pub fn get_spotify_client_secret() -> Result<String, String> {
                     .to_string(),
             );
         }
-        Err(e) => return Err(format!("Failed to read Spotify client secret from keychain: {}", e)),
+        Err(e) => {
+            return Err(format!(
+                "Failed to read Spotify client secret from keychain: {}",
+                e
+            ))
+        }
     };
     // Populate cache for next call
     *cache().write() = Some(secret.clone());
@@ -113,8 +118,9 @@ pub fn delete_spotify_client_secret() -> Result<(), String> {
             log::info!("[KEYCHAIN] Spotify client_secret not in keychain (cache cleared)");
             Ok(())
         }
-        Err(e) => {
-            Err(format!("Failed to delete Spotify client secret from keychain: {}", e))
-        }
+        Err(e) => Err(format!(
+            "Failed to delete Spotify client secret from keychain: {}",
+            e
+        )),
     }
 }

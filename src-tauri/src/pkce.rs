@@ -54,7 +54,8 @@ mod tests {
         // also guarantees the verifier has no `=` padding.
         let v = generate_verifier();
         assert!(
-            v.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            v.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
             "verifier contains non-URL-safe chars: {:?}",
             v
         );

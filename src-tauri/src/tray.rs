@@ -28,7 +28,11 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
 
     let tray = TrayIconBuilder::new()
         .tooltip("PresenceJam")
-        .icon(app.default_window_icon().cloned().ok_or("No default icon")?)
+        .icon(
+            app.default_window_icon()
+                .cloned()
+                .ok_or("No default icon")?,
+        )
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
@@ -88,7 +92,8 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
         log::warn!("[TRAY] setup_tray: already initialized, skipping");
         return Ok(());
     }
-    TRAY.set(tray).map_err(|_| "Tray already initialized".to_string())?;
+    TRAY.set(tray)
+        .map_err(|_| "Tray already initialized".to_string())?;
 
     // Immediately update tray menu to reflect actual state (Bug 11 fix).
     // Without this, the initial menu always shows "Pause Sync" regardless of actual
@@ -97,7 +102,10 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
     let is_syncing = state.is_syncing.load(Ordering::Acquire);
     let current_track = state.current_track.read().clone();
     if let Err(e) = update_tray_menu(app.handle(), is_syncing, current_track) {
-        log::warn!("[TRAY] setup_tray: failed to update initial tray menu: {}", e);
+        log::warn!(
+            "[TRAY] setup_tray: failed to update initial tray menu: {}",
+            e
+        );
     }
 
     log::info!("[TRAY] setup_tray: system tray initialized successfully");
@@ -158,8 +166,7 @@ fn last_tray_state() -> &'static parking_lot::Mutex<Option<TrayStateSnapshot>> {
 
 /// Module-level mutex that serialises the two writers to the tray
 /// (polling thread and frontend command). Issue #71.
-static TRAY_WRITE_LOCK: std::sync::OnceLock<parking_lot::Mutex<()>> =
-    std::sync::OnceLock::new();
+static TRAY_WRITE_LOCK: std::sync::OnceLock<parking_lot::Mutex<()>> = std::sync::OnceLock::new();
 
 fn tray_write_lock() -> &'static parking_lot::Mutex<()> {
     TRAY_WRITE_LOCK.get_or_init(|| parking_lot::Mutex::new(()))
@@ -222,17 +229,31 @@ pub fn update_tray_menu(
     let show_hide = MenuItemBuilder::with_id(ID_SHOW_HIDE, show_hide_label)
         .build(app)
         .map_err(|e| {
-            log::warn!("[TRAY] update_tray_menu: failed to build show_hide menu item: {}", e);
+            log::warn!(
+                "[TRAY] update_tray_menu: failed to build show_hide menu item: {}",
+                e
+            );
             e.to_string()
         })?;
 
     // Pause/Resume label based on sync state
-    let pause_resume_id = if is_syncing { ID_PAUSE_SYNC } else { ID_RESUME_SYNC };
-    let pause_resume_label = if is_syncing { "Pause Sync" } else { "Resume Sync" };
+    let pause_resume_id = if is_syncing {
+        ID_PAUSE_SYNC
+    } else {
+        ID_RESUME_SYNC
+    };
+    let pause_resume_label = if is_syncing {
+        "Pause Sync"
+    } else {
+        "Resume Sync"
+    };
     let pause_resume = MenuItemBuilder::with_id(pause_resume_id, pause_resume_label)
         .build(app)
         .map_err(|e| {
-            log::warn!("[TRAY] update_tray_menu: failed to build pause_resume menu item: {}", e);
+            log::warn!(
+                "[TRAY] update_tray_menu: failed to build pause_resume menu item: {}",
+                e
+            );
             e.to_string()
         })?;
 
@@ -249,21 +270,30 @@ pub fn update_tray_menu(
     let open_settings = MenuItemBuilder::with_id(ID_OPEN_SETTINGS, "Open Settings")
         .build(app)
         .map_err(|e| {
-            log::warn!("[TRAY] update_tray_menu: failed to build open_settings menu item: {}", e);
+            log::warn!(
+                "[TRAY] update_tray_menu: failed to build open_settings menu item: {}",
+                e
+            );
             e.to_string()
         })?;
 
     let open_logs = MenuItemBuilder::with_id(ID_OPEN_LOGS, "Open Logs Folder")
         .build(app)
         .map_err(|e| {
-            log::warn!("[TRAY] update_tray_menu: failed to build open_logs menu item: {}", e);
+            log::warn!(
+                "[TRAY] update_tray_menu: failed to build open_logs menu item: {}",
+                e
+            );
             e.to_string()
         })?;
 
     let quit = MenuItemBuilder::with_id(ID_QUIT, "Quit")
         .build(app)
         .map_err(|e| {
-            log::warn!("[TRAY] update_tray_menu: failed to build quit menu item: {}", e);
+            log::warn!(
+                "[TRAY] update_tray_menu: failed to build quit menu item: {}",
+                e
+            );
             e.to_string()
         })?;
 
@@ -299,11 +329,10 @@ pub fn update_tray_menu(
             e.to_string()
         })?;
 
-    tray.set_menu(Some(menu))
-        .map_err(|e| {
-            log::warn!("[TRAY] update_tray_menu: failed to set tray menu: {}", e);
-            format!("Failed to set tray menu: {}", e)
-        })?;
+    tray.set_menu(Some(menu)).map_err(|e| {
+        log::warn!("[TRAY] update_tray_menu: failed to set tray menu: {}", e);
+        format!("Failed to set tray menu: {}", e)
+    })?;
 
     // Commit the snapshot only after a successful set_menu. A failed
     // set_menu above left the snapshot at the previous value, so the
@@ -314,7 +343,9 @@ pub fn update_tray_menu(
         "[TRAY] update_tray_menu: tray menu updated - is_syncing={}, visible={}, track={:?}",
         is_syncing,
         is_window_visible,
-        current_track.as_ref().map(|t| format!("{} - {}", t.artist, t.title))
+        current_track
+            .as_ref()
+            .map(|t| format!("{} - {}", t.artist, t.title))
     );
     Ok(())
 }
