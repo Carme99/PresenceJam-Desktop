@@ -1,0 +1,66 @@
+# https://docs.github.com/en/code-security/dependabot/dependabot-version-updates
+# Behaviour summary:
+#   - Weekly cadence (Mon 9am UK), predictable batch
+#   - Minor + patch updates grouped into single PRs (less noise)
+#   - Major version bumps ignored (manual decision; security updates still happen)
+#   - Labels so Dependabot PRs are filterable alongside regular work
+#   - Dependabot security updates (already enabled) auto-PR vulns as before
+#   - Tracking visibility: filter by `label:dependencies` to see all Dependabot PRs
+
+version: 2
+
+updates:
+  # Frontend (Svelte + Vite + Tauri JS plugins)
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Europe/London"
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-and-patch:
+        applies-to: version-updates
+        update-types: ["minor", "patch"]
+    labels:
+      - "dependencies"
+      - "frontend"
+    commit-message:
+      prefix: "deps(frontend)"
+      include: "scope"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  # Backend (Tauri Rust deps in src-tauri/)
+  - package-ecosystem: "cargo"
+    directory: "/src-tauri"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Europe/London"
+    open-pull-requests-limit: 5
+    groups:
+      cargo-minor-and-patch:
+        applies-to: version-updates
+        update-types: ["minor", "patch"]
+    labels:
+      - "dependencies"
+      - "backend"
+    commit-message:
+      prefix: "deps(backend)"
+      include: "scope"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "ci"
