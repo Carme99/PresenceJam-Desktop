@@ -241,6 +241,118 @@ fn with_keychain_flags(mut config: AppConfig) -> AppConfig {
     config.spotify.client_secret_set = crate::keychain::has_spotify_client_secret();
     config
 }
+/// One-shot startup migration:
+/// `spotify.client_secret` field (legacy from ≤ v2.5.0), write it to
+/// the OS keychain and strip the plaintext from the file. Idempotent
+/// and safe to call on every startup.
+///
+/// Conflict policy: if the keychain already holds a *different*
+/// secret, the migration is a no-op (we don't clobber a working
+/// keychain entry with another install's plaintext). The user can
+/// resolve the conflict via Settings → Reconnect Spotify. See audit
+/// Q3 and issue #9.
+pub fn migrate_legacy_client_secret() {
+    let path = match get_config_path() {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!(
+                "[CFG] migrate_legacy_client_secret: config path unavailable: {}",
+                e
+            );
+            return;
+        }
+    };
+    if !path.exists() {
+        return; // Fresh install — nothing to migrate.
+    }
+    let contents = match fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!("[CFG] migrate_legacy_client_secret: read failed: {}", e);
+            return;
+        }
+    };
+    // Parse as raw Value so we can inspect unknown / pre-v2.6.0 fields
+    // without AppConfig's silent-drop on unknown keys. (AppConfig does
+    // not declare `client_secret`, so `serde_json::from_str::<AppConfig>`
+    // would discard it before we got a chance to migrate.)
+    let mut root: serde_json::Value = match serde_json::from_str(&contents) {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("[CFG] migrate_legacy_client_secret: parse failed: {}", e);
+            return;
+        }
+    };
+    let plaintext = root
+        .get("spotify")
+        .and_then(|s| s.get("client_secret"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let plaintext = match plaintext {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            log::debug!("[CFG] migrate_legacy_client_secret: no legacy plaintext field");
+            return;
+        }
+    };
+    // Conflict check: if keychain already holds a *different* secret,
+    // don't clobber it. Leave the plaintext in place; the user can
+    // resolve via Settings → Reconnect Spotify.
+    match crate::keychain::get_spotify_client_secret() {
+        Ok(existing) if existing == plaintext => {
+            log::info!(
+                "[CFG] migrate_legacy_client_secret: keychain already holds this value, stripping plaintext only"
+            );
+        }
+        Ok(existing) => {
+            log::warn!(
+                "[CFG] migrate_legacy_client_secret: keychain holds a different secret; leaving config.json untouched (user should Reconnect)"
+            );
+            log::warn!(
+                "[CFG] migrate_legacy_client_secret: plaintext.len={}, keychain.len={}",
+                plaintext.len(),
+                existing.len()
+            );
+            return;
+        }
+        Err(_) => {
+            // Keychain empty (the typical pre-v2.6.0-upgrader case).
+            // Write the plaintext into the keychain, then strip the file.
+            log::info!("[CFG] migrate_legacy_client_secret: keychain empty, writing plaintext into keychain");
+            if let Err(e) = crate::keychain::store_spotify_client_secret(&plaintext) {
+                log::warn!(
+                    "[CFG] migrate_legacy_client_secret: keychain write failed: {} (plaintext left in config.json)",
+                    e
+                );
+                return;
+            }
+        }
+    }
+    // Strip the plaintext field and re-serialise.
+    if let Some(spotify_obj) = root.get_mut("spotify").and_then(|v| v.as_object_mut()) {
+        spotify_obj.remove("client_secret");
+    }
+    let new_contents = match serde_json::to_string_pretty(&root) {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!(
+                "[CFG] migrate_legacy_client_secret: re-serialise failed: {}",
+                e
+            );
+            return;
+        }
+    };
+    if let Err(e) = atomic_write_json(&path, &new_contents) {
+        log::warn!(
+            "[CFG] migrate_legacy_client_secret: atomic rewrite failed: {} (keychain has the value, plaintext remains on disk)",
+            e
+        );
+    } else {
+        log::info!(
+            "[CFG] migrate_legacy_client_secret: SUCCESS — plaintext stripped from config.json"
+        );
+    }
+}
 
 fn atomic_write_json(path: &std::path::Path, json: &str) -> Result<(), String> {
     let temp_path = path.with_extension("tmp");

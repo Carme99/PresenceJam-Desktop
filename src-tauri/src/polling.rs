@@ -868,13 +868,19 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                     backoff_secs = with_jitter(RATE_LIMIT_BACKOFF_SECONDS);
                 }
 
-                // Only count truly transient errors toward the retry limit.
-                // ExpiredToken triggers a refresh/retry above; if we reach here the
-                // retry failed — still count it as transient so the loop can give up.
-                // Auth/Other errors are non-transient and do not contribute.
+                // Count truly transient errors toward the retry limit.
+                // `Other` is the catch-all variant `get_currently_playing`
+                // uses for reqwest send failures (DNS, TLS handshake,
+                // connection refused) and any non-200/204/401/429 HTTP
+                // response. Counting it here means a permanent network
+                // outage eventually hits the 5-strikes exit at line 883
+                // and emits `reconnect-required`, instead of looping
+                // forever emitting `error` events. See audit M1.
                 if matches!(
                     final_err,
-                    SpotifyApiError::RateLimited | SpotifyApiError::ExpiredToken
+                    SpotifyApiError::RateLimited
+                        | SpotifyApiError::ExpiredToken
+                        | SpotifyApiError::Other(_)
                 ) {
                     transient_failure_count += 1;
                 }
