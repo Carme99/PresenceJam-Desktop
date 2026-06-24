@@ -131,6 +131,23 @@ pub fn save_config(
             log::warn!("[CMD] save_config: failed to sync autostart state: {}", e);
         }
     }
+
+    // On macOS, sync the app's activation policy with the saved
+    // `start_minimized` preference so the dock icon disappears when the
+    // user wants tray-only behavior and reappears when they disable it.
+    // Setting on every save (not just on toggle) keeps the policy
+    // idempotent and avoids tracking previous state. See audit Q4.
+    #[cfg(target_os = "macos")]
+    {
+        let policy = if config.teams.start_minimized {
+            tauri::ActivationPolicy::Accessory
+        } else {
+            tauri::ActivationPolicy::Regular
+        };
+        if let Err(e) = app.set_activation_policy(policy) {
+            log::warn!("[CMD] save_config: failed to set ActivationPolicy: {}", e);
+        }
+    }
     log::info!("[CMD] save_config: SUCCESS");
     Ok(())
 }
