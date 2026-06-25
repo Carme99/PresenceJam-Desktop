@@ -45,3 +45,38 @@ export interface ErrorEventPayload {
   message: string;
   severity: 'warning' | 'error';
 }
+
+/**
+ * Returned by the `get_sync_status` Tauri command. Mirrors
+ * `commands::SyncStatus` in `src-tauri/src/commands.rs`.
+ */
+export interface SyncStatus {
+  is_syncing: boolean;
+  current_track: TrackInfo | null;
+  spotify_connected: boolean;
+  teams_connected: boolean;
+}
+
+/**
+ * Returned by the `start_teams_auth_device_code` Tauri command. Mirrors
+ * `teams::DeviceCodeResponse` in `src-tauri/src/teams.rs`.
+ */
+export interface DeviceCodeResponse {
+  user_code: string;
+  verification_url: string;
+  device_code: string;
+  interval: number;
+  expires_in: number;
+}
+
+/**
+ * Payload of the `log://log` event emitted by `tauri-plugin-log`. The
+ * plugin's actual payload shape includes a `target` string and several
+ * timestamp fields; we narrow defensively in the listener to the
+ * fields the app actually uses. The full plugin type lives in
+ * `@tauri-apps/plugin-log` if a strict import is preferred later.
+ */
+export interface LogPayload {
+  level: number;
+  message: string;
+}

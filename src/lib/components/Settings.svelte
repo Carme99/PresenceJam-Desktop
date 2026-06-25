@@ -4,6 +4,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { currentView } from '$lib/stores/app';
   import { configStore, saveConfig, loadConfig, type AppConfig } from '$lib/stores/config';
+  import type { SyncStatus } from '$lib/types';
   import { authFlow, setSpotifyPhase, setTeamsPhase } from '$lib/stores/authFlow.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
 
@@ -40,7 +41,7 @@
     localConfig = JSON.parse(JSON.stringify($configStore));
 
     try {
-      const syncStatus = await invoke<any>('get_sync_status');
+      const syncStatus = await invoke<SyncStatus>('get_sync_status');
       isConnected = syncStatus.spotify_connected ?? false;
       teamsStatusConnected = syncStatus.teams_connected ?? false;
     } catch {
