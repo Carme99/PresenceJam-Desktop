@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.7.3] - 2026-06-25
+
 ### Security
 - **fix: per-install keychain namespacing (audit M2).** `keychain.rs:19-34` — `SPOTIFY_CLIENT_SECRET_USER` is now namespaced by the Tauri bundle identifier (`spotify_client_secret:com.presencejam.app`). Side-by-side installs on the same OS user (prod, dev, beta) now get isolated slots. `get_spotify_client_secret` falls back to the legacy unnamespaced slot used through v2.7.2, migrates the value forward to the namespaced slot, and deletes the legacy entry — so existing v2.7.2 users do not have to re-onboard. `has_spotify_client_secret` and `delete_spotify_client_secret` consult both slots (legacy delete is best-effort).
 - **fix: strip plaintext Spotify client_secret from config.json on startup (audit Q3).** `config.rs` adds `migrate_legacy_client_secret()`, called from `lib.rs:441` after `load_config`. If `config.json` contains a plaintext `spotify.client_secret` field (legacy ≤ v2.5.0), the value is written into the OS keychain and the plaintext is atomically stripped from the file. Conflict policy: if the keychain already holds a *different* secret, the migration is a no-op (the user is told to Reconnect via Settings) so a multi-install upgrade cannot clobber a working keychain entry.
@@ -28,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Verified (no code change)
 - **Verified: keychain cache priming at startup is race-free (audit Q1).** `lib.rs:406-415` reads the keychain on startup to populate the `OnceLock<RwLock<Option<String>>>` cache before the polling thread's first iteration. Because `keychain::store_spotify_client_secret` (called from `start_spotify_auth` during onboarding) also writes the cache on success, there is no race window where the polling thread could see a stale empty cache after onboarding completes. Left as-is.
 - **Verified: tray Show/Hide label regression is fixed (audit Q5).** `tray.rs:158-211` already includes `is_window_visible` in the dedup key (`TrayStateSnapshot = (bool, bool, Option<String>)` for `(is_syncing, is_window_visible, track_key)`); `update_tray_menu` reads `window.is_visible()` at line 200 before computing the label. Per v2.6.4 #71 fix. No code change needed.
+
 ## [2.7.2] - 2026-06-20
 
 ### Fixed
