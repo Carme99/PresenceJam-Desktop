@@ -586,6 +586,7 @@ pub fn validate_teams_token(tokens: &TeamsTokens) -> Result<(), TeamsApiError> {
 #[cfg(test)]
 mod tests {
     use super::truncate_for_log;
+    use super::{DeviceCodeResponse, TeamsTokens};
 
     #[test]
     fn test_truncate_under_limit() {
