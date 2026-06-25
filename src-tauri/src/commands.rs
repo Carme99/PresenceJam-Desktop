@@ -124,19 +124,15 @@ pub fn save_config(
         }
     }
 
-    // Sync autostart state with the OS autostart manager
-    #[cfg(desktop)]
-    {
-        if let Err(e) = set_autostart_enabled(app, config.autostart) {
-            log::warn!("[CMD] save_config: failed to sync autostart state: {}", e);
-        }
-    }
-
     // On macOS, sync the app's activation policy with the saved
     // `start_minimized` preference so the dock icon disappears when the
     // user wants tray-only behavior and reappears when they disable it.
     // Setting on every save (not just on toggle) keeps the policy
     // idempotent and avoids tracking previous state. See audit Q4.
+    //
+    // Run BEFORE `set_autostart_enabled` because that helper takes
+    // `app` by value, and `set_activation_policy` borrows it. This
+    // ordering matches the new doc note on the lib.rs side.
     #[cfg(target_os = "macos")]
     {
         let policy = if config.teams.start_minimized {
@@ -144,8 +140,18 @@ pub fn save_config(
         } else {
             tauri::ActivationPolicy::Regular
         };
-        if let Err(e) = app.set_activation_policy(policy) {
-            log::warn!("[CMD] save_config: failed to set ActivationPolicy: {}", e);
+        // tauri::AppHandle::set_activation_policy returns () on success;
+        // the underlying call logs its own errors via the tauri-runtime-wry
+        // layer. We deliberately discard the unit value rather than wrapping
+        // in `if let Err(...)`.
+        let _ = app.set_activation_policy(policy);
+    }
+
+    // Sync autostart state with the OS autostart manager
+    #[cfg(desktop)]
+    {
+        if let Err(e) = set_autostart_enabled(app, config.autostart) {
+            log::warn!("[CMD] save_config: failed to sync autostart state: {}", e);
         }
     }
     log::info!("[CMD] save_config: SUCCESS");

@@ -451,14 +451,13 @@ pub fn run() {
                         }
                         #[cfg(target_os = "macos")]
                         {
-                            if let Err(e) = app.set_activation_policy(
+                            // tauri::AppHandle::set_activation_policy returns () on
+                            // success; the underlying call logs its own errors via the
+                            // tauri-runtime-wry layer. We deliberately discard the unit
+                            // value here rather than wrapping in `if let Err(...)`.
+                            let _ = app.set_activation_policy(
                                 tauri::ActivationPolicy::Accessory,
-                            ) {
-                                log::warn!(
-                                    "[APP] setup: failed to set ActivationPolicy::Accessory: {}",
-                                    e
-                                );
-                            }
+                            );
                         }
                     }
                 }
