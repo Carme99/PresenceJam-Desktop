@@ -11,7 +11,10 @@ use crate::profanity;
 use crate::spotify::{
     format_status, get_currently_playing, is_token_expired, refresh_spotify_token, SpotifyApiError,
 };
-use crate::teams::{clear_teams_status_message, refresh_teams_token, set_teams_status_message};
+use crate::teams::{
+    clear_teams_status_message, is_token_expired as is_teams_token_expired, refresh_teams_token,
+    set_teams_status_message,
+};
 use crate::token_io;
 use crate::{tray, AppState};
 
@@ -128,7 +131,7 @@ fn process_track(
 
     // Check if Teams token is expired and refresh if needed (similar to Spotify token refresh)
     let teams_tokens = if let Some(ref tok) = teams_tokens {
-        let expired = Utc::now() >= tok.expires_at - chrono::Duration::seconds(60);
+        let expired = is_teams_token_expired(tok);
         if expired {
             log::info!("[POLLING] process_track: Teams token expired, refreshing...");
 
