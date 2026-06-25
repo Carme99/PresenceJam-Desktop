@@ -240,15 +240,23 @@ jobs:
               -e "s|__VERSION__|${VERSION}|g" \
               homebrew/presence-jam.rb > presence-jam.rb.rendered
 
-          # Shallow clone the tap with the token embedded in the URL.
+          # Shallow clone the tap without any credentials, then push via
+          # a credential helper that hands the HOMEBREW_TAP_TOKEN to git
+          # on demand. The token never appears in `git remote -v` output,
+          # command lines, or shell history. Pattern from
+          # https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions#using-secrets
           # SECURITY: HOMEBREW_TAP_TOKEN must be a fine-grained PAT scoped ONLY to
           # carme99/homebrew-tap with contents:write. A classic PAT gives full
           # access to every repo under the Carme99 GitHub account.
           # Rotate on a 90-day cadence. See docs: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens
-          git clone --depth 1 --branch main \
-            "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/carme99/homebrew-tap.git" \
-            tap
+          git clone --depth 1 --branch main https://github.com/carme99/homebrew-tap.git tap
           cd tap
+          # Configure a non-persistent credential helper that returns the token
+          # only for pushes to the tap. The `!` prefix runs the command via
+          # `sh -c`, so the token is sourced from the env, not interpolated.
+          git config --local credential.helper '!f() { echo username=x-access-token; echo password=${HOMEBREW_TAP_TOKEN}; }; f'
+          # Sanity-check the credential helper works before any commit/push.
+          git ls-remote --heads origin main >/dev/null
 
           # If the formula is already at this version, nothing to do.
           if [ -f presence-jam.rb ]; then

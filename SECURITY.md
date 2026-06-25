@@ -154,6 +154,26 @@ For a more secure experience:
 5. **Uninstall the app** and delete `%APPDATA%\PresenceJam` when done
 6. **Rotate credentials** if you suspect compromise (Spotify Developer Dashboard → your app → Client Secrets → Reset)
 
+
+## Release Pipeline Token Rotation
+
+The release workflow (`.github/workflows/release.yml`) uses two repository secrets to publish to package managers. Both are personal access tokens (PATs) held by the maintainer and must be rotated on a 90-day cadence to limit blast radius if the token leaks through any other channel (CI logs, tap repo history, developer machine, etc.).
+
+| Secret | Scope | Stored where | Rotation check |
+|---|---|---|---|
+| `HOMEBREW_TAP_TOKEN` | `contents:write` on `carme99/homebrew-tap` only (fine-grained PAT) | GitHub Actions secrets | When did the token last rotate? If >90 days, generate a new fine-grained PAT with the same scope, update the secret, revoke the old one. |
+| `WINGET_TOKEN` | `contents:write` + `pull_requests:write` on `microsoft/winget-pkgs` only (fine-grained PAT) | GitHub Actions secrets | Same as above. |
+
+**Rotation procedure:**
+1. Generate a new fine-grained PAT on GitHub (Settings → Developer settings → Personal access tokens → Fine-grained tokens). Scope it to the single repository that needs write access; set the minimum required permissions (`contents:write` for the tap, plus `pull_requests:write` for winget-pkgs).
+2. In the PresenceJam-Desktop repo, go to Settings → Secrets and variables → Actions. Update the secret value to the new token.
+3. Revoke the old token on GitHub (Settings → Developer settings → Personal access tokens → … → Delete).
+4. Trigger a dry-run of the release workflow (push a `v0.0.0-test` tag, then delete it) to confirm the new token works.
+5. Record the rotation in the repo's release notes / changelog under "Internal / security".
+
+**Why fine-grained, not classic:** A classic PAT grants the token owner full access to every repository they can see. If `HOMEBREW_TAP_TOKEN` leaks, a classic PAT lets the attacker push to PresenceJam-Desktop, the homebrew tap, and any other repo under the Carme99 account. A fine-grained PAT scoped to a single repo with `contents:write` only leaks the ability to push to that one repo.
+
+**Why 90 days:** A compromise window of 90 days balances the operational cost of rotation against the average time-to-detection for token misuse in monitoring (per GitHub's own PAT guidance). Shorter windows (30/60 days) are acceptable if rotation can be automated; longer windows increase the blast radius of any leak.
 ## Open Source
 
 PresenceJam is open source. You're encouraged to review the code yourself:
