@@ -379,7 +379,7 @@ pub fn complete_spotify_auth_manual(
     log::info!("[CMD] complete_spotify_auth_manual: tokens persisted atomically");
 
     // Issue #70: invalidate the onboarding cache.
-    *state.onboarding_cache.lock() = None;
+    state.onboarding_cache.invalidate();
     log::info!("[CMD] complete_spotify_auth_manual: onboarding_cache invalidated");
 
     log::info!("[CMD] complete_spotify_auth_manual: EMIT spotify-auth-complete event");
@@ -545,7 +545,7 @@ pub fn poll_teams_auth(
     }
 
     // Issue #70: invalidate the onboarding cache.
-    *state.onboarding_cache.lock() = None;
+    state.onboarding_cache.invalidate();
     log::info!("[CMD] poll_teams_auth: onboarding_cache invalidated");
 
     log::info!("[CMD] poll_teams_auth: EMIT teams-auth-complete event");
@@ -1034,7 +1034,7 @@ pub fn reconnect_spotify(
     }
 
     // Issue #70: invalidate the onboarding cache so the UI sees the cleared state.
-    *state.onboarding_cache.lock() = None;
+    state.onboarding_cache.invalidate();
     log::info!("[CMD] reconnect_spotify: onboarding_cache invalidated");
 
     // Clear the client_secret from the OS keychain (see issue #9).
@@ -1082,7 +1082,7 @@ pub fn reconnect_teams(
     }
 
     // Issue #70: invalidate the onboarding cache.
-    *state.onboarding_cache.lock() = None;
+    state.onboarding_cache.invalidate();
     log::info!("[CMD] reconnect_teams: onboarding_cache invalidated");
 
     // Emit event so UI can show re-auth flow
