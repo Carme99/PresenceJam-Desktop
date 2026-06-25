@@ -130,3 +130,45 @@ No data is sent to any third-party server — all tokens stay on your machine.
    ```
 
 Your Spotify app credentials (Client ID/Secret) in the Spotify Developer Dashboard are unaffected — revoke them separately if you want to fully disconnect.
+
+## Linux: System Keyring Required
+
+<a name="linux-keyring"></a>
+
+PresenceJam stores your Spotify `client_secret` in the OS keychain (the same place Firefox/Chromium store website passwords). On Windows and macOS this works automatically; on Linux it requires a system keyring daemon to be installed and running.
+
+If PresenceJam fails to start with an error mentioning "OS keychain is unavailable" or "Failed to open keychain entry", your Linux setup is missing a keyring. Install one of the following:
+
+| Distro / DE | Recommended package |
+|---|---|
+| GNOME (Ubuntu, Fedora Workstation, etc.) | `gnome-keyring` (usually pre-installed on GNOME desktops) |
+| KDE Plasma | `kwallet5` or `kwallet6` |
+| systemd-based, no GUI | `systemd-creds` |
+| Other / headless | `gnome-keyring` + `libsecret-tools` |
+
+**Linux install command:**
+
+```bash
+# Debian / Ubuntu
+sudo apt install gnome-keyring libsecret-1-0
+
+# Fedora
+sudo dnf install gnome-keyring libsecret
+
+# Arch
+sudo pacman -S gnome-keyring libsecret
+```
+
+After installing, **log in to a graphical session** (a headless SSH session can't reach the keyring). If you launched PresenceJam from a TTY, launch it from your desktop session instead. Then restart PresenceJam.
+
+Verify the keyring is reachable from your shell:
+
+```bash
+secret-tool store --label=test service test user test
+secret-tool lookup service test user test  # should echo "test"
+secret-tool clear service test user test
+```
+
+If `secret-tool` can read/write, PresenceJam's keychain path will work. If not, your distro's Secret Service D-Bus activation is broken — check `systemctl --user status gnome-keyring-daemon` (or the equivalent for `kwalletd`).
+
+There is **no plaintext-on-disk fallback** for the client secret. A working keyring is a hard requirement.

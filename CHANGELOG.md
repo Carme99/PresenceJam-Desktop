@@ -13,9 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 - **fix(polling): count `SpotifyApiError::Other` toward `transient_failure_count` (audit M1).** `polling.rs:871-886` — the 5-strikes exit-to-reconnect-required previously only counted `RateLimited` and `ExpiredToken`. A reqwest send failure (DNS, TLS handshake, connection refused) or a non-200/204/401/429 HTTP response is wrapped into `Other`; that variant is now treated as transient so a permanent network outage eventually triggers `reconnect-required` instead of looping forever emitting `error` events.
+- **feat: actionable keychain error on Linux (audit Q7).** `keychain.rs` adds `keychain_error_help()` / `map_keychain_err()` helpers that wrap every `Entry::new` / `set_password` / `delete_credential` call site. When the keychain is unavailable (no Secret Service daemon, locked `gnome-keyring`, missing `kwallet`), the returned error message points the user at `SETUP.md#linux-keyring` with install commands for the major distros and a `secret-tool` self-check recipe. `SETUP.md` adds a new "Linux: System Keyring Required" section documenting the dependency and the `secret-tool` smoke test. No encrypted-config fallback is added — a working keyring is a hard requirement, by design.
 
 ### Changed
 - **chore(deps): drop unused `tauri-plugin-process` (audit Q6).** The plugin was registered in `lib.rs:372` and declared in `Cargo.toml:28` and `package.json:23`, but no frontend code imports `@tauri-apps/plugin-process` and no Rust code calls into the plugin's IPC. All three registration points and the `ACKNOWLEDGEMENTS.md` table entries have been removed. No behaviour change; pure attack-surface reduction.
+- **feat(macOS): hide dock icon when Start minimized is on (audit Q4).** `lib.rs` setup now calls `app.set_activation_policy(ActivationPolicy::Accessory)` when `start_minimized` is true, and `commands::save_config` does the same on every save (symmetrically setting `Regular` when the user disables it) so the dock icon and menu-bar app menu disappear for tray-only use. No restart required to re-enable the dock icon. The change is `#[cfg(target_os = "macos")]`-gated; Windows and Linux are unaffected.
 
 ## [2.7.2] - 2026-06-20
 
