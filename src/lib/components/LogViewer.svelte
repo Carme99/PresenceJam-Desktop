@@ -3,6 +3,7 @@
   import { listen } from '@tauri-apps/api/event';
   import { onMount, onDestroy } from 'svelte';
   import { currentView } from '$lib/stores/app';
+  import type { LogPayload } from '$lib/types';
 
   interface LogEntry {
     timestamp: string;
@@ -19,7 +20,7 @@
     // Note: get_recent_logs is a placeholder in v2 — tauri_plugin_log streams live via Webview
     // The listener below handles all log entries in real-time.
 
-    unlisten.push(await listen<any>('log://log', (event) => {
+    unlisten.push(await listen<LogPayload>('log://log', (event) => {
       // Map numeric level (1=Trace, 2=Debug, 3=Info, 4=Warning, 5=Error) to string
       const levelMap: Record<number, string> = { 1: 'Trace', 2: 'Debug', 3: 'Info', 4: 'Warning', 5: 'Error' };
       const numericLevel = event.payload?.level;
