@@ -3,21 +3,28 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct SpotifyTokens {
     pub access_token: String,
     pub refresh_token: String,
     pub expires_at: DateTime<Utc>,
 }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct TrackInfo {
     pub title: String,
     pub artist: String,
     pub album: String,
     pub album_art_url: String,
     pub is_playing: bool,
+    // Tauri IPC crosses the boundary via serde_json, which decodes u64
+    // values as JS `number` (f64). Override ts-rs's `bigint` default so
+    // the generated `.ts` matches what `invoke()` actually returns at
+    // runtime — `bigint` would type-lie about the wire shape.
+    #[ts(type = "number")]
     pub progress_ms: u64,
+    #[ts(type = "number")]
     pub duration_ms: u64,
 }
 
@@ -365,5 +372,58 @@ mod tests {
     fn preview_status_with_sample_uses_sample_values_and_playing_emoji() {
         let result = preview_status_with_sample("{emoji} {artist} - {track} ({album}) {emoji}");
         assert_eq!(result, "🎵 Sample Artist - Sample Track (Sample Album) 🎵");
+    }
+
+    // Regression guard for issue #78: ensure the SpotifyTokens struct
+    // round-trips through serde_json with field-name parity. The
+    // ts-rs-generated TS type in `src/lib/types-generated/SpotifyTokens.ts`
+    // mirrors these field names exactly; a future field rename that
+    // updates only one side will break this test (proving the drift
+    // before it ships to consumers).
+    #[test]
+    fn spotify_tokens_serde_roundtrip() {
+        let original = SpotifyTokens {
+            access_token: "access-abc".to_string(),
+            refresh_token: "refresh-xyz".to_string(),
+            expires_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&original).expect("serialize");
+        let parsed: SpotifyTokens =
+            serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.access_token, original.access_token);
+        assert_eq!(parsed.refresh_token, original.refresh_token);
+        assert_eq!(parsed.expires_at, original.expires_at);
+    }
+
+    // Regression guard for issue #78: ensure TrackInfo's u64 fields
+    // serialise as plain JSON numbers (not strings), so the Tauri IPC
+    // bridge delivers them to JS as `number` (f64). The matching TS
+    // override is `#[ts(type = "number")]` on progress_ms/duration_ms.
+    #[test]
+    fn track_info_u64_fields_serialize_as_numbers() {
+        let track = TrackInfo {
+            title: "Test Track".to_string(),
+            artist: "Test Artist".to_string(),
+            album: "Test Album".to_string(),
+            album_art_url: "https://example.com/art.jpg".to_string(),
+            is_playing: true,
+            progress_ms: 123_456,
+            duration_ms: 240_000,
+        };
+        let json: serde_json::Value =
+            serde_json::to_value(&track).expect("to_value");
+        // u64 must round-trip as a JSON number, not a string.
+        assert!(
+            json["progress_ms"].is_number(),
+            "progress_ms must serialise as a JSON number, got {:?}",
+            json["progress_ms"]
+        );
+        assert!(
+            json["duration_ms"].is_number(),
+            "duration_ms must serialise as a JSON number, got {:?}",
+            json["duration_ms"]
+        );
+        assert_eq!(json["progress_ms"].as_u64(), Some(123_456));
+        assert_eq!(json["duration_ms"].as_u64(), Some(240_000));
     }
 }

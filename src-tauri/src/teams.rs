@@ -55,7 +55,8 @@ fn build_teams_client() -> Result<reqwest::blocking::Client, String> {
         .map_err(|e| format!("Failed to create HTTP client: {}", e))
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct TeamsTokens {
     pub access_token: String,
     #[serde(default)]
@@ -63,12 +64,20 @@ pub struct TeamsTokens {
     pub expires_at: chrono::DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct DeviceCodeResponse {
     pub user_code: String,
     pub verification_url: String,
     pub device_code: String,
+    // Tauri IPC crosses the boundary via serde_json, which decodes u64
+    // values as JS `number` (f64). Override ts-rs's `bigint` default so
+    // the generated `.ts` matches what `invoke()` actually returns at
+    // runtime. The OAuth interval/expires-in values are always small,
+    // well under 2^53, so no precision is lost in practice.
+    #[ts(type = "number")]
     pub interval: u64,
+    #[ts(type = "number")]
     pub expires_in: u64,
 }
 
@@ -645,9 +654,85 @@ mod tests {
 
         let truncated = truncate_for_log(&body);
 
-        // Output must start with the emoji (preserved as a complete
-        // char) and end with the byte count.
         assert!(truncated.starts_with("\u{1F600}"));
         assert!(truncated.ends_with("(…260 total)"));
+    }
+    // Regression guard for issue #78: ensure TeamsTokens (and the
+    // `Option<String>` refresh_token field that distinguishes it from
+    // SpotifyTokens) round-trips through serde_json with field-name
+    // parity. The ts-rs-generated TS type at
+    // `src/lib/types-generated/TeamsTokens.ts` mirrors these fields
+    // exactly — a future field rename or Option/Single swap will
+    // break this test before it ships to consumers.
+    #[test]
+    fn teams_tokens_serde_roundtrip_with_some_refresh() {
+        let original = TeamsTokens {
+            access_token: "teams-access".to_string(),
+            refresh_token: Some("teams-refresh".to_string()),
+            expires_at: chrono::Utc::now(),
+        };
+        let json = serde_json::to_string(&original).expect("serialize");
+        let parsed: TeamsTokens =
+            serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.access_token, original.access_token);
+        assert_eq!(parsed.refresh_token, original.refresh_token);
+        assert_eq!(parsed.expires_at, original.expires_at);
+    }
+
+    #[test]
+    fn teams_tokens_serde_roundtrip_with_none_refresh() {
+        // Microsoft endpoint sometimes omits the refresh token; this
+        // path is exercised at runtime and the TS shape
+        // `refresh_token: string | null` must survive the round-trip
+        // as null, not missing-key or undefined.
+        let original = TeamsTokens {
+            access_token: "teams-access".to_string(),
+            refresh_token: None,
+            expires_at: chrono::Utc::now(),
+        };
+        let json = serde_json::to_string(&original).expect("serialize");
+        let parsed: TeamsTokens =
+            serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.refresh_token, None);
+        // Defensive: confirm the wire form actually contains the
+        // "refresh_token":null pair (serde default is to emit null,
+        // not omit the key, for `Option<String>`).
+        assert!(
+            json.contains("\"refresh_token\":null"),
+            "refresh_token must serialise as null on the wire, got: {}",
+            json
+        );
+    }
+
+    // Regression guard for issue #78: DeviceCodeResponse's u64 fields
+    // (interval, expires_in) must serialise as JSON numbers, matching
+    // the `#[ts(type = "number")]` override on the Rust side. If a
+    // future contributor removes the override, ts-rs will start
+    // generating `bigint` for these fields and the TS-side
+    // `invoke<DeviceCodeResponse>('start_teams_auth_device_code')` will
+    // type-error at consumer sites.
+    #[test]
+    fn device_code_response_u64_fields_serialize_as_numbers() {
+        let resp = DeviceCodeResponse {
+            user_code: "ABC-123".to_string(),
+            verification_url: "https://microsoft.com/devicelogin".to_string(),
+            device_code: "device-code-blob".to_string(),
+            interval: 5,
+            expires_in: 900,
+        };
+        let json: serde_json::Value =
+            serde_json::to_value(&resp).expect("to_value");
+        assert!(
+            json["interval"].is_number(),
+            "interval must serialise as JSON number, got {:?}",
+            json["interval"]
+        );
+        assert!(
+            json["expires_in"].is_number(),
+            "expires_in must serialise as JSON number, got {:?}",
+            json["expires_in"]
+        );
+        assert_eq!(json["interval"].as_u64(), Some(5));
+        assert_eq!(json["expires_in"].as_u64(), Some(900));
     }
 }
