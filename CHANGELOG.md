@@ -4,8 +4,22 @@ All notable changes to PresenceJam are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
-
 ## [Unreleased]
+
+## [2.7.4] - 2026-06-25
+
+### Security
+- **deps(npm): pin cookie >= 0.7.0 via package.json overrides (GHSA-pxg6-pf52-xh8x, PR #113).** The vulnerable `cookie@0.6.0` was pulled transitively via `@sveltejs/kit@2.68.0`. A top-level `overrides` block in `package.json` forces resolution to `^0.7.0` across the entire transitive graph. Dev-only (vite/svelte-kit dev server); no production binary impact.
+- **security(ci): switch homebrew job to credential helper, document 90-day PAT rotation (PR #114, #68 finish).** The `homebrew` job in `release.yml` previously cloned the tap with `x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/...` — the token leaked into `git remote -v` output, the process listing, and any error log captured by the job. Replaced with a non-persistent `git config credential.helper` that hands the token to git on demand. Added a new "Release Pipeline Token Rotation" section to `SECURITY.md` documenting the rotation procedure, why fine-grained PATs (not classic), and why 90 days.
+
+### Fixed
+- **refactor(frontend): type the 5 invoke<any> / listen<any> call sites (PR #116, #78 part 1).** Replaces 6 untyped invoke/listen sites with typed equivalents matching the Rust-side return shapes. Closes the silent-drift risk: a Rust-side field rename now produces a TypeScript compile error, not a runtime undefined. New interfaces in `src/lib/types.ts`: `SyncStatus`, `DeviceCodeResponse`, `LogPayload`.
+
+### Changed
+- **refactor: error handling consistency (PR #117, #79 items 1+2).** Three sub-changes: (1) drop the silent-failure `eprintln!` in the panic hook (`lib.rs:407`) — stderr is not connected to the user's log file on macOS release builds, so the panic was invisible. (2) Add a `severity` field to the `error` event payload via a centralised `emit_error(app, source, message, severity)` helper; the polling loop's 3 error emit sites now route through it. (3) Gate the Dashboard.svelte red banner on `severity === 'error'` — warnings (transient 401-retry, backoff) no longer alarm-fatigue the user. Includes a `test_error_event_emits_severity_field` regression guard in `polling.rs`.
+
+### Refactored
+- **refactor: extract OnboardingCache sub-struct with lock encapsulation (PR #118, #80 step 1).** Pulls the 30s onboarding result cache out of the monolithic `AppState` into its own `OnboardingCache` sub-struct. The `lock()` and `invalidate()` methods encapsulate the inner mutex; the field is private. This is the load-bearing pattern for #80 step 2 (Tokens, Polling, PendingAuths, Config). Includes 2 regression tests: `test_onboarding_cache_lock_and_invalidate` (exercises the public API) and `test_onboarding_cache_encapsulation_no_direct_state_access` (grep guard against re-exposing the field).
 
 ## [2.7.3] - 2026-06-25
 
