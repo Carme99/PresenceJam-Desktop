@@ -51,6 +51,7 @@ impl OnboardingCache {
         Self { state: Mutex::new(None) }
     }
 
+
     /// Acquire the cache lock. Use this instead of touching `self.state`
     /// directly so future refactors (e.g. async-aware locks) only
     /// need to change one site.
@@ -64,6 +65,14 @@ impl OnboardingCache {
     /// initial setup completion).
     pub fn invalidate(&self) {
         *self.state.lock() = None;
+    }
+}
+
+impl Default for OnboardingCache {
+    /// Required by `clippy::new_without_default`. `Default::default()`
+    /// produces an empty cache, identical to `OnboardingCache::new()`.
+    fn default() -> Self {
+        Self::new()
     }
 }
 pub struct AppState {
