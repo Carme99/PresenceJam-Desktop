@@ -13,7 +13,8 @@ use tauri::{AppHandle, Emitter};
 /// Log tag prefix for this submodule (issue #79 item 3).
 const CMD: &str = "[CMD.SYNC]";
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct SyncStatus {
     pub is_syncing: bool,
     pub current_track: Option<TrackInfo>,

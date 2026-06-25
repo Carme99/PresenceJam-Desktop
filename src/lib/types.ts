@@ -29,10 +29,6 @@ export type { DeviceCodeResponse } from './types-generated/DeviceCodeResponse';
 export type { SyncStatus } from './types-generated/SyncStatus';
 export type {
   AppConfig,
-  SpotifyConfig,
-  TeamsConfig,
-  PollingConfig,
-  LoggingConfig,
 } from './types-generated/AppConfig';
 /**
  * Payload of the `error` event emitted by the Rust polling loop. The
