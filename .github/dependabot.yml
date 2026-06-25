@@ -6,7 +6,9 @@
 #   - Labels so Dependabot PRs are filterable alongside regular work
 #   - Dependabot security updates (already enabled) auto-PR vulns as before
 #   - Tracking visibility: filter by `label:dependencies` to see all Dependabot PRs
-
+# Last reviewed: 2026-06-25 — adds schedule/pr-limit/groups/majors-ignore to the
+# github-actions block (was inconsistent with npm + cargo); also adds the
+# `deps(ci)` commit prefix to match the npm/cargo patterns.
 version: 2
 
 updates:
@@ -56,11 +58,28 @@ updates:
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
 
-  # GitHub Actions
+  # GitHub Actions — same shape as npm + cargo: weekly cadence, 5 PR limit,
+  # minor+patch grouped, majors ignored. (Previously had no day/time/pr-limit
+  # /groups/majors-ignore, so Dependabot would fire major bumps like
+  # actions/checkout 4->7 without review.)
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Europe/London"
+    open-pull-requests-limit: 5
+    groups:
+      github-actions-minor-and-patch:
+        applies-to: version-updates
+        update-types: ["minor", "patch"]
     labels:
       - "dependencies"
       - "ci"
+    commit-message:
+      prefix: "deps(ci)"
+      include: "scope"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
