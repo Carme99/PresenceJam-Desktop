@@ -971,8 +971,6 @@ mod tests {
             access_token: "spotify-access".to_string(),
             refresh_token: "spotify-refresh".to_string(),
             expires_at: chrono::Utc::now() + chrono::Duration::seconds(3600),
-            token_type: "Bearer".to_string(),
-            scope: String::new(),
         });
         {
             let guard = tokens.spotify();
@@ -983,10 +981,8 @@ mod tests {
         // Same round-trip for Teams.
         *tokens.teams_mut() = Some(TeamsTokens {
             access_token: "teams-access".to_string(),
-            refresh_token: "teams-refresh".to_string(),
+            refresh_token: Some("teams-refresh".to_string()),
             expires_at: chrono::Utc::now() + chrono::Duration::seconds(3600),
-            token_type: "Bearer".to_string(),
-            scope: String::new(),
         });
         {
             let guard = tokens.teams();
