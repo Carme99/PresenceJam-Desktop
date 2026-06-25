@@ -94,7 +94,7 @@ fn run_spotify_oauth_flow(
     // disk persistence leaks it to filesystem-level attackers. See issue
     // #65 / HIGH #3.
     {
-        let mut pending = state.pending_spotify_auth.write();
+        let mut pending = state.pending.spotify_mut();
         *pending = Some(PendingSpotifyAuth {
             verifier,
             state: csrf_state,
@@ -217,7 +217,7 @@ pub fn complete_spotify_auth_manual(
 
     // Get pending auth from AppState
     let pending = {
-        let mut guard = state.pending_spotify_auth.write();
+        let mut guard = state.pending.spotify_mut();
         log::info!("{CMD} complete_spotify_auth_manual: taking pending auth from AppState");
         guard.take().ok_or_else(|| {
             log::error!("{CMD} complete_spotify_auth_manual: No pending Spotify auth");
@@ -243,7 +243,7 @@ pub fn complete_spotify_auth_manual(
     log::info!("{CMD} complete_spotify_auth_manual: token exchange successful");
 
     {
-        let mut tokens_guard = state.spotify_tokens.write();
+        let mut tokens_guard = state.tokens.spotify_mut();
         *tokens_guard = Some(tokens.clone());
         log::info!("{CMD} complete_spotify_auth_manual: tokens stored in AppState");
     }
@@ -278,7 +278,7 @@ pub fn refresh_spotify(
     // implementation read client_id from `tauri-plugin-store` — that
     // path is removed as part of issue #65.
     let client_id = {
-        let guard = state.config.read();
+        let guard = state.config.get();
         guard
             .as_ref()
             .map(|c| c.spotify.client_id.clone())
@@ -292,7 +292,7 @@ pub fn refresh_spotify(
     log::info!("{CMD} refresh_spotify: credentials loaded (id from config, secret from keychain)");
 
     let current_tokens = {
-        let guard = state.spotify_tokens.read();
+        let guard = state.tokens.spotify();
         guard.clone().ok_or_else(|| {
             log::error!("{CMD} refresh_spotify: No Spotify tokens in state");
             "No Spotify tokens to refresh".to_string()
@@ -309,7 +309,7 @@ pub fn refresh_spotify(
     // Reconnect from another command), discard the result.
     let pre_refresh_access_token = current_tokens.access_token.clone();
     let committed = {
-        let mut guard = state.spotify_tokens.write();
+        let mut guard = state.tokens.spotify_mut();
         if guard.as_ref().map(|t| &t.access_token) == Some(&pre_refresh_access_token) {
             *guard = Some(new_tokens.clone());
             true

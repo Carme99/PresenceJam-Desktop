@@ -148,8 +148,8 @@ pub fn write_tokens_atomic(path: &PathBuf, contents: &TokensFile) -> Result<(), 
 /// updated; the next call (or a follow-up persist) flushes to disk.
 pub fn persist_tokens(state: &Arc<crate::AppState>, app: &tauri::AppHandle) -> Result<(), String> {
     let path = tokens_file_path(app)?;
-    let spotify_tokens = state.spotify_tokens.read().clone();
-    let teams_tokens = state.teams_tokens.read().clone();
+    let spotify_tokens = state.tokens.spotify().clone();
+    let teams_tokens = state.tokens.teams().clone();
     let contents = TokensFile {
         spotify_tokens,
         teams_tokens,

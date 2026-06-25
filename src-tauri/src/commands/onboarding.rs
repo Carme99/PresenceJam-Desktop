@@ -75,7 +75,7 @@ fn is_onboarding_complete_impl(state: &Arc<AppState>) -> Result<bool, String> {
     // Check Teams tokens — only ExpiredToken (401/403) means invalid.
     // RateLimited (429) and Transient (5xx, network) are temporary → treat as valid.
     let (teams_configured, teams_valid) = {
-        let guard = state.teams_tokens.read();
+        let guard = state.tokens.teams();
         match guard.as_ref() {
             Some(tokens) => {
                 let valid = match crate::teams::validate_teams_token(tokens) {
@@ -92,7 +92,7 @@ fn is_onboarding_complete_impl(state: &Arc<AppState>) -> Result<bool, String> {
     // Check Spotify tokens — only ExpiredToken means invalid.
     // RateLimited and Other are transient → treat as valid.
     let (spotify_valid, _spotify_token) = {
-        let guard = state.spotify_tokens.read();
+        let guard = state.tokens.spotify();
         match guard.as_ref() {
             Some(tokens) => {
                 let valid = match crate::spotify::validate_spotify_token(tokens) {
@@ -130,12 +130,12 @@ pub fn complete_onboarding(
     log::debug!("{CMD} complete_onboarding: ENTRY");
 
     let has_spotify = {
-        let guard = state.spotify_tokens.read();
+        let guard = state.tokens.spotify();
         guard.is_some()
     };
 
     let has_teams = {
-        let guard = state.teams_tokens.read();
+        let guard = state.tokens.teams();
         guard.is_some()
     };
 
@@ -173,11 +173,11 @@ pub fn reconnect_spotify(
     log::debug!("{CMD} reconnect_spotify: ENTRY");
 
     // Clear Spotify tokens from state
-    *state.spotify_tokens.write() = None;
+    *state.tokens.spotify_mut() = None;
     log::info!("{CMD} reconnect_spotify: cleared spotify_tokens");
 
     // Clear pending Spotify auth
-    *state.pending_spotify_auth.write() = None;
+    *state.pending.spotify_mut() = None;
     log::info!("{CMD} reconnect_spotify: cleared pending_spotify_auth");
 
     // Persist the cleared state to disk atomically.
@@ -221,11 +221,11 @@ pub fn reconnect_teams(
     log::debug!("{CMD} reconnect_teams: ENTRY");
 
     // Clear Teams tokens from state
-    *state.teams_tokens.write() = None;
+    *state.tokens.teams_mut() = None;
     log::info!("{CMD} reconnect_teams: cleared teams_tokens");
 
     // Clear pending Teams auth
-    *state.pending_teams_auth.write() = None;
+    *state.pending.teams_mut() = None;
     log::info!("{CMD} reconnect_teams: cleared pending_teams_auth");
 
     // Persist the cleared state to disk atomically.
