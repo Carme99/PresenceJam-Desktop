@@ -39,16 +39,57 @@ fn cache() -> &'static parking_lot::RwLock<Option<String>> {
     CACHE.get_or_init(|| parking_lot::RwLock::new(None))
 }
 
+/// DOC ANCHOR — referenced from keychain error messages. Bump the
+/// anchor if SETUP.md is restructured. See audit Q7.
+const LINUX_KEYRING_DOC: &str = "SETUP.md#linux-keyring";
+
+/// Map a `keyring::Error` to a user-actionable error message when it
+/// indicates the OS keychain is unavailable or inaccessible. Returns
+/// `Some(help)` when the error is "no keychain" / "keychain locked";
+/// returns `None` for `NoEntry` (a missing credential is a normal
+/// onboarding flow, not a platform problem).
+///
+/// On Linux, the most common failure modes — no Secret Service daemon
+/// running, locked `gnome-keyring`, missing `kwallet` — surface as
+/// `PlatformFailure` or `NoStorageAccess` wrapping a platform-specific
+/// inner error. We match both broadly and point the user at SETUP.md
+/// instead of trying to distinguish "no Secret Service" from "locked
+/// keychain" (the inner-error text varies across keyring-crate and
+/// platform versions). See audit Q7.
+fn keychain_error_help(err: &keyring::Error) -> Option<String> {
+    match err {
+        keyring::Error::NoEntry => None,
+        keyring::Error::PlatformFailure(_) | keyring::Error::NoStorageAccess(_) => Some(format!(
+            "OS keychain is unavailable: {}. On Linux install/enable a system \
+                 keyring (gnome-keyring, kwallet, or systemd-creds) and log in to a \
+                 graphical session; see {}.",
+            err, LINUX_KEYRING_DOC
+        )),
+        _ => Some(format!(
+            "OS keychain error: {}. On Linux see {} for setup help.",
+            err, LINUX_KEYRING_DOC
+        )),
+    }
+}
+
+/// Wrap a `Result<T, keyring::Error>` with a platform-aware help
+/// message when the error is "keychain unavailable". Pass-through the
+/// success value unchanged. Used by every keychain function that can
+/// fail at the OS layer. See audit Q7.
+fn map_keychain_err<T>(result: Result<T, keyring::Error>) -> Result<T, String> {
+    result.map_err(|e| keychain_error_help(&e).unwrap_or_else(|| format!("{}", e)))
+}
+
 /// Persist the Spotify `client_secret` in the OS keychain.
 ///
 /// Overwrites any existing entry for `(KEYRING_SERVICE, SPOTIFY_CLIENT_SECRET_USER)`
 /// and updates the in-process cache.
 pub fn store_spotify_client_secret(secret: &str) -> Result<(), String> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, SPOTIFY_CLIENT_SECRET_USER)
-        .map_err(|e| format!("Failed to open keychain entry: {}", e))?;
-    entry
-        .set_password(secret)
-        .map_err(|e| format!("Failed to write Spotify client secret to keychain: {}", e))?;
+    let entry = map_keychain_err(keyring::Entry::new(
+        KEYRING_SERVICE,
+        SPOTIFY_CLIENT_SECRET_USER,
+    ))?;
+    map_keychain_err(entry.set_password(secret))?;
     *cache().write() = Some(secret.to_string());
     log::info!("[KEYCHAIN] Stored Spotify client_secret in OS keychain (cache updated)");
     Ok(())
@@ -69,8 +110,10 @@ pub fn get_spotify_client_secret() -> Result<String, String> {
         }
     }
     // Slow path: read from OS keychain (namespaced slot — see audit M2).
-    let entry = keyring::Entry::new(KEYRING_SERVICE, SPOTIFY_CLIENT_SECRET_USER)
-        .map_err(|e| format!("Failed to open keychain entry: {}", e))?;
+    let entry = map_keychain_err(keyring::Entry::new(
+        KEYRING_SERVICE,
+        SPOTIFY_CLIENT_SECRET_USER,
+    ))?;
     let secret = match entry.get_password() {
         Ok(s) => s,
         Err(keyring::Error::NoEntry) => {
@@ -119,10 +162,9 @@ pub fn get_spotify_client_secret() -> Result<String, String> {
             legacy_secret
         }
         Err(e) => {
-            return Err(format!(
-                "Failed to read Spotify client secret from keychain: {}",
-                e
-            ))
+            return Err(keychain_error_help(&e).unwrap_or_else(|| {
+                format!("Failed to read Spotify client secret from keychain: {}", e)
+            }));
         }
     };
     // Populate cache for next call
@@ -185,11 +227,11 @@ pub fn delete_spotify_client_secret() -> Result<(), String> {
 /// Delete a single keychain entry. Returns Ok(()) if the entry was
 /// deleted or didn't exist; surfaces other keyring errors.
 fn delete_keychain_entry(user: &str) -> Result<(), String> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, user)
-        .map_err(|e| format!("Failed to open keychain entry '{}': {}", user, e))?;
+    let entry = map_keychain_err(keyring::Entry::new(KEYRING_SERVICE, user))?;
     match entry.delete_credential() {
         Ok(()) => Ok(()),
         Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(format!("Failed to delete keychain entry '{}': {}", user, e)),
+        Err(e) => Err(keychain_error_help(&e)
+            .unwrap_or_else(|| format!("Failed to delete keychain entry '{}': {}", user, e))),
     }
 }

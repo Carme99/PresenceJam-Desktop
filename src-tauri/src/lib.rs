@@ -420,11 +420,28 @@ pub fn run() {
                     *config_guard = Some(cfg.clone());
                     log::info!("[APP] setup: config loaded into AppState");
 
-                    // Handle start_minimized setting
+                    // Handle start_minimized setting. On macOS, also switch
+                    // the app's activation policy to `Accessory` so the
+                    // dock icon and menu-bar app menu disappear when the
+                    // user wants tray-only behavior. Setting the policy on
+                    // every startup is idempotent and ensures the dock
+                    // icon matches the saved preference even after a
+                    // crash-restart. See audit Q4.
                     if cfg.teams.start_minimized {
                         log::info!("[APP] setup: start_minimized enabled, hiding window");
                         if let Some(window) = app.get_webview_window("main") {
                             let _ = window.hide();
+                        }
+                        #[cfg(target_os = "macos")]
+                        {
+                            if let Err(e) = app.set_activation_policy(
+                                tauri::ActivationPolicy::Accessory,
+                            ) {
+                                log::warn!(
+                                    "[APP] setup: failed to set ActivationPolicy::Accessory: {}",
+                                    e
+                                );
+                            }
                         }
                     }
                 }
