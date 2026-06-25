@@ -42,9 +42,14 @@ pub enum TeamsApiError {
 
 /// Creates a reqwest blocking client with standard config (user agent + 10s timeout).
 /// Ensures consistent HTTP client settings across all Teams API calls.
+///
+/// User-Agent uses `env!("CARGO_PKG_VERSION")` so it tracks `Cargo.toml`
+/// (which mirrors `tauri.conf.json` → `version`) automatically on every
+/// release. Never hardcode the version — see CONTRIBUTING.md. See audit
+/// Q8.
 fn build_teams_client() -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
-        .user_agent("PresenceJam/2.0")
+        .user_agent(format!("PresenceJam/{}", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))
@@ -70,7 +75,7 @@ pub struct DeviceCodeResponse {
 #[derive(Debug, Deserialize)]
 struct DeviceCodeResponseRaw {
     user_code: String,
-    #[serde(alias = "verification_url", rename = "verification_uri")]
+    #[serde(alias = "verification_url")]
     verification_uri: String,
     device_code: String,
     interval: u64,
@@ -165,6 +170,13 @@ pub fn start_teams_auth_device_code() -> Result<DeviceCodeResponse, String> {
     );
 
     Ok(result)
+}
+
+/// True iff the Teams access token has less than 60 seconds of lifetime
+/// remaining. Mirrors `spotify::is_token_expired` so the two providers
+/// share the same refresh-window heuristic. See audit PR-3 nit.
+pub fn is_token_expired(tokens: &TeamsTokens) -> bool {
+    Utc::now() >= tokens.expires_at - chrono::Duration::seconds(60)
 }
 
 pub fn poll_teams_auth(device_code: &str) -> Result<TeamsTokens, String> {
@@ -532,7 +544,7 @@ pub fn clear_teams_status_message(access_token: &str, placeholder: &str) -> Resu
 pub fn validate_teams_token(tokens: &TeamsTokens) -> Result<(), TeamsApiError> {
     // Local pre-check: if the token clearly has plenty of life left, skip
     // the network call. Mirrors the 60s refresh window used elsewhere.
-    if Utc::now() < tokens.expires_at - chrono::Duration::seconds(60) {
+    if !is_token_expired(tokens) {
         return Ok(());
     }
 

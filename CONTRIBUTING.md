@@ -59,6 +59,7 @@ Types: `feat`, `fix`, `docs`, `test`, `refactor`, `chore`
 - Error handling with `Result` types — no `unwrap()` in production code
 - Use `log::info!` / `log::debug!` over `println!`
 - Prefix module-level log tags in square brackets: `[MODULE]`
+- User-Agent and any version-stamped payload must use `env!("CARGO_PKG_VERSION")` — never hardcode the version. `Cargo.toml` is the single source of truth (mirrored into `tauri.conf.json` → `version`).
 
 ### Frontend (Svelte + TypeScript)
 
