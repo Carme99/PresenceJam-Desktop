@@ -24,6 +24,11 @@ export interface TrackInfo {
 
 export interface TeamsTokens {
   access_token: string;
-  refresh_token: string;
+  // Spotify's refresh token is non-optional (Spotify always returns one on
+  // the auth-code exchange), so it's `string` in both directions. Teams'
+  // refresh token is `Option<String>` in Rust (`serde(default)` keeps the
+  // field present, defaulting to `null` when the Microsoft endpoint doesn't
+  // return one) — so on the wire it's `string | null`, not `string`.
+  refresh_token: string | null;
   expires_at: string;
 }
