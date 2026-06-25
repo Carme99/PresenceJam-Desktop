@@ -73,7 +73,15 @@ jobs:
       - name: Cargo test (lib) to materialise ts-rs codegen
         env:
           CARGO_INCREMENTAL: 0
-        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+        # Clear any stale generated files from a previous CI cache.
+        # Without this, ts-rs sees the source hasn't changed (cargo
+        # incremental cache) and skips re-running the export tests,
+        # leaving an outdated AppConfig.ts that doesn't re-export
+        # the inner config types. See #78.
+        run: |
+          rm -rf src/lib/types-generated/
+          mkdir -p src/lib/types-generated/
+          cargo test --manifest-path src-tauri/Cargo.toml --lib
 
       # Type-check Svelte/TS via svelte-check. Runs after Build frontend
       # and the cargo test step above so the generated $types,
