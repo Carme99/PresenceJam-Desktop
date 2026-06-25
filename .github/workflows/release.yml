@@ -41,7 +41,7 @@ jobs:
           cache: 'npm'
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e  # stable
 
       # Cargo cache mirrors the PR-time ci.yml setup (PR #55). Cuts the
       # release build from ~50 min cold compile to ~15-20 min warm.
