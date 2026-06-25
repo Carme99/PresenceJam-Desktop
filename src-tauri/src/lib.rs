@@ -337,11 +337,28 @@ pub fn run() {
     {
         use tauri_plugin_single_instance::init as single_instance_init;
 
-        builder = builder.plugin(single_instance_init(|_app, argv, _cwd| {
-            log::info!(
-                "[APP] single_instance: New instance opened with argv: {:?}",
-                argv
-            );
+        builder = builder.plugin(single_instance_init(|app, argv, _cwd| {
+            // Raise the existing window so the user sees it when a second
+            // instance is launched (e.g., double-click the .msi shortcut
+            // while the app is running, or a deep-link click from a
+            // browser when the app is already open).
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+            // argv[0] is the exe path; scan for a presencejam:// URL
+            // (Windows + Linux pass deep links as argv when the scheme
+            // is invoked; macOS uses the deep-link plugin's on_open_url
+            // callback, which is also wired below).
+            for arg in argv.iter().skip(1) {
+                if arg.starts_with("presencejam://") {
+                    log::info!(
+                        "[APP] single_instance: forwarding deep-link argv to handle_deep_link"
+                    );
+                    handle_deep_link(arg, app.clone());
+                }
+            }
         }));
 
         builder = builder.plugin(tauri_plugin_deep_link::init());
