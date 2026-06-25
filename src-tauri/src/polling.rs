@@ -464,14 +464,19 @@ pub fn start_polling(
                 // app_clone is moved into polling_loop above, so use app here
                 let _ = app.emit("polling-thread-panicked", serde_json::json!(null));
             }
-            // Release sync state on ALL thread exits (panic OR normal return).
-            // If polling_loop returns on its own (e.g., the 5-transient-failures
-            // backoff path breaks the loop), the flag would otherwise stay true
-            // and the next start_syncing call would short-circuit as "already
-            // syncing" with no live thread. The load() guard avoids double-
-            // resetting if stop_syncing has already cleared the flag. stop_tx
-            // is unconditionally cleared because it was created at the top of
-            // this function and is only ever set by us.
+            // Clear stop_tx unconditionally first. This sender was created at
+            // the top of start_polling and is only ever set by us, so on every
+            // thread exit (panic OR normal) it is safe to drop. Clearing it
+            // BEFORE the is_syncing load/store matters: a racing start_syncing
+            // that observes flag=false must not find a stale sender it did not
+            // create. See CodeRabbit review on PR #120 (issue #80 step 2 follow-up).
+            *state_for_cleanup.polling.stop_tx_mut() = None;
+            // Reset is_syncing only if it is still set. The load() guard
+            // avoids double-resetting if stop_syncing has already cleared
+            // the flag. Without this guard the flag would stay true on a
+            // normal return (e.g. the 5-transient-failures backoff path
+            // breaks the loop), and the next start_syncing call would
+            // short-circuit as "already syncing" with no live thread.
             if state_for_cleanup.polling.is_syncing(Ordering::Acquire) {
                 log::warn!(
                     "[POLLING] start_polling: polling thread exited without stop_syncing; \
@@ -479,15 +484,17 @@ pub fn start_polling(
                 );
                 state_for_cleanup.polling.set_syncing(false, Ordering::Release);
             }
-            *state_for_cleanup.polling.stop_tx_mut() = None;
             log::info!("[POLLING] start_polling: thread ended");
         })
         .map_err(|e| {
             log::error!("[POLLING] start_polling: thread spawn failed - {}", e);
-            // Reset is_syncing so future start_polling calls are not permanently wedged.
-            state.polling.set_syncing(false, Ordering::Release);
-            // Also clean up the stop channel sender we just stored.
+            // Same ordering as the success path: clear stop_tx first, then
+            // is_syncing. The stop_tx sender was just stored at the top of
+            // this function so it MUST be cleared unconditionally here;
+            // is_syncing is reset unconditionally too because the thread
+            // never started (no risk of double-resetting).
             *state.polling.stop_tx_mut() = None;
+            state.polling.set_syncing(false, Ordering::Release);
             format!("Failed to spawn polling thread: {}", e)
         })?;
 
