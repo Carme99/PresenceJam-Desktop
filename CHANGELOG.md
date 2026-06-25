@@ -5,6 +5,18 @@ All notable changes to PresenceJam are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Security
+- **fix: per-install keychain namespacing (audit M2).** `keychain.rs:19-34` — `SPOTIFY_CLIENT_SECRET_USER` is now namespaced by the Tauri bundle identifier (`spotify_client_secret:com.presencejam.app`). Side-by-side installs on the same OS user (prod, dev, beta) now get isolated slots. `get_spotify_client_secret` falls back to the legacy unnamespaced slot used through v2.7.2, migrates the value forward to the namespaced slot, and deletes the legacy entry — so existing v2.7.2 users do not have to re-onboard. `has_spotify_client_secret` and `delete_spotify_client_secret` consult both slots (legacy delete is best-effort).
+- **fix: strip plaintext Spotify client_secret from config.json on startup (audit Q3).** `config.rs` adds `migrate_legacy_client_secret()`, called from `lib.rs:441` after `load_config`. If `config.json` contains a plaintext `spotify.client_secret` field (legacy ≤ v2.5.0), the value is written into the OS keychain and the plaintext is atomically stripped from the file. Conflict policy: if the keychain already holds a *different* secret, the migration is a no-op (the user is told to Reconnect via Settings) so a multi-install upgrade cannot clobber a working keychain entry.
+
+### Fixed
+- **fix(polling): count `SpotifyApiError::Other` toward `transient_failure_count` (audit M1).** `polling.rs:871-886` — the 5-strikes exit-to-reconnect-required previously only counted `RateLimited` and `ExpiredToken`. A reqwest send failure (DNS, TLS handshake, connection refused) or a non-200/204/401/429 HTTP response is wrapped into `Other`; that variant is now treated as transient so a permanent network outage eventually triggers `reconnect-required` instead of looping forever emitting `error` events.
+
+### Changed
+- **chore(deps): drop unused `tauri-plugin-process` (audit Q6).** The plugin was registered in `lib.rs:372` and declared in `Cargo.toml:28` and `package.json:23`, but no frontend code imports `@tauri-apps/plugin-process` and no Rust code calls into the plugin's IPC. All three registration points and the `ACKNOWLEDGEMENTS.md` table entries have been removed. No behaviour change; pure attack-surface reduction.
+
 ## [2.7.2] - 2026-06-20
 
 ### Fixed

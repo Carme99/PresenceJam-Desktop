@@ -369,7 +369,6 @@ pub fn run() {
             .build())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_http::init())
-        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             // Set panic hook to log crashes
             std::panic::set_hook(Box::new(|panic_info| {
@@ -428,13 +427,18 @@ pub fn run() {
                             let _ = window.hide();
                         }
                     }
-
                 }
 
                 Err(e) => {
                     log::warn!("[APP] setup: no config found: {}", e);
                 }
             }
+
+            // One-shot startup migration: strip plaintext Spotify client_secret
+            // from config.json (legacy ≤ v2.5.0) into the OS keychain. Safe to
+            // call on every launch; no-op once the field is gone. See audit Q3
+            // and issue #9.
+            config::migrate_legacy_client_secret();
 
             // Load persisted tokens (Spotify + Teams) into AppState. We bypass
             // `tauri-plugin-store` for the tokens file and read it directly

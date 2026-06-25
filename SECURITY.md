@@ -68,6 +68,8 @@ These files contain:
 
 > **Status:** As of v2.6.0, the Spotify `client_secret` is stored in the **OS keychain** (macOS Keychain, Windows Credential Manager, or Linux Secret Service via the `keyring` crate) rather than in `config.json`. This supersedes the plaintext-storage approach used through v2.5.0 and earlier; on first run after upgrading, users will be prompted to re-authenticate Spotify so the secret can be migrated. `tokens.json` (access/refresh tokens) was already encrypted to the user account via DPAPI/Keychain in earlier versions.
 
+> **Status:** As of the next release, the keychain user field is **namespaced by the Tauri bundle identifier** (`spotify_client_secret:com.presencejam.app`) so side-by-side installs on the same OS user (prod, dev, beta) get isolated slots. v2.7.2 and earlier stored the secret under the unnamespaced key `spotify_client_secret`; on first read after upgrading, the old entry is automatically migrated forward to the namespaced slot and deleted. The migration is conflict-safe: if the keychain already holds a *different* secret, the legacy plaintext (if any) is left untouched and the user is directed to Settings → Reconnect to resolve.
+
 ### Logs
 
 Application logs are written to:

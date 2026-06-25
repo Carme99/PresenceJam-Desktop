@@ -15,7 +15,6 @@ PresenceJam uses the following open-source projects. We're grateful to all the m
 | [tauri-plugin-log](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | File-based logging |
 | [tauri-plugin-shell](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Shell operations |
 | [tauri-plugin-http](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | HTTP client |
-| [tauri-plugin-process](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Process management |
 | [reqwest](https://github.com/seanmonstar/reqwest) | 0.12 | Apache-2.0 OR MIT | HTTP client for Spotify/Graph APIs |
 | [serde](https://github.com/serde-rs/serde) | 1.x | Apache-2.0 OR MIT | Serialization framework |
 | [serde_json](https://github.com/serde-rs/json) | 1.x | Apache-2.0 OR MIT | JSON parsing |
@@ -42,7 +41,6 @@ PresenceJam uses the following open-source projects. We're grateful to all the m
 | [@tauri-apps/plugin-log](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Log plugin |
 | [@tauri-apps/plugin-notification](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Notification plugin |
 | [@tauri-apps/plugin-opener](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Opener plugin |
-| [@tauri-apps/plugin-process](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Process plugin |
 | [@tauri-apps/plugin-shell](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Shell plugin |
 | [@tauri-apps/plugin-store](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Store plugin |
 | [@sveltejs/adapter-static](https://github.com/sveltejs/kit) | 3.x | MIT | Static site adapter |
