@@ -4,7 +4,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { currentView } from '$lib/stores/app';
   import { configStore, loadConfig } from '$lib/stores/config';
-  import type { TrackInfo } from '$lib/types';
+  import type { SyncStatus, TrackInfo } from '$lib/types';
   import { devLog } from '$lib/utils/dev';
 
   let isSyncing = $state(false);
@@ -27,7 +27,7 @@
     
     try {
       devLog('[DASHBOARD] onMount: calling invoke get_sync_status');
-      const status = await invoke<any>('get_sync_status');
+      const status = await invoke<SyncStatus>('get_sync_status');
       console.info('[DASHBOARD] initial sync status:', {
         is_syncing: status.is_syncing,
         spotify_connected: status.spotify_connected,

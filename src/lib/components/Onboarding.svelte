@@ -2,6 +2,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import { onMount, onDestroy } from 'svelte';
   import { configStore, saveConfig, type AppConfig } from '$lib/stores/config';
+  import type { DeviceCodeResponse, SpotifyTokens, TeamsTokens } from '$lib/types';
   import { currentView } from '$lib/stores/app';
   import { authFlow, setSpotifyPhase, setTeamsPhase } from '$lib/stores/authFlow.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
@@ -127,7 +128,7 @@
       
       if (code) {
         devLog('[ONBOARDING] handleManualUrlPaste: calling invoke complete_spotify_auth_manual');
-        const tokens = await invoke<any>('complete_spotify_auth_manual', { code });
+        const tokens = await invoke<SpotifyTokens>('complete_spotify_auth_manual', { code });
         devLog('[ONBOARDING] handleManualUrlPaste: invoke SUCCESS, tokens=', tokens ? 'present' : 'null');
         
         if (tokens) {
@@ -166,7 +167,7 @@
     
     try {
       devLog('[ONBOARDING] connectTeams: calling invoke start_teams_auth_device_code');
-      const response = await invoke<any>('start_teams_auth_device_code');
+      const response = await invoke<DeviceCodeResponse>('start_teams_auth_device_code');
       devLog('[ONBOARDING] connectTeams: invoke SUCCESS');
       devLog('[ONBOARDING] connectTeams: response.user_code=', response.user_code);
       devLog('[ONBOARDING] connectTeams: response.verification_url=', response.verification_url);
@@ -197,7 +198,7 @@
       devLog('[ONBOARDING] pollTeamsAuth: calling invoke poll_teams_auth');
       devLog('[ONBOARDING] pollTeamsAuth: deviceCode.length=', teamsDeviceCode.length);
       
-      const tokens = await invoke<any>('poll_teams_auth', { deviceCode: teamsDeviceCode });
+      const tokens = await invoke<TeamsTokens>('poll_teams_auth', { deviceCode: teamsDeviceCode });
       devLog('[ONBOARDING] pollTeamsAuth: invoke SUCCESS, tokens=', tokens ? 'present' : 'null');
       
       if (tokens) {
