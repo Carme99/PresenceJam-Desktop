@@ -22,6 +22,40 @@ const ERROR_RETRY_INTERVAL_SECONDS: u64 = 30;
 const RATE_LIMIT_BACKOFF_SECONDS: u64 = 60;
 const DEBOUNCE_MS: u64 = 500;
 
+/// Severity tier for `error` events emitted to the frontend.
+///
+/// Used by `Dashboard.svelte` and other listeners to decide between a
+/// transient toast (warning) and a persistent banner (error). See
+/// issue #79. A transient error that the polling loop will retry
+/// (e.g. a 401 that triggers token refresh, a 429 that triggers
+/// back-off) is `warning`; an error that ended the current attempt
+/// with no automatic recovery is `error`.
+#[derive(Debug, Clone, Copy)]
+enum ErrorSeverity {
+    Warning,
+    Error,
+}
+
+/// Emit an `error` event to the frontend with a stable shape:
+/// `{ "source": <string>, "message": <string>, "severity": "warning" | "error" }`.
+///
+/// Centralised so the field shape cannot drift between emit sites
+/// (polling.rs had 3 of them, see issue #79).
+fn emit_error(app: &AppHandle, source: &str, message: String, severity: ErrorSeverity) {
+    let severity_str = match severity {
+        ErrorSeverity::Warning => "warning",
+        ErrorSeverity::Error => "error",
+    };
+    let _ = app.emit(
+        "error",
+        serde_json::json!({
+            "source": source,
+            "message": message,
+            "severity": severity_str,
+        }),
+    );
+}
+
 /// Read the configured default poll interval (with a hard fallback).
 fn config_default_interval(config: &Option<crate::config::AppConfig>) -> u64 {
     config
@@ -276,12 +310,11 @@ fn process_track(
                 }
                 Err(e) => {
                     log::error!("[POLLING] process_track: Failed to set Teams status: {}", e);
-                    let _ = app.emit(
-                        "error",
-                        serde_json::json!({
-                            "source": "teams",
-                            "message": format!("Failed to update status: {}", e)
-                        }),
+                    emit_error(
+                        app,
+                        "teams",
+                        format!("Failed to update status: {}", e),
+                        ErrorSeverity::Error,
                     );
                     // Emit reconnect-required so the frontend knows to re-auth Teams
                     let e_str = e.to_lowercase();
@@ -641,14 +674,12 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                         "[POLLING] polling_loop: Failed to refresh Spotify token: {}",
                         e
                     );
-                    let _ = app.emit(
-                        "error",
-                        serde_json::json!({
-                            "source": "spotify",
-                            "message": format!("Token refresh failed: {}", e)
-                        }),
+                    emit_error(
+                        &app,
+                        "spotify",
+                        format!("Token refresh failed: {}", e),
+                        ErrorSeverity::Warning,
                     );
-                    log::info!("[POLLING] polling_loop: EMIT error event");
                     match stop_rx.recv_timeout(StdDuration::from_secs(with_jitter(
                         ERROR_RETRY_INTERVAL_SECONDS,
                     ))) {
@@ -895,14 +926,12 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                     break;
                 }
 
-                let _ = app.emit(
-                    "error",
-                    serde_json::json!({
-                        "source": "spotify",
-                        "message": format!("Failed to get currently playing: {}", final_err)
-                    }),
-                );
-                log::info!("[POLLING] polling_loop: EMIT error event");
+                    emit_error(
+                        &app,
+                        "spotify",
+                        format!("Failed to get currently playing: {}", final_err),
+                        ErrorSeverity::Warning,
+                    );
                 match stop_rx.recv_timeout(StdDuration::from_secs(backoff_secs)) {
                     Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                         log::info!(
@@ -998,6 +1027,52 @@ mod tests {
             !body.contains(".compare_exchange("),
             "polling::start_polling must not CAS is_syncing — \
              commands::start_syncing owns the flag. See issue #60."
+        );
+    }
+
+    #[test]
+    fn test_error_event_emits_severity_field() {
+        // Regression guard for issue #79: the frontend's error toast /
+        // banner rendering depends on a `severity` field being present
+        // on every `error` event. If a future contributor adds a new
+        // `app.emit("error", json!({ ... }))` call site that omits
+        // the severity, the Dashboard.svelte listener will treat every
+        // error as the same severity (alarm fatigue).
+        //
+        // The check: prod code (above `#[cfg(test)] mod tests`) must
+        // contain exactly one occurrence of `"severity": severity_str`,
+        // which is the helper's internal field assignment. Any other
+        // shape (inline `json!({...})` without severity, multiple
+        // helpers, etc.) fails. We don't try to count `app.emit("error"`
+        // substrings because the helper's own emit call is split
+        // across lines.
+        let full_source = include_str!("polling.rs");
+        let prod_source = full_source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("polling.rs has no #[cfg(test)] mod tests block");
+        // We have 3 known call sites that must use emit_error:
+        //   1. process_track (Teams status update failure) — Error
+        //   2. polling_loop (Spotify token refresh failure) — Warning
+        //   3. polling_loop (currently-playing failure) — Warning
+        let helper_call_count = prod_source.matches("emit_error(").count();
+        assert!(
+            helper_call_count >= 3,
+            "polling.rs must have at least 3 emit_error() call sites. \
+             Found {}. If you added a new error emit, route it through \
+             emit_error so the severity field is set.",
+            helper_call_count
+        );
+        // Exactly one source of severity-string materialisation: the
+        // helper itself.
+        let severity_source_count = prod_source.matches("\"severity\": severity_str").count();
+        assert_eq!(
+            severity_source_count, 1,
+            "polling.rs must have exactly one place that materialises the \
+             severity string — the emit_error helper. Found {}. If you added \
+             a second error-emit helper, the two can drift in field shape. \
+             See issue #79.",
+            severity_source_count
         );
     }
 }

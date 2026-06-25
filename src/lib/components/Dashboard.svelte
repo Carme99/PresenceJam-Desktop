@@ -4,7 +4,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { currentView } from '$lib/stores/app';
   import { configStore, loadConfig } from '$lib/stores/config';
-  import type { SyncStatus, TrackInfo } from '$lib/types';
+  import type { ErrorEventPayload, SyncStatus, TrackInfo } from '$lib/types';
   import { devLog } from '$lib/utils/dev';
 
   let isSyncing = $state(false);
@@ -70,10 +70,23 @@
     }));
     
     devLog('[DASHBOARD] onMount: setting up error listener');
-    unlisten.push(await listen('error', (event: any) => {
-      console.error('[DASHBOARD] EVENT: error received:', event.payload);
+    unlisten.push(await listen<ErrorEventPayload>('error', (event) => {
+      const payload = event.payload;
+      console.error('[DASHBOARD] EVENT: error received:', payload);
+      // Issue #79: only `severity: "error"` (i.e. an error the polling
+      // loop did not automatically recover from) pops the red banner.
+      // `severity: "warning"` events (e.g. a 401 that triggered token
+      // refresh, a 429 that triggered backoff) are logged to the
+      // console for the developer but do not alarm-fatigue the user
+      // with a banner that disappears during the next successful poll.
+      if (payload.severity !== 'error') {
+        return;
+      }
+      const message = typeof payload.message === 'string'
+        ? payload.message
+        : String(payload);
       if (displayErrorTimeout) clearTimeout(displayErrorTimeout);
-      displayError = String(event.payload);
+      displayError = message;
       displayErrorTimeout = setTimeout(() => { displayError = ''; displayErrorTimeout = null; }, 5000);
     }));
     

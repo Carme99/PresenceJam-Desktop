@@ -34,6 +34,19 @@ export interface TeamsTokens {
 }
 
 /**
+ * Payload of the `error` event emitted by the Rust polling loop. The
+ * `severity` field was added in #79 part 1; the Dashboard.svelte
+ * listener uses it to gate the red banner (only `severity: "error"`
+ * pops it; `severity: "warning"` is logged to the console for the
+ * developer but does not alarm-fatigue the user).
+ */
+export interface ErrorEventPayload {
+  source: string;
+  message: string;
+  severity: 'warning' | 'error';
+}
+
+/**
  * Returned by the `get_sync_status` Tauri command. Mirrors
  * `commands::SyncStatus` in `src-tauri/src/commands.rs`.
  */
