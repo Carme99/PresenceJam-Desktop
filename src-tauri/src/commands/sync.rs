@@ -33,25 +33,22 @@ pub fn start_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> 
     //
     // Only drain if a thread is actually running; the common case
     // (start_syncing from a fresh app start) skips this entirely.
-    if state.is_syncing.load(Ordering::Acquire) {
+    if state.polling.is_syncing(Ordering::Acquire) {
         log::info!("{CMD} start_syncing: previous thread still running; draining");
         stop_polling_and_join(state.inner(), "start_syncing_drain");
     }
 
-    // Use compare_exchange for an atomic check-and-set. AcqRel on
-    // success preserves the happens-before relationship with subsequent
-    // reads of is_syncing (e.g. the polling loop and tray).
-    {
-        if state
-            .is_syncing
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            log::info!("{CMD} start_syncing: already syncing (race lost), returning early");
-            return Ok(());
-        }
-        log::info!("{CMD} start_syncing: is_syncing flag set to true");
+    // Use Polling::try_claim for an atomic check-and-set. The AcqRel /
+    // Acquire orderings are encapsulated inside try_claim() so the
+    // happens-before relationship with subsequent reads of is_syncing
+    // (polling loop, tray) is preserved exactly. See Polling::try_claim
+    // for the original `compare_exchange(false, true, AcqRel, Acquire)`
+    // this replaces.
+    if !state.polling.try_claim() {
+        log::info!("{CMD} start_syncing: already syncing (race lost), returning early");
+        return Ok(());
     }
+    log::info!("{CMD} start_syncing: is_syncing flag set to true");
 
     let handle = match polling::start_polling(Arc::clone(state.inner()), app.clone()) {
         Ok(h) => h,
@@ -61,14 +58,14 @@ pub fn start_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> 
                 "{CMD} start_syncing: polling start failed - {}; rolling back is_syncing",
                 e
             );
-            state.is_syncing.store(false, Ordering::Release);
+            state.polling.set_syncing(false, Ordering::Release);
             return Err(e);
         }
     };
     log::info!("{CMD} start_syncing: polling task spawned");
 
     {
-        let mut handle_guard = state.polling_handle.write();
+        let mut handle_guard = state.polling.handle_mut();
         *handle_guard = Some(handle);
         log::info!("{CMD} start_syncing: polling handle stored");
     }
@@ -83,7 +80,7 @@ pub fn start_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> 
 fn stop_polling_and_join(state: &Arc<AppState>, context: &str) {
     polling::stop_polling(state);
     {
-        let mut handle_guard = state.polling_handle.write();
+        let mut handle_guard = state.polling.handle_mut();
         if let Some(handle) = handle_guard.take() {
             drop(handle_guard); // Release lock while waiting
 
@@ -142,7 +139,7 @@ pub fn stop_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> R
 pub fn app_exit(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> Result<(), String> {
     log::debug!("{CMD} app_exit: ENTRY");
 
-    let is_syncing = state.is_syncing.load(Ordering::Acquire);
+    let is_syncing = state.polling.is_syncing(Ordering::Acquire);
 
     if is_syncing {
         log::info!("{CMD} app_exit: stopping polling first");
@@ -158,16 +155,16 @@ pub fn app_exit(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> Resul
 pub fn get_sync_status(state: tauri::State<'_, Arc<AppState>>) -> Result<SyncStatus, String> {
     log::debug!("{CMD} get_sync_status: ENTRY");
 
-    let is_syncing = state.is_syncing.load(Ordering::Acquire);
+    let is_syncing = state.polling.is_syncing(Ordering::Acquire);
 
     let current_track = {
-        let guard = state.current_track.read();
+        let guard = state.polling.current_track();
         guard.clone()
     };
 
     let spotify_connected = {
-        let tokens = state.spotify_tokens.read();
-        let config = state.config.read();
+        let tokens = state.tokens.spotify();
+        let config = state.config.get();
         tokens.is_some()
             && config
                 .as_ref()
@@ -176,7 +173,7 @@ pub fn get_sync_status(state: tauri::State<'_, Arc<AppState>>) -> Result<SyncSta
     };
 
     let teams_connected = {
-        let guard = state.teams_tokens.read();
+        let guard = state.tokens.teams();
         guard.is_some()
     };
 

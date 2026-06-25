@@ -42,7 +42,7 @@ pub fn save_config(
     // Hold the write lock for the entire read-modify-write to prevent races
     // with concurrent reads from the polling loop. See bug #26.
     {
-        let mut config_guard = state.config.write();
+        let mut config_guard = state.config.get_mut();
         match config::save_config(&config) {
             Ok(()) => {
                 log::info!("{CMD} save_config: file saved successfully");

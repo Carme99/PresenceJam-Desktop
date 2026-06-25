@@ -142,7 +142,7 @@ fn process_track(
     if changed {
         log::info!("[POLLING] process_track: new track detected, updating");
         *last_track_key = Some(track_key);
-        *state.current_track.write() = Some(track.clone());
+        *state.polling.current_track_mut() = Some(track.clone());
 
         let _ = app.emit(
             "spotify-track-changed",
@@ -159,7 +159,7 @@ fn process_track(
     }
 
     let teams_tokens = {
-        let guard = state.teams_tokens.read();
+        let guard = state.tokens.teams();
         guard.clone()
     };
 
@@ -181,7 +181,7 @@ fn process_track(
                     // we refreshed from. If state changed during the refresh
                     // (e.g. user clicked Reconnect), discard the result.
                     let committed = {
-                        let mut guard = state.teams_tokens.write();
+                        let mut guard = state.tokens.teams_mut();
                         if guard.as_ref().map(|t| &t.access_token)
                             == Some(&pre_refresh_access_token)
                         {
@@ -207,7 +207,7 @@ fn process_track(
                         // Teams API call. If it's Some(other), a different
                         // writer won the race and we use those tokens instead
                         // of the discarded refresh.
-                        state.teams_tokens.read().clone()
+                        state.tokens.teams().clone()
                     }
                 }
                 Err(e) => {
@@ -216,7 +216,7 @@ fn process_track(
                         e
                     );
                     // Clear the tokens so we don't keep trying with expired ones
-                    *state.teams_tokens.write() = None;
+                    *state.tokens.teams_mut() = None;
                     let _ = app.emit("teams-reconnect-required", serde_json::json!(null));
                     None
                 }
@@ -381,10 +381,10 @@ fn process_track(
 fn handle_no_track(app: &AppHandle, state: &Arc<AppState>, last_track_key: &mut Option<String>) {
     if last_track_key.is_some() {
         *last_track_key = None;
-        *state.current_track.write() = None;
+        *state.polling.current_track_mut() = None;
 
         let teams_tokens = {
-            let guard = state.teams_tokens.read();
+            let guard = state.tokens.teams();
             guard.clone()
         };
         if let Some(teams_tok) = teams_tokens {
@@ -428,7 +428,7 @@ pub fn start_polling(
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
 
     {
-        let mut tx_guard = state.stop_tx.write();
+        let mut tx_guard = state.polling.stop_tx_mut();
         *tx_guard = Some(stop_tx);
     }
 
@@ -472,22 +472,22 @@ pub fn start_polling(
             // resetting if stop_syncing has already cleared the flag. stop_tx
             // is unconditionally cleared because it was created at the top of
             // this function and is only ever set by us.
-            if state_for_cleanup.is_syncing.load(Ordering::Acquire) {
+            if state_for_cleanup.polling.is_syncing(Ordering::Acquire) {
                 log::warn!(
                     "[POLLING] start_polling: polling thread exited without stop_syncing; \
                      cleaning up sync state"
                 );
-                state_for_cleanup.is_syncing.store(false, Ordering::Release);
+                state_for_cleanup.polling.set_syncing(false, Ordering::Release);
             }
-            *state_for_cleanup.stop_tx.write() = None;
+            *state_for_cleanup.polling.stop_tx_mut() = None;
             log::info!("[POLLING] start_polling: thread ended");
         })
         .map_err(|e| {
             log::error!("[POLLING] start_polling: thread spawn failed - {}", e);
             // Reset is_syncing so future start_polling calls are not permanently wedged.
-            state.is_syncing.store(false, Ordering::Release);
+            state.polling.set_syncing(false, Ordering::Release);
             // Also clean up the stop channel sender we just stored.
-            *state.stop_tx.write() = None;
+            *state.polling.stop_tx_mut() = None;
             format!("Failed to spawn polling thread: {}", e)
         })?;
 
@@ -542,7 +542,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
             }
         }
         {
-            let is_syncing = state.is_syncing.load(Ordering::Acquire);
+            let is_syncing = state.polling.is_syncing(Ordering::Acquire);
             if !is_syncing {
                 log::info!("[POLLING] polling_loop: is_syncing=false, breaking loop");
                 break;
@@ -551,14 +551,14 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
 
         // Get config
         let config = {
-            let guard = state.config.read();
+            let guard = state.config.get();
             guard.clone()
         };
         log::debug!("[POLLING] polling_loop: config loaded");
 
         // Get Spotify tokens
         let spotify_tokens = {
-            let guard = state.spotify_tokens.read();
+            let guard = state.tokens.spotify();
             guard.clone()
         };
         log::debug!(
@@ -617,7 +617,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                     // we refreshed from. If state changed during the refresh
                     // (e.g. user clicked Reconnect), discard the result.
                     let committed = {
-                        let mut guard = state.spotify_tokens.write();
+                        let mut guard = state.tokens.spotify_mut();
                         if guard.as_ref().map(|t| &t.access_token)
                             == Some(&pre_refresh_access_token)
                         {
@@ -647,7 +647,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                         // the next iteration rather than using the discarded
                         // refresh — the caller dereferences spotify_tokens
                         // unconditionally a few lines below.
-                        match state.spotify_tokens.read().clone() {
+                        match state.tokens.spotify().clone() {
                             Some(t) => t,
                             None => {
                                 log::info!(
@@ -725,8 +725,8 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                 );
                 transient_failure_count = 0;
                 // Update tray menu with current sync state and track info (Bug 24+25 fix)
-                let is_syncing = state.is_syncing.load(Ordering::Acquire);
-                let current_track = state.current_track.read().clone();
+                let is_syncing = state.polling.is_syncing(Ordering::Acquire);
+                let current_track = state.polling.current_track().clone();
                 if let Err(e) = tray::update_tray_menu(&app, is_syncing, current_track) {
                     log::warn!("[POLLING] polling_loop: failed to update tray menu: {}", e);
                 }
@@ -752,8 +752,8 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                 handle_no_track(&app, &state, &mut last_track_key);
                 transient_failure_count = 0;
                 // Update tray menu with current sync state and track info (Bug 24+25 fix)
-                let is_syncing = state.is_syncing.load(Ordering::Acquire);
-                let current_track = state.current_track.read().clone();
+                let is_syncing = state.polling.is_syncing(Ordering::Acquire);
+                let current_track = state.polling.current_track().clone();
                 if let Err(e) = tray::update_tray_menu(&app, is_syncing, current_track) {
                     log::warn!("[POLLING] polling_loop: failed to update tray menu: {}", e);
                 }
@@ -790,7 +790,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
 
                     if !client_id.is_empty() && !client_secret.is_empty() {
                         let current_tokens = {
-                            let guard = state.spotify_tokens.read();
+                            let guard = state.tokens.spotify();
                             guard.clone()
                         };
 
@@ -811,7 +811,7 @@ fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()
                                     // changed during the refresh (e.g. user
                                     // clicked Reconnect), discard the result.
                                     let committed = {
-                                        let mut guard = state.spotify_tokens.write();
+                                        let mut guard = state.tokens.spotify_mut();
                                         if guard.as_ref().map(|t| &t.access_token)
                                             == Some(&pre_refresh_access_token)
                                         {
@@ -954,11 +954,11 @@ pub fn stop_polling(state: &AppState) {
     // Close the stop channel to immediately wake the polling thread from all
     // recv_timeout calls. This prevents the up-to-30s freeze when stopping sync.
     {
-        let mut tx_guard = state.stop_tx.write();
+        let mut tx_guard = state.polling.stop_tx_mut();
         *tx_guard = None; // Drop the sender, closing the channel
     }
 
-    state.is_syncing.store(false, Ordering::Release);
+    state.polling.set_syncing(false, Ordering::Release);
     log::info!("[POLLING] stop_polling: stop channel closed and is_syncing set to false");
 }
 

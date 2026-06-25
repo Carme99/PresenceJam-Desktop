@@ -47,8 +47,8 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
                 }
                 // Refresh tray menu label (Show ↔ Hide) and sync state
                 let state = app.state::<std::sync::Arc<crate::AppState>>();
-                let is_syncing = state.is_syncing.load(Ordering::Acquire);
-                let current_track = state.current_track.read().clone();
+                let is_syncing = state.polling.is_syncing(Ordering::Acquire);
+                let current_track = state.polling.current_track().clone();
                 let _ = update_tray_menu(app, is_syncing, current_track);
             }
             ID_PAUSE_SYNC | ID_RESUME_SYNC => {
@@ -99,8 +99,8 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
     // Without this, the initial menu always shows "Pause Sync" regardless of actual
     // sync state, and the menu doesn't show the current track if one is cached.
     let state = app.state::<std::sync::Arc<crate::AppState>>();
-    let is_syncing = state.is_syncing.load(Ordering::Acquire);
-    let current_track = state.current_track.read().clone();
+    let is_syncing = state.polling.is_syncing(Ordering::Acquire);
+    let current_track = state.polling.current_track().clone();
     if let Err(e) = update_tray_menu(app.handle(), is_syncing, current_track) {
         log::warn!(
             "[TRAY] setup_tray: failed to update initial tray menu: {}",

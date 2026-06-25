@@ -75,16 +75,239 @@ impl Default for OnboardingCache {
         Self::new()
     }
 }
+// =====================================================================
+// AppState sub-structs (issue #80 step 2)
+// =====================================================================
+//
+// Each sub-struct follows the OnboardingCache pattern established in step 1:
+//   * All fields are private.
+//   * `lock_*` / `get*` / `is_syncing` / `set_syncing` / `try_claim`
+//     methods are the only path to the inner data. Call sites never
+//     name the underlying Mutex/RwLock/AtomicBool.
+//   * `Default` is implemented alongside `new()` so clippy's
+//     `new_without_default` lint stays quiet (this bit PR #118).
+//
+// The atomic ordering on is_syncing (Acquire load, Release store,
+// AcqRel compare-exchange) is preserved exactly: see `Polling::is_syncing`
+// / `Polling::set_syncing` / `Polling::try_claim`.
+
+/// OAuth tokens for Spotify + Teams. The two locks are independent so
+/// a refresh on one provider can't block reads/writes on the other.
+pub struct Tokens {
+    spotify: RwLock<Option<crate::spotify::SpotifyTokens>>,
+    teams: RwLock<Option<crate::teams::TeamsTokens>>,
+}
+
+impl Tokens {
+    pub fn new() -> Self {
+        Self {
+            spotify: RwLock::new(None),
+            teams: RwLock::new(None),
+        }
+    }
+
+    /// Read guard for the Spotify token slot. Use this instead of
+    /// touching the `spotify` field directly.
+    pub fn spotify(&self) -> parking_lot::RwLockReadGuard<'_, Option<crate::spotify::SpotifyTokens>> {
+        self.spotify.read()
+    }
+
+    /// Write guard for the Spotify token slot. Use this instead of
+    /// touching the `spotify` field directly.
+    pub fn spotify_mut(&self) -> parking_lot::RwLockWriteGuard<'_, Option<crate::spotify::SpotifyTokens>> {
+        self.spotify.write()
+    }
+
+    /// Read guard for the Teams token slot. Use this instead of
+    /// touching the `teams` field directly.
+    pub fn teams(&self) -> parking_lot::RwLockReadGuard<'_, Option<crate::teams::TeamsTokens>> {
+        self.teams.read()
+    }
+
+    /// Write guard for the Teams token slot. Use this instead of
+    /// touching the `teams` field directly.
+    pub fn teams_mut(&self) -> parking_lot::RwLockWriteGuard<'_, Option<crate::teams::TeamsTokens>> {
+        self.teams.write()
+    }
+}
+
+impl Default for Tokens {
+    /// Required by `clippy::new_without_default`. Equivalent to
+    /// `Tokens::new()`.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Pending PKCE/device-code auths, in flight between the OAuth URL
+/// being opened and the callback landing. Never persisted to disk
+/// (issue #65 / HIGH #3).
+pub struct PendingAuths {
+    spotify: RwLock<Option<PendingSpotifyAuth>>,
+    teams: RwLock<Option<PendingTeamsAuth>>,
+}
+
+impl PendingAuths {
+    pub fn new() -> Self {
+        Self {
+            spotify: RwLock::new(None),
+            teams: RwLock::new(None),
+        }
+    }
+
+    pub fn spotify(&self) -> parking_lot::RwLockReadGuard<'_, Option<PendingSpotifyAuth>> {
+        self.spotify.read()
+    }
+
+    pub fn spotify_mut(&self) -> parking_lot::RwLockWriteGuard<'_, Option<PendingSpotifyAuth>> {
+        self.spotify.write()
+    }
+
+    pub fn teams(&self) -> parking_lot::RwLockReadGuard<'_, Option<PendingTeamsAuth>> {
+        self.teams.read()
+    }
+
+    pub fn teams_mut(&self) -> parking_lot::RwLockWriteGuard<'_, Option<PendingTeamsAuth>> {
+        self.teams.write()
+    }
+}
+
+impl Default for PendingAuths {
+    /// Required by `clippy::new_without_default`. Equivalent to
+    /// `PendingAuths::new()`.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Persistent user config (`AppConfig`). `set()` is provided so the
+/// save_config read-modify-write path can hold one write guard for the
+/// whole critical section without naming the inner lock.
+pub struct Config {
+    config: RwLock<Option<crate::config::AppConfig>>,
+}
+
+impl Config {
+    pub fn new() -> Self {
+        Self {
+            config: RwLock::new(None),
+        }
+    }
+
+    /// Read guard for the config slot. Use this instead of touching
+    /// the `config` field directly.
+    pub fn get(&self) -> parking_lot::RwLockReadGuard<'_, Option<crate::config::AppConfig>> {
+        self.config.read()
+    }
+
+    /// Write guard for the config slot. Use this instead of touching
+    /// the `config` field directly.
+    pub fn get_mut(&self) -> parking_lot::RwLockWriteGuard<'_, Option<crate::config::AppConfig>> {
+        self.config.write()
+    }
+}
+
+impl Default for Config {
+    /// Required by `clippy::new_without_default`. Equivalent to
+    /// `Config::new()`.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Live polling state: the sync flag, the worker thread handle, the
+/// stop-channel sender, and the last observed track. The atomic flag
+/// keeps its original orderings (Acquire load, Release store, AcqRel
+/// compare-exchange) so the happens-before chain with the polling
+/// loop and tray menu stays identical to the pre-refactor code.
+pub struct Polling {
+    is_syncing: AtomicBool,
+    handle: RwLock<Option<thread::JoinHandle<()>>>,
+    stop_tx: RwLock<Option<mpsc::Sender<()>>>,
+    current_track: RwLock<Option<crate::spotify::TrackInfo>>,
+}
+
+impl Polling {
+    pub fn new() -> Self {
+        Self {
+            is_syncing: AtomicBool::new(false),
+            handle: RwLock::new(None),
+            stop_tx: RwLock::new(None),
+            current_track: RwLock::new(None),
+        }
+    }
+
+    /// Load the sync flag with the caller's chosen ordering. Preserves
+    /// the original `state.is_syncing.load(Ordering::Acquire)` semantics.
+    pub fn is_syncing(&self, ordering: std::sync::atomic::Ordering) -> bool {
+        self.is_syncing.load(ordering)
+    }
+
+    /// Store a new value into the sync flag with the caller's chosen
+    /// ordering. Preserves the original `state.is_syncing.store(.., Ordering::Release)`
+    /// semantics.
+    pub fn set_syncing(&self, value: bool, ordering: std::sync::atomic::Ordering) {
+        self.is_syncing.store(value, ordering);
+    }
+
+    /// Attempt to atomically claim the sync flag (false -> true). Returns
+    /// `true` if this caller won the claim, `false` if the flag was
+    /// already set. Uses AcqRel on success and Acquire on failure so the
+    /// happens-before relationship with subsequent reads of `is_syncing`
+    /// (polling loop, tray menu) is preserved exactly. This is the only
+    /// site that does the CAS-equivalent operation; `polling.rs` itself
+    /// is intentionally CAS-free (see the regression guard at the
+    /// bottom of `polling.rs::tests`).
+    pub fn try_claim(&self) -> bool {
+        self.is_syncing
+            .compare_exchange(false, true, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Acquire)
+            .is_ok()
+    }
+
+    /// Read guard for the worker thread handle.
+    pub fn handle(&self) -> parking_lot::RwLockReadGuard<'_, Option<thread::JoinHandle<()>>> {
+        self.handle.read()
+    }
+
+    /// Write guard for the worker thread handle.
+    pub fn handle_mut(&self) -> parking_lot::RwLockWriteGuard<'_, Option<thread::JoinHandle<()>>> {
+        self.handle.write()
+    }
+
+    /// Read guard for the stop-channel sender.
+    pub fn stop_tx(&self) -> parking_lot::RwLockReadGuard<'_, Option<mpsc::Sender<()>>> {
+        self.stop_tx.read()
+    }
+
+    /// Write guard for the stop-channel sender.
+    pub fn stop_tx_mut(&self) -> parking_lot::RwLockWriteGuard<'_, Option<mpsc::Sender<()>>> {
+        self.stop_tx.write()
+    }
+
+    /// Read guard for the last observed track.
+    pub fn current_track(&self) -> parking_lot::RwLockReadGuard<'_, Option<crate::spotify::TrackInfo>> {
+        self.current_track.read()
+    }
+
+    /// Write guard for the last observed track.
+    pub fn current_track_mut(&self) -> parking_lot::RwLockWriteGuard<'_, Option<crate::spotify::TrackInfo>> {
+        self.current_track.write()
+    }
+}
+
+impl Default for Polling {
+    /// Required by `clippy::new_without_default`. Equivalent to
+    /// `Polling::new()`.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub struct AppState {
-    pub config: RwLock<Option<crate::config::AppConfig>>,
-    pub spotify_tokens: RwLock<Option<crate::spotify::SpotifyTokens>>,
-    pub teams_tokens: RwLock<Option<crate::teams::TeamsTokens>>,
-    pub current_track: RwLock<Option<crate::spotify::TrackInfo>>,
-    pub is_syncing: AtomicBool,
-    pub polling_handle: RwLock<Option<thread::JoinHandle<()>>>,
-    pub pending_spotify_auth: RwLock<Option<PendingSpotifyAuth>>,
-    pub pending_teams_auth: RwLock<Option<PendingTeamsAuth>>,
-    pub stop_tx: RwLock<Option<mpsc::Sender<()>>>,
+    pub tokens: Tokens,
+    pub polling: Polling,
+    pub pending: PendingAuths,
+    pub config: Config,
     pub onboarding_cache: OnboardingCache,
 }
 
@@ -92,15 +315,10 @@ impl AppState {
     pub fn new() -> Self {
         log::info!("[APP_STATE] AppState::new: creating new AppState");
         Self {
-            config: RwLock::new(None),
-            spotify_tokens: RwLock::new(None),
-            teams_tokens: RwLock::new(None),
-            current_track: RwLock::new(None),
-            is_syncing: AtomicBool::new(false),
-            polling_handle: RwLock::new(None),
-            pending_spotify_auth: RwLock::new(None),
-            pending_teams_auth: RwLock::new(None),
-            stop_tx: RwLock::new(None),
+            tokens: Tokens::new(),
+            polling: Polling::new(),
+            pending: PendingAuths::new(),
+            config: Config::new(),
             onboarding_cache: OnboardingCache::new(),
         }
     }
@@ -139,7 +357,7 @@ async fn handle_spotify_callback(
     log::info!("[CALLBACK] handle_spotify_callback: got app state");
 
     let pending = {
-        let mut guard = app_state.pending_spotify_auth.write();
+        let mut guard = app_state.pending.spotify_mut();
         log::info!("[CALLBACK] handle_spotify_callback: taking pending Spotify auth from state");
         guard.take().ok_or_else(|| {
             log::error!("[CALLBACK] handle_spotify_callback: No pending Spotify auth found");
@@ -209,7 +427,7 @@ async fn handle_spotify_callback(
     );
 
     {
-        let mut guard = app_state.spotify_tokens.write();
+        let mut guard = app_state.tokens.spotify_mut();
         *guard = Some(tokens.clone());
         log::info!("[CALLBACK] handle_spotify_callback: tokens stored in AppState");
     }
@@ -237,7 +455,7 @@ async fn handle_teams_callback(code: &str, app: &AppHandle) -> Result<(), String
     log::info!("[CALLBACK] handle_teams_callback: got app state");
 
     let pending = {
-        let mut guard = state.pending_teams_auth.write();
+        let mut guard = state.pending.teams_mut();
         log::info!("[CALLBACK] handle_teams_callback: taking pending Teams auth from state");
         guard.take().ok_or_else(|| {
             log::error!("[CALLBACK] handle_teams_callback: No pending Teams auth found");
@@ -272,7 +490,7 @@ async fn handle_teams_callback(code: &str, app: &AppHandle) -> Result<(), String
     );
 
     {
-        let mut guard = state.teams_tokens.write();
+        let mut guard = state.tokens.teams_mut();
         *guard = Some(tokens);
         log::info!("[CALLBACK] handle_teams_callback: tokens stored in AppState");
     }
@@ -485,7 +703,7 @@ pub fn run() {
             // Load config into AppState
             match config::load_config() {
                 Ok(cfg) => {
-                    let mut config_guard = state.config.write();
+                    let mut config_guard = state.config.get_mut();
                     *config_guard = Some(cfg.clone());
                     log::info!("[APP] setup: config loaded into AppState");
 
@@ -536,13 +754,13 @@ pub fn run() {
             match token_io::read_tokens_at(app.handle()) {
                 Ok(tf) => {
                     if let Some(st) = tf.spotify_tokens {
-                        *state.spotify_tokens.write() = Some(st);
+                        *state.tokens.spotify_mut() = Some(st);
                         log::info!("[APP] setup: spotify_tokens loaded into AppState");
                     } else {
                         log::info!("[APP] setup: no spotify_tokens in tokens.json");
                     }
                     if let Some(tt) = tf.teams_tokens {
-                        *state.teams_tokens.write() = Some(tt);
+                        *state.tokens.teams_mut() = Some(tt);
                         log::info!("[APP] setup: teams_tokens loaded into AppState");
                     } else {
                         log::info!("[APP] setup: no teams_tokens in tokens.json");
@@ -730,5 +948,102 @@ mod tests {
              method (lock/invalidate). Found 'pub state' in the struct body:\n{}",
             struct_body
         );
+    }
+    #[test]
+    fn test_tokens_sub_struct_lock_and_invalidate() {
+        // Issue #80 step 2: Tokens is now its own sub-struct with
+        // private inner fields. All access goes through `spotify()` /
+        // `teams()` / `spotify_mut()` / `teams_mut()`. This test
+        // exercises the public API: cold state, write/read round-trip,
+        // and the take pattern used by handle_spotify_callback /
+        // handle_teams_callback.
+        use crate::spotify::SpotifyTokens;
+        use crate::teams::TeamsTokens;
+
+        let tokens = Tokens::new();
+
+        // Cold state: both guards return None.
+        assert!(tokens.spotify().is_none(), "fresh Tokens must have no Spotify token");
+        assert!(tokens.teams().is_none(), "fresh Tokens must have no Teams token");
+
+        // Write a Spotify token via spotify_mut(); read back via spotify().
+        *tokens.spotify_mut() = Some(SpotifyTokens {
+            access_token: "spotify-access".to_string(),
+            refresh_token: "spotify-refresh".to_string(),
+            expires_at: chrono::Utc::now() + chrono::Duration::seconds(3600),
+            token_type: "Bearer".to_string(),
+            scope: String::new(),
+        });
+        {
+            let guard = tokens.spotify();
+            let read = guard.as_ref().expect("Spotify token must round-trip");
+            assert_eq!(read.access_token, "spotify-access");
+        }
+
+        // Same round-trip for Teams.
+        *tokens.teams_mut() = Some(TeamsTokens {
+            access_token: "teams-access".to_string(),
+            refresh_token: "teams-refresh".to_string(),
+            expires_at: chrono::Utc::now() + chrono::Duration::seconds(3600),
+            token_type: "Bearer".to_string(),
+            scope: String::new(),
+        });
+        {
+            let guard = tokens.teams();
+            let read = guard.as_ref().expect("Teams token must round-trip");
+            assert_eq!(read.access_token, "teams-access");
+        }
+
+        // Take pattern (used by handle_spotify_callback / handle_teams_callback):
+        // pulling the Option out leaves the slot None.
+        let taken = tokens.spotify_mut().take();
+        assert!(taken.is_some(), "take() must return the stored Spotify token");
+        assert!(
+            tokens.spotify().is_none(),
+            "take() must leave the Spotify slot empty"
+        );
+    }
+
+    #[test]
+    fn test_polling_sub_struct_lock_and_invalidate() {
+        use std::sync::atomic::Ordering;
+        use std::sync::mpsc;
+        let polling = Polling::new();
+        assert!(!polling.is_syncing(Ordering::Acquire));
+        assert!(polling.current_track().is_none());
+        assert!(polling.handle().is_none());
+        assert!(polling.stop_tx().is_none());
+        assert!(polling.try_claim());
+        assert!(polling.is_syncing(Ordering::Acquire));
+        assert!(!polling.try_claim());
+        polling.set_syncing(false, Ordering::Release);
+        assert!(!polling.is_syncing(Ordering::Acquire));
+        let (tx, _rx) = mpsc::channel::<()>();
+        *polling.stop_tx_mut() = Some(tx);
+        assert!(polling.stop_tx().is_some());
+        let handle = std::thread::Builder::new().spawn(|| {}).expect("spawn");
+        *polling.handle_mut() = Some(handle);
+        assert!(polling.handle().is_some());
+    }
+
+    #[test]
+    fn test_app_state_sub_encapsulation_no_pub_inner_fields() {
+        let source = include_str!("lib.rs");
+        for name in ["Tokens", "Polling", "PendingAuths", "Config"] {
+            let header = format!("pub struct {}", name);
+            let start = source.find(&header)
+                .unwrap_or_else(|| panic!("missing struct {}", name));
+            let end = source[start..]
+                .find("\n}\n")
+                .map(|i| start + i + 2)
+                .unwrap_or_else(|| panic!("no closing brace for {}", name));
+            let body = &source[start..end];
+            for line in body.lines() {
+                let t = line.trim_start();
+                if t.starts_with("pub ") && t.contains(':') && !t.starts_with("pub struct") {
+                    panic!("{} has pub field `{}`; must stay private", name, t);
+                }
+            }
+        }
     }
 }

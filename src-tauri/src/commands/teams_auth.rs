@@ -36,7 +36,7 @@ pub fn start_teams_auth_device_code(
     // issue #65 / HIGH #3. If the user crashes between this call and
     // `poll_teams_auth`, they re-start the device-code flow (cheap UX).
     {
-        let mut pending = state.pending_teams_auth.write();
+        let mut pending = state.pending.teams_mut();
         *pending = Some(crate::PendingTeamsAuth {
             verifier: response.device_code.clone(),
             client_id: crate::teams::MICROSOFT_GRAPH_CLIENT_ID.to_string(),
@@ -68,7 +68,7 @@ pub fn poll_teams_auth(
     );
 
     {
-        let mut guard = state.teams_tokens.write();
+        let mut guard = state.tokens.teams_mut();
         *guard = Some(tokens.clone());
         log::info!("{CMD} poll_teams_auth: tokens stored in AppState");
     }
@@ -77,7 +77,7 @@ pub fn poll_teams_auth(
 
     // Clear pending Teams auth in AppState (no disk side — we never wrote it)
     {
-        let mut pending = state.pending_teams_auth.write();
+        let mut pending = state.pending.teams_mut();
         *pending = None;
     }
 
@@ -97,7 +97,7 @@ pub fn refresh_teams(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> 
     log::debug!("{CMD} refresh_teams: ENTRY");
 
     let current_tokens = {
-        let guard = state.teams_tokens.read();
+        let guard = state.tokens.teams();
         guard.clone().ok_or_else(|| {
             log::error!("{CMD} refresh_teams: No Teams tokens in state");
             "No Teams tokens to refresh".to_string()
@@ -113,7 +113,7 @@ pub fn refresh_teams(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> 
     // Reconnect from another command), discard the result.
     let pre_refresh_access_token = current_tokens.access_token.clone();
     let committed = {
-        let mut guard = state.teams_tokens.write();
+        let mut guard = state.tokens.teams_mut();
         if guard.as_ref().map(|t| &t.access_token) == Some(&pre_refresh_access_token) {
             *guard = Some(new_tokens.clone());
             true
