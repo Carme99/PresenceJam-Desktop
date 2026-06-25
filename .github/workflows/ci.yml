@@ -17,10 +17,14 @@ concurrency:
 jobs:
   # Frontend: catches Svelte/TS build errors. Mirrors the npm ci + npm run build
   # steps from release.yml. Cached via actions/setup-node cache: 'npm'.
+  # Also runs `cargo test --lib` to materialise the ts-rs `#[ts(export)]`
+  # generated .ts files into src/lib/types-generated/ BEFORE
+  # `npm run check` (the re-exports in src/lib/types.ts depend on them).
+  # This is a no-op for projects not using ts-rs. See #78.
   frontend:
-    name: Frontend (npm build)
+    name: Frontend (npm build + ts-rs codegen)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
@@ -36,11 +40,45 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e  # 1.96
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            pkg-config \
+            build-essential
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+        with:
+          workspaces: src-tauri -> target
+
       - name: Build frontend
         run: npm run build
 
-      # Type-check Svelte/TS via svelte-check. Runs after Build frontend so the
-      # generated $types and .svelte-kit output are in place.
+      # ts-rs's `#[ts(export)]` derive writes the generated .ts files
+      # into src/lib/types-generated/ when the test binary runs. The
+      # `npm run check` step below depends on those files existing
+      # (src/lib/types.ts re-exports from them). The test suite also
+      # serves as a sanity check that the Rust types round-trip
+      # cleanly. For projects not using ts-rs, this is a no-op
+      # build of the test binary. See #78.
+      - name: Cargo test (lib) to materialise ts-rs codegen
+        env:
+          CARGO_INCREMENTAL: 0
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+
+      # Type-check Svelte/TS via svelte-check. Runs after Build frontend
+      # and the cargo test step above so the generated $types,
+      # .svelte-kit output, and src/lib/types-generated/ files are
+      # all in place.
       - name: Svelte/TS type check (npm run check)
         run: npm run check
 
