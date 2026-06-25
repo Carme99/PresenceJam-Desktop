@@ -27,6 +27,45 @@ pub struct PendingTeamsAuth {
     pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// 30s result cache for `is_onboarding_complete`.
+///
+/// `Some((ts, result))` means a successful or failed validation ran at `ts`
+/// and produced `result`. `None` means the cache is cold (or was cleared
+/// after a token refresh). Lives in its own sub-struct (not as a top-level
+/// field on `AppState`) so the AppState struct-of-states refactor (#80)
+/// can fold other sub-structs alongside it.
+///
+/// **Lock encapsulation (load-bearing):** all access goes through the
+/// `lock()` method on this sub-struct — never via `self.state.lock()`
+/// from the call site. The pattern keeps the lock acquisition
+/// observable in one place, which is what makes future work like
+/// "lock must not be held across an await" enforceable (a `lock_async`
+/// method could replace `lock` later without rewriting every call
+/// site). See issue #80.
+pub struct OnboardingCache {
+    state: Mutex<Option<(Instant, bool)>>,
+}
+
+impl OnboardingCache {
+    pub fn new() -> Self {
+        Self { state: Mutex::new(None) }
+    }
+
+    /// Acquire the cache lock. Use this instead of touching `self.state`
+    /// directly so future refactors (e.g. async-aware locks) only
+    /// need to change one site.
+    pub fn lock(&self) -> parking_lot::MutexGuard<'_, Option<(Instant, bool)>> {
+        self.state.lock()
+    }
+
+    /// Clear the cache. Convenience wrapper for the common
+    /// `*state.lock() = None;` pattern; used after any auth flow that
+    /// could change the onboarding result (token refresh, reconnect,
+    /// initial setup completion).
+    pub fn invalidate(&self) {
+        *self.state.lock() = None;
+    }
+}
 pub struct AppState {
     pub config: RwLock<Option<crate::config::AppConfig>>,
     pub spotify_tokens: RwLock<Option<crate::spotify::SpotifyTokens>>,
@@ -37,10 +76,7 @@ pub struct AppState {
     pub pending_spotify_auth: RwLock<Option<PendingSpotifyAuth>>,
     pub pending_teams_auth: RwLock<Option<PendingTeamsAuth>>,
     pub stop_tx: RwLock<Option<mpsc::Sender<()>>>,
-    /// 30s result cache for `is_onboarding_complete` — see commands.rs.
-    /// `Some((ts, result))` means a successful or failed validation ran at `ts` and produced `result`.
-    /// `None` means the cache is cold (or older than 30s and was cleared).
-    pub onboarding_cache: Mutex<Option<(Instant, bool)>>,
+    pub onboarding_cache: OnboardingCache,
 }
 
 impl AppState {
@@ -56,7 +92,7 @@ impl AppState {
             pending_spotify_auth: RwLock::new(None),
             pending_teams_auth: RwLock::new(None),
             stop_tx: RwLock::new(None),
-            onboarding_cache: Mutex::new(None),
+            onboarding_cache: OnboardingCache::new(),
         }
     }
 }
@@ -172,7 +208,7 @@ async fn handle_spotify_callback(
     log::info!("[CALLBACK] handle_spotify_callback: tokens persisted atomically");
 
     // Issue #70: invalidate the onboarding cache.
-    *app_state.onboarding_cache.lock() = None;
+    app_state.onboarding_cache.invalidate();
     log::info!("[CALLBACK] handle_spotify_callback: onboarding_cache invalidated");
 
     log::info!("[CALLBACK] handle_spotify_callback: EMIT spotify-auth-complete event");
@@ -235,7 +271,7 @@ async fn handle_teams_callback(code: &str, app: &AppHandle) -> Result<(), String
     log::info!("[CALLBACK] handle_teams_callback: tokens persisted atomically");
 
     // Issue #70: invalidate the onboarding cache.
-    *state.onboarding_cache.lock() = None;
+    state.onboarding_cache.invalidate();
     log::info!("[CALLBACK] handle_teams_callback: onboarding_cache invalidated");
 
     log::info!("[CALLBACK] handle_teams_callback: EMIT teams-auth-complete event");
@@ -609,4 +645,74 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_onboarding_cache_lock_and_invalidate() {
+        // Issue #80: OnboardingCache is now its own sub-struct with a
+        // load-bearing lock() method. The lock() / invalidate() API
+        // must be the only way to reach the inner state from outside
+        // the sub-struct — direct access to the `state` field would
+        // defeat the encapsulation that the struct-of-states refactor
+        // is supposed to give us.
+        let cache = OnboardingCache::new();
+
+        // Initially cold: lock returns None.
+        assert!(cache.lock().is_none(), "fresh cache must be cold");
+
+        // Write a value via lock() and read it back.
+        *cache.lock() = Some((Instant::now(), true));
+        let guard = cache.lock();
+        assert!(guard.is_some(), "value written via lock() must round-trip");
+        let (ts, result) = guard.unwrap();
+        assert!(result, "value must be the one we wrote");
+        // Timestamp must be recent (within the last 5s).
+        assert!(
+            ts.elapsed() < std::time::Duration::from_secs(5),
+            "timestamp should be ~now, not stale"
+        );
+        drop(guard);
+
+        // invalidate() must clear the cache back to None.
+        cache.invalidate();
+        assert!(
+            cache.lock().is_none(),
+            "invalidate() must reset cache to None"
+        );
+    }
+
+    #[test]
+    fn test_onboarding_cache_encapsulation_no_direct_state_access() {
+        // Regression guard for issue #80: a future contributor must
+        // not re-expose the `state` field as `pub`. The struct-of-
+        // states refactor relies on every AppState sub-struct hiding
+        // its inner mutex behind a method. If someone makes
+        // `OnboardingCache::state` public, callers can bypass
+        // invalidate() and lock() — and the "lock must not be held
+        // across await" future invariant becomes unenforceable.
+        let source = include_str!("lib.rs");
+        // Find the OnboardingCache struct definition.
+        let start = source
+            .find("pub struct OnboardingCache")
+            .expect("lib.rs must contain OnboardingCache struct");
+        let end = source[start..]
+            .find("\n}\n")
+            .map(|i| start + i + 2)
+            .expect("OnboardingCache struct must end with closing brace");
+        let struct_body = &source[start..end];
+        // The `state` field must be private (no `pub` keyword on the
+        // field declaration). We grep for `pub state:` to detect a
+        // regression. Whitespace-tolerant.
+        assert!(
+            !struct_body.lines().any(|l| l.trim_start().starts_with("pub state")),
+            "OnboardingCache::state must remain private. The struct-of-states \
+             refactor (#80) relies on the inner mutex being hidden behind a \
+             method (lock/invalidate). Found 'pub state' in the struct body:\n{}",
+            struct_body
+        );
+    }
 }
