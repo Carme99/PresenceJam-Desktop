@@ -4,7 +4,8 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct SpotifyConfig {
     pub client_id: String,
     /// True iff the Spotify `client_secret` is currently stored in the OS
@@ -30,7 +31,8 @@ fn default_scopes() -> Vec<String> {
     ]
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct TeamsConfig {
     #[serde(default = "default_status_format")]
     pub status_format: String,
@@ -64,7 +66,8 @@ fn default_profanity_placeholder() -> String {
     profanity::safe_placeholder_default().to_string()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct PollingConfig {
     #[serde(default = "default_interval_seconds")]
     pub default_interval_seconds: u64,
@@ -92,7 +95,8 @@ fn default_expiry_buffer_seconds() -> u64 {
     10
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct LoggingConfig {
     #[serde(default = "default_logging_enabled")]
     pub enabled: bool,
@@ -108,7 +112,8 @@ fn default_log_level() -> String {
     "Info".to_string()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct AppConfig {
     #[serde(default)]
     pub spotify: SpotifyConfig,
