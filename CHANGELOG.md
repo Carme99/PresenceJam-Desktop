@@ -93,7 +93,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **#66 (deep-link hijack)** remains deferred to v2.7.1. Per-launch custom-scheme registration (OS-specific) is required for the full fix. Partial mitigation from #65 (PKCE verifier in `AppState` only) is still in place.
 
 ### Follow-ups (not addressed here)
-- **#71 (tray Show/Hide label regression).** The menu label doesn't update after clicking "Hide Window" — the dedup key omits `window.is_visible()`. Tracked separately.
 - **Reconnect Spotify flow.** `Reconnect.svelte` and `Settings.svelte` pass `clientSecret: ''` which the #67 validator rejects. Pre-existing bug, not introduced by this release.
 - **Frontend dead stores.** `src/lib/stores/spotify.ts` and `src/lib/stores/teams.ts` are still present. Tracked separately.
 
