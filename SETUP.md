@@ -10,12 +10,14 @@ Get PresenceJam running on your machine.
 
 ## Step 1 — Install the App
 
-Download the latest release from [GitHub Releases](https://github.com/Carme99/PresenceJam-Desktop/releases):
+Download the latest release from the [GitHub Releases page](https://github.com/Carme99/PresenceJam-Desktop/releases/latest):
 
 | OS | File | Notes |
 |----|------|-------|
-| Windows | `PresenceJam-2.6.0.msi` | Run the installer, follow the prompts |
-| macOS | `PresenceJam-2.6.0-macos.dmg` | Drag PresenceJam to Applications |
+| Windows | see [Releases page](https://github.com/Carme99/PresenceJam-Desktop/releases/latest) | Run the installer, follow the prompts |
+| macOS | see [Releases page](https://github.com/Carme99/PresenceJam-Desktop/releases/latest) | Drag PresenceJam to Applications |
+
+Filenames follow the pattern `PresenceJam-<version>-<os>.<ext>` (e.g. `PresenceJam-<version>-linux-amd64.deb`); see the [latest release](https://github.com/Carme99/PresenceJam-Desktop/releases/latest) for the current values.
 
 The installer will create:
 - The app in your Applications/start menu

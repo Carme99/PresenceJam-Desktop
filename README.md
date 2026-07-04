@@ -1,4 +1,6 @@
-# PresenceJam 2.7.2
+# PresenceJam
+
+Latest release: [GitHub Releases](https://github.com/Carme99/PresenceJam-Desktop/releases/latest). See [CHANGELOG.md](CHANGELOG.md) for the full version history.
 
 Sync your Spotify playback to Microsoft Teams status automatically.
 
@@ -27,28 +29,30 @@ PresenceJam polls Spotify's Web API for your currently playing track and sets it
 
 ## Downloads
 
-Install the latest release from [GitHub Releases](https://github.com/Carme99/PresenceJam-Desktop/releases):
+Download the installer for your platform from the [latest release](https://github.com/Carme99/PresenceJam-Desktop/releases/latest):
 
-- `PresenceJam-2.7.2.msi` — Windows 10/11 (64-bit)
-- `PresenceJam-2.7.2-macos.dmg` — macOS (Apple Silicon)
-- `PresenceJam-2.7.2-linux-amd64.deb` — Debian / Ubuntu / Mint / popOS (64-bit)
-- `PresenceJam-2.7.2-linux-amd64.AppImage` — any modern Linux (64-bit, no install)
+- Windows 10/11 (64-bit) — `.msi` installer
+- macOS (Apple Silicon) — `.dmg` image
+- Debian / Ubuntu / Mint / popOS (64-bit) — `.deb` package
+- Any modern Linux (64-bit, no install required) — `.AppImage`
+
+Filenames follow the pattern `PresenceJam-<version>-<os>.<ext>` — see the [latest release](https://github.com/Carme99/PresenceJam-Desktop/releases/latest) for the current values.
 
 ### Linux install
 
 **Debian / Ubuntu / Mint / popOS** (one-time):
 
 ```bash
-sudo apt install ./PresenceJam-2.7.2-linux-amd64.deb
+sudo apt install ./PresenceJam-<version>-linux-amd64.deb
 # or if apt refuses the local path:
-sudo dpkg -i PresenceJam-2.7.2-linux-amd64.deb && sudo apt-get install -f
+sudo dpkg -i PresenceJam-<version>-linux-amd64.deb && sudo apt-get install -f
 ```
 
 **AppImage** (any distro, no install required):
 
 ```bash
-chmod +x PresenceJam-2.7.2-linux-amd64.AppImage
-./PresenceJam-2.7.2-linux-amd64.AppImage
+chmod +x PresenceJam-<version>-linux-amd64.AppImage
+./PresenceJam-<version>-linux-amd64.AppImage
 ```
 
 For autostart with an AppImage, see the [Tauri Linux docs](https://tauri.app/distribute/linux/) — a `.desktop` file in `~/.local/share/applications/` plus the binary in `~/.local/bin/` is the standard pattern.

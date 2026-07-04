@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
+## [2.8.0] - 2026-07-04
+
+### Security
+- **fix(security): re-register the `presencejam://` custom-scheme handler at every launch on Windows and Linux, further mitigating the deep-link hijack tracked in #66.** Landed via #129. The release commit will fill in the full per-PR details.
+
+### Documentation
+- **docs: README and SETUP install instructions no longer pin a specific release version.** Install commands and download links now reference the [latest release](https://github.com/Carme99/PresenceJam-Desktop/releases/latest) instead of stale `PresenceJam-<v>.msi` filenames. The release commit will expand this entry.
+
+
 ## [2.7.5] - 2026-06-25
 
 ### Refactored
