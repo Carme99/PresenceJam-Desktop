@@ -227,6 +227,7 @@ sequenceDiagram
     Commands->>UI: emit("spotify-reconnect-required")
     UI->>User: Show re-auth wizard (uses start_spotify_reconnect,<br/>reads existing client_secret from keychain)
 ```
+
 ### Commands
 
 | Command | Action |
