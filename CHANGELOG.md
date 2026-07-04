@@ -6,14 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
-
 ## [2.8.0] - 2026-07-04
 
 ### Security
 - **fix(security): re-register presencejam:// scheme at every launch (further mitigates #66).** `src-tauri/src/lib.rs` previously called `tauri-plugin-deep-link`'s `register_all()` only on Windows (`#[cfg(windows)]` gate around the existing call site). The plugin's `register` is a no-op on macOS/Android/iOS (returns `Err(UnsupportedPlatform)`) and an effective re-registration on Windows (writes `HKCU\Software\Classes\<scheme>`) and Linux (writes `~/.local/share/applications/<scheme>.desktop` and runs `xdg-mime default`). This change removes the Windows-only gate so Linux also re-registers on every launch, defending against a foreign app pre-registering `presencejam://` to hijack the Spotify OAuth callback. **Windows + Linux coverage only**; macOS remains partially mitigated by #65 (PKCE verifier in AppState only, never on disk, never exposed via IPC — an interceptor can read the `code` but cannot exchange it for tokens). Native `LSSetDefaultHandlerForURLScheme` work for macOS is tracked separately. Does not modify the OAuth `redirect_uri` or `state` parameter — no Spotify re-registration required.
 
+### Documentation
+- **docs: README and SETUP install instructions no longer pin a specific release version.** Install commands and download links now reference the [latest release](https://github.com/Carme99/PresenceJam-Desktop/releases/latest) instead of stale `PresenceJam-<v>.msi` filenames. (Landed via #131.)
+
 ### Tests
 - Regression guard `test_register_all_not_gated_to_windows_only` added; uses `include_str!("lib.rs")` to assert `app.deep_link().register_all()` is not gated to Windows alone.
+
 
 ## [2.7.5] - 2026-06-25
 
@@ -102,7 +105,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **#66 (deep-link hijack)** remains deferred to v2.7.1. Per-launch custom-scheme registration (OS-specific) is required for the full fix. Partial mitigation from #65 (PKCE verifier in `AppState` only) is still in place.
 
 ### Follow-ups (not addressed here)
-- **#71 (tray Show/Hide label regression).** The menu label doesn't update after clicking "Hide Window" — the dedup key omits `window.is_visible()`. Tracked separately.
 - **Reconnect Spotify flow.** `Reconnect.svelte` and `Settings.svelte` pass `clientSecret: ''` which the #67 validator rejects. Pre-existing bug, not introduced by this release.
 - **Frontend dead stores.** `src/lib/stores/spotify.ts` and `src/lib/stores/teams.ts` are still present. Tracked separately.
 
