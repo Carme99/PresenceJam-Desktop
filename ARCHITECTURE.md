@@ -4,90 +4,112 @@ A deep-dive into how PresenceJam works under the hood.
 
 ## Overview
 
-PresenceJam is a Tauri 2 desktop application with:
+PresenceJam is a Tauri 2 desktop application:
 
-- **Frontend:** Svelte 5 + TypeScript (SPA mode via `@sveltejs/adapter-static`)
-- **Backend:** Rust (Tauri 2 command handlers + polling thread)
-- **Storage:** `tauri-plugin-store` for all persistent data (tokens + config)
-- **Auth:** Spotify PKCE OAuth 2.0 + Microsoft Teams Device Code flow
-- **Platform:** Windows + macOS (single-instance enforcement, system tray, DPAPI token encryption on Windows, Keychain on macOS)
+- **Frontend:** Svelte 5 + TypeScript (SPA via `@sveltejs/adapter-static`),
+  wired to a strict Rust contract via `ts-rs` build-time codegen (see
+  *Directory Structure* below).
+- **Backend:** Rust — Tauri 2 `#[tauri::command]` handlers in the
+  `commands/` submodule tree, plus a single `polling/` driver that
+  handles all Spotify/Teams sync work.
+- **Storage (atomic, no tauri-plugin-store):** `tauri-plugin-store` is
+  registered in `lib.rs` for capability reasons but **never invoked** at
+  runtime — all persistence goes through two hand-written atomic-write
+  modules instead:
+  - `config.rs::save_config()` → `atomic_write_json()` → temp-file + rename
+    + fsync to `%APPDATA%\PresenceJam\config.json` (Linux/macOS path
+    variants handled by `dirs`).
+  - `token_io.rs::persist_tokens()` → temp-file + rename + fsync to
+    `<app-config-dir>/PresenceJam/tokens.json` for OAuth tokens.
+  Both paths survive process-kill mid-write (issue #65 issue context; see
+  `SECURITY.md`).
+- **Auth:** Spotify PKCE OAuth 2.0 + Microsoft Teams Device Code flow.
+- **Secrets — TWO PATHS, both intentional** (do not conflate):
+  - **Spotify `client_secret`** is in the OS keychain, namespaced per
+    installation — DPAPI on Windows, Keychain on macOS, Secret Service
+    on Linux (gnome-keyring or kwallet). See [SETUP.md#linux-keyring](SETUP.md#linux-keyring).
+    A working OS keychain is a hard dependency; there is no on-disk
+    encrypted fallback (issue #9).
+  - **OAuth access/refresh tokens** (Spotify + Teams) live in
+    `tokens.json` written atomically by `token_io.rs`. The webview has
+    no path to read them (closed issue #65).
+- **Platform:** Windows + macOS + Linux. Single-instance enforcement,
+  system tray, `presencejam://` deep-link scheme re-registered on every
+  launch (see *Deep Link Routing*).
 
 ## System Diagram
 
 ```mermaid
 graph TD
-    subgraph Frontend ["Frontend (Svelte)"]
-        UI["+page.svelte<br/>Dashboard / Onboarding<br/>Settings / LogViewer"]
-        Stores["Stores<br/>app.ts, config.ts<br/>spotify.ts (interfaces)<br/>teams.ts (interfaces)"]
+    subgraph Frontend ["Frontend (Svelte 5 SPA)"]
+        UI["+page.svelte + lib/components/<br/>Dashboard / Onboarding / Settings / Reconnect / LogViewer"]
+        Stores["lib/stores/<br/>app.ts (view + error)<br/>config.ts (configStore)<br/>authFlow.svelte.ts<br/>useAuthListeners.ts"]
+        Types["lib/types.ts<br/>(re-exports ts-rs codegen)"]
     end
 
-    subgraph Backend ["Backend (Rust / Tauri)"]
-        Commands["commands.rs<br/>invoke handlers"]
-        Polling["polling.rs<br/>sync thread"]
-        SpotifyAPI["spotify.rs<br/>Spotify Web API"]
-        TeamsAPI["teams.rs<br/>Microsoft Graph API"]
-        Tray["tray.rs<br/>system tray"]
-        Menu["menu.rs<br/>application menu"]
+    subgraph Backend ["Backend (Rust / Tauri 2)"]
+        Commands["commands/ submodule<br/>config / spotify_auth / teams_auth<br/>sync / window / onboarding / misc"]
+        Polling["polling/ submodule<br/>loop (driver) + state (lifecycle)<br/>poll_once (single-source-of-truth iteration)<br/>+ mod.rs (ErrorSeverity, emit_error)"]
+        SpotifyAPI["spotify.rs<br/>Spotify Web API (PKCE)"]
+        TeamsAPI["teams.rs<br/>Microsoft Graph (device code)"]
+        Keychain["keychain.rs<br/>OS keychain wrapper<br/>(Secret Service on Linux)"]
+        Tray["tray.rs / menu.rs<br/>system tray + app menu"]
     end
 
     subgraph Storage ["Storage"]
-        TokenStore["tauri-plugin-store<br/>tokens.json"]
+        Tokens["tokens.json<br/>(hand-managed, atomic write)"]
+        Secret["OS keychain<br/>(Spotify client_secret only)"]
         Config["config.json<br/>%APPDATA%\\PresenceJam"]
     end
 
-    UI <-->|"invoke / events"| Commands
-    Commands -->|"HTTP"| SpotifyAPI
-    Commands -->|"HTTP"| TeamsAPI
+    UI -->|"invoke<Cmd>"| Commands
+    Commands -->|"emit<Event>"| UI
+    Commands -->|"start / stop"| Polling
     Polling -->|"HTTP"| SpotifyAPI
     Polling -->|"HTTP"| TeamsAPI
-    Commands --> Polling
-    SpotifyAPI -->|"tokens"| TokenStore
-    TeamsAPI -->|"tokens"| TokenStore
+    SpotifyAPI -->|"read / write"| Tokens
+    TeamsAPI -->|"read / write"| Tokens
+    SpotifyAPI -->|"get / set"| Keychain
+    Commands -->|"read / write"| Config
+    Keychain -->|"DPAPI / Keychain /<br/>Secret Service"| Secret
 ```
 
 ## CI/CD Pipeline
 
-Releases are automated via GitHub Actions. When a version tag is pushed, the pipeline builds and releases for both platforms:
+Releases are automated via GitHub Actions on every `v*.*.*` tag push. Three jobs
+fire in parallel; three downstream jobs (`release`, `homebrew`, `winget`) sequence
+off them:
 
 ```mermaid
 flowchart TD
-    subgraph Trigger["🔔 Trigger: git tag v* pushed"]
-        tag["git tag v2.2.0 && git push --tags"]
-    end
-
-    subgraph Build["🔨 Build Matrix"]
+    Trigger["🔔 Trigger: git tag v* v2.8.0 && git push --tags"]
+    subgraph Build["🔨 Build Matrix (parallel)"]
         direction LR
-        macos_build["macOS Build<br/>aarch64-apple-darwin"]
-        windows_build["Windows Build<br/>x86_64-pc-windows-msvc"]
+        MacBuild["macOS Build<br/>aarch64-apple-darwin → .dmg"]
+        WinBuild["Windows Build<br/>x86_64-pc-windows-msvc → .msi"]
+        LinBuild["Linux Build<br/>ubuntu-22.04 → .deb + .AppImage"]
     end
-
-    subgraph Package["📦 Package"]
-        direction LR
-        macos_zip["macOS: .app → .zip"]
-        msi["Windows: .msi"]
-    end
-
-    subgraph Release["🚀 GitHub Release"]
-        release["Auto-created Release<br/>Drafted from tag"]
-        assets["Artifacts attached:<br/>PresenceJam-v2.2.0-macos.dmg<br/>PresenceJam-v2.2.0.msi"]
-    end
-
-    tag --> Build
-    Build --> Package
-    Package --> Release
+    Release["🚀 release<br/>download all artifacts<br/>create GitHub Release"]
+    Brew["🍺 homebrew<br/>update carme99/homebrew-tap"]
+    Winget["📥 winget<br/>open PR to microsoft/winget-pkgs"]
+    Trigger --> Build --> Release --> Brew
+    Release --> Winget
 ```
 
 ### Release Process
 
-1. **Tag Push:** Developer runs `git tag v2.2.0 && git push --tags`
-2. **Workflow Trigger:** GitHub Actions detects the `v*` tag pattern
-3. **Parallel Build:** macOS and Windows builds run concurrently on GitHub's hosted runners
-4. **Artifact Upload:** Build outputs are uploaded as workflow artifacts
-5. **Release Creation:** `release-action` creates a GitHub Release and attaches all artifacts
+1. **Tag push:** Maintainer runs `git tag vX.Y.Z && git push --tags`.
+2. **Parallel matrix:** macOS, Windows, and Linux builds run concurrently on
+   GitHub's hosted runners (Linux .deb + .AppImage added in v2.7.0 via PR #94).
+3. **Artifact upload:** Each OS build uploads its Tauri-bundled artifact via
+   `actions/upload-artifact` (v7 in v2.8.0; v4 in 2.7.x).
+4. **Release:** The `release` job downloads all artifacts and creates the
+   GitHub Release via `ncipollo/release-action`.
+5. **Distribution:** `homebrew` and `winget` jobs (each consuming the GitHub
+   Release artifact) update the tap / open a winget-pkgs PR in parallel.
 
-### Workflow File
-
-The CI/CD workflow is defined in [`.github/workflows/release.yml`](.github/workflows/release.yml).
+The full workflow: [`.github/workflows/release.yml`](.github/workflows/release.yml).
+The PR-time CI that gates merges is [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 ## Authentication Flows
 
@@ -96,26 +118,35 @@ The CI/CD workflow is defined in [`.github/workflows/release.yml`](.github/workf
 ```mermaid
 sequenceDiagram
     actor User
-    participant App
-    participant Spotify as Spotify<br/>Developer Portal
+    participant App as PresenceJam
+    participant Spotify as Spotify<br/>accounts.spotify.com
     participant Browser
 
-    User->>App: Enter Client ID + Secret
-    App->>Spotify: POST /api/token (code_verifier)
-    Spotify-->>Browser: Open auth URL with code_challenge
+    User->>App: Enter Client ID + Secret (Settings)
+    App->>App: store client_secret in OS keychain<br/>(per-install namespaced slot)
+    App->>App: generate PKCE code_verifier (64 random bytes)
+    App->>App: compute code_challenge = SHA256(verifier)
+    App->>App: build auth URL, open in system browser
+    Note over App,Spotify: redirect_uri = `presencejam://callback`<br/>(Spotify requires byte-exact match;<br/>no per-launch scheme UUID possible)
     User->>Browser: Login + Authorize
-    Browser-->>App: Redirect to presencejam://callback?code=XXX
+    Browser-->>App: Deep-link callback `presencejam://callback?code=…&state=…`
     App->>Spotify: POST /api/token (code, code_verifier)
     Spotify-->>App: access_token + refresh_token
-    App->>App: Store tokens via tauri-plugin-store
+    App->>App: persist tokens to tokens.json (atomic write)
 ```
 
-1. App generates a PKCE `code_verifier` (random 64-byte string)
-2. App sends `code_challenge` (SHA256 hash of verifier) to Spotify
-3. Spotify returns an auth URL → App opens browser
-4. User authorizes → Spotify redirects to `presencejam://callback?code=XXX`
-5. App extracts the `code`, sends it + `code_verifier` to Spotify
-6. Spotify returns `access_token` + `refresh_token` → stored via `tauri-plugin-store`
+**Notes:**
+
+- The `state` parameter is the CSRF token **and** the per-launch anti-hijack
+  binding — Spotify echoes it back verbatim, so we can encode extra entropy in
+  it without registering anything new with Spotify. See *Deep Link Routing* for
+  the matching server-side check.
+- The `client_secret` round-trip from settings → keychain happens once during
+  initial onboarding; subsequent token refreshes read it back from the cache.
+  See `keychain.rs` and issue #9.
+- The OS keychain / Secret Service write happens via `keychain.rs`; failure to
+  reach a working keychain surfaces a user-actionable error pointing at
+  [SETUP.md#linux-keyring](SETUP.md#linux-keyring).
 
 ### Microsoft Teams Device Code Flow
 
@@ -145,149 +176,125 @@ The app polls Microsoft's token endpoint every 5 seconds while the user complete
 
 ## Startup Loading
 
-On app launch, PresenceJam loads saved config and tokens from persistent storage into `AppState`:
+On app launch, PresenceJam loads persisted config and tokens into `AppState`:
 
 ```mermaid
 sequenceDiagram
     participant App as Tauri App
-    participant Config as Config Module
-    participant Polling as Polling Module
-    participant Store as tauri-plugin-store
-    
-    App->>App: app.manage(state)
+    participant Config as config module
+    participant TokenIO as token_io.rs
+    participant Keychain as keychain.rs
+    participant State as AppState
+
+    App->>App: app.manage(AppState::new())
+    App->>Keychain: prime Spotify client_secret cache
+    Keychain-->>App: Ok(missing) | Ok(secret)
     App->>Config: load_config()
-    Config-->>App: AppConfig
-    App->>App: state.config = Some(cfg)
-    App->>Polling: restore_pending_spotify_auth()
-    Polling->>Store: get("spotify_*")
-    Store-->>Polling: pending auth | None
-    Polling-->>App: Some(PendingSpotifyAuth) | None
-    App->>App: state.pending_spotify_auth = Some(auth)
-    Note over App: deep-link callback can now succeed
-    App->>Polling: load_spotify_tokens()
-    Polling->>Store: get("spotify_tokens")
-    Store-->>Polling: SpotifyTokens | None
-    Polling-->>App: Some(tokens) | None
-    App->>App: state.spotify_tokens = Some(tokens)
-    App->>Polling: load_teams_tokens()
-    Polling->>Store: get("teams_tokens")
-    Store-->>Polling: TeamsTokens | None
-    Polling-->>App: Some(tokens) | None
-    App->>App: state.teams_tokens = Some(tokens)
+    Config-->>App: AppConfig | Err (first-launch path)
+    App->>State: config.set(cfg)
+    App->>TokenIO: read_tokens_at(app_config_dir)
+    TokenIO-->>App: TokenFile { spotify, teams }
+    App->>State: tokens.spotify = Some(st)
+    App->>State: tokens.teams = Some(tt)
+    Note over App: deep-link handler can now resolve callbacks
 ```
 
 This means:
-- **On first launch**, the app starts fresh and requires onboarding
-- **On subsequent launches**, the app auto-connects if valid tokens exist
-- **If app restarts during Spotify OAuth**, pending auth state is restored so the callback succeeds
+- **First launch:** no tokens on disk, onboarding prompts are shown.
+- **Subsequent launches:** tokens atomically re-read by `token_io.rs`, OAuth-tokens
+  never re-enter `tauri-plugin-store` (issue #65 closed that path).
+- **After a Spotify mid-OAuth crash:** pending auth *state* is no longer
+  persisted to disk at all — the user restarts the OAuth flow. Disc-by-disc
+  safe: PKCE verifier (a 10-min bearer credential) is in AppState only.
 - **Reconnect** clears tokens from both memory and store, forcing re-auth
 
 ## Reconnect Flow
 
-When a user clicks "Reconnect" in Settings, the app clears auth state and triggers re-authentication:
+When the user clicks "Reconnect" in Settings, the app clears auth state for
+one provider and triggers re-authentication:
 
 ```mermaid
 sequenceDiagram
     actor User
-    participant UI as Settings UI
-    participant Commands as Tauri Commands
-    participant Polling as Polling Module
-    participant Store as tauri-plugin-store
-    
+    participant UI as Settings.svelte
+    participant Commands as commands/sync.rs
+    participant TokenIO as token_io.rs
+    participant State as AppState
+
     User->>UI: Click Spotify reconnect
     UI->>Commands: invoke("reconnect_spotify")
-    Commands->>Commands: state.spotify_tokens = None
-    Commands->>Commands: state.pending_spotify_auth = None
-    Commands->>Polling: clear_spotify_tokens()
-    Polling->>Store: delete("spotify_tokens")
-    Polling->>Store: delete("spotify_client_id, client_secret, etc.")
+    Commands->>State: tokens.spotify = None (in-memory)
+    Commands->>TokenIO: clear_spotify_tokens()
+    TokenIO->>TokenIO: atomic rewrite tokens.json (spotify: null)
+    Commands->>Commands: onboarding_cache.invalidate()
     Commands->>UI: emit("spotify-reconnect-required")
-    UI->>User: Show re-authentication flow
+    UI->>User: Show re-auth wizard (uses start_spotify_reconnect,<br/>reads existing client_secret from keychain)
 ```
-
 ### Commands
 
 | Command | Action |
 |---------|--------|
-| `reconnect_spotify` | Clears Spotify tokens from state and store, emits `spotify-reconnect-required` event |
-| `reconnect_teams` | Clears Teams tokens from state and store, emits `teams-reconnect-required` event |
+| `reconnect_spotify` | Clears Spotify tokens (in-memory + atomic rewrite of tokens.json), emits `spotify-reconnect-required` event |
+| `reconnect_teams` | Clears Teams tokens (in-memory + atomic rewrite of tokens.json), emits `teams-reconnect-required` event |
 
 ## Polling Loop
 
+The sync loop is intentionally a single thread, driven by `polling/loop.rs`
+around the single-source-of-truth `polling/poll_once.rs` (refactored from
+the pre-v2.7.5 monolith in PR #72 — three near-duplicate API-call branches
+and 3 drift points now collapse into one). Flow:
+
 ```mermaid
 flowchart TD
-    START[Start Syncing] --> TOKEN_CHECK{Spotify Tokens<br/>Available?}
-    TOKEN_CHECK -->|No| WAIT_30[Sleep 30s] --> TOKEN_CHECK
-    TOKEN_CHECK -->|Yes| SPOTIFY_EXPIRED{Spotify Token<br/>Expired?}
-    SPOTIFY_EXPIRED -->|Yes| REFRESH_SPOTIFY[Refresh Spotify Token] --> TRACK_POLL
-    SPOTIFY_EXPIRED -->|No| TRACK_POLL[Poll Spotify<br/>/me/player/currently-playing]
-    TRACK_POLL --> TRACK_CHANGED{Track<br/>Changed?}
-    TRACK_CHANGED -->|No| SLEEP_SMART[Smart Sleep<br/>remaining - 5s buffer]
-    TRACK_CHANGED -->|Yes| FORMAT_STATUS[Format Status<br/>from template]
-    FORMAT_STATUS --> PROFANITY_CHECK{Profanity<br/>Filter<br/>Enabled?}
-    PROFANITY_CHECK -->|Yes| FILTER_PROFANITY[Filter Status<br/>replace profane<br/>with placeholder]
-    PROFANITY_CHECK -->|No| TEAMS_TOKEN_CHECK
-    FILTER_PROFANITY --> TEAMS_TOKEN_CHECK{Teams Token<br/>Expired?}
-    TEAMS_TOKEN_CHECK -->|Yes| REFRESH_TEAMS[Refresh Teams Token] --> UPDATE_TEAMS
-    TEAMS_TOKEN_CHECK -->|No| UPDATE_TEAMS[Set Teams Status<br/>with final message]
-    UPDATE_TEAMS --> SLEEP_SMART
-    SLEEP_SMART --> TOKEN_CHECK
-    TRACK_POLL --> NO_TRACK{No Track<br/>Playing?}
-    NO_TRACK -->|Yes| CLEAR_CHECK{clear_on_pause?}
-    CLEAR_CHECK -->|Yes| CLEAR_STATUS[Clear Teams Status]
-    CLEAR_CHECK -->|No| PRESERVE_STATUS[Preserve Status]
-    CLEAR_STATUS --> SLEEP_30[Sleep 30s] --> TOKEN_CHECK
-    PRESERVE_STATUS --> SLEEP_30
-    NO_TRACK -->|No| TRACK_CHANGED
+    Start[User clicks Start Syncing] --> Claim{Polling::try_claim}
+    Claim -->|false, already on| Exit
+    Claim -->|true| Loop[polling/loop.rs spawns thread]
+    Loop --> Tick[polling/poll_once::run one iteration]
+    Tick --> Tokens{Spotify & Teams<br/>tokens valid?}
+    Tokens -->|spotify expired| RefreshSpot[refresh_spotify_token]
+    Tokens -->|ok| Poll[/me/player/currently-playing]
+    RefreshSpot --> Poll
+    Poll --> Changed{Track changed?}
+    Changed -->|No track, paused| Consec[consecutive_pauses++]
+    Changed -->|yes| Format[format_status template]
+    Format --> Prof[filter_profanity if enabled]
+    Prof --> Set[PATCH /me/presence<br/>setStatusMessage]
+    Set --> SmartSleep[Smart sleep until track ends - 5s]
+    Consec --> Backoff[Pause-aware exponential backoff:<br/>30s → 60s → 120s → 300s cap]
+    SmartSleep --> Tick
+    Backoff --> Tick
 ```
 
-### Profanity Filter
+### Smart sleep + pause-aware backoff (PR #45)
 
-The `profanity.rs` module screens the formatted status before it is sent to Teams. If profanity is detected, the status is replaced with a safe placeholder rather than exposing the profane content.
+Two complementary rate-limits:
+- **Smart sleep:** when a track is playing, sleep until `track.duration_ms - track.progress_ms - 5000ms`,
+  clamped to the configured `min/max_interval_seconds`. Polling resumes
+  immediately when the track changes. ~240 seconds of silence per 4-min track.
+- **Pause-aware backoff:** when Spotify returns `Ok(None)` (paused or
+  idle) repeatedly, the loop doubles its interval up to a 5-min cap
+  (30 → 60 → 120 → 300 s). Resets the moment a track is observed again.
+  Six hours of paused Spotify drops from ~720 calls/day to ~25.
 
-**How it works:**
+`is_syncing` ownership: `commands/sync::start_syncing` is the **sole claimer**
+(v2.6.3, fixes issue #60 — `compare_exchange(false, true, …)` is here).
+`polling::start_polling` is a pure thread-spawner; the panic guard + spawn-error
+map-err in `polling/state.rs` resets the flag so future claims don't wedge.
 
-1. `format_status()` produces the status string from the track template
-2. If `config.teams.profanity_filter` is enabled, `filter_status()` is called
-3. `contains_profanity()` normalizes the text and checks against a 25-word curated list
-4. If matched, the placeholder (with `{emoji}` resolved to 🎵 or ⏸️) replaces the status
-5. The replacement is logged, but the original profane content is **never written to logs**
+### Profanity filter
 
-**Detection features:**
-- Leetspeak normalization (1→i, 3→e, $→s, @→a, 0→o, 5→s, 7→t, !→i, |→i)
-- Repeated-character collapse (shiiit → shiit, but not excessive repeats)
-- Word-boundary checks prevent false positives (class, assassin, cocktail, vacuum)
-- Special handling: "fucking", "fucked", "fucker" are detected as profane variants
-- Safe suffix words (tail, head, hand, etc.) allow compound words without false positives
+`profanity.rs` screens the formatted status string before it hits Microsoft
+Graph. If matched, the status is replaced with `config.teams.profanity_placeholder`
+(default: `Currently Listening to Spotify`), with the `{emoji}` placeholder
+resolved to 🎵 or ⏸️. The replaced status is logged at info level; the
+**original profane text is never written to logs**.
 
-**TODO:** Currently filters the formatted status string. A future refactor should filter raw Spotify fields (track, artist, album) before formatting to prevent placeholder injection via custom templates with `{emoji}`.
+Detection features (25-word curated list, see `profanity.rs`):
+- **Leetspeak normalization:** `1→i, 3→e, $→s, @→a, 0→o, 5→s, 7→t, !→i, |→i`.
+- **Repeated-character collapse:** `shiiit → shiit` (up to 2 excess chars).
+- **Word-boundary safety:** prevents false positives on `class`, `assassin`, `cocktail`, `vacuum`.
+- **Compound-word safe-suffixes:** `tail, head, hand, ...` allow `fishtail`, `forehead`, `handheld`.
 
-### Smart Sleep Logic
-
-When a track is playing, the app calculates the exact time remaining until the track ends:
-
-```rust
-let remaining_ms = track.duration_ms - track.progress_ms;
-let buffer_ms = 5000u64; // 5 second buffer
-let sleep_secs = (remaining_ms / 1000).saturating_sub(buffer_ms / 1000);
-sleep_secs.max(MINIMUM_INTERVAL_SECONDS).min(MAX_INTERVAL_SECONDS)
-```
-
-This means:
-- **No API calls** while you're listening to a 4-minute track (~240 seconds of silence)
-- **Polling resumes immediately** when the track changes
-- **Minimum 10 seconds** between polls
-
-### Pause-Aware Backoff (PR #45)
-
-When Spotify repeatedly returns no track (`Ok(None)` — paused or idle), the polling loop lengthens its sleep interval to avoid burning API quota:
-
-- 1st consecutive no-track poll: sleep `default_interval_seconds` (30 s, configurable in `config.toml`)
-- 2nd consecutive: 60 s
-- 3rd consecutive: 120 s
-- 4th+ consecutive: 300 s (5 min cap)
-
-The counter resets to zero the moment a track is observed again, and `consecutive_pauses` is also reset before the debounce early-return when a track resumes after a pause streak. With this backoff, six hours of paused Spotify drops from ~720 calls/day to ~25 — a ~28× reduction.
 
 ## Event Bus
 
@@ -324,89 +331,181 @@ sequenceDiagram
 
 ## Deep Link Routing
 
-PresenceJam registers a custom URL scheme to handle OAuth callbacks:
+PresenceJam registers the custom URL scheme `presencejam://` (declared in
+`tauri.conf.json` under `plugins.deep-link.desktop.schemes`) to handle OAuth
+callbacks. The registration runs **on every launch**, not just at install:
 
-| Scheme | Used For |
-|--------|----------|
-| `presencejam://callback` | Spotify PKCE OAuth redirect |
-| `presencejam://teams-callback` | Teams auth (reserved for future use) |
+| Scheme                          | Used For                          |
+|---------------------------------|-----------------------------------|
+| `presencejam://callback`        | Spotify PKCE OAuth redirect       |
+| `presencejam://teams-callback`  | Teams auth (reserved for future)  |
 
-The app's `lib.rs` intercepts these URLs via Tauri's `deep-link` plugin and routes them to the appropriate handler.
+### Routing flow
+
+`lib.rs::handle_deep_link` parses the URL, matches on scheme + path, and
+dispatches to either `handle_spotify_callback` or `handle_teams_callback`.
+The single-instance plugin scans the launch argv for `presencejam://…` on
+Windows + Linux so opening a callback URL routes to the running instance
+(via the single-instance hook) instead of spawning a second copy.
+
+### `state` parameter is both CSRF and anti-hijack binding
+
+Spotify echos the OAuth `state` parameter back verbatim in the callback URL.
+We piggyback two things on it:
+
+1. **CSRF token** (random 64-byte verifier-ish) — rejected on mismatch
+   in `handle_spotify_callback`, defending against cross-site initiated flows.
+2. **Per-launch anti-hijack binding** — the matching verifier is also in
+   `AppState::PendingSpotifyAuth.state` (in-memory only, never persisted —
+   issue #65). An interceptor who steals the OAuth `code` cannot exchange it
+   for tokens without the verifier, and our polling thread's verifier cache
+   keeps the secret off disk.
+
+### Per-launch scheme re-registration (further mitigates #66)
+
+`tauri-plugin-deep-link`'s `register_all()` is invoked in the desktop
+`setup` block on every launch. Behavior by platform:
+
+- **Windows:** writes `HKCU\Software\Classes\presencejam` — last-writer
+  wins. A foreign app that pre-registered the scheme gets clobbered.
+- **Linux:** writes `~/.local/share/applications/presencejam.desktop` with
+  `MimeType=x-scheme-handler/presencejam;` and runs `xdg-mime default`.
+  Same last-writer semantics.
+- **macOS:** the plugin's `register` returns `Err(UnsupportedPlatform)`.
+  App logs a warning at startup and continues. macOS coverage relies on
+  PKCE + `state`-only protection (no LaunchServices call). The full
+  `LSSetDefaultHandlerForURLScheme` native-FFI work for macOS is tracked
+  separately.
+
+On a `name` mismatch (an attacker pre-registers before launch), the
+local-machine registry / desktop file reflects our (last-write) entry.
+A foreign app already installed before PresenceJam at the **same OS
+user** can still win the race on platforms without per-launch
+reregistration — that's the macOS gap. Windows + Linux are now covered.
 
 ## Directory Structure
 
 ```
 PresenceJam-Desktop/
-├── src/                          # Svelte frontend
+├── src/                                   # Svelte 5 frontend (SPA)
 │   ├── lib/
 │   │   ├── components/
-│   │   │   ├── Dashboard.svelte      # Main sync view
-│   │   │   ├── Onboarding.svelte     # 3-step auth wizard
-│   │   │   ├── Settings.svelte        # Config editor
-│   │   │   └── LogViewer.svelte       # In-app log viewer
+│   │   │   ├── Dashboard.svelte            # Sync status + currently-playing card
+│   │   │   ├── Onboarding.svelte           # 3-step OAuth wizard
+│   │   │   ├── Settings.svelte             # Config editor
+│   │   │   ├── Reconnect.svelte            # Re-auth flow
+│   │   │   ├── About.svelte                # Version + license
+│   │   │   └── LogViewer.svelte            # In-app log viewer
 │   │   ├── stores/
-│   │   │   ├── app.ts                 # currentView, isSyncing, appError
-│   │   │   ├── config.ts               # configStore, saveConfig
-│   │   │   ├── spotify.ts              # interfaces only (SpotifyTokens, TrackInfo)
-│   │   │   └── teams.ts                # interfaces only (TeamsTokens)
+│   │   │   ├── app.ts                      # currentView, appError (classic writable stores)
+│   │   │   ├── config.ts                   # configStore + saveConfig
+│   │   │   └── authFlow.svelte.ts          # 4-event auth-listener state
+│   │   ├── types.ts                        # Re-exports ts-rs codegen
+│   │   ├── types-generated/                # ts-rs output (gitignored, regenerated by cargo test)
 │   │   └── utils/
-│   │       └── dev.ts                  # devLog() conditional logger
+│   │       ├── dev.ts                      # devLog() no-op in prod builds
+│   │       └── useAuthListeners.ts          # Shared 4-event listener setup
 │   └── routes/
-│       └── +page.svelte               # SPA entry, routes to views
+│       └── +page.svelte                    # SPA entry, routes to views
 ├── src-tauri/
 │   ├── src/
-│   │   ├── lib.rs                     # Tauri entry, command registration
-│   │   ├── commands.rs               # All invoke() command handlers
-│   │   ├── config.rs                 # JSON config load/save, AppConfig struct
-│   │   ├── polling.rs                # Polling loop (thread::spawn)
-│   │   ├── profanity.rs             # Profanity filter module
-│   │   ├── spotify.rs                # Spotify Web API client
-│   │   ├── teams.rs                  # Microsoft Graph API client
-│   │   ├── tray.rs                   # System tray setup
-│   │   └── menu.rs                   # Application menu bar
-│   ├── Cargo.toml                    # Rust dependencies
-│   ├── tauri.conf.json               # Tauri 2 config (window, deep-link, plugins)
+│   │   ├── lib.rs                          # Tauri entry, command registration, AppState
+│   │   ├── commands/                       # Split from commands.rs (PR #76)
+│   │   │   ├── mod.rs                      #   re-exports + tests
+│   │   │   ├── config.rs                   #   save_config / load_config
+│   │   │   ├── spotify_auth.rs             #   start_spotify_auth / reconnect / refresh
+│   │   │   ├── teams_auth.rs                #   device code + refresh
+│   │   │   ├── sync.rs                     #   start_syncing / stop_syncing / get_sync_status
+│   │   │   ├── window.rs                    #   show_window / autostart / logs folder
+│   │   │   ├── onboarding.rs                #   is_onboarding_complete / complete / reconnect
+│   │   │   └── misc.rs                     #   preview_status / update_tray_menu_state
+│   │   ├── polling/                        # Split from polling.rs (PR #72)
+│   │   │   ├── mod.rs                      #   re-exports + ErrorSeverity + emit_error
+│   │   │   ├── loop.rs                     #   driver (mpsc channel, ~50 lines)
+│   │   │   ├── poll_once.rs                #   single source of truth for one iteration
+│   │   │   └── state.rs                    #   start_polling / stop_polling + panic guard
+│   │   ├── config.rs                      # AppConfig struct, ts-rs TS derive
+│   │   ├── keychain.rs                    # OS keychain wrapper, secret-service Linux
+│   │   ├── token_io.rs                    # Hand-rolled atomic-write for tokens.json
+│   │   ├── pkce.rs                        # PKCE verifier/challenge generation
+│   │   ├── profanity.rs                   # 25-word curated profanity filter
+│   │   ├── spotify.rs                      # PKCE OAuth client + Web API (ts-rs TS)
+│   │   ├── teams.rs                        # Device-code + MS Graph (ts-rs TS)
+│   │   ├── tray.rs                        # System tray + dedup snapshot
+│   │   └── menu.rs                        # macOS / Windows app menu bar
+│   ├── Cargo.toml                         # Rust deps + `ts-rs = { version = "12", features = ["chrono-impl"] }`
+│   ├── Cargo.lock                         # Commit-locked for reproducible builds
+│   ├── tauri.conf.json                    # Window + deep-link + bundle config
 │   └── capabilities/
-│       └── default.json              # Permission grants (store, http, deep-link, etc.)
-├── package.json                     # Node dependencies
-├── svelte.config.js                # SvelteKit SPA config (adapter-static)
-├── vite.config.js                  # Vite/Tauri dev server config
-└── tsconfig.json                   # TypeScript config
+│       └── default.json                   # CSP, permissions, allowed APIs
+├── .github/workflows/
+│   ├── ci.yml                             # PR-time: cargo check/clippy/test, npm check
+│   └── release.yml                        # Tag-triggered: 3-OS matrix + homebrew + winget
+├── homebrew/presence-jam.rb               # Homebrew tap formula template
+├── package.json                           # Node deps + scripts
+├── pnpm-lock.yaml                         # (npm package-lock.json committed instead)
+├── svelte.config.js                       # SvelteKit SPA config (adapter-static)
+├── vite.config.js                         # Vite + Tauri dev server
+└── jsconfig.json                          # TypeScript config
 ```
+
+**ts-rs generated types** — `src/lib/types.ts` re-exports `SpotifyTokens`,
+`TrackInfo`, `TeamsTokens`, `DeviceCodeResponse`, `SyncStatus`, and `AppConfig`
+from `src/lib/types-generated/` (a build-time-only directory; .gitignored).
+The Rust structs derive `#[ts_rs::TS]` with `#[ts(export, export_to =
+"../../src/lib/types-generated/")]`. Renaming a Rust wire field produces a
+TypeScript compile error in the consumer, not a runtime `undefined`.
 
 ## State Management
 
-### Rust State (`AppState`)
+### Rust State — `AppState` (struct-of-states, v2.7.5 refactor PR #80)
+
+`AppState` is composed of private sub-structs, each with its own lock
+acquired only via a method. Field access is encapsulated; the inner mutex
+/atomic is **never named at call sites**:
 
 ```rust
 pub struct AppState {
-    pub config: RwLock<Option<AppConfig>>,
-    pub spotify_tokens: RwLock<Option<SpotifyTokens>>,
-    pub teams_tokens: RwLock<Option<TeamsTokens>>,
-    pub current_track: RwLock<Option<TrackInfo>>,
-    pub is_syncing: AtomicBool,                              // PR #44: was RwLock<bool>; v2.6.3: sole claimer is commands::start_syncing (see #60)
-    pub polling_handle: RwLock<Option<JoinHandle<()>>>,
-    pub pending_spotify_auth: RwLock<Option<PendingSpotifyAuth>>,
-    pub pending_teams_auth: RwLock<Option<PendingTeamsAuth>>,
-    pub stop_tx: RwLock<Option<Sender<()>>>,
-    pub onboarding_cache: parking_lot::Mutex<Option<(Instant, bool)>>, // PR #47: 30s cache
+    pub tokens: Tokens,                       // #80 step 2: spotify + teams RwLocks
+    pub polling: Polling,                     // #80 step 2: is_syncing + handle + stop_tx
+    pub pending: PendingAuths,                // #80 step 2: spotify + teams RwLocks
+    pub config: Config,                       // #80 step 2: AppConfig RwLock
+    pub onboarding_cache: OnboardingCache,    // #80 step 1: 30s cache sub-struct
 }
 ```
 
-Multiple threads access this shared state:
-- `polling.rs` thread writes to `spotify_tokens`, `teams_tokens`, `current_track`, `is_syncing`
-- `commands.rs` handlers read/write via `tauri::State<AppState>`
-- `is_syncing` uses `AtomicBool` for lock-free reads/writes (PR #44)
-- `is_syncing` ownership (v2.6.3, fixes #60): `commands::start_syncing` is the **sole claimer** of the flag. It does the `compare_exchange(false, true, …)` and only then calls `polling::start_polling`, which is a pure thread-spawner that does **not** touch the flag. The polling loop reads `is_syncing` under `load()` to decide whether to keep iterating. `stop_syncing` flips it `false` on clean exit; the panic handler inside `polling::start_polling` resets it on crash; the spawn-failure `map_err` block resets it if `thread::Builder::spawn()` returns `Err`. **Do not add a second CAS to `is_syncing` from anywhere else** — that was the v2.6.0–v2.6.2 bug that blocked first-run onboarding (every Finish click after a successful Spotify + Teams auth hit "Polling is already running"). A source-grep regression guard (`test_start_polling_does_not_claim_is_syncing`) fails the build if a `compare_exchange(` is reintroduced inside `polling::start_polling`.
-- `onboarding_cache` (added in PR #47) holds a `(timestamp, result)` pair under a `parking_lot::Mutex` so `is_onboarding_complete` can serve cached results for 30 s without re-hitting Spotify/Teams
+Each sub-struct exposes only lock-acquisition methods (`tokens.spotify_mut()`,
+`polling.try_claim()`, `pending.spotify_mut()`, `config.set()`, `onboarding_cache.lock()`).
+The lock-encapsulation pattern is what makes future work like "lock must not be
+held across await" enforceable: a `lock_async` method could replace `lock` later
+without rewriting every call site.
 
-**Token-refresh concurrency (PR #43):** Both `polling.rs` and `commands.rs` can refresh the same `*_tokens` field. To avoid the lost-update race where a second writer overwrites a freshly-cleared state, all token-refresh paths use a compare-and-swap (CAS) guard: re-read the field under the write lock, only commit the new tokens if the `access_token` matches the pre-refresh snapshot, otherwise discard the refresh result. This pattern is applied to Spotify tokens, Teams tokens, and the 401-retry path.
+**Lock ordering / concurrency rules:**
 
-### Frontend Stores
+- `is_syncing` is owned only by `commands/sync::start_syncing::try_claim()`. The
+  polling `loop` reads it under `Ordering::Acquire` and exits on `false`. The
+  panic guard + spawn-error `map_err` in `polling/state.rs` **reset** it so
+  future claims never wedge. Adding a second CAS to `is_syncing` from anywhere
+  else (PR #60 was exactly this) will brick first-run onboarding. The
+  `test_app_state_sub_encapsulation_no_pub_inner_fields` regression guard
+  asserts no future contributor re-exposes a sub-struct's inner mutex as `pub`.
+- **Token-refresh concurrency (PR #43):** all token-refresh paths (Spotify
+  proactive, Spotify 401-retry, Teams refresh) share a CAS guard: re-read
+  under the write lock, only commit if `access_token` is unchanged from
+  the pre-refresh snapshot, otherwise discard. Prevents the lost-update race.
+- **`onboarding_cache.lock()` (PR #47):** `parking_lot::Mutex<(Instant, bool)>`
+  with a 30 s TTL — `is_onboarding_complete` calls upstream APIs only on cache
+  miss. Plus `invalidate()` from every token-mutating command (issue #70).
 
-| Store | Type | Purpose |
-|-------|------|---------|
-| `currentView` | `'onboarding' \| 'dashboard' \| 'settings' \| 'logs'` | Active view |
-| `isSyncing` | `boolean` | Sync running/paused |
-| `appError` | `string \| null` | Current error message |
-| `configStore` | `AppConfig` | Full app config |
+### Frontend state
+
+- `lib/stores/app.ts` (classic Svelte stores): `currentView`, `appError`. Pattern: `writable<View>('dashboard')`. Not Svelte 5 runes.
+- `lib/stores/config.ts`: `configStore` (full AppConfig), `saveConfig` (mirrors
+  `commands/save_config`'s atomic-write semantics on the Rust side; the
+  frontend does not call `localStorage`).
+- `lib/stores/authFlow.svelte.ts`: per-provider `isAuthenticating`,
+  `lastError` derived from the 4 backend auth events (refactored from 3
+  duplicated listener setups in PR #73 via `useAuthListeners`).
+- `lib/types.ts` / `lib/types-generated/` — Rust-side TS mirrors, see *ts-rs
+  generated types* above.
+
