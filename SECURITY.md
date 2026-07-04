@@ -32,43 +32,100 @@ Expected response time: within 7 days.
 
 ## Data Storage
 
-### Tokens
-
-|| Token Type | Storage Location | Encryption ||
+| Token Type | Storage Location | Encryption |
 |-----------|----------------|------------|
-| Spotify access/refresh tokens | `tauri-plugin-store` (`tokens.json`) | DPAPI on Windows; Keychain on macOS |
-| Teams access/refresh tokens | `tauri-plugin-store` (`tokens.json`) | DPAPI on Windows; Keychain on macOS |
-| Spotify OAuth pending state (verifier, state) | `tauri-plugin-store` (`tokens.json`) | Same as tokens — cleared after auth completes |
+| Spotify access/refresh tokens | `<app-config-dir>/PresenceJam/tokens.json` (hand-rolled atomic write via `src-tauri/src/token_io.rs`) | **Plaintext JSON.** No encryption is applied to this file; the app does NOT call the OS keychain or DPAPI for OAuth tokens. See "Plaintext tokens.json" note below for the actual protection model. |
+| Teams access/refresh tokens | `<app-config-dir>/PresenceJam/tokens.json` (same hand-rolled atomic write) | **Plaintext JSON** — same as Spotify above. |
+| Spotify OAuth pending state (PKCE verifier, state) | **Not persisted to disk.** Lives in `AppState::PendingSpotifyAuth.state` only (in-memory); the deep-link callback resolves it before the user closes the app. If the process is killed mid-OAuth, the user re-starts the OAuth flow and Spotify issues a fresh code. | N/A — in-memory only. |
 
-**Pending-state expiry (v2.6.0):** Each pending-auth record carries an `expires_at` timestamp. The expiry is now re-checked at submit time (i.e. when the deep-link callback is delivered), not only at startup when the record is first loaded from disk. A pending-auth record older than the configured TTL is treated as expired and discarded before the code is sent to Spotify, preventing stale OAuth codes from reaching the token endpoint and surfacing as a generic 400.
-
-**DPAPI (Windows):** Tokens are encrypted using Windows Data Protection API, which binds encryption to the current Windows user account. This means tokens cannot be extracted or read by other user accounts on the same machine, or by someone who steals the hard drive but doesn't have your login credentials.
-
-**Keychain (macOS):** Tokens are stored in the macOS Keychain, tied to the current user account.
+**Plaintext tokens.json on disk (v2.6.4 to present — issue #65):** As of
+v2.6.4, `token_io.rs` writes OAuth access/refresh tokens as plaintext JSON
+to `<app-config-dir>/PresenceJam/tokens.json`. This was a deliberate change
+during the security hardening of #65 — the previous `tauri-plugin-store`
+path was found to leak credentials to the webview via the IPC bridge. The
+OS keychain is reserved **only** for the Spotify `client_secret` (see
+"Configuration" below). The only protection for `tokens.json` is the
+file permissions that the OS grants the new file at creation time
+(PresenceJam does not explicitly set a mode — under the typical umask
+022, `tokens.json` ends up mode 0644 on macOS / Linux, which is
+world-readable on the local machine; on Windows the default ACL
+inherits the user-only parent permissions and is not world-readable).
+This is **the real-world soft exposure**. Mitigations to consider in a
+future release: explicitly `chmod 0600` on Unix, and explicit user-only
+DACLs on Windows; full-disk encryption (BitLocker / FileVault / LUKS)
+is the strongest defense today against offline-disk reads. See
+`ARCHITECTURE.md` "Storage" section for the implementation reference.
 
 ### Configuration
 
-App settings are stored in plain JSON:
+App settings are stored in two files:
 
 ```
-%APPDATA%\PresenceJam\config.json
-%APPDATA%\PresenceJam\tokens.json
+%APPDATA%\PresenceJam\config.json   (Windows)
+~/Library/Application Support/PresenceJam/config.json   (macOS)
+$XDG_CONFIG_HOME/PresenceJam/config.json   (Linux; falls back to ~/.config/)
+%APPDATA%\PresenceJam\tokens.json   (Windows; same dir as config.json)
+~/Library/Application Support/PresenceJam/tokens.json   (macOS)
+$XDG_CONFIG_HOME/PresenceJam/tokens.json   (Linux)
 ```
 
-These files contain:
-- Spotify Client ID and Client Secret (from your Spotify Developer app) — stored **unencrypted** in `config.json`
-- Spotify access/refresh tokens — stored **encrypted** (DPAPI/Keychain) in `tokens.json` via tauri-plugin-store
-- Teams access/refresh tokens — stored **encrypted** (DPAPI/Keychain) in `tokens.json` via tauri-plugin-store
+`config.json` contains:
+
+- Spotify Client ID — stored **plaintext** in `config.json`
+- Spotify **Client Secret** is **NOT** in `config.json` as of v2.6.0 — it
+  lives in the **OS keychain** (see "Status" note below). Older v2.5.0 and
+  earlier configs that still carry the plaintext secret are auto-migrated
+  to the keychain on first run after upgrade and the plaintext is stripped.
 - Status format template (`status_format`)
 - Profanity filter settings (`profanity_filter`, `profanity_placeholder`)
 - Polling configuration
 - Logging preferences
 
-**⚠️ The `config.json` file is not encrypted.** If you share your machine with untrusted parties, consider revoking your Spotify app credentials when you're done using PresenceJam. The `tokens.json` file is encrypted to your user account via DPAPI (Windows) or Keychain (macOS).
+`tokens.json` contains (plaintext — see "Plaintext tokens.json" note above):
 
-> **Status:** As of v2.6.0, the Spotify `client_secret` is stored in the **OS keychain** (macOS Keychain, Windows Credential Manager, or Linux Secret Service via the `keyring` crate) rather than in `config.json`. This supersedes the plaintext-storage approach used through v2.5.0 and earlier; on first run after upgrading, users will be prompted to re-authenticate Spotify so the secret can be migrated. `tokens.json` (access/refresh tokens) was already encrypted to the user account via DPAPI/Keychain in earlier versions.
+- Spotify access token + refresh token (`SpotifyTokens` JSON object)
+- Teams access token + refresh token (`TeamsTokens` JSON object)
 
-> **Status:** As of the next release, the keychain user field is **namespaced by the Tauri bundle identifier** (`spotify_client_secret:com.presencejam.app`) so side-by-side installs on the same OS user (prod, dev, beta) get isolated slots. v2.7.2 and earlier stored the secret under the unnamespaced key `spotify_client_secret`; on first read after upgrading, the old entry is automatically migrated forward to the namespaced slot and deleted. The migration is conflict-safe: if the keychain already holds a *different* secret, the legacy plaintext (if any) is left untouched and the user is directed to Settings → Reconnect to resolve.
+**⚠️ The `config.json` file (now) contains no secrets after a successful
+v2.6.0+ migration**, but the plaintext tokens in `tokens.json` are exposed
+to any process running under the same OS user (on Unix-like systems,
+under the typical umask 022, the file is created 0644; PresenceJam does
+not change this). Recommendations, ordered by effort:
+
+1. Enable full-disk encryption on the OS (BitLocker on Windows, FileVault
+   on macOS, LUKS on Linux). This is the strongest defense against
+   physical-disk theft and the only defense that protects the plaintext
+   `tokens.json` against an offline read of the disk.
+2. Do not run PresenceJam on a machine whose user account is shared with
+   untrusted parties; on Unix-like systems, any other process running
+   under the same user can read `tokens.json`.
+3. **Revoke your Spotify and Teams app authorizations** from those
+   providers' settings if you suspect the local machine is compromised.
+   This is the only way to invalidate the credentials stored in
+   `tokens.json` from the provider side; revocation is faster than
+   waiting for the tokens to expire (Spotify refresh token TTL is long).
+
+> **Status:** As of v2.6.0, the Spotify `client_secret` is stored in the
+> **OS keychain** (macOS Keychain, Windows DPAPI-backed credential store,
+> or Linux Secret Service via the `keyring` crate) rather than in
+> `config.json`. This supersedes the plaintext-storage approach used
+> through v2.5.0 and earlier; on first run after upgrading, users will be
+> prompted to re-authenticate Spotify so the secret can be migrated.
+> `tokens.json` (access/refresh tokens) is currently **plaintext on disk**
+> (see the note above) — the v2.6.4 (#65) migration from
+> `tauri-plugin-store` to `token_io.rs` explicitly chose crash-safe
+> atomic writes over encryption, on the basis that the tokens are
+> short-lived, refreshable, and revocable.
+
+> **Status:** As of v2.8.0, the keychain user field is **namespaced by the
+> Tauri bundle identifier** (`spotify_client_secret:com.presencejam.app`)
+> so side-by-side installs on the same OS user (prod, dev, beta) get
+> isolated slots. v2.7.2 and earlier stored the secret under the
+> unnamespaced key `spotify_client_secret`; on first read after upgrading,
+> the old entry is automatically migrated forward to the namespaced slot
+> and deleted. The migration is conflict-safe: if the keychain already
+> holds a *different* secret, the legacy plaintext (if any) is left
+> untouched and the user is directed to Settings → Reconnect to resolve.
 
 ### Logs
 
@@ -135,7 +192,7 @@ Review these links to understand how your data is handled by each service.
 
 ### Token Storage
 
-Currently, tokens are stored via `tauri-plugin-store` with DPAPI encryption on Windows. There is no password or biometric unlock — the app has access to tokens as soon as you're logged into your Windows session.
+Currently, OAuth tokens (`tokens.json`) are **plaintext JSON on disk** in `<app-config-dir>/PresenceJam/tokens.json` (written atomically by `src-tauri/src/token_io.rs`). The file is not encrypted by the app — protection is whatever the OS grants the file at creation time (typically umask 022 → 0644 on Unix-like systems; user-only default ACL on Windows). The app has access to tokens as soon as you’re logged into your OS session — there is no additional password or biometric unlock layer. See "Plaintext tokens.json" note above.
 
 **Mitigation:** Use a strong Windows login password/PIN and enable Windows Hello or BitLocker where possible.
 

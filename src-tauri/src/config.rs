@@ -376,10 +376,6 @@ fn atomic_write_json(path: &std::path::Path, json: &str) -> Result<(), String> {
     file.sync_all()
         .map_err(|e| format!("Failed to sync temp file '{}': {}", temp_path.display(), e))?;
 
-    if path.exists() {
-        std::fs::remove_file(path)
-            .map_err(|e| format!("Failed to remove existing file '{}': {}", path.display(), e))?;
-    }
 
     std::fs::rename(&temp_path, path)
         .map_err(|e| format!("Failed to rename temp file to '{}': {}", path.display(), e))?;
@@ -422,5 +418,73 @@ mod tests {
     fn test_config_dir_creation() {
         let dir = config_dir().expect("config_dir should return valid path");
         assert!(dir.to_str().unwrap().ends_with("PresenceJam"));
+    }
+
+    /// Regression guard for issue found in PR review: a redundant
+    /// `fs::remove_file(path)` before the final `rename` opened a window
+    /// where a process crash leaves config.json missing. Drop the
+    /// remove_file; rename() atomically replaces the destination on
+    /// POSIX + same-volume Windows renames. Mirrors token_io.rs pattern.
+    #[test]
+    fn test_atomic_write_json_replaces_existing_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "pj-test-{}-{}",
+            std::process::id(),
+            chrono_like_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(&path, b"OLD_CONTENTS_AAA").unwrap();
+
+        atomic_write_json(&path, "NEW_CONTENTS_BBB").expect("write should succeed");
+
+        // After atomic_write_json, the destination must hold the new bytes
+        // (no mix with the old), and there must be no leftover .tmp sidecar.
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "NEW_CONTENTS_BBB"
+        );
+        let sidecar = path.with_extension("tmp");
+        assert!(
+            !sidecar.exists(),
+            "temp sidecar {} must be consumed by rename (rename atomicity)",
+            sidecar.display()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Source-level regression guard: the redundant `fs::remove_file(path)`
+    /// would have re-introduced the crash window. If this source-grep
+    /// trips, the caller-visible rename-atomicity guarantee in
+    /// test_atomic_write_json_replaces_existing_file is no longer
+    /// trustworthy under a process-kill mid-write.
+    #[test]
+    fn test_atomic_write_json_does_not_remove_destination_first() {
+        let src = include_str!("config.rs");
+        // Get just the atomic_write_json body (between the fn line and
+        // the fn closing brace + the next sibling fn).
+        let body_start = src
+            .find("fn atomic_write_json")
+            .expect("atomic_write_json fn must exist");
+        let body_end_rel = src[body_start..]
+            .find("\npub fn save_config")
+            .expect("save_config must follow atomic_write_json");
+        let body = &src[body_start..body_start + body_end_rel];
+        assert!(
+            !body.contains("remove_file"),
+            "atomic_write_json must not call remove_file(path) before \
+             rename — rename atomically replaces the destination on POSIX \
+             + Windows same-volume renames, and the explicit remove \
+             breaks crash-safety. See ARCHITECTURE.md 'Storage' section \
+             and PR #132 review for context."
+        );
+    }
+
+    fn chrono_like_nanos() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     }
 }
