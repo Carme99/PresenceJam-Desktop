@@ -21,8 +21,7 @@ PresenceJam is a Tauri 2 desktop application:
     variants handled by `dirs`).
   - `token_io.rs::persist_tokens()` → temp-file + rename + fsync to
     `<app-config-dir>/PresenceJam/tokens.json` for OAuth tokens.
-  Both paths survive process-kill mid-write (issue #65 issue context; see
-  `SECURITY.md`).
+  Both paths survive process-kill mid-write (see issue #65; see `SECURITY.md`).
 - **Auth:** Spotify PKCE OAuth 2.0 + Microsoft Teams Device Code flow.
 - **Secrets — TWO PATHS, both intentional** (do not conflate):
   - **Spotify `client_secret`** is in the OS keychain, namespaced per
@@ -193,7 +192,7 @@ sequenceDiagram
     Config-->>App: AppConfig | Err (first-launch path)
     App->>State: config.set(cfg)
     App->>TokenIO: read_tokens_at(app_config_dir)
-    TokenIO-->>App: TokenFile { spotify, teams }
+    TokenIO-->>App: TokensFile { spotify_tokens, teams_tokens }
     App->>State: tokens.spotify = Some(st)
     App->>State: tokens.teams = Some(tt)
     Note over App: deep-link handler can now resolve callbacks
@@ -203,10 +202,8 @@ This means:
 - **First launch:** no tokens on disk, onboarding prompts are shown.
 - **Subsequent launches:** tokens atomically re-read by `token_io.rs`, OAuth-tokens
   never re-enter `tauri-plugin-store` (issue #65 closed that path).
-- **After a Spotify mid-OAuth crash:** pending auth *state* is no longer
-  persisted to disk at all — the user restarts the OAuth flow. Disc-by-disc
-  safe: PKCE verifier (a 10-min bearer credential) is in AppState only.
-- **Reconnect** clears tokens from both memory and store, forcing re-auth
+- **After a Spotify mid-OAuth crash:** pending auth *state* is no longer persisted to disk at all — the user restarts the OAuth flow. Crash-safe: PKCE verifier (a 10-min bearer credential) is in AppState only.
+- **Reconnect** clears tokens from both memory and the tokens.json file on disk, forcing re-auth.
 
 ## Reconnect Flow
 
@@ -350,7 +347,7 @@ Windows + Linux so opening a callback URL routes to the running instance
 
 ### `state` parameter is both CSRF and anti-hijack binding
 
-Spotify echos the OAuth `state` parameter back verbatim in the callback URL.
+Spotify echoes the OAuth `state` parameter back verbatim in the callback URL.
 We piggyback two things on it:
 
 1. **CSRF token** (random 64-byte verifier-ish) — rejected on mismatch
