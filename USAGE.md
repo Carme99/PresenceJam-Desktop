@@ -69,7 +69,7 @@ Edit the template that formats your Teams status message. Supports `{artist}`, `
 
 | Setting | Description |
 | Launch at login | Start PresenceJam automatically when your OS boots |
-| Start minimized | Open the app minimized to the tray (window hidden on launch). On macOS, also hides the dock icon and menu-bar app menu — the app becomes a pure tray-resident app. The dock icon reappears when you disable this setting in Settings (no restart needed). |
+| Start minimized | Open the app minimized to the tray (window hidden on launch). On macOS, `start_minimized` also switches the app's activation policy to `Accessory`, removing the dock icon and menu-bar app menu — the app becomes a pure tray-resident app. The dock icon reappears when you disable this setting in Settings (no restart needed). (v2.7.3+) |
 ---
 
 ## Log Viewer
