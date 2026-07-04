@@ -774,14 +774,30 @@ pub fn run() {
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
 
-                #[cfg(windows)]
-                {
-                    log::info!("[APP] setup: registering deep links");
-                    if let Err(e) = app.deep_link().register_all() {
-                        log::error!("[APP] setup: Failed to register deep links: {}", e);
-                    } else {
-                        log::info!("[APP] setup: deep links registered successfully");
-                    }
+                // Issue #66 (further mitigation): re-register the
+                // `presencejam://` scheme at every launch so a foreign app
+                // that pre-registered the scheme gets clobbered by our
+                // last-write. The plugin's `register()` writes
+                // `HKCU\Software\Classes\<scheme>` on Windows and
+                // `~/.local/share/applications/<scheme>.desktop` plus
+                // `xdg-mime default` on Linux; it returns
+                // `Err(UnsupportedPlatform)` on macOS — we log that case
+                // and continue, since startup must not block on a known
+                // platform gap. PKCE verifier in AppState only (#65)
+                // remains the macOS mitigation: an interceptor can read
+                // the `code` from the callback URL but cannot exchange it
+                // for tokens.
+                log::info!("[APP] setup: registering deep links");
+                if let Err(e) = app.deep_link().register_all() {
+                    #[cfg(target_os = "macos")]
+                    log::warn!(
+                        "[APP] setup: deep_link::register_all unsupported on macOS ({e}); \
+                         relying on #65 PKCE-only mitigation for scheme hijack defence"
+                    );
+                    #[cfg(not(target_os = "macos"))]
+                    log::error!("[APP] setup: Failed to register deep links: {}", e);
+                } else {
+                    log::info!("[APP] setup: deep links registered successfully");
                 }
 
                 // Setup system tray
@@ -1022,6 +1038,59 @@ mod tests {
         assert!(polling.handle().is_some());
     }
 
+    /// Regression guard for issue #66: a future contributor must not
+    /// re-gate `app.deep_link().register_all()` to `#[cfg(windows)]`
+    /// alone. Per-launch re-registration of the `presencejam://`
+    /// scheme is required on Windows AND Linux to defend against a
+    /// foreign app pre-registering the scheme. The macOS path is a
+    /// known gap handled inside the call site (logs a warning, does
+    /// not crash startup) — the platform gap is documented in #66
+    /// and the changelog; do NOT reintroduce the Windows-only gate.
+    #[test]
+    fn test_register_all_not_gated_to_windows_only() {
+        let source = include_str!("lib.rs");
+        let needle = "app.deep_link().register_all()";
+        // Capture ±10 lines of context around the call site.
+        let byte_offset = source.find(needle).unwrap_or_else(|| {
+            panic!(
+                "no call to `{}` found in lib.rs — the re-registration site \
+                 must remain in the desktop setup block",
+                needle
+            )
+        });
+        let line_start_byte = source[..byte_offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let mut line_start = line_start_byte;
+        for _ in 0..10 {
+            if line_start == 0 {
+                break;
+            }
+            line_start = source[..line_start - 1]
+                .rfind('\n')
+                .map(|i| i + 1)
+                .unwrap_or(0);
+        }
+        let match_end = byte_offset + needle.len();
+        let mut line_end = match_end;
+        for _ in 0..10 {
+            if line_end >= source.len() {
+                break;
+            }
+            line_end = source[line_end..]
+                .find('\n')
+                .map(|i| line_end + i + 1)
+                .unwrap_or(source.len());
+        }
+        let window = &source[line_start..line_end];
+        assert!(
+            !window.contains("#[cfg(windows)]"),
+            "Regression: `{}` is gated to Windows only. Issue #66 \
+             requires per-launch re-registration on Windows AND Linux. \
+             The macOS gap is handled inside the call site (logs \
+             a warning, does not crash) — do NOT reintroduce \
+             `#[cfg(windows)]` around this call. Offending context:\n{}",
+            needle, window
+        );
+    }
     #[test]
     fn test_app_state_sub_encapsulation_no_pub_inner_fields() {
         let source = include_str!("lib.rs");
