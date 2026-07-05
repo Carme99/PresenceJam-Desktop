@@ -454,30 +454,53 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Source-level regression guard: the redundant `fs::remove_file(path)`
-    /// would have re-introduced the crash window. If this source-grep
-    /// trips, the caller-visible rename-atomicity guarantee in
-    /// test_atomic_write_json_replaces_existing_file is no longer
-    /// trustworthy under a process-kill mid-write.
+    /// Source-level regression guard for the crash-window bug: a redundant
+    /// `fs::remove_file(path)` between temp-write-fsync and `rename()`
+    /// breaks the rename-atomicity guarantee (rename atomically replaces
+    /// the destination on POSIX + Windows same-volume renames, removing
+    /// first leaves a crash window where the destination is gone and the
+    /// rename never happens).
+    ///
+    /// Robust anchor: walk a brace count from the first `{` after the
+    /// `fn atomic_write_json(...)` signature. The body's `{`/`}` count is
+    /// independent of what other functions are declared around it, so this
+    /// test survives reordering / splitting / renaming of adjacent code.
     #[test]
     fn test_atomic_write_json_does_not_remove_destination_first() {
         let src = include_str!("config.rs");
-        // Get just the atomic_write_json body (between the fn line and
-        // the fn closing brace + the next sibling fn).
-        let body_start = src
-            .find("fn atomic_write_json")
-            .expect("atomic_write_json fn must exist");
-        let body_end_rel = src[body_start..]
-            .find("\npub fn save_config")
-            .expect("save_config must follow atomic_write_json");
-        let body = &src[body_start..body_start + body_end_rel];
+        // Find the function signature (the line that starts the body).
+        let sig_idx = src
+            .find("fn atomic_write_json(")
+            .expect("atomic_write_json must exist");
+        // Walk forward until the first `{`, then count braces to find the
+        // matching `}`. Robust to whatever comes after the function.
+        let brace_open_rel = src[sig_idx..]
+            .find('{')
+            .expect("atomic_write_json body must have an opening brace");
+        let body_start = sig_idx + brace_open_rel;
+        let mut depth: u32 = 0;
+        let mut i = body_start;
+        let body_end = loop {
+            let ch = src.as_bytes()[i];
+            match ch {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 { break i; }
+                }
+                _ => {}
+            }
+            i += 1;
+            if i >= src.len() { panic!("atomic_write_json body has unbalanced braces"); }
+        };
+        let body = &src[body_start + 1..body_end];
         assert!(
             !body.contains("remove_file"),
-            "atomic_write_json must not call remove_file(path) before \
-             rename — rename atomically replaces the destination on POSIX \
-             + Windows same-volume renames, and the explicit remove \
-             breaks crash-safety. See ARCHITECTURE.md 'Storage' section \
-             and PR #132 review for context."
+            "atomic_write_json must not call remove_file(path) before rename — \
+             rename atomically replaces the destination on POSIX + Windows \
+             same-volume renames, and the explicit remove breaks \
+             crash-safety. See ARCHITECTURE.md 'Storage' section and the \
+             original review comment on PR #133 for context."
         );
     }
 
