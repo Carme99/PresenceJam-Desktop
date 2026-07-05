@@ -38,23 +38,29 @@ Expected response time: within 7 days.
 | Teams access/refresh tokens | `<app-config-dir>/PresenceJam/tokens.json` (same hand-rolled atomic write) | **Plaintext JSON** — same as Spotify above. |
 | Spotify OAuth pending state (PKCE verifier, state) | **Not persisted to disk.** Lives in `AppState::PendingSpotifyAuth.state` only (in-memory); the deep-link callback resolves it before the user closes the app. If the process is killed mid-OAuth, the user re-starts the OAuth flow and Spotify issues a fresh code. | N/A — in-memory only. |
 
-**Plaintext tokens.json on disk (v2.6.4 to present — issue #65):** As of
-v2.6.4, `token_io.rs` writes OAuth access/refresh tokens as plaintext JSON
-to `<app-config-dir>/PresenceJam/tokens.json`. This was a deliberate change
-during the security hardening of #65 — the previous `tauri-plugin-store`
-path was found to leak credentials to the webview via the IPC bridge. The
-OS keychain is reserved **only** for the Spotify `client_secret` (see
-"Configuration" below). The only protection for `tokens.json` is the
-file permissions that the OS grants the new file at creation time
-(PresenceJam does not explicitly set a mode — under the typical umask
-022, `tokens.json` ends up mode 0644 on macOS / Linux, which is
-world-readable on the local machine; on Windows the default ACL
-inherits the user-only parent permissions and is not world-readable).
-This is **the real-world soft exposure**. Mitigations to consider in a
-future release: explicitly `chmod 0600` on Unix, and explicit user-only
-DACLs on Windows; full-disk encryption (BitLocker / FileVault / LUKS)
-is the strongest defense today against offline-disk reads. See
-`ARCHITECTURE.md` "Storage" section for the implementation reference.
+**Plaintext tokens.json on disk (every released version of PresenceJam
+to date):** OAuth access/refresh tokens in `tokens.json` have been stored
+as plaintext JSON in every released version of this app to date — both
+under the pre-v2.6.4 `tauri-plugin-store` write path AND under the current
+`token_io.rs` hand-rolled atomic-write path introduced by #65. The v2.6.4
+(#65) migration was not a trade-off against encryption; it was a switch
+to fix two unrelated bugs: (1) the previous `tauri-plugin-store` path
+leaked credentials to the webview via the IPC bridge (issue #65), and
+(2) it could corrupt the store JSON on a mid-write crash. The new
+`token_io.rs` writer addresses both — neither pre-#65 nor post-#65 has
+tokens.json ever been encrypted at rest. The OS keychain is reserved
+**only** for the Spotify `client_secret` (see "Configuration" below).
+The only protection for `tokens.json` is the file permissions that the
+OS grants the new file at creation time (PresenceJam does not explicitly
+set a mode — under the typical umask 022, `tokens.json` ends up mode
+0644 on macOS / Linux, which is world-readable on the local machine;
+on Windows the default ACL inherits the user-only parent permissions and
+is not world-readable). This is **the real-world soft exposure**.
+Mitigations to consider in a future release: explicitly `chmod 0600` on
+Unix, and explicit user-only DACLs on Windows; full-disk encryption
+(BitLocker / FileVault / LUKS) is the strongest defense today against
+offline-disk reads. See `ARCHITECTURE.md` "Storage" section for the
+implementation reference.
 
 ### Configuration
 
@@ -111,11 +117,11 @@ not change this). Recommendations, ordered by effort:
 > `config.json`. This supersedes the plaintext-storage approach used
 > through v2.5.0 and earlier; on first run after upgrading, users will be
 > prompted to re-authenticate Spotify so the secret can be migrated.
-> `tokens.json` (access/refresh tokens) is currently **plaintext on disk**
-> (see the note above) — the v2.6.4 (#65) migration from
-> `tauri-plugin-store` to `token_io.rs` explicitly chose crash-safe
-> atomic writes over encryption, on the basis that the tokens are
-> short-lived, refreshable, and revocable.
+> `tokens.json` (access/refresh tokens) has been stored **as plaintext JSON
+> on disk in every released version** (see the note above) — the v2.6.4
+> (#65) migration from `tauri-plugin-store` to `token_io.rs` was NOT
+> introducing encryption; it was fixing two pre-existing bugs (webview
+> IPC leak + crash-corruption) without adding encryption at any point.
 
 > **Status:** As of v2.8.0, the keychain user field is **namespaced by the
 > Tauri bundle identifier** (`spotify_client_secret:com.presencejam.app`)
