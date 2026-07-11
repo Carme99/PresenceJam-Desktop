@@ -50,17 +50,58 @@ leaked credentials to the webview via the IPC bridge (issue #65), and
 `token_io.rs` writer addresses both — neither pre-#65 nor post-#65 has
 tokens.json ever been encrypted at rest. The OS keychain is reserved
 **only** for the Spotify `client_secret` (see "Configuration" below).
-The only protection for `tokens.json` is the file permissions that the
-OS grants the new file at creation time (PresenceJam does not explicitly
-set a mode — under the typical umask 022, `tokens.json` ends up mode
-0644 on macOS / Linux, which is world-readable on the local machine;
-on Windows the default ACL inherits the user-only parent permissions and
-is not world-readable). This is **the real-world soft exposure**.
-Mitigations to consider in a future release: explicitly `chmod 0600` on
-Unix, and explicit user-only DACLs on Windows; full-disk encryption
-(BitLocker / FileVault / LUKS) is the strongest defense today against
-offline-disk reads. See `ARCHITECTURE.md` "Storage" section for the
-implementation reference.
+
+**File-mode history.** Prior to v2.8.x, PresenceJam did not explicitly
+set a mode on `tokens.json` (or `config.json`); under the typical umask
+022, the file ended up at mode 0644 on macOS / Linux, which is
+world-readable on the local machine. On Windows, the default ACL
+inherited the user-only parent permissions and was not world-readable.
+Starting with v2.8.x (issue #135 path A), `tokens.json` and
+`config.json` are explicitly set to mode 0600 on Unix-like systems at
+write time, and any pre-existing loose file is tightened on first read;
+on Windows, the default ACL remains user-only and no explicit ACL
+change is required. See "File permissions (v2.8.x — issue #135 path A)"
+below for source-of-truth citations, and "Limitations → Token Storage"
+for the residual exposure.
+
+Full-disk encryption (BitLocker / FileVault / LUKS) remains the
+strongest defense against offline-disk reads; revocation at the provider
+(Spotify / Microsoft account settings) is the only way to invalidate
+the credentials once a local-user compromise is suspected. See
+`ARCHITECTURE.md` "Storage" section for the implementation reference.
+
+#### File permissions (v2.8.x — issue #135 path A)
+
+`tokens.json` and `config.json` are explicitly set to mode **0600** (owner
+read/write only) on Unix-like systems and inherit the user-only default
+ACL on Windows. This is **file-mode tightening, not encryption** — the
+file contents are still plaintext JSON; this change only narrows which
+local-user processes can read them. Claims tied to the source:
+
+| Claim | Source |
+|---|---|
+| `tokens.json` temp sidecar is created with mode 0600 atomically (no world-readable window) | `src-tauri/src/token_io.rs::write_tokens_atomic` — `OpenOptions::new().create_new(true).mode(0o600)` (Unix); `fs::File::create` (Windows, inherits user-only ACL). |
+| `tokens.json` live file inherits 0600 from the rename source | POSIX `rename(2)` preserves the source mode; the source is the 0600 tmp. |
+| `config.json` temp sidecar is created with mode 0600 atomically | `src-tauri/src/config.rs::atomic_write_json` — `OpenOptions::new().create_new(true).mode(0o600)` (Unix); `fs::File::create` (Windows). |
+| Pre-existing loose files are tightened on read (upgrade path) | `src-tauri/src/token_io.rs::read_tokens_at` and `src-tauri/src/config.rs::load_config` — `fs::set_permissions(0o600)` after `fs::metadata` shows a non-0600 mode. Idempotent. |
+| Stale `.tmp` sidecar from a prior crash is cleared before create_new (avoids `AlreadyExists` permanent save failure) | `src-tauri/src/token_io.rs::write_tokens_atomic` and `src-tauri/src/config.rs::atomic_write_json` — `fs::remove_file(&temp_path)` with `NotFound` tolerated. |
+| Windows does NOT need an explicit DACL change | Windows default ACL on a new file in a user-owned directory inherits user-only access (issue #135 acceptance; verified by reading the existing `Plaintext tokens.json` paragraph above). |
+
+**What this is NOT.** This does not encrypt `tokens.json` or `config.json`.
+The file contents remain plaintext JSON on disk; only the OS-level file
+mode (Unix) or default ACL (Windows) is narrowed. Full-disk encryption
+(BitLocker / FileVault / LUKS) remains the strongest defense against
+offline-disk reads; revocation at the provider (Spotify / Microsoft
+account settings) remains the only way to invalidate the credentials
+once a local-user compromise is suspected.
+
+**Decision recorded on issue #135:** Path A (file-mode tightening) was
+chosen over Path B (full encryption with keychain-stored key) for v2.8.x
+because it is a small, low-risk, cross-platform change that closes the
+umask-022 → 0644 exposure surface without introducing a new crypto
+dependency or breaking the atomic-write guarantees of `token_io.rs` and
+`config.rs`. Path B (real encryption) is deferred to a future release
+that warrants its own design + cross-platform test pass.
 
 ### Configuration
 
@@ -93,10 +134,13 @@ $XDG_CONFIG_HOME/PresenceJam/tokens.json   (Linux)
 - Teams access token + refresh token (`TeamsTokens` JSON object)
 
 **⚠️ The `config.json` file (now) contains no secrets after a successful
-v2.6.0+ migration**, but the plaintext tokens in `tokens.json` are exposed
-to any process running under the same OS user (on Unix-like systems,
-under the typical umask 022, the file is created 0644; PresenceJam does
-not change this). Recommendations, ordered by effort:
+v2.6.0+ migration**. As of v2.8.x (issue #135 path A), both `config.json`
+and `tokens.json` are explicitly set to mode 0600 on Unix-like systems,
+narrowing the plaintext-exposure surface to the owning OS user (on
+Windows, the default ACL is already user-only). This is
+**file-mode tightening, not encryption** — the file contents remain
+plaintext JSON; only the OS-level mode is narrowed. Recommendations,
+ordered by effort:
 
 1. Enable full-disk encryption on the OS (BitLocker on Windows, FileVault
    on macOS, LUKS on Linux). This is the strongest defense against
@@ -200,7 +244,9 @@ Review these links to understand how your data is handled by each service.
 
 Currently, OAuth tokens (`tokens.json`) are **plaintext JSON on disk** in `<app-config-dir>/PresenceJam/tokens.json` (written atomically by `src-tauri/src/token_io.rs`). The file is not encrypted by the app — protection is whatever the OS grants the file at creation time (typically umask 022 → 0644 on Unix-like systems; user-only default ACL on Windows). The app has access to tokens as soon as you’re logged into your OS session — there is no additional password or biometric unlock layer. See "Plaintext tokens.json" note above.
 
-**Mitigation:** Use a strong Windows login password/PIN and enable Windows Hello or BitLocker where possible.
+**Mitigation (file-mode tightening, v2.8.x — issue #135 path A):** `tokens.json` and `config.json` are now explicitly set to mode 0600 on Unix-like systems (and inherit the user-only default ACL on Windows) at write time, and any pre-existing loose file is tightened on first read. This narrows the plaintext-exposure surface to the owning OS user; it is not encryption. See "File permissions (v2.8.x)" under "Data Storage" for source citations.
+
+**Mitigation (broader):** Use a strong Windows login password/PIN and enable Windows Hello or BitLocker where possible.
 
 ### No Certificate Pinning
 
