@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
+### Security
+- **fix(security): tighten tokens.json + config.json file mode to 0600 (Unix), user-only ACL (Windows) — issue #135 path A.** `src-tauri/src/token_io.rs::write_tokens_atomic` and `src-tauri/src/config.rs::atomic_write_json` now create the temp sidecar with mode 0600 atomically via `OpenOptions::new().write(true).create_new(true).mode(0o600)` (Unix); the subsequent `rename()` preserves the source mode, so the live file ends up 0600 too. Pre-existing loose files are tightened on first read by `read_tokens_at` / `load_config`. Stale `.tmp` sidecars from a prior crash are pre-cleared so `create_new(true)` does not block the next write. This is **file-mode tightening, not encryption**; the file contents remain plaintext JSON. See `SECURITY.md` "Data Storage → File permissions (v2.8.x)" for source-of-truth citations and the A-vs-B decision. Adds two regression tests: `token_io::tests::recovers_from_stale_tmp_sidecar` and `config::tests::test_atomic_write_json_recovers_from_stale_tmp_sidecar`. Existing `test_atomic_write_json_does_not_remove_destination_first` (PR #133) tightened to forbid `remove_file(path)` on the destination while allowing `remove_file(&temp_path)` on the sidecar.
+
 ## [2.8.0] - 2026-07-04
 
 ### Security

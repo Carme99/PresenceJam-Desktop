@@ -17,6 +17,8 @@ use crate::spotify::SpotifyTokens;
 use crate::teams::TeamsTokens;
 use serde::{Deserialize, Serialize};
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -66,6 +68,32 @@ pub fn read_tokens_at(app: &tauri::AppHandle) -> Result<TokensFile, String> {
         );
         return Ok(TokensFile::default());
     }
+    // Issue #135 path A: tighten the mode of any pre-existing tokens.json
+    // that was created loose by an older PresenceJam version (default umask
+    // 022 → 0644). Idempotent on a file that is already 0600. Windows
+    // default ACL is user-only, so this is a no-op there.
+    #[cfg(unix)]
+    {
+        let current = fs::metadata(&path)
+            .map_err(|e| format!("Failed to stat tokens file '{}': {}", path.display(), e))?
+            .permissions();
+        let current_mode = current.mode() & 0o777;
+        if current_mode != 0o600 {
+            log::warn!(
+                "[TOKEN_IO] tightening tokens.json mode from {:o} to 0600 (issue #135)",
+                current_mode
+            );
+            let mut tightened = current;
+            tightened.set_mode(0o600);
+            fs::set_permissions(&path, tightened).map_err(|e| {
+                format!(
+                    "Failed to chmod tokens file '{}' to 0600: {}",
+                    path.display(),
+                    e
+                )
+            })?;
+        }
+    }
     let s = fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read tokens file '{}': {}", path.display(), e))?;
     if s.trim().is_empty() {
@@ -110,19 +138,54 @@ pub fn write_tokens_atomic(path: &PathBuf, contents: &TokensFile) -> Result<(), 
         .map_err(|e| format!("Failed to serialize tokens: {}", e))?;
 
     let temp_path = path.with_extension("json.tmp");
-    {
-        let mut f = fs::File::create(&temp_path).map_err(|e| {
+    // Issue #135 path A: create the temp file with mode 0600 atomically.
+    // Pre-clear any stale sidecar from a previous crash (between temp-write
+    // and rename). Without this pre-clear, create_new(true) would error with
+    // AlreadyExists on a leftover `.json.tmp`, turning a one-off crash into
+    // a permanent save failure until the user manually deletes the sidecar.
+    // Deletion of a non-existent file is fine — we ignore NotFound.
+    if let Err(e) = fs::remove_file(&temp_path) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return Err(format!(
+                "Failed to remove stale temp tokens file '{}': {}",
+                temp_path.display(),
+                e
+            ));
+        }
+    }
+    // OpenOptions::create_new(true) prevents racing with a leftover sidecar;
+    // .mode(0o600) sets the mode at file-creation time (no chmod-after-create
+    // window where plaintext tokens would be world-readable). The subsequent
+    // rename() preserves the source mode on POSIX, so the live tokens.json
+    // ends up at 0600 too. On Windows, the new file inherits the user-only
+    // default ACL of the parent directory (no explicit ACL change needed —
+    // see SECURITY.md "Data Storage" section).
+    #[cfg(unix)]
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temp_path)
+        .map_err(|e| {
             format!(
                 "Failed to create temp tokens file '{}': {}",
                 temp_path.display(),
                 e
             )
         })?;
-        f.write_all(json.as_bytes())
-            .map_err(|e| format!("Failed to write temp tokens file: {}", e))?;
-        f.sync_all()
-            .map_err(|e| format!("Failed to fsync temp tokens file: {}", e))?;
-    }
+    #[cfg(not(unix))]
+    let mut f = fs::File::create(&temp_path).map_err(|e| {
+        format!(
+            "Failed to create temp tokens file '{}': {}",
+            temp_path.display(),
+            e
+        )
+    })?;
+    f.write_all(json.as_bytes())
+        .map_err(|e| format!("Failed to write temp tokens file: {}", e))?;
+    f.sync_all()
+        .map_err(|e| format!("Failed to fsync temp tokens file: {}", e))?;
+    drop(f); // close before rename — Windows fails rename of an open file.
     fs::rename(&temp_path, path).map_err(|e| {
         format!(
             "Failed to rename '{}' to '{}': {}",
@@ -262,5 +325,38 @@ mod tests {
         fs::write(&path, "{not valid json").unwrap();
         assert!(read_tokens_inner(&path).is_err());
         let _ = fs::remove_file(&path);
+    }
+
+    /// Regression guard for issue #135: a stale `.json.tmp` from a previous
+    /// crash must not block the next write. Without the pre-clear, the new
+    /// create_new(true) on a leftover sidecar would error with AlreadyExists
+    /// and turn a one-off crash into a permanent save failure.
+    #[test]
+    fn recovers_from_stale_tmp_sidecar() {
+        let path = tmp_path("recover.json");
+        let sidecar = path.with_extension("json.tmp");
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(&sidecar);
+
+        // Simulate a previous crash that left the sidecar behind.
+        fs::write(&sidecar, b"PARTIAL_GARBAGE_FROM_CRASH").unwrap();
+        assert!(sidecar.exists(), "sidecar must exist before recovery");
+
+        let tf = TokensFile {
+            spotify_tokens: Some(sample_spotify()),
+            teams_tokens: Some(sample_teams()),
+        };
+        write_tokens_atomic(&path, &tf).expect("write must succeed despite stale sidecar");
+        assert!(path.exists(), "tokens.json must exist after write");
+        assert!(
+            !sidecar.exists(),
+            "sidecar must be consumed by rename (no .json.tmp leftover)"
+        );
+
+        let loaded = read_tokens_inner(&path).unwrap();
+        assert!(loaded.spotify_tokens.is_some());
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(&sidecar);
     }
 }

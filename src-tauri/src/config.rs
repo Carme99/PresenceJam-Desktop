@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::PathBuf;
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
@@ -224,6 +226,33 @@ pub fn load_config() -> Result<AppConfig, String> {
         return Ok(with_keychain_flags(AppConfig::default()));
     }
 
+    // Issue #135 path A: tighten mode of any pre-existing config.json that
+    // was created loose by an older PresenceJam version (default umask 022
+    // → 0644). Idempotent on a file that is already 0600. Windows default
+    // ACL is user-only, so this is a no-op there.
+    #[cfg(unix)]
+    {
+        let current = fs::metadata(&path)
+            .map_err(|e| format!("Failed to stat config file '{}': {}", path.display(), e))?
+            .permissions();
+        let current_mode = current.mode() & 0o777;
+        if current_mode != 0o600 {
+            log::warn!(
+                "Tightening config.json mode from {:o} to 0600 (issue #135)",
+                current_mode
+            );
+            let mut tightened = current;
+            tightened.set_mode(0o600);
+            fs::set_permissions(&path, tightened).map_err(|e| {
+                format!(
+                    "Failed to chmod config file '{}' to 0600: {}",
+                    path.display(),
+                    e
+                )
+            })?;
+        }
+    }
+
     let mut file = fs::File::open(&path)
         .map_err(|e| format!("Failed to open config file '{}': {}", path.display(), e))?;
 
@@ -362,6 +391,41 @@ pub fn migrate_legacy_client_secret() {
 fn atomic_write_json(path: &std::path::Path, json: &str) -> Result<(), String> {
     let temp_path = path.with_extension("tmp");
 
+    // Issue #135 path A: create the temp file with mode 0600 atomically.
+    // Pre-clear any stale sidecar from a previous crash (between temp-write
+    // and rename). Without this pre-clear, create_new(true) would error with
+    // AlreadyExists on a leftover `.tmp`, turning a one-off crash into a
+    // permanent save failure until the user manually deletes the sidecar.
+    // Deletion of a non-existent file is fine — we ignore NotFound.
+    if let Err(e) = fs::remove_file(&temp_path) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return Err(format!(
+                "Failed to remove stale temp file '{}': {}",
+                temp_path.display(),
+                e
+            ));
+        }
+    }
+    // OpenOptions::create_new(true) prevents racing with a leftover sidecar;
+    // .mode(0o600) sets the mode at file-creation time (no chmod-after-create
+    // window where config.json could briefly sit world-readable). The
+    // subsequent rename() preserves the source mode on POSIX. On Windows,
+    // the new file inherits the user-only default ACL of the parent.
+    #[cfg(unix)]
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temp_path)
+        .map_err(|e| {
+            format!(
+                "Failed to create temp file '{}': {}",
+                temp_path.display(),
+                e
+            )
+        })?;
+
+    #[cfg(not(unix))]
     let mut file = fs::File::create(&temp_path).map_err(|e| {
         format!(
             "Failed to create temp file '{}': {}",
@@ -494,13 +558,24 @@ mod tests {
             if i >= src.len() { panic!("atomic_write_json body has unbalanced braces"); }
         };
         let body = &src[body_start + 1..body_end];
+        // Allow `remove_file(&temp_path)` (pre-clearing a stale sidecar from
+        // a prior crash, introduced by issue #135 path A) but forbid
+        // `remove_file(path)` (removing the destination before rename would
+        // break the rename-atomicity guarantee). The latter is the original
+        // PR #133 regression. We anchor on the destination-path identifier
+        // to be string-literal-safe (the brace counter excludes braces
+        // inside string contents only by accident, so we rely on the
+        // specific `remove_file(path` token rather than free-form
+        // `remove_file`).
         assert!(
-            !body.contains("remove_file"),
-            "atomic_write_json must not call remove_file(path) before rename — \
-             rename atomically replaces the destination on POSIX + Windows \
-             same-volume renames, and the explicit remove breaks \
-             crash-safety. See ARCHITECTURE.md 'Storage' section and the \
-             original review comment on PR #133 for context."
+            !body.contains("remove_file(path"),
+            "atomic_write_json must not call remove_file(path) on the destination \
+             before rename — rename atomically replaces the destination on POSIX \
+             + Windows same-volume renames, and the explicit remove breaks \
+             crash-safety. `remove_file(&temp_path)` on the sidecar IS allowed \
+             (issue #135 path A: pre-clear stale sidecar from a prior crash). \
+             See ARCHITECTURE.md 'Storage' section and PR #133 for the \
+             original regression context."
         );
     }
 
@@ -509,5 +584,38 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos()
+    }
+
+    /// Regression guard for issue #135: a stale `.tmp` from a previous crash
+    /// must not block the next write. Without the pre-clear, the new
+    /// create_new(true) on a leftover sidecar would error with AlreadyExists
+    /// and turn a one-off crash into a permanent save failure.
+    #[test]
+    fn test_atomic_write_json_recovers_from_stale_tmp_sidecar() {
+        let dir = std::env::temp_dir().join(format!(
+            "pj-test-recover-{}-{}",
+            std::process::id(),
+            chrono_like_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let sidecar = path.with_extension("tmp");
+
+        // Simulate a previous crash that left the sidecar behind.
+        std::fs::write(&sidecar, b"PARTIAL_GARBAGE_FROM_CRASH").unwrap();
+        assert!(sidecar.exists(), "sidecar must exist before recovery");
+
+        atomic_write_json(&path, "NEW_CONTENTS_AFTER_CRASH")
+            .expect("write must succeed despite stale sidecar");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "NEW_CONTENTS_AFTER_CRASH"
+        );
+        assert!(
+            !sidecar.exists(),
+            "sidecar must be consumed by rename (no .tmp leftover)"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
