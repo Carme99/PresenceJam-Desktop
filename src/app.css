@@ -357,6 +357,31 @@ input[type='radio'] {
 .badge.info    { background: var(--info-soft);    color: var(--info);    border-color: transparent; }
 .badge.accent  { background: var(--accent-soft);  color: var(--accent-text); border-color: transparent; }
 
+/* Leading dot — part of the badge primitive per the visual-refresh
+ * PR's intent (consistency across Dashboard / Settings / Reconnect). */
+.badge .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--fg-subtle);
+  flex-shrink: 0;
+}
+.badge.success .dot { background: var(--success); }
+.badge.warning .dot { background: var(--warning); }
+.badge.error   .dot { background: var(--danger); }
+.badge.info    .dot { background: var(--info); }
+.badge.accent  .dot { background: var(--accent); }
+
+/* Pulsing dot for active-sync badge / live log indicators. */
+@keyframes pulse-dot {
+  0%   { box-shadow: 0 0 0 0   var(--success-soft); }
+  70%  { box-shadow: 0 0 0 8px transparent; }
+  100% { box-shadow: 0 0 0 0   transparent; }
+}
+.badge .dot.pulse {
+  animation: pulse-dot 1.5s var(--ease-out) infinite;
+}
+
 /* ---------- Inline code ---------- */
 code {
   font-family: var(--font-mono);

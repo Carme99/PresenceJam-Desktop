@@ -384,30 +384,6 @@
     flex-wrap: wrap;
     gap: var(--sp-2);
   }
-  .badge {
-    padding: var(--sp-1) var(--sp-3);
-    border-radius: var(--r-pill);
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    background: var(--bg-elevated);
-    color: var(--fg-muted);
-    border: 1px solid var(--border);
-    display: inline-flex;
-    align-items: center;
-    gap: var(--sp-1);
-  }
-  .badge .dot {
-    width: 7px; height: 7px;
-    border-radius: 50%;
-    background: var(--fg-subtle);
-  }
-  .badge.success { background: var(--success-soft); color: var(--success); border-color: transparent; }
-  .badge.success .dot { background: var(--success); }
-  .badge.error { background: var(--danger-soft); color: var(--danger); border-color: transparent; }
-  .badge.error .dot { background: var(--danger); }
-  .badge.accent { background: var(--accent-soft); color: var(--accent-text); border-color: transparent; }
-  .badge.accent .dot { background: var(--accent); }
-
   .header-right {
     display: flex;
     gap: var(--sp-2);

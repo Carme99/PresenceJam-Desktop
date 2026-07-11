@@ -2,6 +2,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
   import { onMount, onDestroy } from 'svelte';
+  import PageHeader from './PageHeader.svelte';
   import { currentView } from '$lib/stores/app';
   import type { LogPayload } from '$lib/types';
 
@@ -68,11 +69,7 @@
 </script>
 
 <div class="log-viewer">
-  <header class="header">
-    <button class="back-btn btn-secondary" onclick={goBack}>← Back</button>
-    <h1>Logs</h1>
-    <span class="count" aria-live="polite">{filteredLogs.length} {filteredLogs.length === 1 ? 'entry' : 'entries'}</span>
-  </header>
+  <PageHeader title="Logs" onBack={goBack} showLogo={false} showThemeToggle={false} />
 
   <div class="toolbar">
     <div class="seg" role="tablist" aria-label="Log level filter">
@@ -83,7 +80,7 @@
           aria-selected={filter === f}>{f}</button>
       {/each}
     </div>
-    <div class="toolbar-spacer"></div>
+    <span class="count" aria-live="polite">{filteredLogs.length} {filteredLogs.length === 1 ? 'entry' : 'entries'}</span>
     <button class="btn-secondary" onclick={clearLogs}>Clear</button>
     <button class="btn-secondary" onclick={openFolder}>Open folder</button>
   </div>
@@ -116,36 +113,20 @@
     margin: 0 auto;
     gap: var(--sp-4);
   }
-  .header {
-    display: flex;
-    align-items: center;
-    gap: var(--sp-4);
-  }
-  .back-btn {
-    width: auto;
-    padding: var(--sp-2) var(--sp-4);
-    font-size: var(--fs-sm);
-  }
-  h1 {
-    font-size: var(--fs-2xl);
-    font-weight: 700;
-    letter-spacing: -0.02em;
-    flex: 1;
-  }
-  .count {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    color: var(--fg-subtle);
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-  }
 
   .toolbar {
     display: flex;
     align-items: center;
     gap: var(--sp-2);
   }
-  .toolbar-spacer { flex: 1; }
+  .count {
+    margin-right: auto;
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    color: var(--fg-subtle);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
   .toolbar .btn-secondary {
     width: auto;
     padding: var(--sp-2) var(--sp-4);

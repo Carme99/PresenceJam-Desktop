@@ -7,8 +7,8 @@
   import type { SyncStatus } from '$lib/types';
   import { authFlow, setSpotifyPhase, setTeamsPhase } from '$lib/stores/authFlow.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
-  import { theme, toggleTheme } from '$lib/stores/theme';
-  import Logo from './Logo.svelte';
+  import PageHeader from './PageHeader.svelte';
+  import { theme } from '$lib/stores/theme';
 
   let localConfig = $state<AppConfig>({ ...$configStore });
   let isConnected = $state(false);
@@ -177,17 +177,7 @@
 </script>
 
 <div class="settings">
-  <header class="header">
-    <button class="back-btn btn-secondary" onclick={goBack}>← Back</button>
-    <div class="title-block">
-      <Logo size={28} />
-      <h1>Settings</h1>
-    </div>
-    <button class="icon-btn theme-btn" onclick={toggleTheme}
-      aria-label="Toggle theme" title="Toggle theme">
-      {$theme === 'dark' ? '☀' : '☾'}
-    </button>
-  </header>
+  <PageHeader title="Settings" onBack={goBack} />
 
   <div class="sections">
     <section class="card">
@@ -394,33 +384,6 @@
     gap: var(--sp-5);
   }
 
-  .header {
-    display: flex;
-    align-items: center;
-    gap: var(--sp-3);
-  }
-  .back-btn {
-    flex-shrink: 0;
-    width: auto;
-    padding: var(--sp-2) var(--sp-4);
-    font-size: var(--fs-sm);
-  }
-  .title-block {
-    display: flex;
-    align-items: center;
-    gap: var(--sp-3);
-    flex: 1;
-    min-width: 0;
-  }
-  .title-block h1 {
-    font-size: var(--fs-2xl);
-    font-weight: 700;
-    letter-spacing: -0.02em;
-  }
-  .theme-btn {
-    flex-shrink: 0;
-  }
-
   .sections {
     display: flex;
     flex-direction: column;
@@ -448,28 +411,6 @@
     font-size: var(--fs-md);
     font-weight: 600;
   }
-  .badge {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--sp-1);
-    padding: 2px var(--sp-3);
-    border-radius: var(--r-pill);
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    background: var(--bg-elevated);
-    color: var(--fg-muted);
-    border: 1px solid var(--border);
-  }
-  .badge .dot {
-    width: 7px; height: 7px; border-radius: 50%;
-    background: var(--fg-subtle);
-  }
-  .badge.success { background: var(--success-soft); color: var(--success); border-color: transparent; }
-  .badge.success .dot { background: var(--success); }
-  .badge.warning { background: var(--warning-soft); color: var(--warning); border-color: transparent; }
-  .badge.warning .dot { background: var(--warning); }
-  .badge.error { background: var(--danger-soft); color: var(--danger); border-color: transparent; }
-  .badge.error .dot { background: var(--danger); }
 
   .form-group { display: flex; flex-direction: column; gap: var(--sp-2); }
   .form-group label,
