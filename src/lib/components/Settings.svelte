@@ -7,6 +7,8 @@
   import type { SyncStatus } from '$lib/types';
   import { authFlow, setSpotifyPhase, setTeamsPhase } from '$lib/stores/authFlow.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
+  import { theme, toggleTheme } from '$lib/stores/theme';
+  import Logo from './Logo.svelte';
 
   let localConfig = $state<AppConfig>({ ...$configStore });
   let isConnected = $state(false);
@@ -130,7 +132,7 @@
       saveMessage = 'Settings saved!';
       if (saveTimeout) clearTimeout(saveTimeout);
       saveTimeout = setTimeout(() => saveMessage = '', 2000);
-    } catch (e) {
+    } catch {
       saveMessage = 'Failed to save';
     }
     isSaving = false;
@@ -176,13 +178,28 @@
 
 <div class="settings">
   <header class="header">
-    <button class="back-btn" onclick={goBack}>← Back</button>
-    <h1>Settings</h1>
+    <button class="back-btn btn-secondary" onclick={goBack}>← Back</button>
+    <div class="title-block">
+      <Logo size={28} />
+      <h1>Settings</h1>
+    </div>
+    <button class="icon-btn theme-btn" onclick={toggleTheme}
+      aria-label="Toggle theme" title="Toggle theme">
+      {$theme === 'dark' ? '☀' : '☾'}
+    </button>
   </header>
 
   <div class="sections">
     <section class="card">
-      <h2>Spotify</h2>
+      <header class="section-header">
+        <h2>Spotify</h2>
+        <span class="badge" class:success={isConnected && !spotifyAuthWaiting}
+              class:warning={spotifyAuthWaiting}
+              class:error={!isConnected && !spotifyAuthWaiting}>
+          <span class="dot"></span>
+          {#if spotifyAuthWaiting}Reconnecting…{:else if isConnected}Connected{:else}Not connected{/if}
+        </span>
+      </header>
       <div class="form-group">
         <label for="spotify-client-id">Client ID</label>
         <input
@@ -194,7 +211,7 @@
         />
       </div>
       <div class="form-group">
-        <span class="form-label">Client Secret</span>
+        <span class="form-label">Client secret</span>
         <p class="hint">
           {#if localConfig.spotify.client_secret_set}
             Stored securely in your operating system's keychain. To replace
@@ -206,50 +223,53 @@
       </div>
       <div class="connection-row">
         {#if isConnected && !spotifyAuthWaiting}
-          <span class="badge success">Connected</span>
           <button class="btn-secondary" onclick={reconnectSpotify} disabled={spotifyAuthWaiting}>Reconnect Spotify</button>
         {:else if spotifyAuthWaiting}
-          <span class="badge warning">Reconnecting...</span>
-          <span class="hint">Complete auth in browser</span>
-        {:else}
-          <span class="badge warning">Not Connected</span>
+          <span class="hint">Complete authentication in the browser.</span>
         {/if}
       </div>
     </section>
 
     <section class="card">
-      <h2>Microsoft Teams</h2>
+      <header class="section-header">
+        <h2>Microsoft Teams</h2>
+        <span class="badge" class:success={teamsStatusConnected && !teamsAuthWaiting}
+              class:warning={teamsAuthWaiting}
+              class:error={!teamsStatusConnected && !teamsAuthWaiting}>
+          <span class="dot"></span>
+          {#if teamsAuthWaiting}Reconnecting…{:else if teamsStatusConnected}Connected{:else}Not connected{/if}
+        </span>
+      </header>
       <p class="hint">Teams authentication uses your Microsoft 365 account. No additional configuration required.</p>
       <div class="connection-row">
         {#if teamsStatusConnected && !teamsAuthWaiting}
-          <span class="badge success">Connected</span>
           <button class="btn-secondary" onclick={reconnectTeams} disabled={teamsAuthWaiting}>Reconnect Teams</button>
         {:else if teamsAuthWaiting}
-          <span class="badge warning">Reconnecting...</span>
-          <span class="hint">Complete auth in browser</span>
-        {:else}
-          <span class="badge warning">Not Connected</span>
+          <span class="hint">Complete authentication in the browser.</span>
         {/if}
       </div>
     </section>
 
     <section class="card">
-      <h2>Status Format</h2>
+      <header class="section-header">
+        <h2>Status format</h2>
+      </header>
       <div class="form-group">
-        <label for="status-format">Format Template</label>
-        <input 
+        <label for="status-format">Format template</label>
+        <input
           id="status-format"
-          type="text" 
+          type="text"
           bind:value={localConfig.teams.status_format}
           placeholder="🎵 {'{artist}'} - {'{track}'} 🎧"
         />
       </div>
       <div class="form-group">
-        <label for="live-preview">Live Preview</label>
-        <div id="live-preview" class="preview-box">{previewText}</div>
+        <span class="form-label">Live preview</span>
+        <div class="preview-box" aria-live="polite">{previewText}</div>
       </div>
       <p class="hint">
-        Available placeholders: <code>{'{artist}'}</code>, <code>{'{track}'}</code>, <code>{'{album}'}</code>, <code>{'{emoji}'}</code>
+        Available placeholders: <code>{'{artist}'}</code>, <code>{'{track}'}</code>,
+        <code>{'{album}'}</code>, <code>{'{emoji}'}</code>
       </p>
       <div class="toggle-row">
         <label for="profanity-filter">Filter profanity in status</label>
@@ -263,7 +283,7 @@
         <div class="form-group">
           <label for="profanity-placeholder">Placeholder text</label>
           <p class="hint">
-            Use <code>{'{emoji}'}</code> for play state (🎵 playing / ⏸️ paused).
+            Use <code>{'{emoji}'}</code> for play state (🎵 playing / ⏸ paused).
             Shown when profanity is detected in track info.
           </p>
           <input
@@ -277,254 +297,303 @@
     </section>
 
     <section class="card">
-      <h2>Polling</h2>
+      <header class="section-header">
+        <h2>Polling</h2>
+      </header>
       <div class="form-group">
-        <label for="default-interval">Default Interval: {localConfig.polling.default_interval_seconds}s</label>
-        <input 
+        <label for="default-interval">Default interval: {localConfig.polling.default_interval_seconds}s</label>
+        <input
           id="default-interval"
-          type="range" 
-          min="10" 
-          max="60" 
+          type="range"
+          min="10"
+          max="60"
           step="5"
           bind:value={localConfig.polling.default_interval_seconds}
         />
       </div>
       <div class="row-2">
         <div class="form-group">
-          <label for="min-interval">Min Interval (s)</label>
-          <input 
+          <label for="min-interval">Min interval (s)</label>
+          <input
             id="min-interval"
-            type="number" 
+            type="number"
             min="5"
             max="30"
             bind:value={localConfig.polling.minimum_interval_seconds}
           />
         </div>
         <div class="form-group">
-          <label for="max-interval">Max Interval (s)</label>
-          <input 
+          <label for="max-interval">Max interval (s)</label>
+          <input
             id="max-interval"
-            type="number" 
+            type="number"
             min="30"
             max="120"
             bind:value={localConfig.polling.max_interval_seconds}
           />
         </div>
       </div>
-      <div class="form-group">
-        <label for="expiry-buffer">Expiry Buffer (s)</label>
-        <input 
-          id="expiry-buffer"
-          type="number" 
-          min="5"
-          max="60"
-          bind:value={localConfig.polling.expiry_buffer_seconds}
-        />
-      </div>
     </section>
 
     <section class="card">
-      <h2>Startup</h2>
-      <div class="toggle-row">
-        <label for="launch-login">Launch at login</label>
-        <input
-          id="launch-login"
-          type="checkbox"
-          bind:checked={localConfig.autostart}
-        />
+      <header class="section-header">
+        <h2>Appearance</h2>
+      </header>
+      <div class="form-group">
+        <span class="form-label">Theme</span>
+        <div class="theme-grid" role="radiogroup" aria-label="Theme">
+          <button type="button" class="theme-card"
+            class:is-active={$theme === 'dark'} aria-pressed={$theme === 'dark'}
+            onclick={() => theme.set('dark')}>
+            <span class="swatch swatch-dark"></span>
+            <span class="theme-name">Dark</span>
+          </button>
+          <button type="button" class="theme-card"
+            class:is-active={$theme === 'light'} aria-pressed={$theme === 'light'}
+            onclick={() => theme.set('light')}>
+            <span class="swatch swatch-light"></span>
+            <span class="theme-name">Light</span>
+          </button>
+        </div>
       </div>
       <div class="toggle-row">
-        <label for="start-minimized">Start minimized to tray</label>
-        <input 
-          id="start-minimized"
-          type="checkbox" 
-          bind:checked={localConfig.teams.start_minimized}
+        <label for="autostart">Launch at login</label>
+        <input
+          id="autostart"
+          type="checkbox"
+          checked={localConfig.autostart}
+          onchange={async (e) => {
+            const enabled = (e.currentTarget as HTMLInputElement).checked;
+            localConfig.autostart = enabled;
+            await invoke('set_autostart_enabled', { enabled });
+          }}
         />
       </div>
     </section>
 
     <section class="actions">
-      <button class="btn-secondary" onclick={openLogs}>Open Logs Folder</button>
-      <button onclick={handleSave} disabled={isSaving}>
-        {isSaving ? 'Saving...' : 'Save Settings'}
+      <button class="btn-full" onclick={handleSave} disabled={isSaving}>
+        {isSaving ? 'Saving…' : 'Save changes'}
       </button>
       {#if saveMessage}
-        <span class="save-message">{saveMessage}</span>
+        <p class="save-message" aria-live="polite">{saveMessage}</p>
       {/if}
+      <button class="btn-secondary btn-full" onclick={openLogs}>Open logs folder</button>
     </section>
   </div>
 </div>
 
 <style>
   .settings {
-    padding: 20px;
-    max-width: 600px;
+    padding: var(--sp-5);
+    max-width: 640px;
     margin: 0 auto;
-    height: 100vh;
+    min-height: 100vh;
     display: flex;
     flex-direction: column;
-    box-sizing: border-box;
-    overflow: hidden;
+    gap: var(--sp-5);
   }
 
   .header {
     display: flex;
     align-items: center;
-    gap: 16px;
-    margin-bottom: 24px;
+    gap: var(--sp-3);
   }
-
   .back-btn {
-    background: transparent;
-    border: 1px solid var(--border-color);
-    color: var(--text-secondary);
-    padding: 6px 12px;
-    font-size: 13px;
+    flex-shrink: 0;
+    width: auto;
+    padding: var(--sp-2) var(--sp-4);
+    font-size: var(--fs-sm);
   }
-
-  .back-btn:hover {
-    background: var(--bg-elevated);
-    color: var(--text-primary);
+  .title-block {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-3);
+    flex: 1;
+    min-width: 0;
   }
-
-  h1 {
-    font-size: 24px;
-    font-weight: 600;
+  .title-block h1 {
+    font-size: var(--fs-2xl);
+    font-weight: 700;
+    letter-spacing: -0.02em;
   }
-
-  h2 {
-    font-size: 16px;
-    font-weight: 600;
-    margin-bottom: 16px;
-    color: var(--text-primary);
+  .theme-btn {
+    flex-shrink: 0;
   }
 
   .sections {
     display: flex;
     flex-direction: column;
-    gap: 16px;
-    flex: 1;
-    overflow-y: auto;
+    gap: var(--sp-4);
   }
 
   .card {
     background: var(--bg-surface);
-    border: 1px solid var(--border-color);
-    border-radius: 12px;
-    padding: 20px;
+    border: 1px solid var(--border);
+    border-radius: var(--r-lg);
+    padding: var(--sp-5);
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-3);
   }
 
-  .form-group {
-    margin-bottom: 14px;
+  .section-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: var(--sp-3);
+    margin-bottom: var(--sp-1);
   }
-
-  .form-group:last-child {
-    margin-bottom: 0;
+  .section-header h2 {
+    font-size: var(--fs-md);
+    font-weight: 600;
   }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-1);
+    padding: 2px var(--sp-3);
+    border-radius: var(--r-pill);
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    background: var(--bg-elevated);
+    color: var(--fg-muted);
+    border: 1px solid var(--border);
+  }
+  .badge .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--fg-subtle);
+  }
+  .badge.success { background: var(--success-soft); color: var(--success); border-color: transparent; }
+  .badge.success .dot { background: var(--success); }
+  .badge.warning { background: var(--warning-soft); color: var(--warning); border-color: transparent; }
+  .badge.warning .dot { background: var(--warning); }
+  .badge.error { background: var(--danger-soft); color: var(--danger); border-color: transparent; }
+  .badge.error .dot { background: var(--danger); }
 
+  .form-group { display: flex; flex-direction: column; gap: var(--sp-2); }
   .form-group label,
   .form-group .form-label {
-    display: block;
-    margin-bottom: 6px;
-    font-size: 13px;
-    font-weight: 500;
-    color: var(--text-secondary);
+    font-size: var(--fs-sm);
+    font-weight: 600;
+    color: var(--fg);
   }
-
   .connection-row {
     display: flex;
     align-items: center;
-    gap: 12px;
-    margin-top: 12px;
+    gap: var(--sp-3);
+    flex-wrap: wrap;
+  }
+  .connection-row .btn-secondary {
+    width: auto;
+    padding: var(--sp-2) var(--sp-4);
+    font-size: var(--fs-sm);
   }
 
   .preview-box {
     background: var(--bg-elevated);
-    border: 1px solid var(--border-color);
-    border-radius: 6px;
-    padding: 12px;
-    font-size: 14px;
-    word-break: break-all;
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    padding: var(--sp-3) var(--sp-4);
+    font-size: var(--fs-base);
+    color: var(--fg);
+    word-break: break-word;
+    min-height: 40px;
   }
 
   .hint {
-    font-size: 12px;
-    color: var(--text-secondary);
-    margin-top: 8px;
+    font-size: var(--fs-xs);
+    color: var(--fg-subtle);
+    line-height: var(--lh-normal);
   }
-
   .hint code {
     background: var(--bg-elevated);
-    padding: 2px 6px;
-    border-radius: 4px;
-    font-family: monospace;
+    border: 1px solid var(--border);
+    padding: 1px 6px;
+    border-radius: var(--r-sm);
+    font-size: var(--fs-xs);
   }
 
   .row-2 {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 12px;
+    gap: var(--sp-3);
+  }
+  @media (max-width: 480px) {
+    .row-2 { grid-template-columns: 1fr; }
   }
 
   .toggle-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 8px 0;
+    gap: var(--sp-3);
+    padding: var(--sp-2) 0;
   }
-
   .toggle-row label {
-    font-size: 14px;
-    color: var(--text-primary);
+    font-size: var(--fs-base);
+    color: var(--fg);
   }
 
-  .toggle-row input[type="checkbox"] {
-    width: 18px;
-    height: 18px;
-    accent-color: var(--color-accent);
+  .theme-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--sp-3);
+  }
+  .theme-card {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--sp-2);
+    padding: var(--sp-3);
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    cursor: pointer;
+    width: auto;
+    transition: border-color var(--dur-fast) var(--ease-out),
+                background-color var(--dur-fast) var(--ease-out);
+  }
+  .theme-card:hover {
+    background: var(--bg-surface);
+    border-color: var(--border-strong);
+  }
+  .theme-card.is-active {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+  .swatch {
+    display: block;
+    height: 64px;
+    border-radius: var(--r-sm);
+    border: 1px solid var(--border);
+  }
+  .swatch-dark { background: linear-gradient(135deg, #0F1226 0%, #232852 100%); }
+  .swatch-light { background: linear-gradient(135deg, #F6F7FB 0%, #FFFFFF 100%); }
+  .theme-name {
+    font-size: var(--fs-sm);
+    font-weight: 600;
+    color: var(--fg);
+    text-align: left;
   }
 
   .actions {
     display: flex;
     flex-direction: column;
-    gap: 12px;
-    margin-top: 8px;
+    gap: var(--sp-3);
+    margin-top: var(--sp-3);
   }
-
-  .btn-secondary {
-    background: var(--bg-elevated);
-    border: 1px solid var(--border-color);
-    color: var(--text-primary);
-  }
-
-  .btn-secondary:hover {
-    background: var(--bg-surface);
-    border-color: var(--color-accent);
-  }
-
-  .btn-link {
-    background: transparent;
-    border: none;
-    color: var(--color-accent);
-    padding: 0;
-    width: auto;
-    text-decoration: underline;
-    cursor: pointer;
-    font: inherit;
-  }
-
-  .btn-link:hover {
-    opacity: 0.85;
-  }
-
-  button {
+  .btn-full {
     width: 100%;
-    padding: 12px 16px;
+    padding: var(--sp-3) var(--sp-5);
+    font-size: var(--fs-md);
   }
+  .btn-full.btn-secondary { background: var(--bg-elevated); }
 
   .save-message {
     text-align: center;
-    font-size: 13px;
-    color: var(--color-success);
+    font-size: var(--fs-sm);
+    color: var(--success);
+    font-weight: 600;
   }
 </style>

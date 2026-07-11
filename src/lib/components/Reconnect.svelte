@@ -6,6 +6,7 @@
   import { authFlow, setSpotifyPhase, setTeamsPhase } from '$lib/stores/authFlow.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
   import { devLog } from '$lib/utils/dev';
+  import Logo from './Logo.svelte';
 
   let needsSpotify = $state(false);
   let needsTeams = $state(false);
@@ -94,210 +95,187 @@
 
 <div class="reconnect">
   <header class="header">
-    <button class="back-btn" onclick={goToDashboard}>← Back</button>
-    <h1>Reconnect</h1>
+    <button class="back-btn btn-secondary" onclick={goToDashboard}>← Back</button>
+    <div class="title-block">
+      <Logo size={28} />
+      <h1>Reconnect</h1>
+    </div>
   </header>
 
   <div class="content">
     <p class="description">
-      Your session has expired. Reconnect below to resume syncing.
+      Your session expired. Reconnect below to resume syncing.
     </p>
 
     <section class="card">
-      <h2>Spotify</h2>
+      <header class="section-header">
+        <h2>Spotify</h2>
+        <span class="badge"
+          class:success={authFlow.spotify.phase === 'done'}
+          class:warning={authFlow.spotify.phase === 'waiting'}
+          class:error={!!authFlow.spotify.error || needsSpotify}>
+          <span class="dot"></span>
+          {#if authFlow.spotify.phase === 'done'}Connected
+          {:else if needsSpotify}Missing credentials
+          {:else if authFlow.spotify.phase === 'waiting'}Waiting…
+          {:else if authFlow.spotify.error}Failed
+          {:else}Ready to reconnect{/if}
+        </span>
+      </header>
+
       {#if authFlow.spotify.phase === 'done'}
-        <div class="status success">
-          <span class="badge success">Connected</span>
-          <span>Spotify reconnected successfully</span>
-        </div>
+        <p class="hint">Spotify reconnected successfully.</p>
       {:else if needsSpotify}
-        <div class="status error">
-          <span class="badge error">Missing Credentials</span>
-          <span>Spotify credentials are not configured</span>
-        </div>
+        <p class="hint">Spotify credentials are not configured on this machine.</p>
       {:else if authFlow.spotify.phase === 'waiting'}
-        <div class="status waiting">
-          <span class="badge warning">Waiting...</span>
-          <span>Complete authentication in the opened browser</span>
-        </div>
-        <p class="hint">If the browser didn't open automatically, check your default browser and complete the Spotify authorization.</p>
+        <p class="hint">Complete authentication in the opened browser window.</p>
       {:else if authFlow.spotify.error}
-        <div class="status error">
-          <span class="badge error">Failed</span>
-          <span>{authFlow.spotify.error}</span>
-        </div>
-        <button class="btn-primary" onclick={reconnectSpotify}>Try Again</button>
+        <p class="error-message" role="alert">{authFlow.spotify.error}</p>
+        <button class="btn-full" onclick={reconnectSpotify}>Try again</button>
       {:else}
         <p class="hint">Click below to reconnect your Spotify account.</p>
-        <button class="btn-primary" onclick={reconnectSpotify}>Reconnect Spotify</button>
+        <button class="btn-full" onclick={reconnectSpotify}>Reconnect Spotify</button>
       {/if}
     </section>
 
-    {#if authFlow.spotify.phase === 'done'}
-      <div class="actions">
-        <button class="btn-full" onclick={goToDashboard}>
-          Back to Dashboard
-        </button>
+    {#if needsSpotify}
+      <div class="info-box card">
+        <div class="info-icon">⚠</div>
+        <div>
+          <strong>Missing Spotify credentials?</strong>
+          <p class="hint">You'll need to re-enter your Client ID and Client Secret.</p>
+        </div>
+        <button class="btn-secondary" onclick={goToOnboarding}>Go to full setup</button>
       </div>
     {/if}
 
-    {#if needsSpotify}
-      <div class="info-box">
-        <p>Missing Spotify credentials? You'll need to enter your Client ID and Secret.</p>
-        <button class="btn-secondary" onclick={goToOnboarding}>Go to Full Setup</button>
-      </div>
+    {#if authFlow.spotify.phase === 'done'}
+      <button class="btn-full" onclick={goToDashboard}>Back to dashboard</button>
     {/if}
   </div>
 </div>
 
 <style>
   .reconnect {
-    padding: 20px;
-    max-width: 600px;
+    padding: var(--sp-5);
+    max-width: 640px;
     margin: 0 auto;
-    height: 100vh;
+    min-height: 100vh;
     display: flex;
     flex-direction: column;
-    box-sizing: border-box;
+    gap: var(--sp-5);
   }
 
   .header {
     display: flex;
     align-items: center;
-    gap: 16px;
-    margin-bottom: 24px;
+    gap: var(--sp-3);
   }
-
   .back-btn {
-    background: transparent;
-    border: 1px solid var(--border-color);
-    color: var(--text-secondary);
-    padding: 6px 12px;
-    font-size: 13px;
+    width: auto;
+    padding: var(--sp-2) var(--sp-4);
+    font-size: var(--fs-sm);
   }
-
-  .back-btn:hover {
-    background: var(--bg-elevated);
-    color: var(--text-primary);
+  .title-block {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-3);
+    flex: 1;
   }
-
   h1 {
-    font-size: 24px;
-    font-weight: 600;
+    font-size: var(--fs-2xl);
+    font-weight: 700;
+    letter-spacing: -0.02em;
   }
 
   .content {
-    flex: 1;
     display: flex;
     flex-direction: column;
-    gap: 16px;
+    gap: var(--sp-4);
   }
-
-  .description {
-    color: var(--text-secondary);
-    font-size: 14px;
-  }
+  .description { color: var(--fg-muted); font-size: var(--fs-base); }
 
   .card {
     background: var(--bg-surface);
-    border: 1px solid var(--border-color);
-    border-radius: 12px;
-    padding: 20px;
-  }
-
-  h2 {
-    font-size: 16px;
-    font-weight: 600;
-    margin-bottom: 12px;
-  }
-
-  .status {
+    border: 1px solid var(--border);
+    border-radius: var(--r-lg);
+    padding: var(--sp-5);
     display: flex;
+    flex-direction: column;
+    gap: var(--sp-3);
+  }
+
+  .section-header {
+    display: flex;
+    justify-content: space-between;
     align-items: center;
-    gap: 12px;
-    font-size: 14px;
+    gap: var(--sp-3);
+  }
+  .section-header h2 {
+    font-size: var(--fs-md);
+    font-weight: 600;
   }
 
   .badge {
-    padding: 4px 10px;
-    border-radius: 999px;
-    font-size: 12px;
-    font-weight: 500;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-1);
+    padding: 2px var(--sp-3);
+    border-radius: var(--r-pill);
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    background: var(--bg-elevated);
+    color: var(--fg-muted);
+    border: 1px solid var(--border);
   }
-
-  .badge.success {
-    background: rgba(74, 222, 128, 0.15);
-    color: var(--color-success);
+  .badge .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--fg-subtle);
   }
-
-  .badge.warning {
-    background: rgba(251, 191, 36, 0.15);
-    color: #fbbf24;
-  }
-
-  .badge.error {
-    background: rgba(239, 68, 68, 0.15);
-    color: var(--color-error);
-  }
-
-  .hint {
-    font-size: 12px;
-    color: var(--text-secondary);
-    margin-top: 8px;
-  }
+  .badge.success { background: var(--success-soft); color: var(--success); border-color: transparent; }
+  .badge.success .dot { background: var(--success); }
+  .badge.warning { background: var(--warning-soft); color: var(--warning); border-color: transparent; }
+  .badge.warning .dot { background: var(--warning); }
+  .badge.error { background: var(--danger-soft); color: var(--danger); border-color: transparent; }
+  .badge.error .dot { background: var(--danger); }
 
   .info-box {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    gap: var(--sp-3);
+    align-items: center;
     background: var(--bg-elevated);
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
-    padding: 16px;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
+  }
+  .info-icon {
+    width: 36px; height: 36px;
+    border-radius: var(--r-md);
+    background: var(--warning-soft);
+    color: var(--warning);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: var(--fs-lg);
+  }
+  .info-box strong { color: var(--fg); font-size: var(--fs-base); display: block; margin-bottom: 2px; }
+  .info-box .btn-secondary {
+    width: auto;
+    padding: var(--sp-2) var(--sp-4);
+    font-size: var(--fs-sm);
+    white-space: nowrap;
   }
 
-  .info-box p {
-    font-size: 13px;
-    color: var(--text-secondary);
-  }
-
-  .actions {
-    margin-top: 8px;
-  }
-
-  button {
-    width: 100%;
-    padding: 12px 16px;
-    border-radius: 8px;
-    font-size: 14px;
-    font-weight: 500;
-    cursor: pointer;
-  }
-
-  .btn-primary {
-    background: var(--color-accent);
-    border: none;
-    color: white;
-    margin-top: 12px;
-  }
-
-  .btn-primary:hover {
-    opacity: 0.9;
-  }
-
-  .btn-secondary {
-    background: var(--bg-surface);
-    border: 1px solid var(--border-color);
-    color: var(--text-primary);
-  }
-
-  .btn-secondary:hover {
-    background: var(--bg-elevated);
+  .hint { font-size: var(--fs-sm); color: var(--fg-subtle); }
+  .error-message {
+    color: var(--danger);
+    background: var(--danger-soft);
+    padding: var(--sp-3);
+    border-radius: var(--r-md);
+    font-size: var(--fs-sm);
   }
 
   .btn-full {
-    background: var(--color-accent);
-    border: none;
-    color: white;
+    width: 100%;
+    padding: var(--sp-3) var(--sp-5);
+    font-size: var(--fs-md);
   }
 </style>

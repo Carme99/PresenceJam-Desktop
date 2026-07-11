@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 144" width="520" height="144">
+  <title>PresenceJam</title>
+  <defs>
+    <linearGradient id="pillGrad2" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#8E78FF"/>
+      <stop offset="100%" stop-color="#6A4DFF"/>
+    </linearGradient>
+    <linearGradient id="waveGrad2" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0%" stop-color="#1ED760"/>
+      <stop offset="100%" stop-color="#1DB954"/>
+    </linearGradient>
+  </defs>
+  <g transform="translate(8 8)">
+    <rect x="0" y="0" width="128" height="128" rx="28" ry="28" fill="#0F1226"/>
+    <rect x="16" y="44" width="96" height="40" rx="20" ry="20" fill="url(#pillGrad2)"/>
+    <circle cx="32" cy="64" r="7" fill="#1DB954"/>
+    <rect x="44" y="70" width="8" height="14" rx="4" fill="url(#waveGrad2)"/>
+    <rect x="58" y="58" width="8" height="26" rx="4" fill="url(#waveGrad2)"/>
+    <rect x="72" y="46" width="8" height="38" rx="4" fill="url(#waveGrad2)"/>
+    <rect x="86" y="56" width="8" height="28" rx="4" fill="url(#waveGrad2)"/>
+    <rect x="100" y="68" width="8" height="16" rx="4" fill="url(#waveGrad2)"/>
+  </g>
+  <g font-family="'Inter','Segoe UI Variable','Helvetica Neue',system-ui,sans-serif">
+    <text x="160" y="80" font-size="48" font-weight="700" fill="#F5F6FF" letter-spacing="-1.2">Presence<tspan fill="#1DB954">Jam</tspan></text>
+    <text x="160" y="106" font-size="13" font-weight="600" fill="#8B92C7" letter-spacing="2.6">SPOTIFY &#8594; TEAMS STATUS</text>
+  </g>
+</svg>
