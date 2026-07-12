@@ -6,9 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
+## [2.9.0] - 2026-07-12
+
 ### Changed
 - **feat(ui): visual refresh — design system, light & dark themes, new brand mark, refreshed app icons.** Replaces the ad-hoc 11-token CSS with a full token system (color, spacing, radius, type, motion). Adds a `<Logo>` Svelte component (`src/lib/components/Logo.svelte`) used in Dashboard header, About, and Onboarding chrome. Adds light & dark themes with a header toggle (round icon button) and a Settings → Appearance picker; `+layout.svelte` side-effect-imports the theme store so persisted themes apply on cold start regardless of which route mounts first. Status badges (Spotify / Teams / Syncing) gain a leading dot, an animated pulse on the active sync state, and a dedicated accent variant. Focus rings moved to `:focus-visible`. Custom scrollbars (WebKit + Firefox). All six components re-skimmed — card padding & border-radius are now sourced from tokens instead of being copy-pasted, log-level filter replaced with a segmented control, Onboarding gets an inline device-code display and the Spotify step supports a manual URL-paste backchannel.
 - **feat(ui): regenerate app icons from a single source-of-truth SVG.** New `static/icon.svg` (Spotify-green EQ inside a Teams-purple "presence" pill on midnight background) is fed to `npx tauri icon` which regenerates the full matrix — PNG/ICO/ICNS/iOS/Android — under `src-tauri/icons/`. The previously-shipped amber/teal yin-yang icon is gone. `static/icon.svg` + `static/logo.svg` (full lockup with wordmark) used in README and as the in-app SVG.
+
+### Dependencies
+- **deps(backend): bump tauri (PR #138).** Patch via Dependabot weekly batch. (Backend cargo group.)
+- **deps(frontend): bump @sveltejs/kit (PR #137).** Patch via Dependabot weekly batch. (Frontend npm dev-dependency group.)
 
 ### Removed
 - **chore: drop stale brand artefacts.** `logos/_Design a modern desktop app logo for PresenceJam_.png` and `logos/_Design a modern desktop app logo for PresenceJam_ 2.png` (unused AI drafts) deleted. `static/svelte.svg`, `static/tauri.svg`, `static/vite.svg` sample assets removed. README no longer references non-existent `docs/screenshots/*.png` paths.
@@ -497,12 +503,12 @@ Closes #60 #61 #62 #63
 - Completely new desktop app architecture (Rust backend + Svelte frontend)
 - Status message expiry set to track end time + 10s buffer
 - Teams device code auth instead of browser redirect
-
 ### Removed
 
 - PowerShell script version — this is a full rewrite
 
-[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v2.6.2...HEAD
+[2.9.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.9.0
+[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v2.9.0...HEAD
 [2.6.2]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.6.2
 [2.6.1]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.6.1
 [2.6.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.6.0

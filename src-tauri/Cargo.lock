@@ -3078,7 +3078,7 @@ checksum = "925383efa346730478fb4838dbe9137d2a47675ad789c546d150a6e1dd4ab31c"
 
 [[package]]
 name = "presence-jam"
-version = "2.8.0"
+version = "2.9.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
