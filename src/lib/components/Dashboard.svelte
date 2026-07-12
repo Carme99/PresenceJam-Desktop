@@ -6,6 +6,8 @@
   import { configStore, loadConfig } from '$lib/stores/config';
   import type { ErrorEventPayload, SyncStatus, TrackInfo } from '$lib/types';
   import { devLog } from '$lib/utils/dev';
+  import { theme, toggleTheme } from '$lib/stores/theme';
+  import Logo from './Logo.svelte';
 
   let isSyncing = $state(false);
   let isToggling = $state(false);
@@ -24,7 +26,7 @@
 
   onMount(async () => {
     devLog('[DASHBOARD] onMount: ENTRY');
-    
+
     try {
       devLog('[DASHBOARD] onMount: calling invoke get_sync_status');
       const status = await invoke<SyncStatus>('get_sync_status');
@@ -34,7 +36,7 @@
         teams_connected: status.teams_connected,
         current_track: status.current_track?.title ?? null
       });
-      
+
       isSyncing = status.is_syncing;
       spotifyConnected = status.spotify_connected;
       teamsConnected = status.teams_connected;
@@ -52,14 +54,14 @@
       currentTrack = event.payload;
       await updateMenuState();
     }));
-    
+
     devLog('[DASHBOARD] onMount: setting up presence-updated listener');
     unlisten.push(await listen('presence-updated', (event: any) => {
       devLog('[DASHBOARD] EVENT: presence-updated received');
       devLog('[DASHBOARD] EVENT: status=', event.payload.status);
       statusPreview = event.payload.status;
     }));
-    
+
     devLog('[DASHBOARD] onMount: setting up presence-cleared listener');
     unlisten.push(await listen('presence-cleared', async () => {
       devLog('[DASHBOARD] EVENT: presence-cleared received');
@@ -68,7 +70,7 @@
       devLog('[DASHBOARD] EVENT: currentTrack=null, statusPreview="No track playing"');
       await updateMenuState();
     }));
-    
+
     devLog('[DASHBOARD] onMount: setting up error listener');
     unlisten.push(await listen<ErrorEventPayload>('error', (event) => {
       const payload = event.payload;
@@ -89,7 +91,7 @@
       displayError = message;
       displayErrorTimeout = setTimeout(() => { displayError = ''; displayErrorTimeout = null; }, 5000);
     }));
-    
+
     devLog('[DASHBOARD] onMount: setting up toggle-pause listener');
     unlisten.push(await listen('toggle-pause', async () => {
       if (isToggling) return;
@@ -197,6 +199,10 @@
     devLog('[DASHBOARD] openLogs: EXIT');
   }
 
+  function openAbout() {
+    currentView.set('about');
+  }
+
   async function goToSetup() {
     devLog('[DASHBOARD] goToSetup: ENTRY');
     await loadConfig();
@@ -249,57 +255,73 @@
 <div class="dashboard">
   <header>
     <div class="header-left">
-      <h1>PresenceJam</h1>
-      <div class="badges">
-        <span class="badge" class:success={spotifyConnected} class:error={!spotifyConnected}>
-          {spotifyConnected ? '✓' : '✗'} Spotify
-        </span>
-        <span class="badge" class:success={teamsConnected} class:error={!teamsConnected}>
-          {teamsConnected ? '✓' : '✗'} Teams
-        </span>
+      <Logo size={32} />
+      <div class="title">
+        <h1>PresenceJam</h1>
+        <div class="badges">
+          <span class="badge" class:success={spotifyConnected} class:error={!spotifyConnected}>
+            <span class="dot"></span>{spotifyConnected ? 'Spotify' : 'Spotify off'}
+          </span>
+          <span class="badge" class:success={teamsConnected} class:error={!teamsConnected}>
+            <span class="dot"></span>{teamsConnected ? 'Teams' : 'Teams off'}
+          </span>
+          {#if isSyncing}
+            <span class="badge accent"><span class="dot pulse"></span>Syncing</span>
+          {/if}
+        </div>
       </div>
     </div>
     <div class="header-right">
-      <button class="icon-btn" onclick={openLogs} title="Logs">📋</button>
-      <button class="icon-btn" onclick={openSettings} title="Settings">⚙️</button>
-      <button class="icon-btn sync-btn" onclick={toggleSync} disabled={isToggling} title={isSyncing ? 'Pause' : 'Resume'}>
+      <button class="icon-btn" onclick={toggleTheme} title="Toggle theme" aria-label="Toggle theme">
+        {$theme === 'dark' ? '☀' : '☾'}
+      </button>
+      <button class="icon-btn" onclick={openLogs} title="Logs" aria-label="Open logs">📋</button>
+      <button class="icon-btn" onclick={openSettings} title="Settings" aria-label="Open settings">⚙</button>
+      <button class="icon-btn" onclick={openAbout} title="About" aria-label="About PresenceJam">ⓘ</button>
+      <button class="icon-btn primary" class:is-on={isSyncing} onclick={toggleSync}
+        disabled={isToggling} aria-label={isSyncing ? 'Pause sync' : 'Resume sync'}
+        title={isSyncing ? 'Pause sync' : 'Resume sync'}>
         {isSyncing ? '⏸' : '▶'}
       </button>
     </div>
   </header>
 
   {#if displayError}
-    <div class="error-banner">{displayError}</div>
+    <div class="error-banner" role="alert">{displayError}</div>
   {/if}
 
   <main>
     {#if !spotifyConnected || !teamsConnected}
       <div class="setup-card card">
-        <h2>Setup Required</h2>
-        <p>Complete onboarding to connect Spotify and Teams.</p>
-        <button onclick={goToSetup}>Go to Setup</button>
+        <div class="setup-icon"><Logo size={56} /></div>
+        <h2>Setup required</h2>
+        <p>Connect Spotify and Microsoft Teams so your now-playing tracks can drive your Teams status.</p>
+        <div class="setup-actions">
+          <button class="btn-full" onclick={goToSetup}>Continue setup</button>
+        </div>
       </div>
     {:else if currentTrack}
       <div class="track-card card">
         {#if currentTrack.album_art_url}
-          <img src={currentTrack.album_art_url} alt="Album art" class="album-art" />
+          <img src={currentTrack.album_art_url} alt="" class="album-art" />
         {:else}
-          <div class="album-art placeholder">🎵</div>
+          <div class="album-art placeholder" aria-hidden="true">🎵</div>
         {/if}
         <div class="track-info">
           <div class="track-title">{currentTrack.title}</div>
           <div class="track-artist">{currentTrack.artist}</div>
           <div class="track-album">{currentTrack.album}</div>
-          
+
           {#if currentTrack.is_playing}
             <div class="playing-indicator">
-              <span class="pulse-dot"></span> Playing
+              <span class="pulse-dot" aria-hidden="true"></span>
+              <span>Playing</span>
             </div>
           {:else}
-            <div class="paused-indicator">⏸ Paused</div>
+            <div class="paused-indicator"><span aria-hidden="true">⏸</span> Paused</div>
           {/if}
-          
-          <div class="progress-bar">
+
+          <div class="progress-bar" aria-hidden="true">
             <div class="progress-fill" style="width: {progressPercent}%"></div>
           </div>
           <div class="progress-time">
@@ -309,14 +331,16 @@
       </div>
 
       <div class="status-preview card">
-        <h3>Your Teams Status</h3>
-        <p class="status-text">{statusPreview}</p>
+        <h3>Your Teams status</h3>
+        <p class="status-text" aria-live="polite">{statusPreview}</p>
       </div>
     {:else}
       <div class="not-playing card">
-        <div class="not-playing-icon">🎵</div>
-        <h3>Not Playing</h3>
-        <p>Start playing something on Spotify</p>
+        <div class="not-playing-icon" aria-hidden="true">
+          <Logo size={64} />
+        </div>
+        <h3>Nothing playing</h3>
+        <p>Start something on Spotify and we'll pipe it through to Teams.</p>
       </div>
     {/if}
   </main>
@@ -327,49 +351,242 @@
     height: 100vh;
     display: flex;
     flex-direction: column;
-    background: var(--bg-primary);
+    background: var(--bg-base);
   }
+
   header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 16px 20px;
-    border-bottom: 1px solid var(--border-color);
+    gap: var(--sp-4);
+    padding: var(--sp-4) var(--sp-5);
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-base);
   }
-  .header-left { display: flex; align-items: center; gap: 16px; }
-  h1 { font-size: 18px; font-weight: 600; }
-  .badges { display: flex; gap: 8px; }
-  .badge { padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 500; }
-  .badge.success { background: rgba(74,222,128,0.15); color: var(--color-success); }
-  .badge.error { background: rgba(239,68,68,0.15); color: var(--color-error); }
-  .header-right { display: flex; gap: 8px; }
-  .icon-btn { background: transparent; border: 1px solid var(--border-color); border-radius: 8px; padding: 8px; font-size: 16px; cursor: pointer; }
-  .icon-btn:hover { background: var(--bg-elevated); }
-  .sync-btn { color: var(--color-accent); }
-  .error-banner { background: rgba(239,68,68,0.15); color: var(--color-error); padding: 12px 20px; text-align: center; font-size: 14px; border-bottom: 1px solid var(--color-error); }
-  main { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; }
-  .card { background: var(--bg-surface); border: 1px solid var(--border-color); border-radius: 12px; padding: 20px; }
-  .track-card { display: flex; gap: 16px; align-items: flex-start; }
-  .album-art { width: 80px; height: 80px; border-radius: 8px; object-fit: cover; }
-  .album-art.placeholder { background: var(--bg-elevated); display: flex; align-items: center; justify-content: center; font-size: 32px; }
-  .track-info { flex: 1; }
-  .track-title { font-size: 18px; font-weight: 600; margin-bottom: 4px; }
-  .track-artist { color: var(--text-secondary); font-size: 14px; }
-  .track-album { color: var(--text-secondary); font-size: 12px; margin-bottom: 8px; }
-  .playing-indicator { display: flex; align-items: center; gap: 6px; color: var(--color-success); font-size: 12px; font-weight: 500; margin-bottom: 8px; }
-  .paused-indicator { color: var(--text-secondary); font-size: 12px; font-weight: 500; margin-bottom: 8px; }
-  .pulse-dot { width: 8px; height: 8px; background: var(--color-success); border-radius: 50%; animation: pulse 1.5s infinite; }
-  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
-  .progress-bar { height: 4px; background: var(--bg-elevated); border-radius: 2px; overflow: hidden; margin-bottom: 4px; }
-  .progress-fill { height: 100%; background: var(--color-accent); transition: width 1s; }
-  .progress-time { font-size: 11px; color: var(--text-secondary); }
-  .status-preview h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-secondary); margin-bottom: 8px; }
-  .status-text { font-size: 16px; color: var(--text-primary); }
-  .not-playing { text-align: center; padding: 40px; }
-  .not-playing-icon { font-size: 48px; margin-bottom: 16px; }
-  .not-playing h3 { margin-bottom: 8px; }
-  .not-playing p { color: var(--text-secondary); }
-  .setup-card { text-align: center; padding: 40px; }
-  .setup-card h2 { margin-bottom: 8px; }
-  .setup-card p { color: var(--text-secondary); margin-bottom: 16px; }
+  .header-left {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-3);
+    min-width: 0;
+  }
+  .title {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-1);
+    min-width: 0;
+  }
+  h1 {
+    font-size: var(--fs-lg);
+    font-weight: 600;
+  }
+  .badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--sp-2);
+  }
+  .header-right {
+    display: flex;
+    gap: var(--sp-2);
+    flex-shrink: 0;
+  }
+  .icon-btn {
+    width: 36px;
+    height: 36px;
+  }
+  .icon-btn.primary {
+    color: var(--accent-text);
+    border-color: var(--border);
+  }
+  .icon-btn.primary.is-on {
+    background: var(--accent-soft);
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+
+  .error-banner {
+    background: var(--danger-soft);
+    color: var(--danger);
+    padding: var(--sp-3) var(--sp-5);
+    text-align: center;
+    font-size: var(--fs-sm);
+    font-weight: 600;
+    border-bottom: 1px solid var(--danger);
+  }
+
+  main {
+    flex: 1;
+    overflow-y: auto;
+    padding: var(--sp-5);
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-4);
+  }
+
+  .card {
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: var(--r-lg);
+    padding: var(--sp-5);
+  }
+
+  .setup-card {
+    text-align: center;
+    padding: var(--sp-9) var(--sp-5);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--sp-3);
+  }
+  .setup-icon {
+    width: 72px;
+    height: 72px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-elevated);
+    border-radius: var(--r-lg);
+    margin-bottom: var(--sp-2);
+  }
+  .setup-card h2 { font-size: var(--fs-2xl); }
+  .setup-card p {
+    color: var(--fg-muted);
+    max-width: 36ch;
+  }
+  .setup-actions {
+    width: 100%;
+    max-width: 280px;
+    margin-top: var(--sp-3);
+  }
+
+  .track-card {
+    display: grid;
+    grid-template-columns: 88px 1fr;
+    gap: var(--sp-4);
+    align-items: flex-start;
+  }
+  .album-art {
+    width: 88px;
+    height: 88px;
+    border-radius: var(--r-md);
+    object-fit: cover;
+    background: var(--bg-elevated);
+  }
+  .album-art.placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 32px;
+  }
+  .track-info {
+    min-width: 0;
+  }
+  .track-title {
+    font-size: var(--fs-lg);
+    font-weight: 600;
+    margin-bottom: 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .track-artist {
+    color: var(--fg);
+    font-size: var(--fs-sm);
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .track-album {
+    color: var(--fg-subtle);
+    font-size: var(--fs-xs);
+    margin-top: 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .playing-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-2);
+    color: var(--success);
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin: var(--sp-3) 0 var(--sp-2);
+  }
+  .paused-indicator {
+    color: var(--fg-subtle);
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin: var(--sp-3) 0 var(--sp-2);
+  }
+  .pulse-dot {
+    width: 8px; height: 8px;
+    background: var(--success);
+    border-radius: 50%;
+    box-shadow: 0 0 0 0 var(--success);
+    animation: pulse 1.5s var(--ease-out) infinite;
+  }
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0 var(--success-soft); }
+    70%  { box-shadow: 0 0 0 8px transparent; }
+    100% { box-shadow: 0 0 0 0 transparent; }
+  }
+  .progress-bar {
+    height: 4px;
+    background: var(--bg-elevated);
+    border-radius: var(--r-pill);
+    overflow: hidden;
+    margin: var(--sp-3) 0 var(--sp-1);
+  }
+  .progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent), var(--accent-hover));
+    border-radius: var(--r-pill);
+    transition: width var(--dur-slow) linear;
+  }
+  .progress-time {
+    font-size: var(--fs-xs);
+    color: var(--fg-subtle);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .status-preview {
+    padding: var(--sp-4) var(--sp-5);
+  }
+  .status-preview h3 {
+    font-size: var(--fs-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--fg-subtle);
+    margin-bottom: var(--sp-2);
+    font-weight: 600;
+  }
+  .status-text {
+    font-size: var(--fs-md);
+    color: var(--fg);
+    word-break: break-word;
+  }
+
+  .not-playing {
+    text-align: center;
+    padding: var(--sp-9) var(--sp-5);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--sp-2);
+  }
+  .not-playing-icon {
+    width: 88px; height: 88px;
+    background: var(--bg-elevated);
+    border-radius: var(--r-lg);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: var(--sp-2);
+  }
+  .not-playing h3 { font-size: var(--fs-xl); }
 </style>

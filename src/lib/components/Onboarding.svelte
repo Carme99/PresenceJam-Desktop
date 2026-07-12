@@ -7,6 +7,7 @@
   import { authFlow, setSpotifyPhase, setTeamsPhase } from '$lib/stores/authFlow.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
   import { devLog } from '$lib/utils/dev';
+  import Logo from './Logo.svelte';
 
   let step = $state(1);
   let spotifyClientId = $state('');
@@ -98,7 +99,7 @@
     devLog('[ONBOARDING] connectSpotify: ENTRY');
     devLog('[ONBOARDING] connectSpotify: spotifyClientId.length=', spotifyClientId.length);
     devLog('[ONBOARDING] connectSpotify: redirectUri=presencejam://callback');
-    
+
     try {
       devLog('[ONBOARDING] connectSpotify: calling invoke start_spotify_auth');
       await invoke('start_spotify_auth', {
@@ -114,23 +115,23 @@
       setSpotifyPhase('error', e instanceof Error ? e.message : String(e));
       devLog('[ONBOARDING] connectSpotify: setSpotifyPhase(error)');
     }
-    
+
     devLog('[ONBOARDING] connectSpotify: EXIT');
   }
 
   async function handleManualUrlPaste() {
     devLog('[ONBOARDING] handleManualUrlPaste: ENTRY');
     devLog('[ONBOARDING] handleManualUrlPaste: spotifyManualUrl.length=', spotifyManualUrl.length);
-    
+
     try {
       const code = extractCodeFromUrl(spotifyManualUrl);
       devLog('[ONBOARDING] handleManualUrlPaste: extracted code:', code ? 'present' : 'null');
-      
+
       if (code) {
         devLog('[ONBOARDING] handleManualUrlPaste: calling invoke complete_spotify_auth_manual');
         const tokens = await invoke<SpotifyTokens>('complete_spotify_auth_manual', { code });
         devLog('[ONBOARDING] handleManualUrlPaste: invoke SUCCESS, tokens=', tokens ? 'present' : 'null');
-        
+
         if (tokens) {
           setSpotifyPhase('done');
           devLog('[ONBOARDING] handleManualUrlPaste: setSpotifyPhase(done)');
@@ -141,7 +142,7 @@
     } catch (e) {
       console.error('[ONBOARDING] handleManualUrlPaste: FAILED:', e);
     }
-    
+
     devLog('[ONBOARDING] handleManualUrlPaste: EXIT');
   }
 
@@ -164,7 +165,7 @@
 
   async function connectTeams() {
     devLog('[ONBOARDING] connectTeams: ENTRY');
-    
+
     try {
       devLog('[ONBOARDING] connectTeams: calling invoke start_teams_auth_device_code');
       const response = await invoke<DeviceCodeResponse>('start_teams_auth_device_code');
@@ -172,35 +173,38 @@
       devLog('[ONBOARDING] connectTeams: response.user_code=', response.user_code);
       devLog('[ONBOARDING] connectTeams: response.verification_url=', response.verification_url);
       devLog('[ONBOARDING] connectTeams: response.device_code=', response.device_code ? 'present' : 'null');
-      
+
       teamsUserCode = response.user_code;
       teamsVerificationUrl = response.verification_url;
       teamsDeviceCode = response.device_code;
       devLog('[ONBOARDING] connectTeams: state updated');
-      
+
       devLog('[ONBOARDING] connectTeams: calling invoke open_external_url');
       await invoke('open_external_url', { url: teamsVerificationUrl });
       devLog('[ONBOARDING] connectTeams: open_external_url SUCCESS');
+
+      // Auto-poll once the user opens the browser. The user can also retry manually.
+      pollTeamsAuth();
     } catch (e) {
       console.error('[ONBOARDING] connectTeams: FAILED:', e);
       setTeamsPhase('error', 'Failed to start Teams sign-in. Please try again.');
     }
-    
+
     devLog('[ONBOARDING] connectTeams: EXIT');
   }
 
   async function pollTeamsAuth() {
     devLog('[ONBOARDING] pollTeamsAuth: ENTRY');
     setTeamsPhase('waiting');
-    
+
     try {
       devLog('[ONBOARDING] pollTeamsAuth: setTeamsPhase(waiting)');
       devLog('[ONBOARDING] pollTeamsAuth: calling invoke poll_teams_auth');
       devLog('[ONBOARDING] pollTeamsAuth: deviceCode.length=', teamsDeviceCode.length);
-      
+
       const tokens = await invoke<TeamsTokens>('poll_teams_auth', { deviceCode: teamsDeviceCode });
       devLog('[ONBOARDING] pollTeamsAuth: invoke SUCCESS, tokens=', tokens ? 'present' : 'null');
-      
+
       if (tokens) {
         setTeamsPhase('done');
         devLog('[ONBOARDING] pollTeamsAuth: setTeamsPhase(done)');
@@ -210,7 +214,7 @@
       setTeamsPhase('error', String(e));
       devLog('[ONBOARDING] pollTeamsAuth: setTeamsPhase(error)');
     }
-    
+
     devLog('[ONBOARDING] pollTeamsAuth: EXIT');
   }
 
@@ -296,288 +300,397 @@
 </script>
 
 <div class="onboarding">
-  <div class="progress">
+  <header class="brand">
+    <Logo size={32} withWordmark />
+    <span class="step-label">Step {step} of 3</span>
+  </header>
+
+  <div class="progress" aria-hidden="true">
     <div class="step-dots">
-      {#each [1,2,3] as s}
-        <div class="dot" class:active={s <= step} class:done={s < step}></div>
+      {#each [1, 2, 3] as n}
+        <span class="dot" class:active={step === n} class:done={step > n}></span>
       {/each}
     </div>
-    <span class="step-label">Step {step} of 3</span>
+    <div class="progress-track">
+      <div class="progress-fill" style="width: {((step - 1) / 2) * 100}%"></div>
+    </div>
   </div>
 
-  {#if step === 1}
-    <div class="step">
-      <h2>Let's get started</h2>
-      <p>PresenceJam syncs your Spotify playback to your Teams status.</p>
+  <div class="step">
+    {#if step === 1}
+      <div class="card">
+        <h2>Connect Spotify</h2>
+        <p>
+          Paste your Spotify application's <strong>Client ID</strong> and
+          <strong>Client Secret</strong>. We'll start the sign-in flow once you
+          click the button.
+        </p>
 
-      <div class="instructions-box">
-        <h3>Create a Spotify App</h3>
-        <ol>
-          <li>Go to <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">https://developer.spotify.com/dashboard</a></li>
-          <li>Sign in and click <strong>Create App</strong></li>
-          <li>Add this redirect URI: <code>presencejam://callback</code></li>
-          <li>Fill in the app name and description, then save</li>
-          <li>Copy your <strong>Client ID</strong> and <strong>Client Secret</strong> from the app settings</li>
-        </ol>
-      </div>
+        <div class="instructions-box">
+          <h3>Get your Spotify credentials</h3>
+          <ol>
+            <li>Open the <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">Spotify developer dashboard</a> and create an app.</li>
+            <li>Add <code>presencejam://callback</code> as a redirect URI.</li>
+            <li>Copy the Client ID and Client Secret from the app's settings.</li>
+          </ol>
+        </div>
 
-      <div class="form-group">
-        <label for="spotify-client-id">Client ID</label>
-        <input id="spotify-client-id" bind:value={spotifyClientId} placeholder="3abc..." />
-      </div>
-      <div class="form-group">
-        <label for="spotify-client-secret">Client Secret</label>
-        <input id="spotify-client-secret" bind:value={spotifyClientSecret} type="password" placeholder="••••••••" />
-      </div>
+        <div class="form-group">
+          <label for="client-id">Client ID</label>
+          <input
+            id="client-id"
+            type="text"
+            bind:value={spotifyClientId}
+            placeholder="32-character Spotify Client ID"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </div>
+        <div class="form-group">
+          <label for="client-secret">Client Secret</label>
+          <input
+            id="client-secret"
+            type="password"
+            bind:value={spotifyClientSecret}
+            placeholder="Spotify Client Secret"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </div>
 
-      {#if validationError}
-        <p class="error-message">{validationError}</p>
-      {/if}
+        {#if validationError}
+          <p class="error-message" role="alert">{validationError}</p>
+        {/if}
+        {#if spotifyAuthError}
+          <p class="error-message" role="alert">{spotifyAuthError}</p>
+        {/if}
 
-      {#if !spotifyConnected && !spotifyWaiting}
-        <button onclick={connectSpotify} disabled={!spotifyClientId || !spotifyClientSecret}>
-          Connect Spotify
-        </button>
-      {:else if spotifyWaiting}
-        <div class="waiting-box">
-          <div class="spinner"></div>
-          <p>Spotify login opened in your browser.</p>
-          <p class="hint">After you authorize, Spotify will redirect you to a URL. Paste that full URL in the field below.</p>
-          <div class="form-group">
-            <input 
-              bind:value={spotifyManualUrl} 
-              placeholder="Paste redirect URL here (e.g. presencejam://callback?code=***...)"
+        {#if !spotifyConnected && !spotifyWaiting}
+          <button class="btn-full" onclick={connectSpotify}
+            disabled={!spotifyClientId || !spotifyClientSecret}>
+            Connect Spotify
+          </button>
+        {:else if spotifyWaiting}
+          <div class="waiting-box">
+            <div class="spinner" aria-hidden="true"></div>
+            <p>Spotify sign-in is waiting…</p>
+            <p class="hint">Complete the authorisation in your browser, or paste the redirect URL below.</p>
+            <input
+              type="text"
+              bind:value={spotifyManualUrl}
+              placeholder="presencejam://callback?code=…"
               onkeydown={(e) => e.key === 'Enter' && handleManualUrlPaste()}
             />
+            <button class="btn-secondary" onclick={handleManualUrlPaste}>Submit code</button>
           </div>
-          <button onclick={handleManualUrlPaste} disabled={!spotifyManualUrl}>
-            Submit URL
-          </button>
-          <button class="back" onclick={() => { setSpotifyPhase('idle'); }}>
-            Cancel
-          </button>
-          {#if spotifyAuthError}
-            <p class="error-message">{spotifyAuthError}</p>
-          {/if}
-        </div>
-      {:else}
-        <div class="success-badge">
-          <span>✓</span> Connected to Spotify
-        </div>
-        <button onclick={() => { step = 2; devLog('[ONBOARDING] step changed to 2'); }}>Next →</button>
-      {/if}
-    </div>
-  {:else if step === 2}
-    <div class="step">
-      <h2>Connect Microsoft Teams</h2>
-      <p>Sign in with Microsoft to update your Teams presence.</p>
-
-      {#if validationError}
-        <p class="error-message">{validationError}</p>
-      {/if}
-
-      {#if !teamsConnected && !teamsUserCode}
-        <button onclick={() => connectTeams()}>
-          Sign in with Microsoft
-        </button>
-      {:else if !teamsConnected}
-        <div class="device-code-box">
-          <p>Visit <a href={teamsVerificationUrl}>{teamsVerificationUrl}</a></p>
-          <div class="code-display">{teamsUserCode}</div>
-          <p class="hint">Enter this code when prompted</p>
-        </div>
-        <button onclick={pollTeamsAuth} disabled={teamsPolling}>
-          {teamsPolling ? 'Checking...' : "I've completed sign-in"}
-        </button>
-        {#if teamsPolling}
-          <div class="spinner"></div>
+        {:else}
+          <div class="success-badge">
+            <span aria-hidden="true">✓</span> Connected to Spotify
+          </div>
+          <button class="btn-full" onclick={() => { step = 2; devLog('[ONBOARDING] step changed to 2'); }}>Continue →</button>
         {/if}
+      </div>
+    {:else if step === 2}
+      <div class="card">
+        <h2>Sign in with Microsoft</h2>
+        <p>
+          We use Microsoft's device-code flow — a one-time <strong>code</strong>
+          you enter at a Microsoft page. No extra setup required.
+        </p>
+
+        {#if !teamsConnected && !teamsPolling}
+          <button class="btn-full" onclick={connectTeams}>Start Microsoft sign-in</button>
+        {:else if teamsPolling}
+          <div class="device-code-box">
+            <p class="hint">Go to</p>
+            <a class="verification-url" href={teamsVerificationUrl} target="_blank" rel="noopener">{teamsVerificationUrl}</a>
+            <p class="hint">and enter this code</p>
+            <div class="code-display" aria-live="polite">{teamsUserCode}</div>
+            <div class="spinner" aria-hidden="true"></div>
+            <p>Waiting for sign-in…</p>
+            <button class="btn-secondary" onclick={pollTeamsAuth}>I've signed in — check now</button>
+          </div>
+        {:else}
+          <div class="success-badge">
+            <span aria-hidden="true">✓</span> Connected to Microsoft Teams
+          </div>
+          <button class="btn-full" onclick={() => { step = 3; devLog('[ONBOARDING] step changed to 3'); }}>Continue →</button>
+        {/if}
+
         {#if teamsAuthError}
-          <p class="error-message">{teamsAuthError}</p>
+          <p class="error-message" role="alert">{teamsAuthError}</p>
         {/if}
-      {:else}
-        <div class="success-badge">
-          <span>✓</span> Connected to Microsoft Teams
+      </div>
+    {:else}
+      <div class="card">
+        <h2>Finishing touches</h2>
+        <p>
+          Choose how your status message should look and whether PresenceJam
+          should launch when you sign in.
+        </p>
+
+        <div class="form-group">
+          <label for="status-format-onb">Status template</label>
+          <input
+            id="status-format-onb"
+            type="text"
+            bind:value={statusFormat}
+            placeholder="🎵 {'{artist}'} - {'{track}'} 🎧"
+          />
+          <p class="hint">
+            Placeholders: <code>{'{artist}'}</code>, <code>{'{track}'}</code>,
+            <code>{'{album}'}</code>, <code>{'{emoji}'}</code>
+          </p>
         </div>
-        <button onclick={() => { step = 3; devLog('[ONBOARDING] step changed to 3'); }}>Next →</button>
-      {/if}
-      
-      <button class="back" onclick={() => { step = 1; devLog('[ONBOARDING] step changed to 1'); }}>← Back</button>
-    </div>
-  {:else}
-    <div class="step">
-      <h2>Customize your status</h2>
-      
-      <div class="form-group">
-        <label for="status-format">Status format</label>
-        <input id="status-format" bind:value={statusFormat} placeholder="🎵 {'{artist}'} - {'{track}'} 🎧" />
-        <p class="hint">Use {'{artist}'}, {'{track}'}, {'{album}'}, {'{emoji}'}</p>
+
+        <div class="form-group">
+          <label for="poll-interval-onb">Default poll interval: {pollingInterval}s</label>
+          <input id="poll-interval-onb" type="range" min="10" max="60" step="5" bind:value={pollingInterval} />
+        </div>
+
+        <div class="toggle-row">
+          <label for="launch-at-login-onb">Launch at login</label>
+          <input id="launch-at-login-onb" type="checkbox" bind:checked={launchAtLogin} />
+        </div>
+
+        {#if validationError}
+          <p class="error-message" role="alert">{validationError}</p>
+        {/if}
+
+        <button class="btn-full" onclick={finish} disabled={isFinishing}>
+          {isFinishing ? 'Setting up…' : 'Finish setup'}
+        </button>
       </div>
-      
-      <div class="form-group">
-        <label for="polling-interval">Polling interval: {pollingInterval}s</label>
-        <input id="polling-interval" type="range" min="10" max="60" step="5" bind:value={pollingInterval} />
-      </div>
-      
-      <div class="form-group toggle">
-        <label for="launch-at-login">Launch at login</label>
-        <input id="launch-at-login" type="checkbox" bind:checked={launchAtLogin} />
-      </div>
-      
-      {#if validationError}
-        <p class="error-message">{validationError}</p>
-      {/if}
-      
-      <button onclick={finish} disabled={isFinishing}>Finish</button>
-      <button class="back" onclick={() => { step = 2; devLog('[ONBOARDING] step changed to 2'); }}>← Back</button>
-    </div>
-  {/if}
+    {/if}
+  </div>
 </div>
 
 <style>
   .onboarding {
-    padding: 32px;
-    max-width: 420px;
+    padding: var(--sp-7) var(--sp-5);
+    max-width: 480px;
     margin: 0 auto;
-    height: 100vh;
+    min-height: 100vh;
     display: flex;
     flex-direction: column;
-    box-sizing: border-box;
-    overflow: hidden;
+    gap: var(--sp-5);
   }
+
+  .brand {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: var(--sp-3);
+  }
+  .step-label {
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    color: var(--fg-subtle);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    padding: 4px var(--sp-3);
+    background: var(--bg-elevated);
+    border-radius: var(--r-pill);
+    border: 1px solid var(--border);
+  }
+
   .progress {
     display: flex;
     align-items: center;
-    gap: 12px;
-    margin-bottom: 32px;
+    gap: var(--sp-3);
   }
   .step-dots {
     display: flex;
-    gap: 8px;
+    gap: var(--sp-2);
   }
   .dot {
-    width: 10px;
-    height: 10px;
+    width: 8px;
+    height: 8px;
     border-radius: 50%;
-    background: var(--border-color);
-    transition: all 0.3s;
+    background: var(--border-strong);
+    transition: background-color var(--dur) var(--ease-out),
+                transform var(--dur) var(--ease-out);
   }
-  .dot.active { background: var(--color-accent); }
-  .dot.done { background: var(--color-success); }
-  .step-label { font-size: 12px; color: var(--text-secondary); }
-  h2 { font-size: 24px; margin-bottom: 8px; }
-  p { color: var(--text-secondary); margin-bottom: 24px; font-size: 14px; }
-  .form-group { margin-bottom: 16px; }
+  .dot.active {
+    background: var(--accent);
+    transform: scale(1.4);
+  }
+  .dot.done { background: var(--success); }
+  .progress-track {
+    flex: 1;
+    height: 2px;
+    background: var(--border);
+    border-radius: var(--r-pill);
+    overflow: hidden;
+  }
+  .progress-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: var(--r-pill);
+    transition: width var(--dur-slow) var(--ease-out);
+  }
+
   .step {
     flex: 1;
-    overflow-y: auto;
-  }
-  .form-group label { display: block; margin-bottom: 6px; font-size: 13px; font-weight: 500; }
-  input[type="password"],
-  input[type="range"] {
-    width: 100%;
-    padding: 10px 12px;
-    border: 1px solid var(--border-color);
-    border-radius: 6px;
-    background: var(--bg-elevated);
-    color: var(--text-primary);
-    font-size: 14px;
-    box-sizing: border-box;
-  }
-  input:focus {
-    outline: none;
-    border-color: var(--color-accent);
-  }
-  input[type="range"] {
-    width: 100%;
-    margin-top: 8px;
-  }
-  input[type="checkbox"] {
-    width: 18px;
-    height: 18px;
-    accent-color: var(--color-accent);
-  }
-  .toggle {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
+    flex-direction: column;
   }
-  .toggle label {
-    margin-bottom: 0;
+  .card {
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: var(--r-lg);
+    padding: var(--sp-6);
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-4);
+    box-shadow: var(--shadow-2);
   }
-  button {
-    width: 100%;
-    padding: 12px 16px;
-    background: var(--color-accent);
-    color: white;
-    border: none;
-    border-radius: 6px;
-    font-size: 14px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: opacity 0.2s;
+  h2 {
+    font-size: var(--fs-2xl);
+    font-weight: 700;
+    letter-spacing: -0.02em;
   }
-  button:hover:not(:disabled) {
-    opacity: 0.9;
-  }
-  button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  .hint { font-size: 12px; color: var(--text-secondary); margin-top: 4px; }
-  .back { background: transparent; border: 1px solid var(--border-color); margin-top: 12px; color: var(--text-secondary); }
-  .back:hover { background: var(--bg-elevated); }
-  .success-badge { display: flex; align-items: center; gap: 8px; color: var(--color-success); margin-bottom: 16px; font-weight: 500; }
-  .error-message { color: var(--color-error); font-size: 13px; margin-top: 8px; padding: 8px; background: rgba(255,0,0,0.1); border-radius: 4px; }
+  p { color: var(--fg-muted); font-size: var(--fs-base); }
+
   .instructions-box {
     background: var(--bg-elevated);
-    border-radius: 8px;
-    padding: 16px;
-    margin-bottom: 20px;
-    font-size: 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    padding: var(--sp-4);
   }
   .instructions-box h3 {
-    margin: 0 0 12px 0;
-    font-size: 15px;
+    font-size: var(--fs-sm);
     font-weight: 600;
+    color: var(--fg);
+    margin-bottom: var(--sp-3);
   }
   .instructions-box ol {
     margin: 0;
-    padding-left: 20px;
+    padding-left: var(--sp-5);
+    color: var(--fg-muted);
+    font-size: var(--fs-sm);
+    line-height: var(--lh-normal);
   }
-  .instructions-box li {
-    margin-bottom: 8px;
-    line-height: 1.5;
-  }
+  .instructions-box li { margin-bottom: var(--sp-2); }
+  .instructions-box li:last-child { margin-bottom: 0; }
   .instructions-box code {
     background: var(--bg-base);
-    padding: 2px 6px;
-    border-radius: 4px;
-    font-size: 13px;
+    padding: 1px 6px;
+    border-radius: var(--r-sm);
+    font-size: 0.9em;
   }
-  .device-code-box { background: var(--bg-elevated); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
-  .code-display { font-size: 32px; font-weight: 700; letter-spacing: 4px; color: var(--color-accent); text-align: center; padding: 16px 0; }
-  a { color: var(--color-accent); text-decoration: none; }
-  a:hover { text-decoration: underline; }
+
+  .device-code-box {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    padding: var(--sp-5);
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--sp-3);
+  }
+  .device-code-box .hint { margin: 0; font-size: var(--fs-sm); }
+  .verification-url {
+    display: inline-block;
+    padding: var(--sp-2) var(--sp-4);
+    background: var(--accent-soft);
+    color: var(--accent);
+    border-radius: var(--r-md);
+    font-weight: 600;
+    word-break: break-all;
+    text-decoration: none;
+    font-family: var(--font-mono);
+    font-size: var(--fs-sm);
+  }
+  .verification-url:hover { background: var(--bg-base); }
+
+  .code-display {
+    font-family: var(--font-mono);
+    font-size: var(--fs-3xl);
+    font-weight: 700;
+    letter-spacing: 0.2em;
+    color: var(--fg);
+    background: var(--bg-base);
+    border: 2px dashed var(--border-strong);
+    border-radius: var(--r-md);
+    padding: var(--sp-4);
+    user-select: all;
+    font-variant-numeric: tabular-nums;
+  }
+
   .waiting-box {
     background: var(--bg-elevated);
-    border-radius: 8px;
-    padding: 16px;
-    margin-bottom: 16px;
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    padding: var(--sp-5);
     text-align: center;
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-3);
   }
-  .waiting-box p { margin-bottom: 12px; }
-  .waiting-box .hint { font-size: 12px; color: var(--text-secondary); margin-bottom: 16px; }
+  .waiting-box .hint { font-size: var(--fs-sm); margin: 0; }
+
   .spinner {
     width: 24px;
     height: 24px;
-    border: 2px solid var(--border-color);
-    border-top-color: var(--color-accent);
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
-    margin: 0 auto 16px;
+    margin: 0 auto;
   }
-  @keyframes spin {
-    to { transform: rotate(360deg); }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .success-badge {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--sp-2);
+    color: var(--success);
+    background: var(--success-soft);
+    border: 1px solid transparent;
+    border-radius: var(--r-md);
+    padding: var(--sp-3) var(--sp-4);
+    font-weight: 600;
   }
+  .success-badge span[aria-hidden] { font-size: var(--fs-lg); }
+
+  .error-message {
+    color: var(--danger);
+    font-size: var(--fs-sm);
+    background: var(--danger-soft);
+    border-radius: var(--r-md);
+    padding: var(--sp-3);
+    font-weight: 500;
+  }
+
+  .toggle-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--sp-2) 0;
+  }
+  .toggle-row label { color: var(--fg); font-size: var(--fs-base); }
+
+  .hint {
+    font-size: var(--fs-xs);
+    color: var(--fg-subtle);
+    line-height: var(--lh-normal);
+  }
+  .hint code {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    padding: 1px 6px;
+    border-radius: var(--r-sm);
+    font-size: 0.9em;
+  }
+
+  .btn-full {
+    width: 100%;
+    padding: var(--sp-3) var(--sp-5);
+    font-size: var(--fs-md);
+  }
+  .btn-secondary { width: 100%; }
 </style>

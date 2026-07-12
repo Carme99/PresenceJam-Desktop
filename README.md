@@ -1,8 +1,8 @@
 # PresenceJam
 
-Latest release: [GitHub Releases](https://github.com/Carme99/PresenceJam-Desktop/releases/latest). See [CHANGELOG.md](CHANGELOG.md) for the full version history.
+<img src="static/logo.svg" alt="PresenceJam logo" width="520" />
 
-Sync your Spotify playback to Microsoft Teams status automatically.
+Sync what you're playing on Spotify into your Microsoft Teams status — automatically.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/Rust-000?logo=rust&style=flat-square)](https://www.rust-lang.org/)
@@ -14,27 +14,31 @@ Sync your Spotify playback to Microsoft Teams status automatically.
 
 PresenceJam polls Spotify's Web API for your currently playing track and sets it as your Microsoft Teams custom status message. When the track changes, your status updates automatically. When you pause or stop, it clears your status (if you've enabled that option).
 
+The app lives in your system tray, syncs while you work, and stays out of the way.
+
 ## Features
 
-| Feature | Description |
-|---------|-------------|
-| Real-time Spotify detection | Polls Spotify's Web API while a track is playing |
-| Teams status sync | Sets your Teams custom status via Microsoft Graph |
-| Smart polling | Sleeps until the track ends — no wasted API calls |
-| Auto-clear | Clears status when Spotify pauses/stops |
-| Profanity filter | Replaces profane track names with a safe placeholder |
-| System tray | Runs silently in the background |
-| Launch at login | Optional auto-start on boot |
-| Secure auth | PKCE OAuth for Spotify, Device Code flow for Teams |
+- **Real-time Spotify detection** — polls Spotify's Web API while a track is playing.
+- **Teams status sync** — sets your Teams custom status via Microsoft Graph.
+- **Smart polling** — sleeps until the track ends; no wasted API calls.
+- **Auto-clear** — clears status when Spotify pauses or stops.
+- **Profanity filter** — replaces profane track names with a safe placeholder.
+- **Customisable status template** — `{artist}`, `{track}`, `{album}`, `{emoji}` placeholders.
+- **Light & dark themes** — pick whichever matches your desktop.
+- **System tray** — runs silently in the background.
+- **Launch at login** — optional auto-start on boot.
+- **Secure auth** — PKCE OAuth for Spotify, Device Code flow for Teams.
 
 ## Downloads
 
+Latest release: [GitHub Releases](https://github.com/Carme99/PresenceJam-Desktop/releases/latest). See [CHANGELOG.md](CHANGELOG.md) for the full version history.
+
 Download the installer for your platform from the [latest release](https://github.com/Carme99/PresenceJam-Desktop/releases/latest):
 
-- Windows 10/11 (64-bit) — `.msi` installer
-- macOS (Apple Silicon) — `.dmg` image
-- Debian / Ubuntu / Mint / popOS (64-bit) — `.deb` package
-- Any modern Linux (64-bit, no install required) — `.AppImage`
+- **Windows 10/11 (64-bit)** — `.msi` installer
+- **macOS (Apple Silicon)** — `.dmg` image
+- **Debian / Ubuntu / Mint / popOS (64-bit)** — `.deb` package
+- **Any modern Linux (64-bit, no install required)** — `.AppImage`
 
 Filenames follow the pattern `PresenceJam-<version>-<os>.<ext>` — see the [latest release](https://github.com/Carme99/PresenceJam-Desktop/releases/latest) for the current values.
 
@@ -86,7 +90,7 @@ npm run tauri build
 ## Documentation
 
 | Doc | What it's for |
-|-----|---------------|
+| --- | --- |
 | [Setup](./SETUP.md) | Installing the app, Spotify app registration, Teams auth |
 | [Usage](./USAGE.md) | Day-to-day guide — tray, dashboard, settings |
 | [Architecture](./ARCHITECTURE.md) | How it works under the hood |
@@ -109,16 +113,16 @@ See [ARCHITECTURE.md](./ARCHITECTURE.md) for deep-dive diagrams and explanation.
 
 ## Status Format
 
-Customize your Teams status using placeholders:
+Customise your Teams status using placeholders:
 
 | Placeholder | Output |
-|-------------|--------|
+| --- | --- |
 | `{artist}` | Artist name |
 | `{track}` | Track name |
 | `{album}` | Album name |
-| `{emoji}` | 🎵 (playing) or ⏸️ (paused) |
+| `{emoji}` | 🎵 (playing) or ⏸ (paused) |
 
-**Default:** `🎵 {artist} - {track} 🎧`  
+**Default:** `🎵 {artist} - {track} 🎧`
 **Example:** `🎵 Daft Punk - One More Time 🎧`
 
 ## License

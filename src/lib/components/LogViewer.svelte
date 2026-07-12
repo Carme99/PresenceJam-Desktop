@@ -2,6 +2,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
   import { onMount, onDestroy } from 'svelte';
+  import PageHeader from './PageHeader.svelte';
   import { currentView } from '$lib/stores/app';
   import type { LogPayload } from '$lib/types';
 
@@ -68,27 +69,27 @@
 </script>
 
 <div class="log-viewer">
-  <header class="header">
-    <button class="back-btn" onclick={goBack}>← Back</button>
-    <h1>Logs</h1>
-  </header>
+  <PageHeader title="Logs" onBack={goBack} showLogo={false} showThemeToggle={false} />
 
   <div class="toolbar">
-    <select bind:value={filter}>
-      <option value="All">All</option>
-      <option value="Debug">Debug</option>
-      <option value="Info">Info</option>
-      <option value="Warning">Warning</option>
-      <option value="Error">Error</option>
-    </select>
+    <div class="seg" role="tablist" aria-label="Log level filter">
+      {#each ['All', 'Debug', 'Info', 'Warning', 'Error'] as f}
+        <button type="button" class="seg-btn btn-secondary"
+          class:is-active={filter === f}
+          onclick={() => (filter = f)} role="tab"
+          aria-selected={filter === f}>{f}</button>
+      {/each}
+    </div>
+    <span class="count" aria-live="polite">{filteredLogs.length} {filteredLogs.length === 1 ? 'entry' : 'entries'}</span>
     <button class="btn-secondary" onclick={clearLogs}>Clear</button>
-    <button class="btn-secondary" onclick={openFolder}>Open Folder</button>
+    <button class="btn-secondary" onclick={openFolder}>Open folder</button>
   </div>
 
   <div class="log-list" bind:this={logContainer}>
     {#if filteredLogs.length === 0}
       <div class="empty-state">
-        <p>No logs yet</p>
+        <p>No log entries yet</p>
+        <p class="hint">Live entries stream here as the polling loop runs.</p>
       </div>
     {:else}
       {#each filteredLogs as log}
@@ -107,147 +108,127 @@
     display: flex;
     flex-direction: column;
     height: 100vh;
-    padding: 20px;
-    max-width: 900px;
+    padding: var(--sp-5);
+    max-width: 980px;
     margin: 0 auto;
-  }
-
-  .header {
-    display: flex;
-    align-items: center;
-    gap: 16px;
-    margin-bottom: 16px;
-  }
-
-  .back-btn {
-    background: transparent;
-    border: 1px solid var(--border-color);
-    color: var(--text-secondary);
-    padding: 6px 12px;
-    font-size: 13px;
-  }
-
-  .back-btn:hover {
-    background: var(--bg-elevated);
-    color: var(--text-primary);
-  }
-
-  h1 {
-    font-size: 24px;
-    font-weight: 600;
+    gap: var(--sp-4);
   }
 
   .toolbar {
     display: flex;
-    gap: 8px;
-    margin-bottom: 12px;
+    align-items: center;
+    gap: var(--sp-2);
   }
-
-  .toolbar select {
+  .count {
+    margin-right: auto;
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    color: var(--fg-subtle);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .toolbar .btn-secondary {
     width: auto;
-    min-width: 100px;
+    padding: var(--sp-2) var(--sp-4);
+    font-size: var(--fs-sm);
   }
 
-  .btn-secondary {
+  .seg {
+    display: inline-flex;
     background: var(--bg-elevated);
-    border: 1px solid var(--border-color);
-    color: var(--text-primary);
-    width: auto;
-    padding: 8px 12px;
-    font-size: 13px;
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    padding: 3px;
+    gap: 2px;
   }
-
-  .btn-secondary:hover {
+  .seg-btn {
+    border: none;
+    background: transparent;
+    color: var(--fg-muted);
+    padding: 4px var(--sp-3);
+    font-size: var(--fs-sm);
+    border-radius: var(--r-sm);
+    width: auto;
+    transition: background-color var(--dur-fast) var(--ease-out),
+                color var(--dur-fast) var(--ease-out);
+  }
+  .seg-btn:hover { background: var(--bg-surface); color: var(--fg); }
+  .seg-btn.is-active {
     background: var(--bg-surface);
-    border-color: var(--color-accent);
+    color: var(--fg);
+    box-shadow: var(--shadow-1);
   }
 
   .log-list {
     flex: 1;
     overflow-y: auto;
     background: var(--bg-surface);
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
-    padding: 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    padding: var(--sp-2);
+    font-family: var(--font-mono);
   }
-
-  .log-list::-webkit-scrollbar {
-    width: 8px;
-  }
-
-  .log-list::-webkit-scrollbar-track {
-    background: var(--bg-elevated);
-    border-radius: 4px;
-  }
-
-  .log-list::-webkit-scrollbar-thumb {
-    background: var(--border-color);
-    border-radius: 4px;
-  }
-
-  .log-list::-webkit-scrollbar-thumb:hover {
-    background: var(--text-secondary);
-  }
-
   .empty-state {
     display: flex;
+    flex-direction: column;
     align-items: center;
     justify-content: center;
+    gap: var(--sp-1);
     height: 100%;
-    min-height: 200px;
-    color: var(--text-secondary);
+    min-height: 240px;
+    color: var(--fg-subtle);
+    font-family: var(--font-sans);
   }
+  .empty-state p {
+    color: var(--fg-muted);
+    font-size: var(--fs-base);
+  }
+  .empty-state .hint { font-size: var(--fs-sm); }
 
   .log-entry {
-    display: flex;
+    display: grid;
+    grid-template-columns: 88px 80px 1fr;
     align-items: flex-start;
-    gap: 10px;
-    padding: 6px 8px;
-    border-radius: 4px;
-    font-size: 13px;
-    font-family: 'Cascadia Code', 'Fira Code', monospace;
+    gap: var(--sp-3);
+    padding: var(--sp-2) var(--sp-3);
+    border-radius: var(--r-sm);
+    font-size: var(--fs-sm);
   }
-
-  .log-entry:hover {
-    background: var(--bg-elevated);
-  }
+  .log-entry:hover { background: var(--bg-elevated); }
 
   .timestamp {
-    color: var(--text-secondary);
-    flex-shrink: 0;
+    color: var(--fg-subtle);
+    font-variant-numeric: tabular-nums;
+    font-size: var(--fs-xs);
   }
-
   .level-badge {
-    flex-shrink: 0;
+    justify-self: start;
     padding: 2px 8px;
-    border-radius: 4px;
+    border-radius: var(--r-sm);
     font-size: 11px;
-    font-weight: 600;
+    font-weight: 700;
     text-transform: uppercase;
+    letter-spacing: 0.04em;
   }
-
   .level-debug {
-    background: rgba(128, 128, 128, 0.2);
-    color: #888;
+    background: var(--bg-elevated);
+    color: var(--fg-subtle);
   }
-
   .level-info {
-    background: rgba(0, 188, 212, 0.2);
-    color: #00bcd4;
+    background: var(--info-soft);
+    color: var(--info);
   }
-
   .level-warning {
-    background: rgba(251, 191, 36, 0.2);
-    color: var(--color-warning);
+    background: var(--warning-soft);
+    color: var(--warning);
   }
-
   .level-error {
-    background: rgba(239, 68, 68, 0.2);
-    color: var(--color-error);
+    background: var(--danger-soft);
+    color: var(--danger);
   }
-
   .message {
-    color: var(--text-primary);
+    color: var(--fg);
     word-break: break-all;
+    line-height: 1.5;
   }
 </style>

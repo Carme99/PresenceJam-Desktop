@@ -136,8 +136,8 @@
     align-items: center;
     justify-content: center;
     height: 100vh;
-    background: var(--bg-primary);
-    color: var(--text-secondary);
+    background: var(--bg-base);
+    color: var(--fg-muted);
     font-size: 16px;
   }
   .app-container {
@@ -150,7 +150,7 @@
     bottom: 8px;
     right: 12px;
     font-size: 11px;
-    color: var(--text-secondary);
+    color: var(--fg-subtle);
     opacity: 0.6;
     pointer-events: none;
   }

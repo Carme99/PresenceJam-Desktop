@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="1024" height="1024">
+  <title>PresenceJam</title>
+  <rect width="64" height="64" rx="14" ry="14" fill="#0F1226"/>
+  <defs>
+    <linearGradient id="pillGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#8E78FF"/>
+      <stop offset="100%" stop-color="#6A4DFF"/>
+    </linearGradient>
+    <linearGradient id="waveGrad" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0%" stop-color="#1ED760"/>
+      <stop offset="100%" stop-color="#1DB954"/>
+    </linearGradient>
+  </defs>
+  <!-- Status pill, slightly narrower so it doesn't crowd the safe area -->
+  <rect x="8" y="22" width="48" height="20" rx="10" ry="10" fill="url(#pillGrad)"/>
+  <!-- White presence LED on the left, separated by clear gap from the bars -->
+  <circle cx="15" cy="32" r="3" fill="#FFFFFF"/>
+  <!-- EQ bars — fewer, wider spacing, taller, so they survive 32px -->
+  <rect x="23" y="36" width="4" height="6" rx="2" fill="url(#waveGrad)"/>
+  <rect x="31" y="29" width="4" height="13" rx="2" fill="url(#waveGrad)"/>
+  <rect x="39" y="23" width="4" height="19" rx="2" fill="url(#waveGrad)"/>
+  <rect x="47" y="30" width="4" height="12" rx="2" fill="url(#waveGrad)"/>
+</svg>
