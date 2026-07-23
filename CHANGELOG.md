@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
+## [2.9.1] - 2026-07-23
+
+### Dependencies
+- **deps(ci): bump `actions/setup-node` 6.4.0 → 6.5.0 (PR #144).** Minor via Dependabot weekly batch. Bundles security bumps underneath: `@actions/cache` 5.1.0, undici + fast-xml-parser security overrides. (CI github-actions group.)
+- **deps(backend): bump the cargo-minor-and-patch group with 6 updates (PR #146).** `tauri-plugin-store` 2.4.3 → 2.4.4 (patch, iOS scanner fix), `tauri-plugin-log` 2.8.0 → 2.9.0 (minor, adds opt-in `FileOpenStrategy::Rotate` — default behaviour unchanged), `serde` 1.0.228 → 1.0.229, `serde_json` 1.0.150 → 1.0.151, `rand` 0.8.6 → 0.8.7, `tauri-plugin-single-instance` 2.4.2 → 2.4.3. (Backend cargo group.)
+- **deps(frontend): bump the npm-minor-and-patch group with 5 updates (PR #145).** `@tauri-apps/plugin-log` 2.8.0 → 2.9.0, `@tauri-apps/plugin-store` 2.4.3 → 2.4.4 (mirror PR #146's Rust-side bumps — Tauri requires Rust ↔ JS plugin version sync), `@sveltejs/kit` 2.69.1 → 2.70.1 (minor; `defineEnvVars` moved to new `@sveltejs/kit/env` package — no impact since PresenceJam doesn't use `defineEnvVars`, runs in SPA mode via `@sveltejs/adapter-static`), `svelte` 5.56.4 → 5.56.6, `svelte-check` 4.7.1 → 4.7.3. (Frontend npm group.)
+
+Patch-level bump because all three PRs are Dependabot minor/patch bumps with no user-visible behaviour changes.
+
 ## [2.9.0] - 2026-07-12
 
 ### Changed
