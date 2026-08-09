@@ -234,7 +234,7 @@ PresenceJam uses two third-party APIs:
 
 - [Microsoft Services Agreement](https://www.microsoft.com/servicesagreement/)
 - [Microsoft Privacy Statement](https://privacy.microsoft.com/privacystatement/)
-- Scope: `Presence.ReadWrite`, `User.Read`
+- Scope: `Presence.ReadWrite`, `offline_access` (the device-code sign-in requests exactly `Presence.ReadWrite offline_access`; the unused `User.Read` scope was dropped in the #151 fix)
 
 Review these links to understand how your data is handled by each service.
 
