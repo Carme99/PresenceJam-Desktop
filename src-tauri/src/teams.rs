@@ -38,8 +38,10 @@ pub enum TeamsApiError {
     /// help. Carries the response body so `insufficient_claims` (and
     /// other Graph error details) are detectable.
     Forbidden(u16, String),
-    /// Rate limited (429) — transient, retry after backoff
-    RateLimited,
+    /// Rate limited (429) — transient, retry after the parsed
+    /// `Retry-After` seconds (None when the header is absent or
+    /// unparseable → fall back to exponential backoff).
+    RateLimited(Option<u64>),
     /// Network error or other transient failure (5xx, send failure)
     Transient(String),
     /// Other non-retryable error
@@ -207,6 +209,17 @@ fn next_poll_wait(current: u64, err: &str) -> u64 {
     } else {
         current
     }
+}
+
+/// Parses a `Retry-After` header (plain seconds, per Graph throttling
+/// docs) into an optional delay. Returns None when the header is absent
+/// or unparseable — callers then fall back to exponential backoff.
+fn parse_retry_after(response: &reqwest::blocking::Response) -> Option<u64> {
+    response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
 }
 
 pub fn poll_teams_auth(device_code: &str, interval: u64) -> Result<TeamsTokens, String> {
@@ -478,13 +491,55 @@ struct ExpiryDateTime {
     time_zone: String,
 }
 
+/// POSTs a status message body to the Graph setStatusMessage endpoint and
+/// maps the response to a typed error. Shared by the set and clear paths so
+/// both get identical status-code discrimination (401 vs 403 vs 429 vs 5xx)
+/// and `Retry-After` parsing. See issues #153/#154.
+fn post_status_message(
+    access_token: &str,
+    body: &StatusMessageRequest,
+    action: &str,
+) -> Result<(), TeamsApiError> {
+    let client = build_teams_client().map_err(TeamsApiError::Transient)?;
+
+    let response = client
+        .post("https://graph.microsoft.com/v1.0/me/presence/setStatusMessage")
+        .header("Authorization", format!("Bearer {}", access_token))
+        .header("Content-Type", "application/json")
+        .json(body)
+        .send()
+        .map_err(|e| {
+            TeamsApiError::Transient(format!("Failed to send status message request: {}", e))
+        })?;
+
+    let status = response.status();
+    let status_code = status.as_u16();
+    let retry_after = parse_retry_after(&response);
+    let body_text = response
+        .text()
+        .unwrap_or_else(|_| "Unknown error".to_string());
+
+    if !status.is_success() {
+        log::error!("Failed to {} Teams status message: {} - {}", action, status, body_text);
+        return Err(match status_code {
+            401 => TeamsApiError::ExpiredToken(status_code),
+            403 => TeamsApiError::Forbidden(status_code, body_text),
+            429 => TeamsApiError::RateLimited(retry_after),
+            500..=599 => {
+                TeamsApiError::Transient(format!("server error {}: {}", status_code, body_text))
+            }
+            _ => TeamsApiError::Other(status_code, body_text),
+        });
+    }
+
+    Ok(())
+}
+
 pub fn set_teams_status_message(
     access_token: &str,
     message: &str,
     expiry_datetime: Option<&str>,
-) -> Result<(), String> {
-    let client = build_teams_client()?;
-
+) -> Result<(), TeamsApiError> {
     let expiry = expiry_datetime.map(|dt| ExpiryDateTime {
         date_time: dt.to_string(),
         time_zone: "UTC".to_string(),
@@ -500,37 +555,16 @@ pub fn set_teams_status_message(
         },
     };
 
-    let response = client
-        .post("https://graph.microsoft.com/v1.0/me/presence/setStatusMessage")
-        .header("Authorization", format!("Bearer {}", access_token))
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .map_err(|e| format!("Failed to send status message request: {}", e))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body_text = response
-            .text()
-            .unwrap_or_else(|_| "Unknown error".to_string());
-        log::error!(
-            "Failed to set Teams status message: {} - {}",
-            status,
-            body_text
-        );
-        return Err(format!(
-            "Failed to set status message: {} - {}",
-            status, body_text
-        ));
-    }
+    post_status_message(access_token, &body, "set")?;
 
     log::info!("Successfully set Teams status message: {}", message);
     Ok(())
 }
 
-pub fn clear_teams_status_message(access_token: &str, placeholder: &str) -> Result<(), String> {
-    let client = build_teams_client()?;
-
+pub fn clear_teams_status_message(
+    access_token: &str,
+    placeholder: &str,
+) -> Result<(), TeamsApiError> {
     let body = StatusMessageRequest {
         status_message: StatusMessageContent {
             message: MessageContent {
@@ -541,29 +575,7 @@ pub fn clear_teams_status_message(access_token: &str, placeholder: &str) -> Resu
         },
     };
 
-    let response = client
-        .post("https://graph.microsoft.com/v1.0/me/presence/setStatusMessage")
-        .header("Authorization", format!("Bearer {}", access_token))
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .map_err(|e| format!("Failed to send clear status message request: {}", e))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body_text = response
-            .text()
-            .unwrap_or_else(|_| "Unknown error".to_string());
-        log::error!(
-            "Failed to clear Teams status message: {} - {}",
-            status,
-            body_text
-        );
-        return Err(format!(
-            "Failed to clear status message: {} - {}",
-            status, body_text
-        ));
-    }
+    post_status_message(access_token, &body, "clear")?;
 
     log::info!("Successfully cleared Teams status message");
     Ok(())
@@ -599,6 +611,7 @@ pub fn validate_teams_token(tokens: &TeamsTokens) -> Result<(), TeamsApiError> {
         .map_err(|e| TeamsApiError::Transient(format!("request failed: {}", e)))?;
 
     let status_code = response.status().as_u16();
+    let retry_after = parse_retry_after(&response);
     match status_code {
         200 => Ok(()),
         // 401 = token missing/invalid → re-auth required; 403 = no
@@ -609,7 +622,7 @@ pub fn validate_teams_token(tokens: &TeamsTokens) -> Result<(), TeamsApiError> {
             let body = response.text().unwrap_or_default();
             Err(TeamsApiError::Forbidden(status_code, body))
         }
-        429 => Err(TeamsApiError::RateLimited),
+        429 => Err(TeamsApiError::RateLimited(retry_after)),
         500..=599 => {
             let body = response.text().unwrap_or_default();
             Err(TeamsApiError::Transient(format!(
