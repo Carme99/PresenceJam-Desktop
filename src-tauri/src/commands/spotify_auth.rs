@@ -300,8 +300,15 @@ pub fn refresh_spotify(
     };
     log::info!("{CMD} refresh_spotify: current tokens found");
 
-    let new_tokens =
-        crate::spotify::refresh_spotify_token(&current_tokens, &client_id, &client_secret)?;
+    // `refresh_spotify_token` now returns a typed `SpotifyApiError`
+    // (issue #160); stringify it for the IPC boundary, preserving this
+    // command's public `Result<(), String>` contract.
+    let new_tokens = crate::spotify::refresh_spotify_token(
+        &current_tokens,
+        &client_id,
+        &client_secret,
+    )
+    .map_err(|e| e.to_string())?;
     log::info!("{CMD} refresh_spotify: new tokens received");
 
     // CAS: only commit if state still holds the access token we refreshed

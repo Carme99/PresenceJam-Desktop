@@ -128,7 +128,7 @@ pub fn refresh_spotify_token(
     tokens: &SpotifyTokens,
     client_id: &str,
     client_secret: &str,
-) -> Result<SpotifyTokens, String> {
+) -> Result<SpotifyTokens, SpotifyApiError> {
     let client = Client::new();
 
     let params = [
@@ -141,12 +141,27 @@ pub fn refresh_spotify_token(
         .form(&params)
         .basic_auth(client_id, Some(client_secret))
         .send()
-        .map_err(|e| format!("Failed to send refresh request: {}", e))?;
+        .map_err(|e| {
+            SpotifyApiError::Other(format!("Failed to send refresh request: {}", e))
+        })?;
 
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().unwrap_or_default();
-        return Err(format!("Refresh request failed: {} - {}", status, body));
+        // Spotify returns `{"error":"invalid_grant"}` when the refresh token
+        // is expired, revoked, or otherwise invalid. The docs say to discard
+        // the refresh token and start the authorization code flow again
+        // rather than retrying — see issue #160.
+        let error_field = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_owned));
+        if error_field.as_deref() == Some("invalid_grant") {
+            return Err(SpotifyApiError::InvalidGrant);
+        }
+        return Err(SpotifyApiError::Other(format!(
+            "Refresh request failed: {} - {}",
+            status, body
+        )));
     }
 
     #[derive(Deserialize)]
@@ -160,7 +175,7 @@ pub fn refresh_spotify_token(
 
     let token_resp: TokenResponse = response
         .json()
-        .map_err(|e| format!("Failed to parse refresh response: {}", e))?;
+        .map_err(|e| SpotifyApiError::Other(format!("Failed to parse refresh response: {}", e)))?;
 
     let expires_at = Utc::now() + chrono::Duration::seconds(token_resp.expires_in as i64);
 
