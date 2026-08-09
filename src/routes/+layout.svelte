@@ -22,8 +22,9 @@
   // Settings, and runs the full device-code flow (mint code, store it,
   // open the verification URL, start polling). Settings renders the
   // stored code/URI and offers a manual "check now" poll.
-  onMount(async () => {
-    const unlisten = await listen('teams-reconnect-required', async () => {
+  onMount(() => {
+    let unlisten: (() => void) | null = null;
+    listen('teams-reconnect-required', async () => {
       devLog('[LAYOUT] teams-reconnect-required received');
       setTeamsPhase('waiting');
       currentView.set('settings');
@@ -41,6 +42,8 @@
         console.error('[LAYOUT] teams-reconnect-required: start_teams_auth_device_code failed:', e);
         setTeamsPhase('error', String(e));
       }
+    }).then((u) => {
+      unlisten = u;
     });
 
     // Polls the backend for device-code completion. The cadence is
@@ -65,7 +68,7 @@
     }
 
     return () => {
-      unlisten();
+      unlisten?.();
     };
   });
 </script>
