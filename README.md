@@ -27,7 +27,7 @@ The app lives in your system tray, syncs while you work, and stays out of the wa
 - **Light & dark themes** — pick whichever matches your desktop.
 - **System tray** — runs silently in the background.
 - **Launch at login** — optional auto-start on boot.
-- **Secure auth** — PKCE OAuth for Spotify, Device Code flow for Teams.
+- **Secure auth** — Authorization Code + PKCE OAuth for Spotify (confidential client), Device Code flow for Teams.
 
 ## Downloads
 
@@ -107,7 +107,7 @@ The app is built with:
 - **Backend:** Tauri 2 (Rust) — polling thread, API clients, token storage, system tray
 - **Frontend:** Svelte 5 + TypeScript — SPA rendered via `@sveltejs/adapter-static`
 - **Storage:** `tauri-plugin-store` for tokens (DPAPI on Windows, Keychain on macOS), JSON for config
-- **Auth:** Spotify PKCE OAuth + Microsoft Teams Device Code flow
+- **Auth:** Spotify Authorization Code + PKCE (confidential client) + Microsoft Teams Device Code flow
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for deep-dive diagrams and explanation.
 
