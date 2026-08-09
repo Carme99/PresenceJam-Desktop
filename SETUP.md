@@ -6,7 +6,8 @@ Get PresenceJam running on your machine.
 
 - **Windows 10/11** (64-bit) or **macOS** (Apple Silicon)
 - A **Spotify Premium** account (required for the Web API)
-- A **Microsoft 365 Teams** account (personal or work — both work)
+- A **Microsoft 365 Teams** account (work or school — the Graph
+  presence APIs don't support personal Microsoft accounts)
 
 ## Step 1 — Install the App
 
