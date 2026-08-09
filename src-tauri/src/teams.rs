@@ -564,14 +564,24 @@ pub fn set_teams_status_message(
 pub fn clear_teams_status_message(
     access_token: &str,
     placeholder: &str,
+    expiry_datetime: Option<&str>,
 ) -> Result<(), TeamsApiError> {
+    // Graph has no "clear status message" action; the clear path posts a
+    // short-lived placeholder whose expiryDateTime removes it. Without an
+    // expiry the placeholder never expires (presenceStatusMessage docs).
+    // See issue #155.
+    let expiry = expiry_datetime.map(|dt| ExpiryDateTime {
+        date_time: dt.to_string(),
+        time_zone: "UTC".to_string(),
+    });
+
     let body = StatusMessageRequest {
         status_message: StatusMessageContent {
             message: MessageContent {
                 content: placeholder.to_string(),
                 content_type: "text".to_string(),
             },
-            expiry_date_time: None,
+            expiry_date_time: expiry,
         },
     };
 
