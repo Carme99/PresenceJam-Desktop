@@ -110,13 +110,26 @@ If a track or artist name contains profanity, PresenceJam replaces the entire st
 
 ---
 
+## Upgrading from 2.x
+
+Upgrading to 3.0 adds new OAuth scopes on both providers, so **both** require a **one-time re-auth** after the upgrade:
+
+- **Spotify** — the new `user-modify-playback-state` scope powers the tray playback controls. Until you reconnect, Settings shows a **"Playback control needs a one-time reconnect"** banner.
+- **Teams** — the new `Presence.Read` (meeting/call-aware gating) and `profile` (object-id claim needed by the availability sync) scopes. Until you reconnect, Settings shows a **"Presence features need a one-time Teams reconnect"** banner.
+
+Click **Reconnect** in the banner (or Settings → reconnect the service) — you only need to do this once per provider.
+
+Your `tokens.json` migrates automatically: on first read, v3.0 detects a ≤2.x plaintext file, encrypts it with AES-256-GCM, and rewrites it. No manual step. The existing folder-copy backup advice still applies unchanged — `config.json` and `tokens.json` live together in `%APPDATA%\PresenceJam\` / `~/Library/Application Support/PresenceJam/`.
+
+---
+
 ## What Gets Installed
 
 ```
 %APPDATA%\PresenceJam\          (Windows)
 ~/Library/Application Support/PresenceJam/  (macOS)
 ├── config.json       # Your settings
-├── tokens.json       # Spotify + Teams tokens (encrypted via DPAPI/Keychain)
+├── tokens.json       # Spotify + Teams tokens (AES-256-GCM ciphertext; decryption key in the OS keychain — see SECURITY.md)
 └── logs\            # Daily rotating application logs
 ```
 

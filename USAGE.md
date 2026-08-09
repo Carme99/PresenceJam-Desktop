@@ -17,7 +17,14 @@ PresenceJam lives in your **system tray** (Windows taskbar or macOS menu bar). T
 | Show Window | Bring the app window to the foreground |
 | Pause Syncing | Stop polling Spotify (Teams status stays as-is) |
 | Resume Syncing | Start polling again after a pause |
+| Play / Pause | Toggle playback on your active Spotify device |
+| Previous | Skip to the previous track |
+| Next | Skip to the next track |
+| Devices | List your Spotify devices — picking one transfers playback there and starts it |
+| Up Next | Peek at the next tracks in your queue |
 | Quit | Fully exit the app |
+
+> **Tray playback** (Play/Pause, Previous, Next, Devices, Up Next) requires a **Spotify Premium** account and the one-time reconnect that adds the `user-modify-playback-state` scope (see [SETUP.md — Upgrading from 2.x](./SETUP.md#upgrading-from-2x)). Until then, Settings shows a "Playback control needs a one-time reconnect" banner.
 
 > **Closing the window (X button) doesn't quit the app** — it minimizes to the tray. This is intentional so sync keeps running in the background. Use **Quit** from the tray menu to fully exit.
 
@@ -58,6 +65,15 @@ Edit the template that formats your Teams status message. Supports `{artist}`, `
 | Profanity filter | On | Replaces profane track/artist names with a safe placeholder |
 | Profanity placeholder | `Currently Listening to Spotify` | Shown when a track name is filtered. Supports `{emoji}`. |
 
+### Presence
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Show Available while listening | Off | Sets your Teams presence to **Available** while a track plays (re-armed every few minutes, cleared on pause). It shows *Available*, not *Busy* — Microsoft's `setPresence` API only supports the Busy/**InACall** combination, so "busy" would display an in-call bubble to your colleagues. |
+| Pause status during meetings/calls/DND | On | Reads your Teams presence before writing a status update and skips the write while you're busy, in a meeting, in a call, or presenting. The status resumes on the next track change once your presence clears. |
+
+> Both toggles need the one-time Teams reconnect (see [SETUP.md — Upgrading from 2.x](./SETUP.md#upgrading-from-2x)) — the new `Presence.Read` and `profile` scopes are only granted on a fresh sign-in.
+
 ### Polling
 
 | Setting | Default | Description |
@@ -70,6 +86,15 @@ Edit the template that formats your Teams status message. Supports `{artist}`, `
 | Setting | Description |
 | Launch at login | Start PresenceJam automatically when your OS boots |
 | Start minimized | Open the app minimized to the tray (window hidden on launch). On macOS, `start_minimized` also switches the app's activation policy to `Accessory`, removing the dock icon and menu-bar app menu — the app becomes a pure tray-resident app. The dock icon reappears when you disable this setting in Settings (no restart needed). (v2.7.3+) |
+
+---
+
+## Updates
+
+On startup, PresenceJam checks GitHub Releases for a newer version. If one is available, a small banner appears at the top of the window: **"Update vX.Y.Z available"** with a **Download & Install** button and a progress readout. Once the download finishes, the app relaunches itself into the new version. The banner is dismissible, and a failed check (offline, unreachable endpoint, mismatched signature key) is silent — it never blocks the UI.
+
+Update payloads are signature-verified against a key baked into the app (minisign), which is independent of OS code signing — so the macOS unsigned/Gatekeeper note in the README applies to updated builds too.
+
 ---
 
 ## Log Viewer

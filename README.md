@@ -26,6 +26,10 @@ The app lives in your system tray, syncs while you work, and stays out of the wa
 - **Customisable status template** — `{artist}`, `{track}`, `{album}`, `{emoji}` placeholders.
 - **Light & dark themes** — pick whichever matches your desktop.
 - **System tray** — runs silently in the background.
+- **Tray playback controls** — Play/Pause, Previous, Next, plus Devices and Up Next submenus, straight from the tray icon.
+- **Availability sync (opt-in)** — optionally show yourself as **Available** in Teams while you listen.
+- **Meeting/call-aware gating** — pauses status updates while you're busy, in a meeting, on a call, or presenting.
+- **Auto-update** — checks GitHub Releases on startup and installs new versions in-app.
 - **Launch at login** — optional auto-start on boot.
 - **Secure auth** — Authorization Code + PKCE OAuth for Spotify (confidential client), Device Code flow for Teams.
 
@@ -106,7 +110,7 @@ The app is built with:
 
 - **Backend:** Tauri 2 (Rust) — polling thread, API clients, token storage, system tray
 - **Frontend:** Svelte 5 + TypeScript — SPA rendered via `@sveltejs/adapter-static`
-- **Storage:** `tauri-plugin-store` for tokens (DPAPI on Windows, Keychain on macOS), JSON for config
+- **Storage:** `tokens.json` encrypted at rest with AES-256-GCM (decryption key in the OS keychain — DPAPI on Windows, Keychain on macOS, Secret Service on Linux), plaintext JSON for config
 - **Auth:** Spotify Authorization Code + PKCE (confidential client) + Microsoft Teams Device Code flow
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for deep-dive diagrams and explanation.

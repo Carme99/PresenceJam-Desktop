@@ -20,7 +20,13 @@ PresenceJam is a Tauri 2 desktop application:
     + fsync to `%APPDATA%\PresenceJam\config.json` (Linux/macOS path
     variants handled by `dirs`).
   - `token_io.rs::persist_tokens()` → temp-file + rename + fsync to
-    `<app-config-dir>/PresenceJam/tokens.json` for OAuth tokens.
+    `<app-config-dir>/PresenceJam/tokens.json` for OAuth tokens. Since
+    v3.0 (issue #140) the file is **AES-256-GCM ciphertext**, never
+    plaintext JSON: `b"PJENC" | version byte (0x01) | 12-byte random
+    nonce | ciphertext`, with the 256-bit key held in the OS keychain
+    under `tokens_aes_key:com.presencejam.app`. Plaintext files from
+    ≤ v2.10.0 are migrated to ciphertext on first read. `config.json`
+    stays plaintext JSON (mode 0600; it holds no credentials).
   Both paths survive process-kill mid-write (see issue #65; see `SECURITY.md`).
 - **Auth:** Spotify Authorization Code + PKCE OAuth (confidential client) +
   Microsoft Teams Device Code flow.
@@ -31,7 +37,9 @@ PresenceJam is a Tauri 2 desktop application:
     A working OS keychain is a hard dependency; there is no on-disk
     encrypted fallback (issue #9).
   - **OAuth access/refresh tokens** (Spotify + Teams) live in
-    `tokens.json` written atomically by `token_io.rs`. The webview has
+    `tokens.json` written atomically by `token_io.rs` — **AES-256-GCM
+    ciphertext at rest** (issue #140), decryption key in the OS keychain
+    under `tokens_aes_key:com.presencejam.app`. The webview has
     no path to read them (closed issue #65).
 - **Platform:** Windows + macOS + Linux. Single-instance enforcement,
   system tray, `presencejam://` deep-link scheme re-registered on every
@@ -57,9 +65,9 @@ graph TD
     end
 
     subgraph Storage ["Storage"]
-        Tokens["tokens.json<br/>(hand-managed, atomic write)"]
-        Secret["OS keychain<br/>(Spotify client_secret only)"]
-        Config["config.json<br/>%APPDATA%\\PresenceJam"]
+        Tokens["tokens.json<br/>(AES-256-GCM ciphertext,<br/>atomic write)"]
+        Secret["OS keychain<br/>(client_secret +<br/>tokens AES key)"]
+        Config["config.json<br/>(plaintext settings, 0600)"]
     end
 
     UI -->|"invoke<Cmd>"| Commands
@@ -82,7 +90,7 @@ off them:
 
 ```mermaid
 flowchart TD
-    Trigger["🔔 Trigger: git tag v* v2.8.0 && git push --tags"]
+    Trigger["🔔 Trigger: git tag v* v3.0.0 && git push --tags"]
     subgraph Build["🔨 Build Matrix (parallel)"]
         direction LR
         MacBuild["macOS Build<br/>aarch64-apple-darwin → .dmg"]
@@ -105,11 +113,49 @@ flowchart TD
    `actions/upload-artifact` (v7 in v2.8.0; v4 in 2.7.x).
 4. **Release:** The `release` job downloads all artifacts and creates the
    GitHub Release via `ncipollo/release-action`.
-5. **Distribution:** `homebrew` and `winget` jobs (each consuming the GitHub
+5. **Updater manifest (v3.0):** the same `release` job hand-assembles
+   `latest.json` — per-platform URLs + minisign `.sig` contents + `pub_date`
+   — and uploads it to the release (`gh release upload`). The updater's
+   configured endpoint resolves it via `releases/latest/download/latest.json`.
+6. **Distribution:** `homebrew` and `winget` jobs (each consuming the GitHub
    Release artifact) update the tap / open a winget-pkgs PR in parallel.
 
 The full workflow: [`.github/workflows/release.yml`](.github/workflows/release.yml).
 The PR-time CI that gates merges is [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+
+## Auto-Update (v3.0)
+
+Updates are delivered through `tauri-plugin-updater` (registered in
+`lib.rs`; `updater:default` in `capabilities/default.json`). The endpoint
+(`tauri.conf.json`) is
+`https://github.com/Carme99/PresenceJam-Desktop/releases/latest/download/latest.json`
+— a hand-assembled manifest (`release.yml`) mapping each platform to its
+signed artifact on the GitHub Release:
+
+- `darwin-aarch64` → `PresenceJam-<tag>.app.tar.gz` (+ `.sig`)
+- `windows-x86_64` → `PresenceJam-<tag>.msi` (+ `.msi.sig`)
+- `linux-x86_64` → `PresenceJam-linux-amd64.AppImage` (+ `.AppImage.sig`)
+
+`latest.json` carries the minisign `signature` (the `.sig` file
+*content*, not a path), `version` (tag without the leading `v`), and
+`pub_date`. The build matrix signs artifacts via the
+`TAURI_SIGNING_PRIVATE_KEY` / `_PASSWORD` secrets; the app's updater
+pubkey is inlined in `tauri.conf.json`, so the plugin rejects tampered
+payloads.
+
+**Flow:** `UpdatePrompt.svelte` calls `check()` on startup → if a newer
+version exists it shows a dismissible **"Update vX.Y.Z available"** banner
+→ **Download & Install** runs `downloadAndInstall()` with a progress
+readout → `invoke("relaunch_app")` (`commands/misc.rs::relaunch_app`,
+`AppHandle::restart`) restarts the process into the new version. A failed
+check (offline, unreachable endpoint, signature mismatch) is silent —
+never blocks the UI.
+
+Payload signing is independent of OS code signing: the updater works on
+unsigned builds, and the macOS unsigned/Gatekeeper story (README
+"macOS first-run note") applies to updated `.app` builds too. The release
+matrix builds **aarch64 macOS only** — Intel Macs never receive updates
+(known gap, see `docs/3.0-release-research.md`).
 
 ## Authentication Flows
 
@@ -183,6 +229,37 @@ sequenceDiagram
 ```
 
 The app polls Microsoft's token endpoint every 5 seconds while the user completes the browser auth. Once authorized, tokens are stored and the status message is set via Graph API.
+
+### Teams Presence APIs (v3.0)
+
+The Graph **presence** surface (`setPresence` / `clearPresence` /
+`getPresence`) is v1.0, delegated via the Teams scope string
+`Presence.ReadWrite Presence.Read profile offline_access` (`teams.rs`) —
+`Presence.Read` powers the status gate, `profile` adds the `oid` claim to
+the access-token JWT. All three endpoints hit `graph.microsoft.com/v1.0`,
+and `sessionId` is always the app's Azure AD client id
+(`MICROSOFT_GRAPH_CLIENT_ID`) — the stable per-app session key.
+
+- **`set_teams_presence(availability, activity, expiration_duration)`** —
+  `POST /me/presence/setPresence` first, falling back to
+  `POST /users/{oid}/presence/setPresence` on 404 (the docs document only
+  `/users/{id}`). The object id comes from the `oid` claim of the Teams
+  access-token JWT (`teams.rs::graph_oid_from_access_token`), which is
+  present once `profile` is in the scope string. Only five
+  availability/activity combinations are valid; PresenceJam uses
+  `Available`/`Available` (expiration `PT4H`) for availability sync.
+- **`clear_teams_presence()`** — `POST /me/presence/clearPresence`, same
+  `/users/{oid}` fallback; a 404 on either path is documented success (the
+  session is already gone).
+- **`get_teams_presence()`** — `GET /me/presence`, parsed
+  case-insensitively into `PresenceInfo { availability, activity }`
+  (the docs enumerate lowercase values; real responses are PascalCase).
+  Powers the status gate (issue #3.0-P2) and availability re-arm timing.
+
+Rate limits: getPresence 1,500 req/30 s/app/tenant; presence writes
+10,000 req/30 s/app/tenant — the polling loop's cadences sit far inside
+both. The entire presence surface is unsupported in the China (21Vianet)
+national cloud (see `docs/STATE-OF-FEATURES.md`).
 
 ## Startup Loading
 
@@ -288,6 +365,27 @@ Two complementary rate-limits:
   300 s — ~288-291 calls per 24 h (steady state 288), ~72-75 per 6 h: a
   ~10× reduction, not ~28×.
 
+### Presence gating + availability sync (v3.0)
+
+Two `TeamsConfig` flags shape what the polling loop writes:
+
+- **`presence_gate` (default ON, issue #3.0-P2):** on a *track change*
+  only, the loop calls `get_teams_presence` *before* the status write.
+  If `availability ∈ {busy, doNotDisturb}` or
+  `activity ∈ {inAMeeting, inACall, presenting}` it skips the write and
+  emits `presence-gated` (the Dashboard shows a "suppressed" chip); the
+  next track change re-evaluates. Writes proceed when presence is clear
+  (`Available`, `Away`, …). A transient gate-read failure degrades to a
+  logged warning and the write proceeds.
+- **`availability_sync` (default OFF, issue #3.0-P1):** while a track
+  plays, re-arm the Graph `Available`/`Available` presence session via
+  `set_teams_presence` at most every 4 minutes — Available sessions
+  **fade after 5 min** regardless of `expirationDuration`, so the re-arm
+  cadence (`AVAILABILITY_REARM_SECONDS` = 240 s) stays strictly inside
+  the fade window. On pause/stop, `clear_teams_presence` drops the
+  session (404 = already gone = success). Emits
+  `presence-availability-updated` on each arm/clear.
+
 `is_syncing` ownership: `commands/sync::start_syncing` is the **sole claimer**
 (v2.6.3, fixes issue #60 — `compare_exchange(false, true, …)` is here).
 `polling::start_polling` is a pure thread-spawner; the panic guard + spawn-error
@@ -340,6 +438,9 @@ sequenceDiagram
 | `polling-thread-panicked` | `null` | Polling thread panicked and was caught by `catch_unwind` |
 | `tray-click` | — | User clicks tray icon |
 | `toggle-pause` | — | User clicks Pause in tray menu |
+| `presence-gated` | `{reason}` | Status write suppressed by busy/DND/in-meeting/in-call/presenting presence (v3.0) |
+| `presence-availability-updated` | `{available, label, timestamp}` | Availability session armed (`Available`) or cleared (v3.0) |
+| `playback-error` | `{message}` | Tray playback command failed — no active device, non-Premium 403, etc. (v3.0) |
 
 ## Deep Link Routing
 
@@ -407,6 +508,7 @@ PresenceJam-Desktop/
 │   │   │   ├── Onboarding.svelte           # 3-step OAuth wizard
 │   │   │   ├── Settings.svelte             # Config editor
 │   │   │   ├── Reconnect.svelte            # Re-auth flow
+│   │   │   ├── UpdatePrompt.svelte         # Auto-update banner (check → download → relaunch, v3.0)
 │   │   │   ├── About.svelte                # Version + license
 │   │   │   └── LogViewer.svelte            # In-app log viewer
 │   │   ├── stores/
@@ -431,7 +533,8 @@ PresenceJam-Desktop/
 │   │   │   ├── sync.rs                     #   start_syncing / stop_syncing / get_sync_status
 │   │   │   ├── window.rs                    #   show_window / autostart / logs folder
 │   │   │   ├── onboarding.rs                #   is_onboarding_complete / complete / reconnect
-│   │   │   └── misc.rs                     #   preview_status / update_tray_menu_state
+│   │   │   ├── playback.rs                 #   playback_play / pause / next / previous / transfer + devices / queue (v3.0)
+│   │   │   └── misc.rs                     #   preview_status / update_tray_menu_state / relaunch_app
 │   │   ├── polling/                        # Split from polling.rs (PR #72)
 │   │   │   ├── mod.rs                      #   re-exports + ErrorSeverity + emit_error
 │   │   │   ├── loop.rs                     #   driver (mpsc channel, ~50 lines)
