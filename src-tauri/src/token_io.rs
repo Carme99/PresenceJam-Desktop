@@ -32,7 +32,7 @@
 //! review.
 
 use aes_gcm::aead::{Aead, KeyInit};
-use aes_gcm::{Aes256Gcm, Key, Nonce};
+use aes_gcm::{Aes256Gcm, Nonce};
 use crate::spotify::SpotifyTokens;
 use crate::teams::TeamsTokens;
 use rand::RngCore;
@@ -81,9 +81,13 @@ const TOKENS_HEADER_LEN: usize = TOKENS_MAGIC.len() + 1 + TOKENS_NONCE_LEN;
 fn encrypt_tokens(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, String> {
     let mut nonce_bytes = [0u8; TOKENS_NONCE_LEN];
     rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+    let cipher = Aes256Gcm::new_from_slice(key)
+        .map_err(|_| "AES-256 key must be 32 bytes".to_string())?;
     let ciphertext = cipher
-        .encrypt(Nonce::from_slice(&nonce_bytes), plaintext)
+        .encrypt(
+            &Nonce::try_from(&nonce_bytes[..]).map_err(|_| "AES-GCM nonce must be 12 bytes".to_string())?,
+            plaintext,
+        )
         .map_err(|e| format!("AES-GCM encryption failed: {}", e))?;
     let mut out = Vec::with_capacity(TOKENS_HEADER_LEN + ciphertext.len());
     out.extend_from_slice(TOKENS_MAGIC);
@@ -102,9 +106,10 @@ fn encrypt_tokens(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, String> {
 /// matches the ciphertext — e.g. the keychain slot was deleted).
 fn decrypt_tokens(key: &[u8; 32], bytes: &[u8]) -> Result<Vec<u8>, String> {
     if !bytes.starts_with(TOKENS_MAGIC) {
-        return Err(format!(
+        return Err(
             "tokens file does not start with the PresenceJam encrypted-tokens magic prefix"
-        ));
+                .to_string(),
+        );
     }
     let version = bytes[TOKENS_MAGIC.len()];
     if version != TOKENS_VERSION {
@@ -122,8 +127,14 @@ fn decrypt_tokens(key: &[u8; 32], bytes: &[u8]) -> Result<Vec<u8>, String> {
     }
     let nonce = &bytes[TOKENS_MAGIC.len() + 1..TOKENS_HEADER_LEN];
     let ciphertext = &bytes[TOKENS_HEADER_LEN..];
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
-    cipher.decrypt(Nonce::from_slice(nonce), ciphertext).map_err(|_| {
+    let cipher = Aes256Gcm::new_from_slice(key)
+        .map_err(|_| "AES-256 key must be 32 bytes".to_string())?;
+    cipher
+        .decrypt(
+            &Nonce::try_from(nonce).map_err(|_| "AES-GCM nonce must be 12 bytes".to_string())?,
+            ciphertext,
+        )
+        .map_err(|_| {
         "tokens file failed AES-GCM authentication (corrupt ciphertext, tampered file, or key mismatch — re-authentication required)"
             .to_string()
     })
