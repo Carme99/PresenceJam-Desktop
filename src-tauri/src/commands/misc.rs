@@ -39,3 +39,13 @@ pub fn update_tray_menu_state(
     log::info!("{CMD} update_tray_menu_state: SUCCESS");
     Ok(())
 }
+
+/// Restarts the app process. Invoked by the frontend after an update has
+/// been downloaded and installed so the new version takes effect.
+/// `AppHandle::restart` never returns (it exits the process), so the
+/// `!` tail expression coerces into the `Result<(), String>` signature.
+#[tauri::command]
+pub fn relaunch_app(app: AppHandle) -> Result<(), String> {
+    log::info!("{CMD} relaunch_app: ENTRY");
+    app.restart()
+}

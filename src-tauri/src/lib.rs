@@ -530,6 +530,9 @@ pub fn run() {
 
         builder = builder.plugin(tauri_plugin_deep_link::init());
         log::info!("[APP] run: deep_link plugin registered");
+
+        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+        log::info!("[APP] run: updater plugin registered");
     }
 
     builder
@@ -792,6 +795,7 @@ pub fn run() {
             commands::onboarding::reconnect_teams,
             commands::misc::preview_status,
             commands::misc::update_tray_menu_state,
+            commands::misc::relaunch_app,
             commands::playback::playback_play,
             commands::playback::playback_pause,
             commands::playback::playback_next,

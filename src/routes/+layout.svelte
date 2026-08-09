@@ -8,6 +8,7 @@
   // changes). Without this, theme only applies when Settings mounts.
   import '$lib/stores/theme';
   import { devLog } from '$lib/utils/dev';
+  import UpdatePrompt from '$lib/components/UpdatePrompt.svelte';
   import { currentView } from '$lib/stores/app';
   import { authFlow, setTeamsPhase, setTeamsDeviceCode } from '$lib/stores/authFlow.svelte';
   import type { DeviceCodeResponse, TeamsTokens } from '$lib/types';
@@ -80,3 +81,4 @@
 </svelte:head>
 
 <slot />
+<UpdatePrompt />

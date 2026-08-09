@@ -24,6 +24,7 @@
     "opener:default",
     "autostart:default",
     "log:default",
-    "deep-link:default"
+    "deep-link:default",
+    "updater:default"
   ]
 }
