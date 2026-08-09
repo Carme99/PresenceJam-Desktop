@@ -153,7 +153,8 @@ ordered by effort:
    providers' settings if you suspect the local machine is compromised.
    This is the only way to invalidate the credentials stored in
    `tokens.json` from the provider side; revocation is faster than
-   waiting for the tokens to expire (Spotify refresh token TTL is long).
+   waiting for the tokens to expire (Spotify refresh tokens are valid up to
+   6 months — on `invalid_grant` the app discards them and triggers re-auth).
 
 > **Status:** As of v2.6.0, the Spotify `client_secret` is stored in the
 > **OS keychain** (macOS Keychain, Windows DPAPI-backed credential store,
