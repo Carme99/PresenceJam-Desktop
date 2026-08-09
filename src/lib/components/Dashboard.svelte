@@ -234,8 +234,11 @@
     return `${mins}:${remainingSecs.toString().padStart(2, '0')}`;
   }
 
+  // `progress_ms` is null for live/unknown-position streams (Spotify
+  // documents it as nullable — see issue #165); treat null as "no known
+  // position" rather than position 0.
   let progressPercent = $derived(
-    currentTrack && currentTrack.duration_ms > 0
+    currentTrack && currentTrack.progress_ms != null && currentTrack.duration_ms > 0
       ? (currentTrack.progress_ms / currentTrack.duration_ms) * 100
       : 0
   );
@@ -326,7 +329,11 @@
             <div class="progress-fill" style="width: {progressPercent}%"></div>
           </div>
           <div class="progress-time">
-            {formatDuration(currentTrack.progress_ms)} / {formatDuration(currentTrack.duration_ms)}
+            {#if currentTrack.progress_ms != null}
+              {formatDuration(currentTrack.progress_ms)} / {formatDuration(currentTrack.duration_ms)}
+            {:else}
+              <span class="live-label" aria-label="Live stream — position unknown">LIVE</span>
+            {/if}
           </div>
         </div>
       </div>
@@ -553,6 +560,16 @@
     font-size: var(--fs-xs);
     color: var(--fg-subtle);
     font-variant-numeric: tabular-nums;
+  }
+  .live-label {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-2);
+    color: var(--success);
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
   }
 
   .status-preview {
