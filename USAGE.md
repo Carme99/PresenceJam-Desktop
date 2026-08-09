@@ -106,7 +106,7 @@ Teams custom status messages automatically expire. PresenceJam sets the message'
 
 Tokens refresh automatically:
 - **Spotify tokens** — refreshed by PresenceJam when needed (no action required)
-- **Teams tokens** — same
+- **Teams tokens** — same. The device-code sign-in requests `offline_access`, so Microsoft issues a refresh token that PresenceJam rotates before the access token expires.
 
 If your connection drops unexpectedly, PresenceJam will emit a reconnect prompt. Go to **Settings → disconnect and reconnect** the affected service.
 
