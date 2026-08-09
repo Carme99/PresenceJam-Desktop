@@ -211,7 +211,10 @@
       devLog('[ONBOARDING] pollTeamsAuth: calling invoke poll_teams_auth');
       devLog('[ONBOARDING] pollTeamsAuth: deviceCode.length=', teamsDeviceCode.length);
 
-      const tokens = await invoke<TeamsTokens>('poll_teams_auth', { deviceCode: teamsDeviceCode });
+      const tokens = await invoke<TeamsTokens>('poll_teams_auth', {
+        deviceCode: teamsDeviceCode,
+        interval: authFlow.teams.interval
+      });
       devLog('[ONBOARDING] pollTeamsAuth: invoke SUCCESS, tokens=', tokens ? 'present' : 'null');
 
       if (tokens) {
