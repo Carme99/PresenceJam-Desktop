@@ -22,8 +22,10 @@ pub struct TrackInfo {
     // values as JS `number` (f64). Override ts-rs's `bigint` default so
     // the generated `.ts` matches what `invoke()` actually returns at
     // runtime — `bigint` would type-lie about the wire shape.
-    #[ts(type = "number")]
-    pub progress_ms: u64,
+    // `progress_ms` is `Option` because Spotify documents it as "Can be
+    // `null`" (live/unknown position) — see issue #165.
+    #[ts(type = "number | null")]
+    pub progress_ms: Option<u64>,
     #[ts(type = "number")]
     pub duration_ms: u64,
 }
@@ -273,7 +275,7 @@ pub fn get_currently_playing(access_token: &str) -> Result<Option<TrackInfo>, Sp
                     album: item.album.name,
                     album_art_url,
                     is_playing: playing.is_playing,
-                    progress_ms: playing.progress_ms.unwrap_or(0),
+                    progress_ms: playing.progress_ms,
                     duration_ms: item.duration_ms,
                 }))
             } else {
@@ -333,7 +335,7 @@ pub fn preview_status_with_sample(format: &str) -> String {
         album: "Sample Album".to_string(),
         album_art_url: String::new(),
         is_playing: true,
-        progress_ms: 0,
+        progress_ms: Some(0),
         duration_ms: 0,
     };
     format_status(&sample, format)
@@ -407,7 +409,7 @@ mod tests {
             album: album.to_string(),
             album_art_url: String::new(),
             is_playing,
-            progress_ms: 0,
+            progress_ms: Some(0),
             duration_ms: 0,
         }
     }
@@ -476,7 +478,9 @@ mod tests {
     // Regression guard for issue #78: ensure TrackInfo's u64 fields
     // serialise as plain JSON numbers (not strings), so the Tauri IPC
     // bridge delivers them to JS as `number` (f64). The matching TS
-    // override is `#[ts(type = "number")]` on progress_ms/duration_ms.
+    // override is `#[ts(type = "number")]` on duration_ms and
+    // `#[ts(type = "number | null")]` on progress_ms (Option<u64> — see
+    // issue #165).
     #[test]
     fn track_info_u64_fields_serialize_as_numbers() {
         let track = TrackInfo {
@@ -485,12 +489,13 @@ mod tests {
             album: "Test Album".to_string(),
             album_art_url: "https://example.com/art.jpg".to_string(),
             is_playing: true,
-            progress_ms: 123_456,
+            progress_ms: Some(123_456),
             duration_ms: 240_000,
         };
         let json: serde_json::Value =
             serde_json::to_value(&track).expect("to_value");
-        // u64 must round-trip as a JSON number, not a string.
+        // u64 must round-trip as a JSON number, not a string. `Some(v)`
+        // serialises as the bare number; `None` would serialise as `null`.
         assert!(
             json["progress_ms"].is_number(),
             "progress_ms must serialise as a JSON number, got {:?}",
