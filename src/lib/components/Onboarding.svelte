@@ -260,8 +260,7 @@
         spotify: {
           client_id: spotifyClientId,
           client_secret_set: true,
-          redirect_uri: 'presencejam://callback',
-          scopes: ['user-read-currently-playing', 'user-read-playback-state']
+          redirect_uri: 'presencejam://callback'
         },
         teams: {
           status_format: statusFormat,
