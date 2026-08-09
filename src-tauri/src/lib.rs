@@ -777,6 +777,7 @@ pub fn run() {
             commands::teams_auth::start_teams_auth_device_code,
             commands::teams_auth::poll_teams_auth,
             commands::teams_auth::refresh_teams,
+            commands::teams_auth::get_teams_granted_scopes,
             commands::sync::start_syncing,
             commands::sync::stop_syncing,
             commands::sync::get_sync_status,

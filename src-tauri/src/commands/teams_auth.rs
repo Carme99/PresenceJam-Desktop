@@ -3,7 +3,7 @@
 //! See issue #76. Teams uses an OAuth 2.0 device-code flow rather than the
 //! PKCE/redirect flow that Spotify uses.
 
-use crate::teams::{DeviceCodeResponse, TeamsTokens};
+use crate::teams::{decode_teams_granted_scopes, DeviceCodeResponse, TeamsTokens};
 use crate::token_io;
 use crate::AppState;
 use std::sync::Arc;
@@ -109,4 +109,18 @@ pub fn refresh_teams(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> 
     }
 
     Ok(())
+}
+
+/// Decodes the `scp` claim from the stored Teams access token's JWT payload
+/// (empty when undecodable or no token). Powers the Settings one-time
+/// reconnect banner when `Presence.Read` or `profile` is missing — those
+/// scopes are needed by the presence gate / availability sync (issue
+/// #3.0-P1/P2). Mirrors `get_spotify_granted_scopes`.
+#[tauri::command]
+pub fn get_teams_granted_scopes(state: tauri::State<'_, Arc<AppState>>) -> Vec<String> {
+    log::debug!("{CMD} get_teams_granted_scopes: ENTRY");
+    match state.tokens.teams().as_ref() {
+        Some(tokens) => decode_teams_granted_scopes(&tokens.access_token),
+        None => Vec::new(),
+    }
 }

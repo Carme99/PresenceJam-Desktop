@@ -37,6 +37,28 @@
     }
   }
 
+  // Scopes granted on the stored Teams access token. The presence gate
+  // needs `Presence.Read` and the availability sync's /users/{oid} fallback
+  // needs the `profile` claim (oid) — existing users don't have them until
+  // they re-connect once; the banner below nudges them. Issue #3.0-P1/P2.
+  let teamsGrantedScopes = $state<string[]>([]);
+  let teamsScopesMissing = $derived(
+    teamsStatusConnected &&
+      !(
+        teamsGrantedScopes.includes('Presence.Read') &&
+        teamsGrantedScopes.includes('profile')
+      )
+  );
+
+  async function refreshTeamsGrantedScopes() {
+    try {
+      teamsGrantedScopes = await invoke<string[]>('get_teams_granted_scopes');
+    } catch (e) {
+      console.error('[SETTINGS] get_teams_granted_scopes failed:', e);
+      teamsGrantedScopes = [];
+    }
+  }
+
   let previewText = $state('');
 
   // Live preview of the status format template. We delegate the
@@ -75,6 +97,9 @@
     // Detect whether the tray-playback scope is missing (existing users
     // re-auth with the new scope set; see issue #3.0-P3).
     await refreshGrantedScopes();
+    // Detect whether the presence scopes are missing (existing users
+    // re-auth with the new scope set; see issue #3.0-P1/P2).
+    await refreshTeamsGrantedScopes();
 
     // Listen for reconnect-required events (emitted when backend clears tokens and needs re-auth)
     unlistenFns.push(await listen('spotify-reconnect-required', async () => {
@@ -126,6 +151,9 @@
         console.log('[SETTINGS] teams-auth-complete received');
         setTeamsPhase('done');
         teamsStatusConnected = true;
+        // The new token carries the freshly-granted scope set — refresh so
+        // the presence banner disappears. Issue #3.0-P1/P2.
+        refreshTeamsGrantedScopes();
       },
       onTeamsFailed: (payload) => {
         console.error('[SETTINGS] teams-auth-failed:', payload);
@@ -300,6 +328,43 @@
           <button class="btn-secondary" onclick={reconnectTeams}>Reconnect Teams</button>
         {/if}
       </div>
+      {#if teamsScopesMissing}
+        <div class="scope-banner">
+          <span class="hint">Presence features need a one-time Teams reconnect.</span>
+          <button type="button" class="btn-link" onclick={reconnectTeams} disabled={teamsAuthWaiting}>Reconnect</button>
+        </div>
+      {/if}
+    </section>
+
+    <section class="card">
+      <header class="section-header">
+        <h2>Presence</h2>
+      </header>
+      <div class="toggle-row">
+        <label for="availability-sync">Show Available while listening</label>
+        <input
+          id="availability-sync"
+          type="checkbox"
+          bind:checked={localConfig.teams.availability_sync}
+        />
+      </div>
+      <p class="hint">
+        Off by default. Shows <em>Available</em> (not <em>Busy</em>) in
+        Teams while a track plays, because setPresence only supports the
+        Busy/InACall combination — see the setPresence limitation.
+      </p>
+      <div class="toggle-row">
+        <label for="presence-gate">Pause status during meetings/calls/DND</label>
+        <input
+          id="presence-gate"
+          type="checkbox"
+          bind:checked={localConfig.teams.presence_gate}
+        />
+      </div>
+      <p class="hint">
+        On by default. Skips writing your Spotify status while Teams says
+        you're busy, in a meeting, in a call, or presenting.
+      </p>
     </section>
 
     <section class="card">
