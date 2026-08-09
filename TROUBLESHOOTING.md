@@ -19,7 +19,7 @@ Before diving in, check these basics:
 
 **Fix:**
 1. Go to [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)
-2. Select your app → **Settings**
+2. Select your app → **Edit Settings**
 3. Under **Redirect URIs**, add: `presencejam://callback`
 4. Save settings
 5. Restart the app and try again
