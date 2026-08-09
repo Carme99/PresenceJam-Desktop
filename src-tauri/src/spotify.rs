@@ -19,8 +19,12 @@ fn parse_retry_after(response: &reqwest::blocking::Response) -> Option<u64> {
 fn parse_error_reason(body: &str) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(body)
         .ok()
-        .and_then(|v| v.get("error").and_then(|e| e.get("reason")).and_then(|r| r.as_str()))
-        .map(str::to_owned)
+        .and_then(|v| {
+            v.get("error")
+                .and_then(|e| e.get("reason"))
+                .and_then(|r| r.as_str())
+                .map(str::to_owned)
+        })
 }
 
 /// True when a response status + body are the player endpoint's

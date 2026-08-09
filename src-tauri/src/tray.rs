@@ -24,7 +24,9 @@ const ID_NEXT: &str = "next";
 const ID_DEVICES: &str = "devices";
 const ID_QUEUE: &str = "queue";
 /// Menu-item id prefix for device submenu entries (`{ID_DEVICES}|{index}`).
-const DEVICE_ITEM_PREFIX: &str = concat!(ID_DEVICES, "|");
+/// `concat!` cannot take a const, so this mirrors `ID_DEVICES` literally;
+/// keep the two in sync when either changes.
+const DEVICE_ITEM_PREFIX: &str = "devices|";
 
 static TRAY: OnceLock<TrayIcon> = OnceLock::new();
 
@@ -288,12 +290,13 @@ fn tray_write_lock() -> &'static parking_lot::Mutex<()> {
 /// here and re-used until the window lapses.
 const TRAY_SPOTIFY_FETCH_THROTTLE: Duration = Duration::from_secs(60);
 
-/// Cache of the last devices fetch: `(fetched_at, devices)`. Also serves
-/// as the source of truth for the device submenu's click dispatch — menu
-/// item ids are `{ID_DEVICES}|{index}` into this list.
-static DEVICES_CACHE: std::sync::LazyLock<
-    parking_lot::Mutex<Option<(Instant, Vec<crate::spotify::DeviceInfo>)>>,
-> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(None));
+/// Cache slot for the throttled devices fetch: `(fetched_at, devices)`.
+/// Also serves as the source of truth for the device submenu's click
+/// dispatch — menu item ids are `{ID_DEVICES}|{index}` into this list.
+type DeviceCacheSlot = Option<(Instant, Vec<crate::spotify::DeviceInfo>)>;
+
+static DEVICES_CACHE: std::sync::LazyLock<parking_lot::Mutex<DeviceCacheSlot>> =
+    std::sync::LazyLock::new(|| parking_lot::Mutex::new(None));
 
 static QUEUE_CACHE: std::sync::LazyLock<
     parking_lot::Mutex<Option<(Instant, crate::spotify::QueueInfo)>>,
