@@ -107,15 +107,27 @@ pub(crate) fn run(
         match refresh_spotify_token(&spotify_tokens, &client_id, &client_secret) {
             Ok(new_tokens) => {
                 log::info!("[POLLING] poll_once: token refresh SUCCESS");
-                match cas_refresh_or_discard(
-                    state,
-                    app,
+                let cas_outcome = cas_refresh_or_discard(
                     "spotify",
                     &mut *state.tokens.spotify_mut(),
                     &pre_refresh_access_token,
                     || Ok(new_tokens.clone()),
                     |t| &t.access_token,
-                ) {
+                );
+                // Issue #180: the write guard reborrowed above is a temporary
+                // that lives only until the end of this statement. Persist in
+                // a LATER statement, when the guard is provably dropped —
+                // persisting while it is alive would re-lock the same
+                // parking_lot RwLock for reading and self-deadlock.
+                if matches!(&cas_outcome, CasOutcome::Committed(_)) {
+                    if let Err(e) = token_io::persist_tokens(state, app) {
+                        log::warn!(
+                            "[POLLING] poll_once: failed to persist refreshed spotify tokens: {}",
+                            e
+                        );
+                    }
+                }
+                match cas_outcome {
                     CasOutcome::Committed(_) => new_tokens,
                     CasOutcome::Discarded { current } => match current {
                         Some(t) => t,
@@ -237,8 +249,6 @@ pub(crate) fn run(
                             log::info!("[POLLING] poll_once: token refresh SUCCESS, retrying");
                             let committed =
                             match cas_refresh_or_discard(
-                                state,
-                                app,
                                 "spotify",
                                 &mut *state.tokens.spotify_mut(),
                                 &pre_refresh_access_token,
@@ -252,8 +262,18 @@ pub(crate) fn run(
                                 }
                             };
                             if committed {
-                                // cas_refresh_or_discard already persisted on
-                                // Committed; do not double-write.
+                                // Issue #180: the write guard reborrowed into
+                                // the CAS call above is dropped at the end of
+                                // that `let` statement. Persist here — in a
+                                // later statement — so the read lock inside
+                                // persist_tokens (same RwLock) cannot
+                                // self-deadlock.
+                                if let Err(e) = token_io::persist_tokens(state, app) {
+                                    log::warn!(
+                                        "[POLLING] poll_once: failed to persist refreshed spotify tokens: {}",
+                                        e
+                                    );
+                                }
                                 let retry_token = new_tokens.access_token.clone();
                                 let last_poll_instant_retry = Instant::now();
                                 match get_currently_playing(&retry_token) {
@@ -403,8 +423,6 @@ enum CasOutcome<T> {
 }
 
 fn cas_refresh_or_discard<T, F, G>(
-    state: &Arc<AppState>,
-    app: &AppHandle,
     label: &str,
     lock: &mut Option<T>,
     pre_refresh_access_token: &str,
@@ -421,6 +439,15 @@ where
         Err(e) => return CasOutcome::RefreshFailed(e),
     };
 
+    // Issue #180: this helper must NEVER persist tokens itself. Callers pass
+    // `&mut *state.tokens.X_mut()` — a reborrow of the parking_lot write
+    // guard, which stays alive for the whole call statement. Persisting here
+    // would re-lock the SAME RwLock for reading (token_io::persist_tokens)
+    // while the write guard is still held; parking_lot has no same-thread
+    // reentrancy detection, so write→read on the same lock from the same
+    // thread parks forever on every successful refresh. The call sites
+    // therefore persist in a statement AFTER this call returns, when the
+    // guard is provably dropped.
     let committed = {
         if lock.as_ref().map(access_token_of) == Some(pre_refresh_access_token) {
             *lock = Some(new_tokens.clone());
@@ -435,18 +462,6 @@ where
     };
 
     if committed {
-        // TODO(#followup): the caller's write guard (`&mut *state.tokens.X_mut()`)
-        // is still alive here, and persist_tokens takes a READ lock on the same
-        // RwLock — a self-deadlock with parking_lot's non-reentrant lock on every
-        // successful refresh. Out of scope for the #153-#165 batch; fix = drop
-        // the guard before persisting (see poll_once Path A invalid_grant).
-        if let Err(e) = token_io::persist_tokens(state, app) {
-            log::warn!(
-                "[POLLING] poll_once: failed to persist refreshed {} tokens: {}",
-                label,
-                e
-            );
-        }
         CasOutcome::Committed(new_tokens)
     } else {
         let current = lock.clone();
@@ -516,16 +531,27 @@ pub(crate) fn process_track(
 
             let pre_refresh_access_token = tok.access_token.clone();
 
-            match cas_refresh_or_discard(
-                state,
-                app,
+            let teams_refresh_outcome = cas_refresh_or_discard(
                 "teams",
                 &mut *state.tokens.teams_mut(),
                 &pre_refresh_access_token,
                 || refresh_teams_token(tok).map_err(|e| e.to_string()),
                 |t| &t.access_token,
-            ) {
-                CasOutcome::Committed(new_tokens) => Some(new_tokens),
+            );
+            match teams_refresh_outcome {
+                CasOutcome::Committed(new_tokens) => {
+                    // Issue #180: the write guard reborrowed into the CAS
+                    // call above is dropped at the end of that statement.
+                    // Persist here so the read lock inside persist_tokens
+                    // (same RwLock) cannot self-deadlock.
+                    if let Err(e) = token_io::persist_tokens(state, app) {
+                        log::warn!(
+                            "[POLLING] poll_once: failed to persist refreshed teams tokens: {}",
+                            e
+                        );
+                    }
+                    Some(new_tokens)
+                }
                 CasOutcome::Discarded { current } => current,
                 CasOutcome::RefreshFailed(e) => {
                     log::error!("[POLLING] process_track: Failed to refresh Teams token: {}", e);
@@ -929,6 +955,155 @@ mod tests {
             "cas_refresh_or_discard called {} times in production; need >=3 \
              (Spotify proactive + 401-retry + Teams)",
             helper_call_count
+        );
+    }
+
+    /// Issue #180 regression test: refresh-success + persist on the same lock.
+    ///
+    /// Pre-fix, `cas_refresh_or_discard` persisted the refreshed tokens from
+    /// inside the helper while the caller's write guard (a reborrow of
+    /// `state.tokens.X_mut()`) was still alive for the whole call statement.
+    /// `token_io::persist_tokens` then re-locked the SAME parking_lot RwLock
+    /// for reading — write→read on the same lock from the same thread parks
+    /// forever (parking_lot has no same-thread reentrancy detection), so
+    /// every successful refresh deadlocked the polling thread.
+    ///
+    /// The fix persists only at the call sites, in a statement AFTER the CAS
+    /// call returns, when the write guard is provably dropped. This test runs
+    /// the exact production call shape (write guard reborrowed into the CAS
+    /// helper) plus the persist step (re-locking the same RwLock for reading,
+    /// which is the lock acquisition `token_io::persist_tokens` performs) in
+    /// a spawned thread, and asserts completion via `recv_timeout`. The
+    /// deadlock would hang CI, so the 10s timeout makes a regression fail
+    /// fast instead of hanging the suite.
+    #[test]
+    fn test_refresh_success_persist_does_not_self_deadlock() {
+        use std::thread;
+        use std::time::Duration;
+
+        let state = Arc::new(AppState::new());
+        {
+            let mut guard = state.tokens.spotify_mut();
+            *guard = Some(crate::spotify::SpotifyTokens {
+                access_token: "pre-refresh-access-token".to_string(),
+                refresh_token: "refresh-token".to_string(),
+                expires_at: Utc::now() + chrono::Duration::hours(1),
+            });
+        }
+
+        let (tx, rx) = mpsc::channel();
+        let state2 = state.clone();
+        let handle = thread::spawn(move || {
+            let pre_refresh_access_token = "pre-refresh-access-token".to_string();
+            let new_tokens = crate::spotify::SpotifyTokens {
+                access_token: "post-refresh-access-token".to_string(),
+                refresh_token: "refresh-token".to_string(),
+                expires_at: Utc::now() + chrono::Duration::hours(2),
+            };
+            // Exact production call shape (Spotify proactive refresh): the
+            // write guard is a temporary reborrowed into the CAS helper; it
+            // stays alive until the end of this statement.
+            let outcome = cas_refresh_or_discard(
+                "spotify",
+                &mut *state2.tokens.spotify_mut(),
+                &pre_refresh_access_token,
+                || Ok(new_tokens.clone()),
+                |t| &t.access_token,
+            );
+            let committed = matches!(outcome, CasOutcome::Committed(_));
+            if committed {
+                // Persist step: re-lock the SAME RwLock for reading, exactly
+                // as token_io::persist_tokens does on a successful refresh.
+                // If the write guard above were still alive, this parks
+                // forever (issue #180).
+                let _persisted = state2.tokens.spotify();
+            }
+            let _ = tx.send(committed);
+        });
+
+        let committed = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect(
+                "refresh-success + persist self-deadlocked: the write guard was still \
+                 held when the same RwLock was re-locked for reading (issue #180)",
+            );
+        // The worker only returns after the persist step re-locked the same
+        // RwLock successfully; joining surfaces any thread panic as a test
+        // failure instead of a silently detached thread.
+        handle.join().expect("persist worker thread panicked");
+        assert!(committed, "CAS should commit the refreshed tokens");
+
+        let stored = state.tokens.spotify();
+        assert_eq!(
+            stored.as_ref().map(|t| t.access_token.as_str()),
+            Some("post-refresh-access-token"),
+            "the refreshed tokens must be stored in AppState"
+        );
+    }
+
+    /// Issue #180 regression guard: the CAS helper must never persist tokens
+    /// itself. Pre-fix it called `token_io::persist_tokens` while the
+    /// caller's write guard was still alive (write→read on the same
+    /// parking_lot RwLock from the same thread parks forever), so every
+    /// successful refresh self-deadlocked. The fix persists only at the
+    /// call sites, in a statement AFTER the CAS call returns. If a future
+    /// contributor moves a persist call back inside the helper body, the
+    /// deadlock returns and this guard fails.
+    #[test]
+    fn test_cas_helper_body_has_no_persist_and_call_sites_persist() {
+        let source = include_str!("poll_once.rs");
+        let prod_source = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("poll_once.rs has no #[cfg(test)] mod tests block");
+
+        // Isolate the helper body by brace counting from its opening `{`
+        // (house style — never boundary anchors, which drift). The `{}`
+        // format placeholders inside string literals are balanced, so they
+        // do not perturb the count.
+        let after_sig = prod_source
+            .split("fn cas_refresh_or_discard<T, F, G>(")
+            .nth(1)
+            .expect("cas_refresh_or_discard definition not found");
+        let open = after_sig
+            .find('{')
+            .expect("cas_refresh_or_discard has no opening brace");
+        let mut depth = 0usize;
+        let mut end = None;
+        for (i, ch) in after_sig[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(open + i + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let body = &after_sig[..end.expect("cas_refresh_or_discard body never closed")];
+        assert!(
+            !body.contains("persist_tokens("),
+            "cas_refresh_or_discard must not persist tokens inside its body (issue #180: \
+             the caller's write guard is alive for the whole call, so persist_tokens' \
+             read lock on the same RwLock self-deadlocks). Body:\n{}",
+            body
+        );
+
+        // All persistence must happen at the call sites, after the CAS call
+        // returns (guard provably dropped): the invalid_grant clear path plus
+        // the three refresh-success call sites (Spotify proactive, Spotify
+        // 401-retry, Teams).
+        let persist_count = prod_source.matches("token_io::persist_tokens(").count();
+        assert_eq!(
+            persist_count, 4,
+            "expected exactly 4 persist_tokens call sites in production (1 invalid_grant \
+             clear + 3 refresh-success call sites); found {}. If a call-site persist is \
+             removed, refreshed tokens stop being flushed to disk; if one is added inside \
+             cas_refresh_or_discard, the #180 self-deadlock returns.",
+            persist_count
         );
     }
 
