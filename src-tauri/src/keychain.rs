@@ -14,6 +14,8 @@
 //! `peek_spotify_client_secret` on every 30s iteration) does not hit the
 //! OS keychain on the happy path. Issue #69.
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use rand::RngCore;
 use std::sync::OnceLock;
 
 const KEYRING_SERVICE: &str = "presencejam";
@@ -233,5 +235,83 @@ fn delete_keychain_entry(user: &str) -> Result<(), String> {
         Err(keyring::Error::NoEntry) => Ok(()),
         Err(e) => Err(keychain_error_help(&e)
             .unwrap_or_else(|| format!("Failed to delete keychain entry '{}': {}", user, e))),
+    }
+}
+
+/// Keychain slot for the tokens.json AES-256-GCM encryption key (issue
+/// #140). Namespaced by the Tauri bundle identifier exactly like
+/// [`SPOTIFY_CLIENT_SECRET_USER`], so side-by-side installs (prod, dev,
+/// beta) get isolated keys and a test build's first persist can never
+/// overwrite the prod install's key (which would make the prod
+/// ciphertext undecryptable).
+const TOKENS_AES_KEY_USER: &str = "tokens_aes_key:com.presencejam.app";
+
+/// Decode a stored tokens AES key from its base64 (STANDARD) form. The
+/// keyring crate stores passwords as strings, so the 32 raw key bytes
+/// are base64-encoded at rest. Rejects any value that is not exactly
+/// 256 bits — a truncated/corrupted entry must not silently produce a
+/// weaker key.
+fn decode_tokens_aes_key(b64: &str) -> Result<[u8; 32], String> {
+    let bytes = STANDARD
+        .decode(b64.trim())
+        .map_err(|e| format!("Stored tokens AES key is not valid base64: {}", e))?;
+    <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| {
+        format!(
+            "Stored tokens AES key has wrong length ({} bytes, expected 32)",
+            bytes.len()
+        )
+    })
+}
+
+/// Read the tokens.json AES-256-GCM key from the OS keychain.
+///
+/// The key is stored base64-encoded under
+/// `(KEYRING_SERVICE, TOKENS_AES_KEY_USER)`.
+///
+/// Returns an error when the entry is missing — the caller
+/// (`token_io::read_tokens_at`) treats that as a re-auth signal: the
+/// ciphertext on disk cannot be decrypted without this key, so the
+/// safest recovery is to discard the tokens and re-onboard (same path
+/// as a corrupt file). This is a pure read: it never creates the key.
+pub fn get_tokens_aes_key() -> Result<[u8; 32], String> {
+    let entry = map_keychain_err(keyring::Entry::new(KEYRING_SERVICE, TOKENS_AES_KEY_USER))?;
+    let b64 = entry.get_password().map_err(|e| match e {
+        keyring::Error::NoEntry => {
+            "Tokens encryption key not found in OS keychain; cannot decrypt tokens.json (re-authentication required).".to_string()
+        }
+        other => keychain_error_help(&other).unwrap_or_else(|| {
+            format!("Failed to read tokens encryption key from keychain: {}", other)
+        }),
+    })?;
+    decode_tokens_aes_key(&b64)
+}
+
+/// Read the tokens.json AES-256-GCM key, generating and storing a fresh
+/// random 256-bit key on first use.
+///
+/// First-use path: no entry exists in the OS keychain → generate 32
+/// random bytes from the OS CSPRNG, store them base64-encoded under
+/// `(KEYRING_SERVICE, TOKENS_AES_KEY_USER)`, and return them. This is
+/// the entry point used by the token *write* path (and by the
+/// plaintext→ciphertext migration), so the key always exists by the
+/// time ciphertext is written. A keychain that is unavailable or locked
+/// surfaces as an error (with Linux setup help) rather than falling
+/// back to weaker storage — silently degrading to a non-keychain key
+/// would defeat the point of issue #140.
+pub fn get_or_create_tokens_aes_key() -> Result<[u8; 32], String> {
+    let entry = map_keychain_err(keyring::Entry::new(KEYRING_SERVICE, TOKENS_AES_KEY_USER))?;
+    match entry.get_password() {
+        Ok(b64) => decode_tokens_aes_key(&b64),
+        Err(keyring::Error::NoEntry) => {
+            let mut key = [0u8; 32];
+            rand::rngs::OsRng.fill_bytes(&mut key);
+            let b64 = STANDARD.encode(key);
+            map_keychain_err(entry.set_password(&b64))?;
+            log::info!("[KEYCHAIN] Generated + stored tokens.json AES key in OS keychain");
+            Ok(key)
+        }
+        Err(e) => Err(keychain_error_help(&e).unwrap_or_else(|| {
+            format!("Failed to read tokens encryption key from keychain: {}", e)
+        })),
     }
 }

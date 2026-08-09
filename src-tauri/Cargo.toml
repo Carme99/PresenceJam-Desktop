@@ -42,6 +42,10 @@ urlencoding = "2"
 # Cross-platform OS keychain access for secure storage of OAuth secrets
 # (e.g. Spotify client_secret). See issue #9.
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "linux-native"] }
+# AES-256-GCM authenticated encryption for tokens.json at rest; the key is
+# held in the OS keychain (see keychain::get_or_create_tokens_aes_key).
+# See issue #140.
+aes-gcm = "0.11.0"
 # ts-rs generates TypeScript type declarations from Rust structs at
 # `cargo test` time. The `#[ts(export)]` attribute emits a hidden `#[test]`
 # that writes the .ts files; the explicit `#[cfg(test)] ts_rs_export` mod

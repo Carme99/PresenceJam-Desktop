@@ -34,22 +34,38 @@ Expected response time: within 7 days.
 
 | Token Type | Storage Location | Encryption |
 |-----------|----------------|------------|
-| Spotify access/refresh tokens | `<app-config-dir>/PresenceJam/tokens.json` (hand-rolled atomic write via `src-tauri/src/token_io.rs`) | **Plaintext JSON.** No encryption is applied to this file; the app does NOT call the OS keychain or DPAPI for OAuth tokens. See "Plaintext tokens.json" note below for the actual protection model. |
-| Teams access/refresh tokens | `<app-config-dir>/PresenceJam/tokens.json` (same hand-rolled atomic write) | **Plaintext JSON** — same as Spotify above. |
+| Spotify access/refresh tokens | `<app-config-dir>/PresenceJam/tokens.json` (hand-rolled atomic write via `src-tauri/src/token_io.rs`) | **AES-256-GCM ciphertext** (issue #140). The file is `b"PJENC" \| version byte (0x01) \| 12-byte random nonce \| AES-256-GCM ciphertext`; the 256-bit key is generated on first use and held in the OS keychain (Windows Credential Manager, macOS Keychain, Linux Secret Service via the `keyring` crate) under the namespaced slot `tokens_aes_key:com.presencejam.app`. See "Encrypted tokens.json" below. |
+| Teams access/refresh tokens | `<app-config-dir>/PresenceJam/tokens.json` (same hand-rolled atomic write) | **AES-256-GCM ciphertext** — same as Spotify above. |
 | Spotify OAuth pending state (PKCE verifier, state) | **Not persisted to disk.** Lives in `AppState::PendingSpotifyAuth.state` only (in-memory); the deep-link callback resolves it before the user closes the app. If the process is killed mid-OAuth, the user re-starts the OAuth flow and Spotify issues a fresh code. | N/A — in-memory only. |
 
-**Plaintext tokens.json on disk (every released version of PresenceJam
-to date):** OAuth access/refresh tokens in `tokens.json` have been stored
-as plaintext JSON in every released version of this app to date — both
-under the pre-v2.6.4 `tauri-plugin-store` write path AND under the current
-`token_io.rs` hand-rolled atomic-write path introduced by #65. The v2.6.4
-(#65) migration was not a trade-off against encryption; it was a switch
-to fix two unrelated bugs: (1) the previous `tauri-plugin-store` path
-leaked credentials to the webview via the IPC bridge (issue #65), and
-(2) it could corrupt the store JSON on a mid-write crash. The new
-`token_io.rs` writer addresses both — neither pre-#65 nor post-#65 has
-tokens.json ever been encrypted at rest. The OS keychain is reserved
-**only** for the Spotify `client_secret` (see "Configuration" below).
+**Encrypted tokens.json on disk (v3.0 — issue #140):** OAuth access/refresh
+tokens in `tokens.json` are AES-256-GCM ciphertext. The on-disk format is
+`b"PJENC" || format-version byte (0x01) || 12-byte random nonce ||
+AES-256-GCM ciphertext` (see `src-tauri/src/token_io.rs::encrypt_tokens`
+and `decrypt_tokens`). The version byte lets a future cipher change
+co-exist with the current format: unknown versions are rejected, never
+mis-decrypted. The encryption key is a random 256-bit value generated on
+first use (get-or-create) and stored in the OS keychain under the
+bundle-identifier-namespaced slot `tokens_aes_key:com.presencejam.app`
+(`src-tauri/src/keychain.rs::get_or_create_tokens_aes_key`). The GCM tag
+authenticates the file, so bit-flips / tampering fail decryption instead
+of yielding garbage tokens. No plaintext JSON ever reaches the disk: the
+write path encrypts before creating the temp sidecar, and the temp file +
+rename source hold ciphertext only (`src-tauri/src/token_io.rs::write_tokens_atomic`).
+
+**Plaintext → ciphertext migration (v3.0 — issue #140):** every released
+version through v2.10.0 stored `tokens.json` as plaintext JSON — under the
+pre-v2.6.4 `tauri-plugin-store` write path and the post-#65 `token_io.rs`
+hand-rolled atomic-write path (the #65 migration fixed two unrelated bugs
+— a webview IPC credential leak and mid-write store corruption — it did
+not add encryption). On first read after upgrading,
+`src-tauri/src/token_io.rs::read_tokens_at` detects a file starting with
+`{` (legacy plaintext JSON), parses it, and immediately re-writes it
+encrypted through the atomic write path, which replaces the plaintext file
+and pre-clears any stale plaintext temp sidecar. A file that is neither
+`PJENC`-encrypted nor plaintext JSON is rejected. A missing keychain key,
+corrupt ciphertext, or GCM tag mismatch surfaces as `Err` and drives
+re-authentication — the same recovery as the pre-v3.0 corrupt-file path.
 
 **File-mode history.** Prior to v2.8.x, PresenceJam did not explicitly
 set a mode on `tokens.json` (or `config.json`); under the typical umask
@@ -65,43 +81,53 @@ below for source-of-truth citations, and "Limitations → Token Storage"
 for the residual exposure.
 
 Full-disk encryption (BitLocker / FileVault / LUKS) remains the
-strongest defense against offline-disk reads; revocation at the provider
-(Spotify / Microsoft account settings) is the only way to invalidate
-the credentials once a local-user compromise is suspected. See
-`ARCHITECTURE.md` "Storage" section for the implementation reference.
+strongest defense against offline-disk reads of `config.json` and of the
+OS keychain itself (which holds the tokens.json decryption key and the
+Spotify `client_secret`); revocation at the provider (Spotify / Microsoft
+account settings) is the only way to invalidate the credentials once a
+local-user compromise is suspected. See `ARCHITECTURE.md` "Storage"
+section for the implementation reference.
 
 #### File permissions (v2.8.x — issue #135 path A)
 
 `tokens.json` and `config.json` are explicitly set to mode **0600** (owner
 read/write only) on Unix-like systems and inherit the user-only default
-ACL on Windows. This is **file-mode tightening, not encryption** — the
-file contents are still plaintext JSON; this change only narrows which
-local-user processes can read them. Claims tied to the source:
+ACL on Windows. For `tokens.json` this is defense-in-depth **on top of**
+the AES-256-GCM encryption (issue #140): the ciphertext is never
+world-readable at any point of the write. For `config.json` (still
+plaintext JSON — it holds no credentials, only settings) the mode is the
+only file-level protection. Claims tied to the source:
 
 | Claim | Source |
 |---|---|
-| `tokens.json` temp sidecar is created with mode 0600 atomically (no world-readable window) | `src-tauri/src/token_io.rs::write_tokens_atomic` — `OpenOptions::new().create_new(true).mode(0o600)` (Unix); `fs::File::create` (Windows, inherits user-only ACL). |
+| `tokens.json` temp sidecar is created with mode 0600 atomically and holds only AES-256-GCM ciphertext (no plaintext window) | `src-tauri/src/token_io.rs::write_tokens_atomic` — `OpenOptions::new().create_new(true).mode(0o600)` (Unix); `fs::File::create` (Windows, inherits user-only ACL); payload encrypted by `encrypt_tokens` before the temp file is opened. |
 | `tokens.json` live file inherits 0600 from the rename source | POSIX `rename(2)` preserves the source mode; the source is the 0600 tmp. |
 | `config.json` temp sidecar is created with mode 0600 atomically | `src-tauri/src/config.rs::atomic_write_json` — `OpenOptions::new().create_new(true).mode(0o600)` (Unix); `fs::File::create` (Windows). |
 | Pre-existing loose files are tightened on read (upgrade path) | `src-tauri/src/token_io.rs::read_tokens_at` and `src-tauri/src/config.rs::load_config` — `fs::set_permissions(0o600)` after `fs::metadata` shows a non-0600 mode. Idempotent. |
 | Stale `.tmp` sidecar from a prior crash is cleared before create_new (avoids `AlreadyExists` permanent save failure) | `src-tauri/src/token_io.rs::write_tokens_atomic` and `src-tauri/src/config.rs::atomic_write_json` — `fs::remove_file(&temp_path)` with `NotFound` tolerated. |
-| Windows does NOT need an explicit DACL change | Windows default ACL on a new file in a user-owned directory inherits user-only access (issue #135 acceptance; verified by reading the existing `Plaintext tokens.json` paragraph above). |
+| Windows does NOT need an explicit DACL change | Windows default ACL on a new file in a user-owned directory inherits user-only access (issue #135 acceptance; verified by reading the existing `Encrypted tokens.json` paragraph above). |
 
-**What this is NOT.** This does not encrypt `tokens.json` or `config.json`.
-The file contents remain plaintext JSON on disk; only the OS-level file
-mode (Unix) or default ACL (Windows) is narrowed. Full-disk encryption
-(BitLocker / FileVault / LUKS) remains the strongest defense against
-offline-disk reads; revocation at the provider (Spotify / Microsoft
-account settings) remains the only way to invalidate the credentials
-once a local-user compromise is suspected.
+**What this is NOT.** The file-mode tightening does not encrypt
+`config.json` — it remains plaintext JSON on disk; only the OS-level file
+mode (Unix) or default ACL (Windows) is narrowed for it. `tokens.json` is
+*additionally* encrypted (AES-256-GCM, issue #140 — see "Encrypted
+tokens.json" above). Full-disk encryption (BitLocker / FileVault / LUKS)
+remains the strongest defense against offline-disk reads of `config.json`
+and of the OS keychain itself; revocation at the provider (Spotify /
+Microsoft account settings) remains the only way to invalidate the
+credentials once a local-user compromise is suspected.
 
 **Decision recorded on issue #135:** Path A (file-mode tightening) was
 chosen over Path B (full encryption with keychain-stored key) for v2.8.x
 because it is a small, low-risk, cross-platform change that closes the
 umask-022 → 0644 exposure surface without introducing a new crypto
 dependency or breaking the atomic-write guarantees of `token_io.rs` and
-`config.rs`. Path B (real encryption) is deferred to a future release
-that warrants its own design + cross-platform test pass.
+`config.rs`. Path B landed in v3.0 for `tokens.json` (issue #140:
+AES-256-GCM with a keychain-stored key — see "Encrypted tokens.json"
+above). `config.json` intentionally remains plaintext JSON: it holds no
+credentials (the Spotify `client_secret` lives in the keychain), only
+non-secret settings, and encrypting it would add key-management burden
+without closing a credential-exposure path.
 
 ### Configuration
 
@@ -128,33 +154,36 @@ $XDG_CONFIG_HOME/PresenceJam/tokens.json   (Linux)
 - Polling configuration
 - Logging preferences
 
-`tokens.json` contains (plaintext — see "Plaintext tokens.json" note above):
+`tokens.json` contains (AES-256-GCM ciphertext on disk — see "Encrypted
+tokens.json" above; the plaintext payload is):
 
 - Spotify access token + refresh token (`SpotifyTokens` JSON object)
 - Teams access token + refresh token (`TeamsTokens` JSON object)
 
 **⚠️ The `config.json` file (now) contains no secrets after a successful
 v2.6.0+ migration**. As of v2.8.x (issue #135 path A), both `config.json`
-and `tokens.json` are explicitly set to mode 0600 on Unix-like systems,
-narrowing the plaintext-exposure surface to the owning OS user (on
-Windows, the default ACL is already user-only). This is
-**file-mode tightening, not encryption** — the file contents remain
-plaintext JSON; only the OS-level mode is narrowed. Recommendations,
-ordered by effort:
+and `tokens.json` are explicitly set to mode 0600 on Unix-like systems
+(on Windows, the default ACL is already user-only). `config.json` remains
+plaintext JSON (file-mode narrowing only); `tokens.json` is *additionally*
+encrypted at rest with AES-256-GCM since v3.0 (issue #140 — see
+"Encrypted tokens.json" above). Recommendations, ordered by effort:
 
 1. Enable full-disk encryption on the OS (BitLocker on Windows, FileVault
    on macOS, LUKS on Linux). This is the strongest defense against
-   physical-disk theft and the only defense that protects the plaintext
-   `tokens.json` against an offline read of the disk.
+   physical-disk theft and protects the OS keychain — which holds the
+   tokens.json decryption key and the Spotify `client_secret` — against an
+   offline read of the disk.
 2. Do not run PresenceJam on a machine whose user account is shared with
    untrusted parties; on Unix-like systems, any other process running
-   under the same user can read `tokens.json`.
+   under the same user can read `config.json` and can request the
+   tokens.json decryption key from the OS keychain (the keychain is
+   unlocked while the user is logged into the graphical session).
 3. **Revoke your Spotify and Teams app authorizations** from those
    providers' settings if you suspect the local machine is compromised.
-   This is the only way to invalidate the credentials stored in
-   `tokens.json` from the provider side; revocation is faster than
-   waiting for the tokens to expire (Spotify refresh tokens are valid up to
-   6 months — on `invalid_grant` the app discards them and triggers re-auth).
+   This is the only way to invalidate the credentials from the provider
+   side; revocation is faster than waiting for the tokens to expire
+   (Spotify refresh tokens are valid up to 6 months — on `invalid_grant`
+   the app discards them and triggers re-auth).
 
 > **Status:** As of v2.6.0, the Spotify `client_secret` is stored in the
 > **OS keychain** (macOS Keychain, Windows DPAPI-backed credential store,
@@ -162,11 +191,21 @@ ordered by effort:
 > `config.json`. This supersedes the plaintext-storage approach used
 > through v2.5.0 and earlier; on first run after upgrading, users will be
 > prompted to re-authenticate Spotify so the secret can be migrated.
-> `tokens.json` (access/refresh tokens) has been stored **as plaintext JSON
-> on disk in every released version** (see the note above) — the v2.6.4
-> (#65) migration from `tauri-plugin-store` to `token_io.rs` was NOT
-> introducing encryption; it was fixing two pre-existing bugs (webview
-> IPC leak + crash-corruption) without adding encryption at any point.
+> `tokens.json` (access/refresh tokens) was stored **as plaintext JSON
+> on disk in every released version through v2.10.0** (see the note
+> above) — the v2.6.4 (#65) migration from `tauri-plugin-store` to
+> `token_io.rs` was NOT introducing encryption; it was fixing two
+> pre-existing bugs (webview IPC leak + crash-corruption) without adding
+> encryption at any point.
+
+> **Status:** As of **v3.0 (issue #140)**, `tokens.json` is **AES-256-GCM
+> ciphertext** at rest. The 256-bit key is generated on first use and
+> stored in the OS keychain under the namespaced slot
+> `tokens_aes_key:com.presencejam.app`. Existing plaintext `tokens.json`
+> files (≤ v2.10.0) are migrated to ciphertext on first read (parsed,
+> then re-written encrypted via the atomic write path). A missing key or
+> corrupt/tampered ciphertext causes the app to discard the tokens and
+> re-authenticate rather than silently fall back to plaintext.
 
 > **Status:** As of v2.8.0, the keychain user field is **namespaced by the
 > Tauri bundle identifier** (`spotify_client_secret:com.presencejam.app`)
@@ -243,11 +282,36 @@ Review these links to understand how your data is handled by each service.
 
 ### Token Storage
 
-Currently, OAuth tokens (`tokens.json`) are **plaintext JSON on disk** in `<app-config-dir>/PresenceJam/tokens.json` (written atomically by `src-tauri/src/token_io.rs`). The file is not encrypted by the app — protection is whatever the OS grants the file at creation time (typically umask 022 → 0644 on Unix-like systems; user-only default ACL on Windows). The app has access to tokens as soon as you’re logged into your OS session — there is no additional password or biometric unlock layer. See "Plaintext tokens.json" note above.
+Since v3.0 (issue #140), OAuth tokens (`tokens.json`) are **AES-256-GCM
+ciphertext on disk** in `<app-config-dir>/PresenceJam/tokens.json`
+(encrypted and written atomically by
+`src-tauri/src/token_io.rs::write_tokens_atomic`; decrypted by
+`read_tokens_at`). The 256-bit key is generated on first use and stored in
+the OS keychain (Windows Credential Manager, macOS Keychain, Linux Secret
+Service) under the namespaced slot `tokens_aes_key:com.presencejam.app`
+(`src-tauri/src/keychain.rs::get_or_create_tokens_aes_key`). Legacy
+plaintext files (≤ v2.10.0) are migrated on first read. See "Encrypted
+tokens.json" under "Data Storage" for the format and source citations.
 
-**Mitigation (file-mode tightening, v2.8.x — issue #135 path A):** `tokens.json` and `config.json` are now explicitly set to mode 0600 on Unix-like systems (and inherit the user-only default ACL on Windows) at write time, and any pre-existing loose file is tightened on first read. This narrows the plaintext-exposure surface to the owning OS user; it is not encryption. See "File permissions (v2.8.x)" under "Data Storage" for source citations.
+**Residual exposure:** the encryption key is protected by the OS keychain,
+not by an app-level password — any process running in the same logged-in
+OS user session can request the key from the unlocked keychain (on Linux,
+the Secret Service is unlocked at graphical login). Tokens are also in
+plaintext in the app's memory while it runs. `config.json` remains
+plaintext JSON (mode 0600; it holds no credentials — the Spotify
+`client_secret` lives in the keychain).
 
-**Mitigation (broader):** Use a strong Windows login password/PIN and enable Windows Hello or BitLocker where possible.
+**Mitigation (file-mode tightening, v2.8.x — issue #135 path A):**
+`tokens.json` and `config.json` are explicitly set to mode 0600 on
+Unix-like systems (and inherit the user-only default ACL on Windows) at
+write time, and any pre-existing loose file is tightened on first read.
+For `tokens.json` this is defense-in-depth on top of the AES-256-GCM
+encryption (the ciphertext is never world-readable); for `config.json` it
+is the only file-level protection. See "File permissions (v2.8.x)" under
+"Data Storage" for source citations.
+
+**Mitigation (broader):** Use a strong Windows login password/PIN and
+enable Windows Hello or BitLocker where possible.
 
 ### No Certificate Pinning
 

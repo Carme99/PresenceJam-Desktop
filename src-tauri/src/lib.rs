@@ -649,8 +649,10 @@ pub fn run() {
 
             // Load persisted tokens (Spotify + Teams) into AppState. We bypass
             // `tauri-plugin-store` for the tokens file and read it directly
-            // as JSON from `<app-config-dir>/PresenceJam/tokens.json`. See
-            // issue #65.
+            // from `<app-config-dir>/PresenceJam/tokens.json` — since v3.0
+            // (issue #140) the file is AES-256-GCM ciphertext, decrypted here;
+            // a legacy plaintext file (≤ v2.10.0) is migrated on read. See
+            // issues #65 and #140.
             //
             // The pending_*_auth blobs (PKCE verifier, device code) are no
             // longer persisted to disk; the user re-starts the auth flow
