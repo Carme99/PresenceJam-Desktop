@@ -127,12 +127,17 @@
     devLog('[ONBOARDING] handleManualUrlPaste: spotifyManualUrl.length=', spotifyManualUrl.length);
 
     try {
-      const code = extractCodeFromUrl(spotifyManualUrl);
-      devLog('[ONBOARDING] handleManualUrlPaste: extracted code:', code ? 'present' : 'null');
+      const extracted = extractCodeFromUrl(spotifyManualUrl);
+      devLog('[ONBOARDING] handleManualUrlPaste: extracted code:', extracted ? 'present' : 'null');
 
-      if (code) {
+      if (extracted) {
         devLog('[ONBOARDING] handleManualUrlPaste: calling invoke complete_spotify_auth_manual');
-        const tokens = await invoke<SpotifyTokens>('complete_spotify_auth_manual', { code });
+        // Pass the OAuth `state` through so the backend can validate it
+        // against the stored value (CSRF check) — see issue #162.
+        const tokens = await invoke<SpotifyTokens>('complete_spotify_auth_manual', {
+          code: extracted.code,
+          oauthState: extracted.state
+        });
         devLog('[ONBOARDING] handleManualUrlPaste: invoke SUCCESS, tokens=', tokens ? 'present' : 'null');
 
         if (tokens) {
@@ -149,7 +154,7 @@
     devLog('[ONBOARDING] handleManualUrlPaste: EXIT');
   }
 
-  function extractCodeFromUrl(url: string): string | null {
+  function extractCodeFromUrl(url: string): { code: string; state: string } | null {
     devLog('[ONBOARDING] extractCodeFromUrl: ENTRY - url.length=', url.length);
     try {
       const parsed = new URL(url);
@@ -159,7 +164,10 @@
         devLog('[ONBOARDING] extractCodeFromUrl: no code in URL params');
         return null;
       }
-      return code;
+      // The `state` param accompanies `code` in the redirect URL. A
+      // missing state still passes (empty string) — the backend rejects
+      // it, mirroring the deep-link path's CSRF check. See issue #162.
+      return { code, state: parsed.searchParams.get('state') ?? '' };
     } catch (e) {
       console.error('[ONBOARDING] extractCodeFromUrl: URL parse failed:', e);
       return null;
