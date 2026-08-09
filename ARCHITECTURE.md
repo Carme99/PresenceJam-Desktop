@@ -280,10 +280,13 @@ Two complementary rate-limits:
 - **Smart sleep:** when a track is playing, sleep until `track.duration_ms - track.progress_ms - 5000ms`,
   clamped to the configured `min/max_interval_seconds`. Polling resumes
   immediately when the track changes. ~240 seconds of silence per 4-min track.
-- **Pause-aware backoff:** when Spotify returns `Ok(None)` (paused or
-  idle) repeatedly, the loop doubles its interval up to a 5-min cap
-  (30 → 60 → 120 → 300 s). Resets the moment a track is observed again.
-  Six hours of paused Spotify drops from ~720 calls/day to ~25.
+- **Pause-aware backoff:** after consecutive non-playing responses
+  (`Ok(None)`, or a track with `is_playing == false`) the loop doubles its
+  interval up to a 5-min cap (30 → 60 → 120 → 300 s). It resets only once
+  a *playing* track is observed again. At the 30 s default cadence a
+  fully-polled day is ~2880 calls; paused, the loop settles at 1 call per
+  300 s — ~288-291 calls per 24 h (steady state 288), ~72-75 per 6 h: a
+  ~10× reduction, not ~28×.
 
 `is_syncing` ownership: `commands/sync::start_syncing` is the **sole claimer**
 (v2.6.3, fixes issue #60 — `compare_exchange(false, true, …)` is here).
