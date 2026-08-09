@@ -557,7 +557,7 @@ pub(crate) fn process_track(
                         format!("Failed to update status: {}", e),
                         ErrorSeverity::Error,
                     );
-                    let e_str = e.to_lowercase();
+                    let e_str = e.to_string().to_lowercase();
                     if e_str.contains("unauthorized")
                         || e_str.contains("forbidden")
                         || e_str.contains("401")
@@ -573,7 +573,7 @@ pub(crate) fn process_track(
             .map(|c| c.teams.clear_on_pause)
             .unwrap_or(true)
         {
-            match clear_teams_status_message(&teams_tok.access_token, "\u{1F3B5} Paused") {
+            match clear_teams_status_message(&teams_tok.access_token, "\u{1F3B5} Paused", None) {
                 Ok(_) => {
                     *last_teams_update = Some(Instant::now());
                     let _ = app.emit(
@@ -620,6 +620,7 @@ pub(crate) fn handle_no_track(
             match clear_teams_status_message(
                 &teams_tok.access_token,
                 "\u{1F3B5} Nothing playing on Spotify",
+                None,
             ) {
                 Ok(_) => {
                     let _ = app.emit(

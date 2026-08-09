@@ -27,17 +27,46 @@ fn truncate_for_log(body: &str) -> String {
 }
 
 /// Error type for Teams API operations.
-///区分 expired/unauthorized tokens vs transient errors.
+/// Distinguishes permanent auth failures (expired/invalid token, revoked
+/// grant, insufficient permission/license) from transient errors (rate
+/// limiting, server errors, network failures).
 #[derive(Debug, Clone)]
 pub enum TeamsApiError {
-    /// Token is expired or invalid (401/403) — requires re-auth
+    /// Token is expired or invalid (401) — requires re-auth
     ExpiredToken(u16),
-    /// Rate limited (429) — transient, retry after backoff
-    RateLimited,
+    /// Access denied (403) — permission/license problem; re-auth won't
+    /// help. Carries the response body so `insufficient_claims` (and
+    /// other Graph error details) are detectable.
+    Forbidden(u16, String),
+    /// Rate limited (429) — transient, retry after the parsed
+    /// `Retry-After` seconds (None when the header is absent or
+    /// unparseable → fall back to exponential backoff).
+    RateLimited(Option<u64>),
+    /// Refresh token is missing/invalid/revoked (token-endpoint 400
+    /// `invalid_grant`) — permanent, re-auth required.
+    InvalidGrant,
     /// Network error or other transient failure (5xx, send failure)
     Transient(String),
     /// Other non-retryable error
     Other(u16, String),
+}
+
+impl std::fmt::Display for TeamsApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TeamsApiError::ExpiredToken(status) => {
+                write!(f, "Access token expired or invalid (HTTP {})", status)
+            }
+            TeamsApiError::Forbidden(_status, body) => write!(f, "{}", body),
+            TeamsApiError::RateLimited(retry_after) => match retry_after {
+                Some(secs) => write!(f, "Rate limited (retry after {}s)", secs),
+                None => write!(f, "Rate limited"),
+            },
+            TeamsApiError::InvalidGrant => write!(f, "Refresh token is invalid or revoked"),
+            TeamsApiError::Transient(msg) => write!(f, "{}", msg),
+            TeamsApiError::Other(_status, body) => write!(f, "{}", body),
+        }
+    }
 }
 
 /// Creates a reqwest blocking client with standard config (user agent + 10s timeout).
@@ -103,7 +132,6 @@ struct TokenResponse {
 struct TokenErrorResponse {
     error: String,
     error_description: Option<String>,
-    interval: Option<u64>,
 }
 
 pub fn start_teams_auth_device_code() -> Result<DeviceCodeResponse, String> {
@@ -114,7 +142,10 @@ pub fn start_teams_auth_device_code() -> Result<DeviceCodeResponse, String> {
 
     let params = [
         ("client_id", MICROSOFT_GRAPH_CLIENT_ID),
-        ("scope", "Presence.ReadWrite User.Read"),
+        // `offline_access` is required for Microsoft to issue a
+        // refresh_token (device-code flow docs). `User.Read` is dropped:
+        // no Graph call in the app uses it (least privilege, see #151).
+        ("scope", "Presence.ReadWrite offline_access"),
     ];
     log::info!("teams::start_teams_auth_device_code: calling devicecode endpoint");
 
@@ -188,10 +219,38 @@ pub fn is_token_expired(tokens: &TeamsTokens) -> bool {
     Utc::now() >= tokens.expires_at - chrono::Duration::seconds(60)
 }
 
-pub fn poll_teams_auth(device_code: &str) -> Result<TeamsTokens, String> {
+/// Computes the next polling wait in seconds per RFC 8628 §3.5.
+///
+/// A `slow_down` error carries no interval of its own; the client MUST
+/// increase its polling interval by 5 seconds for this and all
+/// subsequent requests. Any other error keeps the current interval.
+fn next_poll_wait(current: u64, err: &str) -> u64 {
+    if err == "slow_down" {
+        current + 5
+    } else {
+        current
+    }
+}
+
+/// Parses a `Retry-After` header (plain seconds, per Graph throttling
+/// docs) into an optional delay. Returns None when the header is absent
+/// or unparseable — callers then fall back to exponential backoff.
+fn parse_retry_after(response: &reqwest::blocking::Response) -> Option<u64> {
+    response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+}
+
+pub fn poll_teams_auth(device_code: &str, interval: u64) -> Result<TeamsTokens, String> {
     let client = build_teams_client()?;
     let start_time = std::time::Instant::now();
     let timeout = StdDuration::from_secs(900);
+
+    // RFC 8628 §3.2/§3.5: wait at least the server-provided `interval`
+    // between polls, or 5s when none was provided.
+    let mut wait = if interval == 0 { 5 } else { interval };
 
     loop {
         if start_time.elapsed() > timeout {
@@ -253,17 +312,20 @@ pub fn poll_teams_auth(device_code: &str) -> Result<TeamsTokens, String> {
 
         match error_resp.error.as_str() {
             "authorization_pending" => {
-                log::debug!("Authorization pending, waiting for user to complete login...");
-                thread::sleep(StdDuration::from_secs(5));
+                log::debug!("Authorization pending, waiting {} seconds", wait);
+                thread::sleep(StdDuration::from_secs(wait));
                 continue;
             }
             "authorization_declined" => {
                 return Err("Authorization was declined by the user".to_string());
             }
             "slow_down" => {
-                let interval = error_resp.interval.unwrap_or(5);
-                log::warn!("Server requested slow down, waiting {} seconds", interval);
-                thread::sleep(StdDuration::from_secs(interval));
+                // RFC 8628 §3.5: slow_down carries no interval; the
+                // client must increase its polling interval by 5s for
+                // this and all subsequent requests.
+                wait = next_poll_wait(wait, error_resp.error.as_str());
+                log::warn!("Server requested slow down, waiting {} seconds", wait);
+                thread::sleep(StdDuration::from_secs(wait));
                 continue;
             }
             "expired_token" => {
@@ -283,81 +345,13 @@ pub fn poll_teams_auth(device_code: &str) -> Result<TeamsTokens, String> {
     }
 }
 
-pub fn complete_teams_auth(
-    code: &str,
-    code_verifier: &str,
-    client_id: &str,
-    redirect_uri: &str,
-) -> Result<TeamsTokens, String> {
-    let client = build_teams_client()?;
-
-    let params = [
-        ("grant_type", "authorization_code"),
-        ("code", code),
-        ("redirect_uri", redirect_uri),
-        ("client_id", client_id),
-        ("code_verifier", code_verifier),
-    ];
-
-    let response = client
-        .post("https://login.microsoftonline.com/common/oauth2/v2.0/token")
-        .header("Accept", "application/json")
-        .form(&params)
-        .send()
-        .map_err(|e| format!("Failed to send token request: {}", e))?;
-
-    let status = response.status();
-    let raw_body = response
-        .text()
-        .map_err(|e| format!("Failed to read response body: {}", e))?;
-
-    if !status.is_success() {
-        log::error!(
-            "complete_teams_auth: token request failed with status {}: {}",
-            status,
-            truncate_for_log(&raw_body)
-        );
-        return Err(format!(
-            "Token request failed: {} - {}",
-            status,
-            truncate_for_log(&raw_body)
-        ));
-    }
-
-    #[derive(Deserialize)]
-    struct TokenResponse {
-        access_token: String,
-        #[serde(default)]
-        refresh_token: Option<String>,
-        expires_in: u64,
-        #[allow(dead_code)]
-        token_type: String,
-    }
-
-    let token_resp: TokenResponse = serde_json::from_str(&raw_body).map_err(|e| {
-        format!(
-            "Failed to parse token response: {} (body was: {})",
-            e,
-            truncate_for_log(&raw_body)
-        )
-    })?;
-
-    let expires_at = chrono::Utc::now() + chrono::Duration::seconds(token_resp.expires_in as i64);
-
-    Ok(TeamsTokens {
-        access_token: token_resp.access_token,
-        refresh_token: token_resp.refresh_token,
-        expires_at,
-    })
-}
-
-pub fn refresh_teams_token(tokens: &TeamsTokens) -> Result<TeamsTokens, String> {
+pub fn refresh_teams_token(tokens: &TeamsTokens) -> Result<TeamsTokens, TeamsApiError> {
     let refresh_token = tokens
         .refresh_token
         .as_ref()
-        .ok_or("No refresh token available. Please sign in again.")?;
+        .ok_or(TeamsApiError::InvalidGrant)?;
 
-    let client = build_teams_client()?;
+    let client = build_teams_client().map_err(TeamsApiError::Transient)?;
 
     let params = [
         ("grant_type", "refresh_token"),
@@ -370,12 +364,16 @@ pub fn refresh_teams_token(tokens: &TeamsTokens) -> Result<TeamsTokens, String> 
         .header("Accept", "application/json")
         .form(&params)
         .send()
-        .map_err(|e| format!("Failed to send refresh token request: {}", e))?;
+        .map_err(|e| {
+            TeamsApiError::Transient(format!("Failed to send refresh token request: {}", e))
+        })?;
 
     let status = response.status();
+    let status_code = status.as_u16();
+    let retry_after = parse_retry_after(&response);
     let raw_body = response
         .text()
-        .map_err(|e| format!("Failed to read response body: {}", e))?;
+        .map_err(|e| TeamsApiError::Transient(format!("Failed to read response body: {}", e)))?;
 
     if !status.is_success() {
         log::error!(
@@ -383,26 +381,51 @@ pub fn refresh_teams_token(tokens: &TeamsTokens) -> Result<TeamsTokens, String> 
             status,
             truncate_for_log(&raw_body)
         );
-        let error_resp: TokenErrorResponse = serde_json::from_str(&raw_body).map_err(|e| {
-            format!(
-                "Failed to parse error response: {} (body was: {})",
-                e,
+        if status_code == 400 {
+            // invalid_grant means the refresh token itself is dead —
+            // permanent, re-auth required. Any other 400 body is an
+            // "Other" non-retryable error.
+            let error_resp: TokenErrorResponse = serde_json::from_str(&raw_body).map_err(|e| {
+                TeamsApiError::Other(
+                    status_code,
+                    format!(
+                        "Failed to parse error response: {} (body was: {})",
+                        e,
+                        truncate_for_log(&raw_body)
+                    ),
+                )
+            })?;
+            if error_resp.error == "invalid_grant" {
+                return Err(TeamsApiError::InvalidGrant);
+            }
+            return Err(TeamsApiError::Other(
+                status_code,
+                format!(
+                    "{} - {}",
+                    error_resp.error,
+                    error_resp.error_description.unwrap_or_default()
+                ),
+            ));
+        }
+        return Err(match status_code {
+            429 => TeamsApiError::RateLimited(retry_after),
+            500..=599 => TeamsApiError::Transient(format!(
+                "server error {}: {}",
+                status_code,
                 truncate_for_log(&raw_body)
-            )
-        })?;
-        return Err(format!(
-            "Failed to refresh token: {} - {} (raw body: {})",
-            error_resp.error,
-            error_resp.error_description.unwrap_or_default(),
-            truncate_for_log(&raw_body)
-        ));
+            )),
+            _ => TeamsApiError::Other(status_code, truncate_for_log(&raw_body)),
+        });
     }
 
     let token_resp: TokenResponse = serde_json::from_str(&raw_body).map_err(|e| {
-        format!(
-            "Failed to parse token response: {} (body was: {})",
-            e,
-            truncate_for_log(&raw_body)
+        TeamsApiError::Other(
+            200,
+            format!(
+                "Failed to parse token response: {} (body was: {})",
+                e,
+                truncate_for_log(&raw_body)
+            ),
         )
     })?;
 
@@ -412,7 +435,12 @@ pub fn refresh_teams_token(tokens: &TeamsTokens) -> Result<TeamsTokens, String> 
 
     Ok(TeamsTokens {
         access_token: token_resp.access_token,
-        refresh_token: token_resp.refresh_token,
+        // MS may omit the refresh token on a refresh response; keep the
+        // existing one rather than silently dropping refresh capability.
+        // Mirrors spotify.rs:142-144. See issue #151.
+        refresh_token: token_resp
+            .refresh_token
+            .or_else(|| tokens.refresh_token.clone()),
         expires_at,
     })
 }
@@ -445,13 +473,55 @@ struct ExpiryDateTime {
     time_zone: String,
 }
 
+/// POSTs a status message body to the Graph setStatusMessage endpoint and
+/// maps the response to a typed error. Shared by the set and clear paths so
+/// both get identical status-code discrimination (401 vs 403 vs 429 vs 5xx)
+/// and `Retry-After` parsing. See issues #153/#154.
+fn post_status_message(
+    access_token: &str,
+    body: &StatusMessageRequest,
+    action: &str,
+) -> Result<(), TeamsApiError> {
+    let client = build_teams_client().map_err(TeamsApiError::Transient)?;
+
+    let response = client
+        .post("https://graph.microsoft.com/v1.0/me/presence/setStatusMessage")
+        .header("Authorization", format!("Bearer {}", access_token))
+        .header("Content-Type", "application/json")
+        .json(body)
+        .send()
+        .map_err(|e| {
+            TeamsApiError::Transient(format!("Failed to send status message request: {}", e))
+        })?;
+
+    let status = response.status();
+    let status_code = status.as_u16();
+    let retry_after = parse_retry_after(&response);
+    let body_text = response
+        .text()
+        .unwrap_or_else(|_| "Unknown error".to_string());
+
+    if !status.is_success() {
+        log::error!("Failed to {} Teams status message: {} - {}", action, status, body_text);
+        return Err(match status_code {
+            401 => TeamsApiError::ExpiredToken(status_code),
+            403 => TeamsApiError::Forbidden(status_code, body_text),
+            429 => TeamsApiError::RateLimited(retry_after),
+            500..=599 => {
+                TeamsApiError::Transient(format!("server error {}: {}", status_code, body_text))
+            }
+            _ => TeamsApiError::Other(status_code, body_text),
+        });
+    }
+
+    Ok(())
+}
+
 pub fn set_teams_status_message(
     access_token: &str,
     message: &str,
     expiry_datetime: Option<&str>,
-) -> Result<(), String> {
-    let client = build_teams_client()?;
-
+) -> Result<(), TeamsApiError> {
     let expiry = expiry_datetime.map(|dt| ExpiryDateTime {
         date_time: dt.to_string(),
         time_zone: "UTC".to_string(),
@@ -467,36 +537,25 @@ pub fn set_teams_status_message(
         },
     };
 
-    let response = client
-        .post("https://graph.microsoft.com/v1.0/me/presence/setStatusMessage")
-        .header("Authorization", format!("Bearer {}", access_token))
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .map_err(|e| format!("Failed to send status message request: {}", e))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body_text = response
-            .text()
-            .unwrap_or_else(|_| "Unknown error".to_string());
-        log::error!(
-            "Failed to set Teams status message: {} - {}",
-            status,
-            body_text
-        );
-        return Err(format!(
-            "Failed to set status message: {} - {}",
-            status, body_text
-        ));
-    }
+    post_status_message(access_token, &body, "set")?;
 
     log::info!("Successfully set Teams status message: {}", message);
     Ok(())
 }
 
-pub fn clear_teams_status_message(access_token: &str, placeholder: &str) -> Result<(), String> {
-    let client = build_teams_client()?;
+pub fn clear_teams_status_message(
+    access_token: &str,
+    placeholder: &str,
+    expiry_datetime: Option<&str>,
+) -> Result<(), TeamsApiError> {
+    // Graph has no "clear status message" action; the clear path posts a
+    // short-lived placeholder whose expiryDateTime removes it. Without an
+    // expiry the placeholder never expires (presenceStatusMessage docs).
+    // See issue #155.
+    let expiry = expiry_datetime.map(|dt| ExpiryDateTime {
+        date_time: dt.to_string(),
+        time_zone: "UTC".to_string(),
+    });
 
     let body = StatusMessageRequest {
         status_message: StatusMessageContent {
@@ -504,33 +563,11 @@ pub fn clear_teams_status_message(access_token: &str, placeholder: &str) -> Resu
                 content: placeholder.to_string(),
                 content_type: "text".to_string(),
             },
-            expiry_date_time: None,
+            expiry_date_time: expiry,
         },
     };
 
-    let response = client
-        .post("https://graph.microsoft.com/v1.0/me/presence/setStatusMessage")
-        .header("Authorization", format!("Bearer {}", access_token))
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .map_err(|e| format!("Failed to send clear status message request: {}", e))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body_text = response
-            .text()
-            .unwrap_or_else(|_| "Unknown error".to_string());
-        log::error!(
-            "Failed to clear Teams status message: {} - {}",
-            status,
-            body_text
-        );
-        return Err(format!(
-            "Failed to clear status message: {} - {}",
-            status, body_text
-        ));
-    }
+    post_status_message(access_token, &body, "clear")?;
 
     log::info!("Successfully cleared Teams status message");
     Ok(())
@@ -548,6 +585,7 @@ pub fn clear_teams_status_message(access_token: &str, placeholder: &str) -> Resu
 /// Err(TeamsApiError) on failure. Callers should distinguish:
 ///
 /// - `ExpiredToken` → permanent auth failure, re-auth required
+/// - `Forbidden` → permission/license problem; re-auth won't help (403)
 /// - `RateLimited` / `Transient` → temporary, treat as "valid enough" for onboarding
 /// - `Other` → non-retryable but onboarding may still proceed
 pub fn validate_teams_token(tokens: &TeamsTokens) -> Result<(), TeamsApiError> {
@@ -565,10 +603,18 @@ pub fn validate_teams_token(tokens: &TeamsTokens) -> Result<(), TeamsApiError> {
         .map_err(|e| TeamsApiError::Transient(format!("request failed: {}", e)))?;
 
     let status_code = response.status().as_u16();
+    let retry_after = parse_retry_after(&response);
     match status_code {
         200 => Ok(()),
-        401 | 403 => Err(TeamsApiError::ExpiredToken(status_code)),
-        429 => Err(TeamsApiError::RateLimited),
+        // 401 = token missing/invalid → re-auth required; 403 = no
+        // permission/license (or conditional-access insufficient_claims)
+        // → re-auth won't help, surface as its own error. See #153.
+        401 => Err(TeamsApiError::ExpiredToken(status_code)),
+        403 => {
+            let body = response.text().unwrap_or_default();
+            Err(TeamsApiError::Forbidden(status_code, body))
+        }
+        429 => Err(TeamsApiError::RateLimited(retry_after)),
         500..=599 => {
             let body = response.text().unwrap_or_default();
             Err(TeamsApiError::Transient(format!(
@@ -735,5 +781,27 @@ mod tests {
         );
         assert_eq!(json["interval"].as_u64(), Some(5));
         assert_eq!(json["expires_in"].as_u64(), Some(900));
+    }
+
+    // Issue #152: RFC 8628 §3.5 — `slow_down` carries no interval of its
+    // own; the client must increase its polling interval by 5 seconds for
+    // this and all subsequent requests. The ramp is cumulative.
+    #[test]
+    fn next_poll_wait_ramps_on_slow_down() {
+        let mut wait = 5;
+        wait = super::next_poll_wait(wait, "slow_down");
+        assert_eq!(wait, 10);
+        wait = super::next_poll_wait(wait, "slow_down");
+        assert_eq!(wait, 15);
+        // Non-slow_down errors keep the current (already-ramped) interval.
+        wait = super::next_poll_wait(wait, "authorization_pending");
+        assert_eq!(wait, 15);
+    }
+
+    #[test]
+    fn next_poll_wait_keeps_interval_for_other_errors() {
+        assert_eq!(super::next_poll_wait(7, "authorization_pending"), 7);
+        assert_eq!(super::next_poll_wait(7, "expired_token"), 7);
+        assert_eq!(super::next_poll_wait(0, "bad_verification_code"), 0);
     }
 }

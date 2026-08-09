@@ -19,14 +19,6 @@ pub struct PendingSpotifyAuth {
     pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct PendingTeamsAuth {
-    pub verifier: String,
-    pub client_id: String,
-    pub redirect_uri: String,
-    pub expires_at: chrono::DateTime<chrono::Utc>,
-}
-
 /// 30s result cache for `is_onboarding_complete`.
 ///
 /// `Some((ts, result))` means a successful or failed validation ran at `ts`
@@ -139,19 +131,18 @@ impl Default for Tokens {
     }
 }
 
-/// Pending PKCE/device-code auths, in flight between the OAuth URL
+/// Pending PKCE auth, in flight between the OAuth URL
 /// being opened and the callback landing. Never persisted to disk
-/// (issue #65 / HIGH #3).
+/// (issue #65 / HIGH #3). Teams uses the device-code flow and stores no
+/// pending state (see issue #158).
 pub struct PendingAuths {
     spotify: RwLock<Option<PendingSpotifyAuth>>,
-    teams: RwLock<Option<PendingTeamsAuth>>,
 }
 
 impl PendingAuths {
     pub fn new() -> Self {
         Self {
             spotify: RwLock::new(None),
-            teams: RwLock::new(None),
         }
     }
 
@@ -161,14 +152,6 @@ impl PendingAuths {
 
     pub fn spotify_mut(&self) -> parking_lot::RwLockWriteGuard<'_, Option<PendingSpotifyAuth>> {
         self.spotify.write()
-    }
-
-    pub fn teams(&self) -> parking_lot::RwLockReadGuard<'_, Option<PendingTeamsAuth>> {
-        self.teams.read()
-    }
-
-    pub fn teams_mut(&self) -> parking_lot::RwLockWriteGuard<'_, Option<PendingTeamsAuth>> {
-        self.teams.write()
     }
 }
 
@@ -445,69 +428,6 @@ async fn handle_spotify_callback(
     Ok(())
 }
 
-async fn handle_teams_callback(code: &str, app: &AppHandle) -> Result<(), String> {
-    log::debug!(
-        "[CALLBACK] handle_teams_callback: ENTRY - code.len={}",
-        code.len()
-    );
-
-    let state = app.state::<Arc<AppState>>();
-    log::info!("[CALLBACK] handle_teams_callback: got app state");
-
-    let pending = {
-        let mut guard = state.pending.teams_mut();
-        log::info!("[CALLBACK] handle_teams_callback: taking pending Teams auth from state");
-        guard.take().ok_or_else(|| {
-            log::error!("[CALLBACK] handle_teams_callback: No pending Teams auth found");
-            "No pending Teams auth".to_string()
-        })?
-    };
-    log::info!("[CALLBACK] handle_teams_callback: pending auth found");
-
-    // Re-check expiry at submit time. Mirrors the Spotify fix above;
-    // a long OS suspend can land us past the device-code TTL.
-    // See issue #34.
-    if pending.expires_at < chrono::Utc::now() {
-        log::error!("[CALLBACK] handle_teams_callback: auth state expired at submit time");
-        return Err("Auth state expired — please try signing in again.".to_string());
-    }
-
-    log::info!("[CALLBACK] handle_teams_callback: calling complete_teams_auth (on blocking pool)");
-    // The HTTP round-trip uses reqwest::blocking internally; offload it to
-    // Tauri's blocking pool so we don't pin an async worker for the full call.
-    let code = code.to_string();
-    let verifier = pending.verifier.clone();
-    let client_id = pending.client_id.clone();
-    let redirect_uri = pending.redirect_uri.clone();
-    let tokens = tauri::async_runtime::spawn_blocking(move || {
-        crate::teams::complete_teams_auth(&code, &verifier, &client_id, &redirect_uri)
-    })
-    .await
-    .map_err(|e| format!("Teams OAuth callback task failed: {}", e))??;
-    log::info!(
-        "[CALLBACK] handle_teams_callback: token exchange successful - access_token.len={}",
-        tokens.access_token.len()
-    );
-
-    {
-        let mut guard = state.tokens.teams_mut();
-        *guard = Some(tokens);
-        log::info!("[CALLBACK] handle_teams_callback: tokens stored in AppState");
-    }
-    token_io::persist_tokens(&state, app)?;
-    log::info!("[CALLBACK] handle_teams_callback: tokens persisted atomically");
-
-    // Issue #70: invalidate the onboarding cache.
-    state.onboarding_cache.invalidate();
-    log::info!("[CALLBACK] handle_teams_callback: onboarding_cache invalidated");
-
-    log::info!("[CALLBACK] handle_teams_callback: EMIT teams-auth-complete event");
-    let _ = app.emit("teams-auth-complete", ());
-
-    log::info!("[CALLBACK] handle_teams_callback: SUCCESS");
-    Ok(())
-}
-
 fn handle_deep_link(url: &str, app: AppHandle) {
     log::debug!("[DEEP_LINK] handle_deep_link: ENTRY - url={}", url);
 
@@ -518,8 +438,6 @@ fn handle_deep_link(url: &str, app: AppHandle) {
 
         if scheme == "presencejam" {
             log::info!("[DEEP_LINK] handle_deep_link: recognized as presencejam scheme");
-            let path = parsed.path();
-            log::info!("[DEEP_LINK] handle_deep_link: path={}", path);
 
             let code = parsed
                 .query_pairs()
@@ -539,46 +457,32 @@ fn handle_deep_link(url: &str, app: AppHandle) {
                 let code_clone = code_str.clone();
                 let state_clone = state_param.clone();
 
-                if path == "/teams-callback" {
-                    log::info!("[DEEP_LINK] handle_deep_link: routing to Teams callback");
-                    tauri::async_runtime::spawn(async move {
-                        log::info!("[DEEP_LINK] handle_deep_link: spawning Teams callback handler");
-                        if let Err(e) = handle_teams_callback(&code_clone, &app_clone).await {
-                            log::error!("[DEEP_LINK] handle_teams_callback: FAILED - {}", e);
-                            log::info!(
-                                "[DEEP_LINK] handle_deep_link: EMIT teams-auth-failed event"
-                            );
-                            let _ = app_clone.emit("teams-auth-failed", e);
-                        }
-                    });
-                } else {
-                    // Issue #66 (deferred): a per-launch UUID in the redirect
-                    // URI path would defend against another app pre-registering
-                    // the `presencejam://` scheme. Spotify requires exact
-                    // redirect-URI match in the registered app, so a path
-                    // component breaks the OAuth round-trip. A full fix needs
-                    // per-launch custom-scheme registration (OS-specific).
-                    // For now, the verifier-in-memory fix from #65 means an
-                    // interceptor can read the `code` but cannot exchange it
-                    // for tokens — the verifier is in our AppState, not on
-                    // disk and not exposed via IPC.
-                    log::info!("[DEEP_LINK] handle_deep_link: routing to Spotify callback");
-                    tauri::async_runtime::spawn(async move {
+                // Issue #66 (deferred): a per-launch UUID in the redirect
+                // URI path would defend against another app pre-registering
+                // the `presencejam://` scheme. Spotify requires exact
+                // redirect-URI match in the registered app, so a path
+                // component breaks the OAuth round-trip. A full fix needs
+                // per-launch custom-scheme registration (OS-specific).
+                // For now, the verifier-in-memory fix from #65 means an
+                // interceptor can read the `code` but cannot exchange it
+                // for tokens — the verifier is in our AppState, not on
+                // disk and not exposed via IPC.
+                log::info!("[DEEP_LINK] handle_deep_link: routing to Spotify callback");
+                tauri::async_runtime::spawn(async move {
+                    log::info!(
+                        "[DEEP_LINK] handle_deep_link: spawning Spotify callback handler"
+                    );
+                    if let Err(e) =
+                        handle_spotify_callback(&code_clone, state_clone.as_deref(), &app_clone)
+                            .await
+                    {
+                        log::error!("[DEEP_LINK] handle_spotify_callback: FAILED - {}", e);
                         log::info!(
-                            "[DEEP_LINK] handle_deep_link: spawning Spotify callback handler"
+                            "[DEEP_LINK] handle_deep_link: EMIT spotify-auth-failed event"
                         );
-                        if let Err(e) =
-                            handle_spotify_callback(&code_clone, state_clone.as_deref(), &app_clone)
-                                .await
-                        {
-                            log::error!("[DEEP_LINK] handle_spotify_callback: FAILED - {}", e);
-                            log::info!(
-                                "[DEEP_LINK] handle_deep_link: EMIT spotify-auth-failed event"
-                            );
-                            let _ = app_clone.emit("spotify-auth-failed", e);
-                        }
-                    });
-                }
+                        let _ = app_clone.emit("spotify-auth-failed", e);
+                    }
+                });
             } else {
                 log::warn!("[DEEP_LINK] handle_deep_link: no code found in URL");
             }
@@ -971,8 +875,7 @@ mod tests {
         // private inner fields. All access goes through `spotify()` /
         // `teams()` / `spotify_mut()` / `teams_mut()`. This test
         // exercises the public API: cold state, write/read round-trip,
-        // and the take pattern used by handle_spotify_callback /
-        // handle_teams_callback.
+        // and the take pattern used by handle_spotify_callback.
         use crate::spotify::SpotifyTokens;
         use crate::teams::TeamsTokens;
 
@@ -1006,7 +909,7 @@ mod tests {
             assert_eq!(read.access_token, "teams-access");
         }
 
-        // Take pattern (used by handle_spotify_callback / handle_teams_callback):
+        // Take pattern (used by handle_spotify_callback):
         // pulling the Option out leaves the slot None.
         let taken = tokens.spotify_mut().take();
         assert!(taken.is_some(), "take() must return the stored Spotify token");
