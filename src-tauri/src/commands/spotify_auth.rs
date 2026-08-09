@@ -19,8 +19,10 @@ const CMD: &str = "[CMD.SPOTIFY_AUTH]";
 /// Single source of truth for the requested scope set — `config.spotify.scopes`
 /// was removed as dead config (issue #163). The space must be percent-encoded
 /// in the query string, hence `urlencoding::encode(SPOTIFY_SCOPES)` (issue
-/// #164).
-const SPOTIFY_SCOPES: &str = "user-read-currently-playing user-read-playback-state";
+/// #164). `user-modify-playback-state` was added for tray playback control
+/// (issue #3.0-P3); devices + queue only need the read scopes already held.
+const SPOTIFY_SCOPES: &str =
+    "user-read-currently-playing user-read-playback-state user-modify-playback-state";
 
 /// Validates a Spotify client_id (32 alphanumeric chars).
 /// See issue #67.
@@ -74,6 +76,11 @@ fn run_spotify_oauth_flow(
         csrf_state.len()
     );
 
+    // `show_dialog=true` forces the consent screen even for users who have
+    // previously approved this app — with `show_dialog=false` (the default)
+    // Spotify can auto-redirect a prior approver without showing any screen,
+    // which silently skips the consent step needed to grant the new
+    // `user-modify-playback-state` scope (issue #3.0-P3).
     let auth_url = format!(
         "https://accounts.spotify.com/authorize\
          ?client_id={}\
@@ -82,7 +89,8 @@ fn run_spotify_oauth_flow(
          &code_challenge_method=S256\
          &code_challenge={}\
          &state={}\
-         &scope={}",
+         &scope={}\
+         &show_dialog=true",
         client_id,
         urlencoding::encode(&redirect_uri),
         urlencoding::encode(&challenge),
