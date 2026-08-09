@@ -662,13 +662,13 @@ pub fn parse_presence_body(body: &str) -> Result<PresenceInfo, String> {
 /// rule — `is_presence_gated` is defined through it so the two cannot
 /// drift apart (issue #3.0-P2).
 pub fn presence_gate_reason(presence: &PresenceInfo) -> String {
-    match presence.activity.as_str() {
+    match presence.activity.to_lowercase().as_str() {
         "inameeting" => return "in a meeting".to_string(),
         "inacall" => return "in a call".to_string(),
         "presenting" => return "presenting".to_string(),
         _ => {}
     }
-    match presence.availability.as_str() {
+    match presence.availability.to_lowercase().as_str() {
         "busy" => "busy".to_string(),
         "donotdisturb" => "Do Not Disturb".to_string(),
         _ => String::new(),
@@ -677,8 +677,8 @@ pub fn presence_gate_reason(presence: &PresenceInfo) -> String {
 
 /// True iff a presence should suppress a status-message write: the user is
 /// busy or Do-Not-Disturb, or their activity is in a meeting/call or
-/// presenting. Case-insensitive — both fields are normalized to lower-case
-/// by `parse_presence_body` (issue #3.0-P2).
+/// presenting. Case-insensitive — both fields are normalized internally
+/// (issue #3.0-P2).
 pub fn is_presence_gated(presence: &PresenceInfo) -> bool {
     !presence_gate_reason(presence).is_empty()
 }
@@ -1214,6 +1214,7 @@ mod tests {
 
     #[test]
     fn graph_oid_from_access_token_errors_cleanly() {
+        use base64::Engine as _;
         assert!(super::graph_oid_from_access_token("not-a-jwt").is_err());
         let no_oid = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(r#"{"sub":"user123"}"#);
@@ -1245,6 +1246,7 @@ mod tests {
 
     #[test]
     fn decode_teams_granted_scopes_empty_when_not_decodable() {
+        use base64::Engine as _;
         assert!(super::decode_teams_granted_scopes("not-a-jwt").is_empty());
         assert!(super::decode_teams_granted_scopes("a.b.c").is_empty());
         let no_scp =

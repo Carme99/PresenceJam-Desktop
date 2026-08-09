@@ -1698,10 +1698,9 @@ mod tests {
         assert!(should_rearm_availability(Some(at), now));
         let over = now - std::time::Duration::from_secs(AVAILABILITY_REARM_SECONDS + 60);
         assert!(should_rearm_availability(Some(over), now));
-        assert!(
-            AVAILABILITY_REARM_SECONDS < 300,
-            "re-arm cadence must be strictly inside the 5-minute Available fade window"
-        );
+        const { assert!(AVAILABILITY_REARM_SECONDS < 300) };
+        // Guard above must hold: re-arm cadence strictly inside the
+        // 5-minute Available fade window (issue #3.0-P1).
     }
 
     /// Issue #3.0-P1/P2 regression guard: inside `process_track`, the
