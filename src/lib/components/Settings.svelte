@@ -19,6 +19,24 @@
   let spotifyAuthWaiting = $derived(authFlow.spotify.phase === 'waiting');
   let teamsAuthWaiting = $derived(authFlow.teams.phase === 'waiting');
 
+  // Scopes granted on the stored Spotify access token (decoded backend-side
+  // from the JWT payload). The tray playback feature needs
+  // `user-modify-playback-state`, which existing users don't have until
+  // they re-connect once — the banner below nudges them. Issue #3.0-P3.
+  let grantedScopes = $state<string[]>([]);
+  let playbackScopeMissing = $derived(
+    isConnected && !grantedScopes.includes('user-modify-playback-state')
+  );
+
+  async function refreshGrantedScopes() {
+    try {
+      grantedScopes = await invoke<string[]>('get_spotify_granted_scopes');
+    } catch (e) {
+      console.error('[SETTINGS] get_spotify_granted_scopes failed:', e);
+      grantedScopes = [];
+    }
+  }
+
   let previewText = $state('');
 
   // Live preview of the status format template. We delegate the
@@ -53,6 +71,10 @@
       isConnected = false;
       teamsStatusConnected = false;
     }
+
+    // Detect whether the tray-playback scope is missing (existing users
+    // re-auth with the new scope set; see issue #3.0-P3).
+    await refreshGrantedScopes();
 
     // Listen for reconnect-required events (emitted when backend clears tokens and needs re-auth)
     unlistenFns.push(await listen('spotify-reconnect-required', async () => {
@@ -92,6 +114,9 @@
         console.log('[SETTINGS] spotify-auth-complete received');
         setSpotifyPhase('done');
         isConnected = true;
+        // The new token carries the freshly-granted scope set — refresh so
+        // the playback banner disappears. Issue #3.0-P3.
+        refreshGrantedScopes();
       },
       onSpotifyFailed: (payload) => {
         console.error('[SETTINGS] spotify-auth-failed:', payload);
@@ -236,6 +261,12 @@
           <span class="hint">Complete authentication in the browser.</span>
         {/if}
       </div>
+      {#if playbackScopeMissing}
+        <div class="scope-banner">
+          <span class="hint">Playback control needs a one-time reconnect.</span>
+          <button type="button" class="btn-link" onclick={reconnectSpotify} disabled={spotifyAuthWaiting}>Reconnect</button>
+        </div>
+      {/if}
     </section>
 
     <section class="card">
@@ -464,6 +495,20 @@
   .connection-row .device-code-box {
     width: 100%;
   }
+
+  /* One-time-reconnect banner for the missing tray-playback scope
+     (issue #3.0-P3). */
+  .scope-banner {
+    margin-top: var(--sp-3);
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    padding: var(--sp-2) var(--sp-3);
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+  }
+  .scope-banner .hint { margin: 0; }
 
   /* Device-code box — mirrors Onboarding's (issue #157). */
   .device-code-box {

@@ -13,6 +13,55 @@ fn parse_retry_after(response: &reqwest::blocking::Response) -> Option<u64> {
         .and_then(|v| v.trim().parse::<u64>().ok())
 }
 
+/// Extracts the `reason` field from a Spotify API error body. The player
+/// endpoints return `{"error":{"status":404,"message":"...","reason":
+/// "NO_ACTIVE_DEVICE"}}` when no device is active — see issue #3.0-P3.
+fn parse_error_reason(body: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.get("error")
+                .and_then(|e| e.get("reason"))
+                .and_then(|r| r.as_str())
+                .map(str::to_owned)
+        })
+}
+
+/// True when a response status + body are the player endpoint's
+/// "no active device" 404 (`reason: "NO_ACTIVE_DEVICE"`). Split out of
+/// `map_player_error` so the mapping is unit-testable without a live
+/// `reqwest::blocking::Response`.
+fn is_no_active_device_404(status: u16, body: &str) -> bool {
+    status == 404 && parse_error_reason(body).as_deref() == Some("NO_ACTIVE_DEVICE")
+}
+
+/// Maps a non-success Spotify response to `SpotifyApiError`. Shared by the
+/// player control/query functions so the mapping lives in one place:
+/// - 401 → `ExpiredToken` (re-auth required)
+/// - 403 → `NotPremium` (playback control requires Premium)
+/// - 429 → `RateLimited` honouring the `Retry-After` header (issue #159)
+/// - 404 with `reason: "NO_ACTIVE_DEVICE"` → `NoActiveDevice` (callers can
+///   offer device transfer)
+/// - anything else → `Other` with the response body for diagnosis
+///
+/// Takes the response by value because `Response::text` consumes it; each
+/// arm reads the response exactly once.
+fn map_player_error(response: reqwest::blocking::Response, context: &str) -> SpotifyApiError {
+    let status = response.status().as_u16();
+    match status {
+        401 => SpotifyApiError::ExpiredToken,
+        403 => SpotifyApiError::NotPremium,
+        429 => SpotifyApiError::RateLimited(parse_retry_after(&response)),
+        _ => {
+            let body = response.text().unwrap_or_default();
+            if is_no_active_device_404(status, &body) {
+                return SpotifyApiError::NoActiveDevice;
+            }
+            SpotifyApiError::Other(format!("{} request failed: {}", context, body))
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct SpotifyTokens {
@@ -40,6 +89,34 @@ pub struct TrackInfo {
     pub duration_ms: u64,
 }
 
+/// A Spotify playback device (GET /v1/me/player/devices).
+/// `id` is `Option` because Spotify documents it as "Can be `null`" for
+/// some devices; such devices cannot be targeted by transfer/playback
+/// commands. See issue #3.0-P3.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
+pub struct DeviceInfo {
+    pub id: Option<String>,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub is_active: bool,
+    pub is_private_session: bool,
+    pub is_restricted: bool,
+    pub supports_volume: bool,
+}
+
+/// The user's playback queue (GET /v1/me/player/queue), mapped down to
+/// the track-shaped subset the app understands — episodes and ads are
+/// gated out (same item-type gate as `get_currently_playing`, issue
+/// #161). See issue #3.0-P3.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
+pub struct QueueInfo {
+    pub currently_playing: Option<TrackInfo>,
+    pub up_next: Vec<TrackInfo>,
+}
+
 #[derive(Debug)]
 pub enum SpotifyApiError {
     ExpiredToken,
@@ -52,6 +129,14 @@ pub enum SpotifyApiError {
     /// discard it and re-run the authorization flow instead of retrying.
     /// See issue #160.
     InvalidGrant,
+    /// The player endpoint returned a 404 whose error body carries
+    /// `reason: "NO_ACTIVE_DEVICE"` — no device is actively playing, so a
+    /// device must be selected (transfer) before playback commands work.
+    /// See issue #3.0-P3.
+    NoActiveDevice,
+    /// The player endpoint returned 403 — playback control requires Spotify
+    /// Premium, which this account does not have.
+    NotPremium,
     Other(String),
 }
 
@@ -78,6 +163,14 @@ impl std::fmt::Display for SpotifyApiError {
             SpotifyApiError::InvalidGrant => write!(
                 f,
                 "Invalid grant: refresh token is expired, revoked, or otherwise invalid - re-authentication required"
+            ),
+            SpotifyApiError::NoActiveDevice => write!(
+                f,
+                "No active playback device - start playback on a device or transfer to one"
+            ),
+            SpotifyApiError::NotPremium => write!(
+                f,
+                "Playback control requires Spotify Premium"
             ),
             SpotifyApiError::Other(s) => write!(f, "{}", s),
         }
@@ -327,6 +420,259 @@ pub fn get_currently_playing(access_token: &str) -> Result<Option<TrackInfo>, Sp
     }
 }
 
+/// Sends a Spotify player-control request (PUT/POST) and maps the response.
+/// `device_id` becomes the `device_id` query param when given (playback
+/// commands act on the active device when omitted); `body` is the optional
+/// JSON payload (used by `player_transfer`). Shared by the four transport
+/// commands so the error mapping (404 NO_ACTIVE_DEVICE, 403 non-Premium,
+/// 429 Retry-After) lives in exactly one place. See issue #3.0-P3.
+fn send_player_command(
+    method: reqwest::Method,
+    path: &str,
+    access_token: &str,
+    device_id: Option<&str>,
+    body: Option<serde_json::Value>,
+    context: &str,
+) -> Result<(), SpotifyApiError> {
+    let client = Client::new();
+    let mut url = format!("https://api.spotify.com/v1{}", path);
+    if let Some(id) = device_id {
+        url = format!("{}?device_id={}", url, id);
+    }
+    let mut request = client
+        .request(method, &url)
+        .header("Authorization", format!("Bearer {}", access_token))
+        .timeout(Duration::from_secs(10));
+    if let Some(payload) = body {
+        request = request.json(&payload);
+    }
+    let response = request
+        .send()
+        .map_err(|e| SpotifyApiError::Other(format!("Failed to send {} request: {}", context, e)))?;
+
+    let status = response.status().as_u16();
+    if status == 202 || status == 204 {
+        Ok(())
+    } else {
+        Err(map_player_error(response, context))
+    }
+}
+
+/// Resumes playback. `device_id` targets a specific device; `None` acts on
+/// the active device. PUT /v1/me/player/play. See issue #3.0-P3.
+pub fn player_play(access_token: &str, device_id: Option<&str>) -> Result<(), SpotifyApiError> {
+    send_player_command(
+        reqwest::Method::PUT,
+        "/me/player/play",
+        access_token,
+        device_id,
+        None,
+        "play",
+    )
+}
+
+/// Pauses playback. `device_id` targets a specific device; `None` acts on
+/// the active device. PUT /v1/me/player/pause. See issue #3.0-P3.
+pub fn player_pause(access_token: &str, device_id: Option<&str>) -> Result<(), SpotifyApiError> {
+    send_player_command(
+        reqwest::Method::PUT,
+        "/me/player/pause",
+        access_token,
+        device_id,
+        None,
+        "pause",
+    )
+}
+
+/// Skips to the next track. `device_id` targets a specific device; `None`
+/// acts on the active device. POST /v1/me/player/next. See issue #3.0-P3.
+pub fn player_next(access_token: &str, device_id: Option<&str>) -> Result<(), SpotifyApiError> {
+    send_player_command(
+        reqwest::Method::POST,
+        "/me/player/next",
+        access_token,
+        device_id,
+        None,
+        "next",
+    )
+}
+
+/// Skips to the previous track. `device_id` targets a specific device;
+/// `None` acts on the active device. POST /v1/me/player/previous.
+/// See issue #3.0-P3.
+pub fn player_previous(access_token: &str, device_id: Option<&str>) -> Result<(), SpotifyApiError> {
+    send_player_command(
+        reqwest::Method::POST,
+        "/me/player/previous",
+        access_token,
+        device_id,
+        None,
+        "previous",
+    )
+}
+
+/// Transfers playback to `device_id`, optionally starting playback.
+/// The device goes in the JSON body (`device_ids`), not the query string.
+/// PUT /v1/me/player. See issue #3.0-P3.
+pub fn player_transfer(access_token: &str, device_id: &str, play: bool) -> Result<(), SpotifyApiError> {
+    send_player_command(
+        reqwest::Method::PUT,
+        "/me/player",
+        access_token,
+        None,
+        Some(serde_json::json!({ "device_ids": [device_id], "play": play })),
+        "transfer",
+    )
+}
+
+/// Lists the user's available playback devices.
+/// GET /v1/me/player/devices. See issue #3.0-P3.
+pub fn get_devices(access_token: &str) -> Result<Vec<DeviceInfo>, SpotifyApiError> {
+    let client = Client::new();
+    let response = client
+        .get("https://api.spotify.com/v1/me/player/devices")
+        .header("Authorization", format!("Bearer {}", access_token))
+        .timeout(Duration::from_secs(10))
+        .send()
+        .map_err(|e| SpotifyApiError::Other(format!("Failed to send devices request: {}", e)))?;
+
+    let status = response.status().as_u16();
+    if status != 200 {
+        return Err(map_player_error(response, "devices"));
+    }
+
+    #[derive(Deserialize)]
+    struct DevicesResponse {
+        devices: Vec<DeviceInfo>,
+    }
+
+    let devices: DevicesResponse = response
+        .json()
+        .map_err(|e| SpotifyApiError::Other(format!("Failed to parse devices response: {}", e)))?;
+    Ok(devices.devices)
+}
+
+/// Fetches the user's playback queue. Only `track` items are mapped to
+/// `TrackInfo` — episodes and ads are gated out with the same item-type
+/// gate as `get_currently_playing` (issue #161). GET /v1/me/player/queue.
+/// See issue #3.0-P3.
+pub fn get_queue(access_token: &str) -> Result<QueueInfo, SpotifyApiError> {
+    let client = Client::new();
+    let response = client
+        .get("https://api.spotify.com/v1/me/player/queue")
+        .header("Authorization", format!("Bearer {}", access_token))
+        .timeout(Duration::from_secs(10))
+        .send()
+        .map_err(|e| SpotifyApiError::Other(format!("Failed to send queue request: {}", e)))?;
+
+    let status = response.status().as_u16();
+    if status == 204 {
+        // 204 No Content — nothing queued; not an error.
+        return Ok(QueueInfo {
+            currently_playing: None,
+            up_next: Vec::new(),
+        });
+    }
+    if status != 200 {
+        return Err(map_player_error(response, "queue"));
+    }
+
+    #[derive(Deserialize)]
+    struct QueueResponse {
+        currently_playing: Option<QueueItem>,
+        queue: Vec<QueueItem>,
+    }
+
+    #[derive(Deserialize)]
+    struct QueueItem {
+        #[serde(rename = "type")]
+        type_: String,
+        name: String,
+        #[serde(default)]
+        artists: Vec<Artist>,
+        #[serde(default)]
+        album: Album,
+        duration_ms: u64,
+    }
+
+    #[derive(Deserialize)]
+    struct Artist {
+        name: String,
+    }
+
+    #[derive(Deserialize, Default)]
+    struct Album {
+        name: String,
+        images: Vec<AlbumImage>,
+    }
+
+    #[derive(Deserialize)]
+    struct AlbumImage {
+        url: String,
+    }
+
+    fn map_item(item: QueueItem) -> Option<TrackInfo> {
+        // Only `track` items are track-shaped (name/artists/album).
+        // Episodes, ads and future item types must not be forced through
+        // TrackInfo — same gate as get_currently_playing (issue #161).
+        if item.type_ != "track" {
+            return None;
+        }
+        Some(TrackInfo {
+            title: item.name,
+            artist: item
+                .artists
+                .iter()
+                .map(|a| a.name.clone())
+                .collect::<Vec<_>>()
+                .join(", "),
+            album: item.album.name,
+            album_art_url: item
+                .album
+                .images
+                .first()
+                .map(|img| img.url.clone())
+                .unwrap_or_default(),
+            // Queue items are by definition not the currently playing one.
+            is_playing: false,
+            progress_ms: None,
+            duration_ms: item.duration_ms,
+        })
+    }
+
+    let queue: QueueResponse = response
+        .json()
+        .map_err(|e| SpotifyApiError::Other(format!("Failed to parse queue response: {}", e)))?;
+
+    Ok(QueueInfo {
+        currently_playing: queue.currently_playing.and_then(map_item),
+        up_next: queue.queue.into_iter().filter_map(map_item).collect(),
+    })
+}
+
+/// Base64url-decodes the payload (middle segment) of a Spotify access
+/// token JWT and returns the granted `scope` claim split on spaces.
+/// Informational only — no signature verification. Returns an empty Vec
+/// when the token isn't a decodable JWT with a `scope` claim. Used by the
+/// Settings page to detect whether `user-modify-playback-state` is missing
+/// (one-time-reconnect banner, issue #3.0-P3).
+pub fn decode_spotify_granted_scopes(access_token: &str) -> Vec<String> {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
+    let payload = access_token.split('.').nth(1).unwrap_or_default();
+    let scopes = URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|v| v.get("scope").and_then(|s| s.as_str()).map(str::to_owned))
+        .unwrap_or_default();
+    if scopes.is_empty() {
+        Vec::new()
+    } else {
+        scopes.split(' ').map(str::to_owned).collect()
+    }
+}
+
 /// Single source of truth for status-format placeholder substitution.
 ///
 /// Substitutes `{artist}`, `{track}`, `{album}`, and `{emoji}` in the
@@ -417,6 +763,7 @@ pub fn validate_spotify_token(tokens: &SpotifyTokens) -> Result<(), SpotifyApiEr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
 
     fn make_track(title: &str, artist: &str, album: &str, is_playing: bool) -> TrackInfo {
         TrackInfo {
@@ -524,5 +871,67 @@ mod tests {
         );
         assert_eq!(json["progress_ms"].as_u64(), Some(123_456));
         assert_eq!(json["duration_ms"].as_u64(), Some(240_000));
+    }
+
+    // Regression guard for issue #3.0-P3: the player endpoint's 404 body
+    // carries `reason: "NO_ACTIVE_DEVICE"` and must surface as a distinct
+    // error so callers can offer device transfer instead of a generic
+    // failure. The parse helper must also be robust to non-JSON bodies.
+    #[test]
+    fn parse_error_reason_extracts_no_active_device() {
+        let body = r#"{"error":{"status":404,"message":"Player command failed: No active device found","reason":"NO_ACTIVE_DEVICE"}}"#;
+        assert_eq!(
+            parse_error_reason(body).as_deref(),
+            Some("NO_ACTIVE_DEVICE")
+        );
+        assert_eq!(parse_error_reason("not json").as_deref(), None);
+        assert_eq!(parse_error_reason(r#"{"error":{"status":404}}"#).as_deref(), None);
+    }
+
+    // Regression guard for issue #3.0-P3: only a 404 whose error body
+    // carries `reason: "NO_ACTIVE_DEVICE"` maps to NoActiveDevice — other
+    // reasons, other statuses, and non-JSON bodies must not.
+    #[test]
+    fn is_no_active_device_404_matches_only_no_active_device() {
+        let no_active = r#"{"error":{"status":404,"message":"Player command failed: No active device found","reason":"NO_ACTIVE_DEVICE"}}"#;
+        assert!(is_no_active_device_404(404, no_active));
+        let other_reason = r#"{"error":{"status":404,"message":"Device not found","reason":"DEVICE_NOT_FOUND"}}"#;
+        assert!(!is_no_active_device_404(404, other_reason));
+        let wrong_status = r#"{"error":{"status":403,"message":"Forbidden","reason":"NO_ACTIVE_DEVICE"}}"#;
+        assert!(!is_no_active_device_404(403, wrong_status));
+        assert!(!is_no_active_device_404(404, "not json"));
+        assert!(!is_no_active_device_404(404, ""));
+    }
+
+    // Regression guard for issue #3.0-P3: the Settings reconnect banner
+    // reads granted scopes from the JWT payload of the stored access
+    // token (base64url, no signature verification). A fake but structurally
+    // valid token must decode to the scope list.
+    #[test]
+    fn decode_spotify_granted_scopes_extracts_scope_claim() {
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            r#"{"scope":"user-read-currently-playing user-read-playback-state user-modify-playback-state"}"#,
+        );
+        let token = format!("header.{}.signature", payload);
+        assert_eq!(
+            decode_spotify_granted_scopes(&token),
+            vec![
+                "user-read-currently-playing".to_string(),
+                "user-read-playback-state".to_string(),
+                "user-modify-playback-state".to_string(),
+            ]
+        );
+    }
+
+    // Guard: tokens that aren't JWTs (or whose payload has no scope claim)
+    // must yield an empty list — the Settings banner treats that as
+    // "scope missing" rather than crashing.
+    #[test]
+    fn decode_spotify_granted_scopes_empty_when_not_decodable() {
+        assert!(decode_spotify_granted_scopes("not-a-jwt").is_empty());
+        assert!(decode_spotify_granted_scopes("a.b.c").is_empty());
+        let no_scope = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(r#"{"sub":"user123"}"#);
+        assert!(decode_spotify_granted_scopes(&format!("h.{}.s", no_scope)).is_empty());
     }
 }

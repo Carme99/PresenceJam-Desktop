@@ -791,6 +791,14 @@ pub fn run() {
             commands::onboarding::reconnect_teams,
             commands::misc::preview_status,
             commands::misc::update_tray_menu_state,
+            commands::playback::playback_play,
+            commands::playback::playback_pause,
+            commands::playback::playback_next,
+            commands::playback::playback_previous,
+            commands::playback::playback_transfer,
+            commands::playback::get_playback_devices,
+            commands::playback::get_playback_queue,
+            commands::playback::get_spotify_granted_scopes,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
