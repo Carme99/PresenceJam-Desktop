@@ -15,6 +15,13 @@ use tauri::{AppHandle, Emitter};
 /// Log tag prefix for this submodule (issue #79 item 3).
 const CMD: &str = "[CMD.SPOTIFY_AUTH]";
 
+/// Space-separated Spotify OAuth scopes requested in the authorize URL.
+/// Single source of truth for the requested scope set — `config.spotify.scopes`
+/// was removed as dead config (issue #163). The space must be percent-encoded
+/// in the query string, hence `urlencoding::encode(SPOTIFY_SCOPES)` (issue
+/// #164).
+const SPOTIFY_SCOPES: &str = "user-read-currently-playing user-read-playback-state";
+
 /// Validates a Spotify client_id (32 alphanumeric chars).
 /// See issue #67.
 fn validate_spotify_client_id(id: &str) -> Result<(), String> {
@@ -75,11 +82,12 @@ fn run_spotify_oauth_flow(
          &code_challenge_method=S256\
          &code_challenge={}\
          &state={}\
-         &scope=user-read-currently-playing user-read-playback-state",
+         &scope={}",
         client_id,
         urlencoding::encode(&redirect_uri),
         urlencoding::encode(&challenge),
-        urlencoding::encode(&csrf_state)
+        urlencoding::encode(&csrf_state),
+        urlencoding::encode(SPOTIFY_SCOPES)
     );
     log::info!(
         "{CMD} run_spotify_oauth_flow: auth_url created, length={}",
