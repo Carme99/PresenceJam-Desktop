@@ -18,19 +18,10 @@ pub struct SpotifyConfig {
     pub client_secret_set: bool,
     #[serde(default = "default_redirect_uri")]
     pub redirect_uri: String,
-    #[serde(default = "default_scopes")]
-    pub scopes: Vec<String>,
 }
 
 fn default_redirect_uri() -> String {
     "presencejam://callback".to_string()
-}
-
-fn default_scopes() -> Vec<String> {
-    vec![
-        "user-read-currently-playing".to_string(),
-        "user-read-playback-state".to_string(),
-    ]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
@@ -135,7 +126,6 @@ impl Default for SpotifyConfig {
             client_id: String::new(),
             client_secret_set: false,
             redirect_uri: default_redirect_uri(),
-            scopes: default_scopes(),
         }
     }
 }
