@@ -3,6 +3,16 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+/// Parse the `Retry-After` header (seconds) from a 429 response.
+/// Returns `None` when the header is absent or unparseable. See issue #159.
+fn parse_retry_after(response: &reqwest::blocking::Response) -> Option<u64> {
+    response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct SpotifyTokens {
@@ -190,6 +200,22 @@ pub fn refresh_spotify_token(
     })
 }
 
+/// The `currently_playing_type` field of the currently-playing response.
+/// Typed so the `track` gate can't be broken by a typo; `Unknown` is the
+/// explicit catch-all for Spotify's documented "unknown" value and any
+/// future item types. Defaults to `Unknown` so an absent field can't
+/// hard-fail the parse. See issue #161.
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+enum CurrentlyPlayingType {
+    Track,
+    Episode,
+    Ad,
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
 pub fn get_currently_playing(access_token: &str) -> Result<Option<TrackInfo>, SpotifyApiError> {
     let client = Client::new();
 
@@ -209,11 +235,11 @@ pub fn get_currently_playing(access_token: &str) -> Result<Option<TrackInfo>, Sp
                 item: Option<CurrentlyPlayingItem>,
                 is_playing: bool,
                 progress_ms: Option<u64>,
-                /// `track`, `episode`, `ad` or `unknown` — the docs say to
-                /// check this and to handle new types gracefully. Default to
-                /// empty so an absent field can't hard-fail the parse.
+                /// `track`, `episode`, `ad` or anything else — the docs say
+                /// to check this and to handle new types gracefully. Default
+                /// to `Unknown` so an absent field can't hard-fail the parse.
                 #[serde(default)]
-                currently_playing_type: String,
+                currently_playing_type: CurrentlyPlayingType,
             }
 
             #[derive(Deserialize)]
@@ -250,7 +276,7 @@ pub fn get_currently_playing(access_token: &str) -> Result<Option<TrackInfo>, Sp
             // Episodes, ads and future item types must not be forced through
             // TrackInfo — treat them as "nothing playing" instead of erroring.
             // See issue #161.
-            if playing.currently_playing_type != "track" {
+            if !matches!(playing.currently_playing_type, CurrentlyPlayingType::Track) {
                 return Ok(None);
             }
 
@@ -289,12 +315,7 @@ pub fn get_currently_playing(access_token: &str) -> Result<Option<TrackInfo>, Sp
             // `Retry-After` header in seconds — honor it instead of a fixed
             // backoff. `None` when the header is absent/unparseable. See
             // issue #159.
-            let retry_after = response
-                .headers()
-                .get("Retry-After")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.trim().parse::<u64>().ok());
-            Err(SpotifyApiError::RateLimited(retry_after))
+            Err(SpotifyApiError::RateLimited(parse_retry_after(&response)))
         }
         _ => {
             let body = response.text().unwrap_or_default();
@@ -384,12 +405,7 @@ pub fn validate_spotify_token(tokens: &SpotifyTokens) -> Result<(), SpotifyApiEr
             // Honor the documented `Retry-After` header (seconds) so the
             // caller can wait out the server's window instead of a fixed
             // backoff. `None` when absent/unparseable. See issue #159.
-            let retry_after = response
-                .headers()
-                .get("Retry-After")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.trim().parse::<u64>().ok());
-            Err(SpotifyApiError::RateLimited(retry_after))
+            Err(SpotifyApiError::RateLimited(parse_retry_after(&response)))
         }
         _ => Err(SpotifyApiError::Other(format!(
             "unexpected status {}",
