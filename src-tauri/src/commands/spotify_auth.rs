@@ -207,12 +207,14 @@ pub fn start_spotify_reconnect(
 #[tauri::command]
 pub fn complete_spotify_auth_manual(
     code: String,
+    oauth_state: String,
     app: AppHandle,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<SpotifyTokens, String> {
     log::info!(
-        "{CMD} complete_spotify_auth_manual: ENTRY - code.len={}",
-        code.len()
+        "{CMD} complete_spotify_auth_manual: ENTRY - code.len={}, oauth_state.len={}",
+        code.len(),
+        oauth_state.len()
     );
 
     // Get pending auth from AppState
@@ -228,6 +230,28 @@ pub fn complete_spotify_auth_manual(
         "{CMD} complete_spotify_auth_manual: pending auth found - verifier.len={}",
         pending.verifier.len()
     );
+
+    // Re-check expiry at submit time, mirroring handle_spotify_callback in
+    // lib.rs (issue #162). Spotify authorization codes expire 10 minutes
+    // after creation; a stale pending must not be consumable later.
+    if pending.expires_at < chrono::Utc::now() {
+        log::error!("{CMD} complete_spotify_auth_manual: auth state expired at submit time");
+        return Err("Auth state expired — please try signing in again.".to_string());
+    }
+
+    // Verify the OAuth `state` parameter against the stored value to prevent
+    // CSRF, mirroring handle_spotify_callback in lib.rs (issue #162). The
+    // manual-paste path is exactly where a socially engineered URL could
+    // land, so a missing or mismatched state rejects the flow.
+    if oauth_state.is_empty() {
+        log::error!("{CMD} complete_spotify_auth_manual: missing state parameter");
+        return Err("Missing state parameter - possible CSRF attack".to_string());
+    }
+    if oauth_state != pending.state {
+        log::error!("{CMD} complete_spotify_auth_manual: state mismatch - CSRF attack detected");
+        return Err("State mismatch - possible CSRF attack".to_string());
+    }
+    log::info!("{CMD} complete_spotify_auth_manual: state verified successfully");
 
     // Read the client_secret from the keychain (it was placed there by
     // `start_spotify_auth` — see issue #9).
