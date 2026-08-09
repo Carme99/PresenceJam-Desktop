@@ -395,14 +395,22 @@ jobs:
       # workaround when this happens: close the open PR, then push
       # a new tag (or force-move the existing tag) to re-fire this
       # job, which sees no open PR and creates a fresh one.
-      # SECURITY: WINGET_TOKEN must be a fine-grained PAT scoped ONLY to
-      # microsoft/winget-pkgs with contents:write (and pull_requests:write
-      # if the action creates PRs against that repo). A classic PAT or
-      # broader-scoped token grants unnecessary access to every repo the
-      # token owner can reach. Rotate on a 90-day cadence.
+      #
+      # TOKEN + FORK (issue #182): the action only supports CLASSIC
+      # PATs (fine-grained not supported — see vedantmgoyal2009/
+      # winget-releaser#172) and microsoft/winget-pkgs blocks direct
+      # classic-token pushes (org restriction; GitHub API reports
+      # push:false for this account). So WINGET_TOKEN must be a classic
+      # PAT with `public_repo` scope, and the manifest is submitted via
+      # the fork at Carme99/winget-pkgs (`fork-user`): the action pushes
+      # the manifest branch to the fork (which the classic token CAN
+      # write) and opens the PR fork -> microsoft/winget-pkgs. Keep the
+      # fork alive; komac syncs it with upstream before each run.
+      # Rotate the PAT on a 90-day cadence.
       # See docs: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens
       - uses: vedantmgoyal2009/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e  # v2
         with:
           identifier: PresenceJam.PresenceJam
           token: ${{ secrets.WINGET_TOKEN }}
           release-tag: ${{ github.ref_name }}
+          fork-user: Carme99
