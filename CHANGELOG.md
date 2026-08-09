@@ -4,7 +4,31 @@ All notable changes to PresenceJam are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
-## [Unreleased]
+
+## [3.0.0] - 2026-08-09
+
+### Breaking
+- **One-time re-auth required for both providers:** the new scope set is not covered by existing grants. Spotify adds `user-modify-playback-state` (tray playback control); Teams adds `Presence.Read` + `profile` (presence features). After upgrading, reconnect Spotify and Teams once from Settings.
+- **tokens.json is now encrypted at rest (PR #184):** the token file is AES-256-GCM encrypted, with the key stored in the OS keychain. Migration to the new format is one-way and happens on first read — **old builds cannot read the new format**, so downgrading requires a fresh re-auth.
+- **Presence gating is ON by default:** status writes are suppressed while the Teams status is busy/DND, in a meeting, on a call, or presenting. Toggle it off in Settings if you want unconditional writes (#187).
+
+### Added
+- **Availability sync opt-in (PR #187):** the availability sync re-arms to Available when a previously-set Available presence is re-set within 5 minutes, and clears on pause.
+- **Presence-aware gating (PR #187):** a `getPresence` gate feeds the gating logic, with new `presence-gated` and `presence-availability-updated` events so the frontend stays in sync.
+- **Tray playback controls (PR #185):** Play/Pause/Next/Previous plus **Devices** and **Up Next** submenus in the tray menu.
+- **Auto-update (PR #188):** `tauri-plugin-updater` wired to GitHub Releases with an update banner in the UI.
+- **tokens.json encryption (PR #184).**
+
+### Fixed
+- **Polling refresh self-deadlock (PR #183):** a refresh triggered from within the polling iteration no longer blocks the loop.
+- **Dependabot security alerts (PR #186):** postcss and quinn-proto bumped to clear the alerts.
+
+### Security
+- **tokens.json encrypted at rest (PR #184):** AES-256-GCM, key in the OS keychain; one-way migration on first read.
+- **postcss 8.5.26 override + quinn-proto 0.11.16 (PR #186).**
+
+### Docs
+- **3.0 sweep:** release research and scope documented in `docs/3.0-release-research.md`.
 
 ## [2.10.0] - 2026-08-09
 
