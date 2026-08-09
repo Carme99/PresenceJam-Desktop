@@ -262,7 +262,7 @@ For a more secure experience:
 3. **Use a password/PIN** on your Windows account — no blank login
 4. **Don't share your machine** with untrusted parties while tokens are active
 5. **Uninstall the app** and delete `%APPDATA%\PresenceJam` when done
-6. **Rotate credentials** if you suspect compromise (Spotify Developer Dashboard → your app → Client Secrets → Reset)
+6. **Rotate credentials** if you suspect compromise (Spotify Developer Dashboard → your app overview page → **ROTATE**)
 
 
 ## Release Pipeline Token Rotation
