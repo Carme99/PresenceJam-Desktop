@@ -18,17 +18,23 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact_name: PresenceJam-${{ github.ref_name }}-macos.dmg
-            bundle_path: PresenceJam-macos.dmg
+            bundle_path: |
+              PresenceJam-macos.dmg
+              PresenceJam-${{ github.ref_name }}.app.tar.gz
+              PresenceJam-${{ github.ref_name }}.app.tar.gz.sig
           - os: windows-latest
             target: ''
             artifact_name: PresenceJam-${{ github.ref_name }}.msi
-            bundle_path: src-tauri/target/release/bundle/msi/*.msi
+            bundle_path: |
+              src-tauri/target/release/bundle/msi/*.msi
+              PresenceJam-${{ github.ref_name }}.msi.sig
           - os: ubuntu-22.04
             target: ''
             artifact_name: PresenceJam-${{ github.ref_name }}-linux-amd64
             bundle_path: |
               PresenceJam-linux-amd64.deb
               PresenceJam-linux-amd64.AppImage
+              PresenceJam-${{ github.ref_name }}.AppImage.sig
 
     steps:
       - name: Checkout repository
@@ -66,12 +72,16 @@ jobs:
         if: matrix.os == 'macos-latest'
         env:
           CARGO_INCREMENTAL: 0
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npx tauri build --target ${{ matrix.target }}
 
       - name: Build Tauri (Windows)
         if: matrix.os == 'windows-latest'
         env:
           CARGO_INCREMENTAL: 0
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npx tauri build
 
       # Tauri on Linux pulls in glib-sys/webkit2gtk-sys/etc. via FFI
@@ -96,6 +106,8 @@ jobs:
         if: matrix.os == 'ubuntu-22.04'
         env:
           CARGO_INCREMENTAL: 0
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npx tauri build
 
       - name: Debug macOS bundle
@@ -113,12 +125,46 @@ jobs:
           echo "Found dmg: $dmg_path"
           cp "$dmg_path" "PresenceJam-macos.dmg"
 
+      # The updater plugin consumes the signed .app.tar.gz (+ .sig) from
+      # the bundle; copy them to the deterministic release names so the
+      # latest.json URLs are stable across versions.
+      - name: Package macOS updater artifacts
+        if: matrix.os == 'macos-latest'
+        run: |
+          set -euo pipefail
+          TARGZ=$(find src-tauri/target/${{ matrix.target }}/release/bundle/macos -name "*.app.tar.gz" 2>/dev/null | head -1)
+          SIG="${TARGZ}.sig"
+          if [ -z "$TARGZ" ] || [ ! -f "$SIG" ]; then
+            echo "::error::Expected .app.tar.gz and .sig in bundle/macos/"
+            ls -la src-tauri/target/${{ matrix.target }}/release/bundle/macos/ 2>&1 || echo "(missing)"
+            exit 1
+          fi
+          cp "$TARGZ" "PresenceJam-${{ github.ref_name }}.app.tar.gz"
+          cp "$SIG" "PresenceJam-${{ github.ref_name }}.app.tar.gz.sig"
+          echo "Packaged updater artifacts:"
+          ls -la PresenceJam-${{ github.ref_name }}.app.tar.gz*
+
       - name: Rename Windows MSI
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
           $msi = Get-ChildItem "src-tauri/target/release/bundle/msi" -Filter "*.msi" | Select-Object -First 1
           Copy-Item $msi.FullName "PresenceJam-${{ github.ref_name }}.msi"
+
+      # The MSI itself is the updater artifact; ship its .sig alongside
+      # under the deterministic release name (the .msi is already renamed
+      # above and uploaded via bundle_path).
+      - name: Package Windows updater signature
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $sig = Get-ChildItem "src-tauri/target/release/bundle/msi" -Filter "*.msi.sig" | Select-Object -First 1
+          if (-not $sig) {
+            Write-Error "Expected .msi.sig in bundle/msi/"
+            exit 1
+          }
+          Copy-Item $sig.FullName "PresenceJam-${{ github.ref_name }}.msi.sig"
+          Get-ChildItem "PresenceJam-${{ github.ref_name }}.msi.sig"
 
       # Linux artifacts are named like `presence-jam_2.7.2_amd64.deb` by
       # Tauri's bundler. Rename to the project-standard format used by
@@ -140,8 +186,15 @@ jobs:
           fi
           cp "$DEB" "PresenceJam-linux-amd64.deb"
           cp "$APPIMAGE" "PresenceJam-linux-amd64.AppImage"
+          APPIMAGE_SIG="${APPIMAGE}.sig"
+          if [ ! -f "$APPIMAGE_SIG" ]; then
+            echo "::error::Expected .AppImage.sig in bundle/appimage/"
+            ls -la src-tauri/target/release/bundle/appimage/ 2>&1 || echo "(missing)"
+            exit 1
+          fi
+          cp "$APPIMAGE_SIG" "PresenceJam-${{ github.ref_name }}.AppImage.sig"
           echo "Packaged:"
-          ls -la PresenceJam-linux-amd64.*
+          ls -la PresenceJam-linux-amd64.* PresenceJam-${{ github.ref_name }}.AppImage.sig
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -170,6 +223,54 @@ jobs:
           generateReleaseNotes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # The updater plugin does no GitHub auto-discovery: it only reads
+      # the endpoint configured in tauri.conf.json, so the release must
+      # carry a latest.json that maps platform -> signed artifact URL.
+      # Signatures are the .sig file CONTENTS (minisign output), not
+      # paths; version = tag without the leading v; pub_date is RFC3339.
+      - name: Generate latest.json
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          # Downloaded artifacts keep the upload-artifact name as a
+          # subdirectory under artifacts/ (download-artifact v4+ layout).
+          MAC_SIG="artifacts/PresenceJam-${GITHUB_REF_NAME}-macos.dmg/PresenceJam-${GITHUB_REF_NAME}.app.tar.gz.sig"
+          WIN_SIG="artifacts/PresenceJam-${GITHUB_REF_NAME}.msi/PresenceJam-${GITHUB_REF_NAME}.msi.sig"
+          LINUX_SIG="artifacts/PresenceJam-${GITHUB_REF_NAME}-linux-amd64/PresenceJam-${GITHUB_REF_NAME}.AppImage.sig"
+
+          for f in "$MAC_SIG" "$WIN_SIG" "$LINUX_SIG"; do
+            if [ ! -s "$f" ]; then
+              echo "::error::Missing updater signature file: $f"
+              exit 1
+            fi
+          done
+
+          jq -n \
+            --arg version "$VERSION" \
+            --arg pub_date "$PUB_DATE" \
+            --arg mac_url "https://github.com/Carme99/PresenceJam-Desktop/releases/download/${GITHUB_REF_NAME}/PresenceJam-${GITHUB_REF_NAME}.app.tar.gz" \
+            --arg mac_sig "$(cat "$MAC_SIG")" \
+            --arg win_url "https://github.com/Carme99/PresenceJam-Desktop/releases/download/${GITHUB_REF_NAME}/PresenceJam-${GITHUB_REF_NAME}.msi" \
+            --arg win_sig "$(cat "$WIN_SIG")" \
+            --arg linux_url "https://github.com/Carme99/PresenceJam-Desktop/releases/download/${GITHUB_REF_NAME}/PresenceJam-linux-amd64.AppImage" \
+            --arg linux_sig "$(cat "$LINUX_SIG")" \
+            '{
+              version: $version,
+              pub_date: $pub_date,
+              platforms: {
+                "darwin-aarch64": { url: $mac_url, signature: $mac_sig },
+                "windows-x86_64": { url: $win_url, signature: $win_sig },
+                "linux-x86_64": { url: $linux_url, signature: $linux_sig }
+              }
+            }' > latest.json
+          echo "=== latest.json ==="
+          cat latest.json
+          gh release upload "$GITHUB_REF_NAME" latest.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ------------------------------------------------------------------
   # Homebrew tap update (carme99/homebrew-tap)
