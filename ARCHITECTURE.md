@@ -22,7 +22,8 @@ PresenceJam is a Tauri 2 desktop application:
   - `token_io.rs::persist_tokens()` → temp-file + rename + fsync to
     `<app-config-dir>/PresenceJam/tokens.json` for OAuth tokens.
   Both paths survive process-kill mid-write (see issue #65; see `SECURITY.md`).
-- **Auth:** Spotify PKCE OAuth 2.0 + Microsoft Teams Device Code flow.
+- **Auth:** Spotify Authorization Code + PKCE OAuth (confidential client) +
+  Microsoft Teams Device Code flow.
 - **Secrets — TWO PATHS, both intentional** (do not conflate):
   - **Spotify `client_secret`** is in the OS keychain, namespaced per
     installation — DPAPI on Windows, Keychain on macOS, Secret Service
@@ -49,7 +50,7 @@ graph TD
     subgraph Backend ["Backend (Rust / Tauri 2)"]
         Commands["commands/ submodule<br/>config / spotify_auth / teams_auth<br/>sync / window / onboarding / misc"]
         Polling["polling/ submodule<br/>loop (driver) + state (lifecycle)<br/>poll_once (single-source-of-truth iteration)<br/>+ mod.rs (ErrorSeverity, emit_error)"]
-        SpotifyAPI["spotify.rs<br/>Spotify Web API (PKCE)"]
+        SpotifyAPI["spotify.rs<br/>Spotify Web API (Authorization Code + PKCE)"]
         TeamsAPI["teams.rs<br/>Microsoft Graph (device code)"]
         Keychain["keychain.rs<br/>OS keychain wrapper<br/>(Secret Service on Linux)"]
         Tray["tray.rs / menu.rs<br/>system tray + app menu"]
@@ -112,7 +113,7 @@ The PR-time CI that gates merges is [`.github/workflows/ci.yml`](.github/workflo
 
 ## Authentication Flows
 
-### Spotify PKCE OAuth
+### Spotify OAuth (Authorization Code + PKCE, confidential client)
 
 ```mermaid
 sequenceDiagram
@@ -129,13 +130,23 @@ sequenceDiagram
     Note over App,Spotify: redirect_uri = `presencejam://callback`<br/>(Spotify requires byte-exact match;<br/>no per-launch scheme UUID possible)
     User->>Browser: Login + Authorize
     Browser-->>App: Deep-link callback `presencejam://callback?code=…&state=…`
-    App->>Spotify: POST /api/token (code, code_verifier)
+    App->>Spotify: POST /api/token (grant_type=authorization_code,<br/>code, code_verifier, client_id)<br/>+ Authorization: Basic &lt;client_id:client_secret&gt;
     Spotify-->>App: access_token + refresh_token
+    App->>Spotify: POST /api/token (grant_type=refresh_token,<br/>refresh_token)<br/>+ Authorization: Basic &lt;client_id:client_secret&gt;
+    Spotify-->>App: new access_token + refresh_token
     App->>App: persist tokens to tokens.json (atomic write)
 ```
 
 **Notes:**
 
+- The flow is a **hybrid**: the authorize leg is genuine PKCE (S256), and the
+  token-exchange and refresh legs also authenticate with the client secret via
+  `Authorization: Basic <client_id:client_secret>`. That matches neither
+  Spotify flow exactly — it's the PKCE-tutorial request body plus the
+  Authorization Code flow's Basic header (a strict superset of both; RFC 7636
+  §5 keeps PKCE params additive, so this is a documented combination). A
+  confidential client — one that can securely store a secret — is expected to
+  use it (Spotify's Feb-2025 "Increasing the security requirements" post).
 - The `state` parameter is the CSRF token **and** the per-launch anti-hijack
   binding — Spotify echoes it back verbatim, so we can encode extra entropy in
   it without registering anything new with Spotify. See *Deep Link Routing* for
@@ -335,7 +346,7 @@ callbacks. The registration runs **on every launch**, not just at install:
 
 | Scheme                          | Used For                          |
 |---------------------------------|-----------------------------------|
-| `presencejam://callback`        | Spotify PKCE OAuth redirect       |
+| `presencejam://callback`        | Spotify OAuth redirect (Authorization Code + PKCE) |
 | `presencejam://teams-callback`  | Teams auth (reserved for future)  |
 
 ### Routing flow
