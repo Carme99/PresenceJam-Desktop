@@ -226,10 +226,6 @@ pub fn reconnect_teams(
     *state.tokens.teams_mut() = None;
     log::info!("{CMD} reconnect_teams: cleared teams_tokens");
 
-    // Clear pending Teams auth
-    *state.pending.teams_mut() = None;
-    log::info!("{CMD} reconnect_teams: cleared pending_teams_auth");
-
     // Persist the cleared state to disk atomically.
     if let Err(e) = token_io::persist_tokens(state.inner(), &app) {
         log::warn!(

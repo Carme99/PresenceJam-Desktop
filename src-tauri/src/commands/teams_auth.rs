@@ -13,10 +13,7 @@ use tauri::{AppHandle, Emitter};
 const CMD: &str = "[CMD.TEAMS_AUTH]";
 
 #[tauri::command]
-pub fn start_teams_auth_device_code(
-    _app: AppHandle,
-    state: tauri::State<'_, Arc<AppState>>,
-) -> Result<DeviceCodeResponse, String> {
+pub fn start_teams_auth_device_code(_app: AppHandle) -> Result<DeviceCodeResponse, String> {
     log::debug!("{CMD} start_teams_auth_device_code: ENTRY");
 
     let response = crate::teams::start_teams_auth_device_code()?;
@@ -27,24 +24,9 @@ pub fn start_teams_auth_device_code(
         response.verification_url
     );
 
-    // Calculate expiry time (device codes typically expire in 900 seconds / 15 minutes)
-    let expires_at = chrono::Utc::now() + chrono::Duration::seconds(response.expires_in as i64);
-
-    // Populate pending_teams_auth in AppState only. We deliberately do NOT
-    // persist the device_code to disk — it's a 15-minute bearer credential
-    // and disk persistence leaks it to filesystem-level attackers. See
-    // issue #65 / HIGH #3. If the user crashes between this call and
-    // `poll_teams_auth`, they re-start the device-code flow (cheap UX).
-    {
-        let mut pending = state.pending.teams_mut();
-        *pending = Some(crate::PendingTeamsAuth {
-            verifier: response.device_code.clone(),
-            client_id: crate::teams::MICROSOFT_GRAPH_CLIENT_ID.to_string(),
-            redirect_uri: "presencejam://callback".to_string(),
-            expires_at,
-        });
-    }
-    log::info!("{CMD} start_teams_auth_device_code: pending_teams_auth populated in AppState (in-memory only)");
+    // No pending state is stored: the device code travels to the poll
+    // command via the frontend, and a device-code flow needs no registered
+    // redirect URI (Entra reply-url docs). See issue #158.
 
     log::info!("{CMD} start_teams_auth_device_code: SUCCESS");
     Ok(response)
@@ -76,12 +58,6 @@ pub fn poll_teams_auth(
     }
     token_io::persist_tokens(state.inner(), &app)?;
     log::info!("{CMD} poll_teams_auth: tokens persisted atomically");
-
-    // Clear pending Teams auth in AppState (no disk side — we never wrote it)
-    {
-        let mut pending = state.pending.teams_mut();
-        *pending = None;
-    }
 
     // Issue #70: invalidate the onboarding cache.
     state.onboarding_cache.invalidate();
