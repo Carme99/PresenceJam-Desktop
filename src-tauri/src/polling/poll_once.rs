@@ -277,13 +277,15 @@ pub(crate) fn run(
                 }
             }
 
-            if matches!(final_err, SpotifyApiError::RateLimited) {
+            // TODO(#159): use `final_err.retry_after().unwrap_or(...)` for the
+            // backoff once the poll_once integration lands.
+            if matches!(final_err, SpotifyApiError::RateLimited(_)) {
                 backoff_secs = with_jitter(RATE_LIMIT_BACKOFF_SECONDS);
             }
 
             if matches!(
                 final_err,
-                SpotifyApiError::RateLimited
+                SpotifyApiError::RateLimited(_)
                     | SpotifyApiError::ExpiredToken
                     | SpotifyApiError::Other(_)
             ) {

@@ -31,15 +31,42 @@ pub struct TrackInfo {
 #[derive(Debug)]
 pub enum SpotifyApiError {
     ExpiredToken,
-    RateLimited,
+    /// 429 rate limited. Carries the `Retry-After` header value in seconds
+    /// when present and parseable, `None` when the header was absent or
+    /// unparseable. See issue #159.
+    RateLimited(Option<u64>),
+    /// The token endpoint returned `{"error":"invalid_grant"}` — the refresh
+    /// token is expired, revoked, or otherwise invalid and the app must
+    /// discard it and re-run the authorization flow instead of retrying.
+    /// See issue #160.
+    InvalidGrant,
     Other(String),
+}
+
+impl SpotifyApiError {
+    /// Retry-after seconds carried by a `RateLimited` (429) error, if the
+    /// server sent a parseable `Retry-After` header. `None` when the header
+    /// was absent or unparseable, or when the error is not a 429.
+    pub fn retry_after(&self) -> Option<u64> {
+        match self {
+            SpotifyApiError::RateLimited(secs) => *secs,
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for SpotifyApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SpotifyApiError::ExpiredToken => write!(f, "Access token expired"),
-            SpotifyApiError::RateLimited => write!(f, "Rate limited"),
+            SpotifyApiError::RateLimited(retry_after) => match retry_after {
+                Some(secs) => write!(f, "Rate limited (retry after {}s)", secs),
+                None => write!(f, "Rate limited"),
+            },
+            SpotifyApiError::InvalidGrant => write!(
+                f,
+                "Invalid grant: refresh token is expired, revoked, or otherwise invalid - re-authentication required"
+            ),
             SpotifyApiError::Other(s) => write!(f, "{}", s),
         }
     }
@@ -225,7 +252,18 @@ pub fn get_currently_playing(access_token: &str) -> Result<Option<TrackInfo>, Sp
         }
         204 => Ok(None),
         401 => Err(SpotifyApiError::ExpiredToken),
-        429 => Err(SpotifyApiError::RateLimited),
+        429 => {
+            // Spotify's rate-limit docs: the 429 response normally includes a
+            // `Retry-After` header in seconds — honor it instead of a fixed
+            // backoff. `None` when the header is absent/unparseable. See
+            // issue #159.
+            let retry_after = response
+                .headers()
+                .get("Retry-After")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.trim().parse::<u64>().ok());
+            Err(SpotifyApiError::RateLimited(retry_after))
+        }
         _ => {
             let body = response.text().unwrap_or_default();
             Err(SpotifyApiError::Other(format!(
@@ -310,7 +348,17 @@ pub fn validate_spotify_token(tokens: &SpotifyTokens) -> Result<(), SpotifyApiEr
     match response.status().as_u16() {
         200 | 204 => Ok(()),
         401 => Err(SpotifyApiError::ExpiredToken),
-        429 => Err(SpotifyApiError::RateLimited),
+        429 => {
+            // Honor the documented `Retry-After` header (seconds) so the
+            // caller can wait out the server's window instead of a fixed
+            // backoff. `None` when absent/unparseable. See issue #159.
+            let retry_after = response
+                .headers()
+                .get("Retry-After")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.trim().parse::<u64>().ok());
+            Err(SpotifyApiError::RateLimited(retry_after))
+        }
         _ => Err(SpotifyApiError::Other(format!(
             "unexpected status {}",
             response.status()
