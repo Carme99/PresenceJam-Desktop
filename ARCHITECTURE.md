@@ -167,8 +167,8 @@ sequenceDiagram
         Note over Microsoft: authorization_pending
     end
     Microsoft-->>App: access_token + refresh_token
-    App->>Teams: PATCH /me/presence/setStatusMessage
-    Teams-->>App: 204 No Content
+    App->>Teams: POST /me/presence/setStatusMessage
+    Teams-->>App: 200 OK
 ```
 
 The app polls Microsoft's token endpoint every 5 seconds while the user completes the browser auth. Once authorized, tokens are stored and the status message is set via Graph API.
@@ -256,7 +256,7 @@ flowchart TD
     Changed -->|No track, paused| Consec[consecutive_pauses++]
     Changed -->|yes| Format[format_status template]
     Format --> Prof[filter_profanity if enabled]
-    Prof --> Set[PATCH /me/presence<br/>setStatusMessage]
+    Prof --> Set[POST /me/presence<br/>setStatusMessage]
     Set --> SmartSleep[Smart sleep until track ends - 5s]
     Consec --> Backoff[Pause-aware exponential backoff:<br/>30s → 60s → 120s → 300s cap]
     SmartSleep --> Tick
