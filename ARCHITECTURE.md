@@ -347,15 +347,16 @@ callbacks. The registration runs **on every launch**, not just at install:
 | Scheme                          | Used For                          |
 |---------------------------------|-----------------------------------|
 | `presencejam://callback`        | Spotify OAuth redirect (Authorization Code + PKCE) |
-| `presencejam://teams-callback`  | Teams auth (reserved for future)  |
 
 ### Routing flow
 
 `lib.rs::handle_deep_link` parses the URL, matches on scheme + path, and
-dispatches to either `handle_spotify_callback` or `handle_teams_callback`.
-The single-instance plugin scans the launch argv for `presencejam://…` on
-Windows + Linux so opening a callback URL routes to the running instance
-(via the single-instance hook) instead of spawning a second copy.
+dispatches to `handle_spotify_callback` — the only deep-link consumer.
+Teams auth uses the **device-code flow exclusively**, which needs no
+redirect URI at all (and therefore no callback route). The single-instance
+plugin scans the launch argv for `presencejam://…` on Windows + Linux so
+opening a callback URL routes to the running instance (via the
+single-instance hook) instead of spawning a second copy.
 
 ### `state` parameter is both CSRF and anti-hijack binding
 
