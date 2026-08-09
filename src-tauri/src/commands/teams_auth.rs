@@ -107,7 +107,8 @@ pub fn refresh_teams(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> 
     };
     log::info!("{CMD} refresh_teams: current tokens found");
 
-    let new_tokens = crate::teams::refresh_teams_token(&current_tokens)?;
+    let new_tokens = crate::teams::refresh_teams_token(&current_tokens)
+        .map_err(|e| e.to_string())?;
     log::info!("{CMD} refresh_teams: new tokens received");
 
     // CAS: only commit if state still holds the access token we refreshed

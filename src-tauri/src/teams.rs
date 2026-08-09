@@ -42,10 +42,31 @@ pub enum TeamsApiError {
     /// `Retry-After` seconds (None when the header is absent or
     /// unparseable → fall back to exponential backoff).
     RateLimited(Option<u64>),
+    /// Refresh token is missing/invalid/revoked (token-endpoint 400
+    /// `invalid_grant`) — permanent, re-auth required.
+    InvalidGrant,
     /// Network error or other transient failure (5xx, send failure)
     Transient(String),
     /// Other non-retryable error
     Other(u16, String),
+}
+
+impl std::fmt::Display for TeamsApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TeamsApiError::ExpiredToken(status) => {
+                write!(f, "Access token expired or invalid (HTTP {})", status)
+            }
+            TeamsApiError::Forbidden(_status, body) => write!(f, "{}", body),
+            TeamsApiError::RateLimited(retry_after) => match retry_after {
+                Some(secs) => write!(f, "Rate limited (retry after {}s)", secs),
+                None => write!(f, "Rate limited"),
+            },
+            TeamsApiError::InvalidGrant => write!(f, "Refresh token is invalid or revoked"),
+            TeamsApiError::Transient(msg) => write!(f, "{}", msg),
+            TeamsApiError::Other(_status, body) => write!(f, "{}", body),
+        }
+    }
 }
 
 /// Creates a reqwest blocking client with standard config (user agent + 10s timeout).
@@ -392,13 +413,13 @@ pub fn complete_teams_auth(
     })
 }
 
-pub fn refresh_teams_token(tokens: &TeamsTokens) -> Result<TeamsTokens, String> {
+pub fn refresh_teams_token(tokens: &TeamsTokens) -> Result<TeamsTokens, TeamsApiError> {
     let refresh_token = tokens
         .refresh_token
         .as_ref()
-        .ok_or("No refresh token available. Please sign in again.")?;
+        .ok_or(TeamsApiError::InvalidGrant)?;
 
-    let client = build_teams_client()?;
+    let client = build_teams_client().map_err(TeamsApiError::Transient)?;
 
     let params = [
         ("grant_type", "refresh_token"),
@@ -411,12 +432,16 @@ pub fn refresh_teams_token(tokens: &TeamsTokens) -> Result<TeamsTokens, String> 
         .header("Accept", "application/json")
         .form(&params)
         .send()
-        .map_err(|e| format!("Failed to send refresh token request: {}", e))?;
+        .map_err(|e| {
+            TeamsApiError::Transient(format!("Failed to send refresh token request: {}", e))
+        })?;
 
     let status = response.status();
+    let status_code = status.as_u16();
+    let retry_after = parse_retry_after(&response);
     let raw_body = response
         .text()
-        .map_err(|e| format!("Failed to read response body: {}", e))?;
+        .map_err(|e| TeamsApiError::Transient(format!("Failed to read response body: {}", e)))?;
 
     if !status.is_success() {
         log::error!(
@@ -424,26 +449,51 @@ pub fn refresh_teams_token(tokens: &TeamsTokens) -> Result<TeamsTokens, String> 
             status,
             truncate_for_log(&raw_body)
         );
-        let error_resp: TokenErrorResponse = serde_json::from_str(&raw_body).map_err(|e| {
-            format!(
-                "Failed to parse error response: {} (body was: {})",
-                e,
+        if status_code == 400 {
+            // invalid_grant means the refresh token itself is dead —
+            // permanent, re-auth required. Any other 400 body is an
+            // "Other" non-retryable error.
+            let error_resp: TokenErrorResponse = serde_json::from_str(&raw_body).map_err(|e| {
+                TeamsApiError::Other(
+                    status_code,
+                    format!(
+                        "Failed to parse error response: {} (body was: {})",
+                        e,
+                        truncate_for_log(&raw_body)
+                    ),
+                )
+            })?;
+            if error_resp.error == "invalid_grant" {
+                return Err(TeamsApiError::InvalidGrant);
+            }
+            return Err(TeamsApiError::Other(
+                status_code,
+                format!(
+                    "{} - {}",
+                    error_resp.error,
+                    error_resp.error_description.unwrap_or_default()
+                ),
+            ));
+        }
+        return Err(match status_code {
+            429 => TeamsApiError::RateLimited(retry_after),
+            500..=599 => TeamsApiError::Transient(format!(
+                "server error {}: {}",
+                status_code,
                 truncate_for_log(&raw_body)
-            )
-        })?;
-        return Err(format!(
-            "Failed to refresh token: {} - {} (raw body: {})",
-            error_resp.error,
-            error_resp.error_description.unwrap_or_default(),
-            truncate_for_log(&raw_body)
-        ));
+            )),
+            _ => TeamsApiError::Other(status_code, truncate_for_log(&raw_body)),
+        });
     }
 
     let token_resp: TokenResponse = serde_json::from_str(&raw_body).map_err(|e| {
-        format!(
-            "Failed to parse token response: {} (body was: {})",
-            e,
-            truncate_for_log(&raw_body)
+        TeamsApiError::Other(
+            200,
+            format!(
+                "Failed to parse token response: {} (body was: {})",
+                e,
+                truncate_for_log(&raw_body)
+            ),
         )
     })?;
 
