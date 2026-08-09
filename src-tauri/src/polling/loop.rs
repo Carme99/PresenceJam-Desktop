@@ -2,7 +2,8 @@
 //!
 //! `polling_loop` is the outermost loop: it owns the per-thread mutable
 //! state whose lifetime spans iterations (`last_track_key`,
-//! `last_teams_update`, `consecutive_pauses`, `transient_failure_count`),
+//! `last_teams_update`, `last_posted_placeholder`, `consecutive_pauses`,
+//! `transient_failure_count`),
 //! checks the stop channel and the `is_syncing` flag, dispatches one
 //! iteration to [`super::poll_once::run`], refreshes the tray, and
 //! sleeps for the duration the iteration returned.
@@ -38,6 +39,13 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
     let mut consecutive_pauses: u8 = 0;
     let mut last_track_key: Option<String> = None;
     let mut last_teams_update: Option<Instant> = None;
+    // Tracks the last placeholder content posted by the clear path so
+    // byte-identical pause/no-track POSTs are skipped (issue #155). Owned by
+    // the driver because the value's lifetime spans iterations; `poll_once`
+    // sets it on a successful placeholder post and clears it when a real
+    // track starts. Reset on a successful post or a real track, so the gate
+    // never suppresses a placeholder that was replaced by real content.
+    let mut last_posted_placeholder: Option<String> = None;
     // Counts consecutive transient errors toward the 5-strikes exit that
     // emits `reconnect-required`. Owned by the driver because the counter's
     // lifetime spans iterations; `poll_once::run` mutates it inside the
@@ -66,7 +74,8 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
 
         // Delegate the iteration. The driver passes `&mut` to per-iteration
         // state so poll_once can mutate consecutive_pauses / last_track_key /
-        // last_teams_update / transient_failure_count without owning them.
+        // last_teams_update / last_posted_placeholder / transient_failure_count
+        // without owning them.
         // The returned `PollIteration` tells the driver what to do next:
         // sleep N seconds, or break.
         let iteration = super::poll_once::run(
@@ -75,6 +84,7 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
             &stop_rx,
             &mut last_track_key,
             &mut last_teams_update,
+            &mut last_posted_placeholder,
             &mut consecutive_pauses,
             &mut transient_failure_count,
         );

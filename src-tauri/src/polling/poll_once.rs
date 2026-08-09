@@ -54,6 +54,7 @@ pub(crate) fn run(
     stop_rx: &mpsc::Receiver<()>,
     last_track_key: &mut Option<String>,
     last_teams_update: &mut Option<Instant>,
+    last_posted_placeholder: &mut Option<String>,
     consecutive_pauses: &mut u8,
     transient_failure_count: &mut u8,
 ) -> PollIteration {
@@ -195,6 +196,7 @@ pub(crate) fn run(
                 last_track_key,
                 last_poll_instant,
                 last_teams_update,
+                last_posted_placeholder,
                 consecutive_pauses,
             );
             *transient_failure_count = 0;
@@ -202,9 +204,16 @@ pub(crate) fn run(
         }
         Ok(None) => {
             log::info!("[POLLING] poll_once: no track playing");
-            handle_no_track(app, state, last_track_key);
+            let no_track_backoff =
+                handle_no_track(app, state, last_track_key, &config, last_posted_placeholder);
             *transient_failure_count = 0;
-            record_no_track_outcome(consecutive_pauses, &config)
+            let mut iteration = record_no_track_outcome(consecutive_pauses, &config);
+            if let PollIteration::Sleep { seconds } = &mut iteration {
+                // Issue #154: a throttled Teams clear extends the next poll
+                // to the server-directed delay.
+                *seconds = (*seconds).max(no_track_backoff);
+            }
+            iteration
         }
         Err(e) => {
             log::error!(
@@ -262,6 +271,7 @@ pub(crate) fn run(
                                             last_track_key,
                                             last_poll_instant_retry,
                                             last_teams_update,
+                                            last_posted_placeholder,
                                             consecutive_pauses,
                                         );
                                         *transient_failure_count = 0;
@@ -269,12 +279,25 @@ pub(crate) fn run(
                                     }
                                     Ok(None) => {
                                         log::info!("[POLLING] poll_once: retry no track");
-                                        handle_no_track(app, state, last_track_key);
+                                        let no_track_backoff = handle_no_track(
+                                            app,
+                                            state,
+                                            last_track_key,
+                                            &config,
+                                            last_posted_placeholder,
+                                        );
                                         *transient_failure_count = 0;
-                                        return record_no_track_outcome(
+                                        let mut iteration = record_no_track_outcome(
                                             consecutive_pauses,
                                             &config,
                                         );
+                                        if let PollIteration::Sleep { seconds } = &mut iteration {
+                                            // Issue #154: a throttled Teams
+                                            // clear extends the next poll to
+                                            // the server-directed delay.
+                                            *seconds = (*seconds).max(no_track_backoff);
+                                        }
+                                        return iteration;
                                     }
                                     Err(retry_err) => {
                                         log::error!(
@@ -449,13 +472,18 @@ pub(crate) fn process_track(
     last_track_key: &mut Option<String>,
     last_poll_instant: Instant,
     last_teams_update: &mut Option<Instant>,
+    last_posted_placeholder: &mut Option<String>,
     consecutive_pauses: &mut u8,
 ) -> u64 {
     let elapsed_ms = last_poll_instant.elapsed().as_millis() as u64;
-    // TODO(#165): handle `None` (live/unknown position) properly — fall back
-    // to the default interval for sleep and no expiry. `unwrap_or(0)`
-    // preserves the pre-Option behavior until that integration lands.
-    let corrected_progress_ms = track.progress_ms.unwrap_or(0).saturating_add(elapsed_ms);
+    // Issue #165: `progress_ms` is `None` for live/unknown-position streams.
+    // Keep the Option alive so the duration-derived sleep/expiry below are
+    // skipped for streams — they fall back to the default interval and no
+    // `expiryDateTime` on the wire respectively.
+    let corrected_progress_ms = track.progress_ms.map(|p| p.saturating_add(elapsed_ms));
+    // Issue #154: a throttled Teams set/clear (429) extends the next poll to
+    // the server-directed delay.
+    let mut teams_backoff_secs: u64 = 0;
 
     let track_key = format!("{} - {}", track.title, track.artist);
     let changed = last_track_key.as_ref() != Some(&track_key);
@@ -526,19 +554,18 @@ pub(crate) fn process_track(
     if let Some(teams_tok) = teams_tokens {
         if track.is_playing {
             *consecutive_pauses = 0;
+            // Issue #155: a real track replaces any placeholder, so the next
+            // pause/no-track must post a fresh placeholder again.
+            *last_posted_placeholder = None;
             if should_skip_api_call {
                 log::debug!(
                     "[POLLING] process_track: debounce active, skipping Teams API call (changed={}, elapsed={}ms)",
                     changed,
                     last_teams_update.map(|i| i.elapsed().as_millis() as u64).unwrap_or(0)
                 );
-                let remaining_ms = track.duration_ms.saturating_sub(corrected_progress_ms);
-                let buffer_ms = 5000u64;
-                let remaining_secs = remaining_ms / 1000;
-                let sleep_secs = remaining_secs.saturating_sub(buffer_ms / 1000);
-                return sleep_secs
-                    .max(config_minimum_interval(config))
-                    .min(config_maximum_interval(config));
+                let remaining_ms = corrected_progress_ms
+                    .map(|c| track.duration_ms.saturating_sub(c));
+                return playing_track_sleep(remaining_ms, config);
             }
             let status_format = config
                 .as_ref()
@@ -559,20 +586,16 @@ pub(crate) fn process_track(
                 status_message.clone()
             };
 
-            let remaining_ms = track.duration_ms.saturating_sub(corrected_progress_ms);
-            let buffer_ms = config
-                .as_ref()
-                .map(|c| c.polling.expiry_buffer_seconds)
-                .unwrap_or(10)
-                * 1000;
-            let expiry = Utc::now()
-                + chrono::Duration::milliseconds(remaining_ms as i64 + buffer_ms as i64);
-            let expiry_str = expiry.to_rfc3339();
+            let remaining_ms = corrected_progress_ms
+                .map(|c| track.duration_ms.saturating_sub(c));
+            // Issue #165: live streams have no known remaining time → no
+            // `expiryDateTime` on the wire (the status does not self-expire).
+            let expiry_str = status_expiry_str(remaining_ms, config);
 
             match set_teams_status_message(
                 &teams_tok.access_token,
                 &final_status,
-                Some(&expiry_str),
+                expiry_str.as_deref(),
             ) {
                 Ok(_) => {
                     *last_teams_update = Some(Instant::now());
@@ -592,14 +615,26 @@ pub(crate) fn process_track(
                         format!("Failed to update status: {}", e),
                         ErrorSeverity::Error,
                     );
-                    let e_str = e.to_string().to_lowercase();
-                    if e_str.contains("unauthorized")
-                        || e_str.contains("forbidden")
-                        || e_str.contains("401")
-                        || e_str.contains("403")
-                    {
-                        log::warn!("[POLLING] process_track: Teams auth failure detected, emitting teams-reconnect-required");
-                        let _ = app.emit("teams-reconnect-required", json!(null));
+                    // Issue #154: a 429 extends the next poll to the
+                    // server-directed delay.
+                    teams_backoff_secs = teams_backoff_secs.max(rate_limit_sleep_secs(&e));
+                    // Issue #153: classify typed TeamsApiError variants instead
+                    // of string-sniffing the error body. Only a dead token
+                    // (401 / invalid_grant) means re-auth; 403 is a
+                    // permission/license problem re-auth cannot fix.
+                    match e {
+                        TeamsApiError::ExpiredToken(_) | TeamsApiError::InvalidGrant => {
+                            log::warn!("[POLLING] process_track: Teams auth failure detected, emitting teams-reconnect-required");
+                            let _ = app.emit("teams-reconnect-required", json!(null));
+                        }
+                        TeamsApiError::Forbidden(_, _) => {
+                            log::error!("[POLLING] process_track: Teams status update forbidden (permission/license) — re-auth cannot fix this; skipping teams-reconnect-required");
+                        }
+                        TeamsApiError::RateLimited(_)
+                        | TeamsApiError::Transient(_)
+                        | TeamsApiError::Other(_, _) => {
+                            log::warn!("[POLLING] process_track: Teams status update failed (transient), continuing");
+                        }
                     }
                 }
             }
@@ -608,68 +643,113 @@ pub(crate) fn process_track(
             .map(|c| c.teams.clear_on_pause)
             .unwrap_or(true)
         {
-            match clear_teams_status_message(&teams_tok.access_token, "\u{1F3B5} Paused", None) {
-                Ok(_) => {
-                    *last_teams_update = Some(Instant::now());
-                    let _ = app.emit(
-                        "presence-cleared",
-                        json!({ "timestamp": Utc::now().to_rfc3339() }),
-                    );
-                }
-                Err(e) => {
-                    log::error!(
-                        "[POLLING] process_track: Failed to clear Teams status: {}",
-                        e
-                    );
+            // Issue #155: the clear path posts a short-lived placeholder
+            // (Graph has no "clear status message" action) and skips
+            // byte-identical repeat posts.
+            let placeholder = "\u{1F3B5} Paused";
+            if last_posted_placeholder.as_deref() == Some(placeholder) {
+                log::debug!("[POLLING] process_track: paused placeholder unchanged, skipping clear POST");
+            } else {
+                let expiry_str = placeholder_expiry_str();
+                match clear_teams_status_message(
+                    &teams_tok.access_token,
+                    placeholder,
+                    Some(&expiry_str),
+                ) {
+                    Ok(_) => {
+                        *last_teams_update = Some(Instant::now());
+                        *last_posted_placeholder = Some(placeholder.to_string());
+                        let _ = app.emit(
+                            "presence-cleared",
+                            json!({ "timestamp": Utc::now().to_rfc3339() }),
+                        );
+                    }
+                    Err(e) => {
+                        log::error!(
+                            "[POLLING] process_track: Failed to clear Teams status: {}",
+                            e
+                        );
+                        // Issue #154: honor the server's Retry-After on a
+                        // throttled clear.
+                        teams_backoff_secs = teams_backoff_secs.max(rate_limit_sleep_secs(&e));
+                    }
                 }
             }
         }
     }
 
     if track.is_playing {
-        let remaining_ms = track.duration_ms.saturating_sub(corrected_progress_ms);
-        let buffer_ms = 5000u64;
-        let remaining_secs = remaining_ms / 1000;
-        let sleep_secs = remaining_secs.saturating_sub(buffer_ms / 1000);
-        sleep_secs
-            .max(config_minimum_interval(config))
-            .min(config_maximum_interval(config))
+        let remaining_ms = corrected_progress_ms.map(|c| track.duration_ms.saturating_sub(c));
+        playing_track_sleep(remaining_ms, config)
     } else {
         let sleep = pause_backoff(*consecutive_pauses, config_default_interval(config));
         *consecutive_pauses = consecutive_pauses.saturating_add(1).min(4);
         sleep
     }
+    .max(teams_backoff_secs)
 }
 
+/// Handle a no-track poll result. Clears the tracked state and, when
+/// `clear_on_pause` allows it (issue #155), posts a short-lived "Nothing
+/// playing" placeholder. Returns extra backoff seconds to fold into the
+/// next poll when the clear was throttled (issue #154).
 pub(crate) fn handle_no_track(
     app: &AppHandle,
     state: &Arc<AppState>,
     last_track_key: &mut Option<String>,
-) {
+    config: &Option<crate::config::AppConfig>,
+    last_posted_placeholder: &mut Option<String>,
+) -> u64 {
     if last_track_key.is_some() {
         *last_track_key = None;
         *state.polling.current_track_mut() = None;
+    } else {
+        return 0;
+    }
 
-        let teams_tokens = state.tokens.teams().clone();
-        if let Some(teams_tok) = teams_tokens {
-            match clear_teams_status_message(
-                &teams_tok.access_token,
-                "\u{1F3B5} Nothing playing on Spotify",
-                None,
-            ) {
-                Ok(_) => {
-                    let _ = app.emit(
-                        "presence-cleared",
-                        json!({ "timestamp": Utc::now().to_rfc3339() }),
-                    );
-                }
-                Err(e) => {
-                    log::error!(
-                        "[POLLING] handle_no_track: Failed to clear Teams status: {}",
-                        e
-                    );
-                }
-            }
+    // Issue #155: honor `clear_on_pause` like the paused-track branch.
+    if !config
+        .as_ref()
+        .map(|c| c.teams.clear_on_pause)
+        .unwrap_or(true)
+    {
+        return 0;
+    }
+
+    let teams_tokens = state.tokens.teams().clone();
+    let teams_tok = match teams_tokens {
+        Some(t) => t,
+        None => return 0,
+    };
+
+    let placeholder = "\u{1F3B5} Nothing playing on Spotify";
+    // Issue #155: skip byte-identical placeholder posts.
+    if last_posted_placeholder.as_deref() == Some(placeholder) {
+        log::debug!("[POLLING] handle_no_track: no-track placeholder unchanged, skipping clear POST");
+        return 0;
+    }
+
+    let expiry_str = placeholder_expiry_str();
+    match clear_teams_status_message(
+        &teams_tok.access_token,
+        placeholder,
+        Some(&expiry_str),
+    ) {
+        Ok(_) => {
+            *last_posted_placeholder = Some(placeholder.to_string());
+            let _ = app.emit(
+                "presence-cleared",
+                json!({ "timestamp": Utc::now().to_rfc3339() }),
+            );
+            0
+        }
+        Err(e) => {
+            log::error!(
+                "[POLLING] handle_no_track: Failed to clear Teams status: {}",
+                e
+            );
+            // Issue #154: honor the server's Retry-After on a throttled clear.
+            rate_limit_sleep_secs(&e)
         }
     }
 }
