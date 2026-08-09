@@ -150,8 +150,9 @@
     unlisten.push(await listen('reconnect-required', () => {
       // Generic reconnect signal from polling.rs:633 (e.g. when the
       // auth refresh loop has been failing for too long). The
-      // provider-specific events (spotify-reconnect-required,
-      // teams-reconnect-required) are handled in Settings.svelte;
+      // provider-specific events are handled elsewhere:
+      // spotify-reconnect-required in Settings.svelte,
+      // teams-reconnect-required in +layout.svelte (issue #157);
       // this is the catch-all that takes the user to the reconnect view.
       devLog('[DASHBOARD] EVENT: reconnect-required received');
       isSyncing = false;

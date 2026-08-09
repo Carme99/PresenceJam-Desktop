@@ -24,7 +24,10 @@
       && $configStore.spotify.client_id.trim() !== '';
     const hasClientSecret = await invoke<boolean>('is_spotify_client_secret_set');
     needsSpotify = !hasClientId || !hasClientSecret;
-    needsTeams = false; // Teams uses device code flow which typically auto-refreshes
+    // Teams re-auth is NOT auto-refreshing in general (device-code
+    // refresh failures land the user in a re-auth flow — see #151,
+    // #157), so surface the Teams reconnect path honestly.
+    needsTeams = true;
 
     devLog('[RECONNECT] needsSpotify=', needsSpotify, 'needsTeams=', needsTeams);
 

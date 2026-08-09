@@ -4,7 +4,7 @@
   import { configStore, saveConfig, type AppConfig } from '$lib/stores/config';
   import type { DeviceCodeResponse, SpotifyTokens, TeamsTokens } from '$lib/types';
   import { currentView } from '$lib/stores/app';
-  import { authFlow, setSpotifyPhase, setTeamsPhase } from '$lib/stores/authFlow.svelte';
+  import { authFlow, setSpotifyPhase, setTeamsPhase, setTeamsDeviceCode } from '$lib/stores/authFlow.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
   import { devLog } from '$lib/utils/dev';
   import Logo from './Logo.svelte';
@@ -18,9 +18,12 @@
   let spotifyWaiting = $derived(authFlow.spotify.phase === 'waiting');
   let spotifyAuthError = $derived(authFlow.spotify.error ?? '');
 
-  let teamsUserCode = $state('');
-  let teamsVerificationUrl = $state('');
-  let teamsDeviceCode = $state('');
+  // Device-code state lives in the authFlow store (set via
+  // setTeamsDeviceCode) so Onboarding and Settings render the same
+  // code/verification URI — see issue #157.
+  let teamsUserCode = $derived(authFlow.teams.userCode);
+  let teamsVerificationUrl = $derived(authFlow.teams.verificationUrl);
+  let teamsDeviceCode = $derived(authFlow.teams.deviceCode);
   let teamsConnected = $derived(authFlow.teams.phase === 'done');
   let teamsPolling = $derived(authFlow.teams.phase === 'waiting');
   let teamsAuthError = $derived(authFlow.teams.error ?? '');
@@ -174,9 +177,15 @@
       devLog('[ONBOARDING] connectTeams: response.verification_url=', response.verification_url);
       devLog('[ONBOARDING] connectTeams: response.device_code=', response.device_code ? 'present' : 'null');
 
-      teamsUserCode = response.user_code;
-      teamsVerificationUrl = response.verification_url;
-      teamsDeviceCode = response.device_code;
+      // Store the DeviceCodeResponse so the polling cadence can honor
+      // the server's `interval` (issue #152) and the Settings re-auth
+      // path can render the same code/URI from the store (issue #157).
+      setTeamsDeviceCode({
+        userCode: response.user_code,
+        verificationUrl: response.verification_url,
+        deviceCode: response.device_code,
+        interval: response.interval
+      });
       devLog('[ONBOARDING] connectTeams: state updated');
 
       devLog('[ONBOARDING] connectTeams: calling invoke open_external_url');
