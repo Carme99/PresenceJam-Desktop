@@ -29,7 +29,7 @@ use crate::spotify::{
 };
 use crate::teams::{
     clear_teams_status_message, is_token_expired as is_teams_token_expired, refresh_teams_token,
-    set_teams_status_message,
+    set_teams_status_message, TeamsApiError,
 };
 use crate::token_io;
 use crate::AppState;
@@ -134,6 +134,28 @@ pub(crate) fn run(
             }
             Err(e) => {
                 log::error!("[POLLING] poll_once: Failed to refresh Spotify token: {}", e);
+                // Issue #160: `invalid_grant` means the refresh token is dead
+                // (documented 6-month lifetime, or revoked). Discard it and
+                // trigger re-auth instead of retrying forever. The write guard
+                // is dropped before persist_tokens (which re-locks the same
+                // RwLock for reading — parking_lot is not reentrant).
+                if matches!(e, SpotifyApiError::InvalidGrant) {
+                    log::error!("[POLLING] poll_once: Spotify refresh token invalid (invalid_grant), discarding tokens and requiring reconnect");
+                    *state.tokens.spotify_mut() = None;
+                    if let Err(persist_err) = token_io::persist_tokens(state, app) {
+                        log::warn!(
+                            "[POLLING] poll_once: failed to persist cleared Spotify tokens: {}",
+                            persist_err
+                        );
+                    }
+                    let _ = app.emit("spotify-reconnect-required", json!(null));
+                    let _ = app.emit("reconnect-required", json!(null));
+                    return interruptible_sleep(
+                        stop_rx,
+                        with_jitter(ERROR_RETRY_INTERVAL_SECONDS),
+                        "invalid-grant sleep",
+                    );
+                }
                 emit_error(
                     app,
                     "spotify",
@@ -269,18 +291,26 @@ pub(crate) fn run(
                                 "[POLLING] poll_once: token refresh failed: {}",
                                 refresh_err
                             );
-                            log::warn!("[POLLING] poll_once: Spotify token refresh permanently failed, emitting spotify-reconnect-required");
-                            let _ = app.emit("spotify-reconnect-required", json!(null));
-                            final_err = SpotifyApiError::Other(refresh_err.to_string());
+                            // Issue #160: only a dead refresh token
+                            // (`invalid_grant`) needs re-auth; other refresh
+                            // failures are transient and flow into the
+                            // backoff / 5-strikes logic below.
+                            if matches!(refresh_err, SpotifyApiError::InvalidGrant) {
+                                log::warn!("[POLLING] poll_once: Spotify refresh token invalid (invalid_grant), emitting spotify-reconnect-required");
+                                let _ = app.emit("spotify-reconnect-required", json!(null));
+                            }
+                            final_err = refresh_err;
                         }
                     }
                 }
             }
 
-            // TODO(#159): use `final_err.retry_after().unwrap_or(...)` for the
-            // backoff once the poll_once integration lands.
+            // Issue #159: honor the server's `Retry-After` (floored at the
+            // error retry interval so a tiny value can't create a busy loop);
+            // fall back to the fixed jittered backoff when the header is
+            // absent.
             if matches!(final_err, SpotifyApiError::RateLimited(_)) {
-                backoff_secs = with_jitter(RATE_LIMIT_BACKOFF_SECONDS);
+                backoff_secs = with_jitter(spotify_backoff_base(&final_err));
             }
 
             if matches!(
@@ -382,6 +412,11 @@ where
     };
 
     if committed {
+        // TODO(#followup): the caller's write guard (`&mut *state.tokens.X_mut()`)
+        // is still alive here, and persist_tokens takes a READ lock on the same
+        // RwLock — a self-deadlock with parking_lot's non-reentrant lock on every
+        // successful refresh. Out of scope for the #153-#165 batch; fix = drop
+        // the guard before persisting (see poll_once Path A invalid_grant).
         if let Err(e) = token_io::persist_tokens(state, app) {
             log::warn!(
                 "[POLLING] poll_once: failed to persist refreshed {} tokens: {}",
@@ -658,6 +693,86 @@ fn config_maximum_interval(config: &Option<crate::config::AppConfig>) -> u64 {
         .as_ref()
         .map(|c| c.polling.max_interval_seconds)
         .unwrap_or(60)
+}
+
+/// Server-directed sleep base for a Spotify 429 (issue #159): the
+/// `Retry-After` seconds when present, else the default rate-limit backoff —
+/// floored at the error retry interval so a tiny server value can't create a
+/// busy loop.
+fn spotify_backoff_base(err: &SpotifyApiError) -> u64 {
+    err.retry_after()
+        .unwrap_or(RATE_LIMIT_BACKOFF_SECONDS)
+        .max(ERROR_RETRY_INTERVAL_SECONDS)
+}
+
+/// Extra sleep contributed by a failed Teams set/clear (issue #154): a
+/// `RateLimited` error with `Retry-After` returns those seconds, without a
+/// header falls back to the jittered default backoff, anything else
+/// contributes nothing.
+fn rate_limit_sleep_secs(err: &TeamsApiError) -> u64 {
+    match err {
+        TeamsApiError::RateLimited(Some(secs)) => *secs,
+        TeamsApiError::RateLimited(None) => with_jitter(RATE_LIMIT_BACKOFF_SECONDS),
+        _ => 0,
+    }
+}
+
+/// Format a UTC instant as Graph's offset-less `dateTime` with 6 fraction
+/// digits (≤ the documented 7). `to_rfc3339()` would embed `+00:00` and up
+/// to 9 fraction digits, contradicting the dateTimeTimeZone schema (issue
+/// #156).
+fn format_expiry(expiry: chrono::DateTime<Utc>) -> String {
+    expiry.format("%Y-%m-%dT%H:%M:%S%.6f").to_string()
+}
+
+/// Expiry for the short-lived "clear" placeholders (issue #155): now + 60s,
+/// so the placeholder self-removes ~1 min after the last successful post even
+/// if the app quits.
+fn placeholder_expiry_str() -> String {
+    let expiry = Utc::now() + chrono::Duration::seconds(60);
+    format_expiry(expiry)
+}
+
+/// Expiry for a playing-track status message: now + remaining + buffer when
+/// the position is known; `None` (no `expiryDateTime` on the wire) for
+/// live/unknown-position streams (issue #165).
+fn status_expiry_str(
+    remaining_ms: Option<u64>,
+    config: &Option<crate::config::AppConfig>,
+) -> Option<String> {
+    remaining_ms.map(|remaining| {
+        let buffer_ms = config
+            .as_ref()
+            .map(|c| c.polling.expiry_buffer_seconds)
+            .unwrap_or(10)
+            * 1000;
+        let expiry =
+            Utc::now() + chrono::Duration::milliseconds(remaining as i64 + buffer_ms as i64);
+        format_expiry(expiry)
+    })
+}
+
+/// Sleep decision for a playing track. Known position → sleep until ~5s
+/// before the track ends (clamped to the config bounds); unknown position
+/// (live stream, issue #165) → the default interval, not a duration-derived
+/// one.
+fn playing_track_sleep(
+    remaining_ms: Option<u64>,
+    config: &Option<crate::config::AppConfig>,
+) -> u64 {
+    match remaining_ms {
+        Some(remaining) => {
+            let buffer_ms = 5000u64;
+            let remaining_secs = remaining / 1000;
+            remaining_secs
+                .saturating_sub(buffer_ms / 1000)
+                .max(config_minimum_interval(config))
+                .min(config_maximum_interval(config))
+        }
+        None => config_default_interval(config)
+            .max(config_minimum_interval(config))
+            .min(config_maximum_interval(config)),
+    }
 }
 
 fn pause_backoff(consecutive_pauses: u8, default_secs: u64) -> u64 {
