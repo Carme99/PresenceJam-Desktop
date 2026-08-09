@@ -53,15 +53,17 @@ pub fn start_teams_auth_device_code(
 #[tauri::command]
 pub fn poll_teams_auth(
     device_code: String,
+    interval: u64,
     app: AppHandle,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<TeamsTokens, String> {
     log::info!(
-        "{CMD} poll_teams_auth: ENTRY - device_code.len={}",
-        device_code.len()
+        "{CMD} poll_teams_auth: ENTRY - device_code.len={}, interval={}",
+        device_code.len(),
+        interval
     );
 
-    let tokens = crate::teams::poll_teams_auth(&device_code)?;
+    let tokens = crate::teams::poll_teams_auth(&device_code, interval)?;
     log::info!(
         "{CMD} poll_teams_auth: poll successful - access_token.len={}",
         tokens.access_token.len()

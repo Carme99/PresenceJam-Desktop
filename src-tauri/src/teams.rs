@@ -103,7 +103,6 @@ struct TokenResponse {
 struct TokenErrorResponse {
     error: String,
     error_description: Option<String>,
-    interval: Option<u64>,
 }
 
 pub fn start_teams_auth_device_code() -> Result<DeviceCodeResponse, String> {
@@ -191,10 +190,27 @@ pub fn is_token_expired(tokens: &TeamsTokens) -> bool {
     Utc::now() >= tokens.expires_at - chrono::Duration::seconds(60)
 }
 
-pub fn poll_teams_auth(device_code: &str) -> Result<TeamsTokens, String> {
+/// Computes the next polling wait in seconds per RFC 8628 §3.5.
+///
+/// A `slow_down` error carries no interval of its own; the client MUST
+/// increase its polling interval by 5 seconds for this and all
+/// subsequent requests. Any other error keeps the current interval.
+fn next_poll_wait(current: u64, err: &str) -> u64 {
+    if err == "slow_down" {
+        current + 5
+    } else {
+        current
+    }
+}
+
+pub fn poll_teams_auth(device_code: &str, interval: u64) -> Result<TeamsTokens, String> {
     let client = build_teams_client()?;
     let start_time = std::time::Instant::now();
     let timeout = StdDuration::from_secs(900);
+
+    // RFC 8628 §3.2/§3.5: wait at least the server-provided `interval`
+    // between polls, or 5s when none was provided.
+    let mut wait = if interval == 0 { 5 } else { interval };
 
     loop {
         if start_time.elapsed() > timeout {
@@ -256,17 +272,20 @@ pub fn poll_teams_auth(device_code: &str) -> Result<TeamsTokens, String> {
 
         match error_resp.error.as_str() {
             "authorization_pending" => {
-                log::debug!("Authorization pending, waiting for user to complete login...");
-                thread::sleep(StdDuration::from_secs(5));
+                log::debug!("Authorization pending, waiting {} seconds", wait);
+                thread::sleep(StdDuration::from_secs(wait));
                 continue;
             }
             "authorization_declined" => {
                 return Err("Authorization was declined by the user".to_string());
             }
             "slow_down" => {
-                let interval = error_resp.interval.unwrap_or(5);
-                log::warn!("Server requested slow down, waiting {} seconds", interval);
-                thread::sleep(StdDuration::from_secs(interval));
+                // RFC 8628 §3.5: slow_down carries no interval; the
+                // client must increase its polling interval by 5s for
+                // this and all subsequent requests.
+                wait = next_poll_wait(wait, error_resp.error.as_str());
+                log::warn!("Server requested slow down, waiting {} seconds", wait);
+                thread::sleep(StdDuration::from_secs(wait));
                 continue;
             }
             "expired_token" => {
@@ -743,5 +762,27 @@ mod tests {
         );
         assert_eq!(json["interval"].as_u64(), Some(5));
         assert_eq!(json["expires_in"].as_u64(), Some(900));
+    }
+
+    // Issue #152: RFC 8628 §3.5 — `slow_down` carries no interval of its
+    // own; the client must increase its polling interval by 5 seconds for
+    // this and all subsequent requests. The ramp is cumulative.
+    #[test]
+    fn next_poll_wait_ramps_on_slow_down() {
+        let mut wait = 5;
+        wait = super::next_poll_wait(wait, "slow_down");
+        assert_eq!(wait, 10);
+        wait = super::next_poll_wait(wait, "slow_down");
+        assert_eq!(wait, 15);
+        // Non-slow_down errors keep the current (already-ramped) interval.
+        wait = super::next_poll_wait(wait, "authorization_pending");
+        assert_eq!(wait, 15);
+    }
+
+    #[test]
+    fn next_poll_wait_keeps_interval_for_other_errors() {
+        assert_eq!(super::next_poll_wait(7, "authorization_pending"), 7);
+        assert_eq!(super::next_poll_wait(7, "expired_token"), 7);
+        assert_eq!(super::next_poll_wait(0, "bad_verification_code"), 0);
     }
 }
