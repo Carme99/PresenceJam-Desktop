@@ -114,7 +114,10 @@ pub fn start_teams_auth_device_code() -> Result<DeviceCodeResponse, String> {
 
     let params = [
         ("client_id", MICROSOFT_GRAPH_CLIENT_ID),
-        ("scope", "Presence.ReadWrite User.Read"),
+        // `offline_access` is required for Microsoft to issue a
+        // refresh_token (device-code flow docs). `User.Read` is dropped:
+        // no Graph call in the app uses it (least privilege, see #151).
+        ("scope", "Presence.ReadWrite offline_access"),
     ];
     log::info!("teams::start_teams_auth_device_code: calling devicecode endpoint");
 
@@ -412,7 +415,12 @@ pub fn refresh_teams_token(tokens: &TeamsTokens) -> Result<TeamsTokens, String> 
 
     Ok(TeamsTokens {
         access_token: token_resp.access_token,
-        refresh_token: token_resp.refresh_token,
+        // MS may omit the refresh token on a refresh response; keep the
+        // existing one rather than silently dropping refresh capability.
+        // Mirrors spotify.rs:142-144. See issue #151.
+        refresh_token: token_resp
+            .refresh_token
+            .or_else(|| tokens.refresh_token.clone()),
         expires_at,
     })
 }
