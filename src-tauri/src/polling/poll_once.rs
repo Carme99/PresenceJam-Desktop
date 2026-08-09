@@ -1041,8 +1041,8 @@ mod tests {
         );
     }
 
-    /// Regression guard for issue #79/#117: poll_once.rs must NOT emit
-    /// raw "error" events directly.
+    /// Regression guard for issue #79/#117: poll_once.rs must NOT emit raw
+    /// "error" events directly.
     #[test]
     fn test_no_raw_error_emit_in_poll_once() {
         let source = include_str!("poll_once.rs");
@@ -1061,6 +1061,195 @@ mod tests {
             helper_call_count >= 2,
             "emit_error called {} times; need >=2",
             helper_call_count
+        );
+    }
+
+    /// Issue #159: a Spotify 429 backoff honors the server's Retry-After,
+    /// floored at the error retry interval so a tiny value can't busy-loop.
+    #[test]
+    fn test_spotify_backoff_base_honors_retry_after_floored() {
+        use crate::spotify::SpotifyApiError;
+        assert_eq!(
+            spotify_backoff_base(&SpotifyApiError::RateLimited(Some(45))),
+            45
+        );
+        assert_eq!(
+            spotify_backoff_base(&SpotifyApiError::RateLimited(Some(10))),
+            ERROR_RETRY_INTERVAL_SECONDS,
+            "retry-after below the floor must be clamped up"
+        );
+        assert_eq!(
+            spotify_backoff_base(&SpotifyApiError::RateLimited(None)),
+            RATE_LIMIT_BACKOFF_SECONDS,
+            "header-less 429 falls back to the fixed backoff"
+        );
+    }
+
+    /// Issue #154: a Teams set/clear failure contributes the server's
+    /// Retry-After seconds, the jittered default backoff when the header is
+    /// absent, and nothing for non-throttle errors.
+    #[test]
+    fn test_rate_limit_sleep_secs_teams() {
+        assert_eq!(rate_limit_sleep_secs(&TeamsApiError::RateLimited(Some(90))), 90);
+        assert_eq!(rate_limit_sleep_secs(&TeamsApiError::ExpiredToken(401)), 0);
+        assert_eq!(
+            rate_limit_sleep_secs(&TeamsApiError::Forbidden(403, "denied".to_string())),
+            0
+        );
+        assert_eq!(rate_limit_sleep_secs(&TeamsApiError::InvalidGrant), 0);
+        assert_eq!(
+            rate_limit_sleep_secs(&TeamsApiError::Transient("boom".to_string())),
+            0
+        );
+        // Header-less 429 → jittered default backoff (60 ± 20% → [48, 72]).
+        let no_header = rate_limit_sleep_secs(&TeamsApiError::RateLimited(None));
+        assert!(
+            (48..=72).contains(&no_header),
+            "jittered backoff out of range: {}",
+            no_header
+        );
+    }
+
+    /// Issue #156: the expiry string must be offset-less with exactly 6
+    /// fraction digits (≤ the documented 7) — no `+00:00`, no `Z`, no
+    /// 9-digit nanosecond fraction.
+    #[test]
+    fn test_format_expiry_is_offset_less_with_six_fraction_digits() {
+        let fixed = chrono::DateTime::parse_from_rfc3339("2015-02-18T23:16:09.123456789+00:00")
+            .unwrap()
+            .with_timezone(&Utc);
+        let s = format_expiry(fixed);
+        assert!(
+            !s.contains('+') && !s.contains('Z'),
+            "offset leaked into dateTime: {}",
+            s
+        );
+        assert!(
+            s.starts_with("2015-02-18T23:16:09."),
+            "unexpected shape: {}",
+            s
+        );
+        let fraction = s.split('.').nth(1).unwrap_or("");
+        assert_eq!(
+            fraction.len(),
+            6,
+            "expected exactly 6 fraction digits, got '{}'",
+            fraction
+        );
+    }
+
+    /// Issue #155/#156: the clear-path placeholder expiry must be offset-less
+    /// with 6 fraction digits.
+    #[test]
+    fn test_placeholder_expiry_str_is_offset_less() {
+        let s = placeholder_expiry_str();
+        assert!(
+            !s.contains('+') && !s.contains('Z'),
+            "offset leaked into placeholder expiry: {}",
+            s
+        );
+        let fraction = s.split('.').nth(1).unwrap_or("");
+        assert_eq!(fraction.len(), 6, "got '{}'", fraction);
+    }
+
+    /// Issue #165: known position → an expiry exists; live stream (None) →
+    /// no expiry so no `expiryDateTime` goes on the wire.
+    #[test]
+    fn test_status_expiry_known_and_unknown_position() {
+        let config = Some(crate::config::AppConfig::default());
+        let s = status_expiry_str(Some(120_000), &config)
+            .expect("known position must yield an expiry");
+        assert!(
+            !s.contains('+') && !s.contains('Z'),
+            "offset leaked into status expiry: {}",
+            s
+        );
+        assert_eq!(
+            status_expiry_str(None, &config),
+            None,
+            "live streams must not get an expiryDateTime"
+        );
+    }
+
+    /// Issue #165: sleep falls back to the default interval for live streams
+    /// instead of a duration-derived value; known positions sleep until ~5s
+    /// before track end, clamped to the config bounds.
+    #[test]
+    fn test_playing_track_sleep_known_position_and_live_stream() {
+        let config = Some(crate::config::AppConfig::default());
+        // Default config: min 5s, max 60s.
+        assert_eq!(playing_track_sleep(Some(30_000), &config), 25);
+        assert_eq!(
+            playing_track_sleep(Some(120_000), &config),
+            60,
+            "long remaining time clamps to max interval"
+        );
+        assert_eq!(
+            playing_track_sleep(Some(2_000), &config),
+            5,
+            "short remaining time clamps to min interval"
+        );
+        assert_eq!(
+            playing_track_sleep(None, &config),
+            30,
+            "live stream falls back to the default interval"
+        );
+        // No config → the built-in defaults (30s default, 5s min, 60s max).
+        assert_eq!(playing_track_sleep(None, &None), 30);
+        assert_eq!(playing_track_sleep(Some(2_000), &None), 5);
+    }
+
+    /// Issue #156 regression guard: the playing-status expiry must be built
+    /// with the offset-less format, never through `to_rfc3339()` (which
+    /// embeds `+00:00` and up to 9 fraction digits). The three remaining
+    /// `to_rfc3339()` uses are frontend payload timestamps, which are fine.
+    #[test]
+    fn test_expiry_uses_offset_less_format_not_rfc3339() {
+        let source = include_str!("poll_once.rs");
+        let prod_source = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("poll_once.rs has no #[cfg(test)] mod tests block");
+        assert!(
+            prod_source.contains(r#""%Y-%m-%dT%H:%M:%S%.6f""#),
+            "expiry must use the offset-less 6-digit format (issue #156)"
+        );
+        let expiry_lines = prod_source
+            .lines()
+            .filter(|l| l.contains("expiry_str ="))
+            .collect::<Vec<_>>();
+        assert!(
+            !expiry_lines.iter().any(|l| l.contains("to_rfc3339")),
+            "expiry_str must not be built with to_rfc3339: {:?}",
+            expiry_lines
+        );
+    }
+
+    /// Issue #153 regression guard: Teams set/clear failures must be
+    /// classified by the typed `TeamsApiError` variants, not by
+    /// string-sniffing the error body for "unauthorized"/"forbidden"/401/403.
+    #[test]
+    fn test_teams_error_classification_is_typed_not_string_sniffed() {
+        let source = include_str!("poll_once.rs");
+        let prod_source = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("poll_once.rs has no #[cfg(test)] mod tests block");
+        for sniff in [
+            r#"e_str.contains("unauthorized")"#,
+            r#"e_str.contains("forbidden")"#,
+            r#"e_str.contains("401")"#,
+            r#"e_str.contains("403")"#,
+        ] {
+            assert!(
+                !prod_source.contains(sniff),
+                "string-sniffing on Teams error bodies must be gone (issue #153): {}",
+                sniff
+            );
+        }
+        assert!(
+            prod_source.contains("TeamsApiError::Forbidden(_, _)"),
+            "Forbidden must be matched by variant (issue #153)"
         );
     }
 }
