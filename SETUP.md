@@ -6,7 +6,8 @@ Get PresenceJam running on your machine.
 
 - **Windows 10/11** (64-bit) or **macOS** (Apple Silicon)
 - A **Spotify Premium** account (required for the Web API)
-- A **Microsoft 365 Teams** account (personal or work — both work)
+- A **Microsoft 365 Teams** account (work or school — the Graph
+  presence APIs don't support personal Microsoft accounts)
 
 ## Step 1 — Install the App
 
@@ -39,16 +40,24 @@ PresenceJam uses Spotify's Web API to read your currently playing track. This re
 3. Fill in the details:
    - **App name:** PresenceJam (or anything you like)
    - **App description:** Syncs my Spotify playback to Teams status
-4. Under **Redirect URIs**, add: `presencejam://callback`
-5. Agree to Spotify's terms and click **Save**
+   - Tick the **Developer Terms of Service** checkbox
+4. Click **CREATE**
+
+### Configure redirect URIs
+
+The Create dialog has no Redirect URIs field — you add those after creation:
+
+1. On the app overview page, click **Edit Settings**
+2. Under **Redirect URIs**, add: `presencejam://callback`
+3. Click **SAVE**
 
 ### Copy your credentials
 
-From the app's page, copy:
+From the app overview page, copy:
 - **Client ID** — you'll paste this into PresenceJam during onboarding
 - **Client Secret** — also pasted into PresenceJam during onboarding
 
-> **Keep your Client Secret private.** It authenticates your app to Spotify. If you accidentally expose it publicly, go to your app's settings and **Reset Client Secret** immediately.
+> **Keep your Client Secret private.** It authenticates your app to Spotify. If you accidentally expose it publicly, click **ROTATE** on the app overview page to regenerate it immediately.
 
 ---
 

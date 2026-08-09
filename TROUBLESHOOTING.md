@@ -19,7 +19,7 @@ Before diving in, check these basics:
 
 **Fix:**
 1. Go to [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)
-2. Select your app → **Settings**
+2. Select your app → **Edit Settings**
 3. Under **Redirect URIs**, add: `presencejam://callback`
 4. Save settings
 5. Restart the app and try again
@@ -110,10 +110,10 @@ Before diving in, check these basics:
 
 ### Status shows but disappears quickly
 
-**Cause:** Teams has a limit on how long custom status messages can persist (maximum 24 hours).
+**Cause:** PresenceJam sets the status message's expiry (`expiryDateTime`) to the track's end time plus a buffer (default 10 s; `polling.expiry_buffer_seconds` in `config.json`). When the track ends, pauses, or stops, the app expires or clears/replaces the status on the next poll. There is no server-side 24-hour cap — the Teams client's "Clear status message after" dropdown (which includes 24 h) affects only messages you set in the Teams UI, not Graph-set messages.
 
 **Fix:**
-This is a Teams limitation. PresenceJam sets the status to expire at track end time + 10 second buffer, but Teams may shorten this. This is normal Teams behavior.
+This is the app's own expiry/clear mechanism, not a Teams limitation. To keep the status visible longer, raise the buffer in `config.json` (`polling.expiry_buffer_seconds`) or disable Clear on pause.
 
 ## Profanity Filter
 

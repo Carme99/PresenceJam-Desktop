@@ -98,7 +98,7 @@ The current log level is set in `config.json` under `logging.log_level`.
 
 ## Status Expiry
 
-Teams custom status messages automatically expire. PresenceJam sets the expiry to the **track's end time + 10 seconds**, but Teams may shorten this window. This is normal Teams behavior — PresenceJam can't control it.
+Teams custom status messages automatically expire. PresenceJam sets the message's expiry (`expiryDateTime`) to the **track's end time + a buffer** (default 10 s; `polling.expiry_buffer_seconds` in `config.json`). This is an app-side choice — the Graph API doesn't shorten it. When playback pauses or stops, PresenceJam replaces the message with a non-expiring placeholder.
 
 ---
 
@@ -106,7 +106,7 @@ Teams custom status messages automatically expire. PresenceJam sets the expiry t
 
 Tokens refresh automatically:
 - **Spotify tokens** — refreshed by PresenceJam when needed (no action required)
-- **Teams tokens** — same
+- **Teams tokens** — same. The device-code sign-in requests `offline_access`, so Microsoft issues a refresh token that PresenceJam rotates before the access token expires.
 
 If your connection drops unexpectedly, PresenceJam will emit a reconnect prompt. Go to **Settings → disconnect and reconnect** the affected service.
 

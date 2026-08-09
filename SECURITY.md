@@ -153,7 +153,8 @@ ordered by effort:
    providers' settings if you suspect the local machine is compromised.
    This is the only way to invalidate the credentials stored in
    `tokens.json` from the provider side; revocation is faster than
-   waiting for the tokens to expire (Spotify refresh token TTL is long).
+   waiting for the tokens to expire (Spotify refresh tokens are valid up to
+   6 months — on `invalid_grant` the app discards them and triggers re-auth).
 
 > **Status:** As of v2.6.0, the Spotify `client_secret` is stored in the
 > **OS keychain** (macOS Keychain, Windows DPAPI-backed credential store,
@@ -193,7 +194,7 @@ Logs may contain:
 
 Logs are written to the `tauri-plugin-log` default log directory. **Log retention/rotation is currently managed by the logging plugin defaults and is not user-configurable.** A previous version of this document claimed logs were "rotated daily and retained for 30 days"; that claim has been removed because no rotation code exists in the application — the v2.5.0 `logging.retention_days` config field was a no-op and has been removed in v2.6.0.
 
-**Token responses are not written to logs (v2.6.3):** Successful Microsoft Graph token responses — which include `access_token` + `refresh_token` (~3.5 KB total, ~77 min lifetime, `Presence.ReadWrite` + 50+ scopes) — are never written to the log file in full. The `poll_teams_auth` debug log, the `start_teams_auth_device_code` info log, and the user-facing error toasts for the `complete_teams_auth` / `refresh_teams_token` / `start_teams_auth_device_code` parse-error paths all run the body through the `truncate_for_log` helper, which records only the first 256 chars + a `(…NB total)` byte-count suffix. That's enough to recognise the error envelope shape (e.g. `authorization_pending`, `slow_down`, JSON parse errors) without exposing the credential. The helper is char-boundary-safe (`body.char_indices().nth(256)`) and unit-tested against the multibyte-UTF-8 case. See [issue #62](https://github.com/Carme99/PresenceJam-Desktop/issues/62).
+**Token responses are not written to logs (v2.6.3):** Successful Microsoft Graph token responses — which include `access_token` + `refresh_token` (~3.5 KB total, ~77 min lifetime, `Presence.ReadWrite` + `offline_access` + 50+ scopes) — are never written to the log file in full. The `poll_teams_auth` debug log, the `start_teams_auth_device_code` info log, and the user-facing error toasts for the `refresh_teams_token` / `start_teams_auth_device_code` parse-error paths all run the body through the `truncate_for_log` helper, which records only the first 256 chars + a `(…NB total)` byte-count suffix. That's enough to recognise the error envelope shape (e.g. `authorization_pending`, JSON parse errors) without exposing the credential — `slow_down` is also handled, though it is RFC 8628 §3.5-only: Microsoft's device-code error table enumerates only `authorization_pending`, `authorization_declined`, `bad_verification_code`, and `expired_token`. The helper is char-boundary-safe (`body.char_indices().nth(256)`) and unit-tested against the multibyte-UTF-8 case. See [issue #62](https://github.com/Carme99/PresenceJam-Desktop/issues/62).
 
 
 ## Network Security
@@ -234,7 +235,7 @@ PresenceJam uses two third-party APIs:
 
 - [Microsoft Services Agreement](https://www.microsoft.com/servicesagreement/)
 - [Microsoft Privacy Statement](https://privacy.microsoft.com/privacystatement/)
-- Scope: `Presence.ReadWrite`, `User.Read`
+- Scope: `Presence.ReadWrite`, `offline_access` (the device-code sign-in requests exactly `Presence.ReadWrite offline_access`; the unused `User.Read` scope was dropped in the #151 fix)
 
 Review these links to understand how your data is handled by each service.
 
@@ -261,7 +262,7 @@ For a more secure experience:
 3. **Use a password/PIN** on your Windows account — no blank login
 4. **Don't share your machine** with untrusted parties while tokens are active
 5. **Uninstall the app** and delete `%APPDATA%\PresenceJam` when done
-6. **Rotate credentials** if you suspect compromise (Spotify Developer Dashboard → your app → Client Secrets → Reset)
+6. **Rotate credentials** if you suspect compromise (Spotify Developer Dashboard → your app overview page → **ROTATE**)
 
 
 ## Release Pipeline Token Rotation

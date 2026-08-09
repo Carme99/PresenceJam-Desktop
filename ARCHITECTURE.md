@@ -22,7 +22,8 @@ PresenceJam is a Tauri 2 desktop application:
   - `token_io.rs::persist_tokens()` → temp-file + rename + fsync to
     `<app-config-dir>/PresenceJam/tokens.json` for OAuth tokens.
   Both paths survive process-kill mid-write (see issue #65; see `SECURITY.md`).
-- **Auth:** Spotify PKCE OAuth 2.0 + Microsoft Teams Device Code flow.
+- **Auth:** Spotify Authorization Code + PKCE OAuth (confidential client) +
+  Microsoft Teams Device Code flow.
 - **Secrets — TWO PATHS, both intentional** (do not conflate):
   - **Spotify `client_secret`** is in the OS keychain, namespaced per
     installation — DPAPI on Windows, Keychain on macOS, Secret Service
@@ -49,7 +50,7 @@ graph TD
     subgraph Backend ["Backend (Rust / Tauri 2)"]
         Commands["commands/ submodule<br/>config / spotify_auth / teams_auth<br/>sync / window / onboarding / misc"]
         Polling["polling/ submodule<br/>loop (driver) + state (lifecycle)<br/>poll_once (single-source-of-truth iteration)<br/>+ mod.rs (ErrorSeverity, emit_error)"]
-        SpotifyAPI["spotify.rs<br/>Spotify Web API (PKCE)"]
+        SpotifyAPI["spotify.rs<br/>Spotify Web API (Authorization Code + PKCE)"]
         TeamsAPI["teams.rs<br/>Microsoft Graph (device code)"]
         Keychain["keychain.rs<br/>OS keychain wrapper<br/>(Secret Service on Linux)"]
         Tray["tray.rs / menu.rs<br/>system tray + app menu"]
@@ -112,7 +113,7 @@ The PR-time CI that gates merges is [`.github/workflows/ci.yml`](.github/workflo
 
 ## Authentication Flows
 
-### Spotify PKCE OAuth
+### Spotify OAuth (Authorization Code + PKCE, confidential client)
 
 ```mermaid
 sequenceDiagram
@@ -129,13 +130,23 @@ sequenceDiagram
     Note over App,Spotify: redirect_uri = `presencejam://callback`<br/>(Spotify requires byte-exact match;<br/>no per-launch scheme UUID possible)
     User->>Browser: Login + Authorize
     Browser-->>App: Deep-link callback `presencejam://callback?code=…&state=…`
-    App->>Spotify: POST /api/token (code, code_verifier)
+    App->>Spotify: POST /api/token (grant_type=authorization_code,<br/>code, code_verifier, client_id)<br/>+ Authorization: Basic &lt;client_id:client_secret&gt;
     Spotify-->>App: access_token + refresh_token
+    App->>Spotify: POST /api/token (grant_type=refresh_token,<br/>refresh_token)<br/>+ Authorization: Basic &lt;client_id:client_secret&gt;
+    Spotify-->>App: new access_token + refresh_token
     App->>App: persist tokens to tokens.json (atomic write)
 ```
 
 **Notes:**
 
+- The flow is a **hybrid**: the authorize leg is genuine PKCE (S256), and the
+  token-exchange and refresh legs also authenticate with the client secret via
+  `Authorization: Basic <client_id:client_secret>`. That matches neither
+  Spotify flow exactly — it's the PKCE-tutorial request body plus the
+  Authorization Code flow's Basic header (a strict superset of both; RFC 7636
+  §5 keeps PKCE params additive, so this is a documented combination). A
+  confidential client — one that can securely store a secret — is expected to
+  use it (Spotify's Feb-2025 "Increasing the security requirements" post).
 - The `state` parameter is the CSRF token **and** the per-launch anti-hijack
   binding — Spotify echoes it back verbatim, so we can encode extra entropy in
   it without registering anything new with Spotify. See *Deep Link Routing* for
@@ -158,17 +169,17 @@ sequenceDiagram
 
     User->>App: Click "Sign in with Microsoft"
     App->>Microsoft: POST /devicecode
-    Microsoft-->>App: user_code + verification_url
+    Microsoft-->>App: user_code + verification_uri
     App->>User: Display code + URL
-    User->>Browser: Visit verification_url, enter code
+    User->>Browser: Visit verification_uri, enter code
     User->>Microsoft: Enter code in browser
     loop Poll every 5s
         App->>Microsoft: POST /token (device_code)
         Note over Microsoft: authorization_pending
     end
     Microsoft-->>App: access_token + refresh_token
-    App->>Teams: PATCH /me/presence/setStatusMessage
-    Teams-->>App: 204 No Content
+    App->>Teams: POST /me/presence/setStatusMessage
+    Teams-->>App: 200 OK
 ```
 
 The app polls Microsoft's token endpoint every 5 seconds while the user completes the browser auth. Once authorized, tokens are stored and the status message is set via Graph API.
@@ -256,7 +267,7 @@ flowchart TD
     Changed -->|No track, paused| Consec[consecutive_pauses++]
     Changed -->|yes| Format[format_status template]
     Format --> Prof[filter_profanity if enabled]
-    Prof --> Set[PATCH /me/presence<br/>setStatusMessage]
+    Prof --> Set[POST /me/presence<br/>setStatusMessage]
     Set --> SmartSleep[Smart sleep until track ends - 5s]
     Consec --> Backoff[Pause-aware exponential backoff:<br/>30s → 60s → 120s → 300s cap]
     SmartSleep --> Tick
@@ -269,10 +280,13 @@ Two complementary rate-limits:
 - **Smart sleep:** when a track is playing, sleep until `track.duration_ms - track.progress_ms - 5000ms`,
   clamped to the configured `min/max_interval_seconds`. Polling resumes
   immediately when the track changes. ~240 seconds of silence per 4-min track.
-- **Pause-aware backoff:** when Spotify returns `Ok(None)` (paused or
-  idle) repeatedly, the loop doubles its interval up to a 5-min cap
-  (30 → 60 → 120 → 300 s). Resets the moment a track is observed again.
-  Six hours of paused Spotify drops from ~720 calls/day to ~25.
+- **Pause-aware backoff:** after consecutive non-playing responses
+  (`Ok(None)`, or a track with `is_playing == false`) the loop doubles its
+  interval up to a 5-min cap (30 → 60 → 120 → 300 s). It resets only once
+  a *playing* track is observed again. At the 30 s default cadence a
+  fully-polled day is ~2880 calls; paused, the loop settles at 1 call per
+  300 s — ~288-291 calls per 24 h (steady state 288), ~72-75 per 6 h: a
+  ~10× reduction, not ~28×.
 
 `is_syncing` ownership: `commands/sync::start_syncing` is the **sole claimer**
 (v2.6.3, fixes issue #60 — `compare_exchange(false, true, …)` is here).
@@ -335,16 +349,17 @@ callbacks. The registration runs **on every launch**, not just at install:
 
 | Scheme                          | Used For                          |
 |---------------------------------|-----------------------------------|
-| `presencejam://callback`        | Spotify PKCE OAuth redirect       |
-| `presencejam://teams-callback`  | Teams auth (reserved for future)  |
+| `presencejam://callback`        | Spotify OAuth redirect (Authorization Code + PKCE) |
 
 ### Routing flow
 
 `lib.rs::handle_deep_link` parses the URL, matches on scheme + path, and
-dispatches to either `handle_spotify_callback` or `handle_teams_callback`.
-The single-instance plugin scans the launch argv for `presencejam://…` on
-Windows + Linux so opening a callback URL routes to the running instance
-(via the single-instance hook) instead of spawning a second copy.
+dispatches to `handle_spotify_callback` — the only deep-link consumer.
+Teams auth uses the **device-code flow exclusively**, which needs no
+redirect URI at all (and therefore no callback route). The single-instance
+plugin scans the launch argv for `presencejam://…` on Windows + Linux so
+opening a callback URL routes to the running instance (via the
+single-instance hook) instead of spawning a second copy.
 
 ### `state` parameter is both CSRF and anti-hijack binding
 
