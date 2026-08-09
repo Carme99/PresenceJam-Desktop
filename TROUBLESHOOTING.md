@@ -52,6 +52,24 @@ Before diving in, check these basics:
 2. Disconnect Spotify
 3. Re-run the onboarding Spotify step
 
+### Tray playback controls do nothing ("no active device")
+
+**Cause:** Spotify has no active playback device — the player commands act on the active device, and there isn't one.
+
+**Fix:** Open the tray menu → **Devices** and pick a device — PresenceJam transfers playback there and starts it. Alternatively, start playback on a device first (e.g. in the Spotify app), then retry.
+
+### Tray playback controls fail with a 403
+
+**Cause:** Playback control requires a **Spotify Premium** subscription (a Spotify platform restriction), or the stored token predates the `user-modify-playback-state` scope.
+
+**Fix:** Check your Spotify plan. If you have Premium but the controls still fail, reconnect Spotify once (see the next entry) so the token carries the new scope.
+
+### "Playback control needs a one-time reconnect" banner
+
+**Cause:** v3.0 added the `user-modify-playback-state` scope; tokens granted before the upgrade don't have it, so the tray playback controls won't work until you re-auth.
+
+**Fix:** Click **Reconnect** in the banner (or Settings → reconnect Spotify) once. You only need to do this once after upgrading.
+
 ## Microsoft Teams
 
 ### "Teams not updating" after connecting
@@ -79,6 +97,12 @@ Before diving in, check these basics:
 **Fix:**
 1. Click "Sign in with Microsoft" again for a fresh code and URL
 2. Make sure to enter the code exactly as shown (uppercase, no spaces)
+
+### "Presence features need a one-time Teams reconnect" banner
+
+**Cause:** v3.0 added the `Presence.Read` (presence gating) and `profile` (object-id claim for availability sync) scopes; tokens granted before the upgrade don't carry them, so the **Settings → Presence** toggles won't take effect until you re-auth.
+
+**Fix:** Click **Reconnect** in the banner (or Settings → reconnect Teams) once. You only need to do this once after upgrading.
 
 ## App Behavior
 
