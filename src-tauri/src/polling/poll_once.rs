@@ -277,13 +277,15 @@ pub(crate) fn run(
                 }
             }
 
-            if matches!(final_err, SpotifyApiError::RateLimited) {
+            // TODO(#159): use `final_err.retry_after().unwrap_or(...)` for the
+            // backoff once the poll_once integration lands.
+            if matches!(final_err, SpotifyApiError::RateLimited(_)) {
                 backoff_secs = with_jitter(RATE_LIMIT_BACKOFF_SECONDS);
             }
 
             if matches!(
                 final_err,
-                SpotifyApiError::RateLimited
+                SpotifyApiError::RateLimited(_)
                     | SpotifyApiError::ExpiredToken
                     | SpotifyApiError::Other(_)
             ) {
@@ -415,7 +417,10 @@ pub(crate) fn process_track(
     consecutive_pauses: &mut u8,
 ) -> u64 {
     let elapsed_ms = last_poll_instant.elapsed().as_millis() as u64;
-    let corrected_progress_ms = track.progress_ms.saturating_add(elapsed_ms);
+    // TODO(#165): handle `None` (live/unknown position) properly — fall back
+    // to the default interval for sleep and no expiry. `unwrap_or(0)`
+    // preserves the pre-Option behavior until that integration lands.
+    let corrected_progress_ms = track.progress_ms.unwrap_or(0).saturating_add(elapsed_ms);
 
     let track_key = format!("{} - {}", track.title, track.artist);
     let changed = last_track_key.as_ref() != Some(&track_key);

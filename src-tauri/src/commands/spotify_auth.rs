@@ -15,6 +15,13 @@ use tauri::{AppHandle, Emitter};
 /// Log tag prefix for this submodule (issue #79 item 3).
 const CMD: &str = "[CMD.SPOTIFY_AUTH]";
 
+/// Space-separated Spotify OAuth scopes requested in the authorize URL.
+/// Single source of truth for the requested scope set — `config.spotify.scopes`
+/// was removed as dead config (issue #163). The space must be percent-encoded
+/// in the query string, hence `urlencoding::encode(SPOTIFY_SCOPES)` (issue
+/// #164).
+const SPOTIFY_SCOPES: &str = "user-read-currently-playing user-read-playback-state";
+
 /// Validates a Spotify client_id (32 alphanumeric chars).
 /// See issue #67.
 fn validate_spotify_client_id(id: &str) -> Result<(), String> {
@@ -75,11 +82,12 @@ fn run_spotify_oauth_flow(
          &code_challenge_method=S256\
          &code_challenge={}\
          &state={}\
-         &scope=user-read-currently-playing user-read-playback-state",
+         &scope={}",
         client_id,
         urlencoding::encode(&redirect_uri),
         urlencoding::encode(&challenge),
-        urlencoding::encode(&csrf_state)
+        urlencoding::encode(&csrf_state),
+        urlencoding::encode(SPOTIFY_SCOPES)
     );
     log::info!(
         "{CMD} run_spotify_oauth_flow: auth_url created, length={}",
@@ -207,12 +215,14 @@ pub fn start_spotify_reconnect(
 #[tauri::command]
 pub fn complete_spotify_auth_manual(
     code: String,
+    oauth_state: String,
     app: AppHandle,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<SpotifyTokens, String> {
     log::info!(
-        "{CMD} complete_spotify_auth_manual: ENTRY - code.len={}",
-        code.len()
+        "{CMD} complete_spotify_auth_manual: ENTRY - code.len={}, oauth_state.len={}",
+        code.len(),
+        oauth_state.len()
     );
 
     // Get pending auth from AppState
@@ -228,6 +238,28 @@ pub fn complete_spotify_auth_manual(
         "{CMD} complete_spotify_auth_manual: pending auth found - verifier.len={}",
         pending.verifier.len()
     );
+
+    // Re-check expiry at submit time, mirroring handle_spotify_callback in
+    // lib.rs (issue #162). Spotify authorization codes expire 10 minutes
+    // after creation; a stale pending must not be consumable later.
+    if pending.expires_at < chrono::Utc::now() {
+        log::error!("{CMD} complete_spotify_auth_manual: auth state expired at submit time");
+        return Err("Auth state expired — please try signing in again.".to_string());
+    }
+
+    // Verify the OAuth `state` parameter against the stored value to prevent
+    // CSRF, mirroring handle_spotify_callback in lib.rs (issue #162). The
+    // manual-paste path is exactly where a socially engineered URL could
+    // land, so a missing or mismatched state rejects the flow.
+    if oauth_state.is_empty() {
+        log::error!("{CMD} complete_spotify_auth_manual: missing state parameter");
+        return Err("Missing state parameter - possible CSRF attack".to_string());
+    }
+    if oauth_state != pending.state {
+        log::error!("{CMD} complete_spotify_auth_manual: state mismatch - CSRF attack detected");
+        return Err("State mismatch - possible CSRF attack".to_string());
+    }
+    log::info!("{CMD} complete_spotify_auth_manual: state verified successfully");
 
     // Read the client_secret from the keychain (it was placed there by
     // `start_spotify_auth` — see issue #9).
@@ -300,8 +332,15 @@ pub fn refresh_spotify(
     };
     log::info!("{CMD} refresh_spotify: current tokens found");
 
-    let new_tokens =
-        crate::spotify::refresh_spotify_token(&current_tokens, &client_id, &client_secret)?;
+    // `refresh_spotify_token` now returns a typed `SpotifyApiError`
+    // (issue #160); stringify it for the IPC boundary, preserving this
+    // command's public `Result<(), String>` contract.
+    let new_tokens = crate::spotify::refresh_spotify_token(
+        &current_tokens,
+        &client_id,
+        &client_secret,
+    )
+    .map_err(|e| e.to_string())?;
     log::info!("{CMD} refresh_spotify: new tokens received");
 
     // CAS: only commit if state still holds the access token we refreshed

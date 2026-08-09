@@ -4,7 +4,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { currentView } from '$lib/stores/app';
   import { configStore, saveConfig, loadConfig, type AppConfig } from '$lib/stores/config';
-  import type { SyncStatus } from '$lib/types';
+  import type { SyncStatus, TeamsTokens } from '$lib/types';
   import { authFlow, setSpotifyPhase, setTeamsPhase } from '$lib/stores/authFlow.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
   import PageHeader from './PageHeader.svelte';
@@ -79,16 +79,12 @@
       }
     }));
 
-    unlistenFns.push(await listen('teams-reconnect-required', async () => {
-      console.log('[SETTINGS] teams-reconnect-required received');
-      setTeamsPhase('waiting');
-      try {
-        await invoke('start_teams_auth_device_code');
-      } catch (e) {
-        console.error('[SETTINGS] start_teams_auth_device_code failed:', e);
-        setTeamsPhase('error', String(e));
-      }
-    }));
+    // NOTE: `teams-reconnect-required` is handled by the always-mounted
+    // listener in +layout.svelte (issue #157). The polling loop can emit
+    // it while Settings is not mounted (the normal Dashboard case), so a
+    // Settings-only listener would drop the event. The layout listener
+    // sets the authFlow phase, navigates to Settings, and starts the
+    // device-code flow; Settings renders the code/URI from the store.
 
     // Auth completion/failure events via the shared helper.
     unlistenAuth = await useAuthListeners({
@@ -164,6 +160,28 @@
     }
   }
 
+  // Polls the backend for device-code completion. The cadence is
+  // Rust-side; `interval` (from the DeviceCodeResponse stored in the
+  // authFlow store) is threaded through so the server's requested
+  // polling rate is honored — see issue #152.
+  async function pollTeamsAuth() {
+    if (!authFlow.teams.deviceCode) return;
+    setTeamsPhase('waiting');
+    try {
+      const tokens = await invoke<TeamsTokens>('poll_teams_auth', {
+        deviceCode: authFlow.teams.deviceCode,
+        interval: authFlow.teams.interval
+      });
+      if (tokens) {
+        setTeamsPhase('done');
+        teamsStatusConnected = true;
+      }
+    } catch (e) {
+      console.error('[SETTINGS] poll_teams_auth failed:', e);
+      setTeamsPhase('error', String(e));
+    }
+  }
+
   function goBack() {
     currentView.set('dashboard');
   }
@@ -235,7 +253,20 @@
         {#if teamsStatusConnected && !teamsAuthWaiting}
           <button class="btn-secondary" onclick={reconnectTeams} disabled={teamsAuthWaiting}>Reconnect Teams</button>
         {:else if teamsAuthWaiting}
-          <span class="hint">Complete authentication in the browser.</span>
+          <div class="device-code-box">
+            <p class="hint">Go to</p>
+            <a class="verification-url" href={authFlow.teams.verificationUrl} target="_blank" rel="noopener">{authFlow.teams.verificationUrl}</a>
+            <p class="hint">and enter this code</p>
+            <div class="code-display" aria-live="polite">{authFlow.teams.userCode}</div>
+            <div class="spinner" aria-hidden="true"></div>
+            <p>Waiting for sign-in…</p>
+            <button class="btn-secondary" onclick={pollTeamsAuth}>I've signed in — check now</button>
+          </div>
+          {#if authFlow.teams.error}
+            <p class="error-message" role="alert">{authFlow.teams.error}</p>
+          {/if}
+        {:else}
+          <button class="btn-secondary" onclick={reconnectTeams}>Reconnect Teams</button>
         {/if}
       </div>
     </section>
@@ -429,6 +460,67 @@
     width: auto;
     padding: var(--sp-2) var(--sp-4);
     font-size: var(--fs-sm);
+  }
+  .connection-row .device-code-box {
+    width: 100%;
+  }
+
+  /* Device-code box — mirrors Onboarding's (issue #157). */
+  .device-code-box {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    padding: var(--sp-4);
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--sp-3);
+  }
+  .device-code-box .hint { margin: 0; }
+  .verification-url {
+    display: inline-block;
+    padding: var(--sp-2) var(--sp-4);
+    background: var(--accent-soft);
+    color: var(--accent);
+    border-radius: var(--r-md);
+    font-weight: 600;
+    word-break: break-all;
+    text-decoration: none;
+    font-family: var(--font-mono);
+    font-size: var(--fs-sm);
+  }
+  .verification-url:hover { background: var(--bg-base); }
+  .code-display {
+    font-family: var(--font-mono);
+    font-size: var(--fs-2xl);
+    font-weight: 700;
+    letter-spacing: 0.2em;
+    color: var(--fg);
+    background: var(--bg-base);
+    border: 2px dashed var(--border-strong);
+    border-radius: var(--r-md);
+    padding: var(--sp-3);
+    user-select: all;
+    font-variant-numeric: tabular-nums;
+  }
+  .spinner {
+    width: 24px;
+    height: 24px;
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    margin: 0 auto;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .error-message {
+    color: var(--danger);
+    font-size: var(--fs-sm);
+    background: var(--danger-soft);
+    border-radius: var(--r-md);
+    padding: var(--sp-3);
+    font-weight: 500;
   }
 
   .preview-box {

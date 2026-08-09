@@ -3,6 +3,16 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+/// Parse the `Retry-After` header (seconds) from a 429 response.
+/// Returns `None` when the header is absent or unparseable. See issue #159.
+fn parse_retry_after(response: &reqwest::blocking::Response) -> Option<u64> {
+    response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct SpotifyTokens {
@@ -22,8 +32,10 @@ pub struct TrackInfo {
     // values as JS `number` (f64). Override ts-rs's `bigint` default so
     // the generated `.ts` matches what `invoke()` actually returns at
     // runtime — `bigint` would type-lie about the wire shape.
-    #[ts(type = "number")]
-    pub progress_ms: u64,
+    // `progress_ms` is `Option` because Spotify documents it as "Can be
+    // `null`" (live/unknown position) — see issue #165.
+    #[ts(type = "number | null")]
+    pub progress_ms: Option<u64>,
     #[ts(type = "number")]
     pub duration_ms: u64,
 }
@@ -31,15 +43,42 @@ pub struct TrackInfo {
 #[derive(Debug)]
 pub enum SpotifyApiError {
     ExpiredToken,
-    RateLimited,
+    /// 429 rate limited. Carries the `Retry-After` header value in seconds
+    /// when present and parseable, `None` when the header was absent or
+    /// unparseable. See issue #159.
+    RateLimited(Option<u64>),
+    /// The token endpoint returned `{"error":"invalid_grant"}` — the refresh
+    /// token is expired, revoked, or otherwise invalid and the app must
+    /// discard it and re-run the authorization flow instead of retrying.
+    /// See issue #160.
+    InvalidGrant,
     Other(String),
+}
+
+impl SpotifyApiError {
+    /// Retry-after seconds carried by a `RateLimited` (429) error, if the
+    /// server sent a parseable `Retry-After` header. `None` when the header
+    /// was absent or unparseable, or when the error is not a 429.
+    pub fn retry_after(&self) -> Option<u64> {
+        match self {
+            SpotifyApiError::RateLimited(secs) => *secs,
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for SpotifyApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SpotifyApiError::ExpiredToken => write!(f, "Access token expired"),
-            SpotifyApiError::RateLimited => write!(f, "Rate limited"),
+            SpotifyApiError::RateLimited(retry_after) => match retry_after {
+                Some(secs) => write!(f, "Rate limited (retry after {}s)", secs),
+                None => write!(f, "Rate limited"),
+            },
+            SpotifyApiError::InvalidGrant => write!(
+                f,
+                "Invalid grant: refresh token is expired, revoked, or otherwise invalid - re-authentication required"
+            ),
             SpotifyApiError::Other(s) => write!(f, "{}", s),
         }
     }
@@ -101,7 +140,7 @@ pub fn refresh_spotify_token(
     tokens: &SpotifyTokens,
     client_id: &str,
     client_secret: &str,
-) -> Result<SpotifyTokens, String> {
+) -> Result<SpotifyTokens, SpotifyApiError> {
     let client = Client::new();
 
     let params = [
@@ -114,12 +153,27 @@ pub fn refresh_spotify_token(
         .form(&params)
         .basic_auth(client_id, Some(client_secret))
         .send()
-        .map_err(|e| format!("Failed to send refresh request: {}", e))?;
+        .map_err(|e| {
+            SpotifyApiError::Other(format!("Failed to send refresh request: {}", e))
+        })?;
 
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().unwrap_or_default();
-        return Err(format!("Refresh request failed: {} - {}", status, body));
+        // Spotify returns `{"error":"invalid_grant"}` when the refresh token
+        // is expired, revoked, or otherwise invalid. The docs say to discard
+        // the refresh token and start the authorization code flow again
+        // rather than retrying — see issue #160.
+        let error_field = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_owned));
+        if error_field.as_deref() == Some("invalid_grant") {
+            return Err(SpotifyApiError::InvalidGrant);
+        }
+        return Err(SpotifyApiError::Other(format!(
+            "Refresh request failed: {} - {}",
+            status, body
+        )));
     }
 
     #[derive(Deserialize)]
@@ -133,7 +187,7 @@ pub fn refresh_spotify_token(
 
     let token_resp: TokenResponse = response
         .json()
-        .map_err(|e| format!("Failed to parse refresh response: {}", e))?;
+        .map_err(|e| SpotifyApiError::Other(format!("Failed to parse refresh response: {}", e)))?;
 
     let expires_at = Utc::now() + chrono::Duration::seconds(token_resp.expires_in as i64);
 
@@ -144,6 +198,22 @@ pub fn refresh_spotify_token(
             .unwrap_or_else(|| tokens.refresh_token.clone()),
         expires_at,
     })
+}
+
+/// The `currently_playing_type` field of the currently-playing response.
+/// Typed so the `track` gate can't be broken by a typo; `Unknown` is the
+/// explicit catch-all for Spotify's documented "unknown" value and any
+/// future item types. Defaults to `Unknown` so an absent field can't
+/// hard-fail the parse. See issue #161.
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+enum CurrentlyPlayingType {
+    Track,
+    Episode,
+    Ad,
+    #[default]
+    #[serde(other)]
+    Unknown,
 }
 
 pub fn get_currently_playing(access_token: &str) -> Result<Option<TrackInfo>, SpotifyApiError> {
@@ -165,12 +235,19 @@ pub fn get_currently_playing(access_token: &str) -> Result<Option<TrackInfo>, Sp
                 item: Option<CurrentlyPlayingItem>,
                 is_playing: bool,
                 progress_ms: Option<u64>,
+                /// `track`, `episode`, `ad` or anything else — the docs say
+                /// to check this and to handle new types gracefully. Default
+                /// to `Unknown` so an absent field can't hard-fail the parse.
+                #[serde(default)]
+                currently_playing_type: CurrentlyPlayingType,
             }
 
             #[derive(Deserialize)]
             struct CurrentlyPlayingItem {
                 name: String,
+                #[serde(default)]
                 artists: Vec<Artist>,
+                #[serde(default)]
                 album: Album,
                 duration_ms: u64,
             }
@@ -180,7 +257,7 @@ pub fn get_currently_playing(access_token: &str) -> Result<Option<TrackInfo>, Sp
                 name: String,
             }
 
-            #[derive(Deserialize)]
+            #[derive(Deserialize, Default)]
             struct Album {
                 name: String,
                 images: Vec<AlbumImage>,
@@ -194,6 +271,14 @@ pub fn get_currently_playing(access_token: &str) -> Result<Option<TrackInfo>, Sp
             let playing: CurrentlyPlayingResponse = response.json().map_err(|e| {
                 SpotifyApiError::Other(format!("Failed to parse currently playing response: {}", e))
             })?;
+
+            // Only `track` items are track-shaped (name/artists/album).
+            // Episodes, ads and future item types must not be forced through
+            // TrackInfo — treat them as "nothing playing" instead of erroring.
+            // See issue #161.
+            if !matches!(playing.currently_playing_type, CurrentlyPlayingType::Track) {
+                return Ok(None);
+            }
 
             if let Some(item) = playing.item {
                 let artist = item
@@ -216,7 +301,7 @@ pub fn get_currently_playing(access_token: &str) -> Result<Option<TrackInfo>, Sp
                     album: item.album.name,
                     album_art_url,
                     is_playing: playing.is_playing,
-                    progress_ms: playing.progress_ms.unwrap_or(0),
+                    progress_ms: playing.progress_ms,
                     duration_ms: item.duration_ms,
                 }))
             } else {
@@ -225,7 +310,13 @@ pub fn get_currently_playing(access_token: &str) -> Result<Option<TrackInfo>, Sp
         }
         204 => Ok(None),
         401 => Err(SpotifyApiError::ExpiredToken),
-        429 => Err(SpotifyApiError::RateLimited),
+        429 => {
+            // Spotify's rate-limit docs: the 429 response normally includes a
+            // `Retry-After` header in seconds — honor it instead of a fixed
+            // backoff. `None` when the header is absent/unparseable. See
+            // issue #159.
+            Err(SpotifyApiError::RateLimited(parse_retry_after(&response)))
+        }
         _ => {
             let body = response.text().unwrap_or_default();
             Err(SpotifyApiError::Other(format!(
@@ -265,7 +356,7 @@ pub fn preview_status_with_sample(format: &str) -> String {
         album: "Sample Album".to_string(),
         album_art_url: String::new(),
         is_playing: true,
-        progress_ms: 0,
+        progress_ms: Some(0),
         duration_ms: 0,
     };
     format_status(&sample, format)
@@ -310,7 +401,12 @@ pub fn validate_spotify_token(tokens: &SpotifyTokens) -> Result<(), SpotifyApiEr
     match response.status().as_u16() {
         200 | 204 => Ok(()),
         401 => Err(SpotifyApiError::ExpiredToken),
-        429 => Err(SpotifyApiError::RateLimited),
+        429 => {
+            // Honor the documented `Retry-After` header (seconds) so the
+            // caller can wait out the server's window instead of a fixed
+            // backoff. `None` when absent/unparseable. See issue #159.
+            Err(SpotifyApiError::RateLimited(parse_retry_after(&response)))
+        }
         _ => Err(SpotifyApiError::Other(format!(
             "unexpected status {}",
             response.status()
@@ -329,7 +425,7 @@ mod tests {
             album: album.to_string(),
             album_art_url: String::new(),
             is_playing,
-            progress_ms: 0,
+            progress_ms: Some(0),
             duration_ms: 0,
         }
     }
@@ -398,7 +494,9 @@ mod tests {
     // Regression guard for issue #78: ensure TrackInfo's u64 fields
     // serialise as plain JSON numbers (not strings), so the Tauri IPC
     // bridge delivers them to JS as `number` (f64). The matching TS
-    // override is `#[ts(type = "number")]` on progress_ms/duration_ms.
+    // override is `#[ts(type = "number")]` on duration_ms and
+    // `#[ts(type = "number | null")]` on progress_ms (Option<u64> — see
+    // issue #165).
     #[test]
     fn track_info_u64_fields_serialize_as_numbers() {
         let track = TrackInfo {
@@ -407,12 +505,13 @@ mod tests {
             album: "Test Album".to_string(),
             album_art_url: "https://example.com/art.jpg".to_string(),
             is_playing: true,
-            progress_ms: 123_456,
+            progress_ms: Some(123_456),
             duration_ms: 240_000,
         };
         let json: serde_json::Value =
             serde_json::to_value(&track).expect("to_value");
-        // u64 must round-trip as a JSON number, not a string.
+        // u64 must round-trip as a JSON number, not a string. `Some(v)`
+        // serialises as the bare number; `None` would serialise as `null`.
         assert!(
             json["progress_ms"].is_number(),
             "progress_ms must serialise as a JSON number, got {:?}",
