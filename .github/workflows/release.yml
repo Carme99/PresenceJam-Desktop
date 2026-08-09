@@ -268,7 +268,7 @@ jobs:
             }' > latest.json
           echo "=== latest.json ==="
           cat latest.json
-          gh release upload --repo "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" latest.json
+          gh release upload --clobber --repo "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" latest.json
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
