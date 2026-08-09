@@ -26,7 +26,6 @@ export interface SpotifyConfig {
    */
   client_secret_set: boolean;
   redirect_uri: string;
-  scopes: string[];
 }
 
 export interface TeamsConfig {
@@ -62,8 +61,7 @@ export const defaultConfig: AppConfig = {
   spotify: {
     client_id: '',
     client_secret_set: false,
-    redirect_uri: 'presencejam://callback',
-    scopes: ['user-read-currently-playing', 'user-read-playback-state']
+    redirect_uri: 'presencejam://callback'
   },
   teams: {
     status_format: '🎵 {artist} - {track} 🎧',

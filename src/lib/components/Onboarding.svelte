@@ -4,7 +4,7 @@
   import { configStore, saveConfig, type AppConfig } from '$lib/stores/config';
   import type { DeviceCodeResponse, SpotifyTokens, TeamsTokens } from '$lib/types';
   import { currentView } from '$lib/stores/app';
-  import { authFlow, setSpotifyPhase, setTeamsPhase } from '$lib/stores/authFlow.svelte';
+  import { authFlow, setSpotifyPhase, setTeamsPhase, setTeamsDeviceCode } from '$lib/stores/authFlow.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
   import { devLog } from '$lib/utils/dev';
   import Logo from './Logo.svelte';
@@ -18,9 +18,12 @@
   let spotifyWaiting = $derived(authFlow.spotify.phase === 'waiting');
   let spotifyAuthError = $derived(authFlow.spotify.error ?? '');
 
-  let teamsUserCode = $state('');
-  let teamsVerificationUrl = $state('');
-  let teamsDeviceCode = $state('');
+  // Device-code state lives in the authFlow store (set via
+  // setTeamsDeviceCode) so Onboarding and Settings render the same
+  // code/verification URI — see issue #157.
+  let teamsUserCode = $derived(authFlow.teams.userCode);
+  let teamsVerificationUrl = $derived(authFlow.teams.verificationUrl);
+  let teamsDeviceCode = $derived(authFlow.teams.deviceCode);
   let teamsConnected = $derived(authFlow.teams.phase === 'done');
   let teamsPolling = $derived(authFlow.teams.phase === 'waiting');
   let teamsAuthError = $derived(authFlow.teams.error ?? '');
@@ -124,12 +127,17 @@
     devLog('[ONBOARDING] handleManualUrlPaste: spotifyManualUrl.length=', spotifyManualUrl.length);
 
     try {
-      const code = extractCodeFromUrl(spotifyManualUrl);
-      devLog('[ONBOARDING] handleManualUrlPaste: extracted code:', code ? 'present' : 'null');
+      const extracted = extractCodeFromUrl(spotifyManualUrl);
+      devLog('[ONBOARDING] handleManualUrlPaste: extracted code:', extracted ? 'present' : 'null');
 
-      if (code) {
+      if (extracted) {
         devLog('[ONBOARDING] handleManualUrlPaste: calling invoke complete_spotify_auth_manual');
-        const tokens = await invoke<SpotifyTokens>('complete_spotify_auth_manual', { code });
+        // Pass the OAuth `state` through so the backend can validate it
+        // against the stored value (CSRF check) — see issue #162.
+        const tokens = await invoke<SpotifyTokens>('complete_spotify_auth_manual', {
+          code: extracted.code,
+          oauthState: extracted.state
+        });
         devLog('[ONBOARDING] handleManualUrlPaste: invoke SUCCESS, tokens=', tokens ? 'present' : 'null');
 
         if (tokens) {
@@ -146,7 +154,7 @@
     devLog('[ONBOARDING] handleManualUrlPaste: EXIT');
   }
 
-  function extractCodeFromUrl(url: string): string | null {
+  function extractCodeFromUrl(url: string): { code: string; state: string } | null {
     devLog('[ONBOARDING] extractCodeFromUrl: ENTRY - url.length=', url.length);
     try {
       const parsed = new URL(url);
@@ -156,7 +164,10 @@
         devLog('[ONBOARDING] extractCodeFromUrl: no code in URL params');
         return null;
       }
-      return code;
+      // The `state` param accompanies `code` in the redirect URL. A
+      // missing state still passes (empty string) — the backend rejects
+      // it, mirroring the deep-link path's CSRF check. See issue #162.
+      return { code, state: parsed.searchParams.get('state') ?? '' };
     } catch (e) {
       console.error('[ONBOARDING] extractCodeFromUrl: URL parse failed:', e);
       return null;
@@ -174,9 +185,15 @@
       devLog('[ONBOARDING] connectTeams: response.verification_url=', response.verification_url);
       devLog('[ONBOARDING] connectTeams: response.device_code=', response.device_code ? 'present' : 'null');
 
-      teamsUserCode = response.user_code;
-      teamsVerificationUrl = response.verification_url;
-      teamsDeviceCode = response.device_code;
+      // Store the DeviceCodeResponse so the polling cadence can honor
+      // the server's `interval` (issue #152) and the Settings re-auth
+      // path can render the same code/URI from the store (issue #157).
+      setTeamsDeviceCode({
+        userCode: response.user_code,
+        verificationUrl: response.verification_url,
+        deviceCode: response.device_code,
+        interval: response.interval
+      });
       devLog('[ONBOARDING] connectTeams: state updated');
 
       devLog('[ONBOARDING] connectTeams: calling invoke open_external_url');
@@ -202,7 +219,10 @@
       devLog('[ONBOARDING] pollTeamsAuth: calling invoke poll_teams_auth');
       devLog('[ONBOARDING] pollTeamsAuth: deviceCode.length=', teamsDeviceCode.length);
 
-      const tokens = await invoke<TeamsTokens>('poll_teams_auth', { deviceCode: teamsDeviceCode });
+      const tokens = await invoke<TeamsTokens>('poll_teams_auth', {
+        deviceCode: teamsDeviceCode,
+        interval: authFlow.teams.interval
+      });
       devLog('[ONBOARDING] pollTeamsAuth: invoke SUCCESS, tokens=', tokens ? 'present' : 'null');
 
       if (tokens) {
@@ -240,8 +260,7 @@
         spotify: {
           client_id: spotifyClientId,
           client_secret_set: true,
-          redirect_uri: 'presencejam://callback',
-          scopes: ['user-read-currently-playing', 'user-read-playback-state']
+          redirect_uri: 'presencejam://callback'
         },
         teams: {
           status_format: statusFormat,
