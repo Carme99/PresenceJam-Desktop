@@ -8,7 +8,7 @@
 //!   - `config` — load_config, save_config
 //!   - `spotify_auth` — start_spotify_auth, start_spotify_reconnect, complete_spotify_auth_manual, refresh_spotify, is_spotify_client_secret_set
 //!   - `playback` — playback_play, playback_pause, playback_next, playback_previous, playback_transfer, get_playback_devices, get_playback_queue, get_spotify_granted_scopes
-//!   - `teams_auth` — start_teams_auth_device_code, poll_teams_auth, refresh_teams
+//!   - `teams_auth` — start_teams_auth_device_code, poll_teams_auth, refresh_teams, get_teams_granted_scopes
 //!   - `sync` — start_syncing, stop_syncing, get_sync_status, app_exit
 //!   - `window` — show_window, set_autostart_enabled, open_logs_folder, open_external_url
 //!   - `onboarding` — is_onboarding_complete, complete_onboarding, reconnect_spotify, reconnect_teams

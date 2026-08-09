@@ -143,9 +143,13 @@ pub fn start_teams_auth_device_code() -> Result<DeviceCodeResponse, String> {
     let params = [
         ("client_id", MICROSOFT_GRAPH_CLIENT_ID),
         // `offline_access` is required for Microsoft to issue a
-        // refresh_token (device-code flow docs). `User.Read` is dropped:
-        // no Graph call in the app uses it (least privilege, see #151).
-        ("scope", "Presence.ReadWrite offline_access"),
+        // refresh_token (device-code flow docs). `Presence.Read` powers the
+        // presence-aware status gate (getPresence, issue #3.0-P2) and
+        // `profile` adds the `oid` claim to the access-token JWT so the
+        // setPresence/clearPresence /users/{oid} fallback can resolve the
+        // user (docs list only /users/{id}; see issue #3.0-P1). `User.Read`
+        // stays dropped: no Graph call uses it (least privilege, #151).
+        ("scope", "Presence.ReadWrite Presence.Read profile offline_access"),
     ];
     log::info!("teams::start_teams_auth_device_code: calling devicecode endpoint");
 
@@ -573,6 +577,313 @@ pub fn clear_teams_status_message(
     Ok(())
 }
 
+/// Base64url-decodes the payload (middle segment) of a Teams access token
+/// JWT and returns the granted `scp` claim split on spaces. Informational
+/// only — no signature verification. Returns an empty Vec when the token
+/// isn't a decodable JWT with a `scp` claim. Used by the Settings page to
+/// detect whether `Presence.Read` / `profile` are missing (one-time
+/// reconnect banner, issue #3.0-P1/P2).
+pub fn decode_teams_granted_scopes(access_token: &str) -> Vec<String> {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
+    let payload = access_token.split('.').nth(1).unwrap_or_default();
+    let scopes = URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|v| v.get("scp").and_then(|s| s.as_str()).map(str::to_owned))
+        .unwrap_or_default();
+    if scopes.is_empty() {
+        Vec::new()
+    } else {
+        scopes.split(' ').map(str::to_owned).collect()
+    }
+}
+
+/// Extracts the Azure AD `oid` claim (the user's object id) from a Teams
+/// access-token JWT payload. Pure function — no signature verification.
+///
+/// The Graph setPresence/clearPresence docs document only `/users/{id}`
+/// (no `/me`); PresenceJam implements `/me` first and falls back to
+/// `/users/{oid}` on 404, so the oid must come from the token itself. The
+/// claim only appears once `profile` is in the scope string (issue #3.0-P1).
+pub fn graph_oid_from_access_token(access_token: &str) -> Result<String, String> {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
+    let payload = access_token
+        .split('.')
+        .nth(1)
+        .ok_or_else(|| "access token is not a JWT (no payload segment)".to_string())?;
+    let bytes = URL_SAFE_NO_PAD
+        .decode(payload)
+        .map_err(|e| format!("failed to base64url-decode JWT payload: {}", e))?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("failed to parse JWT payload JSON: {}", e))?;
+    value
+        .get("oid")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| "JWT payload has no `oid` claim".to_string())
+}
+
+/// Presence returned by the Graph getPresence endpoint (v1.0). The docs
+/// enumerate lowercase enum values (`available`, `busy`, …) but real
+/// examples return PascalCase (`Available`, `Busy`, `InACall`, …) — parse
+/// case-insensitively (issue #3.0-P1/P2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PresenceInfo {
+    pub availability: String,
+    pub activity: String,
+}
+
+/// Parses a Graph getPresence response body into a `PresenceInfo`,
+/// normalizing both enum fields to lower-case so callers compare once.
+pub fn parse_presence_body(body: &str) -> Result<PresenceInfo, String> {
+    let value: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| format!("Failed to parse presence body: {}", e))?;
+    let availability = value
+        .get("availability")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "presence body has no `availability` string".to_string())?
+        .to_lowercase();
+    let activity = value
+        .get("activity")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "presence body has no `activity` string".to_string())?
+        .to_lowercase();
+    Ok(PresenceInfo {
+        availability,
+        activity,
+    })
+}
+
+/// Human-readable reason a presence gates a status-message write, or an
+/// empty string when it doesn't. Single source of truth for the gating
+/// rule — `is_presence_gated` is defined through it so the two cannot
+/// drift apart (issue #3.0-P2).
+pub fn presence_gate_reason(presence: &PresenceInfo) -> String {
+    match presence.activity.as_str() {
+        "inameeting" => return "in a meeting".to_string(),
+        "inacall" => return "in a call".to_string(),
+        "presenting" => return "presenting".to_string(),
+        _ => {}
+    }
+    match presence.availability.as_str() {
+        "busy" => "busy".to_string(),
+        "donotdisturb" => "Do Not Disturb".to_string(),
+        _ => String::new(),
+    }
+}
+
+/// True iff a presence should suppress a status-message write: the user is
+/// busy or Do-Not-Disturb, or their activity is in a meeting/call or
+/// presenting. Case-insensitive — both fields are normalized to lower-case
+/// by `parse_presence_body` (issue #3.0-P2).
+pub fn is_presence_gated(presence: &PresenceInfo) -> bool {
+    !presence_gate_reason(presence).is_empty()
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SetPresenceRequest {
+    session_id: String,
+    availability: String,
+    activity: String,
+    expiration_duration: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClearPresenceRequest {
+    session_id: String,
+}
+
+/// POSTs a JSON body to a Graph presence endpoint and maps the response to
+/// a typed error — the same status-code discrimination and `Retry-After`
+/// parsing as `post_status_message` (issues #153/#154). A 404 is surfaced
+/// as `Other(404, …)` so callers can retry the documented `/users/{oid}`
+/// path (the setPresence/clearPresence docs list only `/users/{id}`; `/me`
+/// works in practice but is undocumented).
+fn post_presence<T: Serialize>(
+    access_token: &str,
+    url: &str,
+    body: &T,
+    action: &str,
+) -> Result<(), TeamsApiError> {
+    let client = build_teams_client().map_err(TeamsApiError::Transient)?;
+
+    let response = client
+        .post(url)
+        .header("Authorization", format!("Bearer {}", access_token))
+        .header("Content-Type", "application/json")
+        .json(body)
+        .send()
+        .map_err(|e| {
+            TeamsApiError::Transient(format!("Failed to send {} request: {}", action, e))
+        })?;
+
+    let status = response.status();
+    let status_code = status.as_u16();
+    let retry_after = parse_retry_after(&response);
+    let body_text = response
+        .text()
+        .unwrap_or_else(|_| "Unknown error".to_string());
+
+    if !status.is_success() {
+        log::error!(
+            "Failed to {} Teams presence: {} - {}",
+            action,
+            status,
+            body_text
+        );
+        return Err(match status_code {
+            401 => TeamsApiError::ExpiredToken(status_code),
+            403 => TeamsApiError::Forbidden(status_code, body_text),
+            429 => TeamsApiError::RateLimited(retry_after),
+            500..=599 => TeamsApiError::Transient(format!(
+                "server error {}: {}",
+                status_code, body_text
+            )),
+            _ => TeamsApiError::Other(status_code, body_text),
+        });
+    }
+
+    Ok(())
+}
+
+/// Sets the user's Teams presence via the Graph setPresence endpoint
+/// (issue #3.0-P1). `availability`/`activity` must be a documented combo
+/// (e.g. `Available`/`Available`, `Busy`/`InACall`) and
+/// `expiration_duration` a `PT5M`-`PT4H` ISO-8601 duration (default PT5M;
+/// the app re-arms well inside the window because Available sessions FADE
+/// after 5 min regardless). `sessionId` MUST be the app's Azure AD client
+/// id (Microsoft Learn v1.0 docs).
+///
+/// Implements `/me` first with a `/users/{oid}` fallback on 404: the docs
+/// document only `/users/{id}` for setPresence/clearPresence, but `/me`
+/// works in practice and is used first (it needs no oid resolution).
+pub fn set_teams_presence(
+    access_token: &str,
+    availability: &str,
+    activity: &str,
+    expiration_duration: &str,
+) -> Result<(), TeamsApiError> {
+    let body = SetPresenceRequest {
+        session_id: MICROSOFT_GRAPH_CLIENT_ID.to_string(),
+        availability: availability.to_string(),
+        activity: activity.to_string(),
+        expiration_duration: expiration_duration.to_string(),
+    };
+    match post_presence(
+        access_token,
+        "https://graph.microsoft.com/v1.0/me/presence/setPresence",
+        &body,
+        "set presence",
+    ) {
+        Ok(()) => Ok(()),
+        Err(TeamsApiError::Other(404, _)) => {
+            let oid = graph_oid_from_access_token(access_token).map_err(|e| {
+                TeamsApiError::Other(
+                    404,
+                    format!("failed to resolve oid for /users fallback: {}", e),
+                )
+            })?;
+            post_presence(
+                access_token,
+                &format!(
+                    "https://graph.microsoft.com/v1.0/users/{}/presence/setPresence",
+                    oid
+                ),
+                &body,
+                "set presence",
+            )
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Clears the app's Teams presence session via the Graph clearPresence
+/// endpoint (issue #3.0-P1). A 404 on either path is documented success —
+/// the session is already gone (clearPresence docs).
+pub fn clear_teams_presence(access_token: &str) -> Result<(), TeamsApiError> {
+    let body = ClearPresenceRequest {
+        session_id: MICROSOFT_GRAPH_CLIENT_ID.to_string(),
+    };
+    match post_presence(
+        access_token,
+        "https://graph.microsoft.com/v1.0/me/presence/clearPresence",
+        &body,
+        "clear presence",
+    ) {
+        Ok(()) => Ok(()),
+        Err(TeamsApiError::Other(404, _)) => {
+            let oid = graph_oid_from_access_token(access_token).map_err(|e| {
+                TeamsApiError::Other(
+                    404,
+                    format!("failed to resolve oid for /users fallback: {}", e),
+                )
+            })?;
+            match post_presence(
+                access_token,
+                &format!(
+                    "https://graph.microsoft.com/v1.0/users/{}/presence/clearPresence",
+                    oid
+                ),
+                &body,
+                "clear presence",
+            ) {
+                Ok(()) => Ok(()),
+                // 404 = the session is already gone — documented success.
+                Err(TeamsApiError::Other(404, _)) => Ok(()),
+                Err(e) => Err(e),
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Reads the user's Teams presence via the Graph getPresence endpoint
+/// (issue #3.0-P2). Requires `Presence.Read` (now in the scope string).
+pub fn get_teams_presence(access_token: &str) -> Result<PresenceInfo, TeamsApiError> {
+    let client = build_teams_client().map_err(TeamsApiError::Transient)?;
+
+    let response = client
+        .get("https://graph.microsoft.com/v1.0/me/presence")
+        .header("Authorization", format!("Bearer {}", access_token))
+        .send()
+        .map_err(|e| {
+            TeamsApiError::Transient(format!("Failed to get Teams presence: {}", e))
+        })?;
+
+    let status = response.status();
+    let status_code = status.as_u16();
+    let retry_after = parse_retry_after(&response);
+    let body_text = response
+        .text()
+        .unwrap_or_else(|_| "Unknown error".to_string());
+
+    if !status.is_success() {
+        log::error!(
+            "Failed to get Teams presence: {} - {}",
+            status,
+            body_text
+        );
+        return Err(match status_code {
+            401 => TeamsApiError::ExpiredToken(status_code),
+            403 => TeamsApiError::Forbidden(status_code, body_text),
+            429 => TeamsApiError::RateLimited(retry_after),
+            500..=599 => TeamsApiError::Transient(format!(
+                "server error {}: {}",
+                status_code, body_text
+            )),
+            _ => TeamsApiError::Other(status_code, body_text),
+        });
+    }
+
+    parse_presence_body(&body_text)
+        .map_err(|e| TeamsApiError::Other(200, format!("Failed to parse presence: {}", e)))
+}
+
 /// Validates that a Teams access token is still functional.
 ///
 /// Short-circuits on the local `expires_at` field when the token is clearly
@@ -803,5 +1114,141 @@ mod tests {
         assert_eq!(super::next_poll_wait(7, "authorization_pending"), 7);
         assert_eq!(super::next_poll_wait(7, "expired_token"), 7);
         assert_eq!(super::next_poll_wait(0, "bad_verification_code"), 0);
+    }
+
+    // Issue #3.0-P2: parse_presence_body must normalize the Graph enum
+    // values case-insensitively — docs list lowercase while real examples
+    // return PascalCase — and reject a body without the required fields.
+    #[test]
+    fn parse_presence_body_normalizes_case() {
+        let info = super::parse_presence_body(
+            r#"{"availability":"Available","activity":"Available"}"#,
+        )
+        .expect("PascalCase body must parse");
+        assert_eq!(info.availability, "available");
+        assert_eq!(info.activity, "available");
+
+        let info = super::parse_presence_body(
+            r#"{"availability":"Busy","activity":"InAMeeting"}"#,
+        )
+        .expect("mixed-case body must parse");
+        assert_eq!(info.availability, "busy");
+        assert_eq!(info.activity, "inameeting");
+    }
+
+    #[test]
+    fn parse_presence_body_requires_fields() {
+        assert!(
+            super::parse_presence_body(r#"{"availability":"Busy"}"#).is_err(),
+            "missing activity must fail"
+        );
+        assert!(
+            super::parse_presence_body(r#"{"activity":"InACall"}"#).is_err(),
+            "missing availability must fail"
+        );
+        assert!(super::parse_presence_body("not json").is_err());
+        assert!(super::parse_presence_body(r#"{"availability":42,"activity":"x"}"#).is_err());
+    }
+
+    // Issue #3.0-P2: gating rule — busy/DND availability OR
+    // in-meeting/in-call/presenting activity, case-insensitive.
+    #[test]
+    fn is_presence_gated_covers_busy_and_meeting_states() {
+        use super::{is_presence_gated, PresenceInfo};
+        let info = |availability: &str, activity: &str| PresenceInfo {
+            availability: availability.to_string(),
+            activity: activity.to_string(),
+        };
+        assert!(is_presence_gated(&info("busy", "available")));
+        assert!(is_presence_gated(&info("donotdisturb", "available")));
+        assert!(is_presence_gated(&info("available", "inameeting")));
+        assert!(is_presence_gated(&info("available", "inacall")));
+        assert!(is_presence_gated(&info("available", "presenting")));
+        // Activity wins even when availability is Available (in-meeting).
+        assert!(is_presence_gated(&info("available", "InAMeeting")));
+        assert!(!is_presence_gated(&info("available", "available")));
+        assert!(!is_presence_gated(&info("away", "away")));
+        assert!(!is_presence_gated(&info("available", "offline")));
+    }
+
+    // Issue #3.0-P2: the human-readable reason must mirror the gating rule
+    // (is_presence_gated is defined through it, so they cannot drift).
+    #[test]
+    fn presence_gate_reason_mirrors_gating_rule() {
+        use super::{presence_gate_reason, PresenceInfo};
+        let info = |availability: &str, activity: &str| PresenceInfo {
+            availability: availability.to_string(),
+            activity: activity.to_string(),
+        };
+        assert_eq!(presence_gate_reason(&info("busy", "available")), "busy");
+        assert_eq!(
+            presence_gate_reason(&info("donotdisturb", "available")),
+            "Do Not Disturb"
+        );
+        assert_eq!(
+            presence_gate_reason(&info("available", "inameeting")),
+            "in a meeting"
+        );
+        assert_eq!(presence_gate_reason(&info("available", "inacall")), "in a call");
+        assert_eq!(
+            presence_gate_reason(&info("available", "presenting")),
+            "presenting"
+        );
+        assert!(presence_gate_reason(&info("available", "available")).is_empty());
+    }
+
+    // Issue #3.0-P1: the oid claim (needed for the /users/{oid} fallback)
+    // must decode from the JWT payload, and fail cleanly otherwise.
+    #[test]
+    fn graph_oid_from_access_token_extracts_oid_claim() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine as _;
+        let payload =
+            URL_SAFE_NO_PAD.encode(r#"{"oid":"00000000-0000-0000-0000-000000000000"}"#);
+        let token = format!("header.{}.signature", payload);
+        assert_eq!(
+            super::graph_oid_from_access_token(&token).as_deref(),
+            Ok("00000000-0000-0000-0000-000000000000")
+        );
+    }
+
+    #[test]
+    fn graph_oid_from_access_token_errors_cleanly() {
+        assert!(super::graph_oid_from_access_token("not-a-jwt").is_err());
+        let no_oid = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(r#"{"sub":"user123"}"#);
+        assert!(super::graph_oid_from_access_token(&format!("h.{}.s", no_oid)).is_err());
+        let not_json = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("not json");
+        assert!(super::graph_oid_from_access_token(&format!("h.{}.s", not_json)).is_err());
+    }
+
+    // Issue #3.0-P1/P2: the Teams JWT `scp` claim (space-separated) must
+    // decode for the Settings one-time-reconnect banner.
+    #[test]
+    fn decode_teams_granted_scopes_extracts_scp_claim() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine as _;
+        let payload = URL_SAFE_NO_PAD.encode(
+            r#"{"scp":"Presence.ReadWrite Presence.Read profile offline_access"}"#,
+        );
+        let token = format!("h.{}.s", payload);
+        assert_eq!(
+            super::decode_teams_granted_scopes(&token),
+            vec![
+                "Presence.ReadWrite".to_string(),
+                "Presence.Read".to_string(),
+                "profile".to_string(),
+                "offline_access".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn decode_teams_granted_scopes_empty_when_not_decodable() {
+        assert!(super::decode_teams_granted_scopes("not-a-jwt").is_empty());
+        assert!(super::decode_teams_granted_scopes("a.b.c").is_empty());
+        let no_scp =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"sub":"user123"}"#);
+        assert!(super::decode_teams_granted_scopes(&format!("h.{}.s", no_scp)).is_empty());
     }
 }

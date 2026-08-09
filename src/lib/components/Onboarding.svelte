@@ -267,7 +267,11 @@
           clear_on_pause: true,
           profanity_filter: true,
           profanity_placeholder: 'Currently Listening to Spotify',
-          start_minimized: false
+          start_minimized: false,
+          // P1/P2 defaults (mirror config.ts / config.rs): availability
+          // sync OFF, presence gate ON. Issue #3.0-P1/P2.
+          availability_sync: false,
+          presence_gate: true
         },
         polling: {
           default_interval_seconds: pollingInterval,

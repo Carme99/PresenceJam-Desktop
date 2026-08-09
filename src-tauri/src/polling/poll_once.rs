@@ -28,8 +28,9 @@ use crate::spotify::{
     format_status, get_currently_playing, is_token_expired, refresh_spotify_token, SpotifyApiError,
 };
 use crate::teams::{
-    clear_teams_status_message, is_token_expired as is_teams_token_expired, refresh_teams_token,
-    set_teams_status_message, TeamsApiError,
+    clear_teams_presence, clear_teams_status_message, get_teams_presence,
+    is_presence_gated, is_token_expired as is_teams_token_expired, presence_gate_reason,
+    refresh_teams_token, set_teams_presence, set_teams_status_message, TeamsApiError,
 };
 use crate::token_io;
 use crate::AppState;
@@ -40,6 +41,11 @@ const ERROR_RETRY_INTERVAL_SECONDS: u64 = 30;
 const RATE_LIMIT_BACKOFF_SECONDS: u64 = 60;
 const DEBOUNCE_MS: u64 = 500;
 const TRANSIENT_FAILURE_EXIT_THRESHOLD: u8 = 5;
+/// Minimum gap between setPresence re-arms while a track plays (issue
+/// #3.0-P1). Available sessions FADE after 5 minutes regardless of
+/// `expirationDuration` (Microsoft Learn v1.0), so the session must be
+/// re-armed well inside that window; 4 minutes leaves slack.
+const AVAILABILITY_REARM_SECONDS: u64 = 4 * 60;
 
 /// What the driver should do after this iteration.
 pub(crate) enum PollIteration {
@@ -57,6 +63,8 @@ pub(crate) fn run(
     last_posted_placeholder: &mut Option<String>,
     consecutive_pauses: &mut u8,
     transient_failure_count: &mut u8,
+    gated_track_key: &mut Option<String>,
+    last_availability_arm: &mut Option<Instant>,
 ) -> PollIteration {
     log::debug!("[POLLING] poll_once: iteration start");
 
@@ -210,14 +218,22 @@ pub(crate) fn run(
                 last_teams_update,
                 last_posted_placeholder,
                 consecutive_pauses,
+                gated_track_key,
+                last_availability_arm,
             );
             *transient_failure_count = 0;
             PollIteration::Sleep { seconds: sleep_duration }
         }
         Ok(None) => {
             log::info!("[POLLING] poll_once: no track playing");
-            let no_track_backoff =
-                handle_no_track(app, state, last_track_key, &config, last_posted_placeholder);
+            let no_track_backoff = handle_no_track(
+                app,
+                state,
+                last_track_key,
+                &config,
+                last_posted_placeholder,
+                last_availability_arm,
+            );
             *transient_failure_count = 0;
             let mut iteration = record_no_track_outcome(consecutive_pauses, &config);
             if let PollIteration::Sleep { seconds } = &mut iteration {
@@ -293,6 +309,8 @@ pub(crate) fn run(
                                             last_teams_update,
                                             last_posted_placeholder,
                                             consecutive_pauses,
+                                            gated_track_key,
+                                            last_availability_arm,
                                         );
                                         *transient_failure_count = 0;
                                         return PollIteration::Sleep { seconds: _sleep };
@@ -305,6 +323,7 @@ pub(crate) fn run(
                                             last_track_key,
                                             &config,
                                             last_posted_placeholder,
+                                            last_availability_arm,
                                         );
                                         *transient_failure_count = 0;
                                         let mut iteration = record_no_track_outcome(
@@ -478,6 +497,18 @@ fn get_spotify_credentials(config: &Option<crate::config::AppConfig>) -> (String
     (client_id, client_secret)
 }
 
+/// True when the Available-presence session should be re-armed (issue
+/// #3.0-P1): no arm yet, or the last arm is at least
+/// `AVAILABILITY_REARM_SECONDS` old. Available sessions FADE after 5
+/// minutes regardless of `expirationDuration`, so the re-arm cadence must
+/// be strictly inside that window (4 min < 5 min).
+fn should_rearm_availability(last_arm: Option<Instant>, now: Instant) -> bool {
+    match last_arm {
+        Some(arm) => now.duration_since(arm).as_secs() >= AVAILABILITY_REARM_SECONDS,
+        None => true,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn process_track(
     app: &AppHandle,
@@ -489,6 +520,8 @@ pub(crate) fn process_track(
     last_teams_update: &mut Option<Instant>,
     last_posted_placeholder: &mut Option<String>,
     consecutive_pauses: &mut u8,
+    gated_track_key: &mut Option<String>,
+    last_availability_arm: &mut Option<Instant>,
 ) -> u64 {
     let elapsed_ms = last_poll_instant.elapsed().as_millis() as u64;
     // Issue #165: `progress_ms` is `None` for live/unknown-position streams.
@@ -505,7 +538,9 @@ pub(crate) fn process_track(
 
     if changed {
         log::info!("[POLLING] process_track: new track detected, updating");
-        *last_track_key = Some(track_key);
+        // Clone: `track_key` is still needed below for the presence-gate
+        // comparison (issue #3.0-P2).
+        *last_track_key = Some(track_key.clone());
         *state.polling.current_track_mut() = Some(track.clone());
 
         let _ = app.emit(
@@ -583,6 +618,63 @@ pub(crate) fn process_track(
             // Issue #155: a real track replaces any placeholder, so the next
             // pause/no-track must post a fresh placeholder again.
             *last_posted_placeholder = None;
+
+            // P2 (issue #3.0-P2): presence-aware gating. On a track change,
+            // read the user's Teams presence; when busy/DND/in a
+            // meeting/call/presenting, suppress the status write for the
+            // whole track (recorded in `gated_track_key`) and emit
+            // `presence-gated`. Evaluated before the debounce so a rapid
+            // track change can't bypass the gate. Fail-safe: a failed read
+            // (network, 403, …) proceeds with the write, logged as a warning.
+            let presence_gate_enabled = config
+                .as_ref()
+                .map(|c| c.teams.presence_gate)
+                .unwrap_or(true);
+            if changed {
+                if presence_gate_enabled {
+                    match get_teams_presence(&teams_tok.access_token) {
+                        Ok(presence) if is_presence_gated(&presence) => {
+                            let reason = presence_gate_reason(&presence);
+                            log::info!(
+                                "[POLLING] process_track: presence gated ({}), skipping status write",
+                                reason
+                            );
+                            *gated_track_key = Some(track_key.clone());
+                            let _ = app.emit(
+                                "presence-gated",
+                                json!({
+                                    "reason": reason,
+                                    "availability": presence.availability,
+                                    "activity": presence.activity,
+                                    "timestamp": Utc::now().to_rfc3339()
+                                }),
+                            );
+                        }
+                        Ok(_) => {
+                            *gated_track_key = None;
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "[POLLING] process_track: presence gate read failed, proceeding with status write: {}",
+                                e
+                            );
+                            *gated_track_key = None;
+                        }
+                    }
+                } else {
+                    *gated_track_key = None;
+                }
+            }
+
+            if gated_track_key.as_deref() == Some(track_key.as_str()) {
+                log::debug!(
+                    "[POLLING] process_track: track presence-gated, skipping status write"
+                );
+                let remaining_ms = corrected_progress_ms
+                    .map(|c| track.duration_ms.saturating_sub(c));
+                return playing_track_sleep(remaining_ms, config);
+            }
+
             if should_skip_api_call {
                 log::debug!(
                     "[POLLING] process_track: debounce active, skipping Teams API call (changed={}, elapsed={}ms)",
@@ -676,23 +768,144 @@ pub(crate) fn process_track(
             if last_posted_placeholder.as_deref() == Some(placeholder) {
                 log::debug!("[POLLING] process_track: paused placeholder unchanged, skipping clear POST");
             } else {
-                let expiry_str = placeholder_expiry_str();
-                match clear_teams_status_message(
-                    &teams_tok.access_token,
-                    placeholder,
-                    Some(&expiry_str),
-                ) {
+                // P2 (issue #3.0-P2): gate the paused-clear the same way as
+                // the playing write — don't replace a busy/meeting presence
+                // with a "Paused" placeholder. `gated_track_key` carries the
+                // change-time decision from the playing path; re-read
+                // presence only when this track wasn't gated there.
+                let gate_blocked = if gated_track_key.as_deref() == Some(track_key.as_str()) {
+                    true
+                } else if config
+                    .as_ref()
+                    .map(|c| c.teams.presence_gate)
+                    .unwrap_or(true)
+                {
+                    match get_teams_presence(&teams_tok.access_token) {
+                        Ok(presence) if is_presence_gated(&presence) => {
+                            *gated_track_key = Some(track_key.clone());
+                            let reason = presence_gate_reason(&presence);
+                            let _ = app.emit(
+                                "presence-gated",
+                                json!({
+                                    "reason": reason,
+                                    "availability": presence.availability,
+                                    "activity": presence.activity,
+                                    "timestamp": Utc::now().to_rfc3339()
+                                }),
+                            );
+                            true
+                        }
+                        Ok(_) => false,
+                        Err(e) => {
+                            // Fail-safe: proceed with the clear.
+                            log::warn!(
+                                "[POLLING] process_track: presence gate read failed, proceeding with paused clear: {}",
+                                e
+                            );
+                            false
+                        }
+                    }
+                } else {
+                    false
+                };
+
+                if gate_blocked {
+                    log::info!(
+                        "[POLLING] process_track: paused-clear gated, keeping presence untouched"
+                    );
+                    // Mark the placeholder as posted so the decision is made
+                    // once per pause; the next track change resets it (the
+                    // playing branch clears `last_posted_placeholder`).
+                    *last_posted_placeholder = Some(placeholder.to_string());
+                } else {
+                    let expiry_str = placeholder_expiry_str();
+                    match clear_teams_status_message(
+                        &teams_tok.access_token,
+                        placeholder,
+                        Some(&expiry_str),
+                    ) {
+                        Ok(_) => {
+                            *last_teams_update = Some(Instant::now());
+                            *last_posted_placeholder = Some(placeholder.to_string());
+                            let _ = app.emit(
+                                "presence-cleared",
+                                json!({ "timestamp": Utc::now().to_rfc3339() }),
+                            );
+                        }
+                        Err(e) => {
+                            log::error!(
+                                "[POLLING] process_track: Failed to clear Teams status: {}",
+                                e
+                            );
+                            // Issue #154: honor the server's Retry-After on a
+                            // throttled clear.
+                            teams_backoff_secs =
+                                teams_backoff_secs.max(rate_limit_sleep_secs(&e));
+                        }
+                    }
+                }
+            }
+        }
+
+        // P1 (issue #3.0-P1): availability sync — OFF by default. While a
+        // track plays, re-arm the Graph "Available" presence session at
+        // most every 4 minutes (Available sessions FADE after 5 min
+        // regardless of `expirationDuration`; re-arm strictly inside that
+        // window); on pause, clear the session (`clearPresence` 404 =
+        // session already gone = success). Emits
+        // `presence-availability-updated` on each arm/clear.
+        if config
+            .as_ref()
+            .map(|c| c.teams.availability_sync)
+            .unwrap_or(false)
+        {
+            let now = Instant::now();
+            if track.is_playing {
+                if should_rearm_availability(*last_availability_arm, now) {
+                    match set_teams_presence(
+                        &teams_tok.access_token,
+                        "Available",
+                        "Available",
+                        "PT4H",
+                    ) {
+                        Ok(_) => {
+                            *last_availability_arm = Some(now);
+                            let _ = app.emit(
+                                "presence-availability-updated",
+                                json!({
+                                    "available": true,
+                                    "label": "Listening (Available)",
+                                    "timestamp": Utc::now().to_rfc3339()
+                                }),
+                            );
+                        }
+                        Err(e) => {
+                            log::error!(
+                                "[POLLING] process_track: failed to set Teams availability: {}",
+                                e
+                            );
+                            // Issue #154: a throttled set extends the next
+                            // poll to the server-directed delay.
+                            teams_backoff_secs = teams_backoff_secs.max(rate_limit_sleep_secs(&e));
+                        }
+                    }
+                }
+            } else if last_availability_arm.is_some() {
+                match clear_teams_presence(&teams_tok.access_token) {
                     Ok(_) => {
-                        *last_teams_update = Some(Instant::now());
-                        *last_posted_placeholder = Some(placeholder.to_string());
+                        *last_availability_arm = None;
                         let _ = app.emit(
-                            "presence-cleared",
-                            json!({ "timestamp": Utc::now().to_rfc3339() }),
+                            "presence-availability-updated",
+                            json!({
+                                "available": false,
+                                "label": "Availability cleared",
+                                "timestamp": Utc::now().to_rfc3339()
+                            }),
                         );
                     }
                     Err(e) => {
                         log::error!(
-                            "[POLLING] process_track: Failed to clear Teams status: {}",
+                            "[POLLING] process_track: failed to clear Teams availability: {}",
                             e
                         );
                         // Issue #154: honor the server's Retry-After on a
@@ -725,20 +938,12 @@ pub(crate) fn handle_no_track(
     last_track_key: &mut Option<String>,
     config: &Option<crate::config::AppConfig>,
     last_posted_placeholder: &mut Option<String>,
+    last_availability_arm: &mut Option<Instant>,
 ) -> u64 {
     if last_track_key.is_some() {
         *last_track_key = None;
         *state.polling.current_track_mut() = None;
     } else {
-        return 0;
-    }
-
-    // Issue #155: honor `clear_on_pause` like the paused-track branch.
-    if !config
-        .as_ref()
-        .map(|c| c.teams.clear_on_pause)
-        .unwrap_or(true)
-    {
         return 0;
     }
 
@@ -748,11 +953,56 @@ pub(crate) fn handle_no_track(
         None => return 0,
     };
 
+    // P1 (issue #3.0-P1): availability sync — clear the Graph presence
+    // session when nothing is playing (`clearPresence` 404 = session
+    // already gone = success). Runs independently of `clear_on_pause`:
+    // that toggle governs the placeholder status message only, while
+    // availability sync owns the presence bubble.
+    let mut teams_backoff_secs: u64 = 0;
+    if config
+        .as_ref()
+        .map(|c| c.teams.availability_sync)
+        .unwrap_or(false)
+        && last_availability_arm.is_some()
+    {
+        match clear_teams_presence(&teams_tok.access_token) {
+            Ok(_) => {
+                *last_availability_arm = None;
+                let _ = app.emit(
+                    "presence-availability-updated",
+                    json!({
+                        "available": false,
+                        "label": "Availability cleared",
+                        "timestamp": Utc::now().to_rfc3339()
+                    }),
+                );
+            }
+            Err(e) => {
+                log::error!(
+                    "[POLLING] handle_no_track: failed to clear Teams availability: {}",
+                    e
+                );
+                // Issue #154: honor the server's Retry-After on a throttled
+                // clear.
+                teams_backoff_secs = teams_backoff_secs.max(rate_limit_sleep_secs(&e));
+            }
+        }
+    }
+
+    // Issue #155: honor `clear_on_pause` like the paused-track branch.
+    if !config
+        .as_ref()
+        .map(|c| c.teams.clear_on_pause)
+        .unwrap_or(true)
+    {
+        return teams_backoff_secs;
+    }
+
     let placeholder = "\u{1F3B5} Nothing playing on Spotify";
     // Issue #155: skip byte-identical placeholder posts.
     if last_posted_placeholder.as_deref() == Some(placeholder) {
         log::debug!("[POLLING] handle_no_track: no-track placeholder unchanged, skipping clear POST");
-        return 0;
+        return teams_backoff_secs;
     }
 
     let expiry_str = placeholder_expiry_str();
@@ -767,7 +1017,7 @@ pub(crate) fn handle_no_track(
                 "presence-cleared",
                 json!({ "timestamp": Utc::now().to_rfc3339() }),
             );
-            0
+            teams_backoff_secs
         }
         Err(e) => {
             log::error!(
@@ -775,7 +1025,7 @@ pub(crate) fn handle_no_track(
                 e
             );
             // Issue #154: honor the server's Retry-After on a throttled clear.
-            rate_limit_sleep_secs(&e)
+            teams_backoff_secs.max(rate_limit_sleep_secs(&e))
         }
     }
 }
@@ -1425,6 +1675,95 @@ mod tests {
         assert!(
             prod_source.contains("TeamsApiError::Forbidden(_, _)"),
             "Forbidden must be matched by variant (issue #153)"
+        );
+    }
+
+    // Issue #3.0-P1: the availability re-arm must happen at most every 4
+    // minutes — Available sessions FADE after 5 min regardless of
+    // `expirationDuration`, so the cadence must be strictly inside that
+    // window (240s < 300s).
+    #[test]
+    fn test_should_rearm_availability_cadence() {
+        let now = Instant::now();
+        // Never armed → arm immediately.
+        assert!(should_rearm_availability(None, now));
+        // Armed 1 second ago → don't re-arm.
+        let recent = now - std::time::Duration::from_secs(1);
+        assert!(!should_rearm_availability(Some(recent), now));
+        // Just under the cadence → don't re-arm.
+        let under = now - std::time::Duration::from_secs(AVAILABILITY_REARM_SECONDS - 1);
+        assert!(!should_rearm_availability(Some(under), now));
+        // At/over the cadence → re-arm (strictly < 5 min fade window).
+        let at = now - std::time::Duration::from_secs(AVAILABILITY_REARM_SECONDS);
+        assert!(should_rearm_availability(Some(at), now));
+        let over = now - std::time::Duration::from_secs(AVAILABILITY_REARM_SECONDS + 60);
+        assert!(should_rearm_availability(Some(over), now));
+        assert!(
+            AVAILABILITY_REARM_SECONDS < 300,
+            "re-arm cadence must be strictly inside the 5-minute Available fade window"
+        );
+    }
+
+    /// Issue #3.0-P1/P2 regression guard: inside `process_track`, the
+    /// presence-gate read (`get_teams_presence`) must precede the status
+    /// write (`set_teams_status_message`) so a busy/meeting presence can
+    /// suppress it, and the availability call sites (set_teams_presence
+    /// re-arm + clear_teams_presence on pause) must exist.
+    #[test]
+    fn test_presence_gate_precedes_status_write_and_availability_call_sites_exist() {
+        let source = include_str!("poll_once.rs");
+        let prod_source = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("poll_once.rs has no #[cfg(test)] mod tests block");
+
+        // Isolate the process_track body by brace counting from its opening
+        // `{` (house style — never boundary anchors, which drift). The
+        // json!({...}) braces and `\u{...}` escapes inside string literals
+        // are balanced, so they do not perturb the count.
+        let after_sig = prod_source
+            .split("pub(crate) fn process_track(")
+            .nth(1)
+            .expect("process_track definition not found");
+        let open = after_sig
+            .find('{')
+            .expect("process_track has no opening brace");
+        let mut depth = 0usize;
+        let mut end = None;
+        for (i, ch) in after_sig[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(open + i + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let body = &after_sig[..end.expect("process_track body never closed")];
+
+        let gate_pos = body
+            .find("get_teams_presence(")
+            .expect("process_track must call get_teams_presence (presence gate, issue #3.0-P2)");
+        let write_pos = body
+            .find("set_teams_status_message(")
+            .expect("process_track must call set_teams_status_message");
+        assert!(
+            gate_pos < write_pos,
+            "the presence-gate read must precede the status write in process_track \
+             so a busy/meeting presence can suppress it (issue #3.0-P2)"
+        );
+        assert!(
+            body.contains("set_teams_presence("),
+            "process_track must re-arm set_teams_presence(Available, ...) while playing \
+             (issue #3.0-P1)"
+        );
+        assert!(
+            body.contains("clear_teams_presence("),
+            "process_track must clear_teams_presence on pause (issue #3.0-P1)"
         );
     }
 }

@@ -3,7 +3,7 @@
 //! `polling_loop` is the outermost loop: it owns the per-thread mutable
 //! state whose lifetime spans iterations (`last_track_key`,
 //! `last_teams_update`, `last_posted_placeholder`, `consecutive_pauses`,
-//! `transient_failure_count`),
+//! `transient_failure_count`, `gated_track_key`, `last_availability_arm`),
 //! checks the stop channel and the `is_syncing` flag, dispatches one
 //! iteration to [`super::poll_once::run`], refreshes the tray, and
 //! sleeps for the duration the iteration returned.
@@ -51,6 +51,17 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
     // lifetime spans iterations; `poll_once::run` mutates it inside the
     // single error arm. Reset by `poll_once` on any non-error iteration.
     let mut transient_failure_count: u8 = 0;
+    // P2 (issue #3.0-P2): the track key whose status write was suppressed
+    // by the presence gate. Owned by the driver because the decision spans
+    // iterations — a gated track stays gated until the next track change
+    // re-evaluates the presence. `poll_once::run` sets/clears it inside
+    // `process_track`.
+    let mut gated_track_key: Option<String> = None;
+    // P1 (issue #3.0-P1): when the "Available" presence session was last
+    // armed via setPresence. Owned by the driver because the re-arm cadence
+    // (≤4 min, sessions fade after 5) spans iterations; `poll_once::run`
+    // arms/clears it inside `process_track` / `handle_no_track`.
+    let mut last_availability_arm: Option<Instant> = None;
 
     loop {
         log::debug!("[POLLING] polling_loop: iteration start");
@@ -87,6 +98,8 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
             &mut last_posted_placeholder,
             &mut consecutive_pauses,
             &mut transient_failure_count,
+            &mut gated_track_key,
+            &mut last_availability_arm,
         );
 
         // Post-iteration tray sync — independent of the API result.

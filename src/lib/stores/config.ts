@@ -34,6 +34,12 @@ export interface TeamsConfig {
   profanity_filter: boolean;
   profanity_placeholder: string;
   start_minimized: boolean;
+  // P1: drive the Teams presence bubble (Available while playing) via
+  // setPresence/clearPresence. Off by default.
+  availability_sync: boolean;
+  // P2: skip status writes while busy/DND/in a meeting/call/presenting.
+  // On by default.
+  presence_gate: boolean;
 }
 
 export interface PollingConfig {
@@ -70,7 +76,9 @@ export const defaultConfig: AppConfig = {
     // NOTE: The Rust backend (profanity::safe_placeholder_default) is the canonical source.
     // This default is only used if load_config fails. Both must stay in sync manually.
     profanity_placeholder: 'Currently Listening to Spotify',
-    start_minimized: false
+    start_minimized: false,
+    availability_sync: false,
+    presence_gate: true
   },
   polling: {
     default_interval_seconds: 30,

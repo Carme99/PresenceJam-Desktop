@@ -16,6 +16,12 @@
   let currentTrack = $state<TrackInfo | null>(null);
   let statusPreview = $state('Not configured');
   let displayError = $state('');
+  // P2 (issue #3.0-P2): true while the status write is suppressed by a
+  // busy/meeting presence; cleared on the next `presence-updated`.
+  let presenceGated = $state(false);
+  // P1 (issue #3.0-P1): label from `presence-availability-updated`
+  // ('Listening (Available)' / 'Availability cleared').
+  let availabilityLabel = $state('');
   let displayErrorTimeout: ReturnType<typeof setTimeout> | null = null;
   let unlisten: (() => void)[] = [];
 
@@ -60,6 +66,9 @@
       devLog('[DASHBOARD] EVENT: presence-updated received');
       devLog('[DASHBOARD] EVENT: status=', event.payload.status);
       statusPreview = event.payload.status;
+      // A real status write means the gate is no longer suppressing —
+      // clear the chip (issue #3.0-P2).
+      presenceGated = false;
     }));
 
     devLog('[DASHBOARD] onMount: setting up presence-cleared listener');
@@ -69,6 +78,19 @@
       statusPreview = 'No track playing';
       devLog('[DASHBOARD] EVENT: currentTrack=null, statusPreview="No track playing"');
       await updateMenuState();
+    }));
+
+    devLog('[DASHBOARD] onMount: setting up presence-gated listener');
+    unlisten.push(await listen('presence-gated', (event: any) => {
+      devLog('[DASHBOARD] EVENT: presence-gated received');
+      devLog('[DASHBOARD] EVENT: reason=', event.payload?.reason);
+      presenceGated = true;
+    }));
+
+    devLog('[DASHBOARD] onMount: setting up presence-availability-updated listener');
+    unlisten.push(await listen('presence-availability-updated', (event: any) => {
+      devLog('[DASHBOARD] EVENT: presence-availability-updated received');
+      availabilityLabel = event.payload?.label ?? '';
     }));
 
     devLog('[DASHBOARD] onMount: setting up error listener');
@@ -295,6 +317,12 @@
   {/if}
 
   <main>
+    {#if presenceGated}
+      <div class="presence-chip" role="status">Status paused while you're busy/in a meeting</div>
+    {/if}
+    {#if availabilityLabel}
+      <div class="availability-chip" role="status">{availabilityLabel}</div>
+    {/if}
     {#if !spotifyConnected || !teamsConnected}
       <div class="setup-card card">
         <div class="setup-icon"><Logo size={56} /></div>
@@ -435,6 +463,19 @@
     border: 1px solid var(--border);
     border-radius: var(--r-lg);
     padding: var(--sp-5);
+  }
+
+  /* Presence indicators (issue #3.0-P1/P2): the gate chip while the status
+     write is suppressed, and the availability-sync bubble state. */
+  .presence-chip,
+  .availability-chip {
+    align-self: flex-start;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    padding: var(--sp-2) var(--sp-3);
+    font-size: var(--fs-sm);
+    color: var(--fg);
   }
 
   .setup-card {

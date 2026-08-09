@@ -37,6 +37,17 @@ pub struct TeamsConfig {
     pub profanity_placeholder: String,
     #[serde(default)]
     pub start_minimized: bool,
+    /// P1 (issue #3.0-P1): drive the Teams presence bubble
+    /// (Available/Available while a track plays) via Graph
+    /// setPresence/clearPresence. OFF by default — it overrides the
+    /// user's manual presence bubble.
+    #[serde(default = "default_availability_sync")]
+    pub availability_sync: bool,
+    /// P2 (issue #3.0-P2): before writing a status message, read the
+    /// user's presence and skip the write when busy/DND/in a
+    /// meeting/in a call/presenting. ON by default.
+    #[serde(default = "default_presence_gate")]
+    pub presence_gate: bool,
 }
 
 fn default_status_format() -> String {
@@ -57,6 +68,14 @@ fn default_profanity_filter() -> bool {
 
 fn default_profanity_placeholder() -> String {
     profanity::safe_placeholder_default().to_string()
+}
+
+fn default_availability_sync() -> bool {
+    false
+}
+
+fn default_presence_gate() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
@@ -138,6 +157,8 @@ impl Default for TeamsConfig {
             profanity_filter: default_profanity_filter(),
             profanity_placeholder: default_profanity_placeholder(),
             start_minimized: default_start_minimized(),
+            availability_sync: default_availability_sync(),
+            presence_gate: default_presence_gate(),
         }
     }
 }
@@ -464,6 +485,9 @@ mod tests {
             config.teams.profanity_placeholder,
             profanity::safe_placeholder_default()
         );
+        // Issue #3.0-P1/P2: availability sync OFF, presence gate ON.
+        assert!(!config.teams.availability_sync);
+        assert!(config.teams.presence_gate);
         assert_eq!(config.polling.default_interval_seconds, 30);
         assert!(config.logging.enabled);
     }
