@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
+## [2.10.0] - 2026-08-09
+
+### Added
+- **Teams auto-refresh restored (PR #177):** the device-code flow now requests the `offline_access` scope, so Microsoft issues a refresh token — previously Teams tokens died after the ~1h access-token lifetime and forced manual re-auth on every session. Refresh rotation also preserves the existing refresh token when the response omits a new one (#151).
+- **Live-stream support (PR #178):** a null `progress_ms` (live/unknown position) now falls back to the default polling interval and sends no status expiry, instead of re-setting a status that expired in 10s (#165).
+- **Spotify error classification (PR #175):** `invalid_grant` on refresh is now detected and triggers re-auth (Spotify refresh tokens expire after 6 months) (#160); 429 responses honor the documented `Retry-After` header (#159).
+
+### Changed
+- **Teams re-auth in Settings (PR #175):** the device-code flow is fully wired — user code + verification URL shown, browser auto-opened, polling started; `teams-reconnect-required` events are handled at the layout level so they're no longer lost while on the Dashboard (#152, #157).
+- **Status-message expiry (PR #178):** `expiryDateTime.dateTime` is sent offset-less with six fractional digits per the Graph schema; pause/no-track placeholders carry a 60s expiry so they self-remove even on quit, and identical writes are gated (#155, #156).
+- **403 handling (PR #177, #178):** Forbidden is classified separately from an expired token — a license/permission failure no longer triggers a re-auth loop (#153).
+- **Item-type gate (PR #175):** currently-playing responses are gated on `currently_playing_type == "track"` — podcasts and ads no longer appear as "Nothing playing" (#161).
+- **Dead code removed (PR #177):** the unused Teams auth-code path (`complete_teams_auth`, `presencejam://teams-callback`, `PendingTeamsAuth`) is deleted — device-code flow only (#158).
+- **Manual Spotify fallback (PR #175):** the pasted-redirect-URL path now validates the OAuth `state` parameter (CSRF) and pending expiry, matching the deep-link path (#162).
+
+### Removed
+- **Dead Spotify scopes config (PR #175):** `SpotifyConfig.scopes` was never read by the auth flow — the authorize URL is the single source of truth (#163).
+- **Unused `User.Read` scope (PR #177):** no Graph call used it; the device-code request is now `Presence.ReadWrite offline_access` (least privilege).
+
+### Docs
+- **MS Learn + Spotify alignment batch (PR #179):** 21 commits closing #166–#174 plus the doc halves of #151/#158/#160 — corrected ARCHITECTURE.md diagrams (POST → 200 OK), work/school-only Teams account requirement, status-expiry attribution to the app's own setting, Spotify app-creation walkthrough matching the current dashboard, "Authorization Code + PKCE (confidential client)" labeling, admin-consent claims, and polling call-math figures. Review report committed at `archive/reviews/mslearn-spotify-docs-alignment.md`.
+
 ## [2.9.1] - 2026-07-23
 
 ### Dependencies
