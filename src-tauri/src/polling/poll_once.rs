@@ -29,7 +29,7 @@ use crate::spotify::{
 };
 use crate::teams::{
     clear_teams_status_message, is_token_expired as is_teams_token_expired, refresh_teams_token,
-    set_teams_status_message,
+    set_teams_status_message, TeamsApiError,
 };
 use crate::token_io;
 use crate::AppState;
@@ -54,6 +54,7 @@ pub(crate) fn run(
     stop_rx: &mpsc::Receiver<()>,
     last_track_key: &mut Option<String>,
     last_teams_update: &mut Option<Instant>,
+    last_posted_placeholder: &mut Option<String>,
     consecutive_pauses: &mut u8,
     transient_failure_count: &mut u8,
 ) -> PollIteration {
@@ -134,6 +135,28 @@ pub(crate) fn run(
             }
             Err(e) => {
                 log::error!("[POLLING] poll_once: Failed to refresh Spotify token: {}", e);
+                // Issue #160: `invalid_grant` means the refresh token is dead
+                // (documented 6-month lifetime, or revoked). Discard it and
+                // trigger re-auth instead of retrying forever. The write guard
+                // is dropped before persist_tokens (which re-locks the same
+                // RwLock for reading — parking_lot is not reentrant).
+                if matches!(e, SpotifyApiError::InvalidGrant) {
+                    log::error!("[POLLING] poll_once: Spotify refresh token invalid (invalid_grant), discarding tokens and requiring reconnect");
+                    *state.tokens.spotify_mut() = None;
+                    if let Err(persist_err) = token_io::persist_tokens(state, app) {
+                        log::warn!(
+                            "[POLLING] poll_once: failed to persist cleared Spotify tokens: {}",
+                            persist_err
+                        );
+                    }
+                    let _ = app.emit("spotify-reconnect-required", json!(null));
+                    let _ = app.emit("reconnect-required", json!(null));
+                    return interruptible_sleep(
+                        stop_rx,
+                        with_jitter(ERROR_RETRY_INTERVAL_SECONDS),
+                        "invalid-grant sleep",
+                    );
+                }
                 emit_error(
                     app,
                     "spotify",
@@ -173,6 +196,7 @@ pub(crate) fn run(
                 last_track_key,
                 last_poll_instant,
                 last_teams_update,
+                last_posted_placeholder,
                 consecutive_pauses,
             );
             *transient_failure_count = 0;
@@ -180,9 +204,16 @@ pub(crate) fn run(
         }
         Ok(None) => {
             log::info!("[POLLING] poll_once: no track playing");
-            handle_no_track(app, state, last_track_key);
+            let no_track_backoff =
+                handle_no_track(app, state, last_track_key, &config, last_posted_placeholder);
             *transient_failure_count = 0;
-            record_no_track_outcome(consecutive_pauses, &config)
+            let mut iteration = record_no_track_outcome(consecutive_pauses, &config);
+            if let PollIteration::Sleep { seconds } = &mut iteration {
+                // Issue #154: a throttled Teams clear extends the next poll
+                // to the server-directed delay.
+                *seconds = (*seconds).max(no_track_backoff);
+            }
+            iteration
         }
         Err(e) => {
             log::error!(
@@ -240,6 +271,7 @@ pub(crate) fn run(
                                             last_track_key,
                                             last_poll_instant_retry,
                                             last_teams_update,
+                                            last_posted_placeholder,
                                             consecutive_pauses,
                                         );
                                         *transient_failure_count = 0;
@@ -247,12 +279,25 @@ pub(crate) fn run(
                                     }
                                     Ok(None) => {
                                         log::info!("[POLLING] poll_once: retry no track");
-                                        handle_no_track(app, state, last_track_key);
+                                        let no_track_backoff = handle_no_track(
+                                            app,
+                                            state,
+                                            last_track_key,
+                                            &config,
+                                            last_posted_placeholder,
+                                        );
                                         *transient_failure_count = 0;
-                                        return record_no_track_outcome(
+                                        let mut iteration = record_no_track_outcome(
                                             consecutive_pauses,
                                             &config,
                                         );
+                                        if let PollIteration::Sleep { seconds } = &mut iteration {
+                                            // Issue #154: a throttled Teams
+                                            // clear extends the next poll to
+                                            // the server-directed delay.
+                                            *seconds = (*seconds).max(no_track_backoff);
+                                        }
+                                        return iteration;
                                     }
                                     Err(retry_err) => {
                                         log::error!(
@@ -269,18 +314,26 @@ pub(crate) fn run(
                                 "[POLLING] poll_once: token refresh failed: {}",
                                 refresh_err
                             );
-                            log::warn!("[POLLING] poll_once: Spotify token refresh permanently failed, emitting spotify-reconnect-required");
-                            let _ = app.emit("spotify-reconnect-required", json!(null));
-                            final_err = SpotifyApiError::Other(refresh_err.to_string());
+                            // Issue #160: only a dead refresh token
+                            // (`invalid_grant`) needs re-auth; other refresh
+                            // failures are transient and flow into the
+                            // backoff / 5-strikes logic below.
+                            if matches!(refresh_err, SpotifyApiError::InvalidGrant) {
+                                log::warn!("[POLLING] poll_once: Spotify refresh token invalid (invalid_grant), emitting spotify-reconnect-required");
+                                let _ = app.emit("spotify-reconnect-required", json!(null));
+                            }
+                            final_err = refresh_err;
                         }
                     }
                 }
             }
 
-            // TODO(#159): use `final_err.retry_after().unwrap_or(...)` for the
-            // backoff once the poll_once integration lands.
+            // Issue #159: honor the server's `Retry-After` (floored at the
+            // error retry interval so a tiny value can't create a busy loop);
+            // fall back to the fixed jittered backoff when the header is
+            // absent.
             if matches!(final_err, SpotifyApiError::RateLimited(_)) {
-                backoff_secs = with_jitter(RATE_LIMIT_BACKOFF_SECONDS);
+                backoff_secs = with_jitter(spotify_backoff_base(&final_err));
             }
 
             if matches!(
@@ -382,6 +435,11 @@ where
     };
 
     if committed {
+        // TODO(#followup): the caller's write guard (`&mut *state.tokens.X_mut()`)
+        // is still alive here, and persist_tokens takes a READ lock on the same
+        // RwLock — a self-deadlock with parking_lot's non-reentrant lock on every
+        // successful refresh. Out of scope for the #153-#165 batch; fix = drop
+        // the guard before persisting (see poll_once Path A invalid_grant).
         if let Err(e) = token_io::persist_tokens(state, app) {
             log::warn!(
                 "[POLLING] poll_once: failed to persist refreshed {} tokens: {}",
@@ -414,13 +472,18 @@ pub(crate) fn process_track(
     last_track_key: &mut Option<String>,
     last_poll_instant: Instant,
     last_teams_update: &mut Option<Instant>,
+    last_posted_placeholder: &mut Option<String>,
     consecutive_pauses: &mut u8,
 ) -> u64 {
     let elapsed_ms = last_poll_instant.elapsed().as_millis() as u64;
-    // TODO(#165): handle `None` (live/unknown position) properly — fall back
-    // to the default interval for sleep and no expiry. `unwrap_or(0)`
-    // preserves the pre-Option behavior until that integration lands.
-    let corrected_progress_ms = track.progress_ms.unwrap_or(0).saturating_add(elapsed_ms);
+    // Issue #165: `progress_ms` is `None` for live/unknown-position streams.
+    // Keep the Option alive so the duration-derived sleep/expiry below are
+    // skipped for streams — they fall back to the default interval and no
+    // `expiryDateTime` on the wire respectively.
+    let corrected_progress_ms = track.progress_ms.map(|p| p.saturating_add(elapsed_ms));
+    // Issue #154: a throttled Teams set/clear (429) extends the next poll to
+    // the server-directed delay.
+    let mut teams_backoff_secs: u64 = 0;
 
     let track_key = format!("{} - {}", track.title, track.artist);
     let changed = last_track_key.as_ref() != Some(&track_key);
@@ -491,19 +554,18 @@ pub(crate) fn process_track(
     if let Some(teams_tok) = teams_tokens {
         if track.is_playing {
             *consecutive_pauses = 0;
+            // Issue #155: a real track replaces any placeholder, so the next
+            // pause/no-track must post a fresh placeholder again.
+            *last_posted_placeholder = None;
             if should_skip_api_call {
                 log::debug!(
                     "[POLLING] process_track: debounce active, skipping Teams API call (changed={}, elapsed={}ms)",
                     changed,
                     last_teams_update.map(|i| i.elapsed().as_millis() as u64).unwrap_or(0)
                 );
-                let remaining_ms = track.duration_ms.saturating_sub(corrected_progress_ms);
-                let buffer_ms = 5000u64;
-                let remaining_secs = remaining_ms / 1000;
-                let sleep_secs = remaining_secs.saturating_sub(buffer_ms / 1000);
-                return sleep_secs
-                    .max(config_minimum_interval(config))
-                    .min(config_maximum_interval(config));
+                let remaining_ms = corrected_progress_ms
+                    .map(|c| track.duration_ms.saturating_sub(c));
+                return playing_track_sleep(remaining_ms, config);
             }
             let status_format = config
                 .as_ref()
@@ -524,20 +586,16 @@ pub(crate) fn process_track(
                 status_message.clone()
             };
 
-            let remaining_ms = track.duration_ms.saturating_sub(corrected_progress_ms);
-            let buffer_ms = config
-                .as_ref()
-                .map(|c| c.polling.expiry_buffer_seconds)
-                .unwrap_or(10)
-                * 1000;
-            let expiry = Utc::now()
-                + chrono::Duration::milliseconds(remaining_ms as i64 + buffer_ms as i64);
-            let expiry_str = expiry.to_rfc3339();
+            let remaining_ms = corrected_progress_ms
+                .map(|c| track.duration_ms.saturating_sub(c));
+            // Issue #165: live streams have no known remaining time → no
+            // `expiryDateTime` on the wire (the status does not self-expire).
+            let expiry_str = status_expiry_str(remaining_ms, config);
 
             match set_teams_status_message(
                 &teams_tok.access_token,
                 &final_status,
-                Some(&expiry_str),
+                expiry_str.as_deref(),
             ) {
                 Ok(_) => {
                     *last_teams_update = Some(Instant::now());
@@ -557,14 +615,26 @@ pub(crate) fn process_track(
                         format!("Failed to update status: {}", e),
                         ErrorSeverity::Error,
                     );
-                    let e_str = e.to_string().to_lowercase();
-                    if e_str.contains("unauthorized")
-                        || e_str.contains("forbidden")
-                        || e_str.contains("401")
-                        || e_str.contains("403")
-                    {
-                        log::warn!("[POLLING] process_track: Teams auth failure detected, emitting teams-reconnect-required");
-                        let _ = app.emit("teams-reconnect-required", json!(null));
+                    // Issue #154: a 429 extends the next poll to the
+                    // server-directed delay.
+                    teams_backoff_secs = teams_backoff_secs.max(rate_limit_sleep_secs(&e));
+                    // Issue #153: classify typed TeamsApiError variants instead
+                    // of string-sniffing the error body. Only a dead token
+                    // (401 / invalid_grant) means re-auth; 403 is a
+                    // permission/license problem re-auth cannot fix.
+                    match e {
+                        TeamsApiError::ExpiredToken(_) | TeamsApiError::InvalidGrant => {
+                            log::warn!("[POLLING] process_track: Teams auth failure detected, emitting teams-reconnect-required");
+                            let _ = app.emit("teams-reconnect-required", json!(null));
+                        }
+                        TeamsApiError::Forbidden(_, _) => {
+                            log::error!("[POLLING] process_track: Teams status update forbidden (permission/license) — re-auth cannot fix this; skipping teams-reconnect-required");
+                        }
+                        TeamsApiError::RateLimited(_)
+                        | TeamsApiError::Transient(_)
+                        | TeamsApiError::Other(_, _) => {
+                            log::warn!("[POLLING] process_track: Teams status update failed (transient), continuing");
+                        }
                     }
                 }
             }
@@ -573,68 +643,113 @@ pub(crate) fn process_track(
             .map(|c| c.teams.clear_on_pause)
             .unwrap_or(true)
         {
-            match clear_teams_status_message(&teams_tok.access_token, "\u{1F3B5} Paused", None) {
-                Ok(_) => {
-                    *last_teams_update = Some(Instant::now());
-                    let _ = app.emit(
-                        "presence-cleared",
-                        json!({ "timestamp": Utc::now().to_rfc3339() }),
-                    );
-                }
-                Err(e) => {
-                    log::error!(
-                        "[POLLING] process_track: Failed to clear Teams status: {}",
-                        e
-                    );
+            // Issue #155: the clear path posts a short-lived placeholder
+            // (Graph has no "clear status message" action) and skips
+            // byte-identical repeat posts.
+            let placeholder = "\u{1F3B5} Paused";
+            if last_posted_placeholder.as_deref() == Some(placeholder) {
+                log::debug!("[POLLING] process_track: paused placeholder unchanged, skipping clear POST");
+            } else {
+                let expiry_str = placeholder_expiry_str();
+                match clear_teams_status_message(
+                    &teams_tok.access_token,
+                    placeholder,
+                    Some(&expiry_str),
+                ) {
+                    Ok(_) => {
+                        *last_teams_update = Some(Instant::now());
+                        *last_posted_placeholder = Some(placeholder.to_string());
+                        let _ = app.emit(
+                            "presence-cleared",
+                            json!({ "timestamp": Utc::now().to_rfc3339() }),
+                        );
+                    }
+                    Err(e) => {
+                        log::error!(
+                            "[POLLING] process_track: Failed to clear Teams status: {}",
+                            e
+                        );
+                        // Issue #154: honor the server's Retry-After on a
+                        // throttled clear.
+                        teams_backoff_secs = teams_backoff_secs.max(rate_limit_sleep_secs(&e));
+                    }
                 }
             }
         }
     }
 
     if track.is_playing {
-        let remaining_ms = track.duration_ms.saturating_sub(corrected_progress_ms);
-        let buffer_ms = 5000u64;
-        let remaining_secs = remaining_ms / 1000;
-        let sleep_secs = remaining_secs.saturating_sub(buffer_ms / 1000);
-        sleep_secs
-            .max(config_minimum_interval(config))
-            .min(config_maximum_interval(config))
+        let remaining_ms = corrected_progress_ms.map(|c| track.duration_ms.saturating_sub(c));
+        playing_track_sleep(remaining_ms, config)
     } else {
         let sleep = pause_backoff(*consecutive_pauses, config_default_interval(config));
         *consecutive_pauses = consecutive_pauses.saturating_add(1).min(4);
         sleep
     }
+    .max(teams_backoff_secs)
 }
 
+/// Handle a no-track poll result. Clears the tracked state and, when
+/// `clear_on_pause` allows it (issue #155), posts a short-lived "Nothing
+/// playing" placeholder. Returns extra backoff seconds to fold into the
+/// next poll when the clear was throttled (issue #154).
 pub(crate) fn handle_no_track(
     app: &AppHandle,
     state: &Arc<AppState>,
     last_track_key: &mut Option<String>,
-) {
+    config: &Option<crate::config::AppConfig>,
+    last_posted_placeholder: &mut Option<String>,
+) -> u64 {
     if last_track_key.is_some() {
         *last_track_key = None;
         *state.polling.current_track_mut() = None;
+    } else {
+        return 0;
+    }
 
-        let teams_tokens = state.tokens.teams().clone();
-        if let Some(teams_tok) = teams_tokens {
-            match clear_teams_status_message(
-                &teams_tok.access_token,
-                "\u{1F3B5} Nothing playing on Spotify",
-                None,
-            ) {
-                Ok(_) => {
-                    let _ = app.emit(
-                        "presence-cleared",
-                        json!({ "timestamp": Utc::now().to_rfc3339() }),
-                    );
-                }
-                Err(e) => {
-                    log::error!(
-                        "[POLLING] handle_no_track: Failed to clear Teams status: {}",
-                        e
-                    );
-                }
-            }
+    // Issue #155: honor `clear_on_pause` like the paused-track branch.
+    if !config
+        .as_ref()
+        .map(|c| c.teams.clear_on_pause)
+        .unwrap_or(true)
+    {
+        return 0;
+    }
+
+    let teams_tokens = state.tokens.teams().clone();
+    let teams_tok = match teams_tokens {
+        Some(t) => t,
+        None => return 0,
+    };
+
+    let placeholder = "\u{1F3B5} Nothing playing on Spotify";
+    // Issue #155: skip byte-identical placeholder posts.
+    if last_posted_placeholder.as_deref() == Some(placeholder) {
+        log::debug!("[POLLING] handle_no_track: no-track placeholder unchanged, skipping clear POST");
+        return 0;
+    }
+
+    let expiry_str = placeholder_expiry_str();
+    match clear_teams_status_message(
+        &teams_tok.access_token,
+        placeholder,
+        Some(&expiry_str),
+    ) {
+        Ok(_) => {
+            *last_posted_placeholder = Some(placeholder.to_string());
+            let _ = app.emit(
+                "presence-cleared",
+                json!({ "timestamp": Utc::now().to_rfc3339() }),
+            );
+            0
+        }
+        Err(e) => {
+            log::error!(
+                "[POLLING] handle_no_track: Failed to clear Teams status: {}",
+                e
+            );
+            // Issue #154: honor the server's Retry-After on a throttled clear.
+            rate_limit_sleep_secs(&e)
         }
     }
 }
@@ -658,6 +773,86 @@ fn config_maximum_interval(config: &Option<crate::config::AppConfig>) -> u64 {
         .as_ref()
         .map(|c| c.polling.max_interval_seconds)
         .unwrap_or(60)
+}
+
+/// Server-directed sleep base for a Spotify 429 (issue #159): the
+/// `Retry-After` seconds when present, else the default rate-limit backoff —
+/// floored at the error retry interval so a tiny server value can't create a
+/// busy loop.
+fn spotify_backoff_base(err: &SpotifyApiError) -> u64 {
+    err.retry_after()
+        .unwrap_or(RATE_LIMIT_BACKOFF_SECONDS)
+        .max(ERROR_RETRY_INTERVAL_SECONDS)
+}
+
+/// Extra sleep contributed by a failed Teams set/clear (issue #154): a
+/// `RateLimited` error with `Retry-After` returns those seconds, without a
+/// header falls back to the jittered default backoff, anything else
+/// contributes nothing.
+fn rate_limit_sleep_secs(err: &TeamsApiError) -> u64 {
+    match err {
+        TeamsApiError::RateLimited(Some(secs)) => *secs,
+        TeamsApiError::RateLimited(None) => with_jitter(RATE_LIMIT_BACKOFF_SECONDS),
+        _ => 0,
+    }
+}
+
+/// Format a UTC instant as Graph's offset-less `dateTime` with 6 fraction
+/// digits (≤ the documented 7). `to_rfc3339()` would embed `+00:00` and up
+/// to 9 fraction digits, contradicting the dateTimeTimeZone schema (issue
+/// #156).
+fn format_expiry(expiry: chrono::DateTime<Utc>) -> String {
+    expiry.format("%Y-%m-%dT%H:%M:%S%.6f").to_string()
+}
+
+/// Expiry for the short-lived "clear" placeholders (issue #155): now + 60s,
+/// so the placeholder self-removes ~1 min after the last successful post even
+/// if the app quits.
+fn placeholder_expiry_str() -> String {
+    let expiry = Utc::now() + chrono::Duration::seconds(60);
+    format_expiry(expiry)
+}
+
+/// Expiry for a playing-track status message: now + remaining + buffer when
+/// the position is known; `None` (no `expiryDateTime` on the wire) for
+/// live/unknown-position streams (issue #165).
+fn status_expiry_str(
+    remaining_ms: Option<u64>,
+    config: &Option<crate::config::AppConfig>,
+) -> Option<String> {
+    remaining_ms.map(|remaining| {
+        let buffer_ms = config
+            .as_ref()
+            .map(|c| c.polling.expiry_buffer_seconds)
+            .unwrap_or(10)
+            * 1000;
+        let expiry =
+            Utc::now() + chrono::Duration::milliseconds(remaining as i64 + buffer_ms as i64);
+        format_expiry(expiry)
+    })
+}
+
+/// Sleep decision for a playing track. Known position → sleep until ~5s
+/// before the track ends (clamped to the config bounds); unknown position
+/// (live stream, issue #165) → the default interval, not a duration-derived
+/// one.
+fn playing_track_sleep(
+    remaining_ms: Option<u64>,
+    config: &Option<crate::config::AppConfig>,
+) -> u64 {
+    match remaining_ms {
+        Some(remaining) => {
+            let buffer_ms = 5000u64;
+            let remaining_secs = remaining / 1000;
+            remaining_secs
+                .saturating_sub(buffer_ms / 1000)
+                .max(config_minimum_interval(config))
+                .min(config_maximum_interval(config))
+        }
+        None => config_default_interval(config)
+            .max(config_minimum_interval(config))
+            .min(config_maximum_interval(config)),
+    }
 }
 
 fn pause_backoff(consecutive_pauses: u8, default_secs: u64) -> u64 {
@@ -846,8 +1041,8 @@ mod tests {
         );
     }
 
-    /// Regression guard for issue #79/#117: poll_once.rs must NOT emit
-    /// raw "error" events directly.
+    /// Regression guard for issue #79/#117: poll_once.rs must NOT emit raw
+    /// "error" events directly.
     #[test]
     fn test_no_raw_error_emit_in_poll_once() {
         let source = include_str!("poll_once.rs");
@@ -866,6 +1061,195 @@ mod tests {
             helper_call_count >= 2,
             "emit_error called {} times; need >=2",
             helper_call_count
+        );
+    }
+
+    /// Issue #159: a Spotify 429 backoff honors the server's Retry-After,
+    /// floored at the error retry interval so a tiny value can't busy-loop.
+    #[test]
+    fn test_spotify_backoff_base_honors_retry_after_floored() {
+        use crate::spotify::SpotifyApiError;
+        assert_eq!(
+            spotify_backoff_base(&SpotifyApiError::RateLimited(Some(45))),
+            45
+        );
+        assert_eq!(
+            spotify_backoff_base(&SpotifyApiError::RateLimited(Some(10))),
+            ERROR_RETRY_INTERVAL_SECONDS,
+            "retry-after below the floor must be clamped up"
+        );
+        assert_eq!(
+            spotify_backoff_base(&SpotifyApiError::RateLimited(None)),
+            RATE_LIMIT_BACKOFF_SECONDS,
+            "header-less 429 falls back to the fixed backoff"
+        );
+    }
+
+    /// Issue #154: a Teams set/clear failure contributes the server's
+    /// Retry-After seconds, the jittered default backoff when the header is
+    /// absent, and nothing for non-throttle errors.
+    #[test]
+    fn test_rate_limit_sleep_secs_teams() {
+        assert_eq!(rate_limit_sleep_secs(&TeamsApiError::RateLimited(Some(90))), 90);
+        assert_eq!(rate_limit_sleep_secs(&TeamsApiError::ExpiredToken(401)), 0);
+        assert_eq!(
+            rate_limit_sleep_secs(&TeamsApiError::Forbidden(403, "denied".to_string())),
+            0
+        );
+        assert_eq!(rate_limit_sleep_secs(&TeamsApiError::InvalidGrant), 0);
+        assert_eq!(
+            rate_limit_sleep_secs(&TeamsApiError::Transient("boom".to_string())),
+            0
+        );
+        // Header-less 429 → jittered default backoff (60 ± 20% → [48, 72]).
+        let no_header = rate_limit_sleep_secs(&TeamsApiError::RateLimited(None));
+        assert!(
+            (48..=72).contains(&no_header),
+            "jittered backoff out of range: {}",
+            no_header
+        );
+    }
+
+    /// Issue #156: the expiry string must be offset-less with exactly 6
+    /// fraction digits (≤ the documented 7) — no `+00:00`, no `Z`, no
+    /// 9-digit nanosecond fraction.
+    #[test]
+    fn test_format_expiry_is_offset_less_with_six_fraction_digits() {
+        let fixed = chrono::DateTime::parse_from_rfc3339("2015-02-18T23:16:09.123456789+00:00")
+            .unwrap()
+            .with_timezone(&Utc);
+        let s = format_expiry(fixed);
+        assert!(
+            !s.contains('+') && !s.contains('Z'),
+            "offset leaked into dateTime: {}",
+            s
+        );
+        assert!(
+            s.starts_with("2015-02-18T23:16:09."),
+            "unexpected shape: {}",
+            s
+        );
+        let fraction = s.split('.').nth(1).unwrap_or("");
+        assert_eq!(
+            fraction.len(),
+            6,
+            "expected exactly 6 fraction digits, got '{}'",
+            fraction
+        );
+    }
+
+    /// Issue #155/#156: the clear-path placeholder expiry must be offset-less
+    /// with 6 fraction digits.
+    #[test]
+    fn test_placeholder_expiry_str_is_offset_less() {
+        let s = placeholder_expiry_str();
+        assert!(
+            !s.contains('+') && !s.contains('Z'),
+            "offset leaked into placeholder expiry: {}",
+            s
+        );
+        let fraction = s.split('.').nth(1).unwrap_or("");
+        assert_eq!(fraction.len(), 6, "got '{}'", fraction);
+    }
+
+    /// Issue #165: known position → an expiry exists; live stream (None) →
+    /// no expiry so no `expiryDateTime` goes on the wire.
+    #[test]
+    fn test_status_expiry_known_and_unknown_position() {
+        let config = Some(crate::config::AppConfig::default());
+        let s = status_expiry_str(Some(120_000), &config)
+            .expect("known position must yield an expiry");
+        assert!(
+            !s.contains('+') && !s.contains('Z'),
+            "offset leaked into status expiry: {}",
+            s
+        );
+        assert_eq!(
+            status_expiry_str(None, &config),
+            None,
+            "live streams must not get an expiryDateTime"
+        );
+    }
+
+    /// Issue #165: sleep falls back to the default interval for live streams
+    /// instead of a duration-derived value; known positions sleep until ~5s
+    /// before track end, clamped to the config bounds.
+    #[test]
+    fn test_playing_track_sleep_known_position_and_live_stream() {
+        let config = Some(crate::config::AppConfig::default());
+        // Default config: min 5s, max 60s.
+        assert_eq!(playing_track_sleep(Some(30_000), &config), 25);
+        assert_eq!(
+            playing_track_sleep(Some(120_000), &config),
+            60,
+            "long remaining time clamps to max interval"
+        );
+        assert_eq!(
+            playing_track_sleep(Some(2_000), &config),
+            5,
+            "short remaining time clamps to min interval"
+        );
+        assert_eq!(
+            playing_track_sleep(None, &config),
+            30,
+            "live stream falls back to the default interval"
+        );
+        // No config → the built-in defaults (30s default, 5s min, 60s max).
+        assert_eq!(playing_track_sleep(None, &None), 30);
+        assert_eq!(playing_track_sleep(Some(2_000), &None), 5);
+    }
+
+    /// Issue #156 regression guard: the playing-status expiry must be built
+    /// with the offset-less format, never through `to_rfc3339()` (which
+    /// embeds `+00:00` and up to 9 fraction digits). The three remaining
+    /// `to_rfc3339()` uses are frontend payload timestamps, which are fine.
+    #[test]
+    fn test_expiry_uses_offset_less_format_not_rfc3339() {
+        let source = include_str!("poll_once.rs");
+        let prod_source = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("poll_once.rs has no #[cfg(test)] mod tests block");
+        assert!(
+            prod_source.contains(r#""%Y-%m-%dT%H:%M:%S%.6f""#),
+            "expiry must use the offset-less 6-digit format (issue #156)"
+        );
+        let expiry_lines = prod_source
+            .lines()
+            .filter(|l| l.contains("expiry_str ="))
+            .collect::<Vec<_>>();
+        assert!(
+            !expiry_lines.iter().any(|l| l.contains("to_rfc3339")),
+            "expiry_str must not be built with to_rfc3339: {:?}",
+            expiry_lines
+        );
+    }
+
+    /// Issue #153 regression guard: Teams set/clear failures must be
+    /// classified by the typed `TeamsApiError` variants, not by
+    /// string-sniffing the error body for "unauthorized"/"forbidden"/401/403.
+    #[test]
+    fn test_teams_error_classification_is_typed_not_string_sniffed() {
+        let source = include_str!("poll_once.rs");
+        let prod_source = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("poll_once.rs has no #[cfg(test)] mod tests block");
+        for sniff in [
+            r#"e_str.contains("unauthorized")"#,
+            r#"e_str.contains("forbidden")"#,
+            r#"e_str.contains("401")"#,
+            r#"e_str.contains("403")"#,
+        ] {
+            assert!(
+                !prod_source.contains(sniff),
+                "string-sniffing on Teams error bodies must be gone (issue #153): {}",
+                sniff
+            );
+        }
+        assert!(
+            prod_source.contains("TeamsApiError::Forbidden(_, _)"),
+            "Forbidden must be matched by variant (issue #153)"
         );
     }
 }
