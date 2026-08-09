@@ -72,8 +72,10 @@ fn is_onboarding_complete_impl(state: &Arc<AppState>) -> Result<bool, String> {
     let config = config::load_config()?;
     let spotify_configured = !config.spotify.client_id.is_empty();
 
-    // Check Teams tokens — only ExpiredToken (401/403) means invalid.
-    // RateLimited (429) and Transient (5xx, network) are temporary → treat as valid.
+    // Check Teams tokens — only ExpiredToken (401) means invalid.
+    // RateLimited (429), Transient (5xx, network) and Forbidden (403 —
+    // permission/license problem, re-auth won't help) are treated as
+    // valid for onboarding purposes. See issue #153.
     let (teams_configured, teams_valid) = {
         let guard = state.tokens.teams();
         match guard.as_ref() {

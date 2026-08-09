@@ -27,11 +27,17 @@ fn truncate_for_log(body: &str) -> String {
 }
 
 /// Error type for Teams API operations.
-///区分 expired/unauthorized tokens vs transient errors.
+/// Distinguishes permanent auth failures (expired/invalid token, revoked
+/// grant, insufficient permission/license) from transient errors (rate
+/// limiting, server errors, network failures).
 #[derive(Debug, Clone)]
 pub enum TeamsApiError {
-    /// Token is expired or invalid (401/403) — requires re-auth
+    /// Token is expired or invalid (401) — requires re-auth
     ExpiredToken(u16),
+    /// Access denied (403) — permission/license problem; re-auth won't
+    /// help. Carries the response body so `insufficient_claims` (and
+    /// other Graph error details) are detectable.
+    Forbidden(u16, String),
     /// Rate limited (429) — transient, retry after backoff
     RateLimited,
     /// Network error or other transient failure (5xx, send failure)
@@ -575,6 +581,7 @@ pub fn clear_teams_status_message(access_token: &str, placeholder: &str) -> Resu
 /// Err(TeamsApiError) on failure. Callers should distinguish:
 ///
 /// - `ExpiredToken` → permanent auth failure, re-auth required
+/// - `Forbidden` → permission/license problem; re-auth won't help (403)
 /// - `RateLimited` / `Transient` → temporary, treat as "valid enough" for onboarding
 /// - `Other` → non-retryable but onboarding may still proceed
 pub fn validate_teams_token(tokens: &TeamsTokens) -> Result<(), TeamsApiError> {
@@ -594,7 +601,14 @@ pub fn validate_teams_token(tokens: &TeamsTokens) -> Result<(), TeamsApiError> {
     let status_code = response.status().as_u16();
     match status_code {
         200 => Ok(()),
-        401 | 403 => Err(TeamsApiError::ExpiredToken(status_code)),
+        // 401 = token missing/invalid → re-auth required; 403 = no
+        // permission/license (or conditional-access insufficient_claims)
+        // → re-auth won't help, surface as its own error. See #153.
+        401 => Err(TeamsApiError::ExpiredToken(status_code)),
+        403 => {
+            let body = response.text().unwrap_or_default();
+            Err(TeamsApiError::Forbidden(status_code, body))
+        }
         429 => Err(TeamsApiError::RateLimited),
         500..=599 => {
             let body = response.text().unwrap_or_default();
