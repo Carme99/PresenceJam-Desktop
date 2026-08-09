@@ -207,12 +207,19 @@ pub fn get_currently_playing(access_token: &str) -> Result<Option<TrackInfo>, Sp
                 item: Option<CurrentlyPlayingItem>,
                 is_playing: bool,
                 progress_ms: Option<u64>,
+                /// `track`, `episode`, `ad` or `unknown` — the docs say to
+                /// check this and to handle new types gracefully. Default to
+                /// empty so an absent field can't hard-fail the parse.
+                #[serde(default)]
+                currently_playing_type: String,
             }
 
             #[derive(Deserialize)]
             struct CurrentlyPlayingItem {
                 name: String,
+                #[serde(default)]
                 artists: Vec<Artist>,
+                #[serde(default)]
                 album: Album,
                 duration_ms: u64,
             }
@@ -222,7 +229,7 @@ pub fn get_currently_playing(access_token: &str) -> Result<Option<TrackInfo>, Sp
                 name: String,
             }
 
-            #[derive(Deserialize)]
+            #[derive(Deserialize, Default)]
             struct Album {
                 name: String,
                 images: Vec<AlbumImage>,
@@ -236,6 +243,14 @@ pub fn get_currently_playing(access_token: &str) -> Result<Option<TrackInfo>, Sp
             let playing: CurrentlyPlayingResponse = response.json().map_err(|e| {
                 SpotifyApiError::Other(format!("Failed to parse currently playing response: {}", e))
             })?;
+
+            // Only `track` items are track-shaped (name/artists/album).
+            // Episodes, ads and future item types must not be forced through
+            // TrackInfo — treat them as "nothing playing" instead of erroring.
+            // See issue #161.
+            if playing.currently_playing_type != "track" {
+                return Ok(None);
+            }
 
             if let Some(item) = playing.item {
                 let artist = item
