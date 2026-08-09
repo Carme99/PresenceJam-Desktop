@@ -158,9 +158,9 @@ sequenceDiagram
 
     User->>App: Click "Sign in with Microsoft"
     App->>Microsoft: POST /devicecode
-    Microsoft-->>App: user_code + verification_url
+    Microsoft-->>App: user_code + verification_uri
     App->>User: Display code + URL
-    User->>Browser: Visit verification_url, enter code
+    User->>Browser: Visit verification_uri, enter code
     User->>Microsoft: Enter code in browser
     loop Poll every 5s
         App->>Microsoft: POST /token (device_code)
