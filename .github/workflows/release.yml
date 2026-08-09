@@ -408,7 +408,13 @@ jobs:
       # fork alive; komac syncs it with upstream before each run.
       # Rotate the PAT on a 90-day cadence.
       # See docs: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens
-      - uses: vedantmgoyal2009/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e  # v2
+      # HEAD after v2 (only tag is v2 = 4ffc7888): adds the `komac
+      # sync-fork` step, which is REQUIRED for the fork path — komac
+      # creates the manifest branch in the fork pointing at UPSTREAM
+      # master; if the fork is behind (winget-pkgs master moves
+      # constantly), createRef is FORBIDDEN with a misleading "does not
+      # have the correct permissions" error (verified empirically).
+      - uses: vedantmgoyal2009/winget-releaser@b3a5dae0047c6180023acba3f548c55fdf6b7193
         with:
           identifier: PresenceJam.PresenceJam
           token: ${{ secrets.WINGET_TOKEN }}
