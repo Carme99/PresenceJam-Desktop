@@ -965,7 +965,7 @@ mod tests {
             std::time::SystemTime::now() + std::time::Duration::from_secs(60);
         let http_date = httpdate::fmt_http_date(future);
         let secs = super::parse_retry_after_value(&http_date).expect("http-date must parse");
-        assert!(secs <= 60 && secs <= 300, "future http-date ~60s got {}", secs);
+        assert!(secs <= 60, "future http-date ~60s got {}", secs);
         // Far-future HTTP-date capped at 300.
         let far_future =
             std::time::SystemTime::now() + std::time::Duration::from_secs(10_000);
