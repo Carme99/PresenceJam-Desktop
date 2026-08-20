@@ -3226,7 +3226,7 @@ checksum = "925383efa346730478fb4838dbe9137d2a47675ad789c546d150a6e1dd4ab31c"
 
 [[package]]
 name = "presence-jam"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",

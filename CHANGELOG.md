@@ -5,6 +5,28 @@ All notable changes to PresenceJam are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [3.0.1] - 2026-08-20
+
+### Fixed
+- **Teams device-code fix (PR #202):** request `openid` whenever `profile` is requested (`MICROSOFT_GRAPH_SCOPES = "Presence.ReadWrite Presence.Read openid profile offline_access"`) — Microsoft Entra returns `AADSTS70011` without it, before Conditional Access. Regression test `teams_oauth_profile_scope_also_requests_openid` + DRY `decode_teams_granted_scopes` via constant. Credit: @BigChiefRick #200 (superseded).
+- **Onboarding Teams Step 2 empty-URL startup (PR #202):** `connectTeams` used stale derived `teamsVerificationUrl` (`''` on first click) for `open_external_url('')` which threw `validate_http_url` and was caught as generic "Failed to start Teams sign-in" — now uses `response.verification_url` directly, makes opener non-fatal, surfaces `String(e)`.
+- **Onboarding manual URL paste silent failure (PR #202):** pasting a URL without `?code=` or with rejected `state` now sets `validationError` instead of console-only logging.
+- **Settings save generic error (PR #202):** `handleSave` now surfaces `String(e).slice(0,180)` instead of bare "Failed to save".
+- **Settings preview race (PR #202):** `preview_status` invoke now has `.catch(() => previewText='(preview unavailable)')` to prevent unhandled rejection.
+- **Polling config hardening (PR #202):** clamp `PollingConfig` on load + save (`default 5-300`, `minimum 5-30`, `maximum clamp(min,300)`, `expiry 0-60`) to prevent hand-edited `0` busy-loop / 429 storm; align Rust `default_min_interval_seconds` 5→10 with frontend store (`src/lib/stores/config.ts:85`); update `config_minimum_interval` fallback 5→10 and test expectations.
+- **Dir permissions + durability (PR #202):** `config_dir()` + `tokens_file_path()` now `chmod 0700` after `create_dir_all` (completes 0600 file-mode promise at directory level, issue #135); `atomic_write_json` + `write_tokens_atomic_with_key` now `fsync` parent directory after `rename` (persists directory entry across power-loss, POSIX durability).
+
+### Changed
+- **Polling fallback alignment (PR #202):** `playing_track_sleep` / `config_minimum_interval` now consistently use 10s minimum (was split 5s Rust fallback vs 10s UI).
+
+### Docs
+- **SECURITY.md WINGET_TOKEN (PR #202):** correct `fine-grained PAT on microsoft/winget-pkgs` → `classic PAT public_repo + workflow on Carme99/winget-pkgs fork (komac sync-fork)`, matching `release.yml`.
+- **CHANGELOG compare link (PR #202):** `Unreleased` now `compare/v3.0.1...HEAD` + add missing `[3.0.0]` tag link (was `v2.9.0`).
+- **CI header (PR #202):** `ci.yml` Rust job comment "Does NOT run tests" → "Runs cargo check + cargo test + clippy".
+
+### Dependencies
+- **deps(frontend): svelte 5.56.8 → 5.56.9, svelte-check 4.7.4 → 4.7.6 (PR #201).**
+
 ## [3.0.0] - 2026-08-09
 
 ### Breaking
@@ -562,9 +584,10 @@ Closes #60 #61 #62 #63
 
 - PowerShell script version — this is a full rewrite
 
+[3.0.1]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v3.0.1
 [3.0.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v3.0.0
 [2.9.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.9.0
-[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v3.0.0...HEAD
+[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v3.0.1...HEAD
 [2.6.2]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.6.2
 [2.6.1]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.6.1
 [2.6.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.6.0
