@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Polling config hardening (PR #202):** clamp `PollingConfig` on load + save (`default 5-300`, `minimum 5-30`, `maximum clamp(min,300)`, `expiry 0-60`) to prevent hand-edited `0` busy-loop / 429 storm; align Rust `default_min_interval_seconds` 5→10 with frontend store (`src/lib/stores/config.ts:85`); update `config_minimum_interval` fallback 5→10 and test expectations.
 - **Dir permissions + durability (PR #202):** `config_dir()` + `tokens_file_path()` now `chmod 0700` after `create_dir_all` (completes 0600 file-mode promise at directory level, issue #135); `atomic_write_json` + `write_tokens_atomic_with_key` now `fsync` parent directory after `rename` (persists directory entry across power-loss, POSIX durability).
 
+### Added
+- **Track-change notifications (3.1.0):** optional desktop notification when the Spotify track changes — uses the dormant `tauri-plugin-notification` (capability `notification:default` + `allow-*`), opt-in via **Settings → Notifications** toggle (`localStorage notificationsEnabled`, default off), deduped by `lastNotifiedId`, permission flow via `isPermissionGranted`/`requestPermission`, `sendNotification` with title/artist — album and `album_art_url` icon. Gated to avoid spam.
+- **Retry-After http-date parsing (3.1.0):** `parse_retry_after` in `teams.rs` + `spotify.rs` now supports both delta-seconds (`120`) and HTTP-date (`Wed, 21 Aug 2026 12:00:00 GMT`) per RFC 7231 §7.1.3 via `httpdate = "1"` crate, capped at 300s, shared `parse_retry_after_value` helper, `unwrap_or(0)` clock-skew handling, with two new unit tests.
+
 ### Changed
 - **Polling fallback alignment (PR #202):** `playing_track_sleep` / `config_minimum_interval` now consistently use 10s minimum (was split 5s Rust fallback vs 10s UI).
 

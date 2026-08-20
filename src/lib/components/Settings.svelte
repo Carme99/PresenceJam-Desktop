@@ -2,6 +2,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { onMount, onDestroy } from 'svelte';
+  import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notification';
   import { currentView } from '$lib/stores/app';
   import { configStore, saveConfig, loadConfig, type AppConfig } from '$lib/stores/config';
   import type { SyncStatus, TeamsTokens } from '$lib/types';
@@ -16,9 +17,10 @@
   let isSaving = $state(false);
   let saveMessage = $state('');
   let saveTimeout: ReturnType<typeof setTimeout> | null = null;
+  // 3.1.0 notification opt-in — localStorage gated, default off
+  let notificationsEnabled = $state(false);
   let spotifyAuthWaiting = $derived(authFlow.spotify.phase === 'waiting');
   let teamsAuthWaiting = $derived(authFlow.teams.phase === 'waiting');
-
   // Scopes granted on the stored Spotify access token (decoded backend-side
   // from the JWT payload). The tray playback feature needs
   // `user-modify-playback-state`, which existing users don't have until
@@ -79,6 +81,7 @@
   let unlistenAuth: (() => void) | null = null;
 
   onMount(async () => {
+    try { notificationsEnabled = localStorage.getItem('notificationsEnabled') === 'true'; } catch {}
     await loadConfig();
     localConfig = JSON.parse(JSON.stringify($configStore));
 
@@ -235,6 +238,13 @@
 
   function goBack() {
     currentView.set('dashboard');
+  }
+
+  async function toggleNotifications(e: Event) {
+    const enabled = (e.currentTarget as HTMLInputElement).checked;
+    notificationsEnabled = enabled;
+    try { localStorage.setItem('notificationsEnabled', String(enabled)); } catch {}
+    if (enabled) { try { if (!(await isPermissionGranted())) await requestPermission(); } catch {} }
   }
 
   function goToOnboarding() {
@@ -448,6 +458,17 @@
           />
         </div>
       </div>
+    </section>
+
+    <section class="card">
+      <header class="section-header">
+        <h2>Notifications</h2>
+      </header>
+      <div class="toggle-row">
+        <label for="notifications-enabled">Desktop notification on track change</label>
+        <input id="notifications-enabled" type="checkbox" checked={notificationsEnabled} onchange={toggleNotifications} />
+      </div>
+      <p class="hint">Shows a system notification when the track changes. Disabled by default.</p>
     </section>
 
     <section class="card">
