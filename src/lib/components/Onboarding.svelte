@@ -146,9 +146,11 @@
         }
       } else {
         devLog('[ONBOARDING] handleManualUrlPaste: no code extracted');
+        validationError = 'No code found in URL — paste the full redirect URL with ?code=…';
       }
     } catch (e) {
       console.error('[ONBOARDING] handleManualUrlPaste: FAILED:', e);
+      validationError = e instanceof Error ? e.message : String(e);
     }
 
     devLog('[ONBOARDING] handleManualUrlPaste: EXIT');
@@ -197,14 +199,19 @@
       devLog('[ONBOARDING] connectTeams: state updated');
 
       devLog('[ONBOARDING] connectTeams: calling invoke open_external_url');
-      await invoke('open_external_url', { url: teamsVerificationUrl });
-      devLog('[ONBOARDING] connectTeams: open_external_url SUCCESS');
+      try {
+        await invoke('open_external_url', { url: response.verification_url });
+        devLog('[ONBOARDING] connectTeams: open_external_url SUCCESS');
+      } catch (openErr) {
+        console.warn('[ONBOARDING] connectTeams: open_external_url FAILED (non-fatal):', openErr);
+        devLog('[ONBOARDING] connectTeams: open_external_url FAILED (non-fatal)');
+      }
 
       // Auto-poll once the user opens the browser. The user can also retry manually.
       pollTeamsAuth();
     } catch (e) {
       console.error('[ONBOARDING] connectTeams: FAILED:', e);
-      setTeamsPhase('error', 'Failed to start Teams sign-in. Please try again.');
+      setTeamsPhase('error', String(e));
     }
 
     devLog('[ONBOARDING] connectTeams: EXIT');
@@ -217,10 +224,10 @@
     try {
       devLog('[ONBOARDING] pollTeamsAuth: setTeamsPhase(waiting)');
       devLog('[ONBOARDING] pollTeamsAuth: calling invoke poll_teams_auth');
-      devLog('[ONBOARDING] pollTeamsAuth: deviceCode.length=', teamsDeviceCode.length);
+      devLog('[ONBOARDING] pollTeamsAuth: deviceCode.length=', authFlow.teams.deviceCode.length);
 
       const tokens = await invoke<TeamsTokens>('poll_teams_auth', {
-        deviceCode: teamsDeviceCode,
+        deviceCode: authFlow.teams.deviceCode,
         interval: authFlow.teams.interval
       });
       devLog('[ONBOARDING] pollTeamsAuth: invoke SUCCESS, tokens=', tokens ? 'present' : 'null');

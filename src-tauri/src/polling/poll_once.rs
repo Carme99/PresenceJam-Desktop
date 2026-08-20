@@ -1041,7 +1041,7 @@ fn config_minimum_interval(config: &Option<crate::config::AppConfig>) -> u64 {
     config
         .as_ref()
         .map(|c| c.polling.minimum_interval_seconds)
-        .unwrap_or(5)
+        .unwrap_or(10)
 }
 
 fn config_maximum_interval(config: &Option<crate::config::AppConfig>) -> u64 {
@@ -1602,7 +1602,7 @@ mod tests {
     #[test]
     fn test_playing_track_sleep_known_position_and_live_stream() {
         let config = Some(crate::config::AppConfig::default());
-        // Default config: min 5s, max 60s.
+        // Default config: min 10s, max 60s.
         assert_eq!(playing_track_sleep(Some(30_000), &config), 25);
         assert_eq!(
             playing_track_sleep(Some(120_000), &config),
@@ -1611,7 +1611,7 @@ mod tests {
         );
         assert_eq!(
             playing_track_sleep(Some(2_000), &config),
-            5,
+            10,
             "short remaining time clamps to min interval"
         );
         assert_eq!(
@@ -1619,9 +1619,9 @@ mod tests {
             30,
             "live stream falls back to the default interval"
         );
-        // No config → the built-in defaults (30s default, 5s min, 60s max).
+        // No config → the built-in defaults (30s default, 10s min, 60s max).
         assert_eq!(playing_track_sleep(None, &None), 30);
-        assert_eq!(playing_track_sleep(Some(2_000), &None), 5);
+        assert_eq!(playing_track_sleep(Some(2_000), &None), 10);
     }
 
     /// Issue #156 regression guard: the playing-status expiry must be built

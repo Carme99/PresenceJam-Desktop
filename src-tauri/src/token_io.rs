@@ -157,6 +157,10 @@ pub fn tokens_file_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     if !dir.exists() {
         fs::create_dir_all(&dir)
             .map_err(|e| format!("Failed to create tokens dir '{}': {}", dir.display(), e))?;
+        #[cfg(unix)]
+        {
+            let _ = fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        }
     }
     Ok(dir.join("tokens.json"))
 }
@@ -385,6 +389,20 @@ fn write_tokens_atomic_with_key(
             e
         )
     })?;
+    #[cfg(unix)]
+    {
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                if let Err(e) = dir.sync_all() {
+                    log::warn!(
+                        "Failed to fsync tokens dir '{}': {}",
+                        parent.display(),
+                        e
+                    );
+                }
+            }
+        }
+    }
     log::info!(
         "[TOKEN_IO] write_tokens_atomic: wrote {} encrypted bytes atomically to {}",
         ciphertext.len(),
