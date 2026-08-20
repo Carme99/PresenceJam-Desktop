@@ -25,6 +25,10 @@
     "autostart:default",
     "log:default",
     "deep-link:default",
-    "updater:default"
+    "updater:default",
+    "notification:default",
+    "notification:allow-is-permission-granted",
+    "notification:allow-request-permission",
+    "notification:allow-notify"
   ]
 }

@@ -239,15 +239,32 @@ fn next_poll_wait(current: u64, err: &str) -> u64 {
     }
 }
 
-/// Parses a `Retry-After` header (plain seconds, per Graph throttling
-/// docs) into an optional delay. Returns None when the header is absent
+/// Parses a `Retry-After` header into an optional delay, supporting both
+/// delta-seconds (`120`) and HTTP-date (`Wed, 21 Aug 2026 12:00:00 GMT`)
+/// forms per RFC 7231 §7.1.3. Returns None when the header is absent
 /// or unparseable — callers then fall back to exponential backoff.
+fn parse_retry_after_value(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if let Ok(secs) = s.parse::<u64>() {
+        return Some(secs.min(300));
+    }
+    if let Ok(date) = httpdate::parse_http_date(s) {
+        let secs = date
+            .duration_since(std::time::SystemTime::now())
+            .unwrap_or(std::time::Duration::from_secs(0))
+            .as_secs()
+            .min(300);
+        return Some(secs);
+    }
+    None
+}
+
 fn parse_retry_after(response: &reqwest::blocking::Response) -> Option<u64> {
     response
         .headers()
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.trim().parse::<u64>().ok())
+        .and_then(parse_retry_after_value)
 }
 
 pub fn poll_teams_auth(device_code: &str, interval: u64) -> Result<TeamsTokens, String> {
@@ -1259,5 +1276,27 @@ mod tests {
         let no_scp =
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"sub":"user123"}"#);
         assert!(super::decode_teams_granted_scopes(&format!("h.{}.s", no_scp)).is_empty());
+    }
+
+    #[test]
+    fn parse_retry_after_value_handles_delta_seconds_and_http_date() {
+        assert_eq!(super::parse_retry_after_value("120"), Some(120));
+        assert_eq!(super::parse_retry_after_value("  42  "), Some(42));
+        assert_eq!(super::parse_retry_after_value("9999"), Some(300));
+        let future =
+            std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        let http_date = httpdate::fmt_http_date(future);
+        let secs = super::parse_retry_after_value(&http_date).expect("http-date must parse");
+        assert!(secs <= 60, "future http-date ~60s got {}", secs);
+        let far_future =
+            std::time::SystemTime::now() + std::time::Duration::from_secs(10_000);
+        let far_date = httpdate::fmt_http_date(far_future);
+        assert_eq!(super::parse_retry_after_value(&far_date), Some(300));
+        let past =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        let past_date = httpdate::fmt_http_date(past);
+        assert_eq!(super::parse_retry_after_value(&past_date), Some(0));
+        assert_eq!(super::parse_retry_after_value("not-a-date"), None);
+        assert_eq!(super::parse_retry_after_value(""), None);
     }
 }

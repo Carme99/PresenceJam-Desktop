@@ -1,6 +1,6 @@
 [package]
 name = "presence-jam"
-version = "3.0.0"
+version = "3.1.0"
 description = "Syncs Spotify playback to Microsoft Teams status"
 authors = ["Jack Lee"]
 edition = "2021"
@@ -36,6 +36,7 @@ rand = "0.8"
 log = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "5"
+httpdate = "1"
 parking_lot = "0.12"
 once_cell = "1"
 url = "2"

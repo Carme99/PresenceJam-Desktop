@@ -2,6 +2,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
   import { onMount, onDestroy } from 'svelte';
+  import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
   import { currentView } from '$lib/stores/app';
   import { configStore, loadConfig } from '$lib/stores/config';
   import type { ErrorEventPayload, SyncStatus, TrackInfo } from '$lib/types';
@@ -24,6 +25,9 @@
   let availabilityLabel = $state('');
   let displayErrorTimeout: ReturnType<typeof setTimeout> | null = null;
   let unlisten: (() => void)[] = [];
+  // 3.1.0 notifications — opt-in via localStorage, default off
+  let notificationsEnabled = $state(false);
+  let lastNotifiedId = '';
 
   onDestroy(() => {
     unlisten.forEach(fn => fn());
@@ -52,6 +56,10 @@
       console.error('[DASHBOARD] onMount: get_sync_status FAILED:', e);
     }
 
+    // 3.1.0: notification opt-in gate — default off, enabled via localStorage flag
+    try { notificationsEnabled = localStorage.getItem('notificationsEnabled') === 'true'; } catch {}
+    isPermissionGranted().catch(() => false);
+
     devLog('[DASHBOARD] onMount: setting up spotify-track-changed listener');
     unlisten.push(await listen('spotify-track-changed', async (event: any) => {
       devLog('[DASHBOARD] EVENT: spotify-track-changed received');
@@ -59,6 +67,19 @@
       devLog('[DASHBOARD] EVENT: track.artist=', event.payload.artist);
       currentTrack = event.payload;
       await updateMenuState();
+      if (notificationsEnabled && event.payload?.title) {
+        const id = `${event.payload.title}::${event.payload.artist}`;
+        if (id !== lastNotifiedId) {
+          lastNotifiedId = id;
+          let granted = false;
+          try { granted = await isPermissionGranted(); } catch {}
+          if (!granted) { try { granted = (await requestPermission()) === 'granted'; } catch {} }
+          if (granted) {
+            const body = `${event.payload.artist} — ${event.payload.album ?? ''}`.trim();
+            try { sendNotification({ title: event.payload.title, body, icon: event.payload.album_art_url || undefined }); } catch {}
+          }
+        }
+      }
     }));
 
     devLog('[DASHBOARD] onMount: setting up presence-updated listener');

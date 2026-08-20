@@ -339,13 +339,13 @@ The release workflow (`.github/workflows/release.yml`) uses two repository secre
 | `WINGET_TOKEN` | `public_repo` + `workflow` on `Carme99/winget-pkgs` fork only (classic PAT; `komac sync-fork` then PR fork → `microsoft/winget-pkgs`) | GitHub Actions secrets | Same as above. |
 
 **Rotation procedure:**
-1. Generate a new fine-grained PAT on GitHub (Settings → Developer settings → Personal access tokens → Fine-grained tokens). Scope it to the single repository that needs write access; set the minimum required permissions (`contents:write` for the tap, plus `pull_requests:write` for winget-pkgs).
-2. In the PresenceJam-Desktop repo, go to Settings → Secrets and variables → Actions. Update the secret value to the new token.
-3. Revoke the old token on GitHub (Settings → Developer settings → Personal access tokens → … → Delete).
-4. Trigger a dry-run of the release workflow (push a `v0.0.0-test` tag, then delete it) to confirm the new token works.
+1. Generate new PATs on GitHub: for `HOMEBREW_TAP_TOKEN` create a **fine-grained PAT** (Settings → Developer settings → Personal access tokens → Fine-grained tokens) scoped to `carme99/homebrew-tap` with `contents:write`; for `WINGET_TOKEN` create a **classic PAT** (Settings → Developer settings → Personal access tokens → Tokens (classic)) with scopes `public_repo` + `workflow` on the `Carme99/winget-pkgs` fork (vedantmgoyal2009/winget-releaser requires classic + workflow scope; fine-grained 422s with "workflow scope required"). See table above for per-secret scope.
+2. In the PresenceJam-Desktop repo, go to Settings → Secrets and variables → Actions. Update each secret value to the new token.
+3. Revoke the old tokens on GitHub (Settings → Developer settings → Personal access tokens → … → Delete).
+4. Trigger a dry-run of the release workflow (push a `v0.0.0-test` tag, then delete it) to confirm the new tokens work.
 5. Record the rotation in the repo's release notes / changelog under "Internal / security".
 
-**Why fine-grained, not classic:** A classic PAT grants the token owner full access to every repository they can see. If `HOMEBREW_TAP_TOKEN` leaks, a classic PAT lets the attacker push to PresenceJam-Desktop, the homebrew tap, and any other repo under the Carme99 account. A fine-grained PAT scoped to a single repo with `contents:write` only leaks the ability to push to that one repo.
+**Why fine-grained where possible, not classic everywhere:** A classic PAT grants the token owner full access to every repository they can see. If `HOMEBREW_TAP_TOKEN` leaks, a classic PAT lets the attacker push to PresenceJam-Desktop, the homebrew tap, and any other repo under the Carme99 account. A fine-grained PAT scoped to a single repo with `contents:write` only leaks the ability to push to that one repo. `WINGET_TOKEN` is the exception: the winget releaser action only supports classic PATs with `workflow` scope (fine-grained returns 422), so it stays classic but is scoped to the `Carme99/winget-pkgs` fork, not `microsoft/winget-pkgs`, and is rotated on the same 90-day cadence.
 
 **Why 90 days:** A compromise window of 90 days balances the operational cost of rotation against the average time-to-detection for token misuse in monitoring (per GitHub's own PAT guidance). Shorter windows (30/60 days) are acceptable if rotation can be automated; longer windows increase the blast radius of any leak.
 ## Open Source
