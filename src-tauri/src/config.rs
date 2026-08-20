@@ -96,7 +96,7 @@ fn default_interval_seconds() -> u64 {
 }
 
 fn default_min_interval_seconds() -> u64 {
-    5
+    10
 }
 
 fn default_max_interval_seconds() -> u64 {
@@ -106,6 +106,13 @@ fn default_max_interval_seconds() -> u64 {
 fn default_expiry_buffer_seconds() -> u64 {
     10
 }
+fn clamp_polling(cfg: &mut PollingConfig) {
+    cfg.default_interval_seconds = cfg.default_interval_seconds.clamp(5, 300);
+    cfg.minimum_interval_seconds = cfg.minimum_interval_seconds.clamp(5, 30);
+    cfg.max_interval_seconds = cfg.max_interval_seconds.clamp(cfg.minimum_interval_seconds, 300);
+    cfg.expiry_buffer_seconds = cfg.expiry_buffer_seconds.clamp(0, 60);
+}
+
 
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
@@ -215,6 +222,10 @@ pub fn config_dir() -> Result<PathBuf, String> {
                 e
             )
         })?;
+        #[cfg(unix)]
+        {
+            let _ = fs::set_permissions(&app_dir, std::fs::Permissions::from_mode(0o700));
+        }
         log::info!("Created config directory at '{}'", app_dir.display());
     }
 
@@ -271,8 +282,9 @@ pub fn load_config() -> Result<AppConfig, String> {
     file.read_to_string(&mut contents)
         .map_err(|e| format!("Failed to read config file '{}': {}", path.display(), e))?;
 
-    let config: AppConfig = serde_json::from_str(&contents)
+    let mut config: AppConfig = serde_json::from_str(&contents)
         .map_err(|e| format!("Failed to parse config file '{}': {}", path.display(), e))?;
+    clamp_polling(&mut config.polling);
 
     log::info!("Loaded configuration from '{}'", path.display());
     Ok(with_keychain_flags(config))
@@ -454,6 +466,16 @@ fn atomic_write_json(path: &std::path::Path, json: &str) -> Result<(), String> {
 
     std::fs::rename(&temp_path, path)
         .map_err(|e| format!("Failed to rename temp file to '{}': {}", path.display(), e))?;
+    #[cfg(unix)]
+    {
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                if let Err(e) = dir.sync_all() {
+                    log::warn!("Failed to fsync config dir '{}': {}", parent.display(), e);
+                }
+            }
+        }
+    }
 
     Ok(())
 }
@@ -461,7 +483,9 @@ fn atomic_write_json(path: &std::path::Path, json: &str) -> Result<(), String> {
 pub fn save_config(config: &AppConfig) -> Result<(), String> {
     let path = get_config_path()?;
 
-    let json = serde_json::to_string_pretty(config)
+    let mut cfg = config.clone();
+    clamp_polling(&mut cfg.polling);
+    let json = serde_json::to_string_pretty(&cfg)
         .map_err(|e| format!("Failed to serialize config to JSON: {}", e))?;
 
     atomic_write_json(&path, &json)?;

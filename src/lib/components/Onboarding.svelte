@@ -146,9 +146,11 @@
         }
       } else {
         devLog('[ONBOARDING] handleManualUrlPaste: no code extracted');
+        validationError = 'No code found in URL — paste the full redirect URL with ?code=…';
       }
     } catch (e) {
       console.error('[ONBOARDING] handleManualUrlPaste: FAILED:', e);
+      validationError = e instanceof Error ? e.message : String(e);
     }
 
     devLog('[ONBOARDING] handleManualUrlPaste: EXIT');

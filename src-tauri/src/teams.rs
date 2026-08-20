@@ -1239,20 +1239,16 @@ mod tests {
     fn decode_teams_granted_scopes_extracts_scp_claim() {
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
         use base64::Engine as _;
-        let payload = URL_SAFE_NO_PAD.encode(
-            r#"{"scp":"Presence.ReadWrite Presence.Read openid profile offline_access"}"#,
-        );
+        let payload = URL_SAFE_NO_PAD.encode(format!(
+            r#"{{"scp":"{}"}}"#,
+            super::MICROSOFT_GRAPH_SCOPES
+        ));
         let token = format!("h.{}.s", payload);
-        assert_eq!(
-            super::decode_teams_granted_scopes(&token),
-            vec![
-                "Presence.ReadWrite".to_string(),
-                "Presence.Read".to_string(),
-                "openid".to_string(),
-                "profile".to_string(),
-                "offline_access".to_string(),
-            ]
-        );
+        let expected: Vec<String> = super::MICROSOFT_GRAPH_SCOPES
+            .split_whitespace()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(super::decode_teams_granted_scopes(&token), expected);
     }
 
     #[test]

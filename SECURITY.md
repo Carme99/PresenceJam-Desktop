@@ -336,7 +336,7 @@ The release workflow (`.github/workflows/release.yml`) uses two repository secre
 | Secret | Scope | Stored where | Rotation check |
 |---|---|---|---|
 | `HOMEBREW_TAP_TOKEN` | `contents:write` on `carme99/homebrew-tap` only (fine-grained PAT) | GitHub Actions secrets | When did the token last rotate? If >90 days, generate a new fine-grained PAT with the same scope, update the secret, revoke the old one. |
-| `WINGET_TOKEN` | `contents:write` + `pull_requests:write` on `microsoft/winget-pkgs` only (fine-grained PAT) | GitHub Actions secrets | Same as above. |
+| `WINGET_TOKEN` | `public_repo` + `workflow` on `Carme99/winget-pkgs` fork only (classic PAT; `komac sync-fork` then PR fork → `microsoft/winget-pkgs`) | GitHub Actions secrets | Same as above. |
 
 **Rotation procedure:**
 1. Generate a new fine-grained PAT on GitHub (Settings → Developer settings → Personal access tokens → Fine-grained tokens). Scope it to the single repository that needs write access; set the minimum required permissions (`contents:write` for the tap, plus `pull_requests:write` for winget-pkgs).

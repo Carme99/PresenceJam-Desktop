@@ -72,7 +72,7 @@
     const format = localConfig.teams.status_format;
     invoke<string>('preview_status', { format }).then((v) => {
       previewText = v;
-    });
+    }).catch(()=>{ previewText='(preview unavailable)'; });
   });
 
   let unlistenFns: UnlistenFn[] = [];
@@ -181,9 +181,7 @@
       saveMessage = 'Settings saved!';
       if (saveTimeout) clearTimeout(saveTimeout);
       saveTimeout = setTimeout(() => saveMessage = '', 2000);
-    } catch {
-      saveMessage = 'Failed to save';
-    }
+    } catch (e) { const msg = String((e as Error)?.message ?? e).slice(0, 180); saveMessage = msg || 'Failed to save'; console.error(e); }
     isSaving = false;
   }
 

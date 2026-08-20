@@ -90,9 +90,9 @@ jobs:
       - name: Svelte/TS type check (npm run check)
         run: npm run check
 
-  # Rust: cargo check on all targets (lib + bins + tests + benches) catches
+  # Rust: cargo check + cargo test on all targets (lib + bins + tests + benches) catches
   # type errors, borrow errors, missing imports, and broken test code.
-  # Does NOT run tests (CI is for compile-time feedback, not correctness).
+  # Runs cargo check + cargo test + clippy (clippy in separate job).
   # Frontend build is required because src-tauri/src/lib.rs uses
   # tauri::generate_context!() which embeds build/ via include_dir! at
   # compile time, even during cargo check.
