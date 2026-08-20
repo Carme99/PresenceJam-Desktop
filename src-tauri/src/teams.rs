@@ -4,6 +4,8 @@ use std::thread;
 use std::time::Duration as StdDuration;
 
 pub const MICROSOFT_GRAPH_CLIENT_ID: &str = "14d82eec-204b-4c2f-b7e8-296a70dab67e";
+pub const MICROSOFT_GRAPH_SCOPES: &str =
+    "Presence.ReadWrite Presence.Read openid profile offline_access";
 
 /// Truncates a string for safe logging. Returns the body unchanged if it
 /// fits in 256 chars; otherwise returns the first 256 chars (cut at a
@@ -144,12 +146,13 @@ pub fn start_teams_auth_device_code() -> Result<DeviceCodeResponse, String> {
         ("client_id", MICROSOFT_GRAPH_CLIENT_ID),
         // `offline_access` is required for Microsoft to issue a
         // refresh_token (device-code flow docs). `Presence.Read` powers the
-        // presence-aware status gate (getPresence, issue #3.0-P2) and
+        // presence-aware status gate (getPresence, issue #3.0-P2).
         // `profile` adds the `oid` claim to the access-token JWT so the
         // setPresence/clearPresence /users/{oid} fallback can resolve the
-        // user (docs list only /users/{id}; see issue #3.0-P1). `User.Read`
+        // user (docs list only /users/{id}; see issue #3.0-P1), and Microsoft
+        // requires `openid` whenever `profile` is requested. `User.Read`
         // stays dropped: no Graph call uses it (least privilege, #151).
-        ("scope", "Presence.ReadWrite Presence.Read profile offline_access"),
+        ("scope", MICROSOFT_GRAPH_SCOPES),
     ];
     log::info!("teams::start_teams_auth_device_code: calling devicecode endpoint");
 
@@ -943,7 +946,14 @@ pub fn validate_teams_token(tokens: &TeamsTokens) -> Result<(), TeamsApiError> {
 #[cfg(test)]
 mod tests {
     use super::truncate_for_log;
-    use super::{DeviceCodeResponse, TeamsTokens};
+    use super::{DeviceCodeResponse, MICROSOFT_GRAPH_SCOPES, TeamsTokens};
+
+    #[test]
+    fn teams_oauth_profile_scope_also_requests_openid() {
+        let scopes: Vec<&str> = MICROSOFT_GRAPH_SCOPES.split_whitespace().collect();
+        assert!(scopes.contains(&"profile"));
+        assert!(scopes.contains(&"openid"));
+    }
 
     #[test]
     fn test_truncate_under_limit() {
@@ -1230,7 +1240,7 @@ mod tests {
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
         use base64::Engine as _;
         let payload = URL_SAFE_NO_PAD.encode(
-            r#"{"scp":"Presence.ReadWrite Presence.Read profile offline_access"}"#,
+            r#"{"scp":"Presence.ReadWrite Presence.Read openid profile offline_access"}"#,
         );
         let token = format!("h.{}.s", payload);
         assert_eq!(
@@ -1238,6 +1248,7 @@ mod tests {
             vec![
                 "Presence.ReadWrite".to_string(),
                 "Presence.Read".to_string(),
+                "openid".to_string(),
                 "profile".to_string(),
                 "offline_access".to_string(),
             ]
