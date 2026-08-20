@@ -5,7 +5,7 @@ All notable changes to PresenceJam are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [3.0.1] - 2026-08-20
+## [3.1.0] - 2026-08-20
 
 ### Fixed
 - **Teams device-code fix (PR #202):** request `openid` whenever `profile` is requested (`MICROSOFT_GRAPH_SCOPES = "Presence.ReadWrite Presence.Read openid profile offline_access"`) — Microsoft Entra returns `AADSTS70011` without it, before Conditional Access. Regression test `teams_oauth_profile_scope_also_requests_openid` + DRY `decode_teams_granted_scopes` via constant. Credit: @BigChiefRick #200 (superseded).
@@ -21,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Docs
 - **SECURITY.md WINGET_TOKEN (PR #202):** correct `fine-grained PAT on microsoft/winget-pkgs` → `classic PAT public_repo + workflow on Carme99/winget-pkgs fork (komac sync-fork)`, matching `release.yml`.
-- **CHANGELOG compare link (PR #202):** `Unreleased` now `compare/v3.0.1...HEAD` + add missing `[3.0.0]` tag link (was `v2.9.0`).
+- **CHANGELOG compare link (PR #202):** `Unreleased` now `compare/v3.1.0...HEAD` + add missing `[3.0.0]` tag link (was `v2.9.0`).
 - **CI header (PR #202):** `ci.yml` Rust job comment "Does NOT run tests" → "Runs cargo check + cargo test + clippy".
 
 ### Dependencies
@@ -584,10 +584,11 @@ Closes #60 #61 #62 #63
 
 - PowerShell script version — this is a full rewrite
 
+[3.1.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v3.1.0
 [3.0.1]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v3.0.1
 [3.0.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v3.0.0
 [2.9.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.9.0
-[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v3.0.1...HEAD
+[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v3.1.0...HEAD
 [2.6.2]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.6.2
 [2.6.1]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.6.1
 [2.6.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.6.0
