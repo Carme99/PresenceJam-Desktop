@@ -88,7 +88,7 @@ pub fn start_polling(state: Arc<AppState>, app: AppHandle) -> Result<thread::Joi
             // the companion fix.
             let this_tid = std::thread::current().id();
             let is_owner = {
-                let stored = state_for_cleanup.polling.thread_id().clone();
+                let stored = *state_for_cleanup.polling.thread_id();
                 stored == Some(this_tid)
             };
             if is_owner {
