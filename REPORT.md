@@ -7,11 +7,13 @@ Scope: #215, #218, #219
 
 | File | Change |
 |------|--------|
-| `src-tauri/src/commands/sync.rs` | `start_syncing`, `stop_syncing`, `app_exit` → `pub async fn`; `stop_polling_and_join` redesigned to use `spawn_blocking`; `start_polling` spawn offloaded; `app_exit` uses timeout + detached drain |
+| `src-tauri/src/commands/sync.rs` | `start_syncing`, `stop_syncing`, `app_exit` → `pub async fn`; `stop_polling_and_join` uses `spawn_blocking` + keeps `is_syncing` until join; drain now gated on `handle`+`is_syncing` not flag alone; `start_polling` spawn offloaded; stores `thread_id` |
 | `src-tauri/src/commands/misc.rs` | `update_tray_menu_state`, `relaunch_app` → `pub async fn` + `spawn_blocking`; `preview_status` stays sync (pure formatting) |
 | `src-tauri/src/commands/window.rs` | `set_autostart_enabled`, `open_logs_folder`, `open_external_url` → `pub async fn` + `spawn_blocking`; `show_window` stays sync |
 | `src-tauri/src/commands/config.rs` | `save_config` → `pub async fn` + `spawn_blocking` for write-lock + fsync; autostart now `await`ed |
 | `src-tauri/src/polling/poll_once.rs` | #219 retry-path InvalidGrant now clears tokens, emits both events, increments counter |
+| `src-tauri/src/polling/state.rs` | #69/#218: `stop_polling` no longer clears `is_syncing` immediately; thread-exit cleanup now ownership-checked via `ThreadId`; `thread_id` cleared on join |
+| `src-tauri/src/lib.rs` | Added `Polling.thread_id: RwLock<Option<ThreadId>>` with accessors |
 | `src-tauri/src/polling/loop.rs` | No change — owned but no IO-bound command; driver remains sync thread |
 
 ## Per-Issue Summary
@@ -35,15 +37,17 @@ Kept cheap sync commands as sync: `get_sync_status`, `load_config`, `show_window
 - `show_window` stays sync: fast window-manager call (`show` + `set_focus`); offloading risks calling `window.show()` off the main thread and adds latency. Labelled in file header.
 - `save_config` write-lock: the guard is now acquired *inside* `spawn_blocking` so it is not held across an `await`. The macOS activation-policy and autostart sync run *after* the blocking section; autostart is now awaited (`set_autostart_enabled` is async).
 
-### #218 — Unbounded blocking join
+### #218 — Unbounded blocking join + #69 race
 
-**What:** `stop_polling_and_join` now moves the `JoinHandle::join` (which can block tens of seconds when the poll thread is stuck in sequential `get_currently_playing` → `set_teams_status` → `get_teams_presence` each 10 s) into `spawn_blocking`.
+**What:** `stop_polling_and_join` now moves the `JoinHandle::join` (which can block tens of seconds when the poll thread is stuck in sequential HTTP) into `spawn_blocking`.
 
-- `stop_polling_and_join` is now `async fn` that `await`s a `spawn_blocking` closure containing the 2 s grace loop + final `join`. Caller thread (Tauri async runtime) is not blocked.
-- `start_syncing`'s drain-first invariant (#69) preserved: it `await`s the same helper before `try_claim`.
-- `app_exit` uses a variant `stop_polling_and_join_for_exit` that awaits only the 2 s grace on the blocking pool; if the thread is still alive after 2 s, it spawns a detached `spawn_blocking` for the final `join` and proceeds to `app.exit(0)`. This implements "await with timeout then proceed (spawn detached drain if needed)" without requiring `tokio::time::timeout`.
+- `stop_polling_and_join` is now `async fn` that `await`s a `spawn_blocking` closure containing the 2 s grace loop + final `join`. The sync flag `is_syncing` is kept set until the join completes (previously `stop_polling` cleared it immediately). Caller thread (Tauri async runtime) is not blocked.
+- `start_syncing` drain is now gated on the stored handle **and** `is_syncing` (`handle().is_some() || is_syncing==true`) instead of the flag alone. Previously async Stop cleared the flag while the old thread lingered ~30 s; Start saw `flag==false`, skipped the drain, `try_claim` succeeded → two concurrent pollers. Handle is now the source of truth, but flag is also checked to cover the window where handle has been taken for an in-flight join yet `is_syncing` is still true until the join observes completion.
+- `polling::stop_polling` (state.rs) no longer clears `is_syncing` immediately — it only closes the stop channel. The flag and `thread_id` are cleared by the joining side after the `join` (or by the owning thread's exit cleanup).
+- `Polling.thread_id` (new `RwLock<Option<ThreadId>>` in lib.rs) is set to `handle.thread().id()` when a new poller is stored in sync.rs. The thread-exit cleanup in state.rs (`start_polling`'s `spawn` closure) now captures `thread::current().id()` and only clears `is_syncing`/`stop_tx`/`thread_id` if it is still the owner (`stored == Some(this_tid)`). This prevents an old thread that finally exits after an async Stop→Start from wiping the new thread's flag/stop_tx.
+- `app_exit` uses `stop_polling_and_join_for_exit` that awaits only the 2 s grace; if still alive it spawns a detached `spawn_blocking` for the final `join`. The detached task clears `is_syncing`/`thread_id` when it completes, but may not get to log before `app.exit(0)` terminates the process — noted as harmless.
 
-**Why:** Previous `stop_polling_and_join` did `while elapsed < 2 s { sleep 50 ms }` then `handle.join()` on the caller thread. If the poll thread was blocked in HTTP, the final `join` froze the UI for up to 30 s. Moving it to the blocking pool fixes the freeze while keeping the 2 s cooperative shutdown.
+**Why:** Previous `stop_polling_and_join` did `while elapsed < 2 s` then `handle.join()` on the caller thread, freezing the UI. Moving it to the blocking pool fixes the freeze. The companion #69 fix was required because making Stop async made the Stop→Start race the common case — the flag-only drain and unconditional exit cleanup shipped the regression.
 
 ### #219 — InvalidGrant 401-retry path
 
@@ -61,9 +65,10 @@ Kept cheap sync commands as sync: `get_sync_status`, `load_config`, `show_window
 ## Risks & Follow-up
 
 - **Tauri `AppHandle` on blocking thread:** `AppHandle` is `Clone + Send` per Tauri docs, and `TrayIcon`/`AutoLaunchManager` are accessed via `app.state` which is `Send` — same pattern as `onboarding.rs`. No known thread-affinity violation.
-- **Window ops off main thread:** avoided by keeping `show_window` sync. If `set_autostart_enabled` internally touches UI, it is still via `AutoLaunchManager` (file/registry), not window, so blocking thread is safe.
+- **Window ops off main thread:** avoided by keeping `show_window` sync. `set_autostart_enabled` touches `AutoLaunchManager` (file/registry), not window, so blocking thread is safe.
 - **Parking_lot guard in blocking thread:** `RwLockWriteGuard` is `Send` and the guard is acquired and dropped entirely inside `spawn_blocking` — no guard held across `await`.
-- **Detached drain leak:** `app_exit` detached `join` continues after `app.exit(0)`; the OS will reap the thread on process exit, but a 2 s grace log is emitted for diagnosis.
+- **Detached drain:** `app_exit` detached `join` may not log before `app.exit(0)` terminates the process — harmless, noted in code comment.
+- **ThreadId ownership:** new `thread_id` field is write-only until read by exit cleanup; adds no contention. `handle` and `is_syncing` together are the liveness signal; either being true triggers a drain.
 - **No `cargo check` run per lane instruction:** orchestrator will verify build once. Local grep evidence below.
 
 ## Grep Evidence
@@ -86,11 +91,15 @@ src-tauri/src/commands/misc.rs:27:pub fn preview_status
 src-tauri/src/commands/config.rs:14:pub fn load_config
 src-tauri/src/commands/sync.rs:239:pub fn get_sync_status
 
-$ grep -n "handle.join" src-tauri/src/commands/sync.rs
-117:                    match handle.join() {
-136:            match handle.join() {
-173:                    match handle.join() {
-195:                match handle.join() {
+$ grep -n "handle.join\|thread_id\|needs_drain" src-tauri/src/commands/sync.rs src-tauri/src/polling/state.rs src-tauri/src/lib.rs | head -n 20
+src-tauri/src/commands/sync.rs:47:    let needs_drain = { state.polling.handle().is_some() || state.polling.is_syncing(Ordering::Acquire) };
+src-tauri/src/commands/sync.rs:71:    let handle = tauri::async_runtime::spawn_blocking(move || {
+src-tauri/src/commands/sync.rs:92:        let tid = handle.thread().id();
+src-tauri/src/commands/sync.rs:118:                    match handle.join() {
+src-tauri/src/polling/state.rs:82:            let this_tid = std::thread::current().id();
+src-tauri/src/polling/state.rs:90:                let stored = state_for_cleanup.polling.thread_id().clone();
+src-tauri/src/lib.rs:211:    thread_id: RwLock<Option<thread::ThreadId>>, 
+src-tauri/src/commands/sync.rs:117:                    match handle.join() {
 
 $ grep -n "spawn_blocking" src-tauri/src/commands/sync.rs
 63:    let handle = tauri::async_runtime::spawn_blocking(move || {

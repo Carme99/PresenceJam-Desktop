@@ -6,11 +6,12 @@
 //! This module's job is:
 //!   1. Create the stop channel and store the sender in `AppState`.
 //!   2. Spawn the polling thread with a panic guard that releases
-//!      `is_syncing` + clears `stop_tx` so a future `start_syncing`
-//!      is not wedged.
-//!   3. Provide `stop_polling` that closes the channel and clears the
-//!      flag, waking the thread immediately from its interruptible
-//!      sleeps.
+//!      `is_syncing` + clears `stop_tx`/`thread_id` for the owning
+//!      thread so a future `start_syncing` is not wedged (see #69
+//!      ownership check).
+//!   3. Provide `stop_polling` that closes the channel (flag is left
+//!      set until the join side observes completion), waking the thread
+//!      immediately from its interruptible sleeps.
 //!
 //! The actual iteration logic lives in [`super::loop_`] and
 //! [`super::poll_once`].
@@ -78,29 +79,44 @@ pub fn start_polling(state: Arc<AppState>, app: AppHandle) -> Result<thread::Joi
                 let _ = app.emit("polling-thread-panicked", json!(null));
             }
             // Release sync state on ALL thread exits (panic OR normal return).
-            // If polling_loop returns on its own (e.g., the 5-transient-failures
-            // backoff path breaks the loop), the flag would otherwise stay true
-            // and the next start_syncing call would short-circuit as "already
-            // syncing" with no live thread. The load() guard avoids double-
-            // resetting if stop_syncing has already cleared the flag. stop_tx
-            // is unconditionally cleared because it was created at the top of
-            // this function and is only ever set by us.
-            if state_for_cleanup.polling.is_syncing(Ordering::Acquire) {
-                log::warn!(
-                    "[POLLING] start_polling: polling thread exited without stop_syncing; \
-                     cleaning up sync state"
+            // Ownership-checked: only the thread that still owns the
+            // stored `thread_id` may clear is_syncing / stop_tx / thread_id.
+            // Without this, an async Stop→Start that clears the flag
+            // while the old thread lingers (~30 s sequential HTTP) would
+            // have its exit wipe the new thread's flag/stop_tx — the #69
+            // regression. The drain gate in sync.rs (handle, not flag) is
+            // the companion fix.
+            let this_tid = std::thread::current().id();
+            let is_owner = {
+                let stored = state_for_cleanup.polling.thread_id().clone();
+                stored == Some(this_tid)
+            };
+            if is_owner {
+                if state_for_cleanup.polling.is_syncing(Ordering::Acquire) {
+                    log::warn!(
+                        "[POLLING] start_polling: polling thread {:?} exited without stop_syncing; cleaning up sync state for owner",
+                        this_tid
+                    );
+                    state_for_cleanup.polling.set_syncing(false, Ordering::Release);
+                }
+                *state_for_cleanup.polling.stop_tx_mut() = None;
+                *state_for_cleanup.polling.thread_id_mut() = None;
+            } else {
+                log::debug!(
+                    "[POLLING] start_polling: thread {:?} exited but is no longer owner (stored {:?}); leaving new owner's state intact",
+                    this_tid,
+                    *state_for_cleanup.polling.thread_id()
                 );
-                state_for_cleanup.polling.set_syncing(false, Ordering::Release);
             }
-            *state_for_cleanup.polling.stop_tx_mut() = None;
             log::info!("[POLLING] start_polling: thread ended");
         })
         .map_err(|e| {
             log::error!("[POLLING] start_polling: thread spawn failed - {}", e);
             // Reset is_syncing so future start_polling calls are not permanently wedged.
             state.polling.set_syncing(false, Ordering::Release);
-            // Also clean up the stop channel sender we just stored.
+            // Also clean up the stop channel sender and thread_id we just stored.
             *state.polling.stop_tx_mut() = None;
+            *state.polling.thread_id_mut() = None;
             format!("Failed to spawn polling thread: {}", e)
         })?;
 
@@ -108,8 +124,15 @@ pub fn start_polling(state: Arc<AppState>, app: AppHandle) -> Result<thread::Joi
     Ok(handle)
 }
 
-/// Close the stop channel (wakes the thread from interruptible sleeps)
-/// and clear `is_syncing`. Idempotent.
+/// Close the stop channel (wakes the thread from interruptible sleeps).
+/// `is_syncing` is NOT cleared here — it stays true until the joining
+/// side (sync.rs `stop_polling_and_join`) observes the join completion
+/// or the owning thread's exit cleanup fires. This keeps the flag
+/// accurate while the old thread lingers in blocking HTTP, so an async
+/// Stop→Start correctly sees `is_syncing==true` or a live handle and
+/// drains. The flag is cleared by the join side or by the ownership-
+/// checked cleanup in `start_polling`'s thread. Idempotent for the
+/// channel; flag clearing is deferred.
 pub fn stop_polling(state: &AppState) {
     log::info!("[POLLING] stop_polling: ENTRY");
 
@@ -120,6 +143,5 @@ pub fn stop_polling(state: &AppState) {
         *tx_guard = None; // Drop the sender, closing the channel
     }
 
-    state.polling.set_syncing(false, Ordering::Release);
-    log::info!("[POLLING] stop_polling: stop channel closed and is_syncing set to false");
+    log::info!("[POLLING] stop_polling: stop channel closed (is_syncing left set until join)");
 }

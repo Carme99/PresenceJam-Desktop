@@ -208,6 +208,11 @@ pub struct Polling {
     handle: RwLock<Option<thread::JoinHandle<()>>>,
     stop_tx: RwLock<Option<mpsc::Sender<()>>>,
     current_track: RwLock<Option<crate::spotify::TrackInfo>>,
+    /// Owner thread id for the running poller. Used to make the
+    /// thread-exit cleanup ownership-checked so an old thread that
+    /// lingers after an async Stop→Start does not wipe the new
+    /// thread's flag/stop_tx. See #69 regression.
+    thread_id: RwLock<Option<thread::ThreadId>>,
 }
 
 impl Polling {
@@ -217,6 +222,7 @@ impl Polling {
             handle: RwLock::new(None),
             stop_tx: RwLock::new(None),
             current_track: RwLock::new(None),
+            thread_id: RwLock::new(None),
         }
     }
 
@@ -275,6 +281,16 @@ impl Polling {
     /// Write guard for the last observed track.
     pub fn current_track_mut(&self) -> parking_lot::RwLockWriteGuard<'_, Option<crate::spotify::TrackInfo>> {
         self.current_track.write()
+    }
+
+    /// Read guard for the stored polling thread id.
+    pub fn thread_id(&self) -> parking_lot::RwLockReadGuard<'_, Option<thread::ThreadId>> {
+        self.thread_id.read()
+    }
+
+    /// Write guard for the stored polling thread id.
+    pub fn thread_id_mut(&self) -> parking_lot::RwLockWriteGuard<'_, Option<thread::ThreadId>> {
+        self.thread_id.write()
     }
 }
 
