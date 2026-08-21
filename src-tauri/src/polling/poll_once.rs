@@ -357,9 +357,22 @@ pub(crate) fn run(
                             // (`invalid_grant`) needs re-auth; other refresh
                             // failures are transient and flow into the
                             // backoff / 5-strikes logic below.
+                            // #219: mirror proactive InvalidGrant path — clear
+                            // tokens, persist, emit both events. The next
+                            // iteration will hit the no-tokens guard
+                            // (state.tokens.spotify().clone() is None) and
+                            // sleep, so we cannot spin on a dead token.
                             if matches!(refresh_err, SpotifyApiError::InvalidGrant) {
-                                log::warn!("[POLLING] poll_once: Spotify refresh token invalid (invalid_grant), emitting spotify-reconnect-required");
+                                log::warn!("[POLLING] poll_once: Spotify refresh token invalid (invalid_grant), discarding tokens and requiring reconnect");
+                                *state.tokens.spotify_mut() = None;
+                                if let Err(persist_err) = token_io::persist_tokens(state, app) {
+                                    log::warn!(
+                                        "[POLLING] poll_once: failed to persist cleared Spotify tokens: {}",
+                                        persist_err
+                                    );
+                                }
                                 let _ = app.emit("spotify-reconnect-required", json!(null));
+                                let _ = app.emit("reconnect-required", json!(null));
                             }
                             final_err = refresh_err;
                         }
@@ -380,6 +393,7 @@ pub(crate) fn run(
                 SpotifyApiError::RateLimited(_)
                     | SpotifyApiError::ExpiredToken
                     | SpotifyApiError::Other(_)
+                    | SpotifyApiError::InvalidGrant
             ) {
                 *transient_failure_count = transient_failure_count.saturating_add(1);
             }

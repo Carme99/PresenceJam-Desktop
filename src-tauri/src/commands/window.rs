@@ -35,6 +35,10 @@ fn validate_http_url(url: &str) -> Result<Url, String> {
         })
 }
 
+/// Show the main window. Stays synchronous (#215): this is a fast
+/// window-manager call (show + focus) with no disk/network/keychain IO.
+/// Offloading to spawn_blocking would add latency and risks calling
+/// `window.show()` off the main thread. Documented per #215 slice.
 #[tauri::command]
 pub fn show_window(app: AppHandle) -> Result<(), String> {
     log::debug!("{CMD} show_window: ENTRY");
@@ -52,63 +56,79 @@ pub fn show_window(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn set_autostart_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
+pub async fn set_autostart_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
     log::debug!("{CMD} set_autostart_enabled: ENTRY - enabled={}", enabled);
 
-    let autolaunch_manager = app.state::<tauri_plugin_autostart::AutoLaunchManager>();
-    let is_enabled = autolaunch_manager.is_enabled().map_err(|e| {
-        log::error!(
-            "{CMD} set_autostart_enabled: is_enabled check FAILED - {}",
-            e
-        );
-        e.to_string()
-    })?;
-
-    if is_enabled == enabled {
-        log::info!(
-            "{CMD} set_autostart_enabled: already in desired state (enabled={}), no-op",
-            enabled
-        );
-        return Ok(());
-    }
-
-    if enabled {
-        autolaunch_manager.enable().map_err(|e| {
-            log::error!("{CMD} set_autostart_enabled: enable FAILED - {}", e);
+    // #215: AutoLaunchManager touches the OS autostart registry/file
+    // (disk + OS service). Offload to blocking pool so the UI thread
+    // is not blocked while the manager reads/writes the autostart entry.
+    let app_clone = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let autolaunch_manager = app_clone.state::<tauri_plugin_autostart::AutoLaunchManager>();
+        let is_enabled = autolaunch_manager.is_enabled().map_err(|e| {
+            log::error!(
+                "{CMD} set_autostart_enabled: is_enabled check FAILED - {}",
+                e
+            );
             e.to_string()
         })?;
-        log::info!("{CMD} set_autostart_enabled: enable SUCCESS");
-    } else {
-        autolaunch_manager.disable().map_err(|e| {
-            log::error!("{CMD} set_autostart_enabled: disable FAILED - {}", e);
-            e.to_string()
-        })?;
-        log::info!("{CMD} set_autostart_enabled: disable SUCCESS");
-    }
-    Ok(())
+
+        if is_enabled == enabled {
+            log::info!(
+                "{CMD} set_autostart_enabled: already in desired state (enabled={}), no-op",
+                enabled
+            );
+            return Ok(());
+        }
+
+        if enabled {
+            autolaunch_manager.enable().map_err(|e| {
+                log::error!("{CMD} set_autostart_enabled: enable FAILED - {}", e);
+                e.to_string()
+            })?;
+            log::info!("{CMD} set_autostart_enabled: enable SUCCESS");
+        } else {
+            autolaunch_manager.disable().map_err(|e| {
+                log::error!("{CMD} set_autostart_enabled: disable FAILED - {}", e);
+                e.to_string()
+            })?;
+            log::info!("{CMD} set_autostart_enabled: disable SUCCESS");
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("set_autostart_enabled spawn_blocking panicked: {:?}", e))?
 }
 
 #[tauri::command]
-pub fn open_logs_folder(app: AppHandle) -> Result<(), String> {
+pub async fn open_logs_folder(app: AppHandle) -> Result<(), String> {
     log::debug!("{CMD} open_logs_folder: ENTRY");
 
-    let logs_path = app.path().app_log_dir().map_err(|e| {
-        log::error!("{CMD} open_logs_folder: failed to get log dir - {}", e);
-        e.to_string()
-    })?;
-    let path_str = logs_path.to_string_lossy();
-    log::info!("{CMD} open_logs_folder: log path={}", path_str);
+    // #215: app_log_dir() touches the filesystem (app data dir resolution)
+    // and opener::open_url spawns a shell process. Offload both to the
+    // blocking pool.
+    let app_clone = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let logs_path = app_clone.path().app_log_dir().map_err(|e| {
+            log::error!("{CMD} open_logs_folder: failed to get log dir - {}", e);
+            e.to_string()
+        })?;
+        let path_str = logs_path.to_string_lossy();
+        log::info!("{CMD} open_logs_folder: log path={}", path_str);
 
-    match tauri_plugin_opener::open_url(&path_str, None::<&str>) {
-        Ok(()) => {
-            log::info!("{CMD} open_logs_folder: SUCCESS");
-            Ok(())
+        match tauri_plugin_opener::open_url(&path_str, None::<&str>) {
+            Ok(()) => {
+                log::info!("{CMD} open_logs_folder: SUCCESS");
+                Ok(())
+            }
+            Err(e) => {
+                log::error!("{CMD} open_logs_folder: FAILED - {}", e);
+                Err(e.to_string())
+            }
         }
-        Err(e) => {
-            log::error!("{CMD} open_logs_folder: FAILED - {}", e);
-            Err(e.to_string())
-        }
-    }
+    })
+    .await
+    .map_err(|e| format!("open_logs_folder spawn_blocking panicked: {:?}", e))?
 }
 
 // `open_external` and `get_current_track` were removed in v2.6.4 (issue #77).
@@ -118,20 +138,27 @@ pub fn open_logs_folder(app: AppHandle) -> Result<(), String> {
 // live paths.
 
 #[tauri::command]
-pub fn open_external_url(url: String) -> Result<(), String> {
+pub async fn open_external_url(url: String) -> Result<(), String> {
     log::debug!("{CMD} open_external_url: ENTRY - url.len={}", url.len());
 
     // Validate URL scheme - only allow http/https. See issue #14.
+    // Pure validation, no IO — keep on async thread before blocking.
     validate_http_url(&url)?;
 
-    match tauri_plugin_opener::open_url(&url, None::<&str>) {
-        Ok(()) => {
-            log::info!("{CMD} open_external_url: SUCCESS");
-            Ok(())
+    // #215: opener::open_url spawns a shell process (blocking). Offload.
+    let url_clone = url.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        match tauri_plugin_opener::open_url(&url_clone, None::<&str>) {
+            Ok(()) => {
+                log::info!("{CMD} open_external_url: SUCCESS");
+                Ok(())
+            }
+            Err(e) => {
+                log::error!("{CMD} open_external_url: FAILED - {}", e);
+                Err(format!("Failed to open URL: {}", e))
+            }
         }
-        Err(e) => {
-            log::error!("{CMD} open_external_url: FAILED - {}", e);
-            Err(format!("Failed to open URL: {}", e))
-        }
-    }
+    })
+    .await
+    .map_err(|e| format!("open_external_url spawn_blocking panicked: {:?}", e))?
 }

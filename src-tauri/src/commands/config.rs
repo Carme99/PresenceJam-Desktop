@@ -29,7 +29,7 @@ pub fn load_config() -> Result<AppConfig, String> {
 }
 
 #[tauri::command]
-pub fn save_config(
+pub async fn save_config(
     app: AppHandle,
     config: AppConfig,
     state: tauri::State<'_, Arc<AppState>>,
@@ -39,21 +39,30 @@ pub fn save_config(
         config.spotify.client_id.len()
     );
 
-    // Hold the write lock for the entire read-modify-write to prevent races
-    // with concurrent reads from the polling loop. See bug #26.
-    {
-        let mut config_guard = state.config.get_mut();
-        match config::save_config(&config) {
+    // #215: serialization + atomic_write_json (fsync) holds the write lock
+    // across IO. Offload the entire read-modify-write critical section to
+    // the blocking pool so the async runtime is not blocked and the lock
+    // is not held across an await.
+    let state_clone = Arc::clone(state.inner());
+    let config_clone = config.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        // Hold the write lock for the entire read-modify-write to prevent races
+        // with concurrent reads from the polling loop. See bug #26.
+        let mut config_guard = state_clone.config.get_mut();
+        match config::save_config(&config_clone) {
             Ok(()) => {
                 log::info!("{CMD} save_config: file saved successfully");
-                *config_guard = Some(config.clone());
+                *config_guard = Some(config_clone);
+                Ok::<(), String>(())
             }
             Err(e) => {
                 log::error!("{CMD} save_config: FAILED - {}", e);
-                return Err(e);
+                Err(e)
             }
         }
-    }
+    })
+    .await
+    .map_err(|e| format!("save_config spawn_blocking panicked: {:?}", e))??;
 
     // On macOS, sync the app's activation policy with the saved
     // `start_minimized` preference so the dock icon disappears when the
@@ -64,6 +73,8 @@ pub fn save_config(
     // Run BEFORE `set_autostart_enabled` because that helper takes
     // `app` by value, and `set_activation_policy` borrows it. This
     // ordering matches the new doc note on the lib.rs side.
+    // This part is fast (no disk IO beyond the already-completed save)
+    // and must run on the main thread, so it stays outside spawn_blocking.
     #[cfg(target_os = "macos")]
     {
         let policy = if config.teams.start_minimized {
@@ -78,11 +89,11 @@ pub fn save_config(
         let _ = app.set_activation_policy(policy);
     }
 
-    // Sync autostart state with the OS autostart manager. `set_autostart_enabled`
-    // lives in the `window` sibling module.
+    // Sync autostart state with the OS autostart manager. The command is
+    // now async (it touches the autostart registry/file), so we await it.
     #[cfg(desktop)]
     {
-        if let Err(e) = super::window::set_autostart_enabled(app, config.autostart) {
+        if let Err(e) = super::window::set_autostart_enabled(app.clone(), config.autostart).await {
             log::warn!("{CMD} save_config: failed to sync autostart state: {}", e);
         }
     }
