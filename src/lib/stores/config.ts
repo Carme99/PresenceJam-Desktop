@@ -20,10 +20,10 @@ export const defaultConfig: AppConfig = {
     presence_gate: true
   },
   polling: {
-    default_interval_seconds: 30,
-    minimum_interval_seconds: 10,
-    max_interval_seconds: 60,
-    expiry_buffer_seconds: 10
+    default_interval_seconds: BigInt(30),
+    minimum_interval_seconds: BigInt(10),
+    max_interval_seconds: BigInt(60),
+    expiry_buffer_seconds: BigInt(10)
   },
   logging: {
     enabled: true,
