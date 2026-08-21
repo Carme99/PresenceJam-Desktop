@@ -94,6 +94,23 @@
       currentView.set('about');
     }).then(fn => { if (destroyed) fn(); else unlisten.push(fn); });
 
+    devLog('[PAGE] onMount: setting up toggle-pause listener');
+    listen('toggle-pause', async () => {
+      devLog('[PAGE] EVENT: toggle-pause received');
+      try {
+        const status = await invoke<{ is_syncing: boolean }>('get_sync_status');
+        if (status.is_syncing) {
+          devLog('[PAGE] EVENT: calling invoke stop_syncing');
+          await invoke('stop_syncing');
+        } else {
+          devLog('[PAGE] EVENT: calling invoke start_syncing');
+          await invoke('start_syncing');
+        }
+      } catch (e) {
+        console.warn('[PAGE] toggle-pause failed:', e);
+      }
+    }).then(fn => { if (destroyed) fn(); else unlisten.push(fn); });
+
     return () => {
       destroyed = true;
       devLog('[PAGE] onDestroy: ENTRY');

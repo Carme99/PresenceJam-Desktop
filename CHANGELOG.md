@@ -5,6 +5,47 @@ All notable changes to PresenceJam are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [3.2.0] - 2026-08-22 — Stratus
+
+Comprehensive hardening and UX polish covering 28 issues. Windows auto-update unblocked, main-thread stalls eliminated, token-revocation loop fixed, event contracts made reliable, and docs/build pipeline tightened.
+
+### Security
+- **OAuth hijack binding (#66, PR #235):** per-launch 32B secret bound into OAuth `state` as `<csrf>.<launch_secret>` (stored in `AppState OnceLock`), validated in `handle_deep_link`; mismatch → redacted warn + early return. Scheme stays `presencejam://` (macOS cannot runtime-register). `state` composition ~130 chars within limits.
+- **Log redaction (#228, PR #235):** all deep-link/auth logs now redact `code`/`state` to `[REDACTED len N]` or 4-char prefix; byte-slice panic fixed via `chars().take(4)`.
+- **Capabilities least-privilege (#227, PR #235):** removed `tauri-plugin-store`/`shell` registrations + Cargo deps + capability entries; audited `default.json` to minimal set; `package.json` store removed (lockfile synced).
+- **Logging config wiring (#226, PR #235):** `logging.enabled`/`log_level` now applied via `log::set_max_level` after config load (disabled → `Off`, case-insensitive, default `Info`).
+
+### Fixed
+- **Windows auto-update 404 (#204, PR #232):** `release.yml` Windows `bundle_path` now uploads renamed `PresenceJam-<tag>.msi` (removed wildcard duplicate) + verification step checks published asset names via `gh api` before generating `latest.json` (advisory option a). Fleet on ≤3.1.0 can now auto-update to 3.2.0.
+- **Update-chain checklist (#205, PR #232):** added `docs/windows-update-chain-v3.2.md` with curl/sig verification steps for the stuck Windows fleet.
+- **Release concurrency (#206, PR #232):** `concurrency: group: release-${{ github.ref }}, cancel-in-progress: false` prevents retag double-fire.
+- **Runner bump (#207, PR #232):** `ubuntu-22.04` → `ubuntu-latest` (24.04) in `release.yml`.
+- **Digest mismatch hardening (#208, PR #232):** `digest-mismatch: warn` → `error` on both `download-artifact` steps.
+- **SHA256SUMS (#209, PR #232):** release job now generates `SHA256SUMS.txt` (basename) from `artifacts/**/*` and uploads via `--clobber`.
+- **CI on main pushes (#210, PR #232):** `ci.yml` now triggers on `push: branches: [main]`.
+- **Least-privilege checkouts (#211, PR #232):** `persist-credentials: false` on release checkouts + `winget` job `contents: write` → `read`.
+- **README asset table (#212, PR #232):** canonical names `PresenceJam-macos.dmg`, `PresenceJam-linux-amd64.AppImage/.deb`, `PresenceJam-<tag>.msi`.
+- **ARCHITECTURE lockfile (#213, PR #232):** `pnpm-lock.yaml` → `package-lock.json`.
+- **STATE-OF-FEATURES header (#214, PR #232):** `v3.0.0` → `v3.2.0` + digest rows updated to `error`.
+- **Tray lock contention (#217, PR #233):** `cached_devices`/`cached_queue` now snapshot under short lock, drop, fetch outside lock, re-acquire only to store; `update_tray_menu` fetches before `tray_write_lock`, holds lock only around `set_menu`.
+- **Play/Pause label staleness (#229, PR #233):** `track_key` now includes `is_playing` so same-track pause triggers rebuild; label flips immediately via `force_tray_refresh`.
+- **Tray Pause/Resume dead when Dashboard not mounted (#230, release):** lifted `toggle-pause` listener from `Dashboard.svelte` to always-mounted `+page.svelte` (checks `get_sync_status` then toggles `start/stop_syncing`).
+- **Main-thread stalls (#215, PRs #233 #234 #235 #236):** 12 IO-bound commands → `pub async fn` + `spawn_blocking` (`start/stop_syncing`, `app_exit`, `save_config`, playback 7, `start/poll_teams_auth`, `start_spotify_auth`, etc.); `complete_onboarding` made async to await `start_syncing`.
+- **Stop/Exit join freeze (#218, PR #234):** `stop_polling_and_join` moved final `join` into `spawn_blocking` with ThreadId ownership check; `app_exit` detaches after grace, preserving #69 drain-first invariant.
+- **Token-revocation infinite loop (#219, PR #234):** 401-retry `InvalidGrant` path now clears `*state.tokens.spotify_mut()=None`, persists, emits both `spotify-reconnect-required` + `reconnect-required`, increments `transient_failure_count` toward 5-strikes. Test `test_cas_helper_body_has_no_persist_and_call_sites_persist` updated to 5 sites (2 invalid_grant + 3 refresh-success).
+- **Teams device-code 15-min block (#216, PR #236):** `poll_teams_auth` → `async fn` + `spawn_blocking`, `interval.clamp(1,15)`, chunked sleep max 30s, `slow_down` +5s cumulative, terminal errors short-circuit per RFC 8628 §3.5, `expires_in` 900s bound.
+- **Dead teams-auth-failed listeners (#223, PR #236):** `teams-auth-failed` now emitted (string payload) from `start_teams_auth_device_code` and `poll_teams_auth` Err paths, matching `listen<string>` in 4 frontend sites.
+- **Spotify reconnect only in Settings (#220, PR #237):** lifted `spotify-reconnect-required` from Settings-only to always-mounted `+layout.svelte` (mirrors teams #157), with keychain check → onboarding fallback.
+- **Teams re-auth missing in Reconnect (#222, PR #237):** `Reconnect.svelte` now derives `needsTeams` from `teams_connected` and offers Teams device-code re-auth.
+- **Playback errors silent (#224, PR #237):** layout-level `playback-error` toast (string payload, auto-dismiss 6s).
+- **Autostart optimistic divergence (#221, PR #237):** `set_autostart_enabled` now try/catch with revert + OS-state re-query.
+- **Frontend hygiene batch (#225, PR #237):** `show_window`/`open_logs_folder`/`is_spotify_client_secret_set` wrapped, `isPermissionGranted` dead pre-check removed/handled, `preview_status` debounce 300ms + seq guard, `AppConfig` now imports generated `../types` (BigInt `PollingConfig` fields fixed via `structuredClone` + `BigInt`↔`Number` helpers), listener micro-race `onDestroy` guards, `package.json` store removed + lockfile synced; follow-up BigInt clone fix (structuredClone + toSavePayload) and layout `open_external_url` isolation.
+
+### Changed
+- **PollingConfig BigInt handling (PR #237 follow-up):** `PollingConfig` `u64` fields remain `bigint` in `ts-rs` but frontend now uses `structuredClone` and converts via `BigInt()`/`Number()` at load/save boundaries to avoid `JSON.stringify(BigInt)` throws.
+- **Clippy hygiene (PR #234):** `state.rs` `clone_on_copy` fixed via deref `*thread_id()`.
+
+
 ## [3.1.0] - 2026-08-20
 
 ### Fixed
