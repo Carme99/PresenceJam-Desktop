@@ -39,28 +39,30 @@ Latest release: [GitHub Releases](https://github.com/Carme99/PresenceJam-Desktop
 
 Download the installer for your platform from the [latest release](https://github.com/Carme99/PresenceJam-Desktop/releases/latest):
 
-- **Windows 10/11 (64-bit)** — `.msi` installer
-- **macOS (Apple Silicon)** — `.dmg` image
-- **Debian / Ubuntu / Mint / popOS (64-bit)** — `.deb` package
-- **Any modern Linux (64-bit, no install required)** — `.AppImage`
+- **Windows 10/11 (64-bit)** — `PresenceJam-<tag>.msi` (e.g., `PresenceJam-v3.2.0.msi`)
+- **macOS (Apple Silicon)** — `PresenceJam-macos.dmg`
+- **Debian / Ubuntu / Mint / popOS (64-bit)** — `PresenceJam-linux-amd64.deb`
+- **Any modern Linux (64-bit, no install required)** — `PresenceJam-linux-amd64.AppImage`
 
-Filenames follow the pattern `PresenceJam-<version>-<os>.<ext>` — see the [latest release](https://github.com/Carme99/PresenceJam-Desktop/releases/latest) for the current values.
+<!-- canonical post-fix asset names verified via `gh api repos/Carme99/PresenceJam-Desktop/releases/tags/v3.1.0 --jq '.assets[].name'` → PresenceJam-macos.dmg, PresenceJam-linux-amd64.deb, PresenceJam-linux-amd64.AppImage, PresenceJam_3.1.0_x64_en-US.msi (pre-fix bundler name; post-fix is PresenceJam-v3.1.0.msi), PresenceJam-v3.1.0.app.tar.gz + .sig, latest.json -->
+
+Filenames are canonical post-fix: `PresenceJam-macos.dmg`, `PresenceJam-linux-amd64.deb` / `PresenceJam-linux-amd64.AppImage`, `PresenceJam-<tag>.msi` — see the [latest release](https://github.com/Carme99/PresenceJam-Desktop/releases/latest) for the current version.
 
 ### Linux install
 
 **Debian / Ubuntu / Mint / popOS** (one-time):
 
 ```bash
-sudo apt install ./PresenceJam-<version>-linux-amd64.deb
+sudo apt install ./PresenceJam-linux-amd64.deb
 # or if apt refuses the local path:
-sudo dpkg -i PresenceJam-<version>-linux-amd64.deb && sudo apt-get install -f
+sudo dpkg -i PresenceJam-linux-amd64.deb && sudo apt-get install -f
 ```
 
 **AppImage** (any distro, no install required):
 
 ```bash
-chmod +x PresenceJam-<version>-linux-amd64.AppImage
-./PresenceJam-<version>-linux-amd64.AppImage
+chmod +x PresenceJam-linux-amd64.AppImage
+./PresenceJam-linux-amd64.AppImage
 ```
 
 For autostart with an AppImage, see the [Tauri Linux docs](https://tauri.app/distribute/linux/) — a `.desktop` file in `~/.local/share/applications/` plus the binary in `~/.local/bin/` is the standard pattern.

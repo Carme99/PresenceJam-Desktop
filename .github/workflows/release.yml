@@ -7,6 +7,9 @@ on:
 
 permissions:
   contents: write
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -26,9 +29,9 @@ jobs:
             target: ''
             artifact_name: PresenceJam-${{ github.ref_name }}.msi
             bundle_path: |
-              src-tauri/target/release/bundle/msi/*.msi
+              PresenceJam-${{ github.ref_name }}.msi
               PresenceJam-${{ github.ref_name }}.msi.sig
-          - os: ubuntu-22.04
+          - os: ubuntu-latest
             target: ''
             artifact_name: PresenceJam-${{ github.ref_name }}-linux-amd64
             bundle_path: |
@@ -39,6 +42,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6.5.0
@@ -90,7 +95,7 @@ jobs:
       # Linux build produces both .deb (Debian package) and .AppImage
       # (universal single-file binary) in one `tauri build` invocation.
       - name: Install Linux system dependencies
-        if: matrix.os == 'ubuntu-22.04'
+        if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -103,7 +108,7 @@ jobs:
             build-essential
 
       - name: Build Tauri (Linux)
-        if: matrix.os == 'ubuntu-22.04'
+        if: matrix.os == 'ubuntu-latest'
         env:
           CARGO_INCREMENTAL: 0
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -171,7 +176,7 @@ jobs:
       # the macOS and Windows steps (PresenceJam-<version>-<os>.ext) and
       # drop the .AppImage alongside.
       - name: Package Linux artifacts
-        if: matrix.os == 'ubuntu-22.04'
+        if: matrix.os == 'ubuntu-latest'
         run: |
           set -euo pipefail
           DEB=$(find src-tauri/target/release/bundle/deb -name "*.deb" | head -1)
@@ -211,7 +216,17 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           path: artifacts
-          digest-mismatch: warn
+          digest-mismatch: error
+
+      - name: Generate SHA256SUMS.txt
+        run: |
+          set -euo pipefail
+          # Compute SHA-256 over every downloaded artifact file so the Release
+          # carries a single SHA256SUMS.txt (uploaded by ncipollo via
+          # artifacts/**/*). Format is one line per file: "<sha256>  <filename>".
+          (cd artifacts && find . -type f ! -name SHA256SUMS.txt -exec sha256sum {} + | awk '{gsub(/^\.\//,"",$2); n=split($2,a,"/"); print $1"  "a[n]}' | sort > SHA256SUMS.txt)
+          echo "=== SHA256SUMS.txt ==="
+          cat artifacts/SHA256SUMS.txt
 
       - name: Create GitHub Release
         uses: ncipollo/release-action@339a81892b84b4eeb0f6e744e4574d79d0d9b8dd  # v1.21.0
@@ -272,6 +287,28 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Verify latest.json assets in release
+        run: |
+          set -euo pipefail
+          # Advisory option (a): derive/verify from actual published assets.
+          # Fetch the asset list for this tag and ensure each URL basename
+          # referenced in latest.json is present. A missing asset means the
+          # updater would 404 (Tauri static JSON 404 silently means no-update).
+          echo "Fetching asset list for ${GITHUB_REF_NAME}..."
+          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" --jq '.assets[].name' > /tmp/assets.txt
+          echo "=== Release assets ==="
+          cat /tmp/assets.txt
+          for expected in "PresenceJam-${GITHUB_REF_NAME}.app.tar.gz" "PresenceJam-${GITHUB_REF_NAME}.msi" "PresenceJam-linux-amd64.AppImage"; do
+            if ! grep -Fxq "$expected" /tmp/assets.txt; then
+              echo "::error::Missing expected asset $expected in release ${GITHUB_REF_NAME} — latest.json URL would 404"
+              exit 1
+            fi
+            echo "Found expected asset: $expected"
+          done
+          echo "All expected updater assets verified"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   # ------------------------------------------------------------------
   # Homebrew tap update (carme99/homebrew-tap)
   # ------------------------------------------------------------------
@@ -300,13 +337,15 @@ jobs:
       # contains what was checked out at workflow-start.
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Download macOS DMG artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: PresenceJam-${{ github.ref_name }}-macos.dmg
           path: dist/
-          digest-mismatch: warn
+          digest-mismatch: error
 
       - name: Compute SHA256 of the DMG
         working-directory: dist
@@ -385,7 +424,7 @@ jobs:
     needs: release
     runs-on: windows-latest
     permissions:
-      contents: write
+      contents: read
     steps:
       # The winget-releaser action does not update open PRs — if a PR
       # already exists for this version, it silently skips. This is
