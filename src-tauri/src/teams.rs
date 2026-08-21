@@ -272,9 +272,11 @@ pub fn poll_teams_auth(device_code: &str, interval: u64) -> Result<TeamsTokens, 
     let start_time = std::time::Instant::now();
     let timeout = StdDuration::from_secs(900);
 
-    // RFC 8628 §3.2/§3.5: wait at least the server-provided `interval`
-    // between polls, or 5s when none was provided.
-    let mut wait = if interval == 0 { 5 } else { interval };
+    // RFC 8628 §3.5 + security: server-provided interval is untrusted
+    // (devtools could inject u64::MAX). Clamp to a sane range so
+    // thread::sleep cannot block the thread for hours.
+    let interval = interval.clamp(1, 15);
+    let mut wait = interval;
 
     loop {
         if start_time.elapsed() > timeout {
@@ -337,11 +339,19 @@ pub fn poll_teams_auth(device_code: &str, interval: u64) -> Result<TeamsTokens, 
         match error_resp.error.as_str() {
             "authorization_pending" => {
                 log::debug!("Authorization pending, waiting {} seconds", wait);
-                thread::sleep(StdDuration::from_secs(wait));
+                // Cap each sleep chunk at 30s and re-check timeout between chunks
+                // so an inflated interval (even after slow_down ramps) cannot
+                // block the thread past the 900s overall deadline.
+                let mut remaining = wait;
+                while remaining > 0 {
+                    if start_time.elapsed() > timeout {
+                        return Err("Authentication timed out".to_string());
+                    }
+                    let chunk = remaining.min(30);
+                    thread::sleep(StdDuration::from_secs(chunk));
+                    remaining -= chunk;
+                }
                 continue;
-            }
-            "authorization_declined" => {
-                return Err("Authorization was declined by the user".to_string());
             }
             "slow_down" => {
                 // RFC 8628 §3.5: slow_down carries no interval; the
@@ -349,13 +359,40 @@ pub fn poll_teams_auth(device_code: &str, interval: u64) -> Result<TeamsTokens, 
                 // this and all subsequent requests.
                 wait = next_poll_wait(wait, error_resp.error.as_str());
                 log::warn!("Server requested slow down, waiting {} seconds", wait);
-                thread::sleep(StdDuration::from_secs(wait));
+                let mut remaining = wait;
+                while remaining > 0 {
+                    if start_time.elapsed() > timeout {
+                        return Err("Authentication timed out".to_string());
+                    }
+                    let chunk = remaining.min(30);
+                    thread::sleep(StdDuration::from_secs(chunk));
+                    remaining -= chunk;
+                }
                 continue;
+            }
+            "authorization_declined" => {
+                return Err("Authorization was declined by the user".to_string());
             }
             "expired_token" => {
                 return Err(
                     "The device code has expired. Please start authentication again.".to_string(),
                 );
+            }
+            "bad_verification_code" => {
+                return Err(format!(
+                    "Authentication failed: {} - {} (raw body: {})",
+                    error_resp.error,
+                    error_resp.error_description.unwrap_or_default(),
+                    truncate_for_log(&raw_body)
+                ));
+            }
+            "unauthorized_client" => {
+                return Err(format!(
+                    "Authentication failed: {} - {} (raw body: {})",
+                    error_resp.error,
+                    error_resp.error_description.unwrap_or_default(),
+                    truncate_for_log(&raw_body)
+                ));
             }
             _ => {
                 return Err(format!(

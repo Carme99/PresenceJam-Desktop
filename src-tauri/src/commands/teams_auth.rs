@@ -13,10 +13,17 @@ use tauri::{AppHandle, Emitter};
 const CMD: &str = "[CMD.TEAMS_AUTH]";
 
 #[tauri::command]
-pub fn start_teams_auth_device_code(_app: AppHandle) -> Result<DeviceCodeResponse, String> {
+pub fn start_teams_auth_device_code(app: AppHandle) -> Result<DeviceCodeResponse, String> {
     log::debug!("{CMD} start_teams_auth_device_code: ENTRY");
 
-    let response = crate::teams::start_teams_auth_device_code()?;
+    let response = match crate::teams::start_teams_auth_device_code() {
+        Ok(r) => r,
+        Err(e) => {
+            log::error!("{CMD} start_teams_auth_device_code: failed: {}", e);
+            let _ = app.emit("teams-auth-failed", e.clone());
+            return Err(e);
+        }
+    };
     log::info!("{CMD} start_teams_auth_device_code: got device code response");
     log::info!(
         "{CMD} start_teams_auth_device_code: user_code={}, verification_url={}",
@@ -33,41 +40,59 @@ pub fn start_teams_auth_device_code(_app: AppHandle) -> Result<DeviceCodeRespons
 }
 
 #[tauri::command]
-pub fn poll_teams_auth(
+pub async fn poll_teams_auth(
     device_code: String,
     interval: u64,
     app: AppHandle,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<TeamsTokens, String> {
+    // Security: server interval is untrusted (devtools can inject u64::MAX).
+    // Clamp before any use so spawn_blocking cannot sleep for hours.
+    let interval = interval.clamp(1, 15);
     log::info!(
         "{CMD} poll_teams_auth: ENTRY - device_code.len={}, interval={}",
         device_code.len(),
         interval
     );
 
-    let tokens = crate::teams::poll_teams_auth(&device_code, interval)?;
-    log::info!(
-        "{CMD} poll_teams_auth: poll successful - access_token.len={}",
-        tokens.access_token.len()
-    );
+    let device_code_for_thread = device_code.clone();
+    let poll_result = tauri::async_runtime::spawn_blocking(move || {
+        crate::teams::poll_teams_auth(&device_code_for_thread, interval)
+    })
+    .await
+    .map_err(|e| format!("poll_teams_auth task panicked: {}", e))?;
 
-    {
-        let mut guard = state.tokens.teams_mut();
-        *guard = Some(tokens.clone());
-        log::info!("{CMD} poll_teams_auth: tokens stored in AppState");
+    match poll_result {
+        Ok(tokens) => {
+            log::info!(
+                "{CMD} poll_teams_auth: poll successful - access_token.len={}",
+                tokens.access_token.len()
+            );
+
+            {
+                let mut guard = state.tokens.teams_mut();
+                *guard = Some(tokens.clone());
+                log::info!("{CMD} poll_teams_auth: tokens stored in AppState");
+            }
+            token_io::persist_tokens(state.inner(), &app)?;
+            log::info!("{CMD} poll_teams_auth: tokens persisted atomically");
+
+            // Issue #70: invalidate the onboarding cache.
+            state.onboarding_cache.invalidate();
+            log::info!("{CMD} poll_teams_auth: onboarding_cache invalidated");
+
+            log::info!("{CMD} poll_teams_auth: EMIT teams-auth-complete event");
+            let _ = app.emit("teams-auth-complete", &tokens);
+
+            log::info!("{CMD} poll_teams_auth: SUCCESS");
+            Ok(tokens)
+        }
+        Err(err_string) => {
+            log::error!("{CMD} poll_teams_auth: poll failed: {}", err_string);
+            let _ = app.emit("teams-auth-failed", err_string.clone());
+            Err(err_string)
+        }
     }
-    token_io::persist_tokens(state.inner(), &app)?;
-    log::info!("{CMD} poll_teams_auth: tokens persisted atomically");
-
-    // Issue #70: invalidate the onboarding cache.
-    state.onboarding_cache.invalidate();
-    log::info!("{CMD} poll_teams_auth: onboarding_cache invalidated");
-
-    log::info!("{CMD} poll_teams_auth: EMIT teams-auth-complete event");
-    let _ = app.emit("teams-auth-complete", &tokens);
-
-    log::info!("{CMD} poll_teams_auth: SUCCESS");
-    Ok(tokens)
 }
 
 #[tauri::command]
