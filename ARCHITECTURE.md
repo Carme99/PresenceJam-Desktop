@@ -559,7 +559,7 @@ PresenceJam-Desktop/
 │   └── release.yml                        # Tag-triggered: 3-OS matrix + homebrew + winget
 ├── homebrew/presence-jam.rb               # Homebrew tap formula template
 ├── package.json                           # Node deps + scripts
-├── pnpm-lock.yaml                         # (npm package-lock.json committed instead)
+├── package-lock.json                       # npm lockfile (committed)
 ├── svelte.config.js                       # SvelteKit SPA config (adapter-static)
 ├── vite.config.js                         # Vite + Tauri dev server
 └── jsconfig.json                          # TypeScript config
