@@ -79,9 +79,8 @@ fn run_spotify_oauth_flow(
     // without secret+verifier.
     let launch_secret = state
         .launch_secret
-        .get()
-        .cloned()
-        .unwrap_or_else(crate::pkce::generate_launch_secret);
+        .get_or_init(crate::pkce::generate_launch_secret)
+        .clone();
     let csrf_state = format!("{}.{}", csrf_state, launch_secret);
     log::info!(
         "{CMD} run_spotify_oauth_flow: state generated, len={} [REDACTED]",

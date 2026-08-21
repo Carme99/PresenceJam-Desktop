@@ -454,7 +454,7 @@ fn handle_deep_link(url: &str, app: AppHandle) {
     log::debug!(
         "[DEEP_LINK] handle_deep_link: ENTRY - url_len={} prefix={}…[REDACTED]",
         url.len(),
-        &url[..url.len().min(4)]
+        url.chars().take(4).collect::<String>()
     );
 
     if let Ok(parsed) = url::Url::parse(url) {
@@ -822,7 +822,7 @@ pub fn run() {
                 if let Ok(Some(urls)) = start_urls {
                     log::info!("[APP] setup: found {} start URL(s)", urls.len());
                     for url in urls {
-                        log::info!("[APP] setup: processing start URL: [REDACTED len {}] prefix={}…", url.as_str().len(), &url.as_str()[..url.as_str().len().min(4)]);
+                        log::info!("[APP] setup: processing start URL: [REDACTED len {}] prefix={}…", url.as_str().len(), url.as_str().chars().take(4).collect::<String>());
                         handle_deep_link(url.as_str(), app.handle().clone());
                     }
                 } else {
@@ -836,7 +836,7 @@ pub fn run() {
                     let urls = event.urls();
                     log::info!("[APP] on_open_url: received {} URL(s)", urls.len());
                     for url in urls {
-                        log::info!("[APP] on_open_url: processing URL: [REDACTED len {}] prefix={}…", url.as_str().len(), &url.as_str()[..url.as_str().len().min(4)]);
+                        log::info!("[APP] on_open_url: processing URL: [REDACTED len {}] prefix={}…", url.as_str().len(), url.as_str().chars().take(4).collect::<String>());
                         handle_deep_link(url.as_str(), app_handle.clone());
                     }
                 });
