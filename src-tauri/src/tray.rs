@@ -315,45 +315,67 @@ static LAST_PLAYING_STATE: std::sync::LazyLock<std::sync::atomic::AtomicBool> =
 /// Returns cached devices when the throttle window hasn't elapsed, else
 /// fetches fresh ones. On a fetch failure the stale cache is returned so
 /// the submenu doesn't flicker to "(no devices)" on a transient error.
+///
+/// The cache mutex is held only to clone the snapshot and to store the
+/// fresh result — the HTTP fetch runs outside any lock so a cold/stale
+/// cache never blocks tray interactions. If two threads race on a stale
+/// cache both will fetch; the last writer wins. This benign double-fetch
+/// wastes one request but cannot corrupt state. See issue #217.
 fn cached_devices(access_token: &str) -> Vec<crate::spotify::DeviceInfo> {
-    let mut cache = DEVICES_CACHE.lock();
-    if let Some((fetched_at, devices)) = cache.as_ref() {
-        if fetched_at.elapsed() < TRAY_SPOTIFY_FETCH_THROTTLE {
-            return devices.clone();
-        }
+    // Snapshot under short lock, then drop before deciding staleness.
+    let snapshot = {
+        let cache = DEVICES_CACHE.lock();
+        cache.clone()
+    };
+    let needs_fetch = match &snapshot {
+        Some((fetched_at, _)) => fetched_at.elapsed() >= TRAY_SPOTIFY_FETCH_THROTTLE,
+        None => true,
+    };
+    if !needs_fetch {
+        return snapshot.unwrap().1;
     }
+    // Throttled fetch OUTSIDE any lock — never hold DEVICES_CACHE across HTTP.
     match crate::spotify::get_devices(access_token) {
         Ok(devices) => {
-            *cache = Some((Instant::now(), devices.clone()));
+            // Re-acquire only to store the fresh result.
+            *DEVICES_CACHE.lock() = Some((Instant::now(), devices.clone()));
             devices
         }
         Err(e) => {
             log::warn!("[TRAY] cached_devices: failed to fetch devices: {}", e);
-            cache
-                .as_ref()
-                .map(|(_, devices)| devices.clone())
-                .unwrap_or_default()
+            snapshot.map(|(_, devices)| devices).unwrap_or_default()
         }
     }
 }
 
 /// Returns cached queue when the throttle window hasn't elapsed, else
 /// fetches fresh. Falls back to the stale cache on failure.
+///
+/// Same lock discipline as `cached_devices`: snapshot, drop, fetch outside
+/// lock, re-acquire to store. Benign double-fetch on a race. See issue #217.
 fn cached_queue(access_token: &str) -> Option<crate::spotify::QueueInfo> {
-    let mut cache = QUEUE_CACHE.lock();
-    if let Some((fetched_at, queue)) = cache.as_ref() {
-        if fetched_at.elapsed() < TRAY_SPOTIFY_FETCH_THROTTLE {
-            return Some(queue.clone());
-        }
+    // Snapshot under short lock, then drop before deciding staleness.
+    let snapshot = {
+        let cache = QUEUE_CACHE.lock();
+        cache.clone()
+    };
+    let needs_fetch = match &snapshot {
+        Some((fetched_at, _)) => fetched_at.elapsed() >= TRAY_SPOTIFY_FETCH_THROTTLE,
+        None => true,
+    };
+    if !needs_fetch {
+        return snapshot.map(|(_, queue)| queue);
     }
+    // Throttled fetch OUTSIDE any lock — never hold QUEUE_CACHE across HTTP.
     match crate::spotify::get_queue(access_token) {
         Ok(queue) => {
-            *cache = Some((Instant::now(), queue.clone()));
+            // Re-acquire only to store.
+            *QUEUE_CACHE.lock() = Some((Instant::now(), queue.clone()));
             Some(queue)
         }
         Err(e) => {
             log::warn!("[TRAY] cached_queue: failed to fetch queue: {}", e);
-            cache.as_ref().map(|(_, queue)| queue.clone())
+            snapshot.map(|(_, queue)| queue)
         }
     }
 }
@@ -365,12 +387,22 @@ fn build_devices_submenu(
     app: &AppHandle,
     access_token: Option<&str>,
 ) -> Result<Submenu<tauri::Wry>, String> {
-    let submenu = Submenu::with_id(app, ID_DEVICES, "Devices", true)
-        .map_err(|e| e.to_string())?;
     let devices = match access_token {
         Some(token) => cached_devices(token),
         None => Vec::new(),
     };
+    build_devices_submenu_from_devices(app, &devices)
+}
+
+/// Builds the Devices submenu from an already-fetched slice. No HTTP is
+/// performed here — the caller must have fetched outside any tray lock.
+/// See issue #217.
+fn build_devices_submenu_from_devices(
+    app: &AppHandle,
+    devices: &[crate::spotify::DeviceInfo],
+) -> Result<Submenu<tauri::Wry>, String> {
+    let submenu = Submenu::with_id(app, ID_DEVICES, "Devices", true)
+        .map_err(|e| e.to_string())?;
     if devices.is_empty() {
         let empty = MenuItemBuilder::with_id(format!("{}|none", ID_DEVICES), "(no devices)")
             .enabled(false)
@@ -402,14 +434,22 @@ fn build_queue_submenu(
     app: &AppHandle,
     access_token: Option<&str>,
 ) -> Result<Submenu<tauri::Wry>, String> {
-    let submenu = Submenu::with_id(app, ID_QUEUE, "Up Next", true)
-        .map_err(|e| e.to_string())?;
     let queue = match access_token {
         Some(token) => cached_queue(token),
         None => None,
     };
+    build_queue_submenu_from_queue(app, queue.as_ref())
+}
+
+/// Builds the Up Next submenu from an already-fetched queue snapshot.
+/// No HTTP here — fetch must have happened outside the tray lock. See issue #217.
+fn build_queue_submenu_from_queue(
+    app: &AppHandle,
+    queue: Option<&crate::spotify::QueueInfo>,
+) -> Result<Submenu<tauri::Wry>, String> {
+    let submenu = Submenu::with_id(app, ID_QUEUE, "Up Next", true)
+        .map_err(|e| e.to_string())?;
     let up_next: Vec<crate::spotify::TrackInfo> = queue
-        .as_ref()
         .map(|q| q.up_next.iter().take(3).cloned().collect())
         .unwrap_or_default();
     if up_next.is_empty() {
@@ -498,10 +538,10 @@ fn force_tray_refresh(app: &AppHandle) {
     let state = app.state::<std::sync::Arc<crate::AppState>>();
     let is_syncing = state.polling.is_syncing(Ordering::Acquire);
     let current_track = state.polling.current_track().clone();
+    // Include is_playing in the key so a same-track pause is not deduped away. See issue #229.
     let track_key = current_track
         .as_ref()
-        .filter(|t| t.is_playing)
-        .map(|t| format!("{}|{}", t.artist, t.title));
+        .map(|t| format!("{}|{}|{}", t.artist, t.title, t.is_playing));
     // Flip the sync bit: the real (is_syncing, visible, track_key) tuple is
     // committed by the rebuild below, so this can never match the dedup key.
     *last_tray_state().lock() = Some((!is_syncing, false, track_key));
@@ -523,10 +563,11 @@ pub fn update_tray_menu(
         }
     };
 
-    // Issue #71: dedup guard. The polling thread calls this on every
+    // Issue #71 + #229: dedup guard. The polling thread calls this on every
     // successful poll; the menu only needs rebuilding when is_syncing,
     // window visibility (drives the Show/Hide label), or the track's
-    // title/is_playing actually changes.
+    // title/artist/is_playing actually changes. is_playing is included so a
+    // same-track pause flips the Play/Pause label without waiting for a poll.
     //
     // Window visibility is computed up front so the dedup key includes
     // it — otherwise a hide/show click would early-return and the label
@@ -537,8 +578,7 @@ pub fn update_tray_menu(
         .unwrap_or(false);
     let track_key = current_track
         .as_ref()
-        .filter(|t| t.is_playing)
-        .map(|t| format!("{}|{}", t.artist, t.title));
+        .map(|t| format!("{}|{}|{}", t.artist, t.title, t.is_playing));
     {
         let last = last_tray_state().lock();
         if last.as_ref() == Some(&(is_syncing, is_window_visible, track_key.clone())) {
@@ -566,11 +606,29 @@ pub fn update_tray_menu(
         // same state to retry rather than no-op on a stale snapshot.
     }
 
-    // Issue #71: serialise the two writers. Acquiring before the long
-    // menu build means the polling thread and the frontend command
-    // never interleave a `set_menu` call.
-    let _write_guard = tray_write_lock().lock();
+    // Fetch Spotify data OUTSIDE the tray write lock. The throttled caches
+    // are snapshotted and fetched without holding either cache mutex across
+    // HTTP (see cached_devices/cached_queue), and the tray lock is not yet
+    // held so a concurrent tray click or polling update never blocks on the
+    // network. Benign double-fetch race documented on those helpers. See issue #217.
+    let state = app.state::<std::sync::Arc<crate::AppState>>();
+    let access_token = state
+        .tokens
+        .spotify()
+        .as_ref()
+        .map(|t| t.access_token.clone());
+    let devices: Vec<crate::spotify::DeviceInfo> = match access_token.as_deref() {
+        Some(token) => cached_devices(token),
+        None => Vec::new(),
+    };
+    let queue: Option<crate::spotify::QueueInfo> = match access_token.as_deref() {
+        Some(token) => cached_queue(token),
+        None => None,
+    };
 
+    // Build menu items without holding the tray write lock. Only the final
+    // tray.set_menu call needs serialising — everything above is pure data
+    // preparation and menu-item construction.
     // Determine Show/Hide label based on the precomputed visibility.
     let show_hide_label = if is_window_visible {
         "Hide Window"
@@ -652,8 +710,11 @@ pub fn update_tray_menu(
     // Spotify playback controls (issue #3.0-P3). Play/Pause is a single
     // toggle labelled from LAST_PLAYING_STATE (see the static's docs — the
     // polling loop's stored track goes stale on a same-track pause); the
-    // Devices/Up Next submenus are built from the throttled caches so the
-    // polling loop's per-iteration rebuilds don't hammer the Spotify API.
+    // Devices/Up Next submenus are built from the pre-fetched throttled
+    // caches so the polling loop's per-iteration rebuilds don't hammer the
+    // Spotify API. Label is derived from (track_id, is_playing) via the
+    // track_key dedup and LAST_PLAYING_STATE, so a same-track pause flips
+    // without waiting for the next poll. See issues #229 and #217.
     let is_playing = LAST_PLAYING_STATE.load(Ordering::Acquire);
     let play_pause = MenuItemBuilder::with_id(
         ID_PLAY_PAUSE,
@@ -681,17 +742,12 @@ pub fn update_tray_menu(
         e.to_string()
     })?;
 
-    let state = app.state::<std::sync::Arc<crate::AppState>>();
-    let access_token = state
-        .tokens
-        .spotify()
-        .as_ref()
-        .map(|t| t.access_token.clone());
-    let devices_submenu = build_devices_submenu(app, access_token.as_deref()).map_err(|e| {
-        log::warn!("[TRAY] update_tray_menu: failed to build devices submenu: {}", e);
-        e
-    })?;
-    let queue_submenu = build_queue_submenu(app, access_token.as_deref()).map_err(|e| {
+    let devices_submenu =
+        build_devices_submenu_from_devices(app, &devices).map_err(|e| {
+            log::warn!("[TRAY] update_tray_menu: failed to build devices submenu: {}", e);
+            e
+        })?;
+    let queue_submenu = build_queue_submenu_from_queue(app, queue.as_ref()).map_err(|e| {
         log::warn!("[TRAY] update_tray_menu: failed to build queue submenu: {}", e);
         e
     })?;
@@ -731,10 +787,17 @@ pub fn update_tray_menu(
             e.to_string()
         })?;
 
-    tray.set_menu(Some(menu)).map_err(|e| {
-        log::warn!("[TRAY] update_tray_menu: failed to set tray menu: {}", e);
-        format!("Failed to set tray menu: {}", e)
-    })?;
+    // Acquire the tray write lock ONLY around the final set_menu. The long
+    // HTTP fetches and the entire menu build above ran without it, so neither
+    // a polling-thread rebuild nor a main-thread tray click blocks on the
+    // network. See issue #217.
+    {
+        let _write_guard = tray_write_lock().lock();
+        tray.set_menu(Some(menu)).map_err(|e| {
+            log::warn!("[TRAY] update_tray_menu: failed to set tray menu: {}", e);
+            format!("Failed to set tray menu: {}", e)
+        })?;
+    }
 
     // Commit the snapshot only after a successful set_menu. A failed
     // set_menu above left the snapshot at the previous value, so the
