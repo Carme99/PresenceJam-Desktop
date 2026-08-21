@@ -1,67 +1,6 @@
 import { writable } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
-
-// ---------------------------------------------------------------------------
-// IMPORTANT: Defaults in this file are FALLBACK-ONLY.
-//
-// The Rust backend (`src-tauri/src/config.rs`) is the source of truth for
-// the runtime config values. The fields here mirror them for first-render
-// and disconnected-frontend scenarios only — `loadConfig()` overwrites
-// them on startup by calling the Rust `load_config` command.
-//
-// If you change a default in Rust, change it here too. Drift between the
-// two layers causes silent UX bugs (e.g. a Settings slider that the
-// backend ignores, or a UI default that the backend immediately
-// overwrites). The long-term fix is to generate this file from Rust
-// via a build script (see GH issue #13).
-// ---------------------------------------------------------------------------
-
-export interface SpotifyConfig {
-  client_id: string;
-  /**
-   * True iff the Spotify `client_secret` is currently stored in the OS
-   * keychain. This is a derived/display field — it is populated by
-   * `load_config` (and not persisted to disk). The actual secret lives
-   * in the keychain, not in `config.json`. See issue #9.
-   */
-  client_secret_set: boolean;
-  redirect_uri: string;
-}
-
-export interface TeamsConfig {
-  status_format: string;
-  clear_on_pause: boolean;
-  profanity_filter: boolean;
-  profanity_placeholder: string;
-  start_minimized: boolean;
-  // P1: drive the Teams presence bubble (Available while playing) via
-  // setPresence/clearPresence. Off by default.
-  availability_sync: boolean;
-  // P2: skip status writes while busy/DND/in a meeting/call/presenting.
-  // On by default.
-  presence_gate: boolean;
-}
-
-export interface PollingConfig {
-  default_interval_seconds: number;
-  minimum_interval_seconds: number;
-  max_interval_seconds: number;
-  expiry_buffer_seconds: number;
-}
-
-export interface LoggingConfig {
-  enabled: boolean;
-  log_level: string;
-  // retention_days removed (was a no-op) — see GH #13
-}
-
-export interface AppConfig {
-  spotify: SpotifyConfig;
-  teams: TeamsConfig;
-  polling: PollingConfig;
-  logging: LoggingConfig;
-  autostart: boolean;
-}
+import type { AppConfig } from '../types';
 
 export const defaultConfig: AppConfig = {
   spotify: {

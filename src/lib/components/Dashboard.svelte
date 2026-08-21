@@ -58,7 +58,6 @@
 
     // 3.1.0: notification opt-in gate — default off, enabled via localStorage flag
     try { notificationsEnabled = localStorage.getItem('notificationsEnabled') === 'true'; } catch {}
-    isPermissionGranted().catch(() => false);
 
     devLog('[DASHBOARD] onMount: setting up spotify-track-changed listener');
     unlisten.push(await listen('spotify-track-changed', async (event: any) => {
@@ -194,7 +193,7 @@
       // Generic reconnect signal from polling.rs:633 (e.g. when the
       // auth refresh loop has been failing for too long). The
       // provider-specific events are handled elsewhere:
-      // spotify-reconnect-required in Settings.svelte,
+      // spotify-reconnect-required in +layout.svelte (issue #220),
       // teams-reconnect-required in +layout.svelte (issue #157);
       // this is the catch-all that takes the user to the reconnect view.
       devLog('[DASHBOARD] EVENT: reconnect-required received');
@@ -247,25 +246,35 @@
     currentView.set('about');
   }
 
+  let goToSetupHint = $state('');
+  let goToSetupDisabled = $state(false);
+
   async function goToSetup() {
     devLog('[DASHBOARD] goToSetup: ENTRY');
-    await loadConfig();
-    // The client_secret now lives in the OS keychain. We check both the
-    // config (client_id) and the keychain (client_secret). See issue #9.
-    const hasClientId = !!$configStore.spotify.client_id
-      && $configStore.spotify.client_id.trim() !== '';
-    const hasClientSecret = await invoke<boolean>('is_spotify_client_secret_set');
-    const hasSpotifyCredentials = hasClientId && hasClientSecret;
-    devLog('[DASHBOARD] goToSetup: hasSpotifyCredentials=', hasSpotifyCredentials);
+    try {
+      await loadConfig();
+      // The client_secret now lives in the OS keychain. We check both the
+      // config (client_id) and the keychain (client_secret). See issue #9.
+      const hasClientId = !!$configStore.spotify.client_id
+        && $configStore.spotify.client_id.trim() !== '';
+      const hasClientSecret = await invoke<boolean>('is_spotify_client_secret_set');
+      const hasSpotifyCredentials = hasClientId && hasClientSecret;
+      devLog('[DASHBOARD] goToSetup: hasSpotifyCredentials=', hasSpotifyCredentials);
 
-    if (hasSpotifyCredentials) {
-      // Credentials exist, go to simplified reconnect flow
-      devLog('[DASHBOARD] goToSetup: navigating to reconnect');
-      currentView.set('reconnect');
-    } else {
-      // Missing credentials, need full onboarding
-      devLog('[DASHBOARD] goToSetup: navigating to onboarding');
-      currentView.set('onboarding');
+      if (hasSpotifyCredentials) {
+        // Credentials exist, go to simplified reconnect flow
+        devLog('[DASHBOARD] goToSetup: navigating to reconnect');
+        currentView.set('reconnect');
+      } else {
+        // Missing credentials, need full onboarding
+        devLog('[DASHBOARD] goToSetup: navigating to onboarding');
+        currentView.set('onboarding');
+      }
+    } catch (e) {
+      console.warn('[DASHBOARD] goToSetup failed:', e);
+      goToSetupHint = 'Unable to check credentials — please try again.';
+      goToSetupDisabled = true;
+      setTimeout(() => { goToSetupHint = ''; goToSetupDisabled = false; }, 4000);
     }
     devLog('[DASHBOARD] goToSetup: EXIT');
   }
@@ -350,7 +359,10 @@
         <h2>Setup required</h2>
         <p>Connect Spotify and Microsoft Teams so your now-playing tracks can drive your Teams status.</p>
         <div class="setup-actions">
-          <button class="btn-full" onclick={goToSetup}>Continue setup</button>
+          <button class="btn-full" onclick={goToSetup} disabled={goToSetupDisabled}>Continue setup</button>
+          {#if goToSetupHint}
+            <p class="hint" role="status">{goToSetupHint}</p>
+          {/if}
         </div>
       </div>
     {:else if currentTrack}

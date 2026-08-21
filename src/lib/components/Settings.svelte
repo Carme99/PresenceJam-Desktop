@@ -4,8 +4,8 @@
   import { onMount, onDestroy } from 'svelte';
   import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notification';
   import { currentView } from '$lib/stores/app';
-  import { configStore, saveConfig, loadConfig, type AppConfig } from '$lib/stores/config';
-  import type { SyncStatus, TeamsTokens } from '$lib/types';
+  import { configStore, saveConfig, loadConfig } from '$lib/stores/config';
+  import type { AppConfig, SyncStatus, TeamsTokens } from '$lib/types';
   import { authFlow, setSpotifyPhase, setTeamsPhase } from '$lib/stores/authFlow.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
   import PageHeader from './PageHeader.svelte';
@@ -62,19 +62,29 @@
   }
 
   let previewText = $state('');
+  let previewSeq = 0;
+  let previewDebounce: ReturnType<typeof setTimeout> | null = null;
 
   // Live preview of the status format template. We delegate the
   // placeholder substitution to Rust (`preview_status`) so the Svelte
   // preview and the runtime polling loop share one implementation —
-  // see issue #74. `$effect` updates `previewText` whenever the user
-  // edits the format string. Using `$effect` over an `await` inside
-  // `$derived` avoids a per-keystroke loading flash and keeps the
-  // template a plain `{previewText}` interpolation.
+  // see issue #74. Debounced 300 ms + sequence guard to discard stale
+  // responses when the user types quickly.
   $effect(() => {
     const format = localConfig.teams.status_format;
-    invoke<string>('preview_status', { format }).then((v) => {
-      previewText = v;
-    }).catch((e)=>{ console.warn('[SETTINGS] preview_status failed:', e); previewText='(preview unavailable)'; });
+    if (previewDebounce) clearTimeout(previewDebounce);
+    previewDebounce = setTimeout(async () => {
+      const my = ++previewSeq;
+      try {
+        const v = await invoke<string>('preview_status', { format });
+        if (my !== previewSeq) return;
+        previewText = v;
+      } catch (e) {
+        if (my !== previewSeq) return;
+        console.warn('[SETTINGS] preview_status failed:', e);
+        previewText = '(preview unavailable)';
+      }
+    }, 300);
   });
 
   let unlistenFns: UnlistenFn[] = [];
@@ -104,30 +114,10 @@
     // re-auth with the new scope set; see issue #3.0-P1/P2).
     await refreshTeamsGrantedScopes();
 
-    // Listen for reconnect-required events (emitted when backend clears tokens and needs re-auth)
-    unlistenFns.push(await listen('spotify-reconnect-required', async () => {
-      console.log('[SETTINGS] spotify-reconnect-required received');
-      setSpotifyPhase('waiting');
-      try {
-        // The client_secret is no longer in the config — it lives in the OS
-        // keychain (set during Onboarding). Re-auth needs the keychain
-        // entry to still be present. If it isn't, redirect the user back
-        // to Onboarding. See issue #9.
-        const hasSecret = await invoke<boolean>('is_spotify_client_secret_set');
-        if (!hasSecret) {
-          console.warn('[SETTINGS] spotify-reconnect-required: keychain empty, redirecting to onboarding');
-          currentView.set('onboarding');
-          return;
-        }
-        await invoke('start_spotify_reconnect', {
-          clientId: localConfig.spotify.client_id,
-          redirectUri: 'presencejam://callback'
-        });
-      } catch (e) {
-        console.error('[SETTINGS] start_spotify_reconnect failed:', e);
-        setSpotifyPhase('error', String(e));
-      }
-    }));
+    // NOTE: `spotify-reconnect-required` is handled by the always-mounted
+    // listener in +layout.svelte (issue #220). Removing the Settings-only
+    // listener avoids double-handling and missed events when Settings is
+    // not mounted (the normal Dashboard case).
 
     // NOTE: `teams-reconnect-required` is handled by the always-mounted
     // listener in +layout.svelte (issue #157). The polling loop can emit
@@ -170,6 +160,10 @@
       clearTimeout(saveTimeout);
       saveTimeout = null;
     }
+    if (previewDebounce) {
+      clearTimeout(previewDebounce);
+      previewDebounce = null;
+    }
     for (const unlisten of unlistenFns) {
       unlisten();
     }
@@ -189,7 +183,11 @@
   }
 
   async function openLogs() {
-    await invoke('open_logs_folder');
+    try {
+      await invoke('open_logs_folder');
+    } catch (e) {
+      console.warn('[SETTINGS] open_logs_folder failed:', e);
+    }
   }
 
   async function reconnectSpotify() {
@@ -499,9 +497,20 @@
           type="checkbox"
           checked={localConfig.autostart}
           onchange={async (e) => {
-            const enabled = (e.currentTarget as HTMLInputElement).checked;
+            const target = e.currentTarget as HTMLInputElement;
+            const enabled = target.checked;
+            const previous = !enabled;
             localConfig.autostart = enabled;
-            await invoke('set_autostart_enabled', { enabled });
+            try {
+              await invoke('set_autostart_enabled', { enabled });
+            } catch (err) {
+              console.warn('[SETTINGS] set_autostart_enabled failed:', err);
+              localConfig.autostart = previous;
+              target.checked = previous;
+              saveMessage = 'Failed to update launch-at-login: ' + String(err).slice(0, 120);
+              if (saveTimeout) clearTimeout(saveTimeout);
+              saveTimeout = setTimeout(() => saveMessage = '', 3000);
+            }
           }}
         />
       </div>

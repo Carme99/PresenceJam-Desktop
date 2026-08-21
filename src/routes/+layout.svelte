@@ -1,6 +1,6 @@
 <script lang="ts">
   import '../app.css';
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
   // Side-effect import — installs the module-level subscribe that
@@ -10,21 +10,32 @@
   import { devLog } from '$lib/utils/dev';
   import UpdatePrompt from '$lib/components/UpdatePrompt.svelte';
   import { currentView } from '$lib/stores/app';
-  import { authFlow, setTeamsPhase, setTeamsDeviceCode } from '$lib/stores/authFlow.svelte';
-  import type { DeviceCodeResponse, TeamsTokens } from '$lib/types';
+  import { authFlow, setTeamsPhase, setTeamsDeviceCode, setSpotifyPhase } from '$lib/stores/authFlow.svelte';
+  import type { DeviceCodeResponse, TeamsTokens, AppConfig } from '$lib/types';
 
   devLog(`[LAYOUT] PresenceJam build: ${import.meta.env.VITE_APP_BUILD ?? 'dev build'}`);
 
-  // `teams-reconnect-required` is emitted by the polling loop (refresh
-  // failed / 401-403 on set-status) and by `reconnect_teams`. The normal
-  // failure case finds the user on the Dashboard, where Settings is not
-  // mounted — so the always-mounted layout owns this single listener
-  // chain (issue #157): it sets the authFlow phase, navigates to
-  // Settings, and runs the full device-code flow (mint code, store it,
-  // open the verification URL, start polling). Settings renders the
-  // stored code/URI and offers a manual "check now" poll.
+  let playbackError = $state('');
+  let playbackErrorTimeout: ReturnType<typeof setTimeout> | null = null;
+
+  function showPlaybackError(msg: string) {
+    playbackError = msg;
+    if (playbackErrorTimeout) clearTimeout(playbackErrorTimeout);
+    playbackErrorTimeout = setTimeout(() => {
+      playbackError = '';
+      playbackErrorTimeout = null;
+    }, 6000);
+  }
+
+  // Always-mounted listeners: teams + spotify reconnect + playback-error.
+  // Settings no longer owns spotify-reconnect-required (issue #220) to
+  // avoid missed events when the user is on Dashboard.
   onMount(() => {
-    let unlisten: (() => void) | null = null;
+    let unlistenTeams: (() => void) | null = null;
+    let unlistenSpotify: (() => void) | null = null;
+    let unlistenPlayback: (() => void) | null = null;
+    let destroyed = false;
+
     listen('teams-reconnect-required', async () => {
       devLog('[LAYOUT] teams-reconnect-required received');
       setTeamsPhase('waiting');
@@ -44,7 +55,49 @@
         setTeamsPhase('error', String(e));
       }
     }).then((u) => {
-      unlisten = u;
+      if (destroyed) u();
+      else unlistenTeams = u;
+    });
+
+    listen<string>('spotify-reconnect-required', async () => {
+      devLog('[LAYOUT] spotify-reconnect-required received');
+      setSpotifyPhase('waiting');
+      currentView.set('settings');
+      try {
+        const hasSecret = await invoke<boolean>('is_spotify_client_secret_set');
+        if (!hasSecret) {
+          console.warn('[LAYOUT] spotify-reconnect-required: keychain empty, redirecting to onboarding');
+          currentView.set('onboarding');
+          return;
+        }
+        // Client ID lives in config; fetch it to drive start_spotify_reconnect.
+        const cfg = await invoke<AppConfig>('load_config');
+        const clientId = cfg.spotify.client_id;
+        if (!clientId) {
+          console.warn('[LAYOUT] spotify-reconnect-required: client_id empty, redirecting to onboarding');
+          currentView.set('onboarding');
+          return;
+        }
+        await invoke('start_spotify_reconnect', {
+          clientId,
+          redirectUri: 'presencejam://callback'
+        });
+      } catch (e) {
+        console.error('[LAYOUT] start_spotify_reconnect failed:', e);
+        setSpotifyPhase('error', String(e));
+      }
+    }).then((u) => {
+      if (destroyed) u();
+      else unlistenSpotify = u;
+    });
+
+    listen<string>('playback-error', (event) => {
+      const msg = typeof event.payload === 'string' ? event.payload : String(event.payload);
+      console.warn('[LAYOUT] playback-error received:', msg);
+      showPlaybackError(msg);
+    }).then((u) => {
+      if (destroyed) u();
+      else unlistenPlayback = u;
     });
 
     // Polls the backend for device-code completion. The cadence is
@@ -69,8 +122,16 @@
     }
 
     return () => {
-      unlisten?.();
+      destroyed = true;
+      unlistenTeams?.();
+      unlistenSpotify?.();
+      unlistenPlayback?.();
+      if (playbackErrorTimeout) clearTimeout(playbackErrorTimeout);
     };
+  });
+
+  onDestroy(() => {
+    if (playbackErrorTimeout) clearTimeout(playbackErrorTimeout);
   });
 </script>
 
@@ -81,4 +142,41 @@
 </svelte:head>
 
 <slot />
+{#if playbackError}
+  <div class="playback-toast" role="alert" aria-live="polite">
+    <span class="toast-msg">{playbackError}</span>
+    <button class="toast-dismiss" onclick={() => { playbackError = ''; if (playbackErrorTimeout) { clearTimeout(playbackErrorTimeout); playbackErrorTimeout = null; } }} aria-label="Dismiss">×</button>
+  </div>
+{/if}
 <UpdatePrompt />
+
+<style>
+  .playback-toast {
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--bg-surface, #1e1e1e);
+    color: var(--fg, #eee);
+    border: 1px solid var(--border, #333);
+    border-radius: 8px;
+    padding: 12px 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    max-width: min(90vw, 480px);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+    z-index: 9999;
+  }
+  .toast-msg { font-size: 14px; line-height: 1.4; }
+  .toast-dismiss {
+    background: transparent;
+    border: none;
+    color: inherit;
+    font-size: 18px;
+    cursor: pointer;
+    padding: 2px 6px;
+    opacity: 0.7;
+  }
+  .toast-dismiss:hover { opacity: 1; }
+</style>

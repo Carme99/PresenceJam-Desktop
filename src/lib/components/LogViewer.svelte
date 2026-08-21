@@ -47,7 +47,11 @@
   );
 
   async function openFolder() {
-    await invoke('open_logs_folder');
+    try {
+      await invoke('open_logs_folder');
+    } catch (e) {
+      console.warn('[LOGVIEWER] open_logs_folder failed:', e);
+    }
   }
 
   function clearLogs() {
