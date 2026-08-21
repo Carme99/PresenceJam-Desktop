@@ -51,60 +51,95 @@ fn friendly_playback_error(err: SpotifyApiError) -> String {
 /// Resumes playback on the active device (or the given one via
 /// `playback_transfer`). See issue #3.0-P3.
 #[tauri::command]
-pub fn playback_play(state: State<'_, Arc<crate::AppState>>) -> Result<(), String> {
+pub async fn playback_play(state: State<'_, Arc<crate::AppState>>) -> Result<(), String> {
     log::debug!("{CMD} playback_play: ENTRY");
     let token = stored_access_token(&state)?;
-    crate::spotify::player_play(&token, None).map_err(friendly_playback_error)
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::spotify::player_play(&token, None).map_err(friendly_playback_error)
+    })
+    .await
+    .map_err(|e| format!("{CMD} playback_play: task panicked: {e}"))?
 }
 
 /// Pauses playback on the active device. See issue #3.0-P3.
 #[tauri::command]
-pub fn playback_pause(state: State<'_, Arc<crate::AppState>>) -> Result<(), String> {
+pub async fn playback_pause(state: State<'_, Arc<crate::AppState>>) -> Result<(), String> {
     log::debug!("{CMD} playback_pause: ENTRY");
     let token = stored_access_token(&state)?;
-    crate::spotify::player_pause(&token, None).map_err(friendly_playback_error)
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::spotify::player_pause(&token, None).map_err(friendly_playback_error)
+    })
+    .await
+    .map_err(|e| format!("{CMD} playback_pause: task panicked: {e}"))?
 }
 
 /// Skips to the next track on the active device. See issue #3.0-P3.
 #[tauri::command]
-pub fn playback_next(state: State<'_, Arc<crate::AppState>>) -> Result<(), String> {
+pub async fn playback_next(state: State<'_, Arc<crate::AppState>>) -> Result<(), String> {
     log::debug!("{CMD} playback_next: ENTRY");
     let token = stored_access_token(&state)?;
-    crate::spotify::player_next(&token, None).map_err(friendly_playback_error)
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::spotify::player_next(&token, None).map_err(friendly_playback_error)
+    })
+    .await
+    .map_err(|e| format!("{CMD} playback_next: task panicked: {e}"))?
 }
 
 /// Skips to the previous track on the active device. See issue #3.0-P3.
 #[tauri::command]
-pub fn playback_previous(state: State<'_, Arc<crate::AppState>>) -> Result<(), String> {
+pub async fn playback_previous(state: State<'_, Arc<crate::AppState>>) -> Result<(), String> {
     log::debug!("{CMD} playback_previous: ENTRY");
     let token = stored_access_token(&state)?;
-    crate::spotify::player_previous(&token, None).map_err(friendly_playback_error)
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::spotify::player_previous(&token, None).map_err(friendly_playback_error)
+    })
+    .await
+    .map_err(|e| format!("{CMD} playback_previous: task panicked: {e}"))?
 }
 
 /// Transfers playback to the given device id, starting playback there.
 /// See issue #3.0-P3.
 #[tauri::command]
-pub fn playback_transfer(device_id: String, state: State<'_, Arc<crate::AppState>>) -> Result<(), String> {
+pub async fn playback_transfer(
+    device_id: String,
+    state: State<'_, Arc<crate::AppState>>,
+) -> Result<(), String> {
     log::debug!("{CMD} playback_transfer: ENTRY - device_id.len={}", device_id.len());
     let token = stored_access_token(&state)?;
-    crate::spotify::player_transfer(&token, &device_id, true).map_err(friendly_playback_error)
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::spotify::player_transfer(&token, &device_id, true).map_err(friendly_playback_error)
+    })
+    .await
+    .map_err(|e| format!("{CMD} playback_transfer: task panicked: {e}"))?
 }
 
 /// Lists the user's available playback devices. See issue #3.0-P3.
 #[tauri::command]
-pub fn get_playback_devices(state: State<'_, Arc<crate::AppState>>) -> Result<Vec<DeviceInfo>, String> {
+pub async fn get_playback_devices(
+    state: State<'_, Arc<crate::AppState>>,
+) -> Result<Vec<DeviceInfo>, String> {
     log::debug!("{CMD} get_playback_devices: ENTRY");
     let token = stored_access_token(&state)?;
-    crate::spotify::get_devices(&token).map_err(friendly_playback_error)
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::spotify::get_devices(&token).map_err(friendly_playback_error)
+    })
+    .await
+    .map_err(|e| format!("{CMD} get_playback_devices: task panicked: {e}"))?
 }
 
 /// Fetches the user's playback queue (currently playing + up to the whole
 /// up-next list). See issue #3.0-P3.
 #[tauri::command]
-pub fn get_playback_queue(state: State<'_, Arc<crate::AppState>>) -> Result<QueueInfo, String> {
+pub async fn get_playback_queue(
+    state: State<'_, Arc<crate::AppState>>,
+) -> Result<QueueInfo, String> {
     log::debug!("{CMD} get_playback_queue: ENTRY");
     let token = stored_access_token(&state)?;
-    crate::spotify::get_queue(&token).map_err(friendly_playback_error)
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::spotify::get_queue(&token).map_err(friendly_playback_error)
+    })
+    .await
+    .map_err(|e| format!("{CMD} get_playback_queue: task panicked: {e}"))?
 }
 
 /// Returns the scopes granted on the stored Spotify access token by
