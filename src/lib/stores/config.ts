@@ -37,14 +37,55 @@ export const configStore = writable<AppConfig>(defaultConfig);
 let loadPromise: Promise<AppConfig> | null = null;
 let savePromise: Promise<void> | null = null;
 
+function normalizeLoadedConfig(cfg: AppConfig): AppConfig {
+  const c = cfg as unknown as { polling: Record<string, unknown> };
+  if (c.polling) {
+    const p = c.polling;
+    if (typeof p.default_interval_seconds === 'number') {
+      p.default_interval_seconds = BigInt(p.default_interval_seconds as number);
+    } else if (typeof p.default_interval_seconds === 'string') {
+      p.default_interval_seconds = BigInt(p.default_interval_seconds as string);
+    }
+    if (typeof p.minimum_interval_seconds === 'number') {
+      p.minimum_interval_seconds = BigInt(p.minimum_interval_seconds as number);
+    } else if (typeof p.minimum_interval_seconds === 'string') {
+      p.minimum_interval_seconds = BigInt(p.minimum_interval_seconds as string);
+    }
+    if (typeof p.max_interval_seconds === 'number') {
+      p.max_interval_seconds = BigInt(p.max_interval_seconds as number);
+    } else if (typeof p.max_interval_seconds === 'string') {
+      p.max_interval_seconds = BigInt(p.max_interval_seconds as string);
+    }
+    if (typeof p.expiry_buffer_seconds === 'number') {
+      p.expiry_buffer_seconds = BigInt(p.expiry_buffer_seconds as number);
+    } else if (typeof p.expiry_buffer_seconds === 'string') {
+      p.expiry_buffer_seconds = BigInt(p.expiry_buffer_seconds as string);
+    }
+  }
+  return cfg;
+}
+
+export function toSavePayload(cfg: AppConfig): AppConfig {
+  const payload = structuredClone(cfg) as unknown as { polling: Record<string, unknown> };
+  const p = payload.polling;
+  if (p) {
+    p.default_interval_seconds = Number(p.default_interval_seconds as bigint | number | string);
+    p.minimum_interval_seconds = Number(p.minimum_interval_seconds as bigint | number | string);
+    p.max_interval_seconds = Number(p.max_interval_seconds as bigint | number | string);
+    p.expiry_buffer_seconds = Number(p.expiry_buffer_seconds as bigint | number | string);
+  }
+  return payload as unknown as AppConfig;
+}
+
 export async function loadConfig(): Promise<AppConfig> {
   if (loadPromise) return loadPromise;
 
   loadPromise = (async () => {
     try {
       const cfg = await invoke<AppConfig>('load_config');
-      configStore.set(cfg);
-      return cfg;
+      const normalized = normalizeLoadedConfig(cfg);
+      configStore.set(normalized);
+      return normalized;
     } catch (e) {
       console.error('[CONFIG] loadConfig failed:', e);
       configStore.set(defaultConfig);
@@ -62,7 +103,8 @@ export async function saveConfig(cfg: AppConfig): Promise<void> {
 
   savePromise = (async () => {
     try {
-      await invoke('save_config', { config: cfg });
+      const payload = toSavePayload(cfg);
+      await invoke('save_config', { config: payload });
       configStore.set(cfg);
     } finally {
       savePromise = null;

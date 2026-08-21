@@ -11,7 +11,7 @@
   import PageHeader from './PageHeader.svelte';
   import { theme } from '$lib/stores/theme';
 
-  let localConfig = $state<AppConfig>({ ...$configStore });
+  let localConfig = $state<AppConfig>(structuredClone($configStore));
   let isConnected = $state(false);
   let teamsStatusConnected = $state(false);
   let isSaving = $state(false);
@@ -93,7 +93,7 @@
   onMount(async () => {
     try { notificationsEnabled = localStorage.getItem('notificationsEnabled') === 'true'; } catch {}
     await loadConfig();
-    localConfig = JSON.parse(JSON.stringify($configStore));
+    localConfig = structuredClone($configStore);
 
     try {
       const syncStatus = await invoke<SyncStatus>('get_sync_status');

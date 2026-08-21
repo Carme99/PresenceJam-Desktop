@@ -48,7 +48,11 @@
           deviceCode: response.device_code,
           interval: response.interval
         });
-        await invoke('open_external_url', { url: response.verification_url });
+        try {
+          await invoke('open_external_url', { url: response.verification_url });
+        } catch (e) {
+          console.warn('[LAYOUT] open_external_url failed:', e);
+        }
         void pollTeamsAuth();
       } catch (e) {
         console.error('[LAYOUT] teams-reconnect-required: start_teams_auth_device_code failed:', e);
