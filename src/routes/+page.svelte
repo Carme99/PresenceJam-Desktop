@@ -43,12 +43,18 @@
     })();
 
     devLog('[PAGE] onMount: setting up tray-click listener');
-    listen('tray-click', () => {
+    let destroyed = false;
+    listen('tray-click', async () => {
       devLog('[PAGE] EVENT: tray-click received');
       devLog('[PAGE] EVENT: calling invoke show_window');
-      invoke('show_window');
+      try {
+        await invoke('show_window');
+      } catch (e) {
+        console.warn('[PAGE] show_window failed:', e);
+      }
     }).then(fn => {
-      unlistenTray = fn;
+      if (destroyed) fn();
+      else unlistenTray = fn;
       devLog('[PAGE] onMount: tray-click listener registered');
     });
     devLog('[PAGE] onMount: setting up app-shutdown listener');
@@ -61,7 +67,8 @@
         console.error('[PAGE] EVENT: app_exit FAILED:', e);
       }
     }).then(fn => {
-      unlistenShutdown = fn;
+      if (destroyed) fn();
+      else unlistenShutdown = fn;
       devLog('[PAGE] onMount: app-shutdown listener registered');
     });
 
@@ -69,7 +76,7 @@
     listen<string>('navigate', (event) => {
       devLog('[PAGE] EVENT: navigate received:', event.payload);
       currentView.set(event.payload as View);
-    }).then(fn => unlisten.push(fn));
+    }).then(fn => { if (destroyed) fn(); else unlisten.push(fn); });
 
     devLog('[PAGE] onMount: setting up open-logs-folder listener');
     listen('open-logs-folder', async () => {
@@ -79,15 +86,16 @@
       } catch (e) {
         console.error('[PAGE] EVENT: open_logs_folder FAILED:', e);
       }
-    }).then(fn => unlisten.push(fn));
+    }).then(fn => { if (destroyed) fn(); else unlisten.push(fn); });
 
     devLog('[PAGE] onMount: setting up show-about listener');
     listen('show-about', () => {
       devLog('[PAGE] EVENT: show-about received');
       currentView.set('about');
-    }).then(fn => unlisten.push(fn));
+    }).then(fn => { if (destroyed) fn(); else unlisten.push(fn); });
 
     return () => {
+      destroyed = true;
       devLog('[PAGE] onDestroy: ENTRY');
       if (unlistenTray) {
         unlistenTray();

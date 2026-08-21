@@ -1,7 +1,8 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { onMount, onDestroy } from 'svelte';
-  import { configStore, saveConfig, type AppConfig } from '$lib/stores/config';
+  import { configStore, saveConfig } from '$lib/stores/config';
+  import type { AppConfig } from '$lib/types';
   import type { DeviceCodeResponse, SpotifyTokens, TeamsTokens } from '$lib/types';
   import { currentView } from '$lib/stores/app';
   import { authFlow, setSpotifyPhase, setTeamsPhase, setTeamsDeviceCode } from '$lib/stores/authFlow.svelte';
@@ -281,10 +282,10 @@
           presence_gate: true
         },
         polling: {
-          default_interval_seconds: pollingInterval,
-          minimum_interval_seconds: 10,
-          max_interval_seconds: 60,
-          expiry_buffer_seconds: 10
+          default_interval_seconds: BigInt(pollingInterval),
+          minimum_interval_seconds: BigInt(10),
+          max_interval_seconds: BigInt(60),
+          expiry_buffer_seconds: BigInt(10)
         },
         logging: {
           enabled: true,

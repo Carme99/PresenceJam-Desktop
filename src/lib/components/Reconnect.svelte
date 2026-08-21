@@ -2,8 +2,10 @@
   import { invoke } from '@tauri-apps/api/core';
   import { onMount, onDestroy } from 'svelte';
   import { currentView } from '$lib/stores/app';
-  import { configStore, loadConfig, type AppConfig } from '$lib/stores/config';
-  import { authFlow, setSpotifyPhase, setTeamsPhase } from '$lib/stores/authFlow.svelte';
+  import { configStore, loadConfig } from '$lib/stores/config';
+  import type { AppConfig } from '$lib/types';
+  import { authFlow, setSpotifyPhase, setTeamsPhase, setTeamsDeviceCode } from '$lib/stores/authFlow.svelte';
+  import type { DeviceCodeResponse, SyncStatus, TeamsTokens } from '$lib/types';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
   import { devLog } from '$lib/utils/dev';
   import PageHeader from './PageHeader.svelte';
@@ -22,12 +24,21 @@
     // presence. See issue #9.
     const hasClientId = !!$configStore.spotify.client_id
       && $configStore.spotify.client_id.trim() !== '';
-    const hasClientSecret = await invoke<boolean>('is_spotify_client_secret_set');
+    let hasClientSecret = false;
+    try { hasClientSecret = await invoke<boolean>('is_spotify_client_secret_set'); } catch { hasClientSecret = false; }
     needsSpotify = !hasClientId || !hasClientSecret;
     // Teams re-auth is NOT auto-refreshing in general (device-code
     // refresh failures land the user in a re-auth flow — see #151,
     // #157), so surface the Teams reconnect path honestly.
-    needsTeams = true;
+    // Derive needsTeams from sync status (teams_connected) rather than
+    // hard-coding true, so the card only shows when Teams actually needs
+    // re-auth.
+    try {
+      const status = await invoke<SyncStatus>('get_sync_status');
+      needsTeams = !status.teams_connected;
+    } catch {
+      needsTeams = true;
+    }
 
     devLog('[RECONNECT] needsSpotify=', needsSpotify, 'needsTeams=', needsTeams);
 
@@ -66,7 +77,8 @@
     // Re-check the keychain: the user may have wiped it since the page
     // loaded. If the secret is gone we cannot complete the auth flow
     // without re-onboarding, so bail. See issue #9.
-    const hasSecret = await invoke<boolean>('is_spotify_client_secret_set');
+    let hasSecret = false;
+    try { hasSecret = await invoke<boolean>('is_spotify_client_secret_set'); } catch { hasSecret = false; }
     if (!hasSecret) {
       devLog('[RECONNECT] reconnectSpotify: keychain empty, redirecting to onboarding');
       needsSpotify = true;
@@ -84,6 +96,48 @@
     } catch (e) {
       devLog('[RECONNECT] reconnectSpotify: invoke failed:', e);
       setSpotifyPhase('error', String(e));
+    }
+  }
+
+  async function reconnectTeams() {
+    if (authFlow.teams.phase === 'waiting') return;
+    devLog('[RECONNECT] reconnectTeams: ENTRY');
+    setTeamsPhase('waiting');
+    try {
+      const response = await invoke<DeviceCodeResponse>('start_teams_auth_device_code');
+      setTeamsDeviceCode({
+        userCode: response.user_code,
+        verificationUrl: response.verification_url,
+        deviceCode: response.device_code,
+        interval: response.interval
+      });
+      try {
+        await invoke('open_external_url', { url: response.verification_url });
+      } catch (e) {
+        console.warn('[RECONNECT] open_external_url failed (non-fatal):', e);
+      }
+      await pollTeamsAuth();
+    } catch (e) {
+      devLog('[RECONNECT] reconnectTeams failed:', e);
+      setTeamsPhase('error', String(e));
+    }
+  }
+
+  async function pollTeamsAuth() {
+    if (!authFlow.teams.deviceCode) return;
+    setTeamsPhase('waiting');
+    try {
+      const tokens = await invoke<TeamsTokens>('poll_teams_auth', {
+        deviceCode: authFlow.teams.deviceCode,
+        interval: authFlow.teams.interval
+      });
+      if (tokens) {
+        setTeamsPhase('done');
+        needsTeams = false;
+      }
+    } catch (e) {
+      devLog('[RECONNECT] pollTeamsAuth failed:', e);
+      setTeamsPhase('error', String(e));
     }
   }
 
@@ -132,6 +186,39 @@
       {:else}
         <p class="hint">Click below to reconnect your Spotify account.</p>
         <button class="btn-full" onclick={reconnectSpotify}>Reconnect Spotify</button>
+      {/if}
+    </section>
+
+        <section class="card">
+      <header class="section-header">
+        <h2>Microsoft Teams</h2>
+        <span class="badge"
+          class:success={authFlow.teams.phase === 'done' || !needsTeams}
+          class:warning={authFlow.teams.phase === 'waiting'}
+          class:error={!!authFlow.teams.error && needsTeams}>
+          <span class="dot"></span>
+          {#if authFlow.teams.phase === 'done' || !needsTeams}Connected
+          {:else if authFlow.teams.phase === 'waiting'}Waiting…
+          {:else if authFlow.teams.error}Failed
+          {:else}Needs reconnect{/if}
+        </span>
+      </header>
+
+      {#if authFlow.teams.phase === 'done' || !needsTeams}
+        <p class="hint">Teams reconnected successfully.</p>
+      {:else if authFlow.teams.phase === 'waiting'}
+        <p class="hint">Go to <a href={authFlow.teams.verificationUrl} target="_blank" rel="noopener">{authFlow.teams.verificationUrl}</a> and enter code <strong>{authFlow.teams.userCode}</strong></p>
+        <p class="hint">Waiting for sign-in…</p>
+        <button class="btn-full" onclick={pollTeamsAuth}>I have signed in — check now</button>
+        {#if authFlow.teams.error}
+          <p class="error-message" role="alert">{authFlow.teams.error}</p>
+        {/if}
+      {:else if authFlow.teams.error}
+        <p class="error-message" role="alert">{authFlow.teams.error}</p>
+        <button class="btn-full" onclick={reconnectTeams}>Try again</button>
+      {:else}
+        <p class="hint">Click below to reconnect your Microsoft Teams account.</p>
+        <button class="btn-full" onclick={reconnectTeams}>Reconnect Teams</button>
       {/if}
     </section>
 
