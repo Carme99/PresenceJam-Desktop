@@ -1,5 +1,6 @@
 use parking_lot::{Mutex, RwLock};
 use std::sync::atomic::AtomicBool;
+use std::sync::OnceLock;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
@@ -292,17 +293,37 @@ pub struct AppState {
     pub pending: PendingAuths,
     pub config: Config,
     pub onboarding_cache: OnboardingCache,
+    /// Per-launch anti-hijack secret bound into the OAuth `state` param as
+    /// `<csrf>.<launch_secret>`. Generated once at startup, held in memory
+    /// only (`OnceLock`), never persisted. Spotify echoes `state` verbatim so
+    /// `handle_deep_link` can reject callbacks whose second component doesn't
+    /// match. See issue #66. **macOS limitation:** the `presencejam://`
+    /// scheme is registered at build time via `tauri.conf.json`; runtime
+    /// re-registration (`register_all`) is unsupported on macOS (returns
+    /// `UnsupportedPlatform`), so a hostile app that pre-registered the
+    /// scheme could still intercept the redirect. The intercepted `code`
+    /// is useless without the secret + PKCE verifier (both in our
+    /// AppState, never on disk / IPC), but the hijack itself is not
+    /// prevented on macOS.
+    pub launch_secret: OnceLock<String>,
 }
 
 impl AppState {
     pub fn new() -> Self {
         log::info!("[APP_STATE] AppState::new: creating new AppState");
+        let launch_secret = OnceLock::new();
+        // Initialise per-launch secret immediately so every AppState (including
+        // those created in tests) has a secret. Production startup via `run()`
+        // will have already set it, but `OnceLock::set` is harmless if already
+        // initialised — we ignore the error.
+        let _ = launch_secret.set(crate::pkce::generate_launch_secret());
         Self {
             tokens: Tokens::new(),
             polling: Polling::new(),
             pending: PendingAuths::new(),
             config: Config::new(),
             onboarding_cache: OnboardingCache::new(),
+            launch_secret,
         }
     }
 }
@@ -429,7 +450,12 @@ async fn handle_spotify_callback(
 }
 
 fn handle_deep_link(url: &str, app: AppHandle) {
-    log::debug!("[DEEP_LINK] handle_deep_link: ENTRY - url={}", url);
+    // #228: never log raw callback URL (contains code + state). Log only length/prefix.
+    log::debug!(
+        "[DEEP_LINK] handle_deep_link: ENTRY - url_len={} prefix={}…[REDACTED]",
+        url.len(),
+        &url[..url.len().min(4)]
+    );
 
     if let Ok(parsed) = url::Url::parse(url) {
         log::info!("[DEEP_LINK] handle_deep_link: URL parsed successfully");
@@ -453,20 +479,53 @@ fn handle_deep_link(url: &str, app: AppHandle) {
                     "[DEEP_LINK] handle_deep_link: code found - code.len={}",
                     code_str.len()
                 );
+                // #66 option b: per-launch secret bound into state as `<csrf>.<launch_secret>`.
+                // Spotify echoes state verbatim, so we can validate the second component against
+                // the secret stored in AppState (OnceLock, in-memory only). Mismatch → ignore
+                // callback (do not proceed to token exchange). Scheme stays `presencejam://`
+                // because macOS bundle scheme registration is config-time only (Info.plist) —
+                // runtime re-registration is not supported, so hijack remains possible on macOS
+                // but the intercepted `code` is useless without secret + PKCE verifier.
+                // #228: redact state in logs — never log raw values.
+                if let Some(ref st) = state_param {
+                    let secret_ok = {
+                        let app_state = app.state::<Arc<AppState>>();
+                        match app_state.launch_secret.get() {
+                            Some(secret) => {
+                                let parts: Vec<&str> = st.splitn(2, '.').collect();
+                                if parts.len() == 2 && parts[1] == secret {
+                                    true
+                                } else {
+                                    let prefix: String = st.chars().take(4).collect();
+                                    log::warn!(
+                                        "[DEEP_LINK] handle_deep_link: launch_secret mismatch — state prefix={}… len={} — ignoring callback (possible hijack) [REDACTED len {}]",
+                                        prefix,
+                                        st.len(),
+                                        st.len()
+                                    );
+                                    false
+                                }
+                            }
+                            None => {
+                                log::warn!(
+                                    "[DEEP_LINK] handle_deep_link: no launch_secret in AppState — ignoring callback [REDACTED len {}]",
+                                    st.len()
+                                );
+                                false
+                            }
+                        }
+                    };
+                    if !secret_ok {
+                        return;
+                    }
+                } else {
+                    log::warn!("[DEEP_LINK] handle_deep_link: missing state in callback — ignoring");
+                    return;
+                }
                 let app_clone = app.clone();
                 let code_clone = code_str.clone();
                 let state_clone = state_param.clone();
 
-                // Issue #66 (deferred): a per-launch UUID in the redirect
-                // URI path would defend against another app pre-registering
-                // the `presencejam://` scheme. Spotify requires exact
-                // redirect-URI match in the registered app, so a path
-                // component breaks the OAuth round-trip. A full fix needs
-                // per-launch custom-scheme registration (OS-specific).
-                // For now, the verifier-in-memory fix from #65 means an
-                // interceptor can read the `code` but cannot exchange it
-                // for tokens — the verifier is in our AppState, not on
-                // disk and not exposed via IPC.
                 log::info!("[DEEP_LINK] handle_deep_link: routing to Spotify callback");
                 tauri::async_runtime::spawn(async move {
                     log::info!(
@@ -538,7 +597,6 @@ pub fn run() {
     builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--minimized"]),
@@ -554,7 +612,6 @@ pub fn run() {
                 tauri_plugin_log::TargetKind::Webview,
             ))
             .build())
-        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_http::init())
         .setup(|app| {
             // Set panic hook to log crashes
@@ -610,6 +667,25 @@ pub fn run() {
             // Load config into AppState
             match config::load_config() {
                 Ok(cfg) => {
+                    // #226: wire logging.enabled / log_level into the logger after config load.
+                    {
+                        let level_str = cfg.logging.log_level.to_lowercase();
+                        let max_level = if !cfg.logging.enabled {
+                            log::LevelFilter::Off
+                        } else {
+                            match level_str.as_str() {
+                                "off" => log::LevelFilter::Off,
+                                "error" => log::LevelFilter::Error,
+                                "warn" => log::LevelFilter::Warn,
+                                "info" => log::LevelFilter::Info,
+                                "debug" => log::LevelFilter::Debug,
+                                "trace" => log::LevelFilter::Trace,
+                                _ => log::LevelFilter::Info,
+                            }
+                        };
+                        log::set_max_level(max_level);
+                        log::info!("[APP] setup: log level set to {:?} (enabled={})", max_level, cfg.logging.enabled);
+                    }
                     let mut config_guard = state.config.get_mut();
                     *config_guard = Some(cfg.clone());
                     log::info!("[APP] setup: config loaded into AppState");
@@ -746,7 +822,7 @@ pub fn run() {
                 if let Ok(Some(urls)) = start_urls {
                     log::info!("[APP] setup: found {} start URL(s)", urls.len());
                     for url in urls {
-                        log::info!("[APP] setup: processing start URL: {}", url);
+                        log::info!("[APP] setup: processing start URL: [REDACTED len {}] prefix={}…", url.as_str().len(), &url.as_str()[..url.as_str().len().min(4)]);
                         handle_deep_link(url.as_str(), app.handle().clone());
                     }
                 } else {
@@ -760,7 +836,7 @@ pub fn run() {
                     let urls = event.urls();
                     log::info!("[APP] on_open_url: received {} URL(s)", urls.len());
                     for url in urls {
-                        log::info!("[APP] on_open_url: processing URL: {}", url);
+                        log::info!("[APP] on_open_url: processing URL: [REDACTED len {}] prefix={}…", url.as_str().len(), &url.as_str()[..url.as_str().len().min(4)]);
                         handle_deep_link(url.as_str(), app_handle.clone());
                     }
                 });

@@ -20,10 +20,8 @@ tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-deep-link = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-notification = "2"
-tauri-plugin-store = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-log = "2"
-tauri-plugin-shell = "2"
 tauri-plugin-http = "2"
 tauri-plugin-updater = "2"
 

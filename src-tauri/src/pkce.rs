@@ -36,6 +36,34 @@ pub fn generate_challenge(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(hasher.finalize())
 }
 
+/// Generate a per-launch anti-hijack secret (32 random bytes, base64url no-pad, 43 chars).
+///
+/// Stored in `AppState::launch_secret` (OnceCell) at startup and bound into the
+/// OAuth `state` param as `<csrf>.<launch_secret>`. Spotify echoes `state` verbatim,
+/// so the callback can prove the `code` came from our launch. On macOS the
+/// `presencejam://` scheme is registered at build time (Tauri config) — runtime
+/// re-registration is not supported, so a hostile app could still intercept the
+/// redirect, but without the secret the intercepted `code` is useless (PKCE verifier
+/// stays in our AppState). See issue #66.
+pub fn generate_launch_secret() -> String {
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// Redact a sensitive value for logging: `[REDACTED len N]`.
+#[allow(dead_code)]
+pub fn redact_len(s: &str) -> String {
+    format!("[REDACTED len {}]", s.len())
+}
+
+/// Redact showing only a 4-char prefix: `abcd…[REDACTED len N]`.
+#[allow(dead_code)]
+pub fn redact_prefix(s: &str) -> String {
+    let prefix: String = s.chars().take(4).collect();
+    format!("{}…[REDACTED len {}]", prefix, s.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

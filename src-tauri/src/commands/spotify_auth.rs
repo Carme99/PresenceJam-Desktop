@@ -71,8 +71,20 @@ fn run_spotify_oauth_flow(
     log::info!("{CMD} run_spotify_oauth_flow: challenge generated");
 
     let csrf_state = crate::pkce::generate_verifier();
+    // #66: bind per-launch secret into state as `<csrf>.<launch_secret>`.
+    // Spotify echoes `state` verbatim, so the callback can validate the
+    // secret without extra storage. `launch_secret` is 43 chars (32B b64url)
+    // and lives in AppState OnceLock (in-memory only). On macOS the scheme
+    // stays `presencejam://` — hijack still possible but code is useless
+    // without secret+verifier.
+    let launch_secret = state
+        .launch_secret
+        .get()
+        .cloned()
+        .unwrap_or_else(crate::pkce::generate_launch_secret);
+    let csrf_state = format!("{}.{}", csrf_state, launch_secret);
     log::info!(
-        "{CMD} run_spotify_oauth_flow: state generated, len={}",
+        "{CMD} run_spotify_oauth_flow: state generated, len={} [REDACTED]",
         csrf_state.len()
     );
 
@@ -136,7 +148,7 @@ fn run_spotify_oauth_flow(
 }
 
 #[tauri::command]
-pub fn start_spotify_auth(
+pub async fn start_spotify_auth(
     client_id: String,
     client_secret: String,
     redirect_uri: String,
@@ -161,10 +173,15 @@ pub fn start_spotify_auth(
     validate_spotify_client_id(&client_id)?;
     validate_spotify_client_secret(&client_secret)?;
 
-    // Store the client_secret in the OS keychain. This is the only place the
-    // secret is persisted from this point forward; it is intentionally NOT
-    // included in `pending_spotify_auth` (AppState or store). See issue #9.
-    crate::keychain::store_spotify_client_secret(&client_secret)?;
+    // #215: keychain I/O is blocking (OS keychain + file). Offload to
+    // the blocking pool so the async runtime stays responsive, matching
+    // the precedent in `commands/onboarding.rs::is_onboarding_complete`.
+    let secret_clone = client_secret.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::keychain::store_spotify_client_secret(&secret_clone)
+    })
+    .await
+    .map_err(|e| format!("start_spotify_auth keychain task failed: {}", e))??;
     log::info!("{CMD} start_spotify_auth: client_secret stored in keychain");
 
     run_spotify_oauth_flow(client_id, redirect_uri, &state)?;
@@ -221,14 +238,14 @@ pub fn start_spotify_reconnect(
 }
 
 #[tauri::command]
-pub fn complete_spotify_auth_manual(
+pub async fn complete_spotify_auth_manual(
     code: String,
     oauth_state: String,
     app: AppHandle,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<SpotifyTokens, String> {
     log::info!(
-        "{CMD} complete_spotify_auth_manual: ENTRY - code.len={}, oauth_state.len={}",
+        "{CMD} complete_spotify_auth_manual: ENTRY - code.len={}, oauth_state.len={} [REDACTED]",
         code.len(),
         oauth_state.len()
     );
@@ -259,27 +276,39 @@ pub fn complete_spotify_auth_manual(
     // CSRF, mirroring handle_spotify_callback in lib.rs (issue #162). The
     // manual-paste path is exactly where a socially engineered URL could
     // land, so a missing or mismatched state rejects the flow.
+    // #228: never log raw state values — compare lengths/prefixes only in logs.
     if oauth_state.is_empty() {
         log::error!("{CMD} complete_spotify_auth_manual: missing state parameter");
         return Err("Missing state parameter - possible CSRF attack".to_string());
     }
     if oauth_state != pending.state {
-        log::error!("{CMD} complete_spotify_auth_manual: state mismatch - CSRF attack detected");
+        log::error!(
+            "{CMD} complete_spotify_auth_manual: state mismatch - CSRF attack detected [REDACTED len {} vs {}]",
+            oauth_state.len(),
+            pending.state.len()
+        );
         return Err("State mismatch - possible CSRF attack".to_string());
     }
     log::info!("{CMD} complete_spotify_auth_manual: state verified successfully");
 
-    // Read the client_secret from the keychain (it was placed there by
-    // `start_spotify_auth` — see issue #9).
-    let client_secret = crate::keychain::get_spotify_client_secret()?;
-
-    let tokens = crate::spotify::complete_spotify_auth(
-        &code,
-        &pending.verifier,
-        &pending.client_id,
-        &client_secret,
-        &pending.redirect_uri,
-    )?;
+    // #215: HTTPS token exchange + keychain I/O are blocking (reqwest::blocking
+    // + OS keychain). Offload to the blocking pool so the async runtime stays
+    // responsive. Clone owned values into the closure; AppState mutation stays
+    // on the async thread after the join.
+    let pending_clone = pending.clone();
+    let code_clone = code.clone();
+    let tokens = tauri::async_runtime::spawn_blocking(move || {
+        let client_secret = crate::keychain::get_spotify_client_secret()?;
+        crate::spotify::complete_spotify_auth(
+            &code_clone,
+            &pending_clone.verifier,
+            &pending_clone.client_id,
+            &client_secret,
+            &pending_clone.redirect_uri,
+        )
+    })
+    .await
+    .map_err(|e| format!("complete_spotify_auth_manual task failed: {}", e))??;
     log::info!("{CMD} complete_spotify_auth_manual: token exchange successful");
 
     {
