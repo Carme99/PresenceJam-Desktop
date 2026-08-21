@@ -125,7 +125,7 @@ fn is_onboarding_complete_impl(state: &Arc<AppState>) -> Result<bool, String> {
 }
 
 #[tauri::command]
-pub fn complete_onboarding(
+pub async fn complete_onboarding(
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<(), String> {
@@ -149,7 +149,7 @@ pub fn complete_onboarding(
 
     if has_spotify && has_teams {
         log::info!("{CMD} complete_onboarding: both tokens present, starting sync");
-        super::sync::start_syncing(state, app)?;
+        super::sync::start_syncing(state, app).await?;
         log::info!("{CMD} complete_onboarding: sync started successfully");
     } else {
         log::error!(
