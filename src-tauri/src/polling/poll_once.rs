@@ -1357,16 +1357,16 @@ mod tests {
         );
 
         // All persistence must happen at the call sites, after the CAS call
-        // returns (guard provably dropped): the invalid_grant clear path plus
-        // the three refresh-success call sites (Spotify proactive, Spotify
-        // 401-retry, Teams).
+        // returns (guard provably dropped): the two invalid_grant clear paths
+        // (proactive + 401-retry) plus the three refresh-success call sites
+        // (Spotify proactive, Spotify 401-retry, Teams).
         let persist_count = prod_source.matches("token_io::persist_tokens(").count();
         assert_eq!(
-            persist_count, 4,
-            "expected exactly 4 persist_tokens call sites in production (1 invalid_grant \
-             clear + 3 refresh-success call sites); found {}. If a call-site persist is \
-             removed, refreshed tokens stop being flushed to disk; if one is added inside \
-             cas_refresh_or_discard, the #180 self-deadlock returns.",
+            persist_count, 5,
+            "expected exactly 5 persist_tokens call sites in production (2 invalid_grant \
+             clear (proactive + 401-retry) + 3 refresh-success call sites); found {}. If a \
+             call-site persist is removed, refreshed tokens stop being flushed to disk; if \
+             one is added inside cas_refresh_or_discard, the #180 self-deadlock returns.",
             persist_count
         );
     }
