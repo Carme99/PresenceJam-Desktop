@@ -5,7 +5,7 @@
 //! (Windows Credential Manager, macOS Keychain, Linux Secret Service).
 //!
 //! Migration note: prior to this module, the secret was persisted in plain
-//! text via `tauri-plugin-store` and inside `config.json`. The first run
+//! text inside `config.json`. The first run
 //! after this change will need the user to re-enter the secret via
 //! Onboarding. See issue #9.
 //!

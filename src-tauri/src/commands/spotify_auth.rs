@@ -343,8 +343,8 @@ pub fn refresh_spotify(
 
     // Spotify client_id lives in the config (it's not a secret). The
     // client_secret is in the OS keychain (see issue #9). The previous
-    // implementation read client_id from `tauri-plugin-store` — that
-    // path is removed as part of issue #65.
+    // implementation read client_id from a persistent store — that path
+    // is removed as part of issue #65.
     let client_id = {
         let guard = state.config.get();
         guard
