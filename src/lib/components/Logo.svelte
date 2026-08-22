@@ -12,6 +12,7 @@
     title?: string | null;
   }
   let { size = 28, withWordmark = false, title = 'PresenceJam' }: Props = $props();
+  import { t } from '$lib/i18n';
 </script>
 
 {#if withWordmark}
@@ -36,7 +37,7 @@
     </svg>
     <span class="logo-wordmark">
       <span class="logo-name">Presence<strong>Jam</strong></span>
-      <span class="logo-tag">Spotify → Teams Status</span>
+      <span class="logo-tag">{t('common.tagline')}</span>
     </span>
   </span>
 {:else}

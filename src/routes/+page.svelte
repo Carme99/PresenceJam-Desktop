@@ -11,6 +11,7 @@
   import { devLog } from '$lib/utils/dev';
   import About from '$lib/components/About.svelte';
   import Reconnect from '$lib/components/Reconnect.svelte';
+  import { t } from '$lib/i18n';
 
   // Build info — injected at build time via vite.config.js define
   // (mirrors the consumer in About.svelte; the vite define key is the
@@ -140,7 +141,7 @@
 
 {#if !ready}
   <div class="loading">
-    <span>Loading...</span>
+    <span>{t('common.loading')}</span>
   </div>
 {:else}
   <div class="app-container" id="main-content" tabindex="-1">

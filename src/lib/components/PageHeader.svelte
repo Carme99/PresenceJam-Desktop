@@ -1,6 +1,7 @@
 <script lang="ts">
   import Logo from './Logo.svelte';
   import { theme, toggleTheme } from '$lib/stores/theme';
+  import { t } from '$lib/i18n';
 
   /**
    * Standard top-of-page chrome used by Settings, Reconnect, LogViewer.
@@ -55,7 +56,7 @@
   {/if}
   {#if showThemeToggle}
     <button type="button" class="icon-btn theme-btn" onclick={toggleTheme}
-      aria-label="Toggle theme" title="Toggle theme">
+      aria-label={t('common.themeToggle')} title={t('common.themeToggle')}>
       {$theme === 'dark' ? '☀' : '☾'}
     </button>
   {:else}

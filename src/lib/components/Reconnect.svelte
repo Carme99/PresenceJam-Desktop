@@ -9,6 +9,7 @@
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
   import { devLog } from '$lib/utils/dev';
   import PageHeader from './PageHeader.svelte';
+  import { t } from '$lib/i18n';
 
   let needsSpotify = $state(false);
   let needsTeams = $state(false);
@@ -151,74 +152,74 @@
 </script>
 
 <div class="reconnect">
-  <PageHeader title="Reconnect" onBack={goToDashboard} showThemeToggle={false} />
+  <PageHeader title={t('reconnect.title')} onBack={goToDashboard} showThemeToggle={false} />
 
   <div class="content">
     <p class="description">
-      Your session expired. Reconnect below to resume syncing.
+      {t('reconnect.description')}
     </p>
 
     <section class="card">
       <header class="section-header">
-        <h2>Spotify</h2>
+        <h2>{t('settings.sectionSpotify')}</h2>
         <span class="badge"
           class:success={authFlow.spotify.phase === 'done'}
           class:warning={authFlow.spotify.phase === 'waiting'}
           class:error={!!authFlow.spotify.error || needsSpotify}>
           <span class="dot"></span>
-          {#if authFlow.spotify.phase === 'done'}Connected
-          {:else if needsSpotify}Missing credentials
-          {:else if authFlow.spotify.phase === 'waiting'}Waiting…
-          {:else if authFlow.spotify.error}Failed
-          {:else}Ready to reconnect{/if}
+          {#if authFlow.spotify.phase === 'done'}{t('common.connected')}
+          {:else if needsSpotify}{t('reconnect.missingCredentials')}
+          {:else if authFlow.spotify.phase === 'waiting'}{t('common.waiting')}
+          {:else if authFlow.spotify.error}{t('reconnect.failed')}
+          {:else}{t('reconnect.readyToReconnect')}{/if}
         </span>
       </header>
 
       {#if authFlow.spotify.phase === 'done'}
-        <p class="hint">Spotify reconnected successfully.</p>
+        <p class="hint">{t('reconnect.spotifyOk')}</p>
       {:else if needsSpotify}
-        <p class="hint">Spotify credentials are not configured on this machine.</p>
+        <p class="hint">{t('reconnect.spotifyNotConfigured')}</p>
       {:else if authFlow.spotify.phase === 'waiting'}
-        <p class="hint">Complete authentication in the opened browser window.</p>
+        <p class="hint">{t('reconnect.completeAuthInOpenedBrowser')}</p>
       {:else if authFlow.spotify.error}
         <p class="error-message" role="alert">{authFlow.spotify.error}</p>
-        <button class="btn-full" onclick={reconnectSpotify}>Try again</button>
+        <button class="btn-full" onclick={reconnectSpotify}>{t('reconnect.tryAgain')}</button>
       {:else}
-        <p class="hint">Click below to reconnect your Spotify account.</p>
-        <button class="btn-full" onclick={reconnectSpotify}>Reconnect Spotify</button>
+        <p class="hint">{t('reconnect.clickBelowSpotify')}</p>
+        <button class="btn-full" onclick={reconnectSpotify}>{t('settings.reconnectSpotify')}</button>
       {/if}
     </section>
 
         <section class="card">
       <header class="section-header">
-        <h2>Microsoft Teams</h2>
+        <h2>{t('settings.sectionTeams')}</h2>
         <span class="badge"
           class:success={authFlow.teams.phase === 'done' || !needsTeams}
           class:warning={authFlow.teams.phase === 'waiting'}
           class:error={!!authFlow.teams.error && needsTeams}>
           <span class="dot"></span>
-          {#if authFlow.teams.phase === 'done' || !needsTeams}Connected
-          {:else if authFlow.teams.phase === 'waiting'}Waiting…
-          {:else if authFlow.teams.error}Failed
-          {:else}Needs reconnect{/if}
+          {#if authFlow.teams.phase === 'done' || !needsTeams}{t('common.connected')}
+          {:else if authFlow.teams.phase === 'waiting'}{t('common.waiting')}
+          {:else if authFlow.teams.error}{t('reconnect.failed')}
+          {:else}{t('reconnect.needsReconnect')}{/if}
         </span>
       </header>
 
       {#if authFlow.teams.phase === 'done' || !needsTeams}
-        <p class="hint">Teams reconnected successfully.</p>
+        <p class="hint">{t('reconnect.teamsOk')}</p>
       {:else if authFlow.teams.phase === 'waiting'}
-        <p class="hint">Go to <a href={authFlow.teams.verificationUrl} target="_blank" rel="noopener">{authFlow.teams.verificationUrl}</a> and enter code <strong>{authFlow.teams.userCode}</strong></p>
-        <p class="hint">Waiting for sign-in…</p>
-        <button class="btn-full" onclick={pollTeamsAuth}>I have signed in — check now</button>
+        <p class="hint">{t('common.goTo')} <a href={authFlow.teams.verificationUrl} target="_blank" rel="noopener">{authFlow.teams.verificationUrl}</a> {t('common.andEnterCode')} <strong>{authFlow.teams.userCode}</strong></p>
+        <p class="hint">{t('common.waitingForSignIn')}</p>
+        <button class="btn-full" onclick={pollTeamsAuth}>{t('common.checkNow')}</button>
         {#if authFlow.teams.error}
           <p class="error-message" role="alert">{authFlow.teams.error}</p>
         {/if}
       {:else if authFlow.teams.error}
         <p class="error-message" role="alert">{authFlow.teams.error}</p>
-        <button class="btn-full" onclick={reconnectTeams}>Try again</button>
+        <button class="btn-full" onclick={reconnectTeams}>{t('reconnect.tryAgain')}</button>
       {:else}
-        <p class="hint">Click below to reconnect your Microsoft Teams account.</p>
-        <button class="btn-full" onclick={reconnectTeams}>Reconnect Teams</button>
+        <p class="hint">{t('reconnect.clickBelowTeams')}</p>
+        <button class="btn-full" onclick={reconnectTeams}>{t('reconnect.reconnectTeams')}</button>
       {/if}
     </section>
 
@@ -226,15 +227,15 @@
       <div class="info-box card">
         <div class="info-icon">⚠</div>
         <div>
-          <strong>Missing Spotify credentials?</strong>
-          <p class="hint">You'll need to re-enter your Client ID and Client Secret.</p>
+          <strong>{t('reconnect.missingCredsTitle')}</strong>
+          <p class="hint">{t('reconnect.reenterCredsHint')}</p>
         </div>
-        <button class="btn-secondary" onclick={goToOnboarding}>Go to full setup</button>
+        <button class="btn-secondary" onclick={goToOnboarding}>{t('reconnect.goToFullSetup')}</button>
       </div>
     {/if}
 
     {#if authFlow.spotify.phase === 'done'}
-      <button class="btn-full" onclick={goToDashboard}>Back to dashboard</button>
+      <button class="btn-full" onclick={goToDashboard}>{t('common.backToDashboard')}</button>
     {/if}
   </div>
 </div>

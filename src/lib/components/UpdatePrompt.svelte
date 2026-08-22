@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { check, type Update } from '@tauri-apps/plugin-updater';
   import { invoke } from '@tauri-apps/api/core';
+  import { t } from '$lib/i18n';
 
   // Always-mounted update banner (3.0-P5). On mount it asks the updater
   // plugin whether a newer release exists; if it does it shows a small
@@ -92,10 +93,10 @@
 {#if update && !dismissed}
   <div class="update-banner" role="status">
     <div class="update-info">
-      <span class="update-title">Update v{update.version} available</span>
+      <span class="update-title">{t('update.available', { version: update.version })}</span>
       {#if stagedVersion}
         <span class="update-staged" role="status">
-          v{stagedVersion} will be installed when you quit PresenceJam
+          {t('update.stagedQuit', { version: stagedVersion })}
         </span>
       {:else if downloading}
         <span class="update-progress">
@@ -104,7 +105,7 @@
             : ''}
         </span>
       {:else if error}
-        <span class="update-error">Download failed — {error}</span>
+        <span class="update-error">{t('update.downloadFailed', { error })}</span>
       {/if}
     </div>
     <div class="update-actions">
@@ -114,7 +115,7 @@
         onclick={downloadAndInstall}
         disabled={downloading || staging}
       >
-        {downloading ? 'Downloading…' : 'Download & Install'}
+        {downloading ? t('update.downloading') : t('update.downloadAndInstall')}
       </button>
       {#if !stagedVersion}
         <button
@@ -123,15 +124,15 @@
           onclick={installOnQuit}
           disabled={downloading || staging}
         >
-          {staging ? 'Preparing…' : 'Install on quit'}
+          {staging ? t('update.preparing') : t('update.installOnQuit')}
         </button>
       {/if}
       <button
         type="button"
         class="icon-btn dismiss-btn"
         onclick={() => (dismissed = true)}
-        aria-label="Dismiss update banner"
-        title="Dismiss"
+        aria-label={t('update.dismissAria')}
+        title={t('common.dismiss')}
       >
         ×
       </button>

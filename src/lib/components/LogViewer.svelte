@@ -7,6 +7,7 @@
   import type { LogPayload } from '$lib/types';
   // C7 multi-window detach: pop-out/pop-back controls.
   import { popOut, popIn } from '$lib/stores/detach';
+  import { t, type TKey } from '$lib/i18n';
 
   // When rendered in the detached `logs-detached` window, "Back" pops the
   // pane back into the main window (closes this one) instead of navigating
@@ -20,6 +21,25 @@
   }
 
   let logs = $state<LogEntry[]>([]);
+
+  // Filter buttons show canonical English level values (compared against
+  // the backend's level strings) with translated labels.
+  const LEVEL_KEYS: Record<string, TKey> = {
+    All: 'logs.level.all',
+    Trace: 'logs.level.trace',
+    Debug: 'logs.level.debug',
+    Info: 'logs.level.info',
+    Warning: 'logs.level.warning',
+    Error: 'logs.level.error'
+  };
+  // Backend level strings -> i18n keys; unknown levels render raw.
+  const LEVEL_LABELS: Record<string, TKey> = {
+    All: LEVEL_KEYS.All,
+    Debug: LEVEL_KEYS.Debug,
+    Info: LEVEL_KEYS.Info,
+    Warning: LEVEL_KEYS.Warning,
+    Error: LEVEL_KEYS.Error
+  };
   let filter = $state('All');
   let unlisten: (() => void)[] = [];
   let logContainer: HTMLDivElement;
@@ -84,37 +104,37 @@
 </script>
 
 <div class="log-viewer">
-  <PageHeader title="Logs" onBack={goBack} showLogo={false} showThemeToggle={false}
-    backLabel={detached ? 'Pop back in' : 'Back'} />
+  <PageHeader title={t('logs.title')} onBack={goBack} showLogo={false} showThemeToggle={false}
+    backLabel={detached ? t('settings.popBackIn') : t('common.back')} />
 
   <div class="toolbar">
-    <div class="seg" role="tablist" aria-label="Log level filter">
-      {#each ['All', 'Debug', 'Info', 'Warning', 'Error'] as f}
+    <div class="seg" role="tablist" aria-label={t('logs.filterAria')}>
+      {#each (Object.keys(LEVEL_LABELS) as (keyof typeof LEVEL_LABELS)[]) as f}
         <button type="button" class="seg-btn btn-secondary"
           class:is-active={filter === f}
           onclick={() => (filter = f)} role="tab"
-          aria-selected={filter === f}>{f}</button>
+          aria-selected={filter === f}>{t(LEVEL_LABELS[f])}</button>
       {/each}
     </div>
-    <span class="count" aria-live="polite">{filteredLogs.length} {filteredLogs.length === 1 ? 'entry' : 'entries'}</span>
+    <span class="count" aria-live="polite">{filteredLogs.length === 1 ? t('logs.countOne', { count: filteredLogs.length }) : t('logs.countOther', { count: filteredLogs.length })}</span>
     {#if !detached}
-      <button class="btn-secondary" onclick={() => popOut('logs')}>Pop out</button>
+      <button class="btn-secondary" onclick={() => popOut('logs')}>{t('logs.popOut')}</button>
     {/if}
-    <button class="btn-secondary" onclick={clearLogs}>Clear</button>
-    <button class="btn-secondary" onclick={openFolder}>Open folder</button>
+    <button class="btn-secondary" onclick={clearLogs}>{t('logs.clear')}</button>
+    <button class="btn-secondary" onclick={openFolder}>{t('logs.openFolder')}</button>
   </div>
 
   <div class="log-list" bind:this={logContainer}>
     {#if filteredLogs.length === 0}
       <div class="empty-state">
-        <p>No log entries yet</p>
-        <p class="hint">Live entries stream here as the polling loop runs.</p>
+        <p>{t('logs.empty')}</p>
+        <p class="hint">{t('logs.emptyHint')}</p>
       </div>
     {:else}
       {#each filteredLogs as log}
         <div class="log-entry">
           <span class="timestamp">{log.timestamp}</span>
-          <span class="level-badge {getLevelClass(log.level)}">{log.level}</span>
+          <span class="level-badge {getLevelClass(log.level)}">{LEVEL_KEYS[log.level] ? t(LEVEL_KEYS[log.level]) : log.level}</span>
           <span class="message">{log.message}</span>
         </div>
       {/each}
