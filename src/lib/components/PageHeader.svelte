@@ -9,20 +9,37 @@
    *
    * On About: pass `showWordmark` to render Logo+title together,
    * otherwise use the centred `<h1>` form.
+   *
+   * C7: `backLabel` renames the left button (e.g. "Pop back in" when the
+   * view is rendered in a detached window) and `onAction`/`actionLabel`
+   * render one extra right-aligned button (e.g. "Pop out").
    */
   interface Props {
     title: string;
     onBack: () => void;
+    backLabel?: string;
     showThemeToggle?: boolean;
     showLogo?: boolean;
+    actionLabel?: string;
+    actionTitle?: string;
+    onAction?: () => void;
   }
-  let { title, onBack, showThemeToggle = true, showLogo = true }: Props = $props();
+  let {
+    title,
+    onBack,
+    backLabel = 'Back',
+    showThemeToggle = true,
+    showLogo = true,
+    actionLabel = '⧉',
+    actionTitle = '',
+    onAction
+  }: Props = $props();
 </script>
 
 <header class="page-header">
   <button type="button" class="back-btn btn-secondary" onclick={onBack}>
     <span aria-hidden="true">←</span>
-    <span>Back</span>
+    <span>{backLabel}</span>
   </button>
   <div class="title-block">
     {#if showLogo}
@@ -30,6 +47,12 @@
     {/if}
     <h1>{title}</h1>
   </div>
+  {#if onAction}
+    <button type="button" class="icon-btn" onclick={onAction}
+      aria-label={actionTitle || actionLabel} title={actionTitle}>
+      {actionLabel}
+    </button>
+  {/if}
   {#if showThemeToggle}
     <button type="button" class="icon-btn theme-btn" onclick={toggleTheme}
       aria-label="Toggle theme" title="Toggle theme">

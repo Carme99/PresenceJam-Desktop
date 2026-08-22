@@ -5,6 +5,13 @@
   import PageHeader from './PageHeader.svelte';
   import { currentView } from '$lib/stores/app';
   import type { LogPayload } from '$lib/types';
+  // C7 multi-window detach: pop-out/pop-back controls.
+  import { popOut, popIn } from '$lib/stores/detach';
+
+  // When rendered in the detached `logs-detached` window, "Back" pops the
+  // pane back into the main window (closes this one) instead of navigating
+  // currentView; the in-main-window-only "Pop out" control is hidden.
+  let { detached = false }: { detached?: boolean } = $props();
 
   interface LogEntry {
     timestamp: string;
@@ -59,6 +66,10 @@
   }
 
   function goBack() {
+    if (detached) {
+      void popIn('logs');
+      return;
+    }
     currentView.set('dashboard');
   }
 
@@ -73,7 +84,8 @@
 </script>
 
 <div class="log-viewer">
-  <PageHeader title="Logs" onBack={goBack} showLogo={false} showThemeToggle={false} />
+  <PageHeader title="Logs" onBack={goBack} showLogo={false} showThemeToggle={false}
+    backLabel={detached ? 'Pop back in' : 'Back'} />
 
   <div class="toolbar">
     <div class="seg" role="tablist" aria-label="Log level filter">
@@ -85,6 +97,9 @@
       {/each}
     </div>
     <span class="count" aria-live="polite">{filteredLogs.length} {filteredLogs.length === 1 ? 'entry' : 'entries'}</span>
+    {#if !detached}
+      <button class="btn-secondary" onclick={() => popOut('logs')}>Pop out</button>
+    {/if}
     <button class="btn-secondary" onclick={clearLogs}>Clear</button>
     <button class="btn-secondary" onclick={openFolder}>Open folder</button>
   </div>

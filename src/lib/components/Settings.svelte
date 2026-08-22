@@ -4,6 +4,14 @@
   import { onMount, onDestroy } from 'svelte';
   import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notification';
   import { currentView } from '$lib/stores/app';
+  import { emitTo } from '@tauri-apps/api/event';
+  // C7 multi-window detach: pop-out/pop-back controls.
+  import { popOut, popIn } from '$lib/stores/detach';
+
+  // When rendered in the detached `settings-detached` window, "Back" pops
+  // the pane back into the main window (closes this one); the onboarding
+  // redirect forwards the navigation to the main window first.
+  let { detached = false }: { detached?: boolean } = $props();
   import { configStore, saveConfig, loadConfig, defaultConfig } from '$lib/stores/config';
   import type { AppConfig, SyncStatus, TeamsTokens } from '$lib/types';
   import { authFlow, setSpotifyPhase, setTeamsPhase } from '$lib/stores/authFlow.svelte';
@@ -274,6 +282,10 @@
   }
 
   function goBack() {
+    if (detached) {
+      void popIn('settings');
+      return;
+    }
     currentView.set('dashboard');
   }
 
@@ -288,12 +300,22 @@
     // Used by the Spotify Client Secret hint when the keychain entry is
     // missing. Re-running Onboarding places a fresh secret in the keychain.
     // See issue #9.
+    if (detached) {
+      // C7: currentView is main-window-only — forward the navigation to
+      // the main window and close this detached pane.
+      void emitTo('main', 'navigate', 'onboarding');
+      void popIn('settings');
+      return;
+    }
     currentView.set('onboarding');
   }
 </script>
 
 <div class="settings">
-  <PageHeader title="Settings" onBack={goBack} />
+  <PageHeader title="Settings" onBack={goBack}
+    backLabel={detached ? 'Pop back in' : 'Back'}
+    onAction={detached ? undefined : () => popOut('settings')}
+    actionTitle={detached ? '' : 'Pop out into its own window'} />
   {#if isDirty}
     <div class="dirty-banner" role="status">Unsaved changes</div>
   {/if}

@@ -4,6 +4,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
   import { currentView } from '$lib/stores/app';
+  import { detachedPanes, focusDetached } from '$lib/stores/detach';
   import { configStore, loadConfig } from '$lib/stores/config';
   import type { ErrorEventPayload, SyncStatus, TrackInfo } from '$lib/types';
   import { devLog } from '$lib/utils/dev';
@@ -230,12 +231,23 @@
 
   function openSettings() {
     devLog('[DASHBOARD] openSettings: ENTRY');
+    // C7: while Settings is popped out, focus the detached window
+    // instead of navigating currentView (main window never shows the
+    // pane content while it is detached).
+    if ($detachedPanes.settings) {
+      void focusDetached('settings');
+      return;
+    }
     currentView.set('settings');
     devLog('[DASHBOARD] openSettings: EXIT');
   }
 
   function openLogs() {
     devLog('[DASHBOARD] openLogs: ENTRY');
+    if ($detachedPanes.logs) {
+      void focusDetached('logs');
+      return;
+    }
     currentView.set('logs');
     devLog('[DASHBOARD] openLogs: EXIT');
   }
@@ -335,9 +347,15 @@
       <button class="icon-btn" onclick={toggleTheme} title="Toggle theme" aria-label="Toggle theme">
         {$theme === 'dark' ? '☀' : '☾'}
       </button>
-      <button class="icon-btn" onclick={openLogs} title="Logs" aria-label="Open logs">📋</button>
+      <button class="icon-btn" class:detached={$detachedPanes.logs}
+        onclick={openLogs}
+        title={$detachedPanes.logs ? 'Logs (detached — click to focus)' : 'Logs'}
+        aria-label={$detachedPanes.logs ? 'Logs (detached in separate window)' : 'Open logs'}>📋</button>
       <button class="icon-btn" onclick={openDiagnostics} title="Diagnostics" aria-label="Open diagnostics">🩺</button>
-      <button class="icon-btn" onclick={openSettings} title="Settings" aria-label="Open settings">⚙</button>
+      <button class="icon-btn" class:detached={$detachedPanes.settings}
+        onclick={openSettings}
+        title={$detachedPanes.settings ? 'Settings (detached — click to focus)' : 'Settings'}
+        aria-label={$detachedPanes.settings ? 'Settings (detached in separate window)' : 'Open settings'}>⚙</button>
       <button class="icon-btn" onclick={openAbout} title="About" aria-label="About PresenceJam">ⓘ</button>
       <button class="icon-btn primary" class:is-on={isSyncing} onclick={toggleSync}
         disabled={isToggling} aria-label={isSyncing ? 'Pause sync' : 'Resume sync'}
@@ -466,6 +484,20 @@
   .icon-btn {
     width: 36px;
     height: 36px;
+  }
+  /* C7: dot badge marks a nav button whose pane is popped out. */
+  .icon-btn.detached {
+    position: relative;
+  }
+  .icon-btn.detached::after {
+    content: '';
+    position: absolute;
+    top: -2px;
+    right: -2px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent, #4a9eff);
   }
   .icon-btn.primary {
     color: var(--accent-text);

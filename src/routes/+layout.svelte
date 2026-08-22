@@ -9,7 +9,16 @@
   import '$lib/stores/theme';
   import { devLog } from '$lib/utils/dev';
   import UpdatePrompt from '$lib/components/UpdatePrompt.svelte';
+  import { getCurrentWindow } from '@tauri-apps/api/window';
   import { currentView } from '$lib/stores/app';
+
+  // C7: this layout is shared by every webview window (the SPA fallback
+  // hydrates it for detached Logs/Settings windows too). Reconnect flows,
+  // auth navigation, and update checks are owned by the main window —
+  // registering them per-window would run device-code/OAuth flows twice
+  // when both windows mount. Detached windows only inherit the theme
+  // side-effect import above.
+  const isMainWindow = getCurrentWindow().label === 'main';
   import { authFlow, setTeamsPhase, setTeamsDeviceCode, setSpotifyPhase } from '$lib/stores/authFlow.svelte';
   import type { DeviceCodeResponse, TeamsTokens, AppConfig } from '$lib/types';
 
@@ -31,6 +40,7 @@
   // Settings no longer owns spotify-reconnect-required (issue #220) to
   // avoid missed events when the user is on Dashboard.
   onMount(() => {
+    if (!isMainWindow) return;
     let unlistenTeams: (() => void) | null = null;
     let unlistenSpotify: (() => void) | null = null;
     let unlistenPlayback: (() => void) | null = null;
@@ -153,7 +163,7 @@
     <button class="toast-dismiss" onclick={() => { playbackError = ''; if (playbackErrorTimeout) { clearTimeout(playbackErrorTimeout); playbackErrorTimeout = null; } }} aria-label="Dismiss">×</button>
   </div>
 {/if}
-<UpdatePrompt />
+{#if isMainWindow}<UpdatePrompt />{/if}
 
 <style>
   .playback-toast {
