@@ -103,9 +103,14 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
                 // title/artist change), and an external device may have
                 // changed state since. One extra GET per click is fine —
                 // this is user-initiated. Unknown → resume (play).
+                // Unconditional GET (`None`): this is a user-initiated
+                // one-off click with no stored validator. C11 signature.
                 let should_pause =
-                    match crate::spotify::get_currently_playing(&token) {
-                        Ok(Some(track)) => track.is_playing,
+                    match crate::spotify::get_currently_playing(&token, None) {
+                        Ok(crate::spotify::CurrentlyPlaying::Modified {
+                            track: Some(track),
+                            ..
+                        }) => track.is_playing,
                         _ => false,
                     };
                 if should_pause {

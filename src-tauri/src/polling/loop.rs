@@ -1,7 +1,7 @@
 //! Polling driver.
 //!
 //! `polling_loop` is the outermost loop: it owns the per-thread mutable
-//! state whose lifetime spans iterations (`last_track_key`,
+//! state whose lifetime spans iterations (`last_track_key`, `last_etag`,
 //! `last_teams_update`, `last_posted_placeholder`, `consecutive_pauses`,
 //! `transient_failure_count`, `gated_track_key`, `last_availability_arm`),
 //! checks the stop channel and the `is_syncing` flag, dispatches one
@@ -62,6 +62,13 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
     // (≤4 min, sessions fade after 5) spans iterations; `poll_once::run`
     // arms/clears it inside `process_track` / `handle_no_track`.
     let mut last_availability_arm: Option<Instant> = None;
+    // Candidate C11 (docs/scope-3.3.md §C11): the ETag validator from the
+    // last conditional GET /me/player/currently-playing response. Owned by
+    // the driver because its lifetime spans iterations; `poll_once::run`
+    // stores it from each 200/204 and echoes it back as `If-None-Match` on
+    // the next poll. Absent ⇒ unconditional GET (graceful degradation:
+    // Spotify's ETag support is empirical, not documented).
+    let mut last_etag: Option<String> = None;
 
     loop {
         log::debug!("[POLLING] polling_loop: iteration start");
@@ -100,6 +107,7 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
             &mut transient_failure_count,
             &mut gated_track_key,
             &mut last_availability_arm,
+            &mut last_etag,
         );
 
         // Post-iteration tray sync — independent of the API result.
