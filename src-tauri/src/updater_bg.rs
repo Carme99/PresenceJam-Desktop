@@ -81,8 +81,13 @@ pub async fn stage_deferred_update(app: AppHandle) -> Result<Option<String>, Str
         tauri::async_runtime::block_on(async move {
             use tauri_plugin_updater::UpdaterExt;
 
-            let updater = app.updater().map_err(|e| format!("updater unavailable: {e}"))?;
-            let Some(update) = updater.check().await.map_err(|e| format!("update check failed: {e}"))?
+            let updater = app
+                .updater()
+                .map_err(|e| format!("updater unavailable: {e}"))?;
+            let Some(update) = updater
+                .check()
+                .await
+                .map_err(|e| format!("update check failed: {e}"))?
             else {
                 log::info!("{TAG} stage_deferred_update: no update available");
                 return Ok::<Option<String>, String>(None);
@@ -124,13 +129,20 @@ pub fn install_pending_on_exit(app: &AppHandle) {
         return;
     };
     let version = staged.update.version.clone();
-    log::info!("{TAG} install_pending_on_exit: installing v{} on quit", version);
+    log::info!(
+        "{TAG} install_pending_on_exit: installing v{} on quit",
+        version
+    );
     match staged.update.install(staged.bytes) {
         Ok(()) => log::info!(
             "{TAG} install_pending_on_exit: v{} installed; takes effect on next launch \
              (Windows installer relaunches automatically)",
             version
         ),
-        Err(e) => log::error!("{TAG} install_pending_on_exit: FAILED for v{} - {}", version, e),
+        Err(e) => log::error!(
+            "{TAG} install_pending_on_exit: FAILED for v{} - {}",
+            version,
+            e
+        ),
     }
 }

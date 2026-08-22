@@ -308,7 +308,10 @@ pub async fn complete_spotify_auth_manual(
                         "{CMD} complete_spotify_auth_manual: launch binding rejected ({}) [REDACTED]",
                         reason
                     );
-                    return Err("State binding validation failed - possible CSRF or replay attack".to_string());
+                    return Err(
+                        "State binding validation failed - possible CSRF or replay attack"
+                            .to_string(),
+                    );
                 }
             }
             None => {

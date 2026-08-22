@@ -247,9 +247,13 @@ mod tests {
         let binding = LaunchBinding::new(generate_launch_secret());
         binding.bind_verifier(&verifier);
 
-        assert!(binding.validate_and_consume(&binding.launch_secret.clone(), &verifier).is_ok());
+        assert!(binding
+            .validate_and_consume(&binding.launch_secret.clone(), &verifier)
+            .is_ok());
         // Replay: same state secret + same verifier → rejected.
-        assert!(binding.validate_and_consume(&binding.launch_secret.clone(), &verifier).is_err());
+        assert!(binding
+            .validate_and_consume(&binding.launch_secret.clone(), &verifier)
+            .is_err());
     }
 
     #[test]

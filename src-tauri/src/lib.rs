@@ -559,7 +559,8 @@ fn handle_deep_link(url: &str, app: AppHandle) {
                                     let pending_peek = app_state.pending.spotify_mut();
                                     match pending_peek.as_ref() {
                                         Some(pending) if crate::pkce::ct_eq(st, &pending.state) => {
-                                            match binding.validate_and_consume(parts[1], &pending.verifier)
+                                            match binding
+                                                .validate_and_consume(parts[1], &pending.verifier)
                                             {
                                                 Ok(()) => true,
                                                 Err(reason) => {
