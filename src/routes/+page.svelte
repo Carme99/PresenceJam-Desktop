@@ -75,6 +75,11 @@
     devLog('[PAGE] onMount: setting up navigate listener');
     listen<string>('navigate', (event) => {
       devLog('[PAGE] EVENT: navigate received:', event.payload);
+      // C2: deep-link auth completions also emit 'navigate'. While the
+      // Onboarding view is up it owns its own phase transitions — jumping
+      // to another view would strand setup half-done — so programmatic
+      // navigation is ignored until onboarding yields the view.
+      if (!ready || $currentView === 'onboarding') return;
       currentView.set(event.payload as View);
     }).then(fn => { if (destroyed) fn(); else unlisten.push(fn); });
 
