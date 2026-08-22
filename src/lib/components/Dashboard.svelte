@@ -601,6 +601,14 @@
     70%  { box-shadow: 0 0 0 8px transparent; }
     100% { box-shadow: 0 0 0 0 transparent; }
   }
+
+  /* WCAG 2.3.3: honour prefers-reduced-motion — the "Playing" indicator's
+   * pulse is decorative (the label carries the state), so freeze it. */
+  @media (prefers-reduced-motion: reduce) {
+    .pulse-dot {
+      animation: none;
+    }
+  }
   .progress-bar {
     height: 4px;
     background: var(--bg-elevated);

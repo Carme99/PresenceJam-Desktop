@@ -145,9 +145,10 @@
   <meta name="color-scheme" content="dark light" />
 </svelte:head>
 
+<a class="skip-link" href="#main-content">Skip to main content</a>
 <slot />
 {#if playbackError}
-  <div class="playback-toast" role="alert" aria-live="polite">
+  <div class="playback-toast" role="alert">
     <span class="toast-msg">{playbackError}</span>
     <button class="toast-dismiss" onclick={() => { playbackError = ''; if (playbackErrorTimeout) { clearTimeout(playbackErrorTimeout); playbackErrorTimeout = null; } }} aria-label="Dismiss">×</button>
   </div>
@@ -183,4 +184,5 @@
     opacity: 0.7;
   }
   .toast-dismiss:hover { opacity: 1; }
+
 </style>
