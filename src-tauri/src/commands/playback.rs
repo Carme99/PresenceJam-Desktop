@@ -31,9 +31,7 @@ fn friendly_playback_error(err: SpotifyApiError) -> String {
         SpotifyApiError::NoActiveDevice => {
             "No active playback device - pick one from the tray Devices menu".to_string()
         }
-        SpotifyApiError::NotPremium => {
-            "Playback control requires Spotify Premium".to_string()
-        }
+        SpotifyApiError::NotPremium => "Playback control requires Spotify Premium".to_string(),
         SpotifyApiError::ExpiredToken => {
             "Spotify session expired - reconnect from Settings".to_string()
         }
@@ -104,7 +102,10 @@ pub async fn playback_transfer(
     device_id: String,
     state: State<'_, Arc<crate::AppState>>,
 ) -> Result<(), String> {
-    log::debug!("{CMD} playback_transfer: ENTRY - device_id.len={}", device_id.len());
+    log::debug!(
+        "{CMD} playback_transfer: ENTRY - device_id.len={}",
+        device_id.len()
+    );
     let token = stored_access_token(&state)?;
     tauri::async_runtime::spawn_blocking(move || {
         crate::spotify::player_transfer(&token, &device_id, true).map_err(friendly_playback_error)

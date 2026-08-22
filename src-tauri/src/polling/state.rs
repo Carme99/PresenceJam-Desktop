@@ -34,7 +34,10 @@ use crate::AppState;
 /// running" error after every fresh install. The `is_syncing` flag is
 /// released by `stop_polling` (clean exit) or by the panic-cleanup
 /// block below (crash exit).
-pub fn start_polling(state: Arc<AppState>, app: AppHandle) -> Result<thread::JoinHandle<()>, String> {
+pub fn start_polling(
+    state: Arc<AppState>,
+    app: AppHandle,
+) -> Result<thread::JoinHandle<()>, String> {
     log::info!("[POLLING] start_polling: ENTRY");
 
     // Create interruptible stop channel so stop_syncing can wake the thread immediately.

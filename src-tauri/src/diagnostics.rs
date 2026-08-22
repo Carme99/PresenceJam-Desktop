@@ -179,6 +179,9 @@ const SECRET_KEYS: &[&str] = &[
 ///
 /// Conservative by design: over-redaction is acceptable because the
 /// page's purpose is human support triage, not log forensics.
+// Index-based pairwise masking with lookahead/lookback ranges; iterator
+// rewrites obscure the span arithmetic the tests pin down.
+#[allow(clippy::needless_range_loop)]
 pub fn redact_sensitive(line: &str) -> String {
     let chars: Vec<char> = line.chars().collect();
     let n = chars.len();
@@ -311,12 +314,15 @@ fn token_metadata(state: &crate::AppState) -> TokenMetadata {
     }
 }
 
-fn config_summary(state: &crate::AppState) -> ConfigSummary {
+fn config_summary(state: &crate::AppState, spotify_client_secret_present: bool) -> ConfigSummary {
     let cfg = state.config.get().clone().unwrap_or_default();
     ConfigSummary {
         spotify_client_id: cfg.spotify.client_id,
         redirect_uri: cfg.spotify.redirect_uri,
-        client_secret_set: cfg.spotify.client_secret_set,
+        // Report the live keychain probe rather than the load-time flag:
+        // `config::with_keychain_flags` only stamps this when the config
+        // file is loaded, so it can go stale within a session.
+        client_secret_set: spotify_client_secret_present,
         clear_on_pause: cfg.teams.clear_on_pause,
         profanity_filter: cfg.teams.profanity_filter,
         start_minimized: cfg.teams.start_minimized,
@@ -361,12 +367,10 @@ fn tail_log_file(log_dir: Option<std::path::PathBuf>) -> (Vec<String>, String) {
     match collected {
         Ok(lines) => {
             let total = lines.len();
-            let tail: Vec<String> = lines
-                .into_iter()
-                .rev()
-                .take(LOG_TAIL_LINES)
-                .map(|l| redact_sensitive(&l))
-                .collect();
+            // Keep chronological (oldest-first) order; take only the last
+            // LOG_TAIL_LINES lines when the file is longer.
+            let start = total.saturating_sub(LOG_TAIL_LINES);
+            let tail: Vec<String> = lines[start..].iter().map(|l| redact_sensitive(l)).collect();
             let status = format!("ok: last {} of {} lines", tail.len(), total);
             (tail, status)
         }
@@ -404,7 +408,7 @@ fn build_snapshot(
             arch: std::env::consts::ARCH.to_string(),
             family: std::env::consts::FAMILY.to_string(),
         },
-        config: config_summary(state),
+        config: config_summary(state, keychain.spotify_client_secret_present),
         tokens: token_metadata(state),
         keychain,
         recent_logs,
@@ -491,10 +495,7 @@ mod tests {
     fn test_whole_identifier_matching() {
         // `codes=` must not trip the `code` key; `client_secret=` is
         // caught by its own (longer) key entry.
-        assert_eq!(
-            redact_sensitive("status codes=200"),
-            "status codes=[REDACTED len 3]"
-        );
+        assert_eq!(redact_sensitive("status codes=200"), "status codes=200");
         let out = redact_sensitive("client_secret=hunter2 do-not-leak");
         assert!(!out.contains("hunter2"));
     }

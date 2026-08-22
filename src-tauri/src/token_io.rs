@@ -32,16 +32,16 @@
 //! leaks the secret to disk. See issue #65 / HIGH #3 in the security
 //! review.
 
-use aes_gcm::aead::{Aead, KeyInit};
-use aes_gcm::{Aes256Gcm, Nonce};
 use crate::spotify::SpotifyTokens;
 use crate::teams::TeamsTokens;
+use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::{Aes256Gcm, Nonce};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::Manager;
@@ -82,11 +82,12 @@ const TOKENS_HEADER_LEN: usize = TOKENS_MAGIC.len() + 1 + TOKENS_NONCE_LEN;
 fn encrypt_tokens(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, String> {
     let mut nonce_bytes = [0u8; TOKENS_NONCE_LEN];
     rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
-    let cipher = Aes256Gcm::new_from_slice(key)
-        .map_err(|_| "AES-256 key must be 32 bytes".to_string())?;
+    let cipher =
+        Aes256Gcm::new_from_slice(key).map_err(|_| "AES-256 key must be 32 bytes".to_string())?;
     let ciphertext = cipher
         .encrypt(
-            &Nonce::try_from(&nonce_bytes[..]).map_err(|_| "AES-GCM nonce must be 12 bytes".to_string())?,
+            &Nonce::try_from(&nonce_bytes[..])
+                .map_err(|_| "AES-GCM nonce must be 12 bytes".to_string())?,
             plaintext,
         )
         .map_err(|e| format!("AES-GCM encryption failed: {}", e))?;
@@ -128,8 +129,8 @@ fn decrypt_tokens(key: &[u8; 32], bytes: &[u8]) -> Result<Vec<u8>, String> {
     }
     let nonce = &bytes[TOKENS_MAGIC.len() + 1..TOKENS_HEADER_LEN];
     let ciphertext = &bytes[TOKENS_HEADER_LEN..];
-    let cipher = Aes256Gcm::new_from_slice(key)
-        .map_err(|_| "AES-256 key must be 32 bytes".to_string())?;
+    let cipher =
+        Aes256Gcm::new_from_slice(key).map_err(|_| "AES-256 key must be 32 bytes".to_string())?;
     cipher
         .decrypt(
             &Nonce::try_from(nonce).map_err(|_| "AES-GCM nonce must be 12 bytes".to_string())?,
@@ -395,11 +396,7 @@ fn write_tokens_atomic_with_key(
         if let Some(parent) = path.parent() {
             if let Ok(dir) = std::fs::File::open(parent) {
                 if let Err(e) = dir.sync_all() {
-                    log::warn!(
-                        "Failed to fsync tokens dir '{}': {}",
-                        parent.display(),
-                        e
-                    );
+                    log::warn!("Failed to fsync tokens dir '{}': {}", parent.display(), e);
                 }
             }
         }
@@ -649,8 +646,7 @@ mod tests {
             "migrated file must start with the PJENC magic prefix"
         );
         assert!(
-            !raw
-                .windows(b"\"access_token\"".len())
+            !raw.windows(b"\"access_token\"".len())
                 .any(|w| w == b"\"access_token\""),
             "plaintext JSON must not remain in the migrated file"
         );
@@ -693,8 +689,7 @@ mod tests {
         let raw = fs::read(&path).unwrap();
         assert!(raw.starts_with(TOKENS_MAGIC));
         assert!(
-            !raw
-                .windows(b"LEAKED_PLAINTEXT".len())
+            !raw.windows(b"LEAKED_PLAINTEXT".len())
                 .any(|w| w == b"LEAKED_PLAINTEXT"),
             "stale plaintext sidecar content must not leak into the live file"
         );

@@ -71,7 +71,8 @@ mod tests {
                     "commands/{} still contains legacy {} ...\") prefix \
                      — issue #79 item 3 requires the file to use its own \
                      [CMD.<GROUP>] constant",
-                    filename, needle
+                    filename,
+                    needle
                 );
             }
         }

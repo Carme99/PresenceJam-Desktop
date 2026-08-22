@@ -23,7 +23,10 @@ pub struct SyncStatus {
 }
 
 #[tauri::command]
-pub async fn start_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> Result<(), String> {
+pub async fn start_syncing(
+    state: tauri::State<'_, Arc<AppState>>,
+    app: AppHandle,
+) -> Result<(), String> {
     log::debug!("{CMD} start_syncing: ENTRY");
 
     // Issue #69: drain any previous polling thread BEFORE claiming the
@@ -44,9 +47,8 @@ pub async fn start_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandl
     // concurrent poller. Checking `handle` is the source of truth for
     // liveness (see state.rs ThreadId ownership check for the companion
     // fix).
-    let needs_drain = {
-        state.polling.handle().is_some() || state.polling.is_syncing(Ordering::Acquire)
-    };
+    let needs_drain =
+        { state.polling.handle().is_some() || state.polling.is_syncing(Ordering::Acquire) };
     if needs_drain {
         log::info!("{CMD} start_syncing: previous thread still considered live (handle present or is_syncing true); draining");
         let state_clone = Arc::clone(state.inner());
@@ -98,7 +100,10 @@ pub async fn start_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandl
             *handle_guard = Some(handle);
         }
         *state.polling.thread_id_mut() = Some(tid);
-        log::info!("{CMD} start_syncing: polling handle stored with thread id {:?}", tid);
+        log::info!(
+            "{CMD} start_syncing: polling handle stored with thread id {:?}",
+            tid
+        );
     }
 
     log::info!("{CMD} start_syncing: EMIT sync-started event");
@@ -247,10 +252,14 @@ async fn stop_polling_and_join_for_exit(state: Arc<AppState>, context: &'static 
             let state_detached = Arc::clone(&state);
             tauri::async_runtime::spawn_blocking(move || {
                 match handle.join() {
-                    Ok(()) => log::info!("{CMD} {}: polling thread ended (detached final join)", context),
+                    Ok(()) => log::info!(
+                        "{CMD} {}: polling thread ended (detached final join)",
+                        context
+                    ),
                     Err(e) => log::error!(
                         "{CMD} {}: polling thread panicked (detached final join): {:?}",
-                        context, e
+                        context,
+                        e
                     ),
                 }
                 state_detached.polling.set_syncing(false, Ordering::Release);
@@ -261,7 +270,10 @@ async fn stop_polling_and_join_for_exit(state: Arc<AppState>, context: &'static 
 }
 
 #[tauri::command]
-pub async fn stop_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> Result<(), String> {
+pub async fn stop_syncing(
+    state: tauri::State<'_, Arc<AppState>>,
+    app: AppHandle,
+) -> Result<(), String> {
     log::debug!("{CMD} stop_syncing: ENTRY");
 
     let state_clone = Arc::clone(state.inner());
@@ -275,7 +287,10 @@ pub async fn stop_syncing(state: tauri::State<'_, Arc<AppState>>, app: AppHandle
 }
 
 #[tauri::command]
-pub async fn app_exit(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> Result<(), String> {
+pub async fn app_exit(
+    state: tauri::State<'_, Arc<AppState>>,
+    app: AppHandle,
+) -> Result<(), String> {
     log::debug!("{CMD} app_exit: ENTRY");
 
     let is_syncing = state.polling.is_syncing(Ordering::Acquire);

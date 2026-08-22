@@ -1,8 +1,8 @@
 use parking_lot::{Mutex, RwLock};
 use std::sync::atomic::AtomicBool;
-use std::sync::OnceLock;
 use std::sync::mpsc;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::thread;
 use std::time::Instant;
 use tauri::{AppHandle, Emitter, Manager};
@@ -41,9 +41,10 @@ pub struct OnboardingCache {
 
 impl OnboardingCache {
     pub fn new() -> Self {
-        Self { state: Mutex::new(None) }
+        Self {
+            state: Mutex::new(None),
+        }
     }
-
 
     /// Acquire the cache lock. Use this instead of touching `self.state`
     /// directly so future refactors (e.g. async-aware locks) only
@@ -101,13 +102,17 @@ impl Tokens {
 
     /// Read guard for the Spotify token slot. Use this instead of
     /// touching the `spotify` field directly.
-    pub fn spotify(&self) -> parking_lot::RwLockReadGuard<'_, Option<crate::spotify::SpotifyTokens>> {
+    pub fn spotify(
+        &self,
+    ) -> parking_lot::RwLockReadGuard<'_, Option<crate::spotify::SpotifyTokens>> {
         self.spotify.read()
     }
 
     /// Write guard for the Spotify token slot. Use this instead of
     /// touching the `spotify` field directly.
-    pub fn spotify_mut(&self) -> parking_lot::RwLockWriteGuard<'_, Option<crate::spotify::SpotifyTokens>> {
+    pub fn spotify_mut(
+        &self,
+    ) -> parking_lot::RwLockWriteGuard<'_, Option<crate::spotify::SpotifyTokens>> {
         self.spotify.write()
     }
 
@@ -119,7 +124,9 @@ impl Tokens {
 
     /// Write guard for the Teams token slot. Use this instead of
     /// touching the `teams` field directly.
-    pub fn teams_mut(&self) -> parking_lot::RwLockWriteGuard<'_, Option<crate::teams::TeamsTokens>> {
+    pub fn teams_mut(
+        &self,
+    ) -> parking_lot::RwLockWriteGuard<'_, Option<crate::teams::TeamsTokens>> {
         self.teams.write()
     }
 }
@@ -250,7 +257,12 @@ impl Polling {
     /// bottom of `polling.rs::tests`).
     pub fn try_claim(&self) -> bool {
         self.is_syncing
-            .compare_exchange(false, true, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Acquire)
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
             .is_ok()
     }
 
@@ -275,12 +287,16 @@ impl Polling {
     }
 
     /// Read guard for the last observed track.
-    pub fn current_track(&self) -> parking_lot::RwLockReadGuard<'_, Option<crate::spotify::TrackInfo>> {
+    pub fn current_track(
+        &self,
+    ) -> parking_lot::RwLockReadGuard<'_, Option<crate::spotify::TrackInfo>> {
         self.current_track.read()
     }
 
     /// Write guard for the last observed track.
-    pub fn current_track_mut(&self) -> parking_lot::RwLockWriteGuard<'_, Option<crate::spotify::TrackInfo>> {
+    pub fn current_track_mut(
+        &self,
+    ) -> parking_lot::RwLockWriteGuard<'_, Option<crate::spotify::TrackInfo>> {
         self.current_track.write()
     }
 
@@ -352,8 +368,8 @@ impl Default for AppState {
 }
 
 pub mod commands;
-pub mod diagnostics;
 pub mod config;
+pub mod diagnostics;
 pub mod keychain;
 pub mod menu;
 pub mod pkce;
@@ -536,7 +552,9 @@ fn handle_deep_link(url: &str, app: AppHandle) {
                         return;
                     }
                 } else {
-                    log::warn!("[DEEP_LINK] handle_deep_link: missing state in callback — ignoring");
+                    log::warn!(
+                        "[DEEP_LINK] handle_deep_link: missing state in callback — ignoring"
+                    );
                     return;
                 }
                 let app_clone = app.clone();
@@ -545,17 +563,13 @@ fn handle_deep_link(url: &str, app: AppHandle) {
 
                 log::info!("[DEEP_LINK] handle_deep_link: routing to Spotify callback");
                 tauri::async_runtime::spawn(async move {
-                    log::info!(
-                        "[DEEP_LINK] handle_deep_link: spawning Spotify callback handler"
-                    );
+                    log::info!("[DEEP_LINK] handle_deep_link: spawning Spotify callback handler");
                     if let Err(e) =
                         handle_spotify_callback(&code_clone, state_clone.as_deref(), &app_clone)
                             .await
                     {
                         log::error!("[DEEP_LINK] handle_spotify_callback: FAILED - {}", e);
-                        log::info!(
-                            "[DEEP_LINK] handle_deep_link: EMIT spotify-auth-failed event"
-                        );
+                        log::info!("[DEEP_LINK] handle_deep_link: EMIT spotify-auth-failed event");
                         let _ = app_clone.emit("spotify-auth-failed", e);
                     }
                 });
@@ -971,7 +985,9 @@ mod tests {
         // field declaration). We grep for `pub state:` to detect a
         // regression. Whitespace-tolerant.
         assert!(
-            !struct_body.lines().any(|l| l.trim_start().starts_with("pub state")),
+            !struct_body
+                .lines()
+                .any(|l| l.trim_start().starts_with("pub state")),
             "OnboardingCache::state must remain private. The struct-of-states \
              refactor (#80) relies on the inner mutex being hidden behind a \
              method (lock/invalidate). Found 'pub state' in the struct body:\n{}",
@@ -991,8 +1007,14 @@ mod tests {
         let tokens = Tokens::new();
 
         // Cold state: both guards return None.
-        assert!(tokens.spotify().is_none(), "fresh Tokens must have no Spotify token");
-        assert!(tokens.teams().is_none(), "fresh Tokens must have no Teams token");
+        assert!(
+            tokens.spotify().is_none(),
+            "fresh Tokens must have no Spotify token"
+        );
+        assert!(
+            tokens.teams().is_none(),
+            "fresh Tokens must have no Teams token"
+        );
 
         // Write a Spotify token via spotify_mut(); read back via spotify().
         *tokens.spotify_mut() = Some(SpotifyTokens {
@@ -1021,7 +1043,10 @@ mod tests {
         // Take pattern (used by handle_spotify_callback):
         // pulling the Option out leaves the slot None.
         let taken = tokens.spotify_mut().take();
-        assert!(taken.is_some(), "take() must return the stored Spotify token");
+        assert!(
+            taken.is_some(),
+            "take() must return the stored Spotify token"
+        );
         assert!(
             tokens.spotify().is_none(),
             "take() must leave the Spotify slot empty"
@@ -1070,7 +1095,10 @@ mod tests {
                 needle
             )
         });
-        let line_start_byte = source[..byte_offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let line_start_byte = source[..byte_offset]
+            .rfind('\n')
+            .map(|i| i + 1)
+            .unwrap_or(0);
         let mut line_start = line_start_byte;
         for _ in 0..10 {
             if line_start == 0 {
@@ -1100,7 +1128,8 @@ mod tests {
              The macOS gap is handled inside the call site (logs \
              a warning, does not crash) — do NOT reintroduce \
              `#[cfg(windows)]` around this call. Offending context:\n{}",
-            needle, window
+            needle,
+            window
         );
     }
     #[test]
@@ -1108,7 +1137,8 @@ mod tests {
         let source = include_str!("lib.rs");
         for name in ["Tokens", "Polling", "PendingAuths", "Config"] {
             let header = format!("pub struct {}", name);
-            let start = source.find(&header)
+            let start = source
+                .find(&header)
                 .unwrap_or_else(|| panic!("missing struct {}", name));
             let end = source[start..]
                 .find("\n}\n")

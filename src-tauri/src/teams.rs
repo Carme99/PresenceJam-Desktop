@@ -563,7 +563,12 @@ fn post_status_message(
         .unwrap_or_else(|_| "Unknown error".to_string());
 
     if !status.is_success() {
-        log::error!("Failed to {} Teams status message: {} - {}", action, status, body_text);
+        log::error!(
+            "Failed to {} Teams status message: {} - {}",
+            action,
+            status,
+            body_text
+        );
         return Err(match status_code {
             401 => TeamsApiError::ExpiredToken(status_code),
             403 => TeamsApiError::Forbidden(status_code, body_text),
@@ -696,8 +701,8 @@ pub struct PresenceInfo {
 /// Parses a Graph getPresence response body into a `PresenceInfo`,
 /// normalizing both enum fields to lower-case so callers compare once.
 pub fn parse_presence_body(body: &str) -> Result<PresenceInfo, String> {
-    let value: serde_json::Value = serde_json::from_str(body)
-        .map_err(|e| format!("Failed to parse presence body: {}", e))?;
+    let value: serde_json::Value =
+        serde_json::from_str(body).map_err(|e| format!("Failed to parse presence body: {}", e))?;
     let availability = value
         .get("availability")
         .and_then(|v| v.as_str())
@@ -797,10 +802,9 @@ fn post_presence<T: Serialize>(
             401 => TeamsApiError::ExpiredToken(status_code),
             403 => TeamsApiError::Forbidden(status_code, body_text),
             429 => TeamsApiError::RateLimited(retry_after),
-            500..=599 => TeamsApiError::Transient(format!(
-                "server error {}: {}",
-                status_code, body_text
-            )),
+            500..=599 => {
+                TeamsApiError::Transient(format!("server error {}: {}", status_code, body_text))
+            }
             _ => TeamsApiError::Other(status_code, body_text),
         });
     }
@@ -908,9 +912,7 @@ pub fn get_teams_presence(access_token: &str) -> Result<PresenceInfo, TeamsApiEr
         .get("https://graph.microsoft.com/v1.0/me/presence")
         .header("Authorization", format!("Bearer {}", access_token))
         .send()
-        .map_err(|e| {
-            TeamsApiError::Transient(format!("Failed to get Teams presence: {}", e))
-        })?;
+        .map_err(|e| TeamsApiError::Transient(format!("Failed to get Teams presence: {}", e)))?;
 
     let status = response.status();
     let status_code = status.as_u16();
@@ -920,19 +922,14 @@ pub fn get_teams_presence(access_token: &str) -> Result<PresenceInfo, TeamsApiEr
         .unwrap_or_else(|_| "Unknown error".to_string());
 
     if !status.is_success() {
-        log::error!(
-            "Failed to get Teams presence: {} - {}",
-            status,
-            body_text
-        );
+        log::error!("Failed to get Teams presence: {} - {}", status, body_text);
         return Err(match status_code {
             401 => TeamsApiError::ExpiredToken(status_code),
             403 => TeamsApiError::Forbidden(status_code, body_text),
             429 => TeamsApiError::RateLimited(retry_after),
-            500..=599 => TeamsApiError::Transient(format!(
-                "server error {}: {}",
-                status_code, body_text
-            )),
+            500..=599 => {
+                TeamsApiError::Transient(format!("server error {}: {}", status_code, body_text))
+            }
             _ => TeamsApiError::Other(status_code, body_text),
         });
     }
@@ -1000,7 +997,7 @@ pub fn validate_teams_token(tokens: &TeamsTokens) -> Result<(), TeamsApiError> {
 #[cfg(test)]
 mod tests {
     use super::truncate_for_log;
-    use super::{DeviceCodeResponse, MICROSOFT_GRAPH_SCOPES, TeamsTokens};
+    use super::{DeviceCodeResponse, TeamsTokens, MICROSOFT_GRAPH_SCOPES};
 
     #[test]
     fn teams_oauth_profile_scope_also_requests_openid() {
@@ -1094,8 +1091,7 @@ mod tests {
             expires_at: chrono::Utc::now(),
         };
         let json = serde_json::to_string(&original).expect("serialize");
-        let parsed: TeamsTokens =
-            serde_json::from_str(&json).expect("deserialize");
+        let parsed: TeamsTokens = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed.access_token, original.access_token);
         assert_eq!(parsed.refresh_token, original.refresh_token);
         assert_eq!(parsed.expires_at, original.expires_at);
@@ -1113,8 +1109,7 @@ mod tests {
             expires_at: chrono::Utc::now(),
         };
         let json = serde_json::to_string(&original).expect("serialize");
-        let parsed: TeamsTokens =
-            serde_json::from_str(&json).expect("deserialize");
+        let parsed: TeamsTokens = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed.refresh_token, None);
         // Defensive: confirm the wire form actually contains the
         // "refresh_token":null pair (serde default is to emit null,
@@ -1142,8 +1137,7 @@ mod tests {
             interval: 5,
             expires_in: 900,
         };
-        let json: serde_json::Value =
-            serde_json::to_value(&resp).expect("to_value");
+        let json: serde_json::Value = serde_json::to_value(&resp).expect("to_value");
         assert!(
             json["interval"].is_number(),
             "interval must serialise as JSON number, got {:?}",
@@ -1185,17 +1179,14 @@ mod tests {
     // return PascalCase — and reject a body without the required fields.
     #[test]
     fn parse_presence_body_normalizes_case() {
-        let info = super::parse_presence_body(
-            r#"{"availability":"Available","activity":"Available"}"#,
-        )
-        .expect("PascalCase body must parse");
+        let info =
+            super::parse_presence_body(r#"{"availability":"Available","activity":"Available"}"#)
+                .expect("PascalCase body must parse");
         assert_eq!(info.availability, "available");
         assert_eq!(info.activity, "available");
 
-        let info = super::parse_presence_body(
-            r#"{"availability":"Busy","activity":"InAMeeting"}"#,
-        )
-        .expect("mixed-case body must parse");
+        let info = super::parse_presence_body(r#"{"availability":"Busy","activity":"InAMeeting"}"#)
+            .expect("mixed-case body must parse");
         assert_eq!(info.availability, "busy");
         assert_eq!(info.activity, "inameeting");
     }
@@ -1253,7 +1244,10 @@ mod tests {
             presence_gate_reason(&info("available", "inameeting")),
             "in a meeting"
         );
-        assert_eq!(presence_gate_reason(&info("available", "inacall")), "in a call");
+        assert_eq!(
+            presence_gate_reason(&info("available", "inacall")),
+            "in a call"
+        );
         assert_eq!(
             presence_gate_reason(&info("available", "presenting")),
             "presenting"
@@ -1267,8 +1261,7 @@ mod tests {
     fn graph_oid_from_access_token_extracts_oid_claim() {
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
         use base64::Engine as _;
-        let payload =
-            URL_SAFE_NO_PAD.encode(r#"{"oid":"00000000-0000-0000-0000-000000000000"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(r#"{"oid":"00000000-0000-0000-0000-000000000000"}"#);
         let token = format!("header.{}.signature", payload);
         assert_eq!(
             super::graph_oid_from_access_token(&token).as_deref(),
@@ -1280,8 +1273,8 @@ mod tests {
     fn graph_oid_from_access_token_errors_cleanly() {
         use base64::Engine as _;
         assert!(super::graph_oid_from_access_token("not-a-jwt").is_err());
-        let no_oid = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(r#"{"sub":"user123"}"#);
+        let no_oid =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"sub":"user123"}"#);
         assert!(super::graph_oid_from_access_token(&format!("h.{}.s", no_oid)).is_err());
         let not_json = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("not json");
         assert!(super::graph_oid_from_access_token(&format!("h.{}.s", not_json)).is_err());
@@ -1293,10 +1286,8 @@ mod tests {
     fn decode_teams_granted_scopes_extracts_scp_claim() {
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
         use base64::Engine as _;
-        let payload = URL_SAFE_NO_PAD.encode(format!(
-            r#"{{"scp":"{}"}}"#,
-            super::MICROSOFT_GRAPH_SCOPES
-        ));
+        let payload =
+            URL_SAFE_NO_PAD.encode(format!(r#"{{"scp":"{}"}}"#, super::MICROSOFT_GRAPH_SCOPES));
         let token = format!("h.{}.s", payload);
         let expected: Vec<String> = super::MICROSOFT_GRAPH_SCOPES
             .split_whitespace()
@@ -1320,17 +1311,14 @@ mod tests {
         assert_eq!(super::parse_retry_after_value("120"), Some(120));
         assert_eq!(super::parse_retry_after_value("  42  "), Some(42));
         assert_eq!(super::parse_retry_after_value("9999"), Some(300));
-        let future =
-            std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        let future = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
         let http_date = httpdate::fmt_http_date(future);
         let secs = super::parse_retry_after_value(&http_date).expect("http-date must parse");
         assert!(secs <= 60, "future http-date ~60s got {}", secs);
-        let far_future =
-            std::time::SystemTime::now() + std::time::Duration::from_secs(10_000);
+        let far_future = std::time::SystemTime::now() + std::time::Duration::from_secs(10_000);
         let far_date = httpdate::fmt_http_date(far_future);
         assert_eq!(super::parse_retry_after_value(&far_date), Some(300));
-        let past =
-            std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
         let past_date = httpdate::fmt_http_date(past);
         assert_eq!(super::parse_retry_after_value(&past_date), Some(0));
         assert_eq!(super::parse_retry_after_value("not-a-date"), None);

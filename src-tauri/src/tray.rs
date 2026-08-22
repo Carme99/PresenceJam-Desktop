@@ -2,9 +2,7 @@ use std::sync::atomic::Ordering;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tauri::{
-    menu::{
-        CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, Submenu,
-    },
+    menu::{CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager,
 };
@@ -111,14 +109,12 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
                 // this is user-initiated. Unknown → resume (play).
                 // Unconditional GET (`None`): this is a user-initiated
                 // one-off click with no stored validator. C11 signature.
-                let should_pause =
-                    match crate::spotify::get_currently_playing(&token, None) {
-                        Ok(crate::spotify::CurrentlyPlaying::Modified {
-                            track: Some(track),
-                            ..
-                        }) => track.is_playing,
-                        _ => false,
-                    };
+                let should_pause = match crate::spotify::get_currently_playing(&token, None) {
+                    Ok(crate::spotify::CurrentlyPlaying::Modified {
+                        track: Some(track), ..
+                    }) => track.is_playing,
+                    _ => false,
+                };
                 if should_pause {
                     run_player_action(app, "pause", Some(false), |t| {
                         crate::spotify::player_pause(t, None)
@@ -413,8 +409,7 @@ fn build_devices_submenu_from_devices(
     app: &AppHandle,
     devices: &[crate::spotify::DeviceInfo],
 ) -> Result<Submenu<tauri::Wry>, String> {
-    let submenu = Submenu::with_id(app, ID_DEVICES, "Devices", true)
-        .map_err(|e| e.to_string())?;
+    let submenu = Submenu::with_id(app, ID_DEVICES, "Devices", true).map_err(|e| e.to_string())?;
     if devices.is_empty() {
         let empty = MenuItemBuilder::with_id(format!("{}|none", ID_DEVICES), "(no devices)")
             .enabled(false)
@@ -459,8 +454,7 @@ fn build_queue_submenu_from_queue(
     app: &AppHandle,
     queue: Option<&crate::spotify::QueueInfo>,
 ) -> Result<Submenu<tauri::Wry>, String> {
-    let submenu = Submenu::with_id(app, ID_QUEUE, "Up Next", true)
-        .map_err(|e| e.to_string())?;
+    let submenu = Submenu::with_id(app, ID_QUEUE, "Up Next", true).map_err(|e| e.to_string())?;
     let up_next: Vec<crate::spotify::TrackInfo> = queue
         .map(|q| q.up_next.iter().take(3).cloned().collect())
         .unwrap_or_default();
@@ -733,13 +727,19 @@ pub fn update_tray_menu(
         .checked(is_playing)
         .build(app)
         .map_err(|e| {
-            log::warn!("[TRAY] update_tray_menu: failed to build play_pause item: {}", e);
+            log::warn!(
+                "[TRAY] update_tray_menu: failed to build play_pause item: {}",
+                e
+            );
             e.to_string()
         })?;
     let previous = MenuItemBuilder::with_id(ID_PREVIOUS, "Previous")
         .build(app)
         .map_err(|e| {
-            log::warn!("[TRAY] update_tray_menu: failed to build previous item: {}", e);
+            log::warn!(
+                "[TRAY] update_tray_menu: failed to build previous item: {}",
+                e
+            );
             e.to_string()
         })?;
     let next = MenuItemBuilder::with_id(ID_NEXT, "Next")
@@ -749,17 +749,25 @@ pub fn update_tray_menu(
             e.to_string()
         })?;
     let playback_separator = PredefinedMenuItem::separator(app).map_err(|e| {
-        log::warn!("[TRAY] update_tray_menu: failed to build playback_separator: {}", e);
+        log::warn!(
+            "[TRAY] update_tray_menu: failed to build playback_separator: {}",
+            e
+        );
         e.to_string()
     })?;
 
-    let devices_submenu =
-        build_devices_submenu_from_devices(app, &devices).map_err(|e| {
-            log::warn!("[TRAY] update_tray_menu: failed to build devices submenu: {}", e);
+    let devices_submenu = build_devices_submenu_from_devices(app, &devices).map_err(|e| {
+        log::warn!(
+            "[TRAY] update_tray_menu: failed to build devices submenu: {}",
             e
-        })?;
+        );
+        e
+    })?;
     let queue_submenu = build_queue_submenu_from_queue(app, queue.as_ref()).map_err(|e| {
-        log::warn!("[TRAY] update_tray_menu: failed to build queue submenu: {}", e);
+        log::warn!(
+            "[TRAY] update_tray_menu: failed to build queue submenu: {}",
+            e
+        );
         e
     })?;
 

@@ -117,6 +117,7 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
             log::warn!("[POLLING] polling_loop: failed to update tray menu: {}", e);
         }
 
+        tray::set_presence_gated_badge(&app, gated_track_key.is_some());
         match iteration {
             super::poll_once::PollIteration::Break => {
                 log::info!("[POLLING] polling_loop: poll_once requested break");
@@ -136,6 +137,8 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
             }
         }
     }
+
+    tray::set_presence_gated_badge(&app, false);
 
     log::info!("[POLLING] polling_loop: ENDED");
 }

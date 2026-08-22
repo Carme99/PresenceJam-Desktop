@@ -11,7 +11,6 @@ use crate::{AppState, PendingSpotifyAuth};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 
-
 /// Log tag prefix for this submodule (issue #79 item 3).
 const CMD: &str = "[CMD.SPOTIFY_AUTH]";
 
@@ -371,12 +370,9 @@ pub fn refresh_spotify(
     // `refresh_spotify_token` now returns a typed `SpotifyApiError`
     // (issue #160); stringify it for the IPC boundary, preserving this
     // command's public `Result<(), String>` contract.
-    let new_tokens = crate::spotify::refresh_spotify_token(
-        &current_tokens,
-        &client_id,
-        &client_secret,
-    )
-    .map_err(|e| e.to_string())?;
+    let new_tokens =
+        crate::spotify::refresh_spotify_token(&current_tokens, &client_id, &client_secret)
+            .map_err(|e| e.to_string())?;
     log::info!("{CMD} refresh_spotify: new tokens received");
 
     // CAS: only commit if state still holds the access token we refreshed

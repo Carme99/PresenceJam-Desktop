@@ -2,9 +2,9 @@ use crate::profanity;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{Read, Write};
-use std::path::PathBuf;
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
@@ -109,10 +109,11 @@ fn default_expiry_buffer_seconds() -> u64 {
 fn clamp_polling(cfg: &mut PollingConfig) {
     cfg.default_interval_seconds = cfg.default_interval_seconds.clamp(5, 300);
     cfg.minimum_interval_seconds = cfg.minimum_interval_seconds.clamp(5, 30);
-    cfg.max_interval_seconds = cfg.max_interval_seconds.clamp(cfg.minimum_interval_seconds, 300);
+    cfg.max_interval_seconds = cfg
+        .max_interval_seconds
+        .clamp(cfg.minimum_interval_seconds, 300);
     cfg.expiry_buffer_seconds = cfg.expiry_buffer_seconds.clamp(0, 60);
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
@@ -463,7 +464,6 @@ fn atomic_write_json(path: &std::path::Path, json: &str) -> Result<(), String> {
     file.sync_all()
         .map_err(|e| format!("Failed to sync temp file '{}': {}", temp_path.display(), e))?;
 
-
     std::fs::rename(&temp_path, path)
         .map_err(|e| format!("Failed to rename temp file to '{}': {}", path.display(), e))?;
     #[cfg(unix)]
@@ -542,10 +542,7 @@ mod tests {
 
         // After atomic_write_json, the destination must hold the new bytes
         // (no mix with the old), and there must be no leftover .tmp sidecar.
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            "NEW_CONTENTS_BBB"
-        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "NEW_CONTENTS_BBB");
         let sidecar = path.with_extension("tmp");
         assert!(
             !sidecar.exists(),
@@ -588,12 +585,16 @@ mod tests {
                 b'{' => depth += 1,
                 b'}' => {
                     depth -= 1;
-                    if depth == 0 { break i; }
+                    if depth == 0 {
+                        break i;
+                    }
                 }
                 _ => {}
             }
             i += 1;
-            if i >= src.len() { panic!("atomic_write_json body has unbalanced braces"); }
+            if i >= src.len() {
+                panic!("atomic_write_json body has unbalanced braces");
+            }
         };
         let body = &src[body_start + 1..body_end];
         // Allow `remove_file(&temp_path)` (pre-clearing a stale sidecar from

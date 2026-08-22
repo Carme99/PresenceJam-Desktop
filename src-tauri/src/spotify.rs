@@ -264,9 +264,7 @@ pub fn refresh_spotify_token(
         .form(&params)
         .basic_auth(client_id, Some(client_secret))
         .send()
-        .map_err(|e| {
-            SpotifyApiError::Other(format!("Failed to send refresh request: {}", e))
-        })?;
+        .map_err(|e| SpotifyApiError::Other(format!("Failed to send refresh request: {}", e)))?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -531,9 +529,9 @@ fn send_player_command(
     if let Some(payload) = body {
         request = request.json(&payload);
     }
-    let response = request
-        .send()
-        .map_err(|e| SpotifyApiError::Other(format!("Failed to send {} request: {}", context, e)))?;
+    let response = request.send().map_err(|e| {
+        SpotifyApiError::Other(format!("Failed to send {} request: {}", context, e))
+    })?;
 
     let status = response.status().as_u16();
     if status == 202 || status == 204 {
@@ -599,7 +597,11 @@ pub fn player_previous(access_token: &str, device_id: Option<&str>) -> Result<()
 /// Transfers playback to `device_id`, optionally starting playback.
 /// The device goes in the JSON body (`device_ids`), not the query string.
 /// PUT /v1/me/player. See issue #3.0-P3.
-pub fn player_transfer(access_token: &str, device_id: &str, play: bool) -> Result<(), SpotifyApiError> {
+pub fn player_transfer(
+    access_token: &str,
+    device_id: &str,
+    play: bool,
+) -> Result<(), SpotifyApiError> {
     send_player_command(
         reqwest::Method::PUT,
         "/me/player",
@@ -916,8 +918,7 @@ mod tests {
             expires_at: Utc::now(),
         };
         let json = serde_json::to_string(&original).expect("serialize");
-        let parsed: SpotifyTokens =
-            serde_json::from_str(&json).expect("deserialize");
+        let parsed: SpotifyTokens = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed.access_token, original.access_token);
         assert_eq!(parsed.refresh_token, original.refresh_token);
         assert_eq!(parsed.expires_at, original.expires_at);
@@ -940,8 +941,7 @@ mod tests {
             progress_ms: Some(123_456),
             duration_ms: 240_000,
         };
-        let json: serde_json::Value =
-            serde_json::to_value(&track).expect("to_value");
+        let json: serde_json::Value = serde_json::to_value(&track).expect("to_value");
         // u64 must round-trip as a JSON number, not a string. `Some(v)`
         // serialises as the bare number; `None` would serialise as `null`.
         assert!(
@@ -970,7 +970,10 @@ mod tests {
             Some("NO_ACTIVE_DEVICE")
         );
         assert_eq!(parse_error_reason("not json").as_deref(), None);
-        assert_eq!(parse_error_reason(r#"{"error":{"status":404}}"#).as_deref(), None);
+        assert_eq!(
+            parse_error_reason(r#"{"error":{"status":404}}"#).as_deref(),
+            None
+        );
     }
 
     // Regression guard for issue #3.0-P3: only a 404 whose error body
@@ -980,9 +983,11 @@ mod tests {
     fn is_no_active_device_404_matches_only_no_active_device() {
         let no_active = r#"{"error":{"status":404,"message":"Player command failed: No active device found","reason":"NO_ACTIVE_DEVICE"}}"#;
         assert!(is_no_active_device_404(404, no_active));
-        let other_reason = r#"{"error":{"status":404,"message":"Device not found","reason":"DEVICE_NOT_FOUND"}}"#;
+        let other_reason =
+            r#"{"error":{"status":404,"message":"Device not found","reason":"DEVICE_NOT_FOUND"}}"#;
         assert!(!is_no_active_device_404(404, other_reason));
-        let wrong_status = r#"{"error":{"status":403,"message":"Forbidden","reason":"NO_ACTIVE_DEVICE"}}"#;
+        let wrong_status =
+            r#"{"error":{"status":403,"message":"Forbidden","reason":"NO_ACTIVE_DEVICE"}}"#;
         assert!(!is_no_active_device_404(403, wrong_status));
         assert!(!is_no_active_device_404(404, "not json"));
         assert!(!is_no_active_device_404(404, ""));
@@ -1015,8 +1020,8 @@ mod tests {
     fn decode_spotify_granted_scopes_empty_when_not_decodable() {
         assert!(decode_spotify_granted_scopes("not-a-jwt").is_empty());
         assert!(decode_spotify_granted_scopes("a.b.c").is_empty());
-        let no_scope = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(r#"{"sub":"user123"}"#);
+        let no_scope =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"sub":"user123"}"#);
         assert!(decode_spotify_granted_scopes(&format!("h.{}.s", no_scope)).is_empty());
     }
 
@@ -1028,19 +1033,16 @@ mod tests {
         // Capped at 300.
         assert_eq!(super::parse_retry_after_value("9999"), Some(300));
         // HTTP-date ~60s in future -> small positive delay, not None.
-        let future =
-            std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        let future = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
         let http_date = httpdate::fmt_http_date(future);
         let secs = super::parse_retry_after_value(&http_date).expect("http-date must parse");
         assert!(secs <= 60, "future http-date ~60s got {}", secs);
         // Far-future HTTP-date capped at 300.
-        let far_future =
-            std::time::SystemTime::now() + std::time::Duration::from_secs(10_000);
+        let far_future = std::time::SystemTime::now() + std::time::Duration::from_secs(10_000);
         let far_date = httpdate::fmt_http_date(far_future);
         assert_eq!(super::parse_retry_after_value(&far_date), Some(300));
         // Past HTTP-date -> 0 (max(0, date-now)).
-        let past =
-            std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
         let past_date = httpdate::fmt_http_date(past);
         assert_eq!(super::parse_retry_after_value(&past_date), Some(0));
         // Unparseable stays None (callers fall back to exponential backoff).
