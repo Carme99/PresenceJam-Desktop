@@ -20,16 +20,19 @@ The app lives in your system tray, syncs while you work, and stays out of the wa
 
 - **Real-time Spotify detection** — polls Spotify's Web API while a track is playing.
 - **Teams status sync** — sets your Teams custom status via Microsoft Graph.
-- **Smart polling** — sleeps until the track ends; no wasted API calls.
+- **Smart polling** — sleeps until the track ends; ETag conditional GETs skip redundant Spotify calls.
 - **Auto-clear** — clears status when Spotify pauses or stops.
 - **Profanity filter** — replaces profane track names with a safe placeholder.
 - **Customisable status template** — `{artist}`, `{track}`, `{album}`, `{emoji}` placeholders.
 - **Light & dark themes** — pick whichever matches your desktop.
 - **System tray** — runs silently in the background.
 - **Tray playback controls** — Play/Pause, Previous, Next, plus Devices and Up Next submenus, straight from the tray icon.
+- **Diagnostics page** — one-click local support snapshot (versions, sanitized config, token expiry metadata, redacted log tail). Never leaves your machine.
+- **Detachable Logs & Settings** — pop Logs or Settings out into their own window and back in again.
+- **Interface languages** — English, German (Deutsch), and French (Français) via an in-app language picker.
 - **Availability sync (opt-in)** — optionally show yourself as **Available** in Teams while you listen.
 - **Meeting/call-aware gating** — pauses status updates while you're busy, in a meeting, on a call, or presenting.
-- **Auto-update** — checks GitHub Releases on startup and installs new versions in-app.
+- **Auto-update** — silent update checks at startup and every ~24h; install immediately in-app or defer with *Install on quit*, which applies the verified update as the app exits.
 - **Launch at login** — optional auto-start on boot.
 - **Secure auth** — Authorization Code + PKCE OAuth for Spotify (confidential client), Device Code flow for Teams.
 

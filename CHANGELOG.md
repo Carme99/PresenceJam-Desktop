@@ -5,6 +5,30 @@ All notable changes to PresenceJam are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [4.0.0] - Unreleased
+
+The scope-3.3 polish wave beyond Stratus: supply-chain and OAuth hardening, a local diagnostics page, silent background updates with install-on-quit, multi-window detach for Logs/Settings, conditional-GET polling, settings/notification UX polish, and a WCAG 2.2 AA accessibility pass. Landing separately (not yet in this history): i18n with an en/de/fr language picker (scope item C6).
+
+### Security
+- **Dependency prune (C13):** dropped the last remaining `@tauri-apps/plugin-shell` entry from `package.json` (+ `package-lock.json`) and pruned `tauri-plugin-shell`/`tauri-plugin-store` from `Cargo.lock`; removed their four ACKNOWLEDGEMENTS.md rows and reworded stale comments naming the store crate. No imports existed in Rust or Svelte code and no capability granted shell/store IPC — bundle-size and attack-surface reduction only, no behavior change.
+- **Release attestations + manual re-cut (C10):** the release workflow now attests every packaged artifact via SHA-pinned `actions/attest-build-provenance` (SLSA build provenance; `id-token: write` + `attestations: write` scoped to the build job alone, `contents` downgraded to read there). New `workflow_dispatch` trigger with a `tag` input re-cuts an existing `v*` release without retagging; a `resolve-tag` job validates the tag exists and every downstream job consumes its output instead of `github.ref_name`. Full SHA-pinning audit of all `uses:` entries confirmed clean. Verification steps documented in `SECURITY.md`.
+- **OAuth state binding hardened to single-use with constant-time compares (C1, defense-in-depth for #66):** `pkce::LaunchBinding` replaces the bare launch-secret slot — it holds the per-launch secret plus a single-use slot with the SHA-256 of the in-flight flow's PKCE verifier, bound at authorize time and validated at callback time (`handle_deep_link` + `complete_spotify_auth_manual`), tying the echoed `state` to the exact code_verifier presented at token exchange. Single-use consumption (`take()` after validation) makes replayed callbacks fail closed, mirroring what RFC 6749 §10.12 requires for authorization codes. Comparisons go through constant-time `pkce::ct_eq` (manual XOR-fold); strict `<csrf>.<secret>` structure check rejects truncated/malformed states before comparison.
+- **deps: h2 bumped to 0.4.18**, clearing RUSTSEC-2026-0258.
+- **Accepted transitive risks:** quick-xml 0.37.5 (via `plist`) and 0.39.x (via `tauri-winrt-notification`) carry RUSTSEC-2026-0194/-0195. Exposure here is build-time/self-generated XML only (no untrusted XML is parsed at runtime); held pending upstream fixes — documented under `SECURITY.md` → *Accepted transitive risks*.
+
+### Fixed
+- **WCAG 2.2 AA accessibility pass (C12):** added a visually-hidden skip-to-content link targeting `#main-content`; raised `--focus-ring` alphas (dark 0.45→0.75, light 0.35→0.90) so the indicator meets 3:1 non-text contrast; `prefers-reduced-motion` now disables decorative pulse animations (badge dot, Playing indicator); fixed failing contrast pairs in both themes — dark: fg-on-accent white→`#0F1226` on accent green (2.59→7.16:1), danger→`#FB8A8A` (5.29:1); light: fg-subtle→`#5A618F` (5.25:1), accent greens darkened so white text reaches 4.91–8.74:1, success/warning/danger/info/accent-text hues darkened to ≥5:1 on their soft backgrounds; fixed contradictory `role="alert"` + `aria-live="polite"` on the playback toast (kept `role="alert"`); verified `role="status"` regions across Dashboard/Diagnostics/UpdatePrompt.
+
+### Added
+- **Telemetry-free local diagnostics page (C5):** new `get_diagnostics_snapshot` command collects a support snapshot entirely locally — app/Tauri/OS versions, sanitized config summary, OAuth token metadata only (RFC3339 expiry timestamps + presence flags, never token values), keychain presence flags for both slots, and the last 50 lines of `PresenceJam.log` passed through a defensive second-pass redaction helper. New `Diagnostics.svelte` page (Copy diagnostics / Save to file, `role="status"` feedback) reachable from a dashboard icon button. No network calls anywhere, matching the No Telemetry promise.
+- **Silent background update checks + install-on-quit (C3a+C3c):** `UpdatePrompt` re-checks GitHub Releases every ~24h while running (failed silent checks stay console-only, never banner/toast). New "Install on quit" path: `stage_deferred_update` runs its own check + download + signature verification on the blocking pool and holds the verified bytes in managed `PendingUpdate` state; `lib.rs` swaps to `build().run()` with a `RunEvent::Exit` arm that applies the staged update when quitting via tray Quit or app exit. The Windows installer relaunches automatically; macOS/Linux pick up the replaced bundle/AppImage on next launch.
+- **Multi-window detach for Logs & Settings (C7):** each pane gains Pop out / Pop back in (VS Code detached-panel style). Child windows are created JS-side via `WebviewWindow` with stable labels `logs-detached`/`settings-detached`, rendered by a new `/detached/[pane]` SvelteKit route; `src/lib/stores/detach.ts` tracks popped-out state (main-window-only) and dashboard nav shows a dot badge + focuses the child instead of navigating. New `capabilities/detached.json` scopes the two child labels to a minimal mirrored permission set; `default.json` gains the runtime window-creation permissions. `+layout.svelte` guards its always-mounted reconnect/auth/update listeners behind a window-label check so detached windows never double-register. The app still boots single-window; tray/show_window, deep-link, and single-instance routing unchanged.
+- **Deep-link navigate UX (C2):** after a validated Spotify deep-link callback token exchange the backend emits `navigate` (`dashboard`); after Teams device-code success it emits `navigate` (`settings`) — the app lands on the right view instead of just raising the window. The frontend listener ignores navigation while Onboarding owns the view.
+- **Tray polish (C4):** live tray tooltip `Artist — Track (▶|⏸)` updated on each menu rebuild; Play/Pause is now a native CheckMenuItem (checked state from `LAST_PLAYING_STATE`) instead of label-swapped rebuilds; cfg-gated macOS dock badge helper (`set_presence_gated_badge`) wired into the polling loop so the badge reflects presence-gated sync state.
+- **Conditional GET for currently-playing polls (C11):** the loop stores the ETag response header from `GET /me/player/currently-playing` and echoes it as `If-None-Match`; a 304 Not Modified becomes a no-op iteration identical to unchanged-track minus JSON parse/format_status/profanity work. Degrades gracefully: no stored validator → unconditional GET, missing header → next poll unconditional (Spotify does not document ETag support; relies only on RFC 9110 conditional-request semantics and is a behavioral no-op if Spotify never sends one).
+- **Settings dirty-state + clamp feedback + reset buttons (C9):** unsaved-changes banner driven by a BigInt-safe deep compare of local config vs saved config; inline clamp feedback on the polling min/max inputs mirroring Rust `clamp_polling` semantics (min clamps to [5,30] first, max clamps to [effMin,300]) showing the effective saved value when min > max; per-section "Reset to default" buttons (Presence, Status format, Polling, Appearance).
+- **Notification throttle + grouping (C8):** track-change desktop notifications throttled to at most one per 5 seconds (throttled tracks don't claim `lastNotifiedId`); replace-in-place per session via a stable notification id + group tag where the platform supports it; dedup and permission gates unchanged.
+
 ## [3.2.0] - 2026-08-22 — Stratus
 
 Comprehensive hardening and UX polish covering 28 issues. Windows auto-update unblocked, main-thread stalls eliminated, token-revocation loop fixed, event contracts made reliable, and docs/build pipeline tightened.
@@ -629,11 +653,13 @@ Closes #60 #61 #62 #63
 
 - PowerShell script version — this is a full rewrite
 
+[4.0.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v3.2.0...HEAD
+[3.2.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v3.2.0
 [3.1.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v3.1.0
 [3.0.1]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v3.0.1
 [3.0.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v3.0.0
 [2.9.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.9.0
-[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v3.1.0...HEAD
+[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v3.2.0...HEAD
 [2.6.2]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.6.2
 [2.6.1]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.6.1
 [2.6.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.6.0

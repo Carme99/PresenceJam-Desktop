@@ -151,11 +151,86 @@ readout → `invoke("relaunch_app")` (`commands/misc.rs::relaunch_app`,
 check (offline, unreachable endpoint, signature mismatch) is silent —
 never blocks the UI.
 
+**Silent background checks + install-on-quit (v4.0):**
+
+- *Background checks:* `UpdatePrompt.svelte` repeats `check()` every ~24h while
+  the app runs (the startup check is unchanged). A failed silent check stays
+  console-only — it never surfaces a banner or toast, so an offline machine is
+  never nagged.
+- *Install-on-quit:* the JS-side `downloadAndInstall()` cannot defer (it applies
+  the payload immediately on Windows), so `src-tauri/src/updater_bg.rs` exposes
+  a `stage_deferred_update` command that performs its own check + download +
+  signature verification on the blocking pool and holds the verified bytes in
+  managed `PendingUpdate` state. `lib.rs` runs the app via `build().run()` with
+  a **`RunEvent::Exit` arm**: when the user quits (tray Quit and `app_exit` both
+  funnel into `AppHandle::exit`), the staged update is applied during exit. The
+  Windows installer relaunches automatically; macOS/Linux pick up the replaced
+  bundle/AppImage on next launch.
+
 Payload signing is independent of OS code signing: the updater works on
 unsigned builds, and the macOS unsigned/Gatekeeper story (README
 "macOS first-run note") applies to updated `.app` builds too. The release
 matrix builds **aarch64 macOS only** — Intel Macs never receive updates
 (known gap, see `docs/3.0-release-research.md`).
+
+## Local Diagnostics Page (v4.0)
+
+`src-tauri/src/diagnostics.rs` implements `get_diagnostics_snapshot`, a support
+snapshot collected **entirely locally** — the page makes no network calls,
+matching SECURITY.md's No Telemetry promise. The snapshot contains:
+
+- App / Tauri / OS version strings.
+- A **sanitized** config summary (no secrets; the Spotify client secret lives in
+  the keychain and never enters config).
+- OAuth token **metadata only** — RFC3339 expiry timestamps + presence flags;
+  never a token value.
+- Keychain presence flags for both app slots (namespaced client-secret slot +
+  tokens AES-key slot).
+- The last 50 lines of the on-disk `PresenceJam.log` tail, passed through a
+  defensive second-pass redaction helper that reuses the `[REDACTED len N]`
+  pattern from v3.2 (#228) — keyed values and any ≥32-char opaque run are
+  scrubbed.
+
+The command is async with `spawn_blocking` per the v3.2 main-thread-stall
+convention (file IO + keychain reads). Regression tests cover the redaction
+edge cases and assert injected fake token values never survive serialization of
+the snapshot. The frontend (`Diagnostics.svelte`) offers Copy diagnostics /
+Save to file with `role="status"` feedback, reachable from a dashboard icon
+button.
+
+## Multi-Window Detach (v4.0)
+
+Logs and Settings can each be *popped out* into their own window (and popped
+back in), VS Code detached-panel style:
+
+- **Creation is JS-side:** the main window constructs child windows via the
+  `@tauri-apps/api/webviewWindow` constructor with stable labels
+  `logs-detached` / `settings-detached` and URL `/detached/<pane>`; a SvelteKit
+  route (`src/routes/detached/[pane]/+page.svelte`) renders `LogViewer` or
+  `Settings` in detached mode. `tauri.conf.json`'s `app.windows` is untouched —
+  the app still boots single-window.
+- **Main window stays the source of truth:** `currentView` remains
+  main-window-only; detached panes invoke the same app-global Tauri commands,
+  so config/polling state is shared by construction. Popping back in re-mounts
+  Settings via `loadConfig()` (backend truth). `src/lib/stores/detach.ts`
+  tracks pane→popped-out state in the main window only; dashboard nav shows a
+  dot badge and focuses the child instead of navigating while detached.
+- **Capabilities:** new `src-tauri/capabilities/detached.json` scopes the two
+  child labels to a minimal mirrored set (`core/event/log/opener/notification`);
+  `default.json` gains `core:window:allow-create` +
+  `core:webview:allow-create-webview-window` for runtime creation.
+- **Listener hygiene:** `+layout.svelte` guards its always-mounted
+  reconnect/auth/update listeners (and `UpdatePrompt`) behind a window-label
+  check so detached windows never double-register handlers.
+
+This stays opt-in per-pane detachment, coexisting with the single-window
+rationale for a tray-resident app: no second window at boot, tray
+`show_window` targets only `main`, and deep-link/single-instance routing is
+unchanged.
+
+> **i18n (en/de/fr language picker):** scoped as C6 and landing separately —
+> not yet merged to main at v4.0.0 docs time; this section will be extended
+> with the i18n barrel when it lands.
 
 ## Authentication Flows
 
@@ -508,20 +583,23 @@ PresenceJam-Desktop/
 │   │   │   ├── Onboarding.svelte           # 3-step OAuth wizard
 │   │   │   ├── Settings.svelte             # Config editor
 │   │   │   ├── Reconnect.svelte            # Re-auth flow
-│   │   │   ├── UpdatePrompt.svelte         # Auto-update banner (check → download → relaunch, v3.0)
+│   │   │   ├── UpdatePrompt.svelte         # Auto-update banner (check → download → relaunch, v3.0; silent 24h re-check + install-on-quit, v4.0)
+│   │   │   ├── Diagnostics.svelte          # Local diagnostics snapshot viewer (v4.0)
 │   │   │   ├── About.svelte                # Version + license
-│   │   │   └── LogViewer.svelte            # In-app log viewer
+│   │   │   └── LogViewer.svelte            # In-app log viewer (detachable to its own window, v4.0)
 │   │   ├── stores/
 │   │   │   ├── app.ts                      # currentView, appError (classic writable stores)
 │   │   │   ├── config.ts                   # configStore + saveConfig
-│   │   │   └── authFlow.svelte.ts          # 4-event auth-listener state
+│   │   │   ├── authFlow.svelte.ts          # 4-event auth-listener state
+│   │   │   └── detach.ts                   # logs/settings popped-out state (main-window only, v4.0)
 │   │   ├── types.ts                        # Re-exports ts-rs codegen
 │   │   ├── types-generated/                # ts-rs output (gitignored, regenerated by cargo test)
 │   │   └── utils/
 │   │       ├── dev.ts                      # devLog() no-op in prod builds
 │   │       └── useAuthListeners.ts          # Shared 4-event listener setup
 │   └── routes/
-│       └── +page.svelte                    # SPA entry, routes to views
+│       ├── +page.svelte                    # SPA entry, routes to views
+│       └── detached/[pane]/+page.svelte    # Renders LogViewer/Settings in detached mode (v4.0)
 ├── src-tauri/
 │   ├── src/
 │   │   ├── lib.rs                          # Tauri entry, command registration, AppState
@@ -547,13 +625,16 @@ PresenceJam-Desktop/
 │   │   ├── profanity.rs                   # 25-word curated profanity filter
 │   │   ├── spotify.rs                      # PKCE OAuth client + Web API (ts-rs TS)
 │   │   ├── teams.rs                        # Device-code + MS Graph (ts-rs TS)
-│   │   ├── tray.rs                        # System tray + dedup snapshot
+│   │   ├── tray.rs                        # System tray + dedup snapshot (native CheckMenuItem Play/Pause + live tooltip, v4.0)
+│   │   ├── updater_bg.rs                  # Background update checks + stage_deferred_update / PendingUpdate (v4.0)
+│   │   ├── diagnostics.rs                 # Telemetry-free get_diagnostics_snapshot (v4.0)
 │   │   └── menu.rs                        # macOS / Windows app menu bar
 │   ├── Cargo.toml                         # Rust deps + `ts-rs = { version = "12", features = ["chrono-impl"] }`
 │   ├── Cargo.lock                         # Commit-locked for reproducible builds
 │   ├── tauri.conf.json                    # Window + deep-link + bundle config
 │   └── capabilities/
-│       └── default.json                   # CSP, permissions, allowed APIs
+│       ├── default.json                   # CSP, permissions, allowed APIs (+ runtime window creation for detach, v4.0)
+│       └── detached.json                  # Minimal mirrored permission set for logs-detached/settings-detached (v4.0)
 ├── .github/workflows/
 │   ├── ci.yml                             # PR-time: cargo check/clippy/test, npm check
 │   └── release.yml                        # Tag-triggered: 3-OS matrix + homebrew + winget

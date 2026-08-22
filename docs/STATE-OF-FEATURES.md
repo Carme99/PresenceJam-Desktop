@@ -1,4 +1,4 @@
-# State of Features — v3.2.0
+# State of Features — v4.0.0
 
 Quick, no-hedge answers to "does this thing actually work in *my* setup?"
 Most of the answers below are tied to a code path or a docs file you can read
@@ -9,7 +9,7 @@ end-to-end; the few rows that can't be sourced inline are explicitly flagged
 > row that's stale, the right place to flag it is in a PR against this file;
 > do not edit the underlying behavior silently.
 
-## Tested in main (verified during the v3.2.0 release cycle)
+## Tested in main (verified during the v4.0.0 release cycle)
 
 | Feature                                               | Status | Where it's wired / verified                                                                                             |
 |-------------------------------------------------------|--------|--------------------------------------------------------------------------------------------------------------------------|
@@ -28,6 +28,21 @@ end-to-end; the few rows that can't be sourced inline are explicitly flagged
 | Auto-update (unsigned, GitHub Releases)                | ✅     | `tauri-plugin-updater` registered in `lib.rs`; `updater:default` in `capabilities/default.json`; endpoint `…/releases/latest/download/latest.json` (`tauri.conf.json`). The release matrix signs artifacts with `TAURI_SIGNING_PRIVATE_KEY` (`release.yml`) and the release job hand-assembles `latest.json` (minisign `.sig` contents). `UpdatePrompt.svelte` → `check()` on startup → banner → `downloadAndInstall()` → `invoke("relaunch_app")`. Payload signing is independent of OS code signing, so it works on unsigned builds. (issue #3.0-P5) |
 | ts-rs generated TS types from Rust wire structs         | ✅     | `src-tauri/src/spotify.rs`, `teams.rs`, `commands/sync.rs`, `config.rs` derive `#[ts_rs::TS]` with `#[ts(export, export_to = "../../src/lib/types-generated/")]`. Cargo test regenerates. See `ARCHITECTURE.md` Directory Structure.                 |
 | Windows / macOS / Linux release matrix builds          | ✅     | `.github/workflows/release.yml` — 3-way job matrix (`macos-latest`, `windows-latest`, `ubuntu-latest`). Verified for v2.8.0: all 3 jobs succeeded in Release run #28720779185. Linux produces both `.deb` and `.AppImage` from one `tauri build` invocation. |
+| Local diagnostics page (C5)                            | ✅     | `src-tauri/src/diagnostics.rs::get_diagnostics_snapshot` (async + `spawn_blocking`) — app/Tauri/OS versions, sanitized config, token metadata only (expiry timestamps + presence flags), keychain presence flags, last 50 log lines through a second-pass redaction helper. `Diagnostics.svelte` Copy/Save actions; no network calls. Regression tests assert injected token values never survive serialization. |
+| Conditional GET polling (C11)                           | ✅     | `polling/loop.rs` + `polling/poll_once.rs` — ETag stored from `/me/player/currently-playing`, echoed as `If-None-Match`; 304 short-circuits parse/format/filter work. Note: Spotify does not document ETag support on this endpoint; handling is empirical per RFC 9110 and degrades to unconditional GET when no validator is present. |
+| Multi-window detach for Logs/Settings (C7)              | ✅     | JS-side `WebviewWindow` creation with labels `logs-detached`/`settings-detached`, rendered by `src/routes/detached/[pane]/+page.svelte`; state in `src/lib/stores/detach.ts`; minimal mirrored permissions in `src-tauri/capabilities/detached.json`; `+layout.svelte` listeners window-label-guarded. App still boots single-window. |
+| Deep-link navigate UX (C2)                              | ✅     | `navigate` event emitted from `handle_deep_link` / Teams auth success (`dashboard` / `settings`); listener in `+page.svelte` defers while Onboarding owns the view. |
+| Tray tooltip + native CheckMenuItem + dock badge (C4)   | ✅     | `tray.rs` — live tooltip `Artist — Track (▶|⏸)` on each rebuild; Play/Pause as native CheckMenuItem driven by `LAST_PLAYING_STATE`; macOS-only (`#[cfg]`) presence-gated dock badge wired into the polling loop (`b82f515`). |
+| Settings dirty-state + clamp feedback + reset (C9)      | ✅     | `Settings.svelte` — unsaved-changes banner via BigInt-safe deep compare; inline clamp feedback mirroring Rust `clamp_polling`; per-section Reset-to-default buttons using `defaultConfig`. |
+| Notification throttle + grouping (C8)                   | ✅     | `Dashboard.svelte` — max 1 track-change notification per 5s (throttled tracks don't claim `lastNotifiedId`); replace-in-place via stable id + group tag where the platform supports it. |
+| WCAG 2.2 AA accessibility pass (C12)                    | ✅     | Skip link, focus-ring alpha fixes (dark 0.75 / light 0.90), `prefers-reduced-motion` guards, darkened status/accent tokens in both themes; contrast validator parses pairs straight from `src/app.css` — 0 failures across both themes. |
+| OAuth single-use state binding (C1)                     | ✅     | `pkce::LaunchBinding` binds the SHA-256 of the in-flight verifier at authorize time; `validate_and_consume` take()s the slot after validation so replayed callbacks fail closed (RFC 6749 §10.12 analogue); constant-time compares via `pkce::ct_eq`. Unit tests cover replay/wrong/truncated/malformed states. |
+| Silent background update checks (C3a)                   | ✅     | `UpdatePrompt.svelte` re-checks every ~24h; failed silent checks stay console-only. |
+| Install-on-quit updates (C3c)                           | ⚠ Partial | `updater_bg.rs::stage_deferred_update` downloads + signature-verifies into managed `PendingUpdate`; `lib.rs` applies it in the `RunEvent::Exit` arm. Code path + tests verified; end-to-end behaviour against a *published* `latest.json` still needs one live release cycle before promising it to users. Windows auto-relaunches; macOS/Linux pick up on next launch. |
+| Release build-provenance attestations (C10)             | ⚠ Verify | `release.yml` attests artifacts via SHA-pinned `actions/attest-build-provenance`; `workflow_dispatch` with a `tag` input allows re-cutting an existing `v*` tag. Landed but not yet exercised by a real `v*` tag push — verify `gh attestation verify` output on the next release. |
+| Dependency prune: shell/store plugins gone (C13)        | ✅     | `package.json`/`package-lock.json` and Cargo lock pruned of `tauri-plugin-shell`/`tauri-plugin-store` + npm shell plugin; ACKNOWLEDGEMENTS rows removed. No imports or capability grants existed. |
+| h2 0.4.18                                               | ✅     | RUSTSEC-2026-0258 cleared via lockfile bump (`ed88008`). |
+| i18n en/de/fr language picker (C6)                      | ⚠ Landing separately | Scoped and in progress on `feat/v4-c6`; **not yet merged to main** at v4.0.0 docs time — do not promise until it lands. |
 
 ## Documented gaps (do work; deliberately out of scope for the version tested)
 

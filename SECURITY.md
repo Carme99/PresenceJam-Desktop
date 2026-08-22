@@ -380,6 +380,28 @@ If verification fails for a file obtained anywhere other than the official
 [releases page](https://github.com/Carme99/PresenceJam-Desktop/releases),
 treat it as untrusted and re-download from the release page.
 
+### Accepted transitive risks
+
+Two `quick-xml` advisories are currently **accepted risks**, tracked pending
+upstream fixes:
+
+- **RUSTSEC-2026-0194 / RUSTSEC-2026-0195** affect the XML parser `quick-xml`.
+  The lockfile resolves two versions transitively: `quick-xml` 0.37.5 (pulled
+  in via `plist`, a dependency of Tauri's macOS bundling/config path) and
+  `quick-xml` 0.39.x (via `tauri-winrt-notification`, used for Windows toast
+  notifications).
+
+**Why this is accepted rather than patched:** PresenceJam never parses
+untrusted XML at runtime. The affected paths are build-time tooling and XML we
+generate ourselves (the Windows notification toast payload is constructed by
+the crate from our own field values; `plist` output is produced during bundling,
+not from user input). There is no attacker-controlled XML surface in the app's
+network or storage paths. Neither advisory has an upstream-fixed version of the
+transitive crates available at v4.0.0 docs time; both clear automatically once
+`tauri-winrt-notification` and `plist` ship updates that pull a fixed
+`quick-xml`. This note should be removed at the first release where
+`cargo audit`/Dependabot shows both advisories cleared.
+
 ## Release Pipeline Token Rotation
 
 The release workflow (`.github/workflows/release.yml`) uses two repository secrets to publish to package managers. Both are personal access tokens (PATs) held by the maintainer and must be rotated on a 90-day cadence to limit blast radius if the token leaks through any other channel (CI logs, tap repo history, developer machine, etc.).
