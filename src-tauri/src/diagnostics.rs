@@ -26,6 +26,9 @@
 //! fire-and-forget on startup), so there is nothing cheaply available to
 //! report; the field is intentionally absent rather than stubbed.
 
+use std::fs;
+
+use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
 /// Log tag prefix for this module (issue #79 item 3 convention).
@@ -364,7 +367,8 @@ fn tail_log_file(log_dir: Option<std::path::PathBuf>) -> (Vec<String>, String) {
                 .take(LOG_TAIL_LINES)
                 .map(|l| redact_sensitive(&l))
                 .collect();
-            (tail, format!("ok: last {} of {} lines", tail.len(), total))
+            let status = format!("ok: last {} of {} lines", tail.len(), total);
+            (tail, status)
         }
         Err(e) => (
             Vec::new(),
@@ -477,7 +481,10 @@ mod tests {
         // Non-keyed short values and ordinary words stay untouched
         // ("interval" is not a secret key; "30s" is below the 32-char
         // opaque-run threshold).
-        assert_eq!(redact_sensitive("poll interval=30s ok"), "poll interval=30s ok");
+        assert_eq!(
+            redact_sensitive("poll interval=30s ok"),
+            "poll interval=30s ok"
+        );
     }
 
     #[test]
@@ -558,11 +565,7 @@ mod tests {
         assert!(status.contains("no log file yet"));
 
         let log_path = dir.join(LOG_FILE_NAME);
-        std::fs::write(
-            &log_path,
-            "[AUTH] code=hunter2secret\n[AUTH] clean line\n",
-        )
-        .unwrap();
+        std::fs::write(&log_path, "[AUTH] code=hunter2secret\n[AUTH] clean line\n").unwrap();
         let (lines, _) = tail_log_file(Some(dir.clone()));
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0], "[AUTH] code=[REDACTED len 13]");
