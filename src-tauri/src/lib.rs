@@ -743,7 +743,7 @@ pub fn run() {
             config::migrate_legacy_client_secret();
 
             // Load persisted tokens (Spotify + Teams) into AppState. We bypass
-            // `tauri-plugin-store` for the tokens file and read it directly
+            // any plugin store for the tokens file and read it directly
             // from `<app-config-dir>/PresenceJam/tokens.json` — since v3.0
             // (issue #140) the file is AES-256-GCM ciphertext, decrypted here;
             // a legacy plaintext file (≤ v2.10.0) is migrated on read. See

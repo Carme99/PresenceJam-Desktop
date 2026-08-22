@@ -1,11 +1,12 @@
 //! Token persistence with atomic temp-file + rename writes, encrypted at
 //! rest with AES-256-GCM (issue #140).
 //!
-//! Background: `tauri-plugin-store` writes the store JSON in-place; a crash
-//! during a write can leave a half-written file that fails to deserialize
-//! and bounces the user back to Onboarding. Issue #65 mandates atomic
-//! writes for the tokens file. We bypass `tauri-plugin-store` for the
-//! tokens file and write a small `{ spotify_tokens, teams_tokens }`
+//! Background: the pre-#65 persistence layer wrote the store JSON
+//! in-place; a crash during a write can leave a half-written file that
+//! fails to deserialize and bounces the user back to Onboarding.
+//! Issue #65 mandates atomic writes for the tokens file. We therefore
+//! bypass any plugin store for the tokens file and write a small
+//! `{ spotify_tokens, teams_tokens }`
 //! structure directly to `<app-config-dir>/PresenceJam/tokens.json` using
 //! the same temp-file + rename pattern as `config::save_config`.
 //!
@@ -169,7 +170,7 @@ pub fn tokens_file_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 /// does not exist or is empty. Returns `Err(...)` if the file exists and
 /// is non-empty but cannot be decrypted or deserialised; the caller in
 /// `lib::run` setup logs the error and continues with default state,
-/// matching the previous `tauri-plugin-store` path's behaviour.
+/// matching the previous (pre-#65) store path's behaviour.
 ///
 /// Since v3.0 the file is AES-256-GCM ciphertext (issue #140); a legacy
 /// plaintext JSON file from ≤ v2.10.0 is migrated to ciphertext on first

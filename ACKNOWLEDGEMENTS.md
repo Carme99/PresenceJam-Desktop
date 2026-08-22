@@ -10,10 +10,8 @@ PresenceJam uses the following open-source projects. We're grateful to all the m
 | [tauri-plugin-opener](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | URL opening in default browser |
 | [tauri-plugin-deep-link](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Custom protocol handling |
 | [tauri-plugin-notification](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Windows toast notifications |
-| [tauri-plugin-store](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Persistent key-value storage |
 | [tauri-plugin-autostart](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Windows startup registration |
 | [tauri-plugin-log](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | File-based logging |
-| [tauri-plugin-shell](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Shell operations |
 | [tauri-plugin-http](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | HTTP client |
 | [reqwest](https://github.com/seanmonstar/reqwest) | 0.12 | Apache-2.0 OR MIT | HTTP client for Spotify/Graph APIs |
 | [serde](https://github.com/serde-rs/serde) | 1.x | Apache-2.0 OR MIT | Serialization framework |
@@ -41,8 +39,6 @@ PresenceJam uses the following open-source projects. We're grateful to all the m
 | [@tauri-apps/plugin-log](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Log plugin |
 | [@tauri-apps/plugin-notification](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Notification plugin |
 | [@tauri-apps/plugin-opener](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Opener plugin |
-| [@tauri-apps/plugin-shell](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Shell plugin |
-| [@tauri-apps/plugin-store](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Store plugin |
 | [@sveltejs/adapter-static](https://github.com/sveltejs/kit) | 3.x | MIT | Static site adapter |
 | [@sveltejs/kit](https://github.com/sveltejs/kit) | 2.x | MIT | Svelte app framework |
 | [@sveltejs/vite-plugin-svelte](https://github.com/sveltejs/vite-plugin-svelte) | 5.x | MIT | Vite Svelte plugin |
