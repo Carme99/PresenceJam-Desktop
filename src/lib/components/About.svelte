@@ -1,6 +1,7 @@
 <script lang="ts">
   import { currentView } from '$lib/stores/app';
   import Logo from './Logo.svelte';
+  import { t } from '$lib/i18n';
 
   const BUILD = import.meta.env.VITE_APP_BUILD ?? 'dev build';
 
@@ -13,38 +14,38 @@
   <div class="card about-card">
     <div class="logo-wrap"><Logo size={72} /></div>
     <h1>PresenceJam</h1>
-    <p class="version">Version {BUILD}</p>
+    <p class="version">{t('about.version', { version: BUILD })}</p>
     <p class="description">
-      Pipes what you're playing on Spotify into your Microsoft Teams status — automatically.
+      {t('about.description')}
     </p>
     <dl class="stats">
       <div>
-        <dt>Status sync</dt>
-        <dd>Live</dd>
+        <dt>{t('about.statusSync')}</dt>
+        <dd>{t('about.live')}</dd>
       </div>
       <div>
-        <dt>Auth</dt>
-        <dd>PKCE / Device Code</dd>
+        <dt>{t('about.auth')}</dt>
+        <dd>{t('about.authMethod')}</dd>
       </div>
       <div>
-        <dt>Storage</dt>
-        <dd>OS keychain</dd>
+        <dt>{t('about.storage')}</dt>
+        <dd>{t('about.osKeychain')}</dd>
       </div>
     </dl>
     <div class="links">
       <a href="https://github.com/Carme99/PresenceJam-Desktop" target="_blank" rel="noopener">
-        GitHub repository
+        {t('about.githubRepo')}
       </a>
       <span class="separator">·</span>
       <a href="https://github.com/Carme99/PresenceJam-Desktop/releases" target="_blank" rel="noopener">
-        Releases
+        {t('about.releases')}
       </a>
       <span class="separator">·</span>
       <a href="https://github.com/Carme99/PresenceJam-Desktop/issues" target="_blank" rel="noopener">
-        Report an issue
+        {t('about.reportIssue')}
       </a>
     </div>
-    <button class="btn-secondary" onclick={goBack}>Back to dashboard</button>
+    <button class="btn-secondary" onclick={goBack}>{t('common.backToDashboard')}</button>
   </div>
 </div>
 

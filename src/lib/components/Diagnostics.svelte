@@ -3,6 +3,7 @@
   import { onMount } from 'svelte';
   import PageHeader from './PageHeader.svelte';
   import { currentView } from '$lib/stores/app';
+  import { t } from '$lib/i18n';
   import type { DiagnosticsSnapshot } from '$lib/types';
 
   /**
@@ -35,10 +36,10 @@
     if (!snapshot) return;
     try {
       await navigator.clipboard.writeText(formatText(snapshot));
-      feedback = 'Diagnostics copied to clipboard.';
+      feedback = t('diagnostics.copied');
     } catch (e) {
       console.warn('[DIAGNOSTICS] clipboard write failed:', e);
-      feedback = 'Copy failed — use "Save to file" instead.';
+      feedback = t('diagnostics.copyFailed');
     }
   }
 
@@ -54,15 +55,15 @@
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-      feedback = 'Diagnostics saved to your downloads folder.';
+      feedback = t('diagnostics.savedToDownloads');
     } catch (e) {
       console.warn('[DIAGNOSTICS] save failed:', e);
-      feedback = 'Save failed — use "Copy diagnostics" instead.';
+      feedback = t('diagnostics.saveFailed');
     }
   }
 
   function boolLabel(v: boolean | undefined | null): string {
-    return v ? 'Yes' : 'No';
+    return v ? t('common.yes') : t('common.no');
   }
 
   onMount(async () => {
@@ -76,12 +77,12 @@
 </script>
 
 <div class="diagnostics">
-  <PageHeader title="Diagnostics" onBack={goBack} showLogo={false} showThemeToggle={false} />
+  <PageHeader title={t('diagnostics.title')} onBack={goBack} showLogo={false} showThemeToggle={false} />
 
   <div class="toolbar">
-    <span class="hint">Local-only snapshot — safe to attach to a bug report.</span>
-    <button class="btn-secondary" onclick={copyDiagnostics} disabled={!snapshot}>Copy diagnostics</button>
-    <button class="btn-secondary" onclick={saveToFile} disabled={!snapshot}>Save to file</button>
+    <span class="hint">{t('diagnostics.localOnlyHint')}</span>
+    <button class="btn-secondary" onclick={copyDiagnostics} disabled={!snapshot}>{t('diagnostics.copy')}</button>
+    <button class="btn-secondary" onclick={saveToFile} disabled={!snapshot}>{t('diagnostics.saveToFile')}</button>
   </div>
 
   <p class="feedback" role="status">{feedback}</p>
@@ -89,61 +90,61 @@
   <div class="content">
     {#if loading}
       <div class="empty-state">
-        <p>Collecting diagnostics…</p>
+        <p>{t('diagnostics.collecting')}</p>
       </div>
     {:else if loadError}
       <div class="empty-state" role="alert">
-        <p>Failed to collect diagnostics</p>
+        <p>{t('diagnostics.collectFailed')}</p>
         <p class="hint">{loadError}</p>
       </div>
     {:else if snapshot}
-      <section aria-label="Versions">
-        <h2>Versions</h2>
+      <section aria-label={t('diagnostics.versions')}>
+        <h2>{t('diagnostics.versions')}</h2>
         <dl>
-          <dt>PresenceJam</dt><dd>{snapshot.app_version}</dd>
-          <dt>Tauri</dt><dd>{snapshot.tauri_version}</dd>
-          <dt>OS</dt><dd>{snapshot.os.platform} ({snapshot.os.arch}, {snapshot.os.family})</dd>
+          <dt>{t('diagnostics.app')}</dt><dd>{snapshot.app_version}</dd>
+          <dt>{t('diagnostics.tauri')}</dt><dd>{snapshot.tauri_version}</dd>
+          <dt>{t('diagnostics.os')}</dt><dd>{snapshot.os.platform} ({snapshot.os.arch}, {snapshot.os.family})</dd>
         </dl>
       </section>
 
-      <section aria-label="Configuration">
-        <h2>Configuration</h2>
+      <section aria-label={t('diagnostics.configuration')}>
+        <h2>{t('diagnostics.configuration')}</h2>
         <dl>
-          <dt>Spotify client ID</dt><dd class="mono">{snapshot.config.spotify_client_id || '(not set)'}</dd>
-          <dt>Redirect URI</dt><dd class="mono">{snapshot.config.redirect_uri}</dd>
-          <dt>Client secret in keychain</dt><dd>{boolLabel(snapshot.config.client_secret_set)}</dd>
-          <dt>Clear status on pause</dt><dd>{boolLabel(snapshot.config.clear_on_pause)}</dd>
-          <dt>Profanity filter</dt><dd>{boolLabel(snapshot.config.profanity_filter)}</dd>
-          <dt>Start minimized</dt><dd>{boolLabel(snapshot.config.start_minimized)}</dd>
-          <dt>Teams availability sync</dt><dd>{boolLabel(snapshot.config.availability_sync)}</dd>
-          <dt>Presence gate</dt><dd>{boolLabel(snapshot.config.presence_gate)}</dd>
-          <dt>Poll interval (default/min/max)</dt>
+          <dt>{t('diagnostics.spotifyClientId')}</dt><dd class="mono">{snapshot.config.spotify_client_id || t('diagnostics.notSet')}</dd>
+          <dt>{t('diagnostics.redirectUri')}</dt><dd class="mono">{snapshot.config.redirect_uri}</dd>
+          <dt>{t('diagnostics.clientSecretKeychain')}</dt><dd>{boolLabel(snapshot.config.client_secret_set)}</dd>
+          <dt>{t('diagnostics.clearOnPause')}</dt><dd>{boolLabel(snapshot.config.clear_on_pause)}</dd>
+          <dt>{t('diagnostics.profanityFilter')}</dt><dd>{boolLabel(snapshot.config.profanity_filter)}</dd>
+          <dt>{t('diagnostics.startMinimized')}</dt><dd>{boolLabel(snapshot.config.start_minimized)}</dd>
+          <dt>{t('diagnostics.availabilitySync')}</dt><dd>{boolLabel(snapshot.config.availability_sync)}</dd>
+          <dt>{t('diagnostics.presenceGate')}</dt><dd>{boolLabel(snapshot.config.presence_gate)}</dd>
+          <dt>{t('diagnostics.pollInterval')}</dt>
           <dd>{snapshot.config.default_interval_seconds}s / {snapshot.config.minimum_interval_seconds}s / {snapshot.config.maximum_interval_seconds}s</dd>
-          <dt>Logging</dt>
-          <dd>{snapshot.config.logging_enabled ? `enabled (${snapshot.config.log_level})` : 'disabled'}</dd>
-          <dt>Launch at login</dt><dd>{boolLabel(snapshot.config.autostart)}</dd>
+          <dt>{t('diagnostics.logging')}</dt>
+          <dd>{snapshot.config.logging_enabled ? t('diagnostics.loggingEnabled', { level: snapshot.config.log_level }) : t('diagnostics.loggingDisabled')}</dd>
+          <dt>{t('diagnostics.launchAtLogin')}</dt><dd>{boolLabel(snapshot.config.autostart)}</dd>
         </dl>
       </section>
 
-      <section aria-label="Connection status">
-        <h2>Connections</h2>
+      <section aria-label={t('diagnostics.connections')}>
+        <h2>{t('diagnostics.connections')}</h2>
         <dl>
-          <dt>Spotify connected</dt><dd>{boolLabel(snapshot.tokens.spotify_connected)}</dd>
-          <dt>Spotify token expires</dt><dd>{snapshot.tokens.spotify_expires_at ?? '—'}{snapshot.tokens.spotify_expired ? ' (expired)' : ''}</dd>
-          <dt>Teams connected</dt><dd>{boolLabel(snapshot.tokens.teams_connected)}</dd>
-          <dt>Teams token expires</dt><dd>{snapshot.tokens.teams_expires_at ?? '—'}{snapshot.tokens.teams_expired ? ' (expired)' : ''}</dd>
-          <dt>Keychain: Spotify secret present</dt><dd>{boolLabel(snapshot.keychain.spotify_client_secret_present)}</dd>
-          <dt>Keychain: token encryption key present</dt><dd>{boolLabel(snapshot.keychain.tokens_encryption_key_present)}</dd>
+          <dt>{t('diagnostics.spotifyConnected')}</dt><dd>{boolLabel(snapshot.tokens.spotify_connected)}</dd>
+          <dt>{t('diagnostics.spotifyTokenExpires')}</dt><dd>{snapshot.tokens.spotify_expires_at ?? '—'}{snapshot.tokens.spotify_expired ? t('diagnostics.expired') : ''}</dd>
+          <dt>{t('diagnostics.teamsConnected')}</dt><dd>{boolLabel(snapshot.tokens.teams_connected)}</dd>
+          <dt>{t('diagnostics.teamsTokenExpires')}</dt><dd>{snapshot.tokens.teams_expires_at ?? '—'}{snapshot.tokens.teams_expired ? t('diagnostics.expired') : ''}</dd>
+          <dt>{t('diagnostics.keychainSpotifySecret')}</dt><dd>{boolLabel(snapshot.keychain.spotify_client_secret_present)}</dd>
+          <dt>{t('diagnostics.keychainEncryptionKey')}</dt><dd>{boolLabel(snapshot.keychain.tokens_encryption_key_present)}</dd>
         </dl>
-        <p class="hint">Token values are never included — expiry timestamps and presence flags only.</p>
+        <p class="hint">{t('diagnostics.tokensNeverIncluded')}</p>
       </section>
 
-      <section aria-label="Recent logs">
-        <h2>Recent log lines</h2>
+      <section aria-label={t('diagnostics.recentLogLines')}>
+        <h2>{t('diagnostics.recentLogLines')}</h2>
         <p class="hint">{snapshot.log_source_status}</p>
         {#if snapshot.recent_logs.length === 0}
           <div class="empty-state small">
-            <p>No log lines available yet.</p>
+            <p>{t('diagnostics.noLogLinesYet')}</p>
           </div>
         {:else}
           <div class="log-list">

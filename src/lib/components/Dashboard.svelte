@@ -10,13 +10,14 @@
   import { devLog } from '$lib/utils/dev';
   import { theme, toggleTheme } from '$lib/stores/theme';
   import Logo from './Logo.svelte';
+  import { t } from '$lib/i18n';
 
   let isSyncing = $state(false);
   let isToggling = $state(false);
   let spotifyConnected = $state(false);
   let teamsConnected = $state(false);
   let currentTrack = $state<TrackInfo | null>(null);
-  let statusPreview = $state('Not configured');
+  let statusPreview = $state(t('dashboard.statusNotConfigured'));
   let displayError = $state('');
   // P2 (issue #3.0-P2): true while the status write is suppressed by a
   // busy/meeting presence; cleared on the next `presence-updated`.
@@ -117,7 +118,7 @@
     unlisten.push(await listen('presence-cleared', async () => {
       devLog('[DASHBOARD] EVENT: presence-cleared received');
       currentTrack = null;
-      statusPreview = 'No track playing';
+      statusPreview = t('dashboard.statusNoTrack');
       devLog('[DASHBOARD] EVENT: currentTrack=null, statusPreview="No track playing"');
       await updateMenuState();
     }));
@@ -182,7 +183,7 @@
       isSyncing = false;
       devLog('[DASHBOARD] EVENT: isSyncing=false (panic recovery)');
       if (displayErrorTimeout) clearTimeout(displayErrorTimeout);
-      displayError = 'Sync stopped unexpectedly. Please restart PresenceJam.';
+      displayError = t('dashboard.syncCrashed');
       displayErrorTimeout = setTimeout(() => { displayError = ''; displayErrorTimeout = null; }, 5000);
       updateMenuState();
     }));
@@ -288,7 +289,7 @@
       }
     } catch (e) {
       console.warn('[DASHBOARD] goToSetup failed:', e);
-      goToSetupHint = 'Unable to check credentials — please try again.';
+      goToSetupHint = t('dashboard.credentialCheckFailed');
       goToSetupDisabled = true;
       setTimeout(() => { goToSetupHint = ''; goToSetupDisabled = false; }, 4000);
     }
@@ -332,34 +333,34 @@
         <h1>PresenceJam</h1>
         <div class="badges">
           <span class="badge" class:success={spotifyConnected} class:error={!spotifyConnected}>
-            <span class="dot"></span>{spotifyConnected ? 'Spotify' : 'Spotify off'}
+            <span class="dot"></span>{spotifyConnected ? 'Spotify' : t('dashboard.spotifyOff')}
           </span>
           <span class="badge" class:success={teamsConnected} class:error={!teamsConnected}>
-            <span class="dot"></span>{teamsConnected ? 'Teams' : 'Teams off'}
+            <span class="dot"></span>{teamsConnected ? 'Teams' : t('dashboard.teamsOff')}
           </span>
           {#if isSyncing}
-            <span class="badge accent"><span class="dot pulse"></span>Syncing</span>
+            <span class="badge accent"><span class="dot pulse"></span>{t('dashboard.syncing')}</span>
           {/if}
         </div>
       </div>
     </div>
     <div class="header-right">
-      <button class="icon-btn" onclick={toggleTheme} title="Toggle theme" aria-label="Toggle theme">
+      <button class="icon-btn" onclick={toggleTheme} title={t('common.themeToggle')} aria-label={t('common.themeToggle')}>
         {$theme === 'dark' ? '☀' : '☾'}
       </button>
       <button class="icon-btn" class:detached={$detachedPanes.logs}
         onclick={openLogs}
-        title={$detachedPanes.logs ? 'Logs (detached — click to focus)' : 'Logs'}
-        aria-label={$detachedPanes.logs ? 'Logs (detached in separate window)' : 'Open logs'}>📋</button>
-      <button class="icon-btn" onclick={openDiagnostics} title="Diagnostics" aria-label="Open diagnostics">🩺</button>
+        title={$detachedPanes.logs ? t('dashboard.logsDetachedTitle') : t('dashboard.logsTitle')}
+        aria-label={$detachedPanes.logs ? t('dashboard.logsDetachedAria') : t('dashboard.openLogsAria')}>📋</button>
+      <button class="icon-btn" onclick={openDiagnostics} title={t('dashboard.diagnostics')} aria-label={t('dashboard.openDiagnosticsAria')}>🩺</button>
       <button class="icon-btn" class:detached={$detachedPanes.settings}
         onclick={openSettings}
-        title={$detachedPanes.settings ? 'Settings (detached — click to focus)' : 'Settings'}
-        aria-label={$detachedPanes.settings ? 'Settings (detached in separate window)' : 'Open settings'}>⚙</button>
-      <button class="icon-btn" onclick={openAbout} title="About" aria-label="About PresenceJam">ⓘ</button>
+        title={$detachedPanes.settings ? t('dashboard.settingsDetachedTitle') : t('dashboard.settings')}
+        aria-label={$detachedPanes.settings ? t('dashboard.settingsDetachedAria') : t('dashboard.openSettingsAria')}>⚙</button>
+      <button class="icon-btn" onclick={openAbout} title={t('dashboard.about')} aria-label={t('dashboard.aboutAria')}>ⓘ</button>
       <button class="icon-btn primary" class:is-on={isSyncing} onclick={toggleSync}
-        disabled={isToggling} aria-label={isSyncing ? 'Pause sync' : 'Resume sync'}
-        title={isSyncing ? 'Pause sync' : 'Resume sync'}>
+        disabled={isToggling} aria-label={isSyncing ? t('dashboard.pauseSync') : t('dashboard.resumeSync')}
+        title={isSyncing ? t('dashboard.pauseSync') : t('dashboard.resumeSync')}>
         {isSyncing ? '⏸' : '▶'}
       </button>
     </div>
@@ -371,7 +372,7 @@
 
   <main>
     {#if presenceGated}
-      <div class="presence-chip" role="status">Status paused while you're busy/in a meeting</div>
+      <div class="presence-chip" role="status">{t('dashboard.presenceGated')}</div>
     {/if}
     {#if availabilityLabel}
       <div class="availability-chip" role="status">{availabilityLabel}</div>
@@ -379,10 +380,10 @@
     {#if !spotifyConnected || !teamsConnected}
       <div class="setup-card card">
         <div class="setup-icon"><Logo size={56} /></div>
-        <h2>Setup required</h2>
-        <p>Connect Spotify and Microsoft Teams so your now-playing tracks can drive your Teams status.</p>
+        <h2>{t('dashboard.setupRequired')}</h2>
+        <p>{t('dashboard.setupHint')}</p>
         <div class="setup-actions">
-          <button class="btn-full" onclick={goToSetup} disabled={goToSetupDisabled}>Continue setup</button>
+          <button class="btn-full" onclick={goToSetup} disabled={goToSetupDisabled}>{t('dashboard.continueSetup')}</button>
           {#if goToSetupHint}
             <p class="hint" role="status">{goToSetupHint}</p>
           {/if}
@@ -403,10 +404,10 @@
           {#if currentTrack.is_playing}
             <div class="playing-indicator">
               <span class="pulse-dot" aria-hidden="true"></span>
-              <span>Playing</span>
+              <span>{t('dashboard.playing')}</span>
             </div>
           {:else}
-            <div class="paused-indicator"><span aria-hidden="true">⏸</span> Paused</div>
+            <div class="paused-indicator"><span aria-hidden="true">⏸</span> {t('dashboard.paused')}</div>
           {/if}
 
           <div class="progress-bar" aria-hidden="true">
@@ -416,14 +417,14 @@
             {#if currentTrack.progress_ms != null}
               {formatDuration(currentTrack.progress_ms)} / {formatDuration(currentTrack.duration_ms)}
             {:else}
-              <span class="live-label" aria-label="Live stream — position unknown">LIVE</span>
+              <span class="live-label" aria-label={t('dashboard.liveStreamAria')}>{t('dashboard.live')}</span>
             {/if}
           </div>
         </div>
       </div>
 
       <div class="status-preview card">
-        <h3>Your Teams status</h3>
+        <h3>{t('dashboard.yourTeamsStatus')}</h3>
         <p class="status-text" aria-live="polite">{statusPreview}</p>
       </div>
     {:else}
@@ -431,8 +432,8 @@
         <div class="not-playing-icon" aria-hidden="true">
           <Logo size={64} />
         </div>
-        <h3>Nothing playing</h3>
-        <p>Start something on Spotify and we'll pipe it through to Teams.</p>
+        <h3>{t('dashboard.nothingPlaying')}</h3>
+        <p>{t('dashboard.nothingPlayingHint')}</p>
       </div>
     {/if}
   </main>

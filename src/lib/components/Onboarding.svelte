@@ -9,6 +9,7 @@
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
   import { devLog } from '$lib/utils/dev';
   import Logo from './Logo.svelte';
+  import { t } from '$lib/i18n';
 
   let step = $state(1);
   let spotifyClientId = $state('');
@@ -81,22 +82,22 @@
     // Client secrets from the developer dashboard are typically 32+ chars.
     if (!spotifyClientId.trim()) {
       console.error('[ONBOARDING] connectSpotify: validation failed - client_id is empty');
-      validationError = 'Spotify Client ID is required.';
+      validationError = t('validation.clientIdRequired');
       return;
     }
     if (!/^[A-Za-z0-9]{32}$/.test(spotifyClientId.trim())) {
       console.error('[ONBOARDING] connectSpotify: validation failed - client_id format invalid');
-      validationError = 'Spotify Client ID must be exactly 32 hexadecimal characters.';
+      validationError = t('validation.clientIdFormat');
       return;
     }
     if (!spotifyClientSecret.trim()) {
       console.error('[ONBOARDING] connectSpotify: validation failed - client_secret is empty');
-      validationError = 'Spotify Client Secret is required.';
+      validationError = t('validation.clientSecretRequired');
       return;
     }
     if (spotifyClientSecret.trim().length < 32) {
       console.error('[ONBOARDING] connectSpotify: validation failed - client_secret too short');
-      validationError = 'Spotify Client Secret appears to be invalid (too short — must be at least 32 characters).';
+      validationError = t('validation.clientSecretTooShort');
       return;
     }
 
@@ -147,7 +148,7 @@
         }
       } else {
         devLog('[ONBOARDING] handleManualUrlPaste: no code extracted');
-        validationError = 'No code found in URL — paste the full redirect URL with ?code=…';
+        validationError = t('validation.noCodeInUrl');
       }
     } catch (e) {
       console.error('[ONBOARDING] handleManualUrlPaste: FAILED:', e);
@@ -254,7 +255,7 @@
 
     if (!spotifyConnected || !teamsConnected) {
       console.error('[ONBOARDING] finish: validation failed - spotifyConnected=', spotifyConnected, ', teamsConnected=', teamsConnected);
-      validationError = 'Please connect both Spotify and Teams before finishing setup.';
+      validationError = t('validation.connectBothFirst');
       return;
     }
 
@@ -321,7 +322,7 @@
       devLog('[ONBOARDING] finish: SUCCESS - all steps completed');
     } catch (e: unknown) {
       console.error('[ONBOARDING] finish: FAILED:', e);
-      validationError = 'Setup failed: ' + (typeof e === 'string' ? e : (e as Error)?.message || String(e));
+      validationError = t('validation.setupFailed', { error: typeof e === 'string' ? e : (e as Error)?.message || String(e) });
     } finally {
       isFinishing = false;
     }
@@ -333,7 +334,7 @@
 <div class="onboarding">
   <header class="brand">
     <Logo size={32} withWordmark />
-    <span class="step-label">Step {step} of 3</span>
+    <span class="step-label">{t('onboarding.stepOf', { step })}</span>
   </header>
 
   <div class="progress" aria-hidden="true">
@@ -350,40 +351,38 @@
   <div class="step">
     {#if step === 1}
       <div class="card">
-        <h2>Connect Spotify</h2>
+        <h2>{t('onboarding.step1Title')}</h2>
         <p>
-          Paste your Spotify application's <strong>Client ID</strong> and
-          <strong>Client Secret</strong>. We'll start the sign-in flow once you
-          click the button.
+          {t('onboarding.step1Intro')}
         </p>
 
         <div class="instructions-box">
-          <h3>Get your Spotify credentials</h3>
+          <h3>{t('onboarding.getCredentials')}</h3>
           <ol>
-            <li>Open the <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">Spotify developer dashboard</a> and create an app.</li>
-            <li>Add <code>presencejam://callback</code> as a redirect URI.</li>
-            <li>Copy the Client ID and Client Secret from the app's settings.</li>
+            <li>{t('onboarding.instruction1')} (<a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">developer.spotify.com</a>)</li>
+            <li>{t('onboarding.instruction2')} (<code>presencejam://callback</code>)</li>
+            <li>{t('onboarding.instruction3')}</li>
           </ol>
         </div>
 
         <div class="form-group">
-          <label for="client-id">Client ID</label>
+          <label for="client-id">{t('settings.clientId')}</label>
           <input
             id="client-id"
             type="text"
             bind:value={spotifyClientId}
-            placeholder="32-character Spotify Client ID"
+            placeholder={t('onboarding.clientIdPlaceholder')}
             autocomplete="off"
             spellcheck="false"
           />
         </div>
         <div class="form-group">
-          <label for="client-secret">Client Secret</label>
+          <label for="client-secret">{t('settings.clientSecret')}</label>
           <input
             id="client-secret"
             type="password"
             bind:value={spotifyClientSecret}
-            placeholder="Spotify Client Secret"
+            placeholder={t('onboarding.clientSecretPlaceholder')}
             autocomplete="off"
             spellcheck="false"
           />
@@ -399,53 +398,52 @@
         {#if !spotifyConnected && !spotifyWaiting}
           <button class="btn-full" onclick={connectSpotify}
             disabled={!spotifyClientId || !spotifyClientSecret}>
-            Connect Spotify
+            {t('onboarding.connectSpotify')}
           </button>
         {:else if spotifyWaiting}
           <div class="waiting-box">
             <div class="spinner" aria-hidden="true"></div>
-            <p>Spotify sign-in is waiting…</p>
-            <p class="hint">Complete the authorisation in your browser, or paste the redirect URL below.</p>
+            <p>{t('onboarding.signInWaiting')}</p>
+            <p class="hint">{t('onboarding.manualUrlHint')}</p>
             <input
               type="text"
               bind:value={spotifyManualUrl}
               placeholder="presencejam://callback?code=…"
               onkeydown={(e) => e.key === 'Enter' && handleManualUrlPaste()}
             />
-            <button class="btn-secondary" onclick={handleManualUrlPaste}>Submit code</button>
+            <button class="btn-secondary" onclick={handleManualUrlPaste}>{t('onboarding.submitCode')}</button>
           </div>
         {:else}
           <div class="success-badge">
-            <span aria-hidden="true">✓</span> Connected to Spotify
+            <span aria-hidden="true">✓</span> {t('onboarding.connectedToSpotify')}
           </div>
-          <button class="btn-full" onclick={() => { step = 2; devLog('[ONBOARDING] step changed to 2'); }}>Continue →</button>
+          <button class="btn-full" onclick={() => { step = 2; devLog('[ONBOARDING] step changed to 2'); }}>{t('onboarding.continue')}</button>
         {/if}
       </div>
     {:else if step === 2}
       <div class="card">
-        <h2>Sign in with Microsoft</h2>
+        <h2>{t('onboarding.step2Title')}</h2>
         <p>
-          We use Microsoft's device-code flow — a one-time <strong>code</strong>
-          you enter at a Microsoft page. No extra setup required.
+          {t('onboarding.step2Intro')}
         </p>
 
         {#if !teamsConnected && !teamsPolling}
-          <button class="btn-full" onclick={connectTeams}>Start Microsoft sign-in</button>
+          <button class="btn-full" onclick={connectTeams}>{t('onboarding.startMicrosoftSignIn')}</button>
         {:else if teamsPolling}
           <div class="device-code-box">
-            <p class="hint">Go to</p>
+            <p class="hint">{t('common.goTo')}</p>
             <a class="verification-url" href={teamsVerificationUrl} target="_blank" rel="noopener">{teamsVerificationUrl}</a>
-            <p class="hint">and enter this code</p>
+            <p class="hint">{t('common.andEnterCode')}</p>
             <div class="code-display" aria-live="polite">{teamsUserCode}</div>
             <div class="spinner" aria-hidden="true"></div>
-            <p>Waiting for sign-in…</p>
-            <button class="btn-secondary" onclick={pollTeamsAuth}>I've signed in — check now</button>
+            <p>{t('common.waitingForSignIn')}</p>
+            <button class="btn-secondary" onclick={pollTeamsAuth}>{t('common.checkNow')}</button>
           </div>
         {:else}
           <div class="success-badge">
-            <span aria-hidden="true">✓</span> Connected to Microsoft Teams
+            <span aria-hidden="true">✓</span> {t('onboarding.connectedToTeams')}
           </div>
-          <button class="btn-full" onclick={() => { step = 3; devLog('[ONBOARDING] step changed to 3'); }}>Continue →</button>
+          <button class="btn-full" onclick={() => { step = 3; devLog('[ONBOARDING] step changed to 3'); }}>{t('onboarding.continue')}</button>
         {/if}
 
         {#if teamsAuthError}
@@ -454,14 +452,13 @@
       </div>
     {:else}
       <div class="card">
-        <h2>Finishing touches</h2>
+        <h2>{t('onboarding.step3Title')}</h2>
         <p>
-          Choose how your status message should look and whether PresenceJam
-          should launch when you sign in.
+          {t('onboarding.step3Intro')}
         </p>
 
         <div class="form-group">
-          <label for="status-format-onb">Status template</label>
+          <label for="status-format-onb">{t('onboarding.statusTemplate')}</label>
           <input
             id="status-format-onb"
             type="text"
@@ -469,18 +466,17 @@
             placeholder="🎵 {'{artist}'} - {'{track}'} 🎧"
           />
           <p class="hint">
-            Placeholders: <code>{'{artist}'}</code>, <code>{'{track}'}</code>,
-            <code>{'{album}'}</code>, <code>{'{emoji}'}</code>
+            {t('onboarding.placeholdersHint')}
           </p>
         </div>
 
         <div class="form-group">
-          <label for="poll-interval-onb">Default poll interval: {pollingInterval}s</label>
+          <label for="poll-interval-onb">{t('onboarding.pollInterval', { seconds: pollingInterval })}</label>
           <input id="poll-interval-onb" type="range" min="10" max="60" step="5" bind:value={pollingInterval} />
         </div>
 
         <div class="toggle-row">
-          <label for="launch-at-login-onb">Launch at login</label>
+          <label for="launch-at-login-onb">{t('common.launchAtLogin')}</label>
           <input id="launch-at-login-onb" type="checkbox" bind:checked={launchAtLogin} />
         </div>
 
@@ -489,7 +485,7 @@
         {/if}
 
         <button class="btn-full" onclick={finish} disabled={isFinishing}>
-          {isFinishing ? 'Setting up…' : 'Finish setup'}
+          {isFinishing ? t('onboarding.settingUp') : t('onboarding.finishSetup')}
         </button>
       </div>
     {/if}
@@ -709,13 +705,6 @@
     font-size: var(--fs-xs);
     color: var(--fg-subtle);
     line-height: var(--lh-normal);
-  }
-  .hint code {
-    background: var(--bg-elevated);
-    border: 1px solid var(--border);
-    padding: 1px 6px;
-    border-radius: var(--r-sm);
-    font-size: 0.9em;
   }
 
   .btn-full {

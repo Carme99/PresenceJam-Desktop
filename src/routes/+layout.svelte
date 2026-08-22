@@ -11,6 +11,7 @@
   import UpdatePrompt from '$lib/components/UpdatePrompt.svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { currentView } from '$lib/stores/app';
+  import { t } from '$lib/i18n';
 
   // C7: this layout is shared by every webview window (the SPA fallback
   // hydrates it for detached Logs/Settings windows too). Reconnect flows,
@@ -155,12 +156,12 @@
   <meta name="color-scheme" content="dark light" />
 </svelte:head>
 
-<a class="skip-link" href="#main-content">Skip to main content</a>
+<a class="skip-link" href="#main-content">{t('routes.skipToMainContent')}</a>
 <slot />
 {#if playbackError}
   <div class="playback-toast" role="alert">
     <span class="toast-msg">{playbackError}</span>
-    <button class="toast-dismiss" onclick={() => { playbackError = ''; if (playbackErrorTimeout) { clearTimeout(playbackErrorTimeout); playbackErrorTimeout = null; } }} aria-label="Dismiss">×</button>
+    <button class="toast-dismiss" onclick={() => { playbackError = ''; if (playbackErrorTimeout) { clearTimeout(playbackErrorTimeout); playbackErrorTimeout = null; } }} aria-label={t('common.dismiss')}>×</button>
   </div>
 {/if}
 {#if isMainWindow}<UpdatePrompt />{/if}

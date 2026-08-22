@@ -2,7 +2,7 @@
   import { page } from '$app/state';
   import LogViewer from '$lib/components/LogViewer.svelte';
   import Settings from '$lib/components/Settings.svelte';
-
+  import { t } from '$lib/i18n';
   // C7: entry point for detached windows. Created from the main window
   // via WebviewWindow with url `/detached/<pane>` (SPA fallback serves
   // index.html; the SvelteKit router hydrates this route). The root
@@ -15,7 +15,7 @@
 {:else if page.params.pane === 'settings'}
   <Settings detached />
 {:else}
-  <div class="unknown">Unknown pane: {page.params.pane}</div>
+  <div class="unknown">{t('routes.unknownPane', { pane: page.params.pane ?? '' })}</div>
 {/if}
 
 <style>

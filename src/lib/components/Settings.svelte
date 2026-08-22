@@ -17,6 +17,7 @@
   import { authFlow, setSpotifyPhase, setTeamsPhase } from '$lib/stores/authFlow.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
   import PageHeader from './PageHeader.svelte';
+  import { t, i18n, type Locale } from '$lib/i18n';
   import { theme } from '$lib/stores/theme';
 
   let localConfig = $state<AppConfig>(structuredClone($configStore));
@@ -129,7 +130,7 @@
       } catch (e) {
         if (my !== previewSeq) return;
         console.warn('[SETTINGS] preview_status failed:', e);
-        previewText = '(preview unavailable)';
+        previewText = t('settings.previewUnavailable');
       }
     }, 300);
   });
@@ -222,10 +223,10 @@
     saveMessage = '';
     try {
       await saveConfig(localConfig);
-      saveMessage = 'Settings saved!';
+      saveMessage = t('settings.saved');
       if (saveTimeout) clearTimeout(saveTimeout);
       saveTimeout = setTimeout(() => saveMessage = '', 2000);
-    } catch (e) { const msg = String((e as Error)?.message ?? e).slice(0, 180); saveMessage = msg || 'Failed to save'; console.error('[SETTINGS] handleSave failed:', e); }
+    } catch (e) { const msg = String((e as Error)?.message ?? e).slice(0, 180); saveMessage = msg || t('settings.failedToSave'); console.error('[SETTINGS] handleSave failed:', e); }
     finally { isSaving = false; }
   }
 
@@ -312,106 +313,105 @@
 </script>
 
 <div class="settings">
-  <PageHeader title="Settings" onBack={goBack}
-    backLabel={detached ? 'Pop back in' : 'Back'}
+  <PageHeader title={t('settings.title')} onBack={goBack}
+    backLabel={detached ? t('settings.popBackIn') : t('common.back')}
     onAction={detached ? undefined : () => popOut('settings')}
-    actionTitle={detached ? '' : 'Pop out into its own window'} />
+    actionTitle={detached ? '' : t('settings.popOutActionTitle')} />
   {#if isDirty}
-    <div class="dirty-banner" role="status">Unsaved changes</div>
+    <div class="dirty-banner" role="status">{t('settings.unsavedChanges')}</div>
   {/if}
 
   <div class="sections">
     <section class="card">
       <header class="section-header">
-        <h2>Spotify</h2>
+        <h2>{t('settings.sectionSpotify')}</h2>
         <span class="badge" class:success={isConnected && !spotifyAuthWaiting}
               class:warning={spotifyAuthWaiting}
               class:error={!isConnected && !spotifyAuthWaiting}>
           <span class="dot"></span>
-          {#if spotifyAuthWaiting}Reconnecting…{:else if isConnected}Connected{:else}Not connected{/if}
+          {#if spotifyAuthWaiting}{t('common.reconnecting')}{:else if isConnected}{t('common.connected')}{:else}{t('common.notConnected')}{/if}
         </span>
       </header>
       <div class="form-group">
-        <label for="spotify-client-id">Client ID</label>
+        <label for="spotify-client-id">{t('settings.clientId')}</label>
         <input
           id="spotify-client-id"
           type="text"
           bind:value={localConfig.spotify.client_id}
           readonly={isConnected}
-          placeholder="Enter Spotify Client ID"
+          placeholder={t('settings.clientIdPlaceholder')}
         />
       </div>
       <div class="form-group">
-        <span class="form-label">Client secret</span>
+        <span class="form-label">{t('settings.clientSecret')}</span>
         <p class="hint">
           {#if localConfig.spotify.client_secret_set}
-            Stored securely in your operating system's keychain. To replace
-            it, run Onboarding again.
+            {t('settings.secretStoredHint')}
           {:else}
-            Not configured. <button type="button" class="btn-link" onclick={goToOnboarding}>Run Onboarding</button> to set up Spotify.
+            {t('settings.secretNotConfigured')} <button type="button" class="btn-link" onclick={goToOnboarding}>{t('settings.runOnboarding')}</button> {t('settings.toSetUpSpotify')}
           {/if}
         </p>
       </div>
       <div class="connection-row">
         {#if isConnected && !spotifyAuthWaiting}
-          <button class="btn-secondary" onclick={reconnectSpotify} disabled={spotifyAuthWaiting}>Reconnect Spotify</button>
+          <button class="btn-secondary" onclick={reconnectSpotify} disabled={spotifyAuthWaiting}>{t('settings.reconnectSpotify')}</button>
         {:else if spotifyAuthWaiting}
-          <span class="hint">Complete authentication in the browser.</span>
+          <span class="hint">{t('settings.completeAuthInBrowser')}</span>
         {/if}
       </div>
       {#if playbackScopeMissing}
         <div class="scope-banner">
-          <span class="hint">Playback control needs a one-time reconnect.</span>
-          <button type="button" class="btn-link" onclick={reconnectSpotify} disabled={spotifyAuthWaiting}>Reconnect</button>
+          <span class="hint">{t('settings.playbackScopeBanner')}</span>
+          <button type="button" class="btn-link" onclick={reconnectSpotify} disabled={spotifyAuthWaiting}>{t('common.reconnect')}</button>
         </div>
       {/if}
     </section>
 
     <section class="card">
       <header class="section-header">
-        <h2>Microsoft Teams</h2>
+        <h2>{t('settings.sectionTeams')}</h2>
         <span class="badge" class:success={teamsStatusConnected && !teamsAuthWaiting}
               class:warning={teamsAuthWaiting}
               class:error={!teamsStatusConnected && !teamsAuthWaiting}>
           <span class="dot"></span>
-          {#if teamsAuthWaiting}Reconnecting…{:else if teamsStatusConnected}Connected{:else}Not connected{/if}
+          {#if teamsAuthWaiting}{t('common.reconnecting')}{:else if teamsStatusConnected}{t('common.connected')}{:else}{t('common.notConnected')}{/if}
         </span>
       </header>
-      <p class="hint">Teams authentication uses your Microsoft 365 account. No additional configuration required.</p>
+      <p class="hint">{t('settings.teamsAuthHint')}</p>
       <div class="connection-row">
         {#if teamsStatusConnected && !teamsAuthWaiting}
-          <button class="btn-secondary" onclick={reconnectTeams} disabled={teamsAuthWaiting}>Reconnect Teams</button>
+          <button class="btn-secondary" onclick={reconnectTeams} disabled={teamsAuthWaiting}>{t('reconnect.reconnectTeams')}</button>
         {:else if teamsAuthWaiting}
           <div class="device-code-box">
-            <p class="hint">Go to</p>
+            <p class="hint">{t('common.goTo')}</p>
             <a class="verification-url" href={authFlow.teams.verificationUrl} target="_blank" rel="noopener">{authFlow.teams.verificationUrl}</a>
-            <p class="hint">and enter this code</p>
+            <p class="hint">{t('common.andEnterCode')}</p>
             <div class="code-display" aria-live="polite">{authFlow.teams.userCode}</div>
             <div class="spinner" aria-hidden="true"></div>
-            <p>Waiting for sign-in…</p>
-            <button class="btn-secondary" onclick={pollTeamsAuth}>I've signed in — check now</button>
+            <p>{t('common.waitingForSignIn')}</p>
+            <button class="btn-secondary" onclick={pollTeamsAuth}>{t('common.checkNow')}</button>
           </div>
           {#if authFlow.teams.error}
             <p class="error-message" role="alert">{authFlow.teams.error}</p>
           {/if}
         {:else}
-          <button class="btn-secondary" onclick={reconnectTeams}>Reconnect Teams</button>
+          <button class="btn-secondary" onclick={reconnectTeams}>{t('reconnect.reconnectTeams')}</button>
         {/if}
       </div>
       {#if teamsScopesMissing}
         <div class="scope-banner">
-          <span class="hint">Presence features need a one-time Teams reconnect.</span>
-          <button type="button" class="btn-link" onclick={reconnectTeams} disabled={teamsAuthWaiting}>Reconnect</button>
+          <span class="hint">{t('settings.presenceScopeBanner')}</span>
+          <button type="button" class="btn-link" onclick={reconnectTeams} disabled={teamsAuthWaiting}>{t('common.reconnect')}</button>
         </div>
       {/if}
     </section>
     <section class="card">
       <header class="section-header">
-        <h2>Presence</h2>
-        <button type="button" class="btn-link" onclick={resetPresenceDefaults}>Reset to default</button>
+        <h2>{t('settings.sectionPresence')}</h2>
+        <button type="button" class="btn-link" onclick={resetPresenceDefaults}>{t('common.resetToDefault')}</button>
       </header>
       <div class="toggle-row">
-        <label for="availability-sync">Show Available while listening</label>
+        <label for="availability-sync">{t('settings.availabilitySyncLabel')}</label>
         <input
           id="availability-sync"
           type="checkbox"
@@ -419,12 +419,10 @@
         />
       </div>
       <p class="hint">
-        Off by default. Shows <em>Available</em> (not <em>Busy</em>) in
-        Teams while a track plays, because setPresence only supports the
-        Busy/InACall combination — see the setPresence limitation.
+        {t('settings.availabilitySyncHint')}
       </p>
       <div class="toggle-row">
-        <label for="presence-gate">Pause status during meetings/calls/DND</label>
+        <label for="presence-gate">{t('settings.presenceGateLabel')}</label>
         <input
           id="presence-gate"
           type="checkbox"
@@ -432,34 +430,32 @@
         />
       </div>
       <p class="hint">
-        On by default. Skips writing your Spotify status while Teams says
-        you're busy, in a meeting, in a call, or presenting.
+        {t('settings.presenceGateHint')}
       </p>
     </section>
     <section class="card">
       <header class="section-header">
-        <h2>Status format</h2>
-        <button type="button" class="btn-link" onclick={resetStatusFormatDefaults}>Reset to default</button>
+        <h2>{t('settings.sectionStatusFormat')}</h2>
+        <button type="button" class="btn-link" onclick={resetStatusFormatDefaults}>{t('common.resetToDefault')}</button>
       </header>
       <div class="form-group">
-        <label for="status-format">Format template</label>
+        <label for="status-format">{t('settings.formatTemplate')}</label>
         <input
           id="status-format"
           type="text"
           bind:value={localConfig.teams.status_format}
-          placeholder="🎵 {'{artist}'} - {'{track}'} 🎧"
+          placeholder={t('settings.formatTemplatePlaceholder')}
         />
       </div>
       <div class="form-group">
-        <span class="form-label">Live preview</span>
+        <span class="form-label">{t('settings.livePreview')}</span>
         <div class="preview-box" aria-live="polite">{previewText}</div>
       </div>
       <p class="hint">
-        Available placeholders: <code>{'{artist}'}</code>, <code>{'{track}'}</code>,
-        <code>{'{album}'}</code>, <code>{'{emoji}'}</code>
+        {t('settings.placeholdersHint')}
       </p>
       <div class="toggle-row">
-        <label for="profanity-filter">Filter profanity in status</label>
+        <label for="profanity-filter">{t('settings.profanityFilterLabel')}</label>
         <input
           id="profanity-filter"
           type="checkbox"
@@ -468,16 +464,15 @@
       </div>
       {#if localConfig.teams.profanity_filter}
         <div class="form-group">
-          <label for="profanity-placeholder">Placeholder text</label>
+          <label for="profanity-placeholder">{t('settings.placeholderTextLabel')}</label>
           <p class="hint">
-            Use <code>{'{emoji}'}</code> for play state (🎵 playing / ⏸ paused).
-            Shown when profanity is detected in track info.
+            {t('settings.placeholderTextHint')}
           </p>
           <input
             id="profanity-placeholder"
             type="text"
             bind:value={localConfig.teams.profanity_placeholder}
-            placeholder="Currently Listening to Spotify"
+            placeholder={t('settings.placeholderTextPlaceholder')}
           />
         </div>
       {/if}
@@ -485,11 +480,11 @@
 
     <section class="card">
       <header class="section-header">
-        <h2>Polling</h2>
-        <button type="button" class="btn-link" onclick={resetPollingDefaults}>Reset to default</button>
+        <h2>{t('settings.sectionPolling')}</h2>
+        <button type="button" class="btn-link" onclick={resetPollingDefaults}>{t('common.resetToDefault')}</button>
       </header>
       <div class="form-group">
-        <label for="default-interval">Default interval: {localConfig.polling.default_interval_seconds}s</label>
+        <label for="default-interval">{t('settings.defaultIntervalLabel', { seconds: Number(localConfig.polling.default_interval_seconds) })}</label>
         <input
           id="default-interval"
           type="range"
@@ -501,7 +496,7 @@
       </div>
       <div class="row-2">
         <div class="form-group">
-          <label for="min-interval">Min interval (s)</label>
+          <label for="min-interval">{t('settings.minIntervalLabel')}</label>
           <input
             id="min-interval"
             type="number"
@@ -511,7 +506,7 @@
           />
         </div>
         <div class="form-group">
-          <label for="max-interval">Max interval (s)</label>
+          <label for="max-interval">{t('settings.maxIntervalLabel')}</label>
           <input
             id="max-interval"
             type="number"
@@ -523,46 +518,59 @@
       </div>
       {#if pollingClamp.active}
         <p class="clamp-hint" role="status">
-          Min interval exceeds max interval — max will be saved as {pollingClamp.effMax}s.
+          {t('settings.clampHint', { max: pollingClamp.effMax })}
         </p>
       {/if}
     </section>
 
     <section class="card">
       <header class="section-header">
-        <h2>Notifications</h2>
+        <h2>{t('settings.sectionNotifications')}</h2>
       </header>
       <div class="toggle-row">
-        <label for="notifications-enabled">Desktop notification on track change</label>
+        <label for="notifications-enabled">{t('settings.notificationsToggle')}</label>
         <input id="notifications-enabled" type="checkbox" checked={notificationsEnabled} onchange={toggleNotifications} />
       </div>
-      <p class="hint">Shows a system notification when the track changes. Disabled by default.</p>
+      <p class="hint">{t('settings.notificationsHint')}</p>
     </section>
 
     <section class="card">
       <header class="section-header">
-        <h2>Appearance</h2>
-        <button type="button" class="btn-link" onclick={resetAppearanceDefaults}>Reset to default</button>
+        <h2>{t('settings.sectionAppearance')}</h2>
+        <button type="button" class="btn-link" onclick={resetAppearanceDefaults}>{t('common.resetToDefault')}</button>
       </header>
       <div class="form-group">
-        <span class="form-label">Theme</span>
-        <div class="theme-grid" role="radiogroup" aria-label="Theme">
+        <span class="form-label">{t('settings.themeLabel')}</span>
+        <div class="theme-grid" role="radiogroup" aria-label={t('settings.themeLabel')}>
           <button type="button" class="theme-card"
             class:is-active={$theme === 'dark'} aria-pressed={$theme === 'dark'}
             onclick={() => theme.set('dark')}>
             <span class="swatch swatch-dark"></span>
-            <span class="theme-name">Dark</span>
+            <span class="theme-name">{t('settings.themeDark')}</span>
           </button>
           <button type="button" class="theme-card"
             class:is-active={$theme === 'light'} aria-pressed={$theme === 'light'}
             onclick={() => theme.set('light')}>
             <span class="swatch swatch-light"></span>
-            <span class="theme-name">Light</span>
+            <span class="theme-name">{t('settings.themeLight')}</span>
           </button>
         </div>
       </div>
+      <div class="form-group">
+        <label for="language">{t('settings.languageLabel')}</label>
+        <!-- Language names are endonyms: shown in their own language by convention. -->
+        <select
+          id="language"
+          value={i18n.locale}
+          onchange={(e) => i18n.set((e.currentTarget as HTMLSelectElement).value as Locale)}
+        >
+          <option value="en">English</option>
+          <option value="de">Deutsch</option>
+          <option value="fr">Français</option>
+        </select>
+      </div>
       <div class="toggle-row">
-        <label for="autostart">Launch at login</label>
+        <label for="autostart">{t('common.launchAtLogin')}</label>
         <input
           id="autostart"
           type="checkbox"
@@ -578,7 +586,7 @@
               console.warn('[SETTINGS] set_autostart_enabled failed:', err);
               localConfig.autostart = previous;
               target.checked = previous;
-              saveMessage = 'Failed to update launch-at-login: ' + String(err).slice(0, 120);
+              saveMessage = t('settings.autostartError', { error: String(err).slice(0, 120) });
               if (saveTimeout) clearTimeout(saveTimeout);
               saveTimeout = setTimeout(() => saveMessage = '', 3000);
             }
@@ -589,12 +597,12 @@
 
     <section class="actions">
       <button class="btn-full" onclick={handleSave} disabled={isSaving}>
-        {isSaving ? 'Saving…' : 'Save changes'}
+        {isSaving ? t('settings.saving') : t('settings.saveChanges')}
       </button>
       {#if saveMessage}
         <p class="save-message" aria-live="polite">{saveMessage}</p>
       {/if}
-      <button class="btn-secondary btn-full" onclick={openLogs}>Open logs folder</button>
+      <button class="btn-secondary btn-full" onclick={openLogs}>{t('settings.openLogsFolder')}</button>
     </section>
   </div>
 </div>
@@ -769,13 +777,6 @@
     font-size: var(--fs-xs);
     color: var(--fg-subtle);
     line-height: var(--lh-normal);
-  }
-  .hint code {
-    background: var(--bg-elevated);
-    border: 1px solid var(--border);
-    padding: 1px 6px;
-    border-radius: var(--r-sm);
-    font-size: var(--fs-xs);
   }
 
   .row-2 {
