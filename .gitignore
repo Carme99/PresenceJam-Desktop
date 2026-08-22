@@ -40,4 +40,3 @@ src/lib/types-generated/
 
 # Worktree reports (never commit)
 /REPORT.md
-/docs/scope-*.md
