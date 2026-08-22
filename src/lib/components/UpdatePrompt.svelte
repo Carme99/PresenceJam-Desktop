@@ -5,29 +5,41 @@
 
   // Always-mounted update banner (3.0-P5). On mount it asks the updater
   // plugin whether a newer release exists; if it does it shows a small
-  // dismissible banner with a "Download & Install" button. Stays silent
-  // when the app is already current.
+  // dismissible banner with a "Download & Install" button (immediate
+  // relaunch) or an "Install on quit" button (deferred — see C3 in
+  // docs/scope-3.3.md). Stays silent when the app is already current.
   let update = $state<Update | null>(null);
   let dismissed = $state(false);
   let downloading = $state(false);
   let downloadedBytes = $state(0);
   let totalBytes = $state(0);
   let error = $state('');
+  // C3(a): silent re-check every ~24h while the app keeps running (the
+  // startup check alone would pin long-lived sessions to a stale
+  // release). setInterval pauses naturally when the OS suspends the app.
+  const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+  // C3(c): set once the deferred update has been downloaded Rust-side;
+  // applied on process exit by `updater_bg::install_pending_on_exit`.
+  let stagedVersion = $state('');
+  let staging = $state(false);
 
-  onMount(() => {
-    let cancelled = false;
+  function checkForUpdate() {
     check()
       .then((u) => {
-        if (!cancelled && u) update = u;
+        if (u) update = u;
       })
       .catch((e) => {
         // Offline / unreachable endpoint / mismatched pubkey etc. — never
-        // block the UI over a failed update check.
+        // surface a failed update check to the user, whether at startup
+        // or from a background timer.
         console.error('[UPDATER] check failed:', e);
       });
-    return () => {
-      cancelled = true;
-    };
+  }
+
+  onMount(() => {
+    checkForUpdate();
+    const interval = setInterval(checkForUpdate, CHECK_INTERVAL_MS);
+    return () => clearInterval(interval);
   });
 
   const progress = $derived(
@@ -56,13 +68,36 @@
       downloading = false;
     }
   }
+
+  // C3(c): download the update Rust-side and hold it until the process
+  // exits (`updater_bg::install_pending_on_exit` on RunEvent::Exit). The
+  // JS plugin API can't defer — `downloadAndInstall()` applies the payload
+  // immediately on Windows.
+  async function installOnQuit() {
+    if (!update || staging) return;
+    staging = true;
+    error = '';
+    try {
+      const version = await invoke<string | null>('stage_deferred_update');
+      stagedVersion = version ?? '';
+    } catch (e) {
+      console.error('[UPDATER] stage_deferred_update failed:', e);
+      error = String(e);
+    } finally {
+      staging = false;
+    }
+  }
 </script>
 
 {#if update && !dismissed}
   <div class="update-banner" role="status">
     <div class="update-info">
       <span class="update-title">Update v{update.version} available</span>
-      {#if downloading}
+      {#if stagedVersion}
+        <span class="update-staged" role="status">
+          v{stagedVersion} will be installed when you quit PresenceJam
+        </span>
+      {:else if downloading}
         <span class="update-progress">
           {Math.round(progress * 100)}%{totalBytes > 0
             ? ` (${Math.round(downloadedBytes / 1024 / 1024)}/${Math.round(totalBytes / 1024 / 1024)} MB)`
@@ -77,10 +112,20 @@
         type="button"
         class="download-btn"
         onclick={downloadAndInstall}
-        disabled={downloading}
+        disabled={downloading || staging}
       >
         {downloading ? 'Downloading…' : 'Download & Install'}
       </button>
+      {#if !stagedVersion}
+        <button
+          type="button"
+          class="quit-btn"
+          onclick={installOnQuit}
+          disabled={downloading || staging}
+        >
+          {staging ? 'Preparing…' : 'Install on quit'}
+        </button>
+      {/if}
       <button
         type="button"
         class="icon-btn dismiss-btn"
@@ -140,6 +185,21 @@
   .download-btn {
     padding: var(--sp-2) var(--sp-4);
     font-size: var(--fs-sm);
+  }
+  .quit-btn {
+    padding: var(--sp-2) var(--sp-4);
+    font-size: var(--fs-sm);
+    background: transparent;
+    color: var(--fg-muted);
+    border: 1px solid var(--fg-muted);
+  }
+  .quit-btn:hover:not(:disabled) {
+    color: var(--fg);
+    border-color: var(--fg);
+  }
+  .update-staged {
+    font-size: var(--fs-xs);
+    color: var(--success);
   }
   .dismiss-btn {
     width: 28px;
