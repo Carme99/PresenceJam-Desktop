@@ -72,7 +72,7 @@
   --fg: #F5F6FF;
   --fg-muted: #B4BAE0;
   --fg-subtle: #8B92C7;
-  --fg-on-accent: #FFFFFF;
+  --fg-on-accent: #0F1226;     /* WCAG: white on Spotify green is only 2.59:1; dark navy is 7.16:1 */
 
   /* Borders */
   --border: #2A2F5A;
@@ -94,7 +94,7 @@
   --success-soft: rgba(34, 197, 94, 0.16);
   --warning: #F4B740;
   --warning-soft: rgba(244, 183, 64, 0.16);
-  --danger:  #EF4444;
+  --danger:  #FB8A8A;          /* WCAG: lifted from #EF4444, which hit 3.24:1 on danger-soft over elevated */
   --danger-soft: rgba(239, 68, 68, 0.16);
   --info:    #38BDF8;
   --info-soft: rgba(56, 189, 248, 0.16);
@@ -104,7 +104,7 @@
   --selection-fg: #FFFFFF;
 
   /* Focus ring */
-  --focus-ring: 0 0 0 3px rgba(29, 185, 84, 0.45);
+  --focus-ring: 0 0 0 3px rgba(29, 185, 84, 0.75); /* WCAG: alpha raised so the blended ring clears 3:1 on every surface */
 }
 
 /* ---------- Theme: light ---------- */
@@ -116,34 +116,35 @@
 
   --fg: #0F1226;
   --fg-muted: #4B5285;
-  --fg-subtle: #6A719E;
+  --fg-subtle: #5A618F;        /* WCAG: #6A719E measured 4.39:1 on bg-base / 4.16:1 on bg-elevated */
   --fg-on-accent: #FFFFFF;
 
   --border: #DFE2F0;
   --border-strong: #B7BEDB;
 
-  --accent: #169C46;
-  --accent-hover: #118238;
-  --accent-press: #0E6D33;
-  --accent-soft: rgba(22, 156, 70, 0.12);
-  --accent-text: #117733;
+  --accent: #118238;           /* WCAG: trio darkened so --fg-on-accent white clears 4.5:1 (4.91 on accent) */
+  --accent-hover: #0E6D2E;
+  --accent-press: #0A5724;
+  --accent-soft: rgba(17, 130, 56, 0.12);
+  --accent-text: #0E6B2B;       /* WCAG: darkened — 4.31:1 on accent-soft over bg-elevated */
 
   --partner: #5A3FE0;
   --partner-soft: rgba(90, 63, 224, 0.12);
 
-  --success: #16A34A;
-  --success-soft: rgba(22, 163, 74, 0.12);
-  --warning: #B45309;
-  --warning-soft: rgba(180, 83, 9, 0.12);
-  --danger:  #DC2626;
-  --danger-soft: rgba(220, 38, 38, 0.10);
-  --info:    #0284C7;
-  --info-soft: rgba(2, 132, 199, 0.10);
+  /* WCAG: status text darkened — every variant was <4.5:1 on its own soft bg */
+  --success: #166534;
+  --success-soft: rgba(22, 101, 52, 0.12);
+  --warning: #92400E;
+  --warning-soft: rgba(146, 64, 14, 0.12);
+  --danger:  #991B1B;
+  --danger-soft: rgba(153, 27, 27, 0.10);
+  --info:    #075985;
+  --info-soft: rgba(7, 89, 133, 0.10);
 
   --selection-bg: rgba(22, 156, 70, 0.22);
   --selection-fg: #0F1226;
 
-  --focus-ring: 0 0 0 3px rgba(22, 156, 70, 0.35);
+  --focus-ring: 0 0 0 3px rgba(17, 130, 56, 0.90); /* WCAG: old 0.35-alpha ring measured ~1.4:1 against surfaces */
 
   --shadow-1: 0 1px 2px rgba(15, 18, 38, 0.06);
   --shadow-2: 0 4px 16px rgba(15, 18, 38, 0.10);
@@ -183,6 +184,27 @@ body {
   outline: none;
   box-shadow: var(--focus-ring);
   border-radius: var(--r-sm);
+}
+
+/* ---------- Skip link ---------- */
+/* Visually hidden until keyboard-focused; jumps to #main-content (+page.svelte). */
+.skip-link {
+  position: absolute;
+  top: var(--sp-2);
+  left: var(--sp-2);
+  z-index: var(--z-tooltip);
+  padding: var(--sp-2) var(--sp-4);
+  background: var(--accent);
+  color: var(--fg-on-accent);
+  border-radius: var(--r-md);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  transform: translateY(-300%);
+}
+
+.skip-link:focus-visible {
+  transform: none;
 }
 
 /* ---------- Typography primitives ---------- */
@@ -380,6 +402,14 @@ input[type='radio'] {
 }
 .badge .dot.pulse {
   animation: pulse-dot 1.5s var(--ease-out) infinite;
+}
+
+/* WCAG 2.3.3 / prefers-reduced-motion: stop decorative pulsing for users
+ * who opt out of animation. Colour state remains fully conveyed. */
+@media (prefers-reduced-motion: reduce) {
+  .badge .dot.pulse {
+    animation: none;
+  }
 }
 
 /* ---------- Inline code ---------- */

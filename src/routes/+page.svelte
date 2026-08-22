@@ -143,7 +143,7 @@
     <span>Loading...</span>
   </div>
 {:else}
-  <div class="app-container">
+  <div class="app-container" id="main-content" tabindex="-1">
     {#if $currentView === 'onboarding'}
       <Onboarding />
     {:else if $currentView === 'dashboard'}
