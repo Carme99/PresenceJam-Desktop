@@ -7,6 +7,7 @@
   import Dashboard from '$lib/components/Dashboard.svelte';
   import Settings from '$lib/components/Settings.svelte';
   import LogViewer from '$lib/components/LogViewer.svelte';
+  import Diagnostics from '$lib/components/Diagnostics.svelte';
   import { devLog } from '$lib/utils/dev';
   import About from '$lib/components/About.svelte';
   import Reconnect from '$lib/components/Reconnect.svelte';
@@ -151,6 +152,8 @@
       <Settings />
     {:else if $currentView === 'logs'}
       <LogViewer />
+    {:else if $currentView === 'diagnostics'}
+      <Diagnostics />
     {:else if $currentView === 'about'}
       <About />
     {:else if $currentView === 'reconnect'}

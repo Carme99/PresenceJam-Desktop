@@ -352,6 +352,7 @@ impl Default for AppState {
 }
 
 pub mod commands;
+pub mod diagnostics;
 pub mod config;
 pub mod keychain;
 pub mod menu;
@@ -896,6 +897,7 @@ pub fn run() {
             commands::playback::get_playback_devices,
             commands::playback::get_playback_queue,
             commands::playback::get_spotify_granted_scopes,
+            diagnostics::get_diagnostics_snapshot,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

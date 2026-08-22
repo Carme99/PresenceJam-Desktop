@@ -219,6 +219,12 @@
     devLog('[DASHBOARD] openLogs: EXIT');
   }
 
+  function openDiagnostics() {
+    devLog('[DASHBOARD] openDiagnostics: ENTRY');
+    currentView.set('diagnostics');
+    devLog('[DASHBOARD] openDiagnostics: EXIT');
+  }
+
   function openAbout() {
     currentView.set('about');
   }
@@ -309,6 +315,7 @@
         {$theme === 'dark' ? '☀' : '☾'}
       </button>
       <button class="icon-btn" onclick={openLogs} title="Logs" aria-label="Open logs">📋</button>
+      <button class="icon-btn" onclick={openDiagnostics} title="Diagnostics" aria-label="Open diagnostics">🩺</button>
       <button class="icon-btn" onclick={openSettings} title="Settings" aria-label="Open settings">⚙</button>
       <button class="icon-btn" onclick={openAbout} title="About" aria-label="About PresenceJam">ⓘ</button>
       <button class="icon-btn primary" class:is-on={isSyncing} onclick={toggleSync}

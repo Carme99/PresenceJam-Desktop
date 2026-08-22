@@ -30,6 +30,7 @@ export type { SyncStatus } from './types-generated/SyncStatus';
 export type {
   AppConfig,
 } from './types-generated/AppConfig';
+export type { DiagnosticsSnapshot } from './types-generated/DiagnosticsSnapshot';
 /**
  * Payload of the `error` event emitted by the Rust polling loop. The
  * `severity` field was added in #79 part 1; the Dashboard.svelte
