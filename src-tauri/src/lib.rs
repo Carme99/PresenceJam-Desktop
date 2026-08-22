@@ -325,11 +325,16 @@ pub struct AppState {
     pub pending: PendingAuths,
     pub config: Config,
     pub onboarding_cache: OnboardingCache,
-    /// Per-launch anti-hijack secret bound into the OAuth `state` param as
-    /// `<csrf>.<launch_secret>`. Generated once at startup, held in memory
-    /// only (`OnceLock`), never persisted. Spotify echoes `state` verbatim so
-    /// `handle_deep_link` can reject callbacks whose second component doesn't
-    /// match. See issue #66. **macOS limitation:** the `presencejam://`
+    /// Per-launch OAuth anti-hijack binding (`pkce::LaunchBinding`), held in
+    /// memory only (`OnceLock`), never persisted. Two layers (issue #66;
+    /// scope-3.3 §C1): the per-launch secret is bound into the OAuth `state`
+    /// param as `<csrf>.<launch_secret>` — Spotify echoes `state` verbatim, so
+    /// `handle_deep_link` can reject foreign callbacks — and the SHA-256 of the
+    /// in-flight flow's PKCE verifier is bound at authorize time and consumed
+    /// (single-use) at callback time, so a replayed callback fails
+    /// closed per RFC 6749 §10.12:
+    /// https://datatracker.ietf.org/doc/html/rfc6749#section-10.12 .
+    /// **macOS limitation:** the `presencejam://`
     /// scheme is registered at build time via `tauri.conf.json`; runtime
     /// re-registration (`register_all`) is unsupported on macOS (returns
     /// `UnsupportedPlatform`), so a hostile app that pre-registered the
@@ -337,25 +342,27 @@ pub struct AppState {
     /// is useless without the secret + PKCE verifier (both in our
     /// AppState, never on disk / IPC), but the hijack itself is not
     /// prevented on macOS.
-    pub launch_secret: OnceLock<String>,
+    pub launch_binding: OnceLock<crate::pkce::LaunchBinding>,
 }
 
 impl AppState {
     pub fn new() -> Self {
         log::info!("[APP_STATE] AppState::new: creating new AppState");
-        let launch_secret = OnceLock::new();
-        // Initialise per-launch secret immediately so every AppState (including
-        // those created in tests) has a secret. Production startup via `run()`
-        // will have already set it, but `OnceLock::set` is harmless if already
-        // initialised — we ignore the error.
-        let _ = launch_secret.set(crate::pkce::generate_launch_secret());
+        let launch_binding = OnceLock::new();
+        // Initialise per-launch binding immediately so every AppState
+        // (including those created in tests) has one. Production startup via
+        // `run()` will have already set it, but `OnceLock::set` is harmless if
+        // already initialised — we ignore the error.
+        let _ = launch_binding.set(crate::pkce::LaunchBinding::new(
+            crate::pkce::generate_launch_secret(),
+        ));
         Self {
             tokens: Tokens::new(),
             polling: Polling::new(),
             pending: PendingAuths::new(),
             config: Config::new(),
             onboarding_cache: OnboardingCache::new(),
-            launch_secret,
+            launch_binding,
         }
     }
 }
@@ -512,26 +519,84 @@ fn handle_deep_link(url: &str, app: AppHandle) {
                     "[DEEP_LINK] handle_deep_link: code found - code.len={}",
                     code_str.len()
                 );
-                // #66 option b: per-launch secret bound into state as `<csrf>.<launch_secret>`.
-                // Spotify echoes state verbatim, so we can validate the second component against
-                // the secret stored in AppState (OnceLock, in-memory only). Mismatch → ignore
-                // callback (do not proceed to token exchange). Scheme stays `presencejam://`
+                // #66 option b + scope-3.3 §C1: per-launch secret bound into
+                // state as `<csrf>.<launch_secret>`. Spotify echoes state
+                // verbatim (https://developer.spotify.com/documentation/web-api/tutorials/code-flow),
+                // so we can validate the callback against the binding stored in
+                // AppState (OnceLock, in-memory only). Defense-in-depth layers,
+                // all fail-closed before any token exchange:
+                //   1. Strict structure: exactly `<csrf>.<secret>`, both
+                //      non-empty base64url components — rejects truncated or
+                //      malformed states.
+                //   2. Constant-time compare of the full echoed state against
+                //      the stored pending state (`pkce::ct_eq`, no early-exit
+                //      content leak).
+                //   3. PKCE linkage: the launch binding's verifier hash (bound
+                //      at authorize time) must match the pending auth's
+                //      verifier.
+                //   4. Single-use consumption (RFC 6749 §10.12
+                //      https://datatracker.ietf.org/doc/html/rfc6749#section-10.12):
+                //      `validate_and_consume` takes the verifier-hash slot on
+                //      success, so a replayed callback is rejected. The full
+                //      state compare + `take()` of the pending auth stay in
+                //      `handle_spotify_callback`.
+                // Scheme stays `presencejam://`
                 // because macOS bundle scheme registration is config-time only (Info.plist) —
                 // runtime re-registration is not supported, so hijack remains possible on macOS
                 // but the intercepted `code` is useless without secret + PKCE verifier.
                 // #228: redact state in logs — never log raw values.
-                if let Some(ref st) = state_param {
+                if let Some(st) = &state_param {
                     let secret_ok = {
                         let app_state = app.state::<Arc<AppState>>();
-                        match app_state.launch_secret.get() {
-                            Some(secret) => {
+                        match app_state.launch_binding.get() {
+                            Some(binding) => {
                                 let parts: Vec<&str> = st.splitn(2, '.').collect();
-                                if parts.len() == 2 && parts[1] == secret {
-                                    true
+                                if parts.len() == 2 && !parts[0].is_empty() && !parts[1].is_empty()
+                                {
+                                    // Peek (do not take) the pending auth: consumption of the
+                                    // pending itself stays in handle_spotify_callback.
+                                    let pending_peek = app_state.pending.spotify_mut();
+                                    match pending_peek.as_ref() {
+                                        Some(pending) if crate::pkce::ct_eq(st, &pending.state) => {
+                                            match binding.validate_and_consume(parts[1], &pending.verifier)
+                                            {
+                                                Ok(()) => true,
+                                                Err(reason) => {
+                                                    let prefix: String =
+                                                        st.chars().take(4).collect();
+                                                    log::warn!(
+                                                        "[DEEP_LINK] handle_deep_link: launch binding rejected ({}) — state prefix={}… len={} — ignoring callback (possible hijack/replay) [REDACTED len {}]",
+                                                        reason,
+                                                        prefix,
+                                                        st.len(),
+                                                        st.len()
+                                                    );
+                                                    false
+                                                }
+                                            }
+                                        }
+                                        Some(_) => {
+                                            let prefix: String = st.chars().take(4).collect();
+                                            log::warn!(
+                                                "[DEEP_LINK] handle_deep_link: state mismatch vs pending auth — state prefix={}… len={} — ignoring callback (possible hijack) [REDACTED len {}]",
+                                                prefix,
+                                                st.len(),
+                                                st.len()
+                                            );
+                                            false
+                                        }
+                                        None => {
+                                            log::warn!(
+                                                "[DEEP_LINK] handle_deep_link: no pending Spotify auth in AppState — ignoring callback (stale or replayed) [REDACTED len {}]",
+                                                st.len()
+                                            );
+                                            false
+                                        }
+                                    }
                                 } else {
                                     let prefix: String = st.chars().take(4).collect();
                                     log::warn!(
-                                        "[DEEP_LINK] handle_deep_link: launch_secret mismatch — state prefix={}… len={} — ignoring callback (possible hijack) [REDACTED len {}]",
+                                        "[DEEP_LINK] handle_deep_link: malformed state (expected <csrf>.<secret>) — state prefix={}… len={} — ignoring callback (possible truncation/hijack) [REDACTED len {}]",
                                         prefix,
                                         st.len(),
                                         st.len()
@@ -541,7 +606,7 @@ fn handle_deep_link(url: &str, app: AppHandle) {
                             }
                             None => {
                                 log::warn!(
-                                    "[DEEP_LINK] handle_deep_link: no launch_secret in AppState — ignoring callback [REDACTED len {}]",
+                                    "[DEEP_LINK] handle_deep_link: no launch binding in AppState — ignoring callback [REDACTED len {}]",
                                     st.len()
                                 );
                                 false
