@@ -28,6 +28,15 @@
   // 3.1.0 notifications — opt-in via localStorage, default off
   let notificationsEnabled = $state(false);
   let lastNotifiedId = '';
+  // C8: throttle — at most one track-change notification every 5 s.
+  const NOTIFICATION_THROTTLE_MS = 5000;
+  let lastNotifiedAt = 0;
+  // C8: stable numeric id + group so platforms that support it
+  // (id reuse / Apple threadIdentifier) replace the existing
+  // track-change notification in place instead of stacking a new one
+  // for every track during a session.
+  const TRACK_NOTIFICATION_ID = 1001;
+  const TRACK_NOTIFICATION_GROUP = 'presencejam-track-change';
 
   onDestroy(() => {
     unlisten.forEach(fn => fn());
@@ -68,20 +77,32 @@
       await updateMenuState();
       if (notificationsEnabled && event.payload?.title) {
         const id = `${event.payload.title}::${event.payload.artist}`;
-        if (id !== lastNotifiedId) {
-          lastNotifiedId = id;
-          let granted = false;
-          try { granted = await isPermissionGranted(); } catch {}
-          if (!granted) { try { granted = (await requestPermission()) === 'granted'; } catch {} }
-          if (granted) {
-            const body = `${event.payload.artist} — ${event.payload.album ?? ''}`.trim();
-            try { sendNotification({ title: event.payload.title, body, icon: event.payload.album_art_url || undefined }); } catch {}
-          }
+        if (id === lastNotifiedId) return;
+        // C8: timestamp throttle — max one notification per 5 s. A
+        // throttled track does NOT claim lastNotifiedId, so once the
+        // window elapses the genuinely-current track can still notify.
+        const now = Date.now();
+        if (now - lastNotifiedAt < NOTIFICATION_THROTTLE_MS) return;
+        lastNotifiedId = id;
+        lastNotifiedAt = now;
+        let granted = false;
+        try { granted = await isPermissionGranted(); } catch {}
+        if (!granted) { try { granted = (await requestPermission()) === 'granted'; } catch {} }
+        if (granted) {
+          const body = `${event.payload.artist} — ${event.payload.album ?? ''}`.trim();
+          try {
+            sendNotification({
+              title: event.payload.title,
+              body,
+              icon: event.payload.album_art_url || undefined,
+              // C8: replace-in-place per session where supported.
+              id: TRACK_NOTIFICATION_ID,
+              group: TRACK_NOTIFICATION_GROUP
+            });
+          } catch {}
         }
       }
     }));
-
-    devLog('[DASHBOARD] onMount: setting up presence-updated listener');
     unlisten.push(await listen('presence-updated', (event: any) => {
       devLog('[DASHBOARD] EVENT: presence-updated received');
       devLog('[DASHBOARD] EVENT: status=', event.payload.status);

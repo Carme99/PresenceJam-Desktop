@@ -4,7 +4,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notification';
   import { currentView } from '$lib/stores/app';
-  import { configStore, saveConfig, loadConfig } from '$lib/stores/config';
+  import { configStore, saveConfig, loadConfig, defaultConfig } from '$lib/stores/config';
   import type { AppConfig, SyncStatus, TeamsTokens } from '$lib/types';
   import { authFlow, setSpotifyPhase, setTeamsPhase } from '$lib/stores/authFlow.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
@@ -17,6 +17,45 @@
   let isSaving = $state(false);
   let saveMessage = $state('');
   let saveTimeout: ReturnType<typeof setTimeout> | null = null;
+
+  // C9: dirty-state detection. Polling fields arrive as BigInt over the
+  // IPC boundary, which JSON.stringify rejects, so serialize with a
+  // BigInt→number replacer on both sides before comparing.
+  function serializeForCompare(cfg: AppConfig): string {
+    return JSON.stringify(cfg, (_k, v) => (typeof v === 'bigint' ? Number(v) : v));
+  }
+  let isDirty = $derived(
+    serializeForCompare(localConfig) !== serializeForCompare($configStore)
+  );
+
+  // C9: inline clamp feedback mirroring Rust `clamp_polling`
+  // (src-tauri/src/config.rs:109): minimum clamps to [5, 30] first, then
+  // maximum clamps to [effectiveMinimum, 300] — an entered max below min
+  // is silently raised on save; surface the effective value immediately.
+  let pollingClamp = $derived.by(() => {
+    const rawMin = Number(localConfig.polling.minimum_interval_seconds);
+    const rawMax = Number(localConfig.polling.max_interval_seconds);
+    const effMin = Math.min(30, Math.max(5, rawMin));
+    const effMax = Math.min(300, Math.max(effMin, rawMax));
+    return { active: rawMin > rawMax, effMax };
+  });
+
+  // C9: per-section "Reset to default" using the shared defaults source.
+  function resetPresenceDefaults() {
+    localConfig.teams.availability_sync = defaultConfig.teams.availability_sync;
+    localConfig.teams.presence_gate = defaultConfig.teams.presence_gate;
+  }
+  function resetStatusFormatDefaults() {
+    localConfig.teams.status_format = defaultConfig.teams.status_format;
+    localConfig.teams.profanity_filter = defaultConfig.teams.profanity_filter;
+    localConfig.teams.profanity_placeholder = defaultConfig.teams.profanity_placeholder;
+  }
+  function resetPollingDefaults() {
+    localConfig.polling = structuredClone(defaultConfig.polling);
+  }
+  function resetAppearanceDefaults() {
+    localConfig.autostart = defaultConfig.autostart;
+  }
   // 3.1.0 notification opt-in — localStorage gated, default off
   let notificationsEnabled = $state(false);
   let spotifyAuthWaiting = $derived(authFlow.spotify.phase === 'waiting');
@@ -255,6 +294,9 @@
 
 <div class="settings">
   <PageHeader title="Settings" onBack={goBack} />
+  {#if isDirty}
+    <div class="dirty-banner" role="status">Unsaved changes</div>
+  {/if}
 
   <div class="sections">
     <section class="card">
@@ -341,10 +383,10 @@
         </div>
       {/if}
     </section>
-
     <section class="card">
       <header class="section-header">
         <h2>Presence</h2>
+        <button type="button" class="btn-link" onclick={resetPresenceDefaults}>Reset to default</button>
       </header>
       <div class="toggle-row">
         <label for="availability-sync">Show Available while listening</label>
@@ -372,10 +414,10 @@
         you're busy, in a meeting, in a call, or presenting.
       </p>
     </section>
-
     <section class="card">
       <header class="section-header">
         <h2>Status format</h2>
+        <button type="button" class="btn-link" onclick={resetStatusFormatDefaults}>Reset to default</button>
       </header>
       <div class="form-group">
         <label for="status-format">Format template</label>
@@ -422,6 +464,7 @@
     <section class="card">
       <header class="section-header">
         <h2>Polling</h2>
+        <button type="button" class="btn-link" onclick={resetPollingDefaults}>Reset to default</button>
       </header>
       <div class="form-group">
         <label for="default-interval">Default interval: {localConfig.polling.default_interval_seconds}s</label>
@@ -456,6 +499,11 @@
           />
         </div>
       </div>
+      {#if pollingClamp.active}
+        <p class="clamp-hint" role="status">
+          Min interval exceeds max interval — max will be saved as {pollingClamp.effMax}s.
+        </p>
+      {/if}
     </section>
 
     <section class="card">
@@ -472,6 +520,7 @@
     <section class="card">
       <header class="section-header">
         <h2>Appearance</h2>
+        <button type="button" class="btn-link" onclick={resetAppearanceDefaults}>Reset to default</button>
       </header>
       <div class="form-group">
         <span class="form-label">Theme</span>
@@ -602,6 +651,28 @@
     border-radius: var(--r-md);
   }
   .scope-banner .hint { margin: 0; }
+
+  /* C9: unsaved-changes banner shown when localConfig drifts from the
+     saved store; and the polling min>max clamp feedback hint. */
+  .dirty-banner {
+    padding: var(--sp-2) var(--sp-4);
+    background: var(--warning-soft);
+    color: var(--warning);
+    border: 1px solid transparent;
+    border-radius: var(--r-md);
+    font-size: var(--fs-sm);
+    font-weight: 600;
+    text-align: center;
+  }
+  .clamp-hint {
+    margin: 0;
+    padding: var(--sp-2) var(--sp-3);
+    background: var(--warning-soft);
+    color: var(--warning);
+    border-radius: var(--r-md);
+    font-size: var(--fs-xs);
+    line-height: var(--lh-normal);
+  }
 
   /* Device-code box — mirrors Onboarding's (issue #157). */
   .device-code-box {
