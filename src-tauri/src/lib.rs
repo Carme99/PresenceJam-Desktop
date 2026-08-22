@@ -386,6 +386,7 @@ pub mod spotify;
 pub mod teams;
 pub mod token_io;
 pub mod tray;
+pub mod updater_bg;
 
 async fn handle_spotify_callback(
     code: &str,
@@ -742,6 +743,11 @@ pub fn run() {
 
             let state = Arc::new(AppState::new());
             app.manage(state.clone());
+
+            // C3(c) "install on quit": register the deferred-update staging
+            // state (updater plugin is desktop-only, so this follows suit).
+            #[cfg(desktop)]
+            updater_bg::manage(app.handle());
             log::info!("[APP] setup: AppState created and managed");
 
             // Issue #69: prime the keychain cache once at app start so the
@@ -968,6 +974,7 @@ pub fn run() {
             commands::misc::preview_status,
             commands::misc::update_tray_menu_state,
             commands::misc::relaunch_app,
+            updater_bg::stage_deferred_update,
             commands::playback::playback_play,
             commands::playback::playback_pause,
             commands::playback::playback_next,
@@ -985,8 +992,19 @@ pub fn run() {
                 api.prevent_close();
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|app, event| {
+            // C3(c) "install on quit": both real exit paths (tray Quit in
+            // menu.rs and the app_exit command) funnel into
+            // AppHandle::exit, which fires RunEvent::Exit once the event
+            // loop has finished — the safe point to apply a staged update
+            // (the plugin requires the app to be quitting on Windows).
+            #[cfg(desktop)]
+            if matches!(event, tauri::RunEvent::Exit) {
+                updater_bg::install_pending_on_exit(app);
+            }
+        });
 }
 
 #[cfg(test)]
