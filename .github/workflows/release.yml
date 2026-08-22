@@ -213,7 +213,7 @@ jobs:
         shell: pwsh
         run: |
           $msi = Get-ChildItem "src-tauri/target/release/bundle/msi" -Filter "*.msi" | Select-Object -First 1
-          Copy-Item $msi.FullName "PresenceJam-$RELEASE_TAG.msi"
+          Copy-Item $msi.FullName "PresenceJam-$env:RELEASE_TAG.msi"
 
       # The MSI itself is the updater artifact; ship its .sig alongside
       # under the deterministic release name (the .msi is already renamed
@@ -227,8 +227,8 @@ jobs:
             Write-Error "Expected .msi.sig in bundle/msi/"
             exit 1
           }
-          Copy-Item $sig.FullName "PresenceJam-$RELEASE_TAG.msi.sig"
-          Get-ChildItem "PresenceJam-$RELEASE_TAG.msi.sig"
+          Copy-Item $sig.FullName "PresenceJam-$env:RELEASE_TAG.msi.sig"
+          Get-ChildItem "PresenceJam-$env:RELEASE_TAG.msi.sig"
 
       # Linux artifacts are named like `presence-jam_2.7.2_amd64.deb` by
       # Tauri's bundler. Rename to the project-standard format used by
