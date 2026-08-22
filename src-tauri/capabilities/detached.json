@@ -1,0 +1,18 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "detached",
+  "description": "C7: minimal capability for the detached Logs/Settings windows (labels logs-detached / settings-detached). Mirrors the main-window set minus tray/menu/deep-link/updater/autostart/window-management, which detached views do not exercise; app-global Tauri commands need no entry.",
+  "windows": ["logs-detached", "settings-detached"],
+  "permissions": [
+    "core:default",
+    "core:event:allow-emit",
+    "core:event:allow-emit-to",
+    "core:event:allow-listen",
+    "log:default",
+    "opener:default",
+    "notification:default",
+    "notification:allow-is-permission-granted",
+    "notification:allow-request-permission",
+    "notification:allow-notify"
+  ]
+}
