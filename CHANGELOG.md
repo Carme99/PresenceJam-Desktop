@@ -5,7 +5,7 @@ All notable changes to PresenceJam are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [4.0.0] - Unreleased
+## [4.0.0] - 2026-08-23
 
 The scope-3.3 polish wave beyond Stratus: supply-chain and OAuth hardening, a local diagnostics page, silent background updates with install-on-quit, multi-window detach for Logs/Settings, conditional-GET polling, settings/notification UX polish, and a WCAG 2.2 AA accessibility pass. Landing separately (not yet in this history): i18n with an en/de/fr language picker (scope item C6).
 
