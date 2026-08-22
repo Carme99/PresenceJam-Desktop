@@ -134,30 +134,7 @@
       displayErrorTimeout = setTimeout(() => { displayError = ''; displayErrorTimeout = null; }, 5000);
     }));
 
-    devLog('[DASHBOARD] onMount: setting up toggle-pause listener');
-    unlisten.push(await listen('toggle-pause', async () => {
-      if (isToggling) return;
-      devLog('[DASHBOARD] EVENT: toggle-pause received');
-      devLog('[DASHBOARD] EVENT: isSyncing=', isSyncing);
-
-      isToggling = true;
-      try {
-        if (isSyncing) {
-          devLog('[DASHBOARD] EVENT: calling invoke stop_syncing');
-          await invoke('stop_syncing');
-          isSyncing = false;
-          devLog('[DASHBOARD] EVENT: isSyncing=false');
-        } else {
-          devLog('[DASHBOARD] EVENT: calling invoke start_syncing');
-          await invoke('start_syncing');
-          isSyncing = true;
-          devLog('[DASHBOARD] EVENT: isSyncing=true');
-        }
-        await updateMenuState();
-      } finally {
-        isToggling = false;
-      }
-    }));
+    // toggle-pause is now handled in +page.svelte (always-mounted) — Dashboard no longer owns it (#230).
     devLog('[DASHBOARD] onMount: setting up sync-started listener');
     unlisten.push(await listen('sync-started', () => {
       devLog('[DASHBOARD] EVENT: sync-started received');
