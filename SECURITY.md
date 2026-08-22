@@ -329,6 +329,57 @@ For a more secure experience:
 6. **Rotate credentials** if you suspect compromise (Spotify Developer Dashboard → your app overview page → **ROTATE**)
 
 
+## Release Pipeline
+
+### Supply-chain hardening (SHA-pinned actions)
+
+Every third-party GitHub Action used by `.github/workflows/ci.yml` and
+`.github/workflows/release.yml` is pinned to a **full commit SHA** (with the
+upstream version noted in a trailing comment), so a compromised or hijacked
+tag on the action's own repository cannot change what executes here.
+Reviewers should treat any new `uses:` entry that is not SHA-pinned as a
+security regression.
+
+### Build provenance attestation
+
+Since v4.0.0, the release workflow generates a **SLSA build provenance
+attestation** for every packaged artifact (macOS DMG, Windows MSI, Linux
+`.deb`/`.AppImage` and their updater companions) via
+[actions/attest-build-provenance](https://github.com/actions/attest-build-provenance)
+(itself SHA-pinned). The attestation is a signed DSSE document produced by
+GitHub's artifact-attestation infrastructure; it binds the artifact's
+SHA-256 digest to the exact workflow run, repository, and commit that built
+it. It **supplements** — and does not replace — the minisign `.sig` files
+that the Tauri auto-updater verifies. The workflow grants itself only the
+minimal scopes needed for this (`id-token: write` + `attestations: write`),
+scoped to the build job alone.
+
+**Verifying a downloaded artifact:**
+
+1. Download the artifact from the official release page.
+2. Run (requires GitHub CLI `gh` >= 2.63):
+
+   ```sh
+   gh attestation verify PresenceJam-v4.0.0.msi --repo Carme99/PresenceJam-Desktop
+   ```
+
+`gh attestation verify` fetches all attestations recorded for the file's
+SHA-256 digest in the repository's attestation store, verifies the DSSE
+signature chain (Sigstore Fulcio certificate with Rekor transparency-log
+inclusion), and reports whether the file was produced by an unmodified run
+of this repository's release workflow. Exit status 0 means verified; any
+digest, signature, or repository mismatch exits non-zero. Example output:
+
+```text
+Loaded 1 digest for PresenceJam-v4.0.0.msi ✓
+Successfully verified attestations:
+Predicate types: [https://slsa.dev/provenance/v1]
+```
+
+If verification fails for a file obtained anywhere other than the official
+[releases page](https://github.com/Carme99/PresenceJam-Desktop/releases),
+treat it as untrusted and re-download from the release page.
+
 ## Release Pipeline Token Rotation
 
 The release workflow (`.github/workflows/release.yml`) uses two repository secrets to publish to package managers. Both are personal access tokens (PATs) held by the maintainer and must be rotated on a 90-day cadence to limit blast radius if the token leaks through any other channel (CI logs, tap repo history, developer machine, etc.).
