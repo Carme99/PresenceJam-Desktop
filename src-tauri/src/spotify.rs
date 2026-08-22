@@ -327,19 +327,74 @@ enum CurrentlyPlayingType {
     Unknown,
 }
 
-pub fn get_currently_playing(access_token: &str) -> Result<Option<TrackInfo>, SpotifyApiError> {
+/// Conditional GET of the currently-playing track (candidate C11(1),
+/// docs/scope-3.3.md §C11).
+///
+/// Outcome is [`CurrentlyPlaying`]: a parsed 200/204 body plus the
+/// response's `ETag` validator, or a 304 Not Modified with no body.
+///
+/// Grounding note: Spotify's official reference for
+/// `GET /me/player/currently-playing`
+/// (https://developer.spotify.com/documentation/web-api/reference/get-the-users-currently-playing-track)
+/// documents only 200/401/403/429 responses and does NOT document an
+/// `ETag` response header or `If-None-Match`/304 handling. ETag support
+/// is therefore EMPIRICAL, relying only on standard RFC 9110 semantics
+/// (§8.8.3 `ETag`, §13 conditional requests, §15.4.5 `304 Not
+/// Modified`). Every step degrades gracefully: no stored ETag ⇒ the
+/// request goes out unconditional; no `ETag` in a response ⇒ the next
+/// poll is unconditional; any other status keeps the pre-existing error
+/// paths. If Spotify never sends an ETag this whole feature is a
+/// behavioral no-op.
+#[derive(Debug)]
+pub enum CurrentlyPlaying {
+    /// 200/204 — the full response was parsed. `track` is `None` for a
+    /// 204, a non-track item type (issue #161) or a missing `item`.
+    Modified {
+        track: Option<TrackInfo>,
+        /// The `ETag` response header when present; echo it back as
+        /// `If-None-Match` on the next poll. `None` ⇒ the next poll is
+        /// unconditional (RFC 9110 §13.1.2).
+        etag: Option<String>,
+    },
+    /// 304 Not Modified — body absent; the caller keeps its prior state
+    /// and skips JSON parse / status-format work.
+    NotModified,
+}
+
+pub fn get_currently_playing(
+    access_token: &str,
+    if_none_match: Option<&str>,
+) -> Result<CurrentlyPlaying, SpotifyApiError> {
     let client = Client::new();
 
-    let response = client
+    let mut request = client
         .get("https://api.spotify.com/v1/me/player/currently-playing")
-        .header("Authorization", format!("Bearer {}", access_token))
+        .header("Authorization", format!("Bearer {}", access_token));
+    // Conditional GET (candidate C11): a stored ETag goes out as
+    // If-None-Match so an unchanged resource can answer 304 without a
+    // body. No stored ETag (first poll, or the server stopped sending
+    // one) ⇒ unconditional GET, exactly the pre-C11 behavior.
+    if let Some(etag) = if_none_match {
+        request = request.header("If-None-Match", etag);
+    }
+    let response = request
         .timeout(Duration::from_secs(10))
         .send()
         .map_err(|e| {
             SpotifyApiError::Other(format!("Failed to send currently playing request: {}", e))
         })?;
 
+    // Read before the response is consumed by `.json()`/`.text()` below.
+    // Captured on both 200 and 304 so a refreshed validator replaces the
+    // stored one.
+    let response_etag = response
+        .headers()
+        .get("ETag")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+
     match response.status().as_u16() {
+        304 => Ok(CurrentlyPlaying::NotModified),
         200 => {
             #[derive(Deserialize)]
             struct CurrentlyPlayingResponse {
@@ -388,7 +443,10 @@ pub fn get_currently_playing(access_token: &str) -> Result<Option<TrackInfo>, Sp
             // TrackInfo — treat them as "nothing playing" instead of erroring.
             // See issue #161.
             if !matches!(playing.currently_playing_type, CurrentlyPlayingType::Track) {
-                return Ok(None);
+                return Ok(CurrentlyPlaying::Modified {
+                    track: None,
+                    etag: response_etag,
+                });
             }
 
             if let Some(item) = playing.item {
@@ -406,20 +464,29 @@ pub fn get_currently_playing(access_token: &str) -> Result<Option<TrackInfo>, Sp
                     .map(|img| img.url.clone())
                     .unwrap_or_default();
 
-                Ok(Some(TrackInfo {
-                    title: item.name,
-                    artist,
-                    album: item.album.name,
-                    album_art_url,
-                    is_playing: playing.is_playing,
-                    progress_ms: playing.progress_ms,
-                    duration_ms: item.duration_ms,
-                }))
+                Ok(CurrentlyPlaying::Modified {
+                    track: Some(TrackInfo {
+                        title: item.name,
+                        artist,
+                        album: item.album.name,
+                        album_art_url,
+                        is_playing: playing.is_playing,
+                        progress_ms: playing.progress_ms,
+                        duration_ms: item.duration_ms,
+                    }),
+                    etag: response_etag,
+                })
             } else {
-                Ok(None)
+                Ok(CurrentlyPlaying::Modified {
+                    track: None,
+                    etag: response_etag,
+                })
             }
         }
-        204 => Ok(None),
+        204 => Ok(CurrentlyPlaying::Modified {
+            track: None,
+            etag: response_etag,
+        }),
         401 => Err(SpotifyApiError::ExpiredToken),
         429 => {
             // Spotify's rate-limit docs: the 429 response normally includes a

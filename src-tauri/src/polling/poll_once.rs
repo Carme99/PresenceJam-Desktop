@@ -25,7 +25,8 @@ use tauri::{AppHandle, Emitter};
 
 use crate::profanity;
 use crate::spotify::{
-    format_status, get_currently_playing, is_token_expired, refresh_spotify_token, SpotifyApiError,
+    CurrentlyPlaying, format_status, get_currently_playing, is_token_expired,
+    refresh_spotify_token, SpotifyApiError,
 };
 use crate::teams::{
     clear_teams_presence, clear_teams_status_message, get_teams_presence,
@@ -65,6 +66,9 @@ pub(crate) fn run(
     transient_failure_count: &mut u8,
     gated_track_key: &mut Option<String>,
     last_availability_arm: &mut Option<Instant>,
+    // Candidate C11: ETag validator from the previous conditional GET;
+    // stored from each 200/204, echoed as If-None-Match on the next poll.
+    last_etag: &mut Option<String>,
 ) -> PollIteration {
     log::debug!("[POLLING] poll_once: iteration start");
 
@@ -199,10 +203,14 @@ pub(crate) fn run(
 
     let last_poll_instant = Instant::now();
 
-    let result = get_currently_playing(&access_token);
+    let result = get_currently_playing(&access_token, last_etag.as_deref());
 
     match result {
-        Ok(Some(track)) => {
+        Ok(CurrentlyPlaying::Modified {
+            track: Some(track),
+            etag,
+        }) => {
+            *last_etag = etag;
             log::info!(
                 "[POLLING] poll_once: track found - {} by {}",
                 track.title,
@@ -224,7 +232,8 @@ pub(crate) fn run(
             *transient_failure_count = 0;
             PollIteration::Sleep { seconds: sleep_duration }
         }
-        Ok(None) => {
+        Ok(CurrentlyPlaying::Modified { track: None, etag }) => {
+            *last_etag = etag;
             log::info!("[POLLING] poll_once: no track playing");
             let no_track_backoff = handle_no_track(
                 app,
@@ -242,6 +251,19 @@ pub(crate) fn run(
                 *seconds = (*seconds).max(no_track_backoff);
             }
             iteration
+        }
+        Ok(CurrentlyPlaying::NotModified) => {
+            // Candidate C11 (docs/scope-3.3.md §C11): a 304 Not Modified
+            // carries no body — nothing to parse, format, filter or
+            // rebuild. Behave exactly like the unchanged-track path minus
+            // that work.
+            not_modified_iteration(
+                last_track_key,
+                last_etag,
+                consecutive_pauses,
+                transient_failure_count,
+                &config,
+            )
         }
         Err(e) => {
             log::error!(
@@ -292,8 +314,12 @@ pub(crate) fn run(
                                 }
                                 let retry_token = new_tokens.access_token.clone();
                                 let last_poll_instant_retry = Instant::now();
-                                match get_currently_playing(&retry_token) {
-                                    Ok(Some(track)) => {
+                                match get_currently_playing(&retry_token, last_etag.as_deref()) {
+                                    Ok(CurrentlyPlaying::Modified {
+                                        track: Some(track),
+                                        etag,
+                                    }) => {
+                                        *last_etag = etag;
                                         log::info!(
                                             "[POLLING] poll_once: retry track found - {} by {}",
                                             track.title,
@@ -315,7 +341,11 @@ pub(crate) fn run(
                                         *transient_failure_count = 0;
                                         return PollIteration::Sleep { seconds: _sleep };
                                     }
-                                    Ok(None) => {
+                                    Ok(CurrentlyPlaying::Modified {
+                                        track: None,
+                                        etag,
+                                    }) => {
+                                        *last_etag = etag;
                                         log::info!("[POLLING] poll_once: retry no track");
                                         let no_track_backoff = handle_no_track(
                                             app,
@@ -337,6 +367,16 @@ pub(crate) fn run(
                                             *seconds = (*seconds).max(no_track_backoff);
                                         }
                                         return iteration;
+                                    }
+                                    Ok(CurrentlyPlaying::NotModified) => {
+                                        // Same no-op as the main path's 304.
+                                        return not_modified_iteration(
+                                            last_track_key,
+                                            last_etag,
+                                            consecutive_pauses,
+                                            transient_failure_count,
+                                            &config,
+                                        );
                                     }
                                     Err(retry_err) => {
                                         log::error!(
@@ -429,6 +469,37 @@ fn record_no_track_outcome(
     );
     PollIteration::Sleep {
         seconds: no_track_sleep,
+    }
+}
+
+/// Handle a 304 Not Modified from the conditional GET (candidate C11,
+/// docs/scope-3.3.md §C11). The response carries no body, so there is
+/// nothing to JSON-parse, no status to format/filter and no new state for
+/// the tray or frontend — the observable behavior matches the
+/// unchanged-track path minus that work: keep every tracked field, reset
+/// the pause/transient counters the way an unchanged playing track does,
+/// and sleep the default interval (the duration-derived smart sleep needs
+/// `progress_ms`, which a bodyless 304 cannot provide).
+///
+/// An ETag without a tracked track refers to nothing actionable (e.g. a
+/// 200 whose item was an episode/ad); drop the validator so the next
+/// poll re-establishes ground truth unconditionally.
+fn not_modified_iteration(
+    last_track_key: &Option<String>,
+    last_etag: &mut Option<String>,
+    consecutive_pauses: &mut u8,
+    transient_failure_count: &mut u8,
+    config: &Option<crate::config::AppConfig>,
+) -> PollIteration {
+    log::info!("[POLLING] poll_once: 304 Not Modified, skipping parse/format/tray work");
+    if last_track_key.is_some() {
+        *consecutive_pauses = 0;
+    } else {
+        *last_etag = None;
+    }
+    *transient_failure_count = 0;
+    PollIteration::Sleep {
+        seconds: config_default_interval(config),
     }
 }
 
@@ -1444,10 +1515,10 @@ mod tests {
             .next()
             .expect("poll_once.rs has no #[cfg(test)] mod tests block");
         let top_level = prod_source
-            .matches("get_currently_playing(&access_token)")
+            .matches("get_currently_playing(&access_token,")
             .count();
         let retry = prod_source
-            .matches("get_currently_playing(&retry_token)")
+            .matches("get_currently_playing(&retry_token,")
             .count();
         assert_eq!(
             top_level, 1,
@@ -1779,4 +1850,92 @@ mod tests {
             "process_track must clear_teams_presence on pause (issue #3.0-P1)"
         );
     }
+
+    /// Candidate C11 (docs/scope-3.3.md §C11): a 304 Not Modified is a
+    /// pure no-op iteration — default-interval sleep, pause/transient
+    /// counters reset exactly like the unchanged-track path, and the
+    /// stored ETag survives for the next conditional poll.
+    #[test]
+    fn test_not_modified_keeps_state_and_sleeps_default_interval() {
+        let config = Some(crate::config::AppConfig::default());
+        let mut last_etag = Some("\"etag-1\"".to_string());
+        let mut consecutive_pauses: u8 = 3;
+        let mut transient_failure_count: u8 = 2;
+
+        let iteration = not_modified_iteration(
+            &Some("Artist - Track".to_string()),
+            &mut last_etag,
+            &mut consecutive_pauses,
+            &mut transient_failure_count,
+            &config,
+        );
+
+        let seconds = match iteration {
+            PollIteration::Sleep { seconds } => seconds,
+            _ => panic!("304 must yield a Sleep iteration"),
+        };
+        assert_eq!(
+            seconds, 30,
+            "304 must sleep the configured default interval"
+        );
+        assert_eq!(consecutive_pauses, 0, "unchanged track resets pauses");
+        assert_eq!(
+            transient_failure_count, 0,
+            "a 304 counts as success for the 5-strikes counter"
+        );
+        assert_eq!(
+            last_etag.as_deref(),
+            Some("\"etag-1\""),
+            "the validator must survive for the next conditional poll"
+        );
+    }
+
+    /// Candidate C11: an ETag with no tracked track refers to nothing
+    /// actionable (e.g. the previous 200 carried an episode/ad item) —
+    /// drop it so the next poll re-establishes ground truth
+    /// unconditionally.
+    #[test]
+    fn test_not_modified_without_tracked_track_drops_etag() {
+        let config = Some(crate::config::AppConfig::default());
+        let mut last_etag = Some("\"orphan\"".to_string());
+        let mut consecutive_pauses: u8 = 4;
+        let mut transient_failure_count: u8 = 1;
+
+        let iteration = not_modified_iteration(
+            &None,
+            &mut last_etag,
+            &mut consecutive_pauses,
+            &mut transient_failure_count,
+            &config,
+        );
+
+        assert!(
+            matches!(iteration, PollIteration::Sleep { .. }),
+            "304 must yield a Sleep iteration"
+        );
+        assert_eq!(last_etag, None, "orphan validator must be dropped");
+        assert_eq!(
+            transient_failure_count, 0,
+            "a 304 counts as success for the 5-strikes counter"
+        );
+    }
+
+    /// Candidate C11 regression guard: both get_currently_playing call
+    /// sites must pass the stored validator (`last_etag.as_deref()`) so
+    /// the conditional GET cannot silently degrade to unconditional-only.
+    #[test]
+    fn test_both_get_currently_playing_call_sites_are_conditional() {
+        let source = include_str!("poll_once.rs");
+        let prod_source = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("poll_once.rs has no #[cfg(test)] mod tests block");
+        let conditional = prod_source.matches(", last_etag.as_deref())").count();
+        assert_eq!(
+            conditional, 2,
+            "expected exactly 2 conditional GET call sites passing              last_etag.as_deref() (top-level + 401-retry); found {}",
+            conditional
+        );
+    }
+
 }
