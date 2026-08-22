@@ -70,17 +70,19 @@ fn run_spotify_oauth_flow(
     log::info!("{CMD} run_spotify_oauth_flow: challenge generated");
 
     let csrf_state = crate::pkce::generate_verifier();
-    // #66: bind per-launch secret into state as `<csrf>.<launch_secret>`.
-    // Spotify echoes `state` verbatim, so the callback can validate the
-    // secret without extra storage. `launch_secret` is 43 chars (32B b64url)
-    // and lives in AppState OnceLock (in-memory only). On macOS the scheme
-    // stays `presencejam://` — hijack still possible but code is useless
-    // without secret+verifier.
-    let launch_secret = state
-        .launch_secret
-        .get_or_init(crate::pkce::generate_launch_secret)
-        .clone();
-    let csrf_state = format!("{}.{}", csrf_state, launch_secret);
+    // #66 + scope-3.3 §C1: bind per-launch secret into state as
+    // `<csrf>.<launch_secret>`. Spotify echoes `state` verbatim, so the
+    // callback can validate the secret without extra storage. Additionally the
+    // SHA-256 of this flow's PKCE verifier is bound into the launch binding and
+    // validated + consumed (single-use) at callback time, so a replayed
+    // callback fails closed (RFC 6749 §10.12). On macOS the scheme stays
+    // `presencejam://` — hijack still possible but code is useless without
+    // secret+verifier.
+    let binding = state
+        .launch_binding
+        .get_or_init(|| crate::pkce::LaunchBinding::new(crate::pkce::generate_launch_secret()));
+    binding.bind_verifier(&verifier);
+    let csrf_state = format!("{}.{}", csrf_state, binding.launch_secret.clone());
     log::info!(
         "{CMD} run_spotify_oauth_flow: state generated, len={} [REDACTED]",
         csrf_state.len()
@@ -288,6 +290,33 @@ pub async fn complete_spotify_auth_manual(
         return Err("State mismatch - possible CSRF attack".to_string());
     }
     log::info!("{CMD} complete_spotify_auth_manual: state verified successfully");
+
+    // scope-3.3 §C1: the manual-paste path must satisfy the same launch
+    // binding as the deep-link path — constant-time secret-component compare,
+    // PKCE verifier-hash linkage, and single-use consumption (a replayed
+    // state/code pair fails closed, RFC 6749 §10.12). The full-state equality
+    // check above already rejected mismatches; this consumes the binding.
+    {
+        let app_state = state.inner();
+        match app_state.launch_binding.get() {
+            Some(binding) => {
+                let secret_component = oauth_state.rsplit('.').next().unwrap_or("");
+                if let Err(reason) =
+                    binding.validate_and_consume(secret_component, &pending.verifier)
+                {
+                    log::error!(
+                        "{CMD} complete_spotify_auth_manual: launch binding rejected ({}) [REDACTED]",
+                        reason
+                    );
+                    return Err("State binding validation failed - possible CSRF or replay attack".to_string());
+                }
+            }
+            None => {
+                log::error!("{CMD} complete_spotify_auth_manual: no launch binding in AppState");
+                return Err("No pending auth binding - please start auth again.".to_string());
+            }
+        }
+    }
 
     // #215: HTTPS token exchange + keychain I/O are blocking (reqwest::blocking
     // + OS keychain). Offload to the blocking pool so the async runtime stays
