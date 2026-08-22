@@ -2,7 +2,9 @@ use std::sync::atomic::Ordering;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tauri::{
-    menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, Submenu},
+    menu::{
+        CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, Submenu,
+    },
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager,
 };
@@ -19,6 +21,10 @@ const ID_QUIT: &str = "quit";
 // ids of the form `{ID_DEVICES}|{index}` so the click handler can look
 // the selected device up in the cached device list.
 const ID_PLAY_PAUSE: &str = "play_pause";
+/// Static label for the Play/Pause check item — the playing state is
+/// conveyed by the native checked mark instead of a swapped label
+/// (docs/scope-3.3.md C4).
+const PLAY_PAUSE_LABEL: &str = "Play/Pause";
 const ID_PREVIOUS: &str = "previous";
 const ID_NEXT: &str = "next";
 const ID_DEVICES: &str = "devices";
@@ -230,10 +236,11 @@ fn build_initial_menu(app: &tauri::App) -> Result<tauri::menu::Menu<tauri::Wry>,
 
     // Spotify playback controls (issue #3.0-P3). This initial menu is
     // transient — `setup_tray` immediately calls `update_tray_menu` with
-    // real state — so the Play/Pause label defaults to "Play" and the
+    // real state — so the Play/Pause toggle starts unchecked and the
     // Devices/Up Next submenus start as placeholders (no network at
     // startup).
-    let play_pause = MenuItemBuilder::with_id(ID_PLAY_PAUSE, "Play")
+    let play_pause = CheckMenuItemBuilder::with_id(ID_PLAY_PAUSE, PLAY_PAUSE_LABEL)
+        .checked(false)
         .build(app)
         .map_err(|e| e.to_string())?;
     let previous = MenuItemBuilder::with_id(ID_PREVIOUS, "Previous")
@@ -713,23 +720,22 @@ pub fn update_tray_menu(
         })?;
 
     // Spotify playback controls (issue #3.0-P3). Play/Pause is a single
-    // toggle labelled from LAST_PLAYING_STATE (see the static's docs — the
-    // polling loop's stored track goes stale on a same-track pause); the
-    // Devices/Up Next submenus are built from the pre-fetched throttled
-    // caches so the polling loop's per-iteration rebuilds don't hammer the
-    // Spotify API. Label is derived from (track_id, is_playing) via the
-    // track_key dedup and LAST_PLAYING_STATE, so a same-track pause flips
-    // without waiting for the next poll. See issues #229 and #217.
+    // check-item whose native checked state comes from LAST_PLAYING_STATE
+    // (see the static's docs — the polling loop's stored track goes stale
+    // on a same-track pause); the Devices/Up Next submenus are built from
+    // the pre-fetched throttled caches so the polling loop's per-iteration
+    // rebuilds don't hammer the Spotify API. The checkmark is derived from
+    // (track_id, is_playing) via the track_key dedup and LAST_PLAYING_STATE,
+    // so a same-track pause flips without waiting for the next poll. See
+    // issues #229 and #217.
     let is_playing = LAST_PLAYING_STATE.load(Ordering::Acquire);
-    let play_pause = MenuItemBuilder::with_id(
-        ID_PLAY_PAUSE,
-        if is_playing { "Pause" } else { "Play" },
-    )
-    .build(app)
-    .map_err(|e| {
-        log::warn!("[TRAY] update_tray_menu: failed to build play_pause item: {}", e);
-        e.to_string()
-    })?;
+    let play_pause = CheckMenuItemBuilder::with_id(ID_PLAY_PAUSE, PLAY_PAUSE_LABEL)
+        .checked(is_playing)
+        .build(app)
+        .map_err(|e| {
+            log::warn!("[TRAY] update_tray_menu: failed to build play_pause item: {}", e);
+            e.to_string()
+        })?;
     let previous = MenuItemBuilder::with_id(ID_PREVIOUS, "Previous")
         .build(app)
         .map_err(|e| {
@@ -804,6 +810,24 @@ pub fn update_tray_menu(
         })?;
     }
 
+    // C4 polish: keep the tray tooltip live — "Artist — Track (▶|⏸)" while
+    // a track is known, the plain app name otherwise. This runs on every
+    // rebuild, i.e. exactly whenever track info changes (the dedup key
+    // already covers artist/title/is_playing), and performs no IO and no
+    // extra locking beyond the tray handle itself.
+    let tooltip = match &current_track {
+        Some(t) => format!(
+            "{} — {} ({})",
+            t.artist,
+            t.title,
+            if t.is_playing { "▶" } else { "⏸" }
+        ),
+        None => "PresenceJam".to_string(),
+    };
+    if let Err(e) = tray.set_tooltip(Some(tooltip)) {
+        log::warn!("[TRAY] update_tray_menu: failed to set tooltip: {}", e);
+    }
+
     // Commit the snapshot only after a successful set_menu. A failed
     // set_menu above left the snapshot at the previous value, so the
     // next call with the same state will retry rather than no-op.
@@ -819,3 +843,32 @@ pub fn update_tray_menu(
     );
     Ok(())
 }
+
+/// C4 polish: reflect presence-gated sync on the macOS dock icon. While a
+/// track's Teams status write is suppressed by the presence gate
+/// (`polling/poll_once.rs` records it in `gated_track_key`), the dock icon
+/// shows a badge so the user can see presence updates are being held back;
+/// cleared when the gate lifts or syncing stops. No-op off macOS so call
+/// sites stay cfg-free and compile everywhere.
+///
+/// SINGLE CALL-SITE (owned by the polling driver, feat/v4-c11): in
+/// `polling/loop.rs::polling_loop`, immediately AFTER the post-iteration
+/// `tray::update_tray_menu(...)` block, add
+/// `tray::set_presence_gated_badge(&app, gated_track_key.is_some());`,
+/// and after the loop exits, add
+/// `tray::set_presence_gated_badge(&app, false);`.
+#[cfg(target_os = "macos")]
+pub fn set_presence_gated_badge(app: &AppHandle, gated: bool) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    if let Err(e) = window.set_badge_count(if gated { Some(1) } else { None }) {
+        log::warn!(
+            "[TRAY] set_presence_gated_badge: failed to set dock badge: {}",
+            e
+        );
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn set_presence_gated_badge(_app: &AppHandle, _gated: bool) {}

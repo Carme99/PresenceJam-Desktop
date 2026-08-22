@@ -84,6 +84,16 @@ pub async fn poll_teams_auth(
             log::info!("{CMD} poll_teams_auth: EMIT teams-auth-complete event");
             let _ = app.emit("teams-auth-complete", &tokens);
 
+            // C2 deep-link single-instance UX (docs/scope-3.3.md): the
+            // user finished the device-code flow in a browser, so land them
+            // back on Settings. Per the Microsoft Entra device authorization
+            // grant, this point means the polled token endpoint returned
+            // access tokens —
+            // https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-device-code.
+            // +page.svelte ignores 'navigate' while Onboarding owns the view.
+            log::info!("{CMD} poll_teams_auth: EMIT navigate -> settings");
+            let _ = app.emit("navigate", "settings");
+
             log::info!("{CMD} poll_teams_auth: SUCCESS");
             Ok(tokens)
         }
