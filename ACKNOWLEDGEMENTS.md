@@ -11,6 +11,7 @@ PresenceJam uses the following open-source projects. We're grateful to all the m
 | [tauri-plugin-deep-link](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Custom protocol handling |
 | [tauri-plugin-notification](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Windows toast notifications |
 | [tauri-plugin-autostart](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Windows startup registration |
+| [tauri-plugin-single-instance](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Single-instance enforcement + deep-link forwarding |
 | [tauri-plugin-log](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | File-based logging |
 | [tauri-plugin-updater](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Auto-update with minisign-signed payloads |
 | [tauri-plugin-http](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | HTTP client |
@@ -24,7 +25,6 @@ PresenceJam uses the following open-source projects. We're grateful to all the m
 | [log](https://github.com/rust-lang/log) | 0.4 | Apache-2.0 OR MIT | Logging facade |
 | [dirs](https://github.com/dirs-dev/dirs-rs) | 5.x | Apache-2.0 OR MIT | Standard directory locations |
 | [parking_lot](https://github.com/Amanieu/parking_lot) | 0.12 | Apache-2.0 OR MIT | Synchronization primitives |
-| [once_cell](https://github.com/matklad/once_cell) | 1.x | Apache-2.0 OR MIT | Lazy statics |
 | [url](https://github.com/servo/rust-url) | 2.x | Apache-2.0 OR MIT | URL parsing |
 | [keyring](https://github.com/hwchen/keyring-rs) | 3.x | MIT OR Apache-2.0 | OS keychain access (client secret + tokens AES key) |
 | [aes-gcm](https://github.com/RustCrypto/AEADs) | 0.11 | Apache-2.0 OR MIT | AES-256-GCM encryption for tokens.json at rest |
