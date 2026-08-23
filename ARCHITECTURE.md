@@ -248,12 +248,12 @@ sequenceDiagram
     App->>App: generate PKCE code_verifier (64 random bytes)
     App->>App: compute code_challenge = SHA256(verifier)
     App->>App: build auth URL, open in system browser
-    Note over App,Spotify: redirect_uri = `presencejam://callback`<br/>(Spotify requires byte-exact match;<br/>no per-launch scheme UUID possible)
+    Note over App,Spotify: redirect_uri = "presencejam://callback"<br/>(Spotify requires byte-exact match,<br/>no per-launch scheme UUID possible)
     User->>Browser: Login + Authorize
     Browser-->>App: Deep-link callback `presencejam://callback?code=…&state=…`
-    App->>Spotify: POST /api/token (grant_type=authorization_code,<br/>code, code_verifier, client_id)<br/>+ Authorization: Basic &lt;client_id:client_secret&gt;
+    App->>Spotify: POST /api/token (grant_type=authorization_code,<br/>code, code_verifier, client_id)<br/>+ Authorization header: Basic base64(client_id, client_secret)
     Spotify-->>App: access_token + refresh_token
-    App->>Spotify: POST /api/token (grant_type=refresh_token,<br/>refresh_token)<br/>+ Authorization: Basic &lt;client_id:client_secret&gt;
+    App->>Spotify: POST /api/token (grant_type=refresh_token,<br/>refresh_token)<br/>+ Authorization header: Basic base64(client_id, client_secret)
     Spotify-->>App: new access_token + refresh_token
     App->>App: persist tokens to tokens.json (atomic write)
 ```
@@ -413,7 +413,7 @@ flowchart TD
     Loop --> Tick[polling/poll_once::run one iteration]
     Tick --> Tokens{Spotify & Teams<br/>tokens valid?}
     Tokens -->|spotify expired| RefreshSpot[refresh_spotify_token]
-    Tokens -->|ok| Poll[/me/player/currently-playing]
+    Tokens -->|ok| Poll["GET /me/player/currently-playing"]
     RefreshSpot --> Poll
     Poll --> Changed{Track changed?}
     Changed -->|No track, paused| Consec[consecutive_pauses++]
