@@ -68,6 +68,7 @@ Types: `feat`, `fix`, `docs`, `test`, `refactor`, `chore`
 - Add TypeScript types for new interfaces
 - Use `devLog()` from `$lib/utils/dev` for debug logging — it is a no-op in production builds
 - `console.error` and `console.warn` are fine for actual errors that should always be visible
+- **All user-facing UI strings must go through `t()` from `$lib/i18n`** — never hardcode English text in components. Add the key to all three dictionaries (`src/lib/i18n/en.ts`, `de.ts`, `fr.ts`); the shared `Dict` type makes a missing translation a compile error. Interpolation uses `{name}` placeholders. Known limitation: Rust-side error strings surfaced through `invoke()` rejections and event payloads stay English.
 
 ### Screenshots
 
@@ -79,9 +80,7 @@ See [ARCHITECTURE.md](./ARCHITECTURE.md#directory-structure) for the full direct
 
 ## Logging
 
-Logs are stored in `%APPDATA%\PresenceJam\logs\` as daily rotating files (`spotify-teams-YYYY-MM-DD.log`).
-
-To access logs from the app, use the **Log Viewer** view in the app. To access them directly:
+Logs are written by the logging plugin to a single `PresenceJam.log` file in `%APPDATA%\PresenceJam\logs\` (Windows; see USAGE.md for macOS/Linux paths) — there is no daily rotation or retention pruning.
 
 ```powershell
 # Open logs folder in Explorer

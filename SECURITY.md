@@ -352,7 +352,11 @@ SHA-256 digest to the exact workflow run, repository, and commit that built
 it. It **supplements** — and does not replace — the minisign `.sig` files
 that the Tauri auto-updater verifies. The workflow grants itself only the
 minimal scopes needed for this (`id-token: write` + `attestations: write`),
-scoped to the build job alone.
+scoped to the build job alone. The pipeline has been **exercised end-to-end
+on the v4.0.0 tag run**: the attest step ran green, and the repository's
+attestation store holds a SLSA provenance entry for the published artifacts
+bound to `refs/tags/v4.0.0` and `.github/workflows/release.yml` (verified
+via the attestations API).
 
 **Verifying a downloaded artifact:**
 

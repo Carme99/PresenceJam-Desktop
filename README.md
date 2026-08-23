@@ -42,12 +42,12 @@ Latest release: [GitHub Releases](https://github.com/Carme99/PresenceJam-Desktop
 
 Download the installer for your platform from the [latest release](https://github.com/Carme99/PresenceJam-Desktop/releases/latest):
 
-- **Windows 10/11 (64-bit)** — `PresenceJam-<tag>.msi` (e.g., `PresenceJam-v3.2.0.msi`)
+- **Windows 10/11 (64-bit)** — `PresenceJam-<tag>.msi` (e.g., `PresenceJam-v4.0.0.msi`)
 - **macOS (Apple Silicon)** — `PresenceJam-macos.dmg`
 - **Debian / Ubuntu / Mint / popOS (64-bit)** — `PresenceJam-linux-amd64.deb`
 - **Any modern Linux (64-bit, no install required)** — `PresenceJam-linux-amd64.AppImage`
 
-<!-- canonical post-fix asset names verified via `gh api repos/Carme99/PresenceJam-Desktop/releases/tags/v3.1.0 --jq '.assets[].name'` → PresenceJam-macos.dmg, PresenceJam-linux-amd64.deb, PresenceJam-linux-amd64.AppImage, PresenceJam_3.1.0_x64_en-US.msi (pre-fix bundler name; post-fix is PresenceJam-v3.1.0.msi), PresenceJam-v3.1.0.app.tar.gz + .sig, latest.json -->
+<!-- canonical post-fix asset names verified via `gh release view v4.0.0` → PresenceJam-macos.dmg, PresenceJam-linux-amd64.deb, PresenceJam-linux-amd64.AppImage, PresenceJam-v4.0.0.msi (+ .msi.sig), PresenceJam-v4.0.0.app.tar.gz (+ .sig), PresenceJam-v4.0.0.AppImage.sig, SHA256SUMS.txt, latest.json -->
 
 Filenames are canonical post-fix: `PresenceJam-macos.dmg`, `PresenceJam-linux-amd64.deb` / `PresenceJam-linux-amd64.AppImage`, `PresenceJam-<tag>.msi` — see the [latest release](https://github.com/Carme99/PresenceJam-Desktop/releases/latest) for the current version.
 

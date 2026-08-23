@@ -117,6 +117,25 @@ Before diving in, check these basics:
 **To prevent it from starting with Windows:**
 - Settings → disable **Launch at Login**
 
+### A detached Logs/Settings window disappeared
+
+**Cause:** The pane was popped out into its own window (`logs-detached` / `settings-detached`) and the window was closed or lost behind others.
+
+**Fix:** The main window's nav still shows the pane with a dot badge while it's detached — clicking it focuses the detached window. If the detached window was closed entirely, click **Logs**/**Settings** in the main nav to re-open the view in-window, then pop it out again if you want.
+
+### The interface is in the wrong language
+
+**Cause:** The language picker (Settings → General → Language) defaults to your browser/OS language and persists the choice.
+
+**Fix:** Pick **English**, **Deutsch**, or **Français** in Settings → General. The choice applies immediately and persists across restarts. Rust-side error strings surfaced by the backend remain English by design — only UI strings are localized.
+
+### "Install on quit" seemed to do nothing
+
+**Cause:** With *Install on quit*, the update is applied while the app is exiting — there is no window left to show progress or an error in. If staging or applying fails at that point, the failure is visible **only in the log file** (`PresenceJam.log`), not in the UI (#244).
+
+**Fix:** Quit again (or relaunch) and check `PresenceJam.log` for `[UPDATER]` lines. If the staged update keeps failing, use **Download & Install** from the update banner instead — that path reports errors in-app.
+
+
 ### No status appears on Teams
 
 1. Check the Dashboard shows both Spotify and Teams as connected (green badges)
@@ -167,12 +186,13 @@ False positives are prevented via word-boundary checks — words like `class`, `
 
 ### Where to find logs
 
-**In-app:**
-Settings → **Log Viewer** → scroll through the log entries
+**In-app:** the **Log Viewer** view (it can be popped out into its own window) lets you scroll through the entries without touching the filesystem.
 
-**Direct filesystem:**
+**Direct filesystem** — a single `PresenceJam.log` file managed by the logging plugin:
 ```
-%APPDATA%\PresenceJam\logs\
+%APPDATA%\PresenceJam\logs\PresenceJam.log        (Windows)
+~/Library/Logs/PresenceJam/PresenceJam.log        (macOS)
+~/.local/share/PresenceJam/logs/PresenceJam.log   (Linux)
 ```
 
 **From PowerShell:**
@@ -193,12 +213,9 @@ The current log level is set in your `config.json` under `logging.log_level` (de
 
 ### Attaching logs to bug reports
 
-1. Open the log folder: `%APPDATA%\PresenceJam\logs`
-2. Find the most recent file (e.g., `spotify-teams-2026-04-09.log`)
-3. Attach it to your GitHub issue
-4. Note the approximate time the issue occurred
-
-## Performance
+1. Open the log folder: tray menu → **Open Logs Folder** (or `%APPDATA%\PresenceJam\logs` on Windows)
+2. Attach `PresenceJam.log`
+3. Note the approximate time the issue occurred
 
 ### High CPU or memory usage
 

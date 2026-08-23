@@ -42,7 +42,7 @@ end-to-end; the few rows that can't be sourced inline are explicitly flagged
 | Release build-provenance attestations (C10)             | ✅ Verified | `release.yml` attests artifacts via SHA-pinned `actions/attest-build-provenance`; exercised live on the v4.0.0 tag run (attest step green). `workflow_dispatch` with a `tag` input allows re-cutting an existing `v*` tag. |
 | Dependency prune: shell/store plugins gone (C13)        | ✅     | `package.json`/`package-lock.json` and Cargo lock pruned of `tauri-plugin-shell`/`tauri-plugin-store` + npm shell plugin; ACKNOWLEDGEMENTS rows removed. No imports or capability grants existed. |
 | h2 0.4.18                                               | ✅     | RUSTSEC-2026-0258 cleared via lockfile bump (`ed88008`). |
-| i18n en/de/fr language picker (C6)                      | ⚠ Landing separately | Scoped and in progress on `feat/v4-c6`; **not yet merged to main** at v4.0.0 docs time — do not promise until it lands. |
+| i18n en/de/fr language picker (C6)                      | ✅ Verified | Shipped in v4.0.0 (`src/lib/i18n/` barrel, `Dict`-typed en/de/fr dictionaries, Settings language picker persisted to `localStorage.locale`). Rust-side error strings remain English (documented limitation). |
 
 ## Documented gaps (do work; deliberately out of scope for the version tested)
 
