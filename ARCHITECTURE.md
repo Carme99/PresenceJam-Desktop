@@ -432,7 +432,7 @@ flowchart TD
     Poll --> Changed{Track changed?}
     Changed -->|No track, paused| Consec[consecutive_pauses++]
     Changed -->|yes| Format[format_status template]
-    Format --> Prof[filter_profanity if enabled]
+    Format --> Prof[profanity::filter_status if enabled]
     Prof --> Set[POST /me/presence<br/>setStatusMessage]
     Set --> SmartSleep[Smart sleep until track ends - 5s]
     Consec --> Backoff[Pause-aware exponential backoff:<br/>30s → 60s → 120s → 300s cap]
