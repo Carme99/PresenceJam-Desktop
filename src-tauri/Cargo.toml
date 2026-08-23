@@ -36,7 +36,6 @@ chrono = { version = "0.4", features = ["serde"] }
 dirs = "5"
 httpdate = "1"
 parking_lot = "0.12"
-once_cell = "1"
 url = "2"
 urlencoding = "2"
 # Cross-platform OS keychain access for secure storage of OAuth secrets

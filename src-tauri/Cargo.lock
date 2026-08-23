@@ -3231,7 +3231,6 @@ dependencies = [
  "httpdate",
  "keyring",
  "log",
- "once_cell",
  "parking_lot",
  "rand 0.8.7",
  "reqwest 0.12.28",
