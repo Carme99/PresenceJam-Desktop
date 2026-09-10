@@ -281,7 +281,7 @@ pub async fn complete_spotify_auth_manual(
         log::error!("{CMD} complete_spotify_auth_manual: missing state parameter");
         return Err("Missing state parameter - possible CSRF attack".to_string());
     }
-    if oauth_state != pending.state {
+    if !crate::pkce::ct_eq(&oauth_state, &pending.state) {
         log::error!(
             "{CMD} complete_spotify_auth_manual: state mismatch - CSRF attack detected [REDACTED len {} vs {}]",
             oauth_state.len(),
