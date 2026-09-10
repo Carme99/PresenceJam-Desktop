@@ -74,7 +74,14 @@ pub fn manage(app: &tauri::AppHandle) {
 /// completion of the deferred stage.
 #[cfg(desktop)]
 #[tauri::command]
-pub async fn stage_deferred_update(app: AppHandle) -> Result<Option<String>, String> {
+pub async fn stage_deferred_update(
+    window: tauri::Window,
+    app: AppHandle,
+) -> Result<Option<String>, String> {
+    // Issue #241: update staging downloads + verifies payloads into managed
+    // state; UpdatePrompt is main-window-only so detached windows never
+    // legitimately stage. Guarded via the commands-layer helper.
+    crate::commands::require_main_window(&window)?;
     log::info!("{TAG} stage_deferred_update: ENTRY");
     let version = tauri::async_runtime::spawn_blocking(move || {
         use tauri::Manager;
