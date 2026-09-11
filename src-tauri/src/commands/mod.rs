@@ -23,6 +23,39 @@ pub mod sync;
 pub mod teams_auth;
 pub mod window;
 
+/// Detached-window isolation (issue #241): the Logs/Settings pop-out windows
+/// (`logs-detached` / `settings-detached`) share the app-global command
+/// surface, so sensitive app commands must reject non-main callers Rust-side
+/// before touching keychain, tokens, config, or process state. The Tauri
+/// capability split (`capabilities/detached.json`) only gates webview APIs —
+/// it is cosmetic for `invoke()` — hence this runtime guard.
+///
+/// The main window label is exactly `"main"` (see `tauri.conf.json`); every
+/// other label is rejected. `window: tauri::Window` injection is transparent
+/// to `invoke_handler` registration, so guarded commands need no wiring
+/// change in `lib.rs`.
+///
+/// Pure predicate over the window label: true only for exactly `"main"`.
+pub fn is_main_window_label(label: &str) -> bool {
+    label == "main"
+}
+
+/// Rejects invocations from any window other than the main one. Call this
+/// first in every sensitive command, before any keychain/token/config read
+/// or side effect.
+pub fn require_main_window(window: &tauri::Window) -> Result<(), String> {
+    let label = window.label();
+    if is_main_window_label(label) {
+        Ok(())
+    } else {
+        log::error!(
+            "[CMD.GUARD] require_main_window: rejected caller from window '{}' — sensitive app commands are only available in the main window",
+            label
+        );
+        Err("This command is only available in the main window.".to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// Regression guard for issue #76: the `commands` module must declare all
@@ -85,5 +118,26 @@ mod tests {
         check(include_str!("window.rs"), "window.rs");
         check(include_str!("onboarding.rs"), "onboarding.rs");
         check(include_str!("misc.rs"), "misc.rs");
+    }
+
+    /// Detached-window guard predicate (issue #241): only exactly `"main"`
+    /// passes; detached labels, empty, and case/whitespace-tampered labels
+    /// are rejected.
+    #[test]
+    fn test_is_main_window_label() {
+        assert!(super::is_main_window_label("main"));
+        for rejected in &[
+            "logs-detached",
+            "settings-detached",
+            "",
+            "Main",
+            "main ",
+        ] {
+            assert!(
+                !super::is_main_window_label(rejected),
+                "label {:?} must not pass the main-window guard (issue #241)",
+                rejected
+            );
+        }
     }
 }

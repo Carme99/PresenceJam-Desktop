@@ -24,9 +24,14 @@ pub struct SyncStatus {
 
 #[tauri::command]
 pub async fn start_syncing(
+    window: tauri::Window,
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<(), String> {
+    // Issue #241: polling lifecycle is main-window-only (Dashboard/+page and
+    // the Rust-side `complete_onboarding` caller, which forwards its own
+    // main-window handle). Detached windows never legitimately start sync.
+    super::require_main_window(&window)?;
     log::debug!("{CMD} start_syncing: ENTRY");
 
     // Issue #69: drain any previous polling thread BEFORE claiming the
@@ -271,9 +276,13 @@ async fn stop_polling_and_join_for_exit(state: Arc<AppState>, context: &'static 
 
 #[tauri::command]
 pub async fn stop_syncing(
+    window: tauri::Window,
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<(), String> {
+    // Issue #241: polling lifecycle is main-window-only (Dashboard/+page are
+    // main-window surfaces; detached windows never legitimately stop sync).
+    super::require_main_window(&window)?;
     log::debug!("{CMD} stop_syncing: ENTRY");
 
     let state_clone = Arc::clone(state.inner());
@@ -288,9 +297,13 @@ pub async fn stop_syncing(
 
 #[tauri::command]
 pub async fn app_exit(
+    window: tauri::Window,
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<(), String> {
+    // Issue #241: process exit is main-window-only (+page exit path);
+    // a detached window must never terminate the app out from under the user.
+    super::require_main_window(&window)?;
     log::debug!("{CMD} app_exit: ENTRY");
 
     let is_syncing = state.polling.is_syncing(Ordering::Acquire);
