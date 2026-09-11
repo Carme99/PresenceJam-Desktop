@@ -113,18 +113,22 @@ fn decrypt_tokens(key: &[u8; 32], bytes: &[u8]) -> Result<Vec<u8>, String> {
                 .to_string(),
         );
     }
-    let version = bytes[TOKENS_MAGIC.len()];
-    if version != TOKENS_VERSION {
-        return Err(format!(
-            "unsupported tokens cipher version byte {} (this build only reads version {})",
-            version, TOKENS_VERSION
-        ));
-    }
+    // Length first: the version-byte read below indexes TOKENS_MAGIC.len(),
+    // so a file that is exactly the 5-byte magic would panic on an
+    // out-of-bounds index instead of returning the Err that drives the
+    // documented re-auth recovery. Every rejection must be an Err.
     if bytes.len() < TOKENS_HEADER_LEN {
         return Err(format!(
             "tokens file too short for the {} byte header + ciphertext ({} bytes)",
             TOKENS_HEADER_LEN,
             bytes.len()
+        ));
+    }
+    let version = bytes[TOKENS_MAGIC.len()];
+    if version != TOKENS_VERSION {
+        return Err(format!(
+            "unsupported tokens cipher version byte {} (this build only reads version {})",
+            version, TOKENS_VERSION
         ));
     }
     let nonce = &bytes[TOKENS_MAGIC.len() + 1..TOKENS_HEADER_LEN];
@@ -625,6 +629,22 @@ mod tests {
         assert!(err.contains("magic"), "unexpected error: {}", err);
         // Truncated header (magic + version, no nonce/ciphertext) → rejected.
         assert!(decrypt_tokens(&test_key(), &ct[..TOKENS_MAGIC.len() + 1]).is_err());
+        // Issue #294: every prefix SHORTER than a full header must be
+        // rejected without panicking. The version-byte read indexes
+        // TOKENS_MAGIC.len(), so a prefix of exactly the 5-byte magic would
+        // panic out of bounds here rather than returning the Err that drives
+        // the documented re-auth recovery — and this runs on the startup
+        // path, so the panic aborts the app before a window exists.
+        for len in 0..TOKENS_HEADER_LEN {
+            let err = decrypt_tokens(&test_key(), &ct[..len])
+                .expect_err(&format!("{} byte prefix must be rejected", len));
+            assert!(
+                err.contains("magic") || err.contains("too short"),
+                "{} byte prefix gave an unexpected error: {}",
+                len,
+                err
+            );
+        }
     }
 
     #[test]
