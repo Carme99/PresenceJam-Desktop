@@ -532,6 +532,23 @@ mod tests {
         let path = tmp_path("with.json");
         let _ = fs::remove_file(&path);
         write_tokens_atomic_with_key(&path, &sample_file(), &test_key()).unwrap();
+        // Issue #263: the atomic write creates the temp file with
+        // `.mode(0o600)` and the subsequent rename() preserves that mode onto
+        // the live file, so tokens.json must be user-only readable. Without
+        // this assertion, dropping `.mode(0o600)` silently regresses to the
+        // process umask (typically 0644) and every access/refresh token
+        // becomes world-readable on a multi-user Linux box. Asserting the
+        // mode rather than the exact builder options keeps the test focused
+        // on the observable on-disk invariant.
+        #[cfg(unix)]
+        {
+            let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode, 0o600,
+                "tokens.json must be user-only readable, got {:o}",
+                mode
+            );
+        }
         // The file on disk must be ciphertext, not plaintext JSON.
         let raw = fs::read(&path).unwrap();
         assert!(
