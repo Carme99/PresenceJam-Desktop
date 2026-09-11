@@ -112,7 +112,17 @@ pub(crate) fn run(
     log::debug!("[POLLING] poll_once: token_expired={}", token_expired);
 
     let (client_id, client_secret) = get_spotify_credentials(&config);
-    let spotify_tokens = if token_expired {
+    // Issue #296: `get_spotify_credentials` reads the secret through the
+    // cache-only `keychain::peek_spotify_client_secret()`, so it is empty
+    // whenever the startup prime failed (locked Secret Service, headless
+    // Linux, entry removed while running). Refreshing with an empty secret
+    // can only produce a 400 `invalid_client` — not `InvalidGrant` — so the
+    // Err arm below would emit a Warning and sleep *before* the 5-strikes
+    // counter, looping forever with no user-visible cause. Classify the
+    // decision up front (pure helper, mirroring the 401 path's guard) and
+    // route the unavailable case to an actionable reconnect.
+    let refresh_plan = spotify_refresh_plan(token_expired, &client_id, &client_secret);
+    let spotify_tokens = if refresh_plan == SpotifyRefreshPlan::Refresh {
         log::info!("[POLLING] poll_once: Spotify token expired, refreshing...");
         log::info!(
             "[POLLING] poll_once: refreshing with client_id.len={}",
@@ -127,7 +137,11 @@ pub(crate) fn run(
                     "spotify",
                     &mut *state.tokens.spotify_mut(),
                     &pre_refresh_access_token,
-                    || Ok(new_tokens.clone()),
+                    // `Ok`-wrapping closure: annotate the error type so `E`
+                    // is inferable (this arm never fails, so nothing else
+                    // pins it) and matches the sibling `Err` arm's
+                    // `SpotifyApiError`.
+                    || Ok::<_, SpotifyApiError>(new_tokens.clone()),
                     |t| &t.access_token,
                 );
                 // Issue #180: the write guard reborrowed above is a temporary
@@ -201,6 +215,43 @@ pub(crate) fn run(
                 );
             }
         }
+    } else if refresh_plan == SpotifyRefreshPlan::CredentialsUnavailable {
+        // Issue #296: the access token is expired but the credential pair
+        // needed to refresh it is unavailable. Retrying cannot fix this, so
+        // count it toward the existing 5-strikes escape and surface the same
+        // actionable reconnect pair as `invalid_grant`.
+        //
+        // The tokens are deliberately NOT cleared here (the `invalid_grant`
+        // path above does): the refresh token itself is still valid, the
+        // user's fix is to restore the keychain entry, and keeping it lets
+        // this branch be re-entered so `transient_failure_count` can actually
+        // reach its threshold — clearing would make the top-of-iteration
+        // no-token guard swallow every later iteration and the escape
+        // unreachable.
+        log::error!(
+            "[POLLING] poll_once: Spotify token expired but credentials unavailable (client_id empty: {}, client_secret empty: {}), requiring reconnect",
+            client_id.is_empty(),
+            client_secret.is_empty()
+        );
+        *transient_failure_count = transient_failure_count.saturating_add(1);
+        // Emit on the first detection only. `spotify-reconnect-required`
+        // makes `+layout.svelte` start a real OAuth flow, so repeating it
+        // every iteration would be user-hostile; the `invalid_grant` sibling
+        // above likewise surfaces the reconnect once (its cleared tokens then
+        // short-circuit later iterations).
+        if *transient_failure_count == 1 {
+            let _ = app.emit("spotify-reconnect-required", json!(null));
+            let _ = app.emit("reconnect-required", json!(null));
+        }
+        if *transient_failure_count >= TRANSIENT_FAILURE_EXIT_THRESHOLD {
+            log::error!("[POLLING] poll_once: 5 consecutive credential failures, exiting and requiring reconnect");
+            return PollIteration::Break;
+        }
+        return interruptible_sleep(
+            stop_rx,
+            with_jitter(ERROR_RETRY_INTERVAL_SECONDS),
+            "credentials-unavailable sleep",
+        );
     } else {
         spotify_tokens
     };
@@ -297,7 +348,7 @@ pub(crate) fn run(
                                 "spotify",
                                 &mut *state.tokens.spotify_mut(),
                                 &pre_refresh_access_token,
-                                || Ok(new_tokens.clone()),
+                                || Ok::<_, SpotifyApiError>(new_tokens.clone()),
                                 |t| &t.access_token,
                             ) {
                                 CasOutcome::Committed(_) => true,
@@ -519,22 +570,25 @@ fn interruptible_sleep(stop_rx: &mpsc::Receiver<()>, seconds: u64, label: &str) 
     }
 }
 
-enum CasOutcome<T> {
+enum CasOutcome<T, E> {
     Committed(T),
     Discarded { current: Option<T> },
-    RefreshFailed(String),
+    RefreshFailed(E),
 }
 
-fn cas_refresh_or_discard<T, F, G>(
+/// Generic over the refresh error type `E` so each caller keeps its
+/// provider's typed error (`SpotifyApiError` / `TeamsApiError`) for the
+/// re-auth policy, instead of a pre-stringified message.
+fn cas_refresh_or_discard<T, E, F, G>(
     label: &str,
     lock: &mut Option<T>,
     pre_refresh_access_token: &str,
     refresh_fn: F,
     access_token_of: G,
-) -> CasOutcome<T>
+) -> CasOutcome<T, E>
 where
     T: Clone,
-    F: FnOnce() -> Result<T, String>,
+    F: FnOnce() -> Result<T, E>,
     G: FnOnce(&T) -> &str,
 {
     let new_tokens = match refresh_fn() {
@@ -579,6 +633,54 @@ fn get_spotify_credentials(config: &Option<crate::config::AppConfig>) -> (String
         .unwrap_or_default();
     let client_secret = crate::keychain::peek_spotify_client_secret().unwrap_or_default();
     (client_id, client_secret)
+}
+
+/// What the proactive Spotify refresh should do this iteration (issue #296).
+#[derive(Debug, PartialEq, Eq)]
+enum SpotifyRefreshPlan {
+    /// The access token is still inside its refresh window — use it as-is.
+    Fresh,
+    /// The access token expired and the client_id/secret needed to refresh it
+    /// are both available.
+    Refresh,
+    /// The access token expired but the credential pair is unavailable
+    /// (cold keychain cache: the startup prime failed, e.g. locked Secret
+    /// Service / headless Linux / entry removed while running). Refreshing
+    /// with an empty secret can only produce a 400 `invalid_client` — not
+    /// `InvalidGrant` — so retrying is pointless; the user must re-auth or
+    /// restore the keychain entry.
+    CredentialsUnavailable,
+}
+
+/// Classify the proactive-refresh decision. Pure and total so the policy is
+/// unit-testable without an `AppHandle`; the caller owns the side effects
+/// (emitting events, persisting, the 5-strikes counter).
+fn spotify_refresh_plan(
+    token_expired: bool,
+    client_id: &str,
+    client_secret: &str,
+) -> SpotifyRefreshPlan {
+    if !token_expired {
+        SpotifyRefreshPlan::Fresh
+    } else if client_id.is_empty() || client_secret.is_empty() {
+        SpotifyRefreshPlan::CredentialsUnavailable
+    } else {
+        SpotifyRefreshPlan::Refresh
+    }
+}
+
+/// True when a failed Teams token refresh must force re-auth (issue #295).
+/// The policy mirrors the Teams status-update classifier and the Spotify
+/// sibling: only a genuinely dead credential — token-endpoint
+/// `invalid_grant`, or a 401 `ExpiredToken` — means re-auth. `Transient`
+/// (network/5xx), `RateLimited`, `Forbidden` and `Other(400, …)` are
+/// recoverable states that must keep the session and retry later; a single
+/// dropped connection must not end Teams sync.
+fn teams_refresh_requires_reauth(e: &TeamsApiError) -> bool {
+    matches!(
+        e,
+        TeamsApiError::InvalidGrant | TeamsApiError::ExpiredToken(_)
+    )
 }
 
 /// True when the Available-presence session should be re-armed (issue
@@ -650,11 +752,14 @@ pub(crate) fn process_track(
 
             let pre_refresh_access_token = tok.access_token.clone();
 
+            // The refresh error stays typed (`CasOutcome<T, E>` is generic
+            // over `E`) so the re-auth policy below can classify it instead
+            // of string-sniffing.
             let teams_refresh_outcome = cas_refresh_or_discard(
                 "teams",
                 &mut *state.tokens.teams_mut(),
                 &pre_refresh_access_token,
-                || refresh_teams_token(tok).map_err(|e| e.to_string()),
+                || refresh_teams_token(tok),
                 |t| &t.access_token,
             );
             match teams_refresh_outcome {
@@ -677,9 +782,44 @@ pub(crate) fn process_track(
                         "[POLLING] process_track: Failed to refresh Teams token: {}",
                         e
                     );
-                    *state.tokens.teams_mut() = None;
-                    let _ = app.emit("teams-reconnect-required", json!(null));
-                    None
+                    // Issue #295: classify the typed error exactly like the
+                    // Teams status-update path below and the Spotify sibling.
+                    // Only a dead refresh token (`invalid_grant`) or a
+                    // rejected access token (401) means re-auth; `Transient`
+                    // (network/5xx), `RateLimited`, `Forbidden` and
+                    // `Other(400, …)` keep the session and retry later — a
+                    // single dropped connection must not send the user
+                    // through a full device-code browser re-auth.
+                    if teams_refresh_requires_reauth(&e) {
+                        log::warn!("[POLLING] process_track: Teams refresh token is dead, discarding tokens and requiring reconnect");
+                        *state.tokens.teams_mut() = None;
+                        // Issue #180: the write guard in the clearing
+                        // statement above dies at the end of that statement.
+                        // Persist in a LATER statement, when the guard is
+                        // provably dropped — persisting while it is alive
+                        // would re-lock the same parking_lot RwLock for
+                        // reading and self-deadlock.
+                        if let Err(persist_err) = token_io::persist_tokens(state, app) {
+                            log::warn!(
+                                "[POLLING] process_track: failed to persist cleared teams tokens: {}",
+                                persist_err
+                            );
+                        }
+                        let _ = app.emit("teams-reconnect-required", json!(null));
+                        None
+                    } else {
+                        // Issue #295: a transient refresh failure keeps the
+                        // session (the tokens stay in `state`, unlike the
+                        // dead-token branch above) and skips this iteration's
+                        // Teams work — attempting the status write with a
+                        // token we just failed to refresh would only produce
+                        // a 401 and force the very re-auth this policy exists
+                        // to avoid. The next iteration retries the refresh.
+                        log::warn!(
+                            "[POLLING] process_track: Teams refresh failed (transient), keeping session and retrying later"
+                        );
+                        None
+                    }
                 }
             }
         } else {
@@ -1340,7 +1480,7 @@ mod tests {
                 "spotify",
                 &mut *state2.tokens.spotify_mut(),
                 &pre_refresh_access_token,
-                || Ok(new_tokens.clone()),
+                || Ok::<_, SpotifyApiError>(new_tokens.clone()),
                 |t| &t.access_token,
             );
             let committed = matches!(outcome, CasOutcome::Committed(_));
@@ -1393,7 +1533,7 @@ mod tests {
         // format placeholders inside string literals are balanced, so they
         // do not perturb the count.
         let after_sig = prod_source
-            .split("fn cas_refresh_or_discard<T, F, G>(")
+            .split("fn cas_refresh_or_discard<T, E, F, G>(")
             .nth(1)
             .expect("cas_refresh_or_discard definition not found");
         let open = after_sig
@@ -1424,16 +1564,18 @@ mod tests {
         );
 
         // All persistence must happen at the call sites, after the CAS call
-        // returns (guard provably dropped): the two invalid_grant clear paths
-        // (proactive + 401-retry) plus the three refresh-success call sites
-        // (Spotify proactive, Spotify 401-retry, Teams).
+        // returns (guard provably dropped): the three invalid_grant/dead-token
+        // clear paths (Spotify proactive, Spotify 401-retry, Teams) plus the
+        // three refresh-success call sites (Spotify proactive, Spotify
+        // 401-retry, Teams).
         let persist_count = prod_source.matches("token_io::persist_tokens(").count();
         assert_eq!(
-            persist_count, 5,
-            "expected exactly 5 persist_tokens call sites in production (2 invalid_grant \
-             clear (proactive + 401-retry) + 3 refresh-success call sites); found {}. If a \
-             call-site persist is removed, refreshed tokens stop being flushed to disk; if \
-             one is added inside cas_refresh_or_discard, the #180 self-deadlock returns.",
+            persist_count, 6,
+            "expected exactly 6 persist_tokens call sites in production (3 provider \
+             clear paths + 3 refresh-success call sites); found {}. If a call-site \
+             persist is removed, refreshed/cleared tokens stop being flushed to disk; \
+             if one is added inside cas_refresh_or_discard, the #180 self-deadlock \
+             returns.",
             persist_count
         );
     }
@@ -1933,6 +2075,64 @@ mod tests {
             conditional, 2,
             "expected exactly 2 conditional GET call sites passing              last_etag.as_deref() (top-level + 401-retry); found {}",
             conditional
+        );
+    }
+
+    /// Issue #295 regression guard: only a genuinely dead Teams credential
+    /// forces re-auth. Pre-fix the `RefreshFailed` arm matched every error
+    /// unconditionally, so a single 5xx/dropped connection discarded the
+    /// session and drove a full device-code re-auth.
+    #[test]
+    fn test_teams_refresh_reauth_policy_is_dead_token_only() {
+        assert!(
+            teams_refresh_requires_reauth(&TeamsApiError::InvalidGrant),
+            "a dead refresh token (invalid_grant) must force re-auth"
+        );
+        assert!(
+            teams_refresh_requires_reauth(&TeamsApiError::ExpiredToken(401)),
+            "a rejected access token (401) must force re-auth"
+        );
+        for transient in [
+            TeamsApiError::Transient("Failed to send refresh token request: boom".to_string()),
+            TeamsApiError::RateLimited(Some(30)),
+            TeamsApiError::RateLimited(None),
+            TeamsApiError::Other(400, "invalid_client".to_string()),
+            TeamsApiError::Forbidden(403, "denied".to_string()),
+        ] {
+            assert!(
+                !teams_refresh_requires_reauth(&transient),
+                "transient Teams refresh failure must keep the session: {:?}",
+                transient
+            );
+        }
+    }
+
+    /// Issue #296 regression guard: an expired access token with a cold
+    /// keychain cache (empty secret) must be classified as
+    /// `CredentialsUnavailable` rather than attempted — and the guard must
+    /// not fire when the token is still fresh or both credentials are
+    /// present.
+    #[test]
+    fn test_spotify_refresh_plan_requires_non_empty_credentials() {
+        assert_eq!(
+            spotify_refresh_plan(true, "client-id", ""),
+            SpotifyRefreshPlan::CredentialsUnavailable,
+            "an empty client_secret (cold keychain cache) must not be attempted"
+        );
+        assert_eq!(
+            spotify_refresh_plan(true, "", "client-secret"),
+            SpotifyRefreshPlan::CredentialsUnavailable,
+            "an empty client_id must not be attempted"
+        );
+        assert_eq!(
+            spotify_refresh_plan(true, "client-id", "client-secret"),
+            SpotifyRefreshPlan::Refresh,
+            "expired token + both credentials present must refresh"
+        );
+        assert_eq!(
+            spotify_refresh_plan(false, "", ""),
+            SpotifyRefreshPlan::Fresh,
+            "a token still inside its window is used as-is regardless of credentials"
         );
     }
 }
