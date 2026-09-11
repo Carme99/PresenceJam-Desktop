@@ -3,7 +3,7 @@
 //! See issue #76. Teams uses an OAuth 2.0 device-code flow rather than the
 //! PKCE/redirect flow that Spotify uses.
 
-use crate::teams::{decode_teams_granted_scopes, DeviceCodeResponse, TeamsTokens};
+use crate::teams::{decode_teams_granted_scopes, DeviceCodeResponse};
 use crate::token_io;
 use crate::AppState;
 use std::sync::Arc;
@@ -45,7 +45,7 @@ pub async fn poll_teams_auth(
     interval: u64,
     app: AppHandle,
     state: tauri::State<'_, Arc<AppState>>,
-) -> Result<TeamsTokens, String> {
+) -> Result<(), String> {
     // Security: server interval is untrusted (devtools can inject u64::MAX).
     // Clamp before any use so spawn_blocking cannot sleep for hours.
     let interval = interval.clamp(1, 15);
@@ -71,7 +71,7 @@ pub async fn poll_teams_auth(
 
             {
                 let mut guard = state.tokens.teams_mut();
-                *guard = Some(tokens.clone());
+                *guard = Some(tokens);
                 log::info!("{CMD} poll_teams_auth: tokens stored in AppState");
             }
             token_io::persist_tokens(state.inner(), &app)?;
@@ -82,7 +82,7 @@ pub async fn poll_teams_auth(
             log::info!("{CMD} poll_teams_auth: onboarding_cache invalidated");
 
             log::info!("{CMD} poll_teams_auth: EMIT teams-auth-complete event");
-            let _ = app.emit("teams-auth-complete", &tokens);
+            let _ = app.emit("teams-auth-complete", ());
 
             // C2 deep-link single-instance UX (docs/scope-3.3.md): the
             // user finished the device-code flow in a browser, so land them
@@ -95,7 +95,7 @@ pub async fn poll_teams_auth(
             let _ = app.emit("navigate", "settings");
 
             log::info!("{CMD} poll_teams_auth: SUCCESS");
-            Ok(tokens)
+            Ok(())
         }
         Err(err_string) => {
             log::error!("{CMD} poll_teams_auth: poll failed: {}", err_string);

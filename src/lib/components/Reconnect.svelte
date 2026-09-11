@@ -3,9 +3,8 @@
   import { onMount, onDestroy } from 'svelte';
   import { currentView } from '$lib/stores/app';
   import { configStore, loadConfig } from '$lib/stores/config';
-  import type { AppConfig } from '$lib/types';
+  import type { AppConfig, DeviceCodeResponse, SyncStatus } from '$lib/types';
   import { authFlow, setSpotifyPhase, setTeamsPhase, setTeamsDeviceCode } from '$lib/stores/authFlow.svelte';
-  import type { DeviceCodeResponse, SyncStatus, TeamsTokens } from '$lib/types';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
   import { devLog } from '$lib/utils/dev';
   import PageHeader from './PageHeader.svelte';
@@ -128,14 +127,12 @@
     if (!authFlow.teams.deviceCode) return;
     setTeamsPhase('waiting');
     try {
-      const tokens = await invoke<TeamsTokens>('poll_teams_auth', {
+      await invoke('poll_teams_auth', {
         deviceCode: authFlow.teams.deviceCode,
         interval: authFlow.teams.interval
       });
-      if (tokens) {
-        setTeamsPhase('done');
-        needsTeams = false;
-      }
+      setTeamsPhase('done');
+      needsTeams = false;
     } catch (e) {
       devLog('[RECONNECT] pollTeamsAuth failed:', e);
       setTeamsPhase('error', String(e));
