@@ -27,6 +27,11 @@
   let availabilityLabel = $state('');
   let displayErrorTimeout: ReturnType<typeof setTimeout> | null = null;
   let unlisten: (() => void)[] = [];
+  // #287: onMount is async and awaits get_sync_status / updateMenuState
+  // before registering listeners, so a destroy while it is suspended
+  // would leave `unlisten` empty and leak every registration. Mirrors
+  // the guard already used in +page.svelte and +layout.svelte.
+  let destroyed = false;
   // 3.1.0 notifications — opt-in via localStorage, default off
   let notificationsEnabled = $state(false);
   let lastNotifiedId = '';
@@ -41,6 +46,7 @@
   const TRACK_NOTIFICATION_GROUP = 'presencejam-track-change';
 
   onDestroy(() => {
+    destroyed = true;
     unlisten.forEach(fn => fn());
     if (displayErrorTimeout) clearTimeout(displayErrorTimeout);
   });
@@ -71,7 +77,7 @@
     try { notificationsEnabled = localStorage.getItem('notificationsEnabled') === 'true'; } catch {}
 
     devLog('[DASHBOARD] onMount: setting up spotify-track-changed listener');
-    unlisten.push(await listen('spotify-track-changed', async (event: any) => {
+    listen('spotify-track-changed', async (event: any) => {
       devLog('[DASHBOARD] EVENT: spotify-track-changed received');
       devLog('[DASHBOARD] EVENT: track.title=', event.payload.title);
       devLog('[DASHBOARD] EVENT: track.artist=', event.payload.artist);
@@ -104,40 +110,40 @@
           } catch {}
         }
       }
-    }));
-    unlisten.push(await listen('presence-updated', (event: any) => {
+    }).then(fn => { if (destroyed) fn(); else unlisten.push(fn); });
+    listen('presence-updated', (event: any) => {
       devLog('[DASHBOARD] EVENT: presence-updated received');
       devLog('[DASHBOARD] EVENT: status=', event.payload.status);
       statusPreview = event.payload.status;
       // A real status write means the gate is no longer suppressing —
       // clear the chip (issue #3.0-P2).
       presenceGated = false;
-    }));
+    }).then(fn => { if (destroyed) fn(); else unlisten.push(fn); });
 
     devLog('[DASHBOARD] onMount: setting up presence-cleared listener');
-    unlisten.push(await listen('presence-cleared', async () => {
+    listen('presence-cleared', async () => {
       devLog('[DASHBOARD] EVENT: presence-cleared received');
       currentTrack = null;
       statusPreview = t('dashboard.statusNoTrack');
       devLog('[DASHBOARD] EVENT: currentTrack=null, statusPreview="No track playing"');
       await updateMenuState();
-    }));
+    }).then(fn => { if (destroyed) fn(); else unlisten.push(fn); });
 
     devLog('[DASHBOARD] onMount: setting up presence-gated listener');
-    unlisten.push(await listen('presence-gated', (event: any) => {
+    listen('presence-gated', (event: any) => {
       devLog('[DASHBOARD] EVENT: presence-gated received');
       devLog('[DASHBOARD] EVENT: reason=', event.payload?.reason);
       presenceGated = true;
-    }));
+    }).then(fn => { if (destroyed) fn(); else unlisten.push(fn); });
 
     devLog('[DASHBOARD] onMount: setting up presence-availability-updated listener');
-    unlisten.push(await listen('presence-availability-updated', (event: any) => {
+    listen('presence-availability-updated', (event: any) => {
       devLog('[DASHBOARD] EVENT: presence-availability-updated received');
       availabilityLabel = event.payload?.label ?? '';
-    }));
+    }).then(fn => { if (destroyed) fn(); else unlisten.push(fn); });
 
     devLog('[DASHBOARD] onMount: setting up error listener');
-    unlisten.push(await listen<ErrorEventPayload>('error', (event) => {
+    listen<ErrorEventPayload>('error', (event) => {
       const payload = event.payload;
       console.error('[DASHBOARD] EVENT: error received:', payload);
       // Issue #79: only `severity: "error"` (i.e. an error the polling
@@ -155,27 +161,27 @@
       if (displayErrorTimeout) clearTimeout(displayErrorTimeout);
       displayError = message;
       displayErrorTimeout = setTimeout(() => { displayError = ''; displayErrorTimeout = null; }, 5000);
-    }));
+    }).then(fn => { if (destroyed) fn(); else unlisten.push(fn); });
 
     // toggle-pause is now handled in +page.svelte (always-mounted) — Dashboard no longer owns it (#230).
     devLog('[DASHBOARD] onMount: setting up sync-started listener');
-    unlisten.push(await listen('sync-started', () => {
+    listen('sync-started', () => {
       devLog('[DASHBOARD] EVENT: sync-started received');
       isSyncing = true;
       devLog('[DASHBOARD] EVENT: isSyncing=true');
       updateMenuState();
-    }));
+    }).then(fn => { if (destroyed) fn(); else unlisten.push(fn); });
 
     devLog('[DASHBOARD] onMount: setting up sync-stopped listener');
-    unlisten.push(await listen('sync-stopped', () => {
+    listen('sync-stopped', () => {
       devLog('[DASHBOARD] EVENT: sync-stopped received');
       isSyncing = false;
       devLog('[DASHBOARD] EVENT: isSyncing=false');
       updateMenuState();
-    }));
+    }).then(fn => { if (destroyed) fn(); else unlisten.push(fn); });
 
     devLog('[DASHBOARD] onMount: setting up polling-thread-panicked listener');
-    unlisten.push(await listen('polling-thread-panicked', () => {
+    listen('polling-thread-panicked', () => {
       // Rust side resets is_syncing in polling.rs:321, but the JS-side
       // mirror (this rune) was not being flipped — UI would stay
       // "Syncing" forever after a thread panic. See issue #33.
@@ -186,10 +192,10 @@
       displayError = t('dashboard.syncCrashed');
       displayErrorTimeout = setTimeout(() => { displayError = ''; displayErrorTimeout = null; }, 5000);
       updateMenuState();
-    }));
+    }).then(fn => { if (destroyed) fn(); else unlisten.push(fn); });
 
     devLog('[DASHBOARD] onMount: setting up reconnect-required listener');
-    unlisten.push(await listen('reconnect-required', () => {
+    listen('reconnect-required', () => {
       // Generic reconnect signal from polling.rs:633 (e.g. when the
       // auth refresh loop has been failing for too long). The
       // provider-specific events are handled elsewhere:
@@ -201,7 +207,7 @@
       devLog('[DASHBOARD] EVENT: isSyncing=false (reconnect)');
       currentView.set('reconnect');
       updateMenuState();
-    }));
+    }).then(fn => { if (destroyed) fn(); else unlisten.push(fn); });
   });
 
   async function toggleSync() {
@@ -223,6 +229,11 @@
         devLog('[DASHBOARD] toggleSync: isSyncing=true');
       }
       await updateMenuState();
+    } catch (e) {
+      console.error('[DASHBOARD] toggleSync failed:', e);
+      if (displayErrorTimeout) clearTimeout(displayErrorTimeout);
+      displayError = t('dashboard.syncToggleFailed');
+      displayErrorTimeout = setTimeout(() => { displayError = ''; displayErrorTimeout = null; }, 5000);
     } finally {
       isToggling = false;
     }

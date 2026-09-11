@@ -71,6 +71,7 @@ export const en = {
     "Start something on Spotify and we'll pipe it through to Teams.",
   'dashboard.syncCrashed': 'Sync stopped unexpectedly. Please restart PresenceJam.',
   'dashboard.credentialCheckFailed': 'Unable to check credentials — please try again.',
+  'dashboard.syncToggleFailed': 'Could not change sync state. Please try again.',
   'dashboard.statusNotConfigured': 'Not configured',
   'dashboard.statusNoTrack': 'No track playing',
   'dashboard.live': 'Live',

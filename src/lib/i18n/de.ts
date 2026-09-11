@@ -61,6 +61,8 @@ export const de: Dict = {
     'Die Synchronisierung wurde unerwartet beendet. Bitte starten Sie PresenceJam neu.',
   'dashboard.credentialCheckFailed':
     'Anmeldedaten konnten nicht geprüft werden — bitte versuchen Sie es erneut.',
+  'dashboard.syncToggleFailed':
+    'Synchronisierungsstatus konnte nicht geändert werden. Bitte versuchen Sie es erneut.',
   'dashboard.statusNotConfigured': 'Nicht konfiguriert',
   'dashboard.statusNoTrack': 'Kein Titel wird abgespielt',
   'dashboard.live': 'Live',
