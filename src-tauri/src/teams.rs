@@ -819,10 +819,10 @@ fn post_presence<T: Serialize>(
 /// Sets the user's Teams presence via the Graph setPresence endpoint
 /// (issue #3.0-P1). `availability`/`activity` must be a documented combo
 /// (e.g. `Available`/`Available`, `Busy`/`InACall`) and
-/// `expiration_duration` a `PT5M`-`PT4H` ISO-8601 duration (default PT5M;
-/// the app re-arms well inside the window because Available sessions FADE
-/// after 5 min regardless). `sessionId` MUST be the app's Azure AD client
-/// id (Microsoft Learn v1.0 docs).
+/// `expiration_duration` a `PT5M`-`PT4H` ISO-8601 duration. An
+/// `Available` session TIMES OUT after 5 minutes (non-configurable, and a
+/// distinct clock from `expirationDuration`), so the app re-arms well
+/// inside that window. `sessionId` MUST be the app's Azure AD client
 ///
 /// Implements `/me` first with a `/users/{oid}` fallback on 404: the docs
 /// document only `/users/{id}` for setPresence/clearPresence, but `/me`

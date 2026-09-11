@@ -43,9 +43,15 @@ const RATE_LIMIT_BACKOFF_SECONDS: u64 = 60;
 const DEBOUNCE_MS: u64 = 500;
 const TRANSIENT_FAILURE_EXIT_THRESHOLD: u8 = 5;
 /// Minimum gap between setPresence re-arms while a track plays (issue
-/// #3.0-P1). Available sessions FADE after 5 minutes regardless of
-/// `expirationDuration` (Microsoft Learn v1.0), so the session must be
-/// re-armed well inside that window; 4 minutes leaves slack.
+/// #3.0-P1). An `Available` session TIMES OUT after 5 minutes when the
+/// availability is `Available` — a separate, non-configurable clock from
+/// `expirationDuration` (which only bounds the session's absolute life,
+/// 5 min–4 h, after which it goes `Offline`). On timeout the state fades
+/// in stages: `Available` → `AvailableInactive` → `Away`. So the re-arm
+/// must be well inside the 5-minute TIMEOUT, not the expiration window;
+/// 4 minutes leaves slack. Raising this toward expiration scale (the
+/// `PT4H` the app sends) does NOT extend the green bubble.
+/// (Microsoft Learn: cloud-communications-manage-presence-state)
 const AVAILABILITY_REARM_SECONDS: u64 = 4 * 60;
 
 /// What the driver should do after this iteration.
@@ -685,9 +691,10 @@ fn teams_refresh_requires_reauth(e: &TeamsApiError) -> bool {
 
 /// True when the Available-presence session should be re-armed (issue
 /// #3.0-P1): no arm yet, or the last arm is at least
-/// `AVAILABILITY_REARM_SECONDS` old. Available sessions FADE after 5
-/// minutes regardless of `expirationDuration`, so the re-arm cadence must
-/// be strictly inside that window (4 min < 5 min).
+/// `AVAILABILITY_REARM_SECONDS` old. An `Available` session TIMES OUT
+/// after 5 minutes (non-configurable; a distinct clock from
+/// `expirationDuration`), so the re-arm cadence must be strictly inside
+/// that window (4 min < 5 min).
 fn should_rearm_availability(last_arm: Option<Instant>, now: Instant) -> bool {
     match last_arm {
         Some(arm) => now.duration_since(arm).as_secs() >= AVAILABILITY_REARM_SECONDS,
