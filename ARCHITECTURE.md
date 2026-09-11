@@ -391,14 +391,14 @@ one provider and triggers re-authentication:
 sequenceDiagram
     actor User
     participant UI as Settings.svelte
-    participant Commands as commands/sync.rs
+    participant Commands as commands/onboarding.rs
     participant TokenIO as token_io.rs
     participant State as AppState
 
     User->>UI: Click Spotify reconnect
     UI->>Commands: invoke("reconnect_spotify")
     Commands->>State: tokens.spotify = None (in-memory)
-    Commands->>TokenIO: clear_spotify_tokens()
+    Commands->>TokenIO: token_io::persist_tokens()
     TokenIO->>TokenIO: atomic rewrite tokens.json (spotify: null)
     Commands->>Commands: onboarding_cache.invalidate()
     Commands->>UI: emit("spotify-reconnect-required")
@@ -520,7 +520,7 @@ sequenceDiagram
 | `spotify-track-changed` | `TrackInfo` | New track detected or track state changed |
 | `presence-updated` | `{status, timestamp}` | Teams status successfully updated |
 | `presence-cleared` | `{timestamp}` | Teams status cleared |
-| `error` | `{source, message}` | Any API error (Spotify, Teams, or auth) |
+| `error` | `{source, message, severity}` | Any API error (Spotify, Teams, or auth); `severity` is `warning` or `error` |
 | `spotify-reconnect-required` | `null` | Spotify token expired or auth failure requiring re-auth |
 | `teams-reconnect-required` | `null` | Teams token expired or auth failure requiring re-auth |
 | `reconnect-required` | `null` | Transient failure retry limit exhausted, polling loop exiting |
