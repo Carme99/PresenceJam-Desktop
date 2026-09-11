@@ -306,4 +306,16 @@ mod tests {
         assert!(contains_profanity("The artist is damn good"));
         assert!(contains_profanity("This is fucking great"));
     }
+
+    // issue #260: Spotify track/artist names routinely arrive Title Case or ALL
+    // CAPS, so normalize()'s to_lowercase() is load-bearing. Removing it left
+    // the whole module green because every other test drives lowercase input.
+    #[test]
+    fn test_case_insensitive_detection() {
+        assert!(contains_profanity("FUCK"));
+        assert!(contains_profanity("Shit"));
+        assert!(contains_profanity("You BITCH"));
+        assert!(contains_profanity("Fucking Great"));
+        assert_eq!(filter_status("SHIT", "Placeholder", true), "Placeholder");
+    }
 }
