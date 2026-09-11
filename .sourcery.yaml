@@ -1,0 +1,9 @@
+# Sourcery configuration.
+#
+# `request_review: none` stops Sourcery requesting itself as a reviewer on
+# every pull request. It still runs when explicitly requested, and the
+# `sourcery-ignore` label additionally suppresses it per PR.
+github:
+  request_review: none
+  ignore_labels:
+    - sourcery-ignore
