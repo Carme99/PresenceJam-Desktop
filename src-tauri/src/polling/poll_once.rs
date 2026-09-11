@@ -441,10 +441,10 @@ pub(crate) fn run(
                 *transient_failure_count = transient_failure_count.saturating_add(1);
             }
 
-            if *transient_failure_count >= TRANSIENT_FAILURE_EXIT_THRESHOLD {
+            if let Some(iteration) = transient_outcome(*transient_failure_count) {
                 log::error!("[POLLING] poll_once: 5 consecutive transient failures, exiting and requiring reconnect");
                 let _ = app.emit("reconnect-required", json!(null));
-                return PollIteration::Break;
+                return iteration;
             }
 
             emit_error(
@@ -455,6 +455,21 @@ pub(crate) fn run(
             );
             interruptible_sleep(stop_rx, backoff_secs, "backoff sleep")
         }
+    }
+}
+
+/// Issue #262: the 5-strikes transient-failure decision, extracted as a
+/// pure function of the counter so the threshold semantics are testable
+/// without driving the whole `run()` error path. Returns `Some(Break)`
+/// exactly when the count has reached `TRANSIENT_FAILURE_EXIT_THRESHOLD`
+/// (the counter is only bumped for transient API errors and reset on any
+/// success), and `None` below it so the caller keeps retrying after
+/// emitting its warning.
+fn transient_outcome(count: u8) -> Option<PollIteration> {
+    if count >= TRANSIENT_FAILURE_EXIT_THRESHOLD {
+        Some(PollIteration::Break)
+    } else {
+        None
     }
 }
 
@@ -1528,18 +1543,40 @@ mod tests {
         );
     }
 
-    /// Regression guard for issue #60.
+    /// Regression guard for issue #60: `start_polling`'s caller
+    /// (`commands::start_syncing`) has already claimed `is_syncing`; a
+    /// second compare-exchange here would always lose and surface
+    /// "Polling is already running" after every fresh install.
+    ///
+    /// The body is isolated by brace counting from `start_polling`'s
+    /// opening `{` (house style — never boundary anchors/log-line
+    /// anchors, which silently drift and leave the assertion vacuous).
     #[test]
     fn test_start_polling_does_not_claim_is_syncing() {
         let source = include_str!("state.rs");
-        let body = source
+        let after_sig = source
             .split("pub fn start_polling(")
             .nth(1)
-            .and_then(|s| {
-                s.split("log::info!(\"[POLLING] start_polling: SUCCESS")
-                    .next()
-            })
-            .unwrap_or("");
+            .expect("state.rs has no `pub fn start_polling(`");
+        let open = after_sig
+            .find('{')
+            .expect("start_polling has no opening brace");
+        let mut depth = 0usize;
+        let mut end = None;
+        for (i, ch) in after_sig[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(open + i + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let body = &after_sig[..end.expect("start_polling body never closed")];
         assert!(
             !body.contains(".compare_exchange("),
             "polling::start_polling must not CAS is_syncing. See issue #60."
@@ -1662,16 +1699,46 @@ mod tests {
 
     /// Issue #165: known position → an expiry exists; live stream (None) →
     /// no expiry so no `expiryDateTime` goes on the wire.
+    ///
+    /// Issue #264: the VALUE must be `now + remaining + buffer` — asserting
+    /// the offset-less shape alone passes if the arithmetic sign flips or
+    /// the buffer is dropped. The buffer default is read from the config
+    /// type rather than hardcoded so a default change cannot silently
+    /// invalidate the expectation.
     #[test]
     fn test_status_expiry_known_and_unknown_position() {
         let config = Some(crate::config::AppConfig::default());
-        let s =
-            status_expiry_str(Some(120_000), &config).expect("known position must yield an expiry");
+        let buffer_secs = config
+            .as_ref()
+            .expect("config is Some")
+            .polling
+            .expiry_buffer_seconds;
+        let remaining_ms = 120_000u64;
+
+        let before = chrono::Utc::now();
+        let s = status_expiry_str(Some(remaining_ms), &config)
+            .expect("known position must yield an expiry");
         assert!(
             !s.contains('+') && !s.contains('Z'),
             "offset leaked into status expiry: {}",
             s
         );
+
+        // The wire shape is offset-less; re-attach UTC to parse it back.
+        let parsed = chrono::DateTime::parse_from_rfc3339(&format!("{}+00:00", s))
+            .expect("status expiry must round-trip as RFC3339 once UTC is re-attached")
+            .with_timezone(&Utc);
+        let delta_secs = (parsed - before).num_seconds();
+        let expected = (remaining_ms / 1000) as i64 + buffer_secs as i64;
+        assert!(
+            (delta_secs - expected).abs() <= 2,
+            "status expiry must be now + remaining + buffer = {}s; got {}s (delta {}s). \
+             A flipped `+ buffer_ms` or a zeroed default buffer lands here. See issue #264.",
+            expected,
+            delta_secs,
+            delta_secs - expected
+        );
+
         assert_eq!(
             status_expiry_str(None, &config),
             None,
@@ -1933,6 +2000,37 @@ mod tests {
             conditional, 2,
             "expected exactly 2 conditional GET call sites passing              last_etag.as_deref() (top-level + 401-retry); found {}",
             conditional
+        );
+    }
+
+    /// Issue #262: the 5-strikes transient-failure counter must break the
+    /// polling loop at exactly `TRANSIENT_FAILURE_EXIT_THRESHOLD` — no
+    /// sooner (a transient blip must not kill the session) and no later
+    /// (a permanently broken token must stop hammering the API).
+    #[test]
+    fn test_transient_outcome_breaks_exactly_at_threshold() {
+        // The issue names five strikes explicitly; pin the constant so a
+        // future retune cannot silently change the documented contract (the
+        // literal assertions below would otherwise follow it).
+        assert_eq!(
+            TRANSIENT_FAILURE_EXIT_THRESHOLD, 5,
+            "issue #262 specifies exactly 5 consecutive transient failures"
+        );
+        assert!(
+            transient_outcome(4).is_none(),
+            "4 consecutive transient failures must NOT break the loop; the counter is \
+             reset by any success, so an early break kills the session on a blip"
+        );
+        assert!(
+            matches!(transient_outcome(5), Some(PollIteration::Break)),
+            "5 consecutive transient failures MUST break the loop so the user is asked \
+             to reconnect (issue #262)"
+        );
+        // Saturating-add can reach u8::MAX; the threshold decision must stay
+        // stable there (no panic, still Break).
+        assert!(
+            matches!(transient_outcome(u8::MAX), Some(PollIteration::Break)),
+            "a saturated counter must still break"
         );
     }
 }
