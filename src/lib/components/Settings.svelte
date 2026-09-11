@@ -224,7 +224,10 @@
     isSaving = true;
     saveMessage = '';
     try {
-      await saveConfig(localConfig);
+      // `localConfig` is a Svelte 5 `$state` proxy; `structuredClone` in
+      // `toSavePayload` rejects proxies with a DataCloneError, aborting the
+      // save before IPC (#285). Snapshot to a plain object first.
+      await saveConfig($state.snapshot(localConfig));
       saveMessage = t('settings.saved');
       if (saveTimeout) clearTimeout(saveTimeout);
       saveTimeout = setTimeout(() => saveMessage = '', 2000);
@@ -361,6 +364,9 @@
           <span class="hint">{t('settings.completeAuthInBrowser')}</span>
         {/if}
       </div>
+      {#if authFlow.spotify.error}
+        <p class="error-message" role="alert">{authFlow.spotify.error}</p>
+      {/if}
       {#if playbackScopeMissing}
         <div class="scope-banner">
           <span class="hint">{t('settings.playbackScopeBanner')}</span>
