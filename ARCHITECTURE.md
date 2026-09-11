@@ -488,7 +488,7 @@ Graph. If matched, the status is replaced with `config.teams.profanity_placehold
 resolved to 🎵 or ⏸️. The replaced status is logged at info level; the
 **original profane text is never written to logs**.
 
-Detection features (25-word curated list, see `profanity.rs`):
+Detection features (curated word list, see `profanity.rs`):
 - **Leetspeak normalization:** `1→i, 3→e, $→s, @→a, 0→o, 5→s, 7→t, !→i, |→i`.
 - **Repeated-character collapse:** `shiiit → shiit` (up to 2 excess chars).
 - **Word-boundary safety:** prevents false positives on `class`, `assassin`, `cocktail`, `vacuum`.
@@ -645,7 +645,7 @@ PresenceJam-Desktop/
 │   │   ├── keychain.rs                    # OS keychain wrapper, secret-service Linux
 │   │   ├── token_io.rs                    # Hand-rolled atomic-write for tokens.json
 │   │   ├── pkce.rs                        # PKCE verifier/challenge generation
-│   │   ├── profanity.rs                   # 25-word curated profanity filter
+│   │   ├── profanity.rs                   # curated profanity filter
 │   │   ├── spotify.rs                      # PKCE OAuth client + Web API (ts-rs TS)
 │   │   ├── teams.rs                        # Device-code + MS Graph (ts-rs TS)
 │   │   ├── tray.rs                        # System tray + dedup snapshot (native CheckMenuItem Play/Pause + live tooltip, v4.0)
