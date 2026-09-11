@@ -1439,7 +1439,7 @@ mod tests {
     }
 
     /// Regression guard for issue #72 drift point #1: every no-track
-    /// code path (main `Ok(None)` arm, 401-retry `Ok(None` arm, and —
+    /// code path (main `Ok(None)` arm, 401-retry `Ok(None)` arm, and —
     /// since issue #242 — the idle 304 arm in `not_modified_iteration`)
     /// must funnel through `record_no_track_outcome` so they cannot
     /// drift apart.
