@@ -733,6 +733,10 @@ pub fn presence_gate_reason(presence: &PresenceInfo) -> String {
     match presence.availability.to_lowercase().as_str() {
         "busy" => "busy".to_string(),
         "donotdisturb" => "Do Not Disturb".to_string(),
+        // Issue #254: `focusing` is a documented v1.0 availability value
+        // that Teams renders with the same red DND icon (scheduled focus
+        // time), so it must gate exactly like Do Not Disturb.
+        "focusing" => "focusing".to_string(),
         _ => String::new(),
     }
 }
@@ -1219,11 +1223,21 @@ mod tests {
         assert!(is_presence_gated(&info("available", "inameeting")));
         assert!(is_presence_gated(&info("available", "inacall")));
         assert!(is_presence_gated(&info("available", "presenting")));
+        // Issue #254: `focusing` is a documented v1.0 availability value
+        // that Teams renders with the same red DND icon (scheduled focus
+        // time), so it must gate like Do Not Disturb.
+        assert!(is_presence_gated(&info("focusing", "focusing")));
         // Activity wins even when availability is Available (in-meeting).
         assert!(is_presence_gated(&info("available", "InAMeeting")));
         assert!(!is_presence_gated(&info("available", "available")));
         assert!(!is_presence_gated(&info("away", "away")));
         assert!(!is_presence_gated(&info("available", "offline")));
+        // `presenceUnknown` deliberately stays ungated — the gate already
+        // fails safe on a read error, so it is not a "do not disturb".
+        assert!(!is_presence_gated(&info(
+            "presenceunknown",
+            "presenceunknown"
+        )));
     }
 
     // Issue #3.0-P2: the human-readable reason must mirror the gating rule
@@ -1251,6 +1265,10 @@ mod tests {
         assert_eq!(
             presence_gate_reason(&info("available", "presenting")),
             "presenting"
+        );
+        assert_eq!(
+            presence_gate_reason(&info("focusing", "focusing")),
+            "focusing"
         );
         assert!(presence_gate_reason(&info("available", "available")).is_empty());
     }
