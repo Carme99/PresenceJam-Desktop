@@ -480,11 +480,23 @@ fn atomic_write_json(path: &std::path::Path, json: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The config as it will actually be persisted: `clamp_polling` applied.
+///
+/// `save_config` writes a clamped copy, so the caller must store THIS value
+/// in `AppState` rather than its own unclamped input — otherwise a value the
+/// UI can type (the number inputs' `min`/`max` attributes do not constrain a
+/// typed value) lives in memory while a different one sits on disk, and the
+/// two silently reconcile only on the next launch. See issue #297.
+pub fn clamped_config(config: &AppConfig) -> AppConfig {
+    let mut cfg = config.clone();
+    clamp_polling(&mut cfg.polling);
+    cfg
+}
+
 pub fn save_config(config: &AppConfig) -> Result<(), String> {
     let path = get_config_path()?;
 
-    let mut cfg = config.clone();
-    clamp_polling(&mut cfg.polling);
+    let cfg = clamped_config(config);
     let json = serde_json::to_string_pretty(&cfg)
         .map_err(|e| format!("Failed to serialize config to JSON: {}", e))?;
 

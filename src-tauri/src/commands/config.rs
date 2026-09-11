@@ -29,11 +29,14 @@ pub fn load_config() -> Result<AppConfig, String> {
 }
 
 #[tauri::command]
+/// Returns the config as PERSISTED (clamped), so the caller can adopt the
+/// same value. Issue #297: the frontend previously stored its own unclamped
+/// input, so the UI showed a value that was never written to disk.
 pub async fn save_config(
     app: AppHandle,
     config: AppConfig,
     state: tauri::State<'_, Arc<AppState>>,
-) -> Result<(), String> {
+) -> Result<AppConfig, String> {
     log::info!(
         "{CMD} save_config: ENTRY - config.spotify.client_id.len={}",
         config.spotify.client_id.len()
@@ -44,16 +47,19 @@ pub async fn save_config(
     // the blocking pool so the async runtime is not blocked and the lock
     // is not held across an await.
     let state_clone = Arc::clone(state.inner());
-    let config_clone = config.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    // Issue #297: `save_config` persists a CLAMPED copy, so store that same
+    // value in AppState. Storing the raw input left the in-memory config (the
+    // one the polling loop reads) disagreeing with config.json until restart.
+    let config_clone = config::clamped_config(&config);
+    let persisted = tauri::async_runtime::spawn_blocking(move || {
         // Hold the write lock for the entire read-modify-write to prevent races
         // with concurrent reads from the polling loop. See bug #26.
         let mut config_guard = state_clone.config.get_mut();
         match config::save_config(&config_clone) {
             Ok(()) => {
                 log::info!("{CMD} save_config: file saved successfully");
-                *config_guard = Some(config_clone);
-                Ok::<(), String>(())
+                *config_guard = Some(config_clone.clone());
+                Ok::<AppConfig, String>(config_clone)
             }
             Err(e) => {
                 log::error!("{CMD} save_config: FAILED - {}", e);
@@ -98,5 +104,5 @@ pub async fn save_config(
         }
     }
     log::info!("{CMD} save_config: SUCCESS");
-    Ok(())
+    Ok(persisted)
 }

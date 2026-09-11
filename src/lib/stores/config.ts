@@ -35,7 +35,7 @@ export const defaultConfig: AppConfig = {
 export const configStore = writable<AppConfig>(defaultConfig);
 
 let loadPromise: Promise<AppConfig> | null = null;
-let savePromise: Promise<void> | null = null;
+let savePromise: Promise<AppConfig> | null = null;
 
 function normalizeLoadedConfig(cfg: AppConfig): AppConfig {
   const c = cfg as unknown as { polling: Record<string, unknown> };
@@ -98,18 +98,22 @@ export async function loadConfig(): Promise<AppConfig> {
   return loadPromise;
 }
 
-export async function saveConfig(cfg: AppConfig): Promise<void> {
+export async function saveConfig(cfg: AppConfig): Promise<AppConfig> {
   if (savePromise) await savePromise;
 
   savePromise = (async () => {
     try {
       const payload = toSavePayload(cfg);
-      await invoke('save_config', { config: payload });
-      configStore.set(cfg);
+      // Issue #297: the backend persists a CLAMPED copy and returns it, so
+      // adopt that value for the store. Storing `cfg` here left the UI
+      // showing a value (e.g. a typed 999) that was never written to disk.
+      const persisted = await invoke<AppConfig>('save_config', { config: payload });
+      configStore.set(persisted);
+      return persisted;
     } finally {
       savePromise = null;
     }
   })();
 
-  await savePromise;
+  return savePromise;
 }

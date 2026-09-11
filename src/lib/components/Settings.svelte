@@ -222,7 +222,9 @@
     isSaving = true;
     saveMessage = '';
     try {
-      await saveConfig(localConfig);
+      // Issue #297: adopt the value the backend actually persisted, so the
+      // form shows the clamped numbers rather than the raw input.
+      localConfig = await saveConfig(localConfig);
       saveMessage = t('settings.saved');
       if (saveTimeout) clearTimeout(saveTimeout);
       saveTimeout = setTimeout(() => saveMessage = '', 2000);
