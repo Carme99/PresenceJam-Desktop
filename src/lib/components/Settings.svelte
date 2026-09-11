@@ -37,16 +37,18 @@
     serializeForCompare(localConfig) !== serializeForCompare($configStore)
   );
 
-  // C9: inline clamp feedback mirroring Rust `clamp_polling`
+  // C9: effective polling bounds, mirroring Rust `clamp_polling`
   // (src-tauri/src/config.rs:109): minimum clamps to [5, 30] first, then
-  // maximum clamps to [effectiveMinimum, 300] — an entered max below min
-  // is silently raised on save; surface the effective value immediately.
+  // maximum clamps to [effectiveMinimum, 300]. Consumed twice — the
+  // max-interval input's native `min` bound (issue #243) and the clamp
+  // hint below it. An entered max below min is silently raised on save;
+  // the hint surfaces that effective value immediately.
   let pollingClamp = $derived.by(() => {
     const rawMin = Number(localConfig.polling.minimum_interval_seconds);
     const rawMax = Number(localConfig.polling.max_interval_seconds);
     const effMin = Math.min(30, Math.max(5, rawMin));
     const effMax = Math.min(300, Math.max(effMin, rawMax));
-    return { active: rawMin > rawMax, effMax };
+    return { active: rawMin > rawMax, effMin, effMax };
   });
 
   // C9: per-section "Reset to default" using the shared defaults source.
@@ -507,11 +509,15 @@
         </div>
         <div class="form-group">
           <label for="max-interval">{t('settings.maxIntervalLabel')}</label>
+          <!-- `min` tracks clamp_polling's effective minimum; `max` is the
+               backend's fixed upper bound (config.rs) — `pollingClamp.effMax`
+               depends on the entered max, so using it here would be
+               self-referential. -->
           <input
             id="max-interval"
             type="number"
-            min="30"
-            max="120"
+            min={pollingClamp.effMin}
+            max="300"
             bind:value={localConfig.polling.max_interval_seconds}
           />
         </div>
