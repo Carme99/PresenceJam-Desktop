@@ -268,7 +268,6 @@ pub(crate) fn run(
             // that work.
             not_modified_iteration(
                 last_track_key,
-                last_etag,
                 consecutive_pauses,
                 transient_failure_count,
                 &config,
@@ -375,7 +374,6 @@ pub(crate) fn run(
                                         // Same no-op as the main path's 304.
                                         return not_modified_iteration(
                                             last_track_key,
-                                            last_etag,
                                             consecutive_pauses,
                                             transient_failure_count,
                                             &config,
@@ -480,30 +478,32 @@ fn record_no_track_outcome(
 /// nothing to JSON-parse, no status to format/filter and no new state for
 /// the tray or frontend — the observable behavior matches the
 /// unchanged-track path minus that work: keep every tracked field, reset
-/// the pause/transient counters the way an unchanged playing track does,
-/// and sleep the default interval (the duration-derived smart sleep needs
-/// `progress_ms`, which a bodyless 304 cannot provide).
+/// the transient counter the way an unchanged playing track does, and sleep
+/// without duration-derived smart sleep (`progress_ms`, which a bodyless 304
+/// cannot provide).
 ///
-/// An ETag without a tracked track refers to nothing actionable (e.g. a
-/// 200 whose item was an episode/ad); drop the validator so the next
-/// poll re-establishes ground truth unconditionally.
+/// A 304 with a tracked track mirrors the unchanged-track path: reset the
+/// pause counter and sleep the default interval. A 304 with no tracked track
+/// means "still nothing playing" (issue #242): the no-track ETag stays valid
+/// so idle polling keeps sending conditional GETs, and the pause backoff
+/// advances exactly like an unconditional 204 no-track. A later change
+/// surfaces as a 200/204 Modified and re-establishes ground truth
+/// automatically.
 fn not_modified_iteration(
     last_track_key: &Option<String>,
-    last_etag: &mut Option<String>,
     consecutive_pauses: &mut u8,
     transient_failure_count: &mut u8,
     config: &Option<crate::config::AppConfig>,
 ) -> PollIteration {
     log::info!("[POLLING] poll_once: 304 Not Modified, skipping parse/format/tray work");
+    *transient_failure_count = 0;
     if last_track_key.is_some() {
         *consecutive_pauses = 0;
-    } else {
-        *last_etag = None;
+        return PollIteration::Sleep {
+            seconds: config_default_interval(config),
+        };
     }
-    *transient_failure_count = 0;
-    PollIteration::Sleep {
-        seconds: config_default_interval(config),
-    }
+    record_no_track_outcome(consecutive_pauses, config)
 }
 
 fn interruptible_sleep(stop_rx: &mpsc::Receiver<()>, seconds: u64, label: &str) -> PollIteration {
@@ -1438,10 +1438,11 @@ mod tests {
         );
     }
 
-    /// Regression guard for issue #72 drift point #1: the two no-track
-    /// code paths (main `Ok(None)` arm and 401-retry `Ok(None)` arm)
-    /// must both funnel through `record_no_track_outcome` so they
-    /// cannot drift apart.
+    /// Regression guard for issue #72 drift point #1: every no-track
+    /// code path (main `Ok(None)` arm, 401-retry `Ok(None)` arm, and —
+    /// since issue #242 — the idle 304 arm in `not_modified_iteration`)
+    /// must funnel through `record_no_track_outcome` so they cannot
+    /// drift apart.
     ///
     /// Note: `process_track`'s paused-but-tracked branch also
     /// increments `consecutive_pauses` (issue #38). That increment is
@@ -1457,21 +1458,21 @@ mod tests {
             .split("#[cfg(test)]\nmod tests")
             .next()
             .expect("poll_once.rs has no #[cfg(test)] mod tests block");
-        // Call sites of `record_no_track_outcome(` in production code.
-        // We don't need to subtract the `fn` definition because the
-        // `fn record_no_track_outcome(` definition includes the
-        // open-paren but is on its own line in the source, so it WILL
-        // match the substring. We want exactly 3 matches in prod
-        // source: 2 call sites (lines 183 + 249) plus the 1 fn
-        // definition (line 309). Anything else is a regression.
+        // Occurrences of `record_no_track_outcome(` in production code.
+        // The `fn record_no_track_outcome(` definition matches too, so
+        // the expected total is 1 definition + one call site per no-track
+        // path: main `Ok(None)`, 401-retry `Ok(None)`, and the idle 304
+        // (`not_modified_iteration`, issue #242). All three funnel the
+        // increment through the same helper; a fourth site outside a
+        // shared helper is a regression. See issue #72 drift point #1.
         let call_count = prod_source.matches("record_no_track_outcome(").count();
         assert_eq!(
-            call_count, 3,
-            "Expected 3 occurrences in production (2 call sites: main \
-             Ok(None) + 401-retry Ok(None), plus the fn definition). \
-             Found {}. If a future contributor adds a third no-track \
-             handling site outside the helper, the increment order \
-             can drift again. See issue #72 drift point #1.",
+            call_count, 4,
+            "Expected 4 occurrences in production (3 call sites: main \
+             Ok(None), 401-retry Ok(None), idle 304 in not_modified_iteration, \
+             plus the fn definition). Found {}. If a future contributor adds \
+             a no-track handling site outside the shared helper, the \
+             increment order can drift again. See issue #72 drift point #1.",
             call_count
         );
     }
@@ -1849,20 +1850,19 @@ mod tests {
         );
     }
 
-    /// Candidate C11 (docs/scope-3.3.md §C11): a 304 Not Modified is a
-    /// pure no-op iteration — default-interval sleep, pause/transient
-    /// counters reset exactly like the unchanged-track path, and the
-    /// stored ETag survives for the next conditional poll.
+    /// Candidate C11 (docs/scope-3.3.md §C11): a 304 Not Modified with a
+    /// tracked track is a pure no-op iteration — default-interval sleep,
+    /// pause/transient counters reset exactly like the unchanged-track path.
+    /// The stored ETag survives structurally: the 304 path never touches it,
+    /// so the next poll stays conditional.
     #[test]
     fn test_not_modified_keeps_state_and_sleeps_default_interval() {
         let config = Some(crate::config::AppConfig::default());
-        let mut last_etag = Some("\"etag-1\"".to_string());
         let mut consecutive_pauses: u8 = 3;
         let mut transient_failure_count: u8 = 2;
 
         let iteration = not_modified_iteration(
             &Some("Artist - Track".to_string()),
-            &mut last_etag,
             &mut consecutive_pauses,
             &mut transient_failure_count,
             &config,
@@ -1881,37 +1881,37 @@ mod tests {
             transient_failure_count, 0,
             "a 304 counts as success for the 5-strikes counter"
         );
-        assert_eq!(
-            last_etag.as_deref(),
-            Some("\"etag-1\""),
-            "the validator must survive for the next conditional poll"
-        );
     }
 
-    /// Candidate C11: an ETag with no tracked track refers to nothing
-    /// actionable (e.g. the previous 200 carried an episode/ad item) —
-    /// drop it so the next poll re-establishes ground truth
-    /// unconditionally.
+    /// Issue #242: a 304 with no tracked track means "still nothing playing".
+    /// It must advance the pause backoff exactly like an unconditional 204
+    /// no-track (steady conditional GETs, no 304/drop/unconditional
+    /// oscillation, no stalled backoff).
     #[test]
-    fn test_not_modified_without_tracked_track_drops_etag() {
+    fn test_not_modified_without_tracked_track_advances_pause_backoff() {
         let config = Some(crate::config::AppConfig::default());
-        let mut last_etag = Some("\"orphan\"".to_string());
-        let mut consecutive_pauses: u8 = 4;
+        let mut consecutive_pauses: u8 = 1;
         let mut transient_failure_count: u8 = 1;
 
         let iteration = not_modified_iteration(
             &None,
-            &mut last_etag,
             &mut consecutive_pauses,
             &mut transient_failure_count,
             &config,
         );
 
-        assert!(
-            matches!(iteration, PollIteration::Sleep { .. }),
-            "304 must yield a Sleep iteration"
+        let seconds = match iteration {
+            PollIteration::Sleep { seconds } => seconds,
+            _ => panic!("304 must yield a Sleep iteration"),
+        };
+        assert_eq!(
+            seconds, 60,
+            "idle 304 must sleep the pause backoff (2x default at pauses=1), matching 204 no-track"
         );
-        assert_eq!(last_etag, None, "orphan validator must be dropped");
+        assert_eq!(
+            consecutive_pauses, 2,
+            "idle 304 must advance the pause counter like a 204 no-track"
+        );
         assert_eq!(
             transient_failure_count, 0,
             "a 304 counts as success for the 5-strikes counter"
