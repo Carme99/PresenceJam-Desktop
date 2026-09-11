@@ -144,17 +144,21 @@ fn decrypt_tokens(key: &[u8; 32], bytes: &[u8]) -> Result<Vec<u8>, String> {
 
 /// Resolve the path to `tokens.json` under the app's config dir.
 ///
-/// We use `app_config_dir` (not `app_data_dir`) so the file is co-located
-/// with `config.json` under `dirs::config_dir()/PresenceJam/` — same dir
-/// as `config::config_dir()`. This keeps user-visible backup/restore
-/// instructions simple: one folder, two files.
+/// NOTE (issue #300): this is intentionally NOT the same directory as
+/// `config.json`. Tauri's `app_config_dir()` already appends the bundle
+/// identifier, so tokens live under `<base>/com.presencejam.app/PresenceJam/`
+/// (e.g. `~/.config/com.presencejam.app/PresenceJam/tokens.json` on Linux)
+/// while `config::config_dir()` is `<base>/PresenceJam/` (e.g.
+/// `~/.config/PresenceJam/config.json`). Keep user-visible backup/restore
+/// instructions naming BOTH directories.
 pub fn tokens_file_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let base = app
         .path()
         .app_config_dir()
         .map_err(|e| format!("Failed to get app config dir: {}", e))?;
-    // Mirror config.rs::config_dir() so the file lives in the same
-    // `<base>/PresenceJam/` folder as `config.json`.
+    // NOTE (issue #300): unlike config.rs::config_dir(), the Tauri base
+    // already contains the bundle id, so this is a DIFFERENT folder from
+    // `config.json` — `<base>/com.presencejam.app/PresenceJam/`.
     let dir = base.join("PresenceJam");
     if !dir.exists() {
         fs::create_dir_all(&dir)
