@@ -203,6 +203,12 @@ export const de: Dict = {
   'diagnostics.tokensNeverIncluded':
     'Token-Werte sind nie enthalten — nur Ablaufzeitstempel und Präsenzflags.',
   'diagnostics.noLogLinesYet': 'Noch keine Protokollzeilen verfügbar.',
+  'diagnostics.failedInstallTitle': 'Fehlgeschlagene Update-Installation',
+  'diagnostics.failedInstallVersion': 'Version',
+  'diagnostics.failedInstallError': 'Fehler',
+  'diagnostics.failedInstallTimestamp': 'Versuch um',
+  'diagnostics.failedInstallDismissFailed':
+    'Der Eintrag zur fehlgeschlagenen Installation konnte nicht verworfen werden.',
 
   // ── reconnect ─────────────────────────────────────────────────────
   'reconnect.title': 'Erneut verbinden',
