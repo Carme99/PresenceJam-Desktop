@@ -66,6 +66,8 @@ export const fr: Dict = {
     "La synchronisation s'est arrêtée de manière inattendue. Veuillez redémarrer PresenceJam.",
   'dashboard.credentialCheckFailed':
     "Impossible de vérifier les identifiants — veuillez réessayer.",
+  'dashboard.syncToggleFailed':
+    "Impossible de modifier l'état de la synchronisation. Veuillez réessayer.",
   'dashboard.statusNotConfigured': 'Non configuré',
   'dashboard.statusNoTrack': 'Aucun titre en lecture',
   'dashboard.live': 'En direct',
