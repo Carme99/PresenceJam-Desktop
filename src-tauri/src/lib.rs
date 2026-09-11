@@ -976,6 +976,7 @@ pub fn run() {
             commands::misc::update_tray_menu_state,
             commands::misc::relaunch_app,
             updater_bg::stage_deferred_update,
+            updater_bg::clear_failed_update_install,
             commands::playback::playback_play,
             commands::playback::playback_pause,
             commands::playback::playback_next,

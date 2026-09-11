@@ -196,6 +196,11 @@ export const en = {
   'diagnostics.tokensNeverIncluded':
     'Token values are never included — expiry timestamps and presence flags only.',
   'diagnostics.noLogLinesYet': 'No log lines available yet.',
+  'diagnostics.failedInstallTitle': 'Failed update install',
+  'diagnostics.failedInstallVersion': 'Version',
+  'diagnostics.failedInstallError': 'Error',
+  'diagnostics.failedInstallTimestamp': 'Attempted at',
+  'diagnostics.failedInstallDismissFailed': 'Could not dismiss the failed-install record.',
 
   // ── reconnect ─────────────────────────────────────────────────────
   'reconnect.title': 'Reconnect',
