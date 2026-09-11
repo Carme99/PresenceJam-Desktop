@@ -6,9 +6,12 @@
 #   - Labels so Dependabot PRs are filterable alongside regular work
 #   - Dependabot security updates (already enabled) auto-PR vulns as before
 #   - Tracking visibility: filter by `label:dependencies` to see all Dependabot PRs
-# Last reviewed: 2026-06-25 — adds schedule/pr-limit/groups/majors-ignore to the
-# github-actions block (was inconsistent with npm + cargo); also adds the
-# `deps(ci)` commit prefix to match the npm/cargo patterns.
+# Last reviewed: 2026-09-11 — dropped `include: "scope"` from all three
+#   commit-message blocks (#267): the explicit `prefix` already carries the
+#   scope, and `include: scope` appended the dependency type on top of it,
+#   emitting doubled subjects like `deps(frontend)(deps):`. The 2026-06-25
+#   review added the github-actions schedule/pr-limit/groups/majors-ignore and
+#   the `deps(ci)` commit prefix.
 version: 2
 
 updates:
@@ -30,7 +33,6 @@ updates:
       - "frontend"
     commit-message:
       prefix: "deps(frontend)"
-      include: "scope"
     ignore:
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
@@ -53,7 +55,6 @@ updates:
       - "backend"
     commit-message:
       prefix: "deps(backend)"
-      include: "scope"
     ignore:
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
@@ -79,7 +80,6 @@ updates:
       - "ci"
     commit-message:
       prefix: "deps(ci)"
-      include: "scope"
     ignore:
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
