@@ -145,18 +145,18 @@ Before diving in, check these basics:
 
 ### Status doesn't clear when Spotify is paused
 
-**Cause:** The `clear_on_pause` config option may be disabled, or you're using Spotify Web Player instead of the desktop app.
+**Cause:** The `teams.clear_on_pause` option in `config.json` may be disabled, or you're using Spotify Web Player instead of the desktop app.
 
 **Fix:**
-1. Check Settings → polling config
+1. Check `teams.clear_on_pause` in `config.json` — it is config-file only (no Settings toggle); edit the file and restart the app to change it
 2. Ensure you're using the Spotify desktop app (not web player) — the API detects both, but desktop is more reliable
 
 ### Status shows but disappears quickly
 
-**Cause:** PresenceJam sets the status message's expiry (`expiryDateTime`) to the track's end time plus a buffer (default 10 s; `polling.expiry_buffer_seconds` in `config.json`). When the track ends, pauses, or stops, the app expires or clears/replaces the status on the next poll. There is no server-side 24-hour cap — the Teams client's "Clear status message after" dropdown (which includes 24 h) affects only messages you set in the Teams UI, not Graph-set messages.
+**Cause:** PresenceJam sets the status message's expiry (`expiryDateTime`) to the track's end time plus a buffer (default 10 s; `polling.expiry_buffer_seconds` in `config.json`). When playback pauses or stops, the replacement placeholder itself expires 60 s after posting, so it self-removes about a minute after the last post even if the app quits. There is no server-side 24-hour cap — the Teams client's "Clear status message after" dropdown (which includes 24 h) affects only messages you set in the Teams UI, not Graph-set messages.
 
 **Fix:**
-This is the app's own expiry/clear mechanism, not a Teams limitation. To keep the status visible longer, raise the buffer in `config.json` (`polling.expiry_buffer_seconds`) or disable Clear on pause.
+This is the app's own expiry/clear mechanism, not a Teams limitation. To keep the status visible longer, raise the buffer in `config.json` (`polling.expiry_buffer_seconds`) and restart the app — or set `teams.clear_on_pause` to `false` in `config.json` (config-file only, no Settings toggle) and restart the app.
 
 ## Profanity Filter
 
