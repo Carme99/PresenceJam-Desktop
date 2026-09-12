@@ -2,9 +2,11 @@ use crate::profanity;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
+use tauri::Emitter;
 
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
@@ -299,17 +301,115 @@ fn with_keychain_flags(mut config: AppConfig) -> AppConfig {
     config.spotify.client_secret_set = crate::keychain::has_spotify_client_secret();
     config
 }
-/// One-shot startup migration:
-/// `spotify.client_secret` field (legacy from ≤ v2.5.0), write it to
+/// Frontend event emitted (once per process) when the legacy-plaintext
+/// migration finds a *different* secret already in the OS keychain.
+///
+/// The Settings view should listen for this event and prompt the user to
+/// run Settings → Reconnect Spotify. See issue #376.
+pub const SPOTIFY_SECRET_CONFLICT_EVENT: &str = "spotify-secret-conflict";
+/// One-shot startup migration for the legacy `spotify.client_secret`
+/// field (≤ v2.5.0): write it to
 /// the OS keychain and strip the plaintext from the file. Idempotent
 /// and safe to call on every startup.
 ///
 /// Conflict policy: if the keychain already holds a *different*
 /// secret, the migration is a no-op (we don't clobber a working
-/// keychain entry with another install's plaintext). The user can
-/// resolve the conflict via Settings → Reconnect Spotify. See audit
-/// Q3 and issue #9.
+/// keychain entry with another install's plaintext, and we do NOT delete
+/// the plaintext unilaterally — the user may need it). The user resolves
+/// the conflict via Settings → Reconnect Spotify. See audit Q3 and
+/// issues #9 and #376.
+///
+/// Bounded notification: the conflict is surfaced exactly once per process
+/// (see `migrate_legacy_client_secret_with_app`; a process-wide flag guards
+/// the emit) — there is no retry loop or timeout that auto-deletes the
+/// plaintext. Manual step: after Reconnect Spotify stores the current
+/// secret in the keychain, the next launch either completes the migration
+/// (keychain empty / identical value → plaintext stripped) or re-emits
+/// this event while the stale plaintext is still present.
+/// Log-only variant kept for backward compatibility (no `AppHandle`
+/// available at some call sites). Prefer
+/// `migrate_legacy_client_secret_with_app`, which additionally surfaces a
+/// keychain conflict to the UI via [`SPOTIFY_SECRET_CONFLICT_EVENT`].
 pub fn migrate_legacy_client_secret() {
+    run_legacy_secret_migration();
+}
+/// Startup migration with user-visible conflict surfacing (issue #376).
+///
+/// Runs the same migration as [`migrate_legacy_client_secret`]; when the
+/// outcome is [`LegacySecretOutcome::ConflictKeychainDiffers`], emits a
+/// one-time [`SPOTIFY_SECRET_CONFLICT_EVENT`] so Settings can prompt
+/// Settings → Reconnect Spotify (payload carries the manual step).
+/// All other outcomes are silent apart from the usual `[CFG]` logs.
+///
+/// Wiring note (orchestrator): `lib.rs` setup currently calls the log-only
+/// `migrate_legacy_client_secret()`; swap that call site to
+/// `config::migrate_legacy_client_secret_with_app(app.handle())` so the
+/// conflict becomes user-visible. This file is slice-D owned, so the
+/// one-line swap lives outside this change.
+pub fn migrate_legacy_client_secret_with_app(app: &tauri::AppHandle) {
+    if run_legacy_secret_migration() == LegacySecretOutcome::ConflictKeychainDiffers {
+        emit_spotify_secret_conflict_once(app);
+    }
+}
+/// Observable outcome of one [`run_legacy_secret_migration`] pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LegacySecretOutcome {
+    /// No `spotify.client_secret` plaintext field (or it was empty):
+    /// nothing to do. Also returned when the config file is missing,
+    /// unreadable, or unparsable, or a keychain write / file rewrite
+    /// failed part-way (plaintext left on disk in those cases).
+    NoLegacyField,
+    /// Plaintext migrated into an empty keychain (or the keychain
+    /// already held the identical value) and the strip pass ran.
+    Migrated,
+    /// Keychain already holds a *different* secret: plaintext deliberately
+    /// left on disk. The caller must surface this via
+    /// [`SPOTIFY_SECRET_CONFLICT_EVENT`].
+    ConflictKeychainDiffers,
+}
+/// Pure decision step of the migration: given the legacy plaintext (if any)
+/// and the current keychain read, decide the outcome without touching disk
+/// or the keychain. Unit-tested directly (issue #376).
+fn decide_legacy_secret_outcome(
+    plaintext: Option<&str>,
+    keychain: &Result<String, String>,
+) -> LegacySecretOutcome {
+    let plaintext = match plaintext {
+        Some(s) if !s.is_empty() => s,
+        _ => return LegacySecretOutcome::NoLegacyField,
+    };
+    match keychain {
+        Ok(existing) if existing == plaintext => LegacySecretOutcome::Migrated,
+        Ok(_) => LegacySecretOutcome::ConflictKeychainDiffers,
+        Err(_) => LegacySecretOutcome::Migrated,
+    }
+}
+/// Process-wide guard so the conflict event fires at most once per launch,
+/// no matter how often the migration entry points are called.
+static CONFLICT_EVENT_SENT: AtomicBool = AtomicBool::new(false);
+/// Emit [`SPOTIFY_SECRET_CONFLICT_EVENT`] unless already sent this process.
+/// Follows the `let _ = app.emit(...)` pattern used in `poll_once.rs`;
+/// the payload tells Settings to prompt Reconnect Spotify. Returns true
+/// when this call performed the (single) emit.
+fn emit_spotify_secret_conflict_once(app: &tauri::AppHandle) -> bool {
+    if CONFLICT_EVENT_SENT.swap(true, Ordering::AcqRel) {
+        return false;
+    }
+    log::warn!(
+        "[CFG] migrate_legacy_client_secret: EMIT {} event (prompt Settings → Reconnect Spotify)",
+        SPOTIFY_SECRET_CONFLICT_EVENT
+    );
+    let _ = app.emit(
+        SPOTIFY_SECRET_CONFLICT_EVENT,
+        serde_json::json!({
+            "action": "reconnect-spotify",
+            "message": "The Spotify client secret in config.json differs from the one in the OS keychain. Open Settings → Reconnect Spotify to resolve. The legacy plaintext is left untouched until then.",
+        }),
+    );
+    true
+}
+/// Executes the migration IO and returns its observable outcome.
+fn run_legacy_secret_migration() -> LegacySecretOutcome {
     let path = match get_config_path() {
         Ok(p) => p,
         Err(e) => {
@@ -317,17 +417,17 @@ pub fn migrate_legacy_client_secret() {
                 "[CFG] migrate_legacy_client_secret: config path unavailable: {}",
                 e
             );
-            return;
+            return LegacySecretOutcome::NoLegacyField;
         }
     };
     if !path.exists() {
-        return; // Fresh install — nothing to migrate.
+        return LegacySecretOutcome::NoLegacyField; // Fresh install — nothing to migrate.
     }
     let contents = match fs::read_to_string(&path) {
         Ok(s) => s,
         Err(e) => {
             log::warn!("[CFG] migrate_legacy_client_secret: read failed: {}", e);
-            return;
+            return LegacySecretOutcome::NoLegacyField;
         }
     };
     // Parse as raw Value so we can inspect unknown / pre-v2.6.0 fields
@@ -338,7 +438,7 @@ pub fn migrate_legacy_client_secret() {
         Ok(v) => v,
         Err(e) => {
             log::warn!("[CFG] migrate_legacy_client_secret: parse failed: {}", e);
-            return;
+            return LegacySecretOutcome::NoLegacyField;
         }
     };
     let plaintext = root
@@ -346,23 +446,19 @@ pub fn migrate_legacy_client_secret() {
         .and_then(|s| s.get("client_secret"))
         .and_then(|v| v.as_str())
         .map(str::to_string);
-    let plaintext = match plaintext {
-        Some(s) if !s.is_empty() => s,
-        _ => {
+    let keychain_read = crate::keychain::get_spotify_client_secret();
+    let outcome = decide_legacy_secret_outcome(plaintext.as_deref(), &keychain_read);
+    match (&outcome, &keychain_read) {
+        (LegacySecretOutcome::NoLegacyField, _) => {
             log::debug!("[CFG] migrate_legacy_client_secret: no legacy plaintext field");
-            return;
+            return outcome;
         }
-    };
-    // Conflict check: if keychain already holds a *different* secret,
-    // don't clobber it. Leave the plaintext in place; the user can
-    // resolve via Settings → Reconnect Spotify.
-    match crate::keychain::get_spotify_client_secret() {
-        Ok(existing) if existing == plaintext => {
-            log::info!(
-                "[CFG] migrate_legacy_client_secret: keychain already holds this value, stripping plaintext only"
-            );
-        }
-        Ok(existing) => {
+        (LegacySecretOutcome::ConflictKeychainDiffers, Ok(existing)) => {
+            // Conflict check: if keychain already holds a *different* secret,
+            // don't clobber it. Leave the plaintext in place; the user can
+            // resolve via Settings → Reconnect Spotify (surfaced via
+            // `spotify-secret-conflict`; see `migrate_legacy_client_secret_with_app`).
+            let plaintext = plaintext.unwrap_or_default();
             log::warn!(
                 "[CFG] migrate_legacy_client_secret: keychain holds a different secret; leaving config.json untouched (user should Reconnect)"
             );
@@ -371,18 +467,28 @@ pub fn migrate_legacy_client_secret() {
                 plaintext.len(),
                 existing.len()
             );
-            return;
+            return outcome;
         }
-        Err(_) => {
-            // Keychain empty (the typical pre-v2.6.0-upgrader case).
-            // Write the plaintext into the keychain, then strip the file.
-            log::info!("[CFG] migrate_legacy_client_secret: keychain empty, writing plaintext into keychain");
-            if let Err(e) = crate::keychain::store_spotify_client_secret(&plaintext) {
-                log::warn!(
-                    "[CFG] migrate_legacy_client_secret: keychain write failed: {} (plaintext left in config.json)",
-                    e
+        _ => {
+            // Keychain empty (the typical pre-v2.6.0-upgrader case), or it
+            // already holds the identical value (strip-only). Write the
+            // plaintext into the keychain only when the keychain is empty.
+            if keychain_read.is_err() {
+                log::info!("[CFG] migrate_legacy_client_secret: keychain empty, writing plaintext into keychain");
+                // `plaintext` is `Some(non-empty)` here: `decide_*` only
+                // returns `Migrated` for `Some(non-empty)` input.
+                let plaintext = plaintext.unwrap_or_default();
+                if let Err(e) = crate::keychain::store_spotify_client_secret(&plaintext) {
+                    log::warn!(
+                        "[CFG] migrate_legacy_client_secret: keychain write failed: {} (plaintext left in config.json)",
+                        e
+                    );
+                    return LegacySecretOutcome::NoLegacyField;
+                }
+            } else {
+                log::info!(
+                    "[CFG] migrate_legacy_client_secret: keychain already holds this value, stripping plaintext only"
                 );
-                return;
             }
         }
     }
@@ -397,7 +503,7 @@ pub fn migrate_legacy_client_secret() {
                 "[CFG] migrate_legacy_client_secret: re-serialise failed: {}",
                 e
             );
-            return;
+            return LegacySecretOutcome::NoLegacyField;
         }
     };
     if let Err(e) = atomic_write_json(&path, &new_contents) {
@@ -410,6 +516,7 @@ pub fn migrate_legacy_client_secret() {
             "[CFG] migrate_legacy_client_secret: SUCCESS — plaintext stripped from config.json"
         );
     }
+    LegacySecretOutcome::Migrated
 }
 
 fn atomic_write_json(path: &std::path::Path, json: &str) -> Result<(), String> {
@@ -668,5 +775,56 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #376: the keychain/config conflict branch must resolve to a
+    /// dedicated outcome (which the `_with_app` entry point turns into a
+    /// user-visible `spotify-secret-conflict` event) — never silently to
+    /// `Migrated` (which strips the file) or `NoLegacyField` (which stays
+    /// log-only). Case from the issue repro: config plaintext "AAA" vs
+    /// keychain "BBB".
+    #[test]
+    fn test_decide_legacy_secret_conflict_keychain_differs() {
+        let outcome = decide_legacy_secret_outcome(
+            Some("AAA"),
+            &Ok("BBB".to_string()),
+        );
+        assert_eq!(outcome, LegacySecretOutcome::ConflictKeychainDiffers);
+    }
+    #[test]
+    fn test_decide_legacy_secret_outcome_matrix() {
+        // No plaintext at all (fresh install / already migrated).
+        assert_eq!(
+            decide_legacy_secret_outcome(None, &Err("empty".to_string())),
+            LegacySecretOutcome::NoLegacyField
+        );
+        // Empty-string field is not a secret.
+        assert_eq!(
+            decide_legacy_secret_outcome(Some(""), &Err("empty".to_string())),
+            LegacySecretOutcome::NoLegacyField
+        );
+        // Empty keychain (typical pre-v2.6.0 upgrader): migrate + strip.
+        assert_eq!(
+            decide_legacy_secret_outcome(Some("AAA"), &Err("empty".to_string())),
+            LegacySecretOutcome::Migrated
+        );
+        // Keychain already holds the identical value: strip-only.
+        assert_eq!(
+            decide_legacy_secret_outcome(Some("AAA"), &Ok("AAA".to_string())),
+            LegacySecretOutcome::Migrated
+        );
+        // Same value with surrounding keychain state must not count as a
+        // conflict: equality is exact, so near-misses still conflict.
+        assert_eq!(
+            decide_legacy_secret_outcome(Some("AAA"), &Ok("AAA ".to_string())),
+            LegacySecretOutcome::ConflictKeychainDiffers
+        );
+    }
+    /// The frontend listens on the literal event name, so a rename of the
+    /// constant silently breaks Settings without a compile error on either
+    /// side. Pin the contract string (issue #376).
+    #[test]
+    fn test_spotify_secret_conflict_event_name_contract() {
+        assert_eq!(SPOTIFY_SECRET_CONFLICT_EVENT, "spotify-secret-conflict");
     }
 }
