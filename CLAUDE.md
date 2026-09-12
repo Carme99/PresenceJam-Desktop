@@ -77,7 +77,7 @@ Types: `feat`, `fix`, `docs`, `test`, `refactor`, `chore`
 
 ## Storage
 
-- Tokens stored in `<config dir>/tokens.json` as AES-256-GCM ciphertext (`token_io.rs`); the 256-bit key lives in the OS keychain via the `keyring` crate (DPAPI on Windows, Keychain on macOS, Secret Service on Linux)
+- Tokens stored as AES-256-GCM ciphertext in `%APPDATA%\com.presencejam.app\PresenceJam\tokens.json` (Windows), `~/Library/Application Support/com.presencejam.app/PresenceJam/tokens.json` (macOS), `$XDG_CONFIG_HOME/com.presencejam.app/PresenceJam/tokens.json` (Linux) via `token_io.rs` — NOT the same folder as `config.json` (issue #300: Tauri `app_config_dir()` appends the bundle id); the 256-bit key lives in the OS keychain via the `keyring` crate (DPAPI on Windows, Keychain on macOS, Secret Service on Linux)
 - Config stored as plain JSON in `%APPDATA%\PresenceJam\config.json` (Windows), `~/Library/Application Support/PresenceJam/` (macOS) or `$XDG_CONFIG_HOME/PresenceJam/` (Linux)
 - Logs: single `PresenceJam.log` via tauri-plugin-log's LogDir target (Windows `%APPDATA%\PresenceJam\logs\`, macOS `~/Library/Logs/PresenceJam/`, Linux `~/.local/share/PresenceJam/logs/`) — no rotation or retention pruning
 

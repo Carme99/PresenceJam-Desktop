@@ -72,6 +72,11 @@ pub struct DiagnosticsSnapshot {
     pub recent_logs: Vec<String>,
     /// Human-readable status of the log-tail collection (ok/error text).
     pub log_source_status: String,
+    /// Exit-time update install that failed on a previous run (issue #244),
+    /// read from the marker written by `updater_bg::install_pending_on_exit`.
+    /// `None` when the last exit-time install succeeded or none was
+    /// attempted. Never contains secrets.
+    pub failed_update_install: Option<crate::updater_bg::FailedUpdateInstall>,
 }
 
 /// Coarse OS identity from `std::env::consts` (no new deps; the
@@ -413,6 +418,7 @@ fn build_snapshot(
         keychain,
         recent_logs,
         log_source_status,
+        failed_update_install: crate::updater_bg::read_failed_install_marker(),
     }
 }
 

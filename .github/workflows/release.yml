@@ -18,7 +18,11 @@ on:
 permissions:
   contents: write
 concurrency:
-  group: release-${{ github.ref }}
+  # Only runs of the same kind serialise: two tag pushes for one tag
+  # must not race on the same Release. A workflow_dispatch re-cut is a
+  # deliberate recovery of a tag-push run (see the header note above)
+  # and must not queue behind it, so the event name is part of the key.
+  group: release-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -303,6 +307,11 @@ jobs:
       - name: Create GitHub Release
         uses: ncipollo/release-action@339a81892b84b4eeb0f6e744e4574d79d0d9b8dd  # v1.21.0
         with:
+          # Tag explicitly, never github.context.ref: a manual re-cut is
+          # dispatched from a branch (or from an older tag), and the
+          # action would otherwise publish this run's artifacts onto
+          # that ref's Release instead of the tag resolve-tag resolved.
+          tag: ${{ needs.resolve-tag.outputs.tag }}
           artifacts: artifacts/**/*
           draft: false
           prerelease: false
@@ -474,14 +483,20 @@ jobs:
           # Sanity-check the credential helper works before any commit/push.
           git ls-remote --heads origin main >/dev/null
 
-          # If the formula is already at this version, nothing to do.
+          # A no-op only when the formula already describes this exact
+          # artifact: same version AND same sha256. The version alone is
+          # not enough — a re-cut can republish a byte-different DMG
+          # under the same version (see the winget job's note below), and
+          # exiting early here would leave the tap pinned to a dead
+          # digest while CI reports success.
           if [ -f presence-jam.rb ]; then
             CURRENT_VERSION=$(grep -E '^  version ' presence-jam.rb | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
-            if [ "${CURRENT_VERSION}" = "${VERSION}" ]; then
-              echo "Formula is already at v${VERSION}, no change"
+            CURRENT_SHA=$(grep -E '^  sha256 ' presence-jam.rb | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+            if [ "${CURRENT_VERSION}" = "${VERSION}" ] && [ "${CURRENT_SHA}" = "${SHA}" ]; then
+              echo "Formula is already at v${VERSION} (sha256=${SHA}), no change"
               exit 0
             fi
-            echo "Formula currently at v${CURRENT_VERSION}, updating to v${VERSION}"
+            echo "Formula currently at v${CURRENT_VERSION} (sha256=${CURRENT_SHA}), updating to v${VERSION} (sha256=${SHA})"
           else
             echo "Formula does not exist yet, creating it"
           fi
