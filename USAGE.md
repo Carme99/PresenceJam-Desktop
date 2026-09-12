@@ -37,11 +37,11 @@ The main screen showing your current sync status.
 
 **Connection status badges:**
 - Green — connected and authenticated
-- Red — disconnected or token expired — click to reconnect
+- Red — not connected or token expired — follow the Reconnect view to sign in again
 
 **Sync toggle:**
-- **Start Syncing** — begins polling Spotify and updating your Teams status
-- **Stop Syncing** — pauses polling, your Teams status remains unchanged
+- An icon-only **▶** / **⏸** button in the Dashboard header — its tooltip and screen-reader label read **Resume sync** / **Pause sync**
+- **▶** starts polling Spotify and updating your Teams status; **⏸** pauses polling, and your Teams status remains unchanged
 
 **Currently playing card:**
 - Shows the active track (artist, track name, album art if available)

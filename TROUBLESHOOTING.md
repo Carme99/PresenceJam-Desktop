@@ -30,8 +30,8 @@ Before diving in, check these basics:
 
 **Fix:**
 1. Check if a popup was blocked in your browser
-2. Try opening the URL manually — the auth URL will be logged in the terminal
-3. If it still doesn't work, paste the redirect URL manually when prompted
+2. Retry **Connect Spotify** (or **Reconnect** in Settings) — the app hands the authorization URL to your default browser. If that handoff fails you'll see a `Failed to open browser` warning from `[CMD.SPOTIFY_AUTH]` in the in-app **Log Viewer** (see [Logs](#logs))
+3. If it still doesn't work, paste the full redirect URL manually when prompted — see [Paste URL but nothing happens](#paste-url-but-nothing-happens)
 
 ### Paste URL but nothing happens
 
@@ -66,7 +66,7 @@ Before diving in, check these basics:
 
 ### "Playback control needs a one-time reconnect" banner
 
-**Cause:** v3.0 added the `user-modify-playback-state` scope; tokens granted before the upgrade don't have it, so the tray playback controls won't work until you re-auth.
+**Cause:** Tray playback control needs the `user-modify-playback-state` scope, which older stored tokens don't carry — a token granted before that scope was added can't control playback until you re-auth.
 
 **Fix:** Click **Reconnect** in the banner (or Settings → reconnect Spotify) once. You only need to do this once after upgrading.
 
@@ -100,7 +100,7 @@ Before diving in, check these basics:
 
 ### "Presence features need a one-time Teams reconnect" banner
 
-**Cause:** v3.0 added the `Presence.Read` (presence gating) and `profile` (object-id claim for availability sync) scopes; tokens granted before the upgrade don't carry them, so the **Settings → Presence** toggles won't take effect until you re-auth.
+**Cause:** The **Settings → Presence** toggles need the `Presence.Read` (presence gating) and `profile` (object-id claim for availability sync) scopes, which older stored tokens don't carry — so the toggles won't take effect until you re-auth.
 
 **Fix:** Click **Reconnect** in the banner (or Settings → reconnect Teams) once. You only need to do this once after upgrading.
 
@@ -140,7 +140,7 @@ Before diving in, check these basics:
 
 1. Check the Dashboard shows both Spotify and Teams as connected (green badges)
 2. Start playing a track on Spotify
-3. Wait 10-30 seconds for the polling interval
+3. Wait for the next poll: with a track playing, the status updates within a few seconds; when nothing is playing, the app backs off between polls (30 s → 60 s → 120 s → 300 s), so an idle app can take up to five minutes to react. Failed polls retry after ~30 s (±20%)
 4. If still nothing, check the log viewer for API errors
 
 ### Status doesn't clear when Spotify is paused
