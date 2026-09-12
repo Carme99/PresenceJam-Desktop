@@ -23,6 +23,10 @@ export const de: Dict = {
   'common.themeToggle': 'Design umschalten',
   'common.waiting': 'Warten…',
   'common.waitingForSignIn': 'Warten auf Anmeldung…',
+  // Best-effort translation (no native review yet) — see wave/slice-e PR body.
+  'common.codeExpiresIn': 'Code läuft in {time} ab',
+  'common.codeExpired': 'Dieser Code ist abgelaufen — er kann nicht mehr verwendet werden.',
+  'common.getNewCode': 'Neuen Code anfordern',
   'common.yes': 'Ja',
   'common.no': 'Nein',
   'common.tagline': 'Spotify → Teams-Status',
