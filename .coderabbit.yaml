@@ -1,0 +1,17 @@
+# CodeRabbit configuration.
+#
+# Automatic review is OFF for this repository. Reviews are opt-in per pull
+# request: add the `review-ready` label (or comment `@coderabbitai review`)
+# when you actually want one. This keeps the noise down on large batches of
+# small, mechanical PRs while leaving the option open.
+language: en-GB
+reviews:
+  auto_review:
+    enabled: false
+    labels:
+      - review-ready
+  # Fewer drive-by nitpicks when a review IS requested.
+  profile: chill
+  poem: false
+chat:
+  auto_reply: true

@@ -126,9 +126,14 @@ fn is_onboarding_complete_impl(state: &Arc<AppState>) -> Result<bool, String> {
 
 #[tauri::command]
 pub async fn complete_onboarding(
+    window: tauri::Window,
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<(), String> {
+    // Issue #241: onboarding completion starts sync + writes state; the
+    // Onboarding view is main-window-only. The window is forwarded to the
+    // Rust-side `start_syncing` call below so its guard sees a main label.
+    super::require_main_window(&window)?;
     log::debug!("{CMD} complete_onboarding: ENTRY");
 
     let has_spotify = {
@@ -149,7 +154,7 @@ pub async fn complete_onboarding(
 
     if has_spotify && has_teams {
         log::info!("{CMD} complete_onboarding: both tokens present, starting sync");
-        super::sync::start_syncing(state, app).await?;
+        super::sync::start_syncing(window, state, app).await?;
         log::info!("{CMD} complete_onboarding: sync started successfully");
     } else {
         log::error!(

@@ -257,13 +257,17 @@ To fully remove PresenceJam:
 1. **Quit the app** (right-click tray → Quit)
 2. **Delete the app:**
    - Windows Settings → Apps → PresenceJam → Uninstall
-3. **Delete user data** (optional — removes all tokens and config):
+3. **Delete user data** (optional — removes all tokens and config).
+   `config.json` and `tokens.json` are NOT in the same folder (issue #300),
+   so delete both directories:
    ```
    %APPDATA%\PresenceJam\
+   %APPDATA%\com.presencejam.app\PresenceJam\
    ```
    You can also use PowerShell:
    ```powershell
    Remove-Item -Recurse -Force "$env:APPDATA\PresenceJam"
+   Remove-Item -Recurse -Force "$env:APPDATA\com.presencejam.app\PresenceJam"
    ```
 
 Note: Your Spotify app credentials in the Spotify Developer Dashboard are unaffected.

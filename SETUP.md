@@ -122,7 +122,7 @@ Upgrading to 3.0 adds new OAuth scopes on both providers, so **both** require a 
 
 Click **Reconnect** in the banner (or Settings → reconnect the service) — you only need to do this once per provider.
 
-Your `tokens.json` migrates automatically: on first read, v3.0 detects a ≤2.x plaintext file, encrypts it with AES-256-GCM, and rewrites it. No manual step. The existing folder-copy backup advice still applies unchanged — `config.json` and `tokens.json` live together in `%APPDATA%\PresenceJam\` / `~/Library/Application Support/PresenceJam/`.
+Your `tokens.json` migrates automatically: on first read, v3.0 detects a ≤2.x plaintext file, encrypts it with AES-256-GCM, and rewrites it. No manual step. For folder-copy backups, copy BOTH directories — they are not co-located (issue #300): `config.json` lives in `%APPDATA%\PresenceJam\` / `~/Library/Application Support/PresenceJam/` / `$XDG_CONFIG_HOME/PresenceJam/`, while `tokens.json` lives under the bundle-id folder `%APPDATA%\com.presencejam.app\PresenceJam\` / `~/Library/Application Support/com.presencejam.app/PresenceJam/` / `$XDG_CONFIG_HOME/com.presencejam.app/PresenceJam/`.
 
 ---
 
@@ -132,9 +132,12 @@ Your `tokens.json` migrates automatically: on first read, v3.0 detects a ≤2.x 
 %APPDATA%\PresenceJam\          (Windows)
 ~/Library/Application Support/PresenceJam/  (macOS)
 ├── config.json       # Your settings
-├── tokens.json       # Spotify + Teams tokens (AES-256-GCM ciphertext; decryption key in the OS keychain — see SECURITY.md)
 └── logs\            # Daily rotating application logs
+%APPDATA%\com.presencejam.app\PresenceJam\  (Windows — bundle-id folder)
+~/Library/Application Support/com.presencejam.app/PresenceJam/  (macOS)
+└── tokens.json       # Spotify + Teams tokens (AES-256-GCM ciphertext; decryption key in the OS keychain — see SECURITY.md)
 ```
+(Linux uses `$XDG_CONFIG_HOME` instead of `%APPDATA%` / `~/Library/Application Support`, same layout otherwise.) `config.json` and `tokens.json` are NOT in the same folder (issue #300) — back up or delete both.
 
 No data is sent to any third-party server — all tokens stay on your machine.
 

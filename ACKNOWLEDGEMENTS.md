@@ -7,6 +7,7 @@ PresenceJam uses the following open-source projects. We're grateful to all the m
 | Crate | Version | License | Purpose |
 |-------|---------|---------|---------|
 | [tauri](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Desktop application framework |
+| [tauri-build](https://github.com/tauri-apps/tauri) | 2.x | Apache-2.0 OR MIT | Build-time codegen (`build.rs`): manifest, permissions and capability resolution |
 | [tauri-plugin-opener](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | URL opening in default browser |
 | [tauri-plugin-deep-link](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Custom protocol handling |
 | [tauri-plugin-notification](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Windows toast notifications |
@@ -14,7 +15,7 @@ PresenceJam uses the following open-source projects. We're grateful to all the m
 | [tauri-plugin-single-instance](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Single-instance enforcement + deep-link forwarding |
 | [tauri-plugin-log](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | File-based logging |
 | [tauri-plugin-updater](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Auto-update with minisign-signed payloads |
-| [tauri-plugin-http](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | HTTP client |
+| [tauri-plugin-http](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | HTTP client plugin (registered in `lib.rs`; the webview grants no `http:*` permission — Teams/Spotify calls go through Rust `reqwest`) |
 | [reqwest](https://github.com/seanmonstar/reqwest) | 0.12 | Apache-2.0 OR MIT | HTTP client for Spotify/Graph APIs |
 | [serde](https://github.com/serde-rs/serde) | 1.x | Apache-2.0 OR MIT | Serialization framework |
 | [serde_json](https://github.com/serde-rs/json) | 1.x | Apache-2.0 OR MIT | JSON parsing |
@@ -37,9 +38,9 @@ PresenceJam uses the following open-source projects. We're grateful to all the m
 | Package | Version | License | Purpose |
 |---------|---------|---------|---------|
 | [@tauri-apps/api](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Tauri JavaScript API |
+| [@tauri-apps/cli](https://github.com/tauri-apps/tauri) | 2.x | Apache-2.0 OR MIT | Tauri CLI — the `tauri` binary behind every `npm run tauri` command |
 | [@tauri-apps/plugin-autostart](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Autostart plugin |
 | [@tauri-apps/plugin-deep-link](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Deep link plugin |
-| [@tauri-apps/plugin-http](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | HTTP plugin |
 | [@tauri-apps/plugin-log](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Log plugin |
 | [@tauri-apps/plugin-updater](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Updater plugin |
 | [@tauri-apps/plugin-notification](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Notification plugin |
@@ -49,7 +50,7 @@ PresenceJam uses the following open-source projects. We're grateful to all the m
 | [@sveltejs/kit](https://github.com/sveltejs/kit) | 2.x | MIT | Svelte app framework |
 | [@sveltejs/vite-plugin-svelte](https://github.com/sveltejs/vite-plugin-svelte) | 5.x | MIT | Vite Svelte plugin |
 | [svelte](https://github.com/sveltejs/svelte) | 5.x | MIT | UI framework |
-| [svelte-check](https://github.com/sveltejs/language-tools) | 4.x | MIT | Type-checking for the Svelte components (`npm run check`) |
+| [svelte-check](https://github.com/sveltejs/language-tools) | 4.x | MIT | Svelte/TypeScript type checking behind `npm run check` |
 | [typescript](https://github.com/microsoft/TypeScript) | 5.x | Apache-2.0 | TypeScript language |
 | [vite](https://github.com/vitejs/vite) | 6.x | MIT | Build tool |
 
