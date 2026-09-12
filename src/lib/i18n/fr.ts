@@ -120,6 +120,8 @@ export const fr: Dict = {
     "Terminez l'authentification dans le navigateur.",
   'settings.playbackScopeBanner':
     'Le contrôle de la lecture nécessite une reconnexion unique.',
+  'settings.spotifySecretConflict':
+    'Le secret client du fichier de configuration diffère de celui du trousseau. Reconnectez Spotify pour corriger cela.',
   'settings.teamsAuthHint':
     "L'authentification Teams utilise votre compte Microsoft 365. Aucune configuration supplémentaire requise.",
   'settings.presenceScopeBanner':

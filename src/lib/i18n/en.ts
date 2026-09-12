@@ -119,6 +119,8 @@ export const en = {
   'settings.reconnectSpotify': 'Reconnect Spotify',
   'settings.completeAuthInBrowser': 'Complete authentication in the browser.',
   'settings.playbackScopeBanner': 'Playback control needs a one-time reconnect.',
+  'settings.spotifySecretConflict':
+    'The client secret in your config file differs from the one in the keychain. Reconnect Spotify to resolve.',
   'settings.teamsAuthHint':
     'Teams authentication uses your Microsoft 365 account. No additional configuration required.',
   'settings.presenceScopeBanner': 'Presence features need a one-time Teams reconnect.',
