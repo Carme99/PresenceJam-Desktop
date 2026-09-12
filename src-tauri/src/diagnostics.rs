@@ -355,7 +355,9 @@ fn tail_log_file(log_dir: Option<std::path::PathBuf>) -> (Vec<String>, String) {
     };
     let path = dir.join(LOG_FILE_NAME);
     if !path.exists() {
-        return (Vec::new(), format!("no log file yet at {}", path.display()));
+        // Username hygiene (issue #409): the absolute path embeds the OS
+        // username — snapshot strings carry only the bare file name.
+        return (Vec::new(), format!("no log file yet ({})", LOG_FILE_NAME));
     }
     let collected = (|| -> Result<Vec<String>, String> {
         let len = fs::metadata(&path).map_err(|e| e.to_string())?.len();
@@ -379,10 +381,19 @@ fn tail_log_file(log_dir: Option<std::path::PathBuf>) -> (Vec<String>, String) {
             let status = format!("ok: last {} of {} lines", tail.len(), total);
             (tail, status)
         }
-        Err(e) => (
-            Vec::new(),
-            format!("error reading {}: {}", path.display(), e),
-        ),
+        Err(e) => {
+            // Full path stays in the local log only; the snapshot string
+            // carries just the file name (issue #409).
+            log::error!(
+                "[DIAG] tail_log_file: error reading {}: {}",
+                path.display(),
+                e
+            );
+            (
+                Vec::new(),
+                format!("error reading {}: {}", LOG_FILE_NAME, e),
+            )
+        }
     }
 }
 
@@ -570,6 +581,13 @@ mod tests {
         let (lines, status) = tail_log_file(Some(dir.clone()));
         assert!(lines.is_empty());
         assert!(status.contains("no log file yet"));
+        // Issue #409: the status string must not embed the absolute dir
+        // (it carries the OS username); only the bare file name travels.
+        assert!(status.contains(LOG_FILE_NAME));
+        assert!(
+            !status.contains(dir.to_str().unwrap()),
+            "log source status leaked the absolute log path"
+        );
 
         let log_path = dir.join(LOG_FILE_NAME);
         std::fs::write(&log_path, "[AUTH] code=hunter2secret\n[AUTH] clean line\n").unwrap();
@@ -577,6 +595,26 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0], "[AUTH] code=[REDACTED len 13]");
         assert_eq!(lines[1], "[AUTH] clean line");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_tail_log_file_error_status_has_no_absolute_path() {
+        // Issue #409: force the read-error branch by planting a
+        // directory where the log file should be (metadata succeeds,
+        // the byte read fails), then assert the snapshot status names
+        // only the file — never the username-bearing absolute path.
+        let dir = std::env::temp_dir().join(format!("pj-diag-err-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join(LOG_FILE_NAME)).unwrap();
+        let (lines, status) = tail_log_file(Some(dir.clone()));
+        assert!(lines.is_empty());
+        assert!(status.contains("error reading"));
+        assert!(status.contains(LOG_FILE_NAME));
+        assert!(
+            !status.contains(dir.to_str().unwrap()),
+            "error status leaked the absolute log path: {}",
+            status
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

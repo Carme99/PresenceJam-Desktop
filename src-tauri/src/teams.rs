@@ -180,27 +180,30 @@ pub fn start_teams_auth_device_code() -> Result<DeviceCodeResponse, String> {
         );
         format!("Failed to read response body: {}", e)
     })?;
-    log::info!(
-        "teams::start_teams_auth_device_code: raw response body: {}",
-        truncate_for_log(&raw_body)
-    );
 
     if !status.is_success() {
+        // Bearer hygiene (issue #348): the body may carry the
+        // `device_code` bearer credential, and this Err is error-logged
+        // by the caller — report the body length, never its content.
         return Err(format!(
-            "Device code request failed with status {}: {}",
+            "Device code request failed with status {} ({}-byte body)",
             status,
-            truncate_for_log(&raw_body)
+            raw_body.len()
         ));
     }
 
     let raw: DeviceCodeResponseRaw = serde_json::from_str(&raw_body).map_err(|e| {
         format!(
-            "Failed to parse device code response: {} (body was: {})",
+            "Failed to parse device code response: {} ({}-byte body)",
             e,
-            truncate_for_log(&raw_body)
+            raw_body.len()
         )
     })?;
-    log::info!("teams::start_teams_auth_device_code: parsed response");
+    log::info!(
+        "teams::start_teams_auth_device_code: received (expires_in={}s, interval={}s)",
+        raw.expires_in,
+        raw.interval
+    );
 
     let result = DeviceCodeResponse {
         user_code: raw.user_code,
@@ -1341,5 +1344,57 @@ mod tests {
         assert_eq!(super::parse_retry_after_value(&past_date), Some(0));
         assert_eq!(super::parse_retry_after_value("not-a-date"), None);
         assert_eq!(super::parse_retry_after_value(""), None);
+    }
+
+    // Issue #348: the device-code endpoint returns a bearer credential
+    // (`device_code`), and this function's Err values are error-logged
+    // by the caller — so its log/error surface must never carry the
+    // response body. Lengths and expiry/interval only. Brace-counted
+    // body isolation (order-independent): do not anchor on the next fn.
+    #[test]
+    fn device_code_flow_logs_no_response_body() {
+        let src = include_str!("teams.rs");
+        let sig_idx = src
+            .find("fn start_teams_auth_device_code()")
+            .expect("start_teams_auth_device_code must exist");
+        let brace_open_rel = src[sig_idx..]
+            .find('{')
+            .expect("function body must have an opening brace");
+        let body_start = sig_idx + brace_open_rel;
+        let mut depth: u32 = 0;
+        let mut i = body_start;
+        let body_end = loop {
+            match src.as_bytes()[i] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break i;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+            if i >= src.len() {
+                panic!("unbalanced braces in start_teams_auth_device_code");
+            }
+        };
+        let body = &src[body_start + 1..body_end];
+        assert!(
+            !body.contains("raw response body"),
+            "device-code response body must never be logged"
+        );
+        assert!(
+            !body.contains("truncate_for_log(&raw_body)"),
+            "device-code bearer must not reach log/error strings"
+        );
+        assert!(
+            body.contains("expires_in="),
+            "device-code receipt must still log expires_in/interval"
+        );
+        assert!(
+            body.contains("User code"),
+            "user-code line must stay: the user reads it to sign in"
+        );
     }
 }
