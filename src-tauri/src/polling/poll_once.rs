@@ -2152,7 +2152,7 @@ mod tests {
         );
     }
 
-/// Issue #262: the 5-strikes transient-failure counter must break the
+    /// Issue #262: the 5-strikes transient-failure counter must break the
     /// polling loop at exactly `TRANSIENT_FAILURE_EXIT_THRESHOLD` — no
     /// sooner (a transient blip must not kill the session) and no later
     /// (a permanently broken token must stop hammering the API).
