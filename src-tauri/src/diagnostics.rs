@@ -384,8 +384,15 @@ fn tail_log_file(log_dir: Option<std::path::PathBuf>) -> (Vec<String>, String) {
         Err(e) => {
             // Full path stays in the local log only; the snapshot string
             // carries just the file name (issue #409).
-            log::error!("[DIAG] tail_log_file: error reading {}: {}", path.display(), e);
-            (Vec::new(), format!("error reading {}: {}", LOG_FILE_NAME, e))
+            log::error!(
+                "[DIAG] tail_log_file: error reading {}: {}",
+                path.display(),
+                e
+            );
+            (
+                Vec::new(),
+                format!("error reading {}: {}", LOG_FILE_NAME, e),
+            )
         }
     }
 }
