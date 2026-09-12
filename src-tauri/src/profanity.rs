@@ -79,15 +79,18 @@ fn is_format_char(c: char) -> bool {
 /// are out of scope.
 fn strip_diacritic(c: char) -> Option<&'static str> {
     Some(match c {
-        'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' | 'ǎ' | 'ȁ' | 'ȃ' | 'ạ' | 'ả'
-        | 'ấ' | 'ầ' | 'ẩ' | 'ẫ' | 'ậ' | 'ắ' | 'ằ' | 'ẳ' | 'ẵ' | 'ặ' => "a",
-        'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ĕ' | 'ė' | 'ę' | 'ě' | 'ȅ' | 'ȇ' | 'ẹ' | 'ẻ' | 'ẽ'
-        | 'ế' | 'ề' | 'ể' | 'ễ' | 'ệ' => "e",
-        'ì' | 'í' | 'î' | 'ï' | 'ĩ' | 'ī' | 'ĭ' | 'į' | 'ǐ' | 'ȉ' | 'ȋ' | 'ị' | 'ỉ' => "i",
-        'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' | 'ō' | 'ŏ' | 'ő' | 'ǒ' | 'ȍ' | 'ȏ' | 'ọ' | 'ỏ'
-        | 'ố' | 'ồ' | 'ổ' | 'ỗ' | 'ộ' | 'ớ' | 'ờ' | 'ở' | 'ỡ' | 'ợ' => "o",
-        'ù' | 'ú' | 'û' | 'ü' | 'ũ' | 'ū' | 'ŭ' | 'ů' | 'ű' | 'ų' | 'ǔ' | 'ȕ' | 'ȗ' | 'ụ'
-        | 'ủ' => "u",
+        'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' | 'ǎ' | 'ȁ' | 'ȃ' | 'ạ' | 'ả' | 'ấ'
+        | 'ầ' | 'ẩ' | 'ẫ' | 'ậ' | 'ắ' | 'ằ' | 'ẳ' | 'ẵ' | 'ặ' => "a",
+        'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ĕ' | 'ė' | 'ę' | 'ě' | 'ȅ' | 'ȇ' | 'ẹ' | 'ẻ' | 'ẽ' | 'ế'
+        | 'ề' | 'ể' | 'ễ' | 'ệ' => "e",
+        'ì' | 'í' | 'î' | 'ï' | 'ĩ' | 'ī' | 'ĭ' | 'į' | 'ǐ' | 'ȉ' | 'ȋ' | 'ị' | 'ỉ' => {
+            "i"
+        }
+        'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' | 'ō' | 'ŏ' | 'ő' | 'ǒ' | 'ȍ' | 'ȏ' | 'ọ' | 'ỏ' | 'ố'
+        | 'ồ' | 'ổ' | 'ỗ' | 'ộ' | 'ớ' | 'ờ' | 'ở' | 'ỡ' | 'ợ' => "o",
+        'ù' | 'ú' | 'û' | 'ü' | 'ũ' | 'ū' | 'ŭ' | 'ů' | 'ű' | 'ų' | 'ǔ' | 'ȕ' | 'ȗ' | 'ụ' | 'ủ' => {
+            "u"
+        }
         'ý' | 'ÿ' | 'ŷ' => "y",
         'ç' | 'ć' | 'ĉ' | 'ċ' | 'č' => "c",
         'ñ' | 'ń' | 'ņ' | 'ň' => "n",
@@ -139,7 +142,10 @@ fn normalize(text: &str) -> Vec<NormChar> {
         // Multi-char leet: `\/` reads as `v`.
         if c == '\\' && chars.peek() == Some(&'/') {
             chars.next();
-            result.push(NormChar { ch: 'v', leet: true });
+            result.push(NormChar {
+                ch: 'v',
+                leet: true,
+            });
             continue;
         }
         if is_format_char(c) || is_combining_mark(c) {
@@ -178,6 +184,7 @@ fn normalize(text: &str) -> Vec<NormChar> {
 ///   as a single-char wildcard (substitution reading, e.g. `f*ck`);
 /// - skip a stretched char: duplicate of the previous char, leet-origin
 ///   char (#337), or a repeat of an already-matched word char.
+///
 /// Separator skips are formatting, not stretching; every other skip sets
 /// `stretched`, which callers must gate on a right-side word boundary
 /// (#332: `shiitake` must stay clean). Any separator skip (or wildcard
@@ -245,7 +252,9 @@ fn is_clean_compound(stem: &str, token: &str) -> bool {
 /// (`head`). Anything else (`pit`, `ens`, `ake`) is a distinct clean
 /// word (#328).
 fn is_profane_continuation(token: &str) -> bool {
-    ["ing", "er", "ed", "es", "s", "head"].iter().any(|p| token.starts_with(p))
+    ["ing", "er", "ed", "es", "s", "head"]
+        .iter()
+        .any(|p| token.starts_with(p))
 }
 
 /// `y`-tail scoped per stem: `shitty`/`bitchy`/`fucky` flag, while
