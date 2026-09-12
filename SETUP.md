@@ -18,10 +18,10 @@ Download the latest release from the [GitHub Releases page](https://github.com/C
 | OS | File | Notes |
 |----|------|-------|
 | Windows | see [Releases page](https://github.com/Carme99/PresenceJam-Desktop/releases/latest) | Run the installer, follow the prompts |
-| Linux | `PresenceJam-<version>-linux-amd64.deb` | Install with `sudo apt install ./PresenceJam-<version>-linux-amd64.deb`; requires a running keyring daemon (see **Linux: System Keyring Required** below) |
+| Linux | `PresenceJam-linux-amd64.deb` / `.AppImage` | Install the `.deb` with `sudo apt install ./PresenceJam-linux-amd64.deb`, or run the `.AppImage` directly; requires a running keyring daemon (see **Linux: System Keyring Required** below) |
 | macOS | see [Releases page](https://github.com/Carme99/PresenceJam-Desktop/releases/latest) | Drag PresenceJam to Applications |
 
-Filenames follow the pattern `PresenceJam-<version>-<os>.<ext>` (e.g. `PresenceJam-<version>-linux-amd64.deb`); see the [latest release](https://github.com/Carme99/PresenceJam-Desktop/releases/latest) for the current values.
+Windows and macOS filenames carry the version (`PresenceJam-<version>.msi`, `PresenceJam-<version>.app.tar.gz`); the Linux artifacts do not (`PresenceJam-linux-amd64.deb` / `.AppImage`). See the [latest release](https://github.com/Carme99/PresenceJam-Desktop/releases/latest) for the current values.
 
 The installer will create:
 - The app in your Applications/start menu
