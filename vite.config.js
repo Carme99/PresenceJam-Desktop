@@ -2,7 +2,7 @@ import pkg from './package.json' with { type: 'json' };
 import { defineConfig } from "vite";
 import { sveltekit } from "@sveltejs/kit/vite";
 
-// @ts-expect-error process is a nodejs global
+// @ts-ignore process may lack node types on fresh installs (CI), or have them (local) — either way this line is fine
 const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/
