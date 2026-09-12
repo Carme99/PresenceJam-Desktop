@@ -1,7 +1,7 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { onMount, onDestroy } from 'svelte';
-  import { configStore, saveConfig } from '$lib/stores/config';
+  import { configStore, saveConfig, DEFAULT_PROFANITY_PLACEHOLDER } from '$lib/stores/config';
   import type { AppConfig, DeviceCodeResponse } from '$lib/types';
   import { currentView } from '$lib/stores/app';
   import { authFlow, setSpotifyPhase, setTeamsPhase, setTeamsDeviceCode } from '$lib/stores/authFlow.svelte';
@@ -270,7 +270,8 @@
           status_format: statusFormat,
           clear_on_pause: true,
           profanity_filter: true,
-          profanity_placeholder: 'Currently Listening to Spotify',
+          // Single frontend canonical source — src/lib/stores/config.ts (issue #342).
+          profanity_placeholder: DEFAULT_PROFANITY_PLACEHOLDER,
           start_minimized: false,
           // P1/P2 defaults (mirror config.ts / config.rs): availability
           // sync OFF, presence gate ON. Issue #3.0-P1/P2.

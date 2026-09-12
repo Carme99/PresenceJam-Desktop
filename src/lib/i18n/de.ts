@@ -132,6 +132,7 @@ export const de: Dict = {
   'settings.placeholderTextHint':
     'Verwenden Sie {emoji} für den Wiedergabestatus (🎵 spielt / ⏸ pausiert). Wird angezeigt, wenn vulgäre Sprache in Titelinformationen erkannt wird.',
   'settings.placeholderTextPlaceholder': 'Hört gerade Spotify',
+  'settings.profaneSampleToggle': 'Vorschau mit vulgärem Beispieltitel',
   'settings.defaultIntervalLabel': 'Standardintervall: {seconds}s',
   'settings.minIntervalLabel': 'Mindestintervall (s)',
   'settings.maxIntervalLabel': 'Maximalintervall (s)',

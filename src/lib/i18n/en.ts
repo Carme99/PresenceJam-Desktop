@@ -135,6 +135,7 @@ export const en = {
   'settings.placeholderTextHint':
     'Use {emoji} for play state (🎵 playing / ⏸ paused). Shown when profanity is detected in track info.',
   'settings.placeholderTextPlaceholder': 'Currently Listening to Spotify',
+  'settings.profaneSampleToggle': 'Preview with a profane sample track',
   'settings.defaultIntervalLabel': 'Default interval: {seconds}s',
   'settings.minIntervalLabel': 'Min interval (s)',
   'settings.maxIntervalLabel': 'Max interval (s)',

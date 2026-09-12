@@ -114,19 +114,27 @@
   let previewText = $state('');
   let previewSeq = 0;
   let previewDebounce: ReturnType<typeof setTimeout> | null = null;
+  // Issue #342: preview the profanity path with a profane sample so a
+  // whitespace-only placeholder demonstrates the effective fallback.
+  let previewProfaneSample = $state(false);
 
   // Live preview of the status format template. We delegate the
   // placeholder substitution to Rust (`preview_status`) so the Svelte
   // preview and the runtime polling loop share one implementation —
-  // see issue #74. Debounced 300 ms + sequence guard to discard stale
-  // responses when the user types quickly.
+  // see issue #74. With the filter on, the preview additionally runs
+  // through `filter_status` with the live placeholder (issue #342), so
+  // what you see matches what Teams gets. Debounced 300 ms + sequence
+  // guard to discard stale responses when the user types quickly.
   $effect(() => {
     const format = localConfig.teams.status_format;
+    const filter_enabled = localConfig.teams.profanity_filter;
+    const placeholder = localConfig.teams.profanity_placeholder;
+    const profane_sample = previewProfaneSample;
     if (previewDebounce) clearTimeout(previewDebounce);
     previewDebounce = setTimeout(async () => {
       const my = ++previewSeq;
       try {
-        const v = await invoke<string>('preview_status', { format });
+        const v = await invoke<string>('preview_status', { format, filter_enabled, placeholder, profane_sample });
         if (my !== previewSeq) return;
         previewText = v;
       } catch (e) {
@@ -481,6 +489,14 @@
             type="text"
             bind:value={localConfig.teams.profanity_placeholder}
             placeholder={t('settings.placeholderTextPlaceholder')}
+          />
+        </div>
+        <div class="toggle-row">
+          <label for="profanity-preview-sample">{t('settings.profaneSampleToggle')}</label>
+          <input
+            id="profanity-preview-sample"
+            type="checkbox"
+            bind:checked={previewProfaneSample}
           />
         </div>
       {/if}
