@@ -95,7 +95,7 @@ Edit the template that formats your Teams status message. Supports `{artist}`, `
 On startup, PresenceJam checks GitHub Releases for a newer version, then re-checks silently every ~24 hours while the app runs. If a new version is found, a small banner appears at the top of the window: **"Update vX.Y.Z available"** with two choices:
 
 - **Download & Install** — downloads with a progress readout and relaunches into the new version immediately.
-- **Install on quit** — downloads and signature-verifies the update in the background; the verified update is applied automatically the next time you quit the app (tray → Quit). On Windows the installer relaunches the app; on macOS/Linux the new version is picked up on your next launch.
+- **Install on quit** — opens a confirmation showing the staged version against your current version, with install/skip. The verified update is applied the next time you quit the app (tray → Quit). If the staged update is stale (same version or older than what you're running), it is skipped instead of installed — the banner shows a skipped state with an **Install anyway** override if you really want it (#431). On Windows the installer relaunches the app; on macOS/Linux the new version is picked up on your next launch.
 
 The banner is dismissible, and a failed *check* (offline, unreachable endpoint, mismatched signature key) is silent — it never blocks the UI.
 
@@ -160,7 +160,7 @@ Tokens refresh automatically:
 - **Spotify tokens** — refreshed by PresenceJam when needed (no action required)
 - **Teams tokens** — same. The device-code sign-in requests `offline_access`, so Microsoft issues a refresh token that PresenceJam rotates before the access token expires.
 
-If your connection drops unexpectedly, PresenceJam opens the Reconnect view. You can also re-authenticate the affected service anytime with its **Reconnect** button in **Settings**.
+If a token expires mid-session, PresenceJam retries once with a fresh token before asking you to sign in again — since v4.2.0 you only see a reconnect prompt when the refresh itself fails (#428). If your connection drops unexpectedly, PresenceJam opens the Reconnect view. You can also re-authenticate the affected service anytime with its **Reconnect** button in **Settings**.
 
 ---
 
