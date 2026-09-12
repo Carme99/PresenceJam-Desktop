@@ -49,7 +49,6 @@
 
     listen('teams-reconnect-required', async () => {
       devLog('[LAYOUT] teams-reconnect-required received');
-      setTeamsPhase('waiting');
       currentView.set('settings');
       try {
         const response = await invoke<DeviceCodeResponse>('start_teams_auth_device_code');
@@ -59,6 +58,7 @@
           deviceCode: response.device_code,
           interval: response.interval
         });
+        setTeamsPhase('waiting');
         try {
           await invoke('open_external_url', { url: response.verification_url });
         } catch (e) {
@@ -76,12 +76,12 @@
 
     listen<string>('spotify-reconnect-required', async () => {
       devLog('[LAYOUT] spotify-reconnect-required received');
-      setSpotifyPhase('waiting');
       currentView.set('settings');
       try {
         const hasSecret = await invoke<boolean>('is_spotify_client_secret_set');
         if (!hasSecret) {
           console.warn('[LAYOUT] spotify-reconnect-required: keychain empty, redirecting to onboarding');
+          setSpotifyPhase('idle');
           currentView.set('onboarding');
           return;
         }
@@ -90,9 +90,11 @@
         const clientId = cfg.spotify.client_id;
         if (!clientId) {
           console.warn('[LAYOUT] spotify-reconnect-required: client_id empty, redirecting to onboarding');
+          setSpotifyPhase('idle');
           currentView.set('onboarding');
           return;
         }
+        setSpotifyPhase('waiting');
         await invoke('start_spotify_reconnect', {
           clientId,
           redirectUri: 'presencejam://callback'

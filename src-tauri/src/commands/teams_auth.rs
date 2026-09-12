@@ -13,7 +13,14 @@ use tauri::{AppHandle, Emitter};
 const CMD: &str = "[CMD.TEAMS_AUTH]";
 
 #[tauri::command]
-pub fn start_teams_auth_device_code(app: AppHandle) -> Result<DeviceCodeResponse, String> {
+pub fn start_teams_auth_device_code(
+    window: tauri::Window,
+    app: AppHandle,
+) -> Result<DeviceCodeResponse, String> {
+    // Issue #241: detached windows never legitimately start the device-code
+    // flow (Onboarding/Reconnect/+layout are main-window-only; detached
+    // Settings goes through `reconnect_teams` + `poll_teams_auth`).
+    super::require_main_window(&window)?;
     log::debug!("{CMD} start_teams_auth_device_code: ENTRY");
 
     let response = match crate::teams::start_teams_auth_device_code() {
@@ -106,7 +113,15 @@ pub async fn poll_teams_auth(
 }
 
 #[tauri::command]
-pub fn refresh_teams(state: tauri::State<'_, Arc<AppState>>, app: AppHandle) -> Result<(), String> {
+pub fn refresh_teams(
+    window: tauri::Window,
+    state: tauri::State<'_, Arc<AppState>>,
+    app: AppHandle,
+) -> Result<(), String> {
+    // Issue #241: token refresh touches persisted tokens; the polling loop
+    // uses `teams::refresh_teams_token` directly and the frontend never
+    // invokes this from a detached window.
+    super::require_main_window(&window)?;
     log::debug!("{CMD} refresh_teams: ENTRY");
 
     let current_tokens = {

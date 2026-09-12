@@ -61,6 +61,8 @@ export const de: Dict = {
     'Die Synchronisierung wurde unerwartet beendet. Bitte starten Sie PresenceJam neu.',
   'dashboard.credentialCheckFailed':
     'Anmeldedaten konnten nicht geprüft werden — bitte versuchen Sie es erneut.',
+  'dashboard.syncToggleFailed':
+    'Synchronisierungsstatus konnte nicht geändert werden. Bitte versuchen Sie es erneut.',
   'dashboard.statusNotConfigured': 'Nicht konfiguriert',
   'dashboard.statusNoTrack': 'Kein Titel wird abgespielt',
   'dashboard.live': 'Live',
@@ -201,6 +203,12 @@ export const de: Dict = {
   'diagnostics.tokensNeverIncluded':
     'Token-Werte sind nie enthalten — nur Ablaufzeitstempel und Präsenzflags.',
   'diagnostics.noLogLinesYet': 'Noch keine Protokollzeilen verfügbar.',
+  'diagnostics.failedInstallTitle': 'Fehlgeschlagene Update-Installation',
+  'diagnostics.failedInstallVersion': 'Version',
+  'diagnostics.failedInstallError': 'Fehler',
+  'diagnostics.failedInstallTimestamp': 'Versuch um',
+  'diagnostics.failedInstallDismissFailed':
+    'Der Eintrag zur fehlgeschlagenen Installation konnte nicht verworfen werden.',
 
   // ── reconnect ─────────────────────────────────────────────────────
   'reconnect.title': 'Erneut verbinden',

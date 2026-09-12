@@ -120,6 +120,8 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e  # 1.96
+        with:
+          components: rustfmt
 
       - name: Install Linux system dependencies
         run: |
@@ -143,6 +145,13 @@ jobs:
 
       - name: Build frontend
         run: npm run build
+
+      # rustfmt is stated policy in CONTRIBUTING.md and CLAUDE.md, but
+      # clippy does not deny rustfmt diffs, so it needs its own gate.
+      # Fast (~2s); the rustfmt component comes from Setup Rust above
+      # (dtolnay/rust-toolchain installs the minimal profile by default).
+      - name: Cargo fmt (check)
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all --check
 
       - name: Cargo check (all targets)
         env:

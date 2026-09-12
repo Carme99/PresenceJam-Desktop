@@ -148,12 +148,15 @@ fn run_spotify_oauth_flow(
 
 #[tauri::command]
 pub async fn start_spotify_auth(
+    window: tauri::Window,
     client_id: String,
     client_secret: String,
     redirect_uri: String,
     _app: AppHandle,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
+    // Issue #241: detached windows never legitimately start the OAuth flow.
+    super::require_main_window(&window)?;
     log::info!(
         "{CMD} start_spotify_auth: ENTRY - client_id.len={}, redirect_uri={}",
         client_id.len(),
@@ -200,11 +203,14 @@ pub async fn start_spotify_auth(
 /// an empty string). See issues #9, #67, and the v2.6.4 verifier report.
 #[tauri::command]
 pub fn start_spotify_reconnect(
+    window: tauri::Window,
     client_id: String,
     redirect_uri: String,
     _app: AppHandle,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
+    // Issue #241: detached windows never legitimately start the OAuth flow.
+    super::require_main_window(&window)?;
     log::info!(
         "{CMD} start_spotify_reconnect: ENTRY - client_id.len={}, redirect_uri={}",
         client_id.len(),
@@ -238,11 +244,14 @@ pub fn start_spotify_reconnect(
 
 #[tauri::command]
 pub async fn complete_spotify_auth_manual(
+    window: tauri::Window,
     code: String,
     oauth_state: String,
     app: AppHandle,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
+    // Issue #241: detached windows never legitimately complete the OAuth flow.
+    super::require_main_window(&window)?;
     log::info!(
         "{CMD} complete_spotify_auth_manual: ENTRY - code.len={}, oauth_state.len={} [REDACTED]",
         code.len(),
@@ -280,7 +289,7 @@ pub async fn complete_spotify_auth_manual(
         log::error!("{CMD} complete_spotify_auth_manual: missing state parameter");
         return Err("Missing state parameter - possible CSRF attack".to_string());
     }
-    if oauth_state != pending.state {
+    if !crate::pkce::ct_eq(&oauth_state, &pending.state) {
         log::error!(
             "{CMD} complete_spotify_auth_manual: state mismatch - CSRF attack detected [REDACTED len {} vs {}]",
             oauth_state.len(),
@@ -366,9 +375,14 @@ pub async fn complete_spotify_auth_manual(
 
 #[tauri::command]
 pub fn refresh_spotify(
+    window: tauri::Window,
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<(), String> {
+    // Issue #241: token refresh touches keychain + persisted tokens; the
+    // polling loop uses `spotify::refresh_spotify_token` directly and the
+    // frontend never invokes this from a detached window.
+    super::require_main_window(&window)?;
     log::debug!("{CMD} refresh_spotify: ENTRY");
 
     // Spotify client_id lives in the config (it's not a secret). The

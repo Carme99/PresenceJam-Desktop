@@ -113,18 +113,22 @@ fn decrypt_tokens(key: &[u8; 32], bytes: &[u8]) -> Result<Vec<u8>, String> {
                 .to_string(),
         );
     }
-    let version = bytes[TOKENS_MAGIC.len()];
-    if version != TOKENS_VERSION {
-        return Err(format!(
-            "unsupported tokens cipher version byte {} (this build only reads version {})",
-            version, TOKENS_VERSION
-        ));
-    }
+    // Length first: the version-byte read below indexes TOKENS_MAGIC.len(),
+    // so a file that is exactly the 5-byte magic would panic on an
+    // out-of-bounds index instead of returning the Err that drives the
+    // documented re-auth recovery. Every rejection must be an Err.
     if bytes.len() < TOKENS_HEADER_LEN {
         return Err(format!(
             "tokens file too short for the {} byte header + ciphertext ({} bytes)",
             TOKENS_HEADER_LEN,
             bytes.len()
+        ));
+    }
+    let version = bytes[TOKENS_MAGIC.len()];
+    if version != TOKENS_VERSION {
+        return Err(format!(
+            "unsupported tokens cipher version byte {} (this build only reads version {})",
+            version, TOKENS_VERSION
         ));
     }
     let nonce = &bytes[TOKENS_MAGIC.len() + 1..TOKENS_HEADER_LEN];
@@ -144,17 +148,21 @@ fn decrypt_tokens(key: &[u8; 32], bytes: &[u8]) -> Result<Vec<u8>, String> {
 
 /// Resolve the path to `tokens.json` under the app's config dir.
 ///
-/// We use `app_config_dir` (not `app_data_dir`) so the file is co-located
-/// with `config.json` under `dirs::config_dir()/PresenceJam/` — same dir
-/// as `config::config_dir()`. This keeps user-visible backup/restore
-/// instructions simple: one folder, two files.
+/// NOTE (issue #300): this is intentionally NOT the same directory as
+/// `config.json`. Tauri's `app_config_dir()` already appends the bundle
+/// identifier, so tokens live under `<base>/com.presencejam.app/PresenceJam/`
+/// (e.g. `~/.config/com.presencejam.app/PresenceJam/tokens.json` on Linux)
+/// while `config::config_dir()` is `<base>/PresenceJam/` (e.g.
+/// `~/.config/PresenceJam/config.json`). Keep user-visible backup/restore
+/// instructions naming BOTH directories.
 pub fn tokens_file_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let base = app
         .path()
         .app_config_dir()
         .map_err(|e| format!("Failed to get app config dir: {}", e))?;
-    // Mirror config.rs::config_dir() so the file lives in the same
-    // `<base>/PresenceJam/` folder as `config.json`.
+    // NOTE (issue #300): unlike config.rs::config_dir(), the Tauri base
+    // already contains the bundle id, so this is a DIFFERENT folder from
+    // `config.json` — `<base>/com.presencejam.app/PresenceJam/`.
     let dir = base.join("PresenceJam");
     if !dir.exists() {
         fs::create_dir_all(&dir)
@@ -524,6 +532,23 @@ mod tests {
         let path = tmp_path("with.json");
         let _ = fs::remove_file(&path);
         write_tokens_atomic_with_key(&path, &sample_file(), &test_key()).unwrap();
+        // Issue #263: the atomic write creates the temp file with
+        // `.mode(0o600)` and the subsequent rename() preserves that mode onto
+        // the live file, so tokens.json must be user-only readable. Without
+        // this assertion, dropping `.mode(0o600)` silently regresses to the
+        // process umask (typically 0644) and every access/refresh token
+        // becomes world-readable on a multi-user Linux box. Asserting the
+        // mode rather than the exact builder options keeps the test focused
+        // on the observable on-disk invariant.
+        #[cfg(unix)]
+        {
+            let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode, 0o600,
+                "tokens.json must be user-only readable, got {:o}",
+                mode
+            );
+        }
         // The file on disk must be ciphertext, not plaintext JSON.
         let raw = fs::read(&path).unwrap();
         assert!(
@@ -625,6 +650,22 @@ mod tests {
         assert!(err.contains("magic"), "unexpected error: {}", err);
         // Truncated header (magic + version, no nonce/ciphertext) → rejected.
         assert!(decrypt_tokens(&test_key(), &ct[..TOKENS_MAGIC.len() + 1]).is_err());
+        // Issue #294: every prefix SHORTER than a full header must be
+        // rejected without panicking. The version-byte read indexes
+        // TOKENS_MAGIC.len(), so a prefix of exactly the 5-byte magic would
+        // panic out of bounds here rather than returning the Err that drives
+        // the documented re-auth recovery — and this runs on the startup
+        // path, so the panic aborts the app before a window exists.
+        for len in 0..TOKENS_HEADER_LEN {
+            let err = decrypt_tokens(&test_key(), &ct[..len])
+                .expect_err(&format!("{} byte prefix must be rejected", len));
+            assert!(
+                err.contains("magic") || err.contains("too short"),
+                "{} byte prefix gave an unexpected error: {}",
+                len,
+                err
+            );
+        }
     }
 
     #[test]
