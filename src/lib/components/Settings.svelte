@@ -224,10 +224,12 @@
     isSaving = true;
     saveMessage = '';
     try {
-      // `localConfig` is a Svelte 5 `$state` proxy; `structuredClone` in
+// `localConfig` is a Svelte 5 `$state` proxy; `structuredClone` in
       // `toSavePayload` rejects proxies with a DataCloneError, aborting the
       // save before IPC (#285). Snapshot to a plain object first.
-      await saveConfig($state.snapshot(localConfig));
+      // Issue #297: adopt the value the backend actually persisted, so the
+      // form shows the clamped numbers rather than the raw input.
+      localConfig = await saveConfig($state.snapshot(localConfig));
       saveMessage = t('settings.saved');
       if (saveTimeout) clearTimeout(saveTimeout);
       saveTimeout = setTimeout(() => saveMessage = '', 2000);
