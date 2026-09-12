@@ -86,7 +86,7 @@ Edit the template that formats your Teams status message. Supports `{artist}`, `
 
 | Launch at login | Start PresenceJam automatically when your OS boots |
 | Language | Interface language: English, Deutsch (German), or Français (French). Defaults to your browser/OS language; the choice persists. |
-| Start minimized | Open the app minimized to the tray (window hidden on launch). There is no Settings toggle — set `teams.start_minimized` to `true` in `config.json` (consumed at `src-tauri/src/lib.rs`). On macOS, it also switches the app's activation policy to `Accessory`, removing the dock icon and menu-bar app menu — the app becomes a pure tray-resident app. The dock icon reappears when you set the field back to `false` (no restart needed). (v2.7.3+) |
+| Start minimized | Open the app minimized to the tray (window hidden on launch). There is no Settings toggle — set `teams.start_minimized` to `true` in `config.json` (consumed at `src-tauri/src/lib.rs`). On macOS, it also switches the app's activation policy to `Accessory`, removing the dock icon and menu-bar app menu — the app becomes a pure tray-resident app. The dock icon reappears when you set the field back to `false` (no restart needed). |
 
 ---
 
