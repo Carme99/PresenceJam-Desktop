@@ -4,7 +4,7 @@
   import { configStore, saveConfig, DEFAULT_PROFANITY_PLACEHOLDER } from '$lib/stores/config';
   import type { AppConfig, DeviceCodeResponse } from '$lib/types';
   import { currentView } from '$lib/stores/app';
-  import { authFlow, setSpotifyPhase, setTeamsPhase, setTeamsDeviceCode } from '$lib/stores/authFlow.svelte';
+  import { authFlow, setSpotifyPhase, setTeamsPhase, setTeamsDeviceCode, expiresAtFromResponse, formatCountdownMs } from '$lib/stores/authFlow.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
   import { devLog } from '$lib/utils/dev';
   import Logo from './Logo.svelte';
@@ -28,6 +28,21 @@
   let teamsConnected = $derived(authFlow.teams.phase === 'done');
   let teamsPolling = $derived(authFlow.teams.phase === 'waiting');
   let teamsAuthError = $derived(authFlow.teams.error ?? '');
+
+  // Device-code expiry countdown (issue #429). The 1s ticker only runs
+  // while a live code is waiting; $effect cleanup clears the interval on
+  // unmount, independent of the onMount/onDestroy listener guard (#392).
+  let expiryNow = $state(Date.now());
+  let teamsRemainingMs = $derived(
+    authFlow.teams.expiresAt == null ? null : authFlow.teams.expiresAt - expiryNow
+  );
+  let teamsCodeExpired = $derived(teamsRemainingMs != null && teamsRemainingMs <= 0);
+  $effect(() => {
+    if (authFlow.teams.phase !== 'waiting' || authFlow.teams.expiresAt == null || teamsCodeExpired) return;
+    expiryNow = Date.now();
+    const id = setInterval(() => { expiryNow = Date.now(); }, 1000);
+    return () => clearInterval(id);
+  });
 
   let statusFormat = $state('🎵 {artist} - {track} 🎧');
   let launchAtLogin = $state(false);
@@ -193,7 +208,8 @@
         userCode: response.user_code,
         verificationUrl: response.verification_url,
         deviceCode: response.device_code,
-        interval: response.interval
+        interval: response.interval,
+        expiresAt: expiresAtFromResponse(response)
       });
       devLog('[ONBOARDING] connectTeams: state updated');
 
@@ -218,6 +234,11 @@
 
   async function pollTeamsAuth() {
     devLog('[ONBOARDING] pollTeamsAuth: ENTRY');
+    // Never poll a dead code — the expired box offers a fresh one (#429).
+    if (teamsCodeExpired) {
+      devLog('[ONBOARDING] pollTeamsAuth: code expired, refusing to poll');
+      return;
+    }
     setTeamsPhase('waiting');
 
     try {
@@ -431,9 +452,17 @@
             <a class="verification-url" href={teamsVerificationUrl} target="_blank" rel="noopener">{teamsVerificationUrl}</a>
             <p class="hint">{t('common.andEnterCode')}</p>
             <div class="code-display" aria-live="polite">{teamsUserCode}</div>
-            <div class="spinner" aria-hidden="true"></div>
-            <p>{t('common.waitingForSignIn')}</p>
-            <button class="btn-secondary" onclick={pollTeamsAuth}>{t('common.checkNow')}</button>
+            {#if teamsCodeExpired}
+              <p class="error-message" role="alert">{t('common.codeExpired')}</p>
+              <button class="btn-secondary" onclick={connectTeams}>{t('common.getNewCode')}</button>
+            {:else}
+              {#if teamsRemainingMs != null}
+                <p class="hint" aria-live="polite">{t('common.codeExpiresIn', { time: formatCountdownMs(teamsRemainingMs) })}</p>
+              {/if}
+              <div class="spinner" aria-hidden="true"></div>
+              <p>{t('common.waitingForSignIn')}</p>
+              <button class="btn-secondary" onclick={pollTeamsAuth}>{t('common.checkNow')}</button>
+            {/if}
           </div>
         {:else}
           <div class="success-badge">

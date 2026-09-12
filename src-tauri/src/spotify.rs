@@ -195,6 +195,24 @@ impl std::fmt::Display for SpotifyApiError {
     }
 }
 
+/// Creates a reqwest blocking client with standard config (user agent + 10s timeout).
+/// Ensures consistent HTTP client settings across all Spotify API calls
+/// (mirrors `teams.rs::build_teams_client`).
+///
+/// The 10s timeout bounds the token exchange and refresh paths, which
+/// previously built a bare `Client::new()` with no timeout (issue #347).
+/// The User-Agent closes the #353 UA gap as a drive-by.
+///
+/// User-Agent uses `env!("CARGO_PKG_VERSION")` so it tracks `Cargo.toml`
+/// automatically on every release — never hardcode the version.
+fn build_spotify_client() -> Result<Client, String> {
+    Client::builder()
+        .user_agent(format!("PresenceJam/{}", env!("CARGO_PKG_VERSION")))
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))
+}
+
 pub fn complete_spotify_auth(
     code: &str,
     code_verifier: &str,
@@ -202,7 +220,7 @@ pub fn complete_spotify_auth(
     client_secret: &str,
     redirect_uri: &str,
 ) -> Result<SpotifyTokens, String> {
-    let client = Client::new();
+    let client = build_spotify_client()?;
 
     let params = [
         ("grant_type", "authorization_code"),
@@ -252,7 +270,7 @@ pub fn refresh_spotify_token(
     client_id: &str,
     client_secret: &str,
 ) -> Result<SpotifyTokens, SpotifyApiError> {
-    let client = Client::new();
+    let client = build_spotify_client().map_err(SpotifyApiError::Other)?;
 
     let params = [
         ("grant_type", "refresh_token"),
@@ -363,7 +381,7 @@ pub fn get_currently_playing(
     access_token: &str,
     if_none_match: Option<&str>,
 ) -> Result<CurrentlyPlaying, SpotifyApiError> {
-    let client = Client::new();
+    let client = build_spotify_client().map_err(SpotifyApiError::Other)?;
 
     let mut request = client
         .get("https://api.spotify.com/v1/me/player/currently-playing")
@@ -517,7 +535,7 @@ fn send_player_command(
     body: Option<serde_json::Value>,
     context: &str,
 ) -> Result<(), SpotifyApiError> {
-    let client = Client::new();
+    let client = build_spotify_client().map_err(SpotifyApiError::Other)?;
     let mut url = format!("https://api.spotify.com/v1{}", path);
     if let Some(id) = device_id {
         url = format!("{}?device_id={}", url, id);
@@ -615,7 +633,7 @@ pub fn player_transfer(
 /// Lists the user's available playback devices.
 /// GET /v1/me/player/devices. See issue #3.0-P3.
 pub fn get_devices(access_token: &str) -> Result<Vec<DeviceInfo>, SpotifyApiError> {
-    let client = Client::new();
+    let client = build_spotify_client().map_err(SpotifyApiError::Other)?;
     let response = client
         .get("https://api.spotify.com/v1/me/player/devices")
         .header("Authorization", format!("Bearer {}", access_token))
@@ -644,7 +662,7 @@ pub fn get_devices(access_token: &str) -> Result<Vec<DeviceInfo>, SpotifyApiErro
 /// gate as `get_currently_playing` (issue #161). GET /v1/me/player/queue.
 /// See issue #3.0-P3.
 pub fn get_queue(access_token: &str) -> Result<QueueInfo, SpotifyApiError> {
-    let client = Client::new();
+    let client = build_spotify_client().map_err(SpotifyApiError::Other)?;
     let response = client
         .get("https://api.spotify.com/v1/me/player/queue")
         .header("Authorization", format!("Bearer {}", access_token))
@@ -829,7 +847,7 @@ pub fn validate_spotify_token(tokens: &SpotifyTokens) -> Result<(), SpotifyApiEr
         return Ok(());
     }
 
-    let client = Client::new();
+    let client = build_spotify_client().map_err(SpotifyApiError::Other)?;
     let response = client
         .get("https://api.spotify.com/v1/me/player/currently-playing")
         .header("Authorization", format!("Bearer {}", tokens.access_token))

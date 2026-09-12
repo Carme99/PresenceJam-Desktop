@@ -23,6 +23,10 @@ export const fr: Dict = {
   'common.themeToggle': 'Changer de thème',
   'common.waiting': 'En attente…',
   'common.waitingForSignIn': "En attente de connexion…",
+  // Best-effort translation (no native review yet) — see wave/slice-e PR body.
+  'common.codeExpiresIn': 'Le code expire dans {time}',
+  'common.codeExpired': 'Ce code a expiré — il ne peut plus être utilisé.',
+  'common.getNewCode': 'Obtenir un nouveau code',
   'common.yes': 'Oui',
   'common.no': 'Non',
   'common.tagline': 'Spotify → Statut Teams',
@@ -271,6 +275,16 @@ export const fr: Dict = {
   'update.installOnQuit': "Installer à la fermeture",
   'update.preparing': 'Préparation…',
   'update.dismissAria': 'Fermer la bannière de mise à jour',
+  'update.confirmQuitInstall':
+    'Installer v{staged} à la fermeture ? Version actuelle : v{current}.',
+  'update.confirmQuitInstallUnknown': 'Installer v{staged} à la fermeture ?',
+  'update.stagedVsCurrent':
+    'v{staged} sera installée à la fermeture (actuelle v{current})',
+  'update.staleSkipped':
+    'v{staged} ignorée — votre v{current} actuelle est plus récente.',
+  'update.staleSkippedUnknown':
+    "v{staged} ignorée — elle n'est pas plus récente que votre version actuelle.",
+  'update.installAnyway': 'Installer quand même',
 
   // ── onboarding ────────────────────────────────────────────────────
   'onboarding.stepOf': 'Étape {step} sur 3',

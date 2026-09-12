@@ -35,6 +35,9 @@ export const en = {
   'common.themeToggle': 'Toggle theme',
   'common.waiting': 'Waiting…',
   'common.waitingForSignIn': 'Waiting for sign-in…',
+  'common.codeExpiresIn': 'Code expires in {time}',
+  'common.codeExpired': 'This code has expired — it can no longer be used.',
+  'common.getNewCode': 'Get a new code',
   'common.yes': 'Yes',
   'common.no': 'No',
   'common.tagline': 'Spotify → Teams Status',
@@ -253,6 +256,16 @@ export const en = {
   'update.installOnQuit': 'Install on quit',
   'update.preparing': 'Preparing…',
   'update.dismissAria': 'Dismiss update banner',
+  'update.confirmQuitInstall':
+    'Install v{staged} when you quit? Current version: v{current}.',
+  'update.confirmQuitInstallUnknown': 'Install v{staged} when you quit?',
+  'update.stagedVsCurrent':
+    'v{staged} will be installed when you quit (current v{current})',
+  'update.staleSkipped':
+    'v{staged} was skipped — your current v{current} is newer.',
+  'update.staleSkippedUnknown':
+    'v{staged} was skipped — it is not newer than your current version.',
+  'update.installAnyway': 'Install anyway',
 
   // ── onboarding ────────────────────────────────────────────────────
   'onboarding.stepOf': 'Step {step} of 3',

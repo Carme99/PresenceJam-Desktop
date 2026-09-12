@@ -981,7 +981,7 @@ pub(crate) fn process_track(
         false
     };
 
-    if let Some(teams_tok) = teams_tokens {
+    if let Some(mut teams_tok) = teams_tokens {
         if track.is_playing {
             *consecutive_pauses = 0;
             // Issue #155: a real track replaces any placeholder, so the next
@@ -1092,32 +1092,152 @@ pub(crate) fn process_track(
                     );
                 }
                 Err(e) => {
-                    log::error!("[POLLING] process_track: Failed to set Teams status: {}", e);
-                    emit_error(
-                        app,
-                        "teams",
-                        format!("Failed to update status: {}", e),
-                        ErrorSeverity::Error,
-                    );
-                    // Issue #154: a 429 extends the next poll to the
-                    // server-directed delay.
-                    teams_backoff_secs = teams_backoff_secs.max(rate_limit_sleep_secs(&e));
-                    // Issue #153: classify typed TeamsApiError variants instead
-                    // of string-sniffing the error body. Only a dead token
-                    // (401 / invalid_grant) means re-auth; 403 is a
-                    // permission/license problem re-auth cannot fix.
-                    match e {
-                        TeamsApiError::ExpiredToken(_) | TeamsApiError::InvalidGrant => {
-                            log::warn!("[POLLING] process_track: Teams auth failure detected, emitting teams-reconnect-required");
-                            let _ = app.emit("teams-reconnect-required", json!(null));
+                    // Issues #367/#428 (never-re-auth): a 401 here can mean
+                    // the token expired mid-sequence (or clock skew) even
+                    // though the pre-write expiry check passed. Mirror the
+                    // Spotify reactive path at the top of `run`: one
+                    // `refresh_teams_token` + CAS-commit + persist + single
+                    // write retry before blaming the credential. Only a dead
+                    // refresh token surfaces `teams-reconnect-required`.
+                    let write_outcome = match e {
+                        TeamsApiError::ExpiredToken(status) => {
+                            log::info!("[POLLING] process_track: Teams status write hit ExpiredToken, attempting one refresh + retry");
+                            let pre_refresh_access_token = teams_tok.access_token.clone();
+                            match refresh_teams_token(&teams_tok) {
+                                Ok(new_tokens) => {
+                                    let committed = match cas_refresh_or_discard(
+                                        "teams",
+                                        &mut *state.tokens.teams_mut(),
+                                        &pre_refresh_access_token,
+                                        || Ok::<_, TeamsApiError>(new_tokens.clone()),
+                                        |t| &t.access_token,
+                                    ) {
+                                        CasOutcome::Committed(_) => true,
+                                        CasOutcome::Discarded { .. } => false,
+                                        CasOutcome::RefreshFailed(_) => {
+                                            unreachable!("inner refresh_fn is Ok-wrapping")
+                                        }
+                                    };
+                                    if committed {
+                                        // Issue #180: the write guard
+                                        // reborrowed into the CAS call above
+                                        // is dropped at the end of that
+                                        // statement. Persist here — in a
+                                        // later statement — so the read lock
+                                        // inside persist_tokens (same RwLock)
+                                        // cannot self-deadlock.
+                                        if let Err(persist_err) =
+                                            token_io::persist_tokens(state, app)
+                                        {
+                                            log::warn!(
+                                                "[POLLING] process_track: failed to persist reactively refreshed teams tokens: {}",
+                                                persist_err
+                                            );
+                                        }
+                                        match set_teams_status_message(
+                                            &new_tokens.access_token,
+                                            &final_status,
+                                            expiry_str.as_deref(),
+                                        ) {
+                                            Ok(()) => Ok(new_tokens),
+                                            Err(retry_err) => {
+                                                log::error!(
+                                                    "[POLLING] process_track: Teams status retry after refresh also failed: {}",
+                                                    retry_err
+                                                );
+                                                Err(retry_err)
+                                            }
+                                        }
+                                    } else {
+                                        // CAS lost (mirrors the Spotify 401
+                                        // path): keep the original error for
+                                        // classification below.
+                                        Err(TeamsApiError::ExpiredToken(status))
+                                    }
+                                }
+                                Err(refresh_err) => {
+                                    log::error!(
+                                        "[POLLING] process_track: Teams reactive refresh failed: {}",
+                                        refresh_err
+                                    );
+                                    // Issue #295 policy: only a dead
+                                    // credential clears the session; a
+                                    // transient refresh failure keeps it and
+                                    // flows into the transient branch below
+                                    // with no reconnect event. Either way the
+                                    // typed refresh error (not the stale
+                                    // write error) is what gets classified.
+                                    if teams_refresh_requires_reauth(&refresh_err) {
+                                        log::warn!("[POLLING] process_track: Teams refresh token is dead, discarding tokens");
+                                        *state.tokens.teams_mut() = None;
+                                        // Issue #180: the write guard in the
+                                        // clearing statement above dies at
+                                        // the end of that statement. Persist
+                                        // in a LATER statement, when the
+                                        // guard is provably dropped.
+                                        if let Err(persist_err) =
+                                            token_io::persist_tokens(state, app)
+                                        {
+                                            log::warn!(
+                                                "[POLLING] process_track: failed to persist cleared teams tokens: {}",
+                                                persist_err
+                                            );
+                                        }
+                                    } else {
+                                        log::warn!("[POLLING] process_track: Teams reactive refresh failed (transient), keeping session");
+                                    }
+                                    Err(refresh_err)
+                                }
+                            }
                         }
-                        TeamsApiError::Forbidden(_, _) => {
-                            log::error!("[POLLING] process_track: Teams status update forbidden (permission/license) — re-auth cannot fix this; skipping teams-reconnect-required");
+                        other => Err(other),
+                    };
+                    match write_outcome {
+                        Ok(refreshed) => {
+                            *last_teams_update = Some(Instant::now());
+                            let _ = app.emit(
+                                "presence-updated",
+                                json!({
+                                    "status": final_status,
+                                    "timestamp": Utc::now().to_rfc3339()
+                                }),
+                            );
+                            // Adopt the fresh token so the availability
+                            // re-arm below does not 401 on the stale one.
+                            teams_tok = refreshed;
                         }
-                        TeamsApiError::RateLimited(_)
-                        | TeamsApiError::Transient(_)
-                        | TeamsApiError::Other(_, _) => {
-                            log::warn!("[POLLING] process_track: Teams status update failed (transient), continuing");
+                        Err(e) => {
+                            log::error!(
+                                "[POLLING] process_track: Failed to set Teams status: {}",
+                                e
+                            );
+                            emit_error(
+                                app,
+                                "teams",
+                                format!("Failed to update status: {}", e),
+                                ErrorSeverity::Error,
+                            );
+                            // Issue #154: a 429 extends the next poll to the
+                            // server-directed delay.
+                            teams_backoff_secs = teams_backoff_secs.max(rate_limit_sleep_secs(&e));
+                            // Issue #153: classify typed TeamsApiError variants instead
+                            // of string-sniffing the error body. Only a dead token
+                            // (401 / invalid_grant) means re-auth; 403 is a
+                            // permission/license problem re-auth cannot fix.
+                            match e {
+                                TeamsApiError::ExpiredToken(_) | TeamsApiError::InvalidGrant => {
+                                    log::warn!("[POLLING] process_track: Teams auth failure detected, emitting teams-reconnect-required");
+                                    let _ = app.emit("teams-reconnect-required", json!(null));
+                                }
+                                TeamsApiError::Forbidden(_, _) => {
+                                    log::error!("[POLLING] process_track: Teams status update forbidden (permission/license) — re-auth cannot fix this; skipping teams-reconnect-required");
+                                }
+                                TeamsApiError::RateLimited(_)
+                                | TeamsApiError::Transient(_)
+                                | TeamsApiError::Other(_, _) => {
+                                    log::warn!("[POLLING] process_track: Teams status update failed (transient), continuing");
+                                }
+                            }
                         }
                     }
                 }
@@ -1562,7 +1682,8 @@ mod tests {
         let helper_def = prod_source.matches("fn cas_refresh_or_discard").count();
         assert_eq!(helper_def, 1, "helper defined {} times", helper_def);
         let helper_call_count = prod_source.matches("cas_refresh_or_discard(").count();
-        // Expect 3 calls: Spotify proactive, Spotify 401-retry, Teams.
+        // Expect 4 calls: Spotify proactive, Spotify 401-retry, Teams
+        // proactive, Teams write-retry (issues #367/#428).
         // The "fn cas_refresh_or_discard(" definition is NOT counted here
         // because the call-shape substring includes the open-paren.
         assert!(
@@ -1704,17 +1825,19 @@ mod tests {
              read lock on the same RwLock self-deadlocks). Body:\n{}",
             body
         );
-
         // All persistence must happen at the call sites, after the CAS call
         // returns (guard provably dropped): the three invalid_grant/dead-token
         // clear paths (Spotify proactive, Spotify 401-retry, Teams) plus the
-        // three refresh-success call sites (Spotify proactive, Spotify
-        // 401-retry, Teams).
+        // four refresh-success call sites (Spotify proactive, Spotify
+        // 401-retry, Teams proactive, Teams write-retry for issues #367/#428).
+        // The Teams write-retry contributes two sites (refresh-success persist
+        // + dead-credential clear persist), so the total is eight.
         let persist_count = prod_source.matches("token_io::persist_tokens(").count();
         assert_eq!(
-            persist_count, 6,
-            "expected exactly 6 persist_tokens call sites in production (3 provider \
-             clear paths + 3 refresh-success call sites); found {}. If a call-site \
+            persist_count, 8,
+            "expected exactly 8 persist_tokens call sites in production (3 provider \
+             clear paths + 4 refresh-success call sites + 1 reactive dead-credential \
+             clear); found {}. If a call-site \
              persist is removed, refreshed/cleared tokens stop being flushed to disk; \
              if one is added inside cas_refresh_or_discard, the #180 self-deadlock \
              returns.",

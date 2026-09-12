@@ -23,6 +23,10 @@ export const de: Dict = {
   'common.themeToggle': 'Design umschalten',
   'common.waiting': 'Warten…',
   'common.waitingForSignIn': 'Warten auf Anmeldung…',
+  // Best-effort translation (no native review yet) — see wave/slice-e PR body.
+  'common.codeExpiresIn': 'Code läuft in {time} ab',
+  'common.codeExpired': 'Dieser Code ist abgelaufen — er kann nicht mehr verwendet werden.',
+  'common.getNewCode': 'Neuen Code anfordern',
   'common.yes': 'Ja',
   'common.no': 'Nein',
   'common.tagline': 'Spotify → Teams-Status',
@@ -263,6 +267,16 @@ export const de: Dict = {
   'update.installOnQuit': 'Beim Beenden installieren',
   'update.preparing': 'Wird vorbereitet…',
   'update.dismissAria': 'Update-Banner ausblenden',
+  'update.confirmQuitInstall':
+    'v{staged} beim Beenden installieren? Aktuelle Version: v{current}.',
+  'update.confirmQuitInstallUnknown': 'v{staged} beim Beenden installieren?',
+  'update.stagedVsCurrent':
+    'v{staged} wird beim Beenden installiert (aktuell v{current})',
+  'update.staleSkipped':
+    'v{staged} wurde übersprungen — Ihre aktuelle v{current} ist neuer.',
+  'update.staleSkippedUnknown':
+    'v{staged} wurde übersprungen — es ist nicht neuer als Ihre aktuelle Version.',
+  'update.installAnyway': 'Trotzdem installieren',
 
   // ── onboarding ────────────────────────────────────────────────────
   'onboarding.stepOf': 'Schritt {step} von 3',

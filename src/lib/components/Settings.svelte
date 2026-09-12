@@ -14,7 +14,7 @@
   let { detached = false }: { detached?: boolean } = $props();
   import { configStore, saveConfig, loadConfig, defaultConfig } from '$lib/stores/config';
   import type { AppConfig, SyncStatus } from '$lib/types';
-  import { authFlow, setSpotifyPhase, setTeamsPhase } from '$lib/stores/authFlow.svelte';
+  import { authFlow, setSpotifyPhase, setTeamsPhase, formatCountdownMs } from '$lib/stores/authFlow.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
   import PageHeader from './PageHeader.svelte';
   import { t, i18n, type Locale } from '$lib/i18n';
@@ -72,6 +72,23 @@
   let notificationsEnabled = $state(false);
   let spotifyAuthWaiting = $derived(authFlow.spotify.phase === 'waiting');
   let teamsAuthWaiting = $derived(authFlow.teams.phase === 'waiting');
+
+  // Device-code expiry countdown (issue #429). Reads the shared store, so
+  // a flow started in Onboarding/Reconnect keeps its countdown here. The
+  // 1s ticker only runs while a code with known expiry is waiting;
+  // $effect cleanup clears the interval on unmount, independent of the
+  // onMount/onDestroy listener guard (#392).
+  let expiryNow = $state(Date.now());
+  let teamsRemainingMs = $derived(
+    authFlow.teams.expiresAt == null ? null : authFlow.teams.expiresAt - expiryNow
+  );
+  let teamsCodeExpired = $derived(teamsRemainingMs != null && teamsRemainingMs <= 0);
+  $effect(() => {
+    if (authFlow.teams.phase !== 'waiting' || authFlow.teams.expiresAt == null || teamsCodeExpired) return;
+    expiryNow = Date.now();
+    const id = setInterval(() => { expiryNow = Date.now(); }, 1000);
+    return () => clearInterval(id);
+  });
   // Scopes granted on the stored Spotify access token (decoded backend-side
   // from the JWT payload). The tray playback feature needs
   // `user-modify-playback-state`, which existing users don't have until
@@ -311,6 +328,11 @@
   // polling rate is honored — see issue #152.
   async function pollTeamsAuth() {
     if (!authFlow.teams.deviceCode) return;
+    // Never poll a dead code — the expired box offers a fresh one (#429).
+    if (teamsCodeExpired) {
+      console.warn('[SETTINGS] pollTeamsAuth: code expired, refusing to poll');
+      return;
+    }
     setTeamsPhase('waiting');
     try {
       await invoke('poll_teams_auth', {
@@ -439,9 +461,17 @@
             <a class="verification-url" href={authFlow.teams.verificationUrl} target="_blank" rel="noopener">{authFlow.teams.verificationUrl}</a>
             <p class="hint">{t('common.andEnterCode')}</p>
             <div class="code-display" aria-live="polite">{authFlow.teams.userCode}</div>
-            <div class="spinner" aria-hidden="true"></div>
-            <p>{t('common.waitingForSignIn')}</p>
-            <button class="btn-secondary" onclick={pollTeamsAuth}>{t('common.checkNow')}</button>
+            {#if teamsCodeExpired}
+              <p class="error-message" role="alert">{t('common.codeExpired')}</p>
+              <button class="btn-secondary" onclick={reconnectTeams}>{t('common.getNewCode')}</button>
+            {:else}
+              {#if teamsRemainingMs != null}
+                <p class="hint" aria-live="polite">{t('common.codeExpiresIn', { time: formatCountdownMs(teamsRemainingMs) })}</p>
+              {/if}
+              <div class="spinner" aria-hidden="true"></div>
+              <p>{t('common.waitingForSignIn')}</p>
+              <button class="btn-secondary" onclick={pollTeamsAuth}>{t('common.checkNow')}</button>
+            {/if}
           </div>
           {#if authFlow.teams.error}
             <p class="error-message" role="alert">{authFlow.teams.error}</p>
