@@ -5,6 +5,31 @@ All notable changes to PresenceJam are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [4.1.1] - 2026-09-12
+
+Profanity-filter correctness pass: the matcher no longer censors innocent
+words or misses glued compounds, common evasions (separators, leet, Unicode
+confusables) are closed, and the placeholder pipeline is hardened. Boundary
+tests now cover phrases, not just bare words (#333).
+
+### Fixed
+- **Start-anchored false positives (#328):** `cockpit`, `Dickens`, and `Spice Girls` no longer trip the filter; the short-tail auto-flag is now a first-token boundary check.
+- **Whitelist compared the whole remainder (#329):** `cocktail bar` and `cocktails` pass; only the first token after the stem is checked.
+- **`head` whitelist immunized insults (#330):** `dickhead`/`shithead`/`fuckhead` flag; the whitelist is scoped to `cock`+`tail`.
+- **Glued compounds evaded the filter (#331):** `bullshit`/`dipshit`/`horseshit` flag via strong stems needing only a clean right edge.
+- **Duplicate-skip fabricated `shiitake` (#332):** stretched matches now require a right-side word boundary.
+- **Separator insertion defeated the filter (#334):** `f*ck`/`f.u.c.k`/`f u c k` flag; separator-spanning matches must start and end at word boundaries, so `Push It` stays clean.
+- **Leet gaps (#335):** `6`/`8` to `b`, `9` to `g`, `+` to `t`, `(` to `c`, `\/` to `v`, `2` to `i` (`sh2t` flags).
+- **Unicode confusables bypassed the filter (#336):** zero-width/format chars are stripped, fullwidth folds to ASCII, and precomposed Latin is table-folded, with no new dependency.
+- **Mixed repeat+leet bypass (#337):** `fuu1uck` flags.
+- **Word-list gaps (#338):** `asshole`/`tits`/`twat` added as compounds (bare `ass` stays out to protect `class`/`assassin`).
+- **Profane placeholder passed through (#339):** the effective placeholder is re-scanned and falls back to the default on hit.
+- **`{emoji}` token was case-sensitive (#340):** placeholder tokens now match case-insensitively.
+- **Track metadata expanded `{emoji}` (#341):** `{emoji}` substitutes before data fields, so data-inserted tokens survive verbatim.
+- **Placeholder default triple-copied (#342):** `config.ts` is the single frontend source, and the Settings preview routes through `filter_status` with a profane-sample toggle.
+- **Mid-track config flips left stale statuses (#343):** the change key fingerprints filter+placeholder+format, and the 304 arms force one rewrite.
+- **Track metadata leaked into diagnostics (#344):** the track-found log lines are now debug level.
+
 ## [4.1.0] - 2026-09-12
 
 A correctness and hardening pass over the 4.0.0 surface: a startup panic on a
@@ -691,6 +716,7 @@ Closes #60 #61 #62 #63
 
 - PowerShell script version — this is a full rewrite
 
+[4.1.1]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.1.0...v4.1.1
 [4.1.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.0.0...v4.1.0
 [4.0.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v3.2.0...v4.0.0
 [3.2.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v3.2.0
@@ -698,7 +724,7 @@ Closes #60 #61 #62 #63
 [3.0.1]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v3.0.1
 [3.0.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v3.0.0
 [2.9.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.9.0
-[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.1.0...HEAD
+[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.1.1...HEAD
 [2.6.2]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.6.2
 [2.6.1]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.6.1
 [2.6.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.6.0
