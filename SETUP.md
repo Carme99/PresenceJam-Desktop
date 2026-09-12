@@ -25,7 +25,7 @@ Windows and macOS filenames carry the version (`PresenceJam-<version>.msi`, `Pre
 
 The installer will create:
 - The app in your Applications/start menu
-- A `%APPDATA%\PresenceJam\` folder (Windows) or `~/Library/Application Support/PresenceJam/` (macOS) for config and tokens
+- A `%APPDATA%\PresenceJam\` (Windows), `~/Library/Application Support/PresenceJam/` (macOS) or `$XDG_CONFIG_HOME/PresenceJam/` (Linux) folder for `config.json`, and a separate bundle-id folder for `tokens.json` — see **What Gets Installed** below
 - A **system tray** icon — the app runs in the background
 
 > **Tip:** When the app first opens, it will show the **Onboarding Wizard** — a 3-step guide that walks you through connecting Spotify and Teams.
@@ -153,10 +153,12 @@ No data is sent to any third-party server — all tokens stay on your machine.
    ```powershell
    # Windows
    Remove-Item -Recurse -Force "$env:APPDATA\PresenceJam"
+   Remove-Item -Recurse -Force "$env:APPDATA\com.presencejam.app\PresenceJam"
    ```
    ```bash
    # macOS
    rm -rf ~/Library/Application\ Support/PresenceJam
+   rm -rf ~/Library/Application\ Support/com.presencejam.app/PresenceJam
    ```
 
 Your Spotify app credentials (Client ID/Secret) in the Spotify Developer Dashboard are unaffected — revoke them separately if you want to fully disconnect.

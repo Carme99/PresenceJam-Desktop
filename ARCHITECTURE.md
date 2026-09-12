@@ -185,6 +185,9 @@ matching SECURITY.md's No Telemetry promise. The snapshot contains:
   never a token value.
 - Keychain presence flags for both app slots (namespaced client-secret slot +
   tokens AES-key slot).
+- The most recent exit-time update install that failed, if any (issue #244) —
+  read from the marker `updater_bg::install_pending_on_exit` writes, so a failed
+  install is visible on the next launch instead of silently lost.
 - The last 50 lines of the on-disk `PresenceJam.log` tail, passed through a
   defensive second-pass redaction helper that reuses the `[REDACTED len N]`
   pattern from v3.2 (#228) — keyed values and any ≥32-char opaque run are
