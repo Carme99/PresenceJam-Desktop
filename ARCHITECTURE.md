@@ -55,7 +55,7 @@ graph TD
     end
 
     subgraph Backend ["Backend (Rust / Tauri 2)"]
-        Commands["commands/ submodule<br/>config / spotify_auth / teams_auth<br/>sync / window / onboarding / misc"]
+        Commands["commands/ submodule<br/>config / spotify_auth / teams_auth<br/>sync / window / onboarding / playback / misc"]
         Polling["polling/ submodule<br/>loop (driver) + state (lifecycle)<br/>poll_once (single-source-of-truth iteration)<br/>+ mod.rs (ErrorSeverity, emit_error)"]
         SpotifyAPI["spotify.rs<br/>Spotify Web API (Authorization Code + PKCE)"]
         TeamsAPI["teams.rs<br/>Microsoft Graph (device code)"]
@@ -308,7 +308,7 @@ sequenceDiagram
     App->>User: Display code + URL
     User->>Browser: Visit verification_uri, enter code
     User->>Microsoft: Enter code in browser
-    loop Poll every 5s
+    loop Poll at server interval (clamped 1-15s)
         App->>Microsoft: POST /token (device_code)
         Note over Microsoft: authorization_pending
     end
@@ -317,7 +317,7 @@ sequenceDiagram
     Teams-->>App: 200 OK
 ```
 
-The app polls Microsoft's token endpoint every 5 seconds while the user completes the browser auth. Once authorized, tokens are stored and the status message is set via Graph API.
+The app polls Microsoft's token endpoint at the server-provided device-code `interval`, clamped to 1-15s per RFC 8628 §3.5 (+5s on each `slow_down` response), while the user completes the browser auth. Once authorized, tokens are stored and the status message is set via Graph API.
 
 ### Teams Presence APIs (v3.0)
 
@@ -723,9 +723,9 @@ without rewriting every call site.
 - `lib/stores/config.ts`: `configStore` (full AppConfig), `saveConfig` (mirrors
   `commands/save_config`'s atomic-write semantics on the Rust side; the
   frontend does not call `localStorage`).
-- `lib/stores/authFlow.svelte.ts`: per-provider `isAuthenticating`,
-  `lastError` derived from the 4 backend auth events (refactored from 3
-  duplicated listener setups in PR #73 via `useAuthListeners`).
+- `lib/stores/authFlow.svelte.ts`: per-provider `phase` (`'idle' | 'waiting'`
+  `| 'error' | 'done'`) plus `error` message, updated from the 4 backend auth
+  events by `setSpotifyPhase` / `setTeamsPhase` (refactored from 3 duplicated
+  listener setups in PR #73 via `useAuthListeners`).
 - `lib/types.ts` / `lib/types-generated/` — Rust-side TS mirrors, see *ts-rs
   generated types* above.
-

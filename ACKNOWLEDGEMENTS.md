@@ -64,4 +64,4 @@ Neither the app nor its author is affiliated with Spotify AB or Microsoft Corpor
 
 ---
 
-*This list was generated from Cargo.toml and package.json dependencies.*
+*This list was generated from Cargo.toml and the `dependencies` + `devDependencies` in package.json.*
