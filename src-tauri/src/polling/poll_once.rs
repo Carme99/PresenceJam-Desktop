@@ -1207,7 +1207,10 @@ pub(crate) fn process_track(
                             teams_tok = refreshed;
                         }
                         Err(e) => {
-                            log::error!("[POLLING] process_track: Failed to set Teams status: {}", e);
+                            log::error!(
+                                "[POLLING] process_track: Failed to set Teams status: {}",
+                                e
+                            );
                             emit_error(
                                 app,
                                 "teams",
