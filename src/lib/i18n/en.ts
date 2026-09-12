@@ -71,6 +71,7 @@ export const en = {
     "Start something on Spotify and we'll pipe it through to Teams.",
   'dashboard.syncCrashed': 'Sync stopped unexpectedly. Please restart PresenceJam.',
   'dashboard.credentialCheckFailed': 'Unable to check credentials — please try again.',
+  'dashboard.syncToggleFailed': 'Could not change sync state. Please try again.',
   'dashboard.statusNotConfigured': 'Not configured',
   'dashboard.statusNoTrack': 'No track playing',
   'dashboard.live': 'Live',
@@ -196,6 +197,11 @@ export const en = {
   'diagnostics.tokensNeverIncluded':
     'Token values are never included — expiry timestamps and presence flags only.',
   'diagnostics.noLogLinesYet': 'No log lines available yet.',
+  'diagnostics.failedInstallTitle': 'Failed update install',
+  'diagnostics.failedInstallVersion': 'Version',
+  'diagnostics.failedInstallError': 'Error',
+  'diagnostics.failedInstallTimestamp': 'Attempted at',
+  'diagnostics.failedInstallDismissFailed': 'Could not dismiss the failed-install record.',
 
   // ── reconnect ─────────────────────────────────────────────────────
   'reconnect.title': 'Reconnect',

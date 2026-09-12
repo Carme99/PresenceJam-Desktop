@@ -23,7 +23,6 @@
     "core:menu:allow-popup",
     "core:event:allow-emit",
     "core:event:allow-listen",
-    "opener:default",
     "autostart:default",
     "log:default",
     "deep-link:default",

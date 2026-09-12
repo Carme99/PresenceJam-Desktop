@@ -43,9 +43,15 @@ const RATE_LIMIT_BACKOFF_SECONDS: u64 = 60;
 const DEBOUNCE_MS: u64 = 500;
 const TRANSIENT_FAILURE_EXIT_THRESHOLD: u8 = 5;
 /// Minimum gap between setPresence re-arms while a track plays (issue
-/// #3.0-P1). Available sessions FADE after 5 minutes regardless of
-/// `expirationDuration` (Microsoft Learn v1.0), so the session must be
-/// re-armed well inside that window; 4 minutes leaves slack.
+/// #3.0-P1). An `Available` session TIMES OUT after 5 minutes when the
+/// availability is `Available` — a separate, non-configurable clock from
+/// `expirationDuration` (which only bounds the session's absolute life,
+/// 5 min–4 h, after which it goes `Offline`). On timeout the state fades
+/// in stages: `Available` → `AvailableInactive` → `Away`. So the re-arm
+/// must be well inside the 5-minute TIMEOUT, not the expiration window;
+/// 4 minutes leaves slack. Raising this toward expiration scale (the
+/// `PT4H` the app sends) does NOT extend the green bubble.
+/// (Microsoft Learn: cloud-communications-manage-presence-state)
 const AVAILABILITY_REARM_SECONDS: u64 = 4 * 60;
 
 /// What the driver should do after this iteration.
@@ -112,7 +118,17 @@ pub(crate) fn run(
     log::debug!("[POLLING] poll_once: token_expired={}", token_expired);
 
     let (client_id, client_secret) = get_spotify_credentials(&config);
-    let spotify_tokens = if token_expired {
+    // Issue #296: `get_spotify_credentials` reads the secret through the
+    // cache-only `keychain::peek_spotify_client_secret()`, so it is empty
+    // whenever the startup prime failed (locked Secret Service, headless
+    // Linux, entry removed while running). Refreshing with an empty secret
+    // can only produce a 400 `invalid_client` — not `InvalidGrant` — so the
+    // Err arm below would emit a Warning and sleep *before* the 5-strikes
+    // counter, looping forever with no user-visible cause. Classify the
+    // decision up front (pure helper, mirroring the 401 path's guard) and
+    // route the unavailable case to an actionable reconnect.
+    let refresh_plan = spotify_refresh_plan(token_expired, &client_id, &client_secret);
+    let spotify_tokens = if refresh_plan == SpotifyRefreshPlan::Refresh {
         log::info!("[POLLING] poll_once: Spotify token expired, refreshing...");
         log::info!(
             "[POLLING] poll_once: refreshing with client_id.len={}",
@@ -127,7 +143,11 @@ pub(crate) fn run(
                     "spotify",
                     &mut *state.tokens.spotify_mut(),
                     &pre_refresh_access_token,
-                    || Ok(new_tokens.clone()),
+                    // `Ok`-wrapping closure: annotate the error type so `E`
+                    // is inferable (this arm never fails, so nothing else
+                    // pins it) and matches the sibling `Err` arm's
+                    // `SpotifyApiError`.
+                    || Ok::<_, SpotifyApiError>(new_tokens.clone()),
                     |t| &t.access_token,
                 );
                 // Issue #180: the write guard reborrowed above is a temporary
@@ -201,6 +221,43 @@ pub(crate) fn run(
                 );
             }
         }
+    } else if refresh_plan == SpotifyRefreshPlan::CredentialsUnavailable {
+        // Issue #296: the access token is expired but the credential pair
+        // needed to refresh it is unavailable. Retrying cannot fix this, so
+        // count it toward the existing 5-strikes escape and surface the same
+        // actionable reconnect pair as `invalid_grant`.
+        //
+        // The tokens are deliberately NOT cleared here (the `invalid_grant`
+        // path above does): the refresh token itself is still valid, the
+        // user's fix is to restore the keychain entry, and keeping it lets
+        // this branch be re-entered so `transient_failure_count` can actually
+        // reach its threshold — clearing would make the top-of-iteration
+        // no-token guard swallow every later iteration and the escape
+        // unreachable.
+        log::error!(
+            "[POLLING] poll_once: Spotify token expired but credentials unavailable (client_id empty: {}, client_secret empty: {}), requiring reconnect",
+            client_id.is_empty(),
+            client_secret.is_empty()
+        );
+        *transient_failure_count = transient_failure_count.saturating_add(1);
+        // Emit on the first detection only. `spotify-reconnect-required`
+        // makes `+layout.svelte` start a real OAuth flow, so repeating it
+        // every iteration would be user-hostile; the `invalid_grant` sibling
+        // above likewise surfaces the reconnect once (its cleared tokens then
+        // short-circuit later iterations).
+        if *transient_failure_count == 1 {
+            let _ = app.emit("spotify-reconnect-required", json!(null));
+            let _ = app.emit("reconnect-required", json!(null));
+        }
+        if *transient_failure_count >= TRANSIENT_FAILURE_EXIT_THRESHOLD {
+            log::error!("[POLLING] poll_once: 5 consecutive credential failures, exiting and requiring reconnect");
+            return PollIteration::Break;
+        }
+        return interruptible_sleep(
+            stop_rx,
+            with_jitter(ERROR_RETRY_INTERVAL_SECONDS),
+            "credentials-unavailable sleep",
+        );
     } else {
         spotify_tokens
     };
@@ -268,7 +325,6 @@ pub(crate) fn run(
             // that work.
             not_modified_iteration(
                 last_track_key,
-                last_etag,
                 consecutive_pauses,
                 transient_failure_count,
                 &config,
@@ -298,7 +354,7 @@ pub(crate) fn run(
                                 "spotify",
                                 &mut *state.tokens.spotify_mut(),
                                 &pre_refresh_access_token,
-                                || Ok(new_tokens.clone()),
+                                || Ok::<_, SpotifyApiError>(new_tokens.clone()),
                                 |t| &t.access_token,
                             ) {
                                 CasOutcome::Committed(_) => true,
@@ -375,7 +431,6 @@ pub(crate) fn run(
                                         // Same no-op as the main path's 304.
                                         return not_modified_iteration(
                                             last_track_key,
-                                            last_etag,
                                             consecutive_pauses,
                                             transient_failure_count,
                                             &config,
@@ -495,30 +550,32 @@ fn record_no_track_outcome(
 /// nothing to JSON-parse, no status to format/filter and no new state for
 /// the tray or frontend — the observable behavior matches the
 /// unchanged-track path minus that work: keep every tracked field, reset
-/// the pause/transient counters the way an unchanged playing track does,
-/// and sleep the default interval (the duration-derived smart sleep needs
-/// `progress_ms`, which a bodyless 304 cannot provide).
+/// the transient counter the way an unchanged playing track does, and sleep
+/// without duration-derived smart sleep (`progress_ms`, which a bodyless 304
+/// cannot provide).
 ///
-/// An ETag without a tracked track refers to nothing actionable (e.g. a
-/// 200 whose item was an episode/ad); drop the validator so the next
-/// poll re-establishes ground truth unconditionally.
+/// A 304 with a tracked track mirrors the unchanged-track path: reset the
+/// pause counter and sleep the default interval. A 304 with no tracked track
+/// means "still nothing playing" (issue #242): the no-track ETag stays valid
+/// so idle polling keeps sending conditional GETs, and the pause backoff
+/// advances exactly like an unconditional 204 no-track. A later change
+/// surfaces as a 200/204 Modified and re-establishes ground truth
+/// automatically.
 fn not_modified_iteration(
     last_track_key: &Option<String>,
-    last_etag: &mut Option<String>,
     consecutive_pauses: &mut u8,
     transient_failure_count: &mut u8,
     config: &Option<crate::config::AppConfig>,
 ) -> PollIteration {
     log::info!("[POLLING] poll_once: 304 Not Modified, skipping parse/format/tray work");
+    *transient_failure_count = 0;
     if last_track_key.is_some() {
         *consecutive_pauses = 0;
-    } else {
-        *last_etag = None;
+        return PollIteration::Sleep {
+            seconds: config_default_interval(config),
+        };
     }
-    *transient_failure_count = 0;
-    PollIteration::Sleep {
-        seconds: config_default_interval(config),
-    }
+    record_no_track_outcome(consecutive_pauses, config)
 }
 
 fn interruptible_sleep(stop_rx: &mpsc::Receiver<()>, seconds: u64, label: &str) -> PollIteration {
@@ -534,22 +591,25 @@ fn interruptible_sleep(stop_rx: &mpsc::Receiver<()>, seconds: u64, label: &str) 
     }
 }
 
-enum CasOutcome<T> {
+enum CasOutcome<T, E> {
     Committed(T),
     Discarded { current: Option<T> },
-    RefreshFailed(String),
+    RefreshFailed(E),
 }
 
-fn cas_refresh_or_discard<T, F, G>(
+/// Generic over the refresh error type `E` so each caller keeps its
+/// provider's typed error (`SpotifyApiError` / `TeamsApiError`) for the
+/// re-auth policy, instead of a pre-stringified message.
+fn cas_refresh_or_discard<T, E, F, G>(
     label: &str,
     lock: &mut Option<T>,
     pre_refresh_access_token: &str,
     refresh_fn: F,
     access_token_of: G,
-) -> CasOutcome<T>
+) -> CasOutcome<T, E>
 where
     T: Clone,
-    F: FnOnce() -> Result<T, String>,
+    F: FnOnce() -> Result<T, E>,
     G: FnOnce(&T) -> &str,
 {
     let new_tokens = match refresh_fn() {
@@ -596,11 +656,60 @@ fn get_spotify_credentials(config: &Option<crate::config::AppConfig>) -> (String
     (client_id, client_secret)
 }
 
+/// What the proactive Spotify refresh should do this iteration (issue #296).
+#[derive(Debug, PartialEq, Eq)]
+enum SpotifyRefreshPlan {
+    /// The access token is still inside its refresh window — use it as-is.
+    Fresh,
+    /// The access token expired and the client_id/secret needed to refresh it
+    /// are both available.
+    Refresh,
+    /// The access token expired but the credential pair is unavailable
+    /// (cold keychain cache: the startup prime failed, e.g. locked Secret
+    /// Service / headless Linux / entry removed while running). Refreshing
+    /// with an empty secret can only produce a 400 `invalid_client` — not
+    /// `InvalidGrant` — so retrying is pointless; the user must re-auth or
+    /// restore the keychain entry.
+    CredentialsUnavailable,
+}
+
+/// Classify the proactive-refresh decision. Pure and total so the policy is
+/// unit-testable without an `AppHandle`; the caller owns the side effects
+/// (emitting events, persisting, the 5-strikes counter).
+fn spotify_refresh_plan(
+    token_expired: bool,
+    client_id: &str,
+    client_secret: &str,
+) -> SpotifyRefreshPlan {
+    if !token_expired {
+        SpotifyRefreshPlan::Fresh
+    } else if client_id.is_empty() || client_secret.is_empty() {
+        SpotifyRefreshPlan::CredentialsUnavailable
+    } else {
+        SpotifyRefreshPlan::Refresh
+    }
+}
+
+/// True when a failed Teams token refresh must force re-auth (issue #295).
+/// The policy mirrors the Teams status-update classifier and the Spotify
+/// sibling: only a genuinely dead credential — token-endpoint
+/// `invalid_grant`, or a 401 `ExpiredToken` — means re-auth. `Transient`
+/// (network/5xx), `RateLimited`, `Forbidden` and `Other(400, …)` are
+/// recoverable states that must keep the session and retry later; a single
+/// dropped connection must not end Teams sync.
+fn teams_refresh_requires_reauth(e: &TeamsApiError) -> bool {
+    matches!(
+        e,
+        TeamsApiError::InvalidGrant | TeamsApiError::ExpiredToken(_)
+    )
+}
+
 /// True when the Available-presence session should be re-armed (issue
 /// #3.0-P1): no arm yet, or the last arm is at least
-/// `AVAILABILITY_REARM_SECONDS` old. Available sessions FADE after 5
-/// minutes regardless of `expirationDuration`, so the re-arm cadence must
-/// be strictly inside that window (4 min < 5 min).
+/// `AVAILABILITY_REARM_SECONDS` old. An `Available` session TIMES OUT
+/// after 5 minutes (non-configurable; a distinct clock from
+/// `expirationDuration`), so the re-arm cadence must be strictly inside
+/// that window (4 min < 5 min).
 fn should_rearm_availability(last_arm: Option<Instant>, now: Instant) -> bool {
     match last_arm {
         Some(arm) => now.duration_since(arm).as_secs() >= AVAILABILITY_REARM_SECONDS,
@@ -665,11 +774,14 @@ pub(crate) fn process_track(
 
             let pre_refresh_access_token = tok.access_token.clone();
 
+            // The refresh error stays typed (`CasOutcome<T, E>` is generic
+            // over `E`) so the re-auth policy below can classify it instead
+            // of string-sniffing.
             let teams_refresh_outcome = cas_refresh_or_discard(
                 "teams",
                 &mut *state.tokens.teams_mut(),
                 &pre_refresh_access_token,
-                || refresh_teams_token(tok).map_err(|e| e.to_string()),
+                || refresh_teams_token(tok),
                 |t| &t.access_token,
             );
             match teams_refresh_outcome {
@@ -692,9 +804,44 @@ pub(crate) fn process_track(
                         "[POLLING] process_track: Failed to refresh Teams token: {}",
                         e
                     );
-                    *state.tokens.teams_mut() = None;
-                    let _ = app.emit("teams-reconnect-required", json!(null));
-                    None
+                    // Issue #295: classify the typed error exactly like the
+                    // Teams status-update path below and the Spotify sibling.
+                    // Only a dead refresh token (`invalid_grant`) or a
+                    // rejected access token (401) means re-auth; `Transient`
+                    // (network/5xx), `RateLimited`, `Forbidden` and
+                    // `Other(400, …)` keep the session and retry later — a
+                    // single dropped connection must not send the user
+                    // through a full device-code browser re-auth.
+                    if teams_refresh_requires_reauth(&e) {
+                        log::warn!("[POLLING] process_track: Teams refresh token is dead, discarding tokens and requiring reconnect");
+                        *state.tokens.teams_mut() = None;
+                        // Issue #180: the write guard in the clearing
+                        // statement above dies at the end of that statement.
+                        // Persist in a LATER statement, when the guard is
+                        // provably dropped — persisting while it is alive
+                        // would re-lock the same parking_lot RwLock for
+                        // reading and self-deadlock.
+                        if let Err(persist_err) = token_io::persist_tokens(state, app) {
+                            log::warn!(
+                                "[POLLING] process_track: failed to persist cleared teams tokens: {}",
+                                persist_err
+                            );
+                        }
+                        let _ = app.emit("teams-reconnect-required", json!(null));
+                        None
+                    } else {
+                        // Issue #295: a transient refresh failure keeps the
+                        // session (the tokens stay in `state`, unlike the
+                        // dead-token branch above) and skips this iteration's
+                        // Teams work — attempting the status write with a
+                        // token we just failed to refresh would only produce
+                        // a 401 and force the very re-auth this policy exists
+                        // to avoid. The next iteration retries the refresh.
+                        log::warn!(
+                            "[POLLING] process_track: Teams refresh failed (transient), keeping session and retrying later"
+                        );
+                        None
+                    }
                 }
             }
         } else {
@@ -1355,7 +1502,7 @@ mod tests {
                 "spotify",
                 &mut *state2.tokens.spotify_mut(),
                 &pre_refresh_access_token,
-                || Ok(new_tokens.clone()),
+                || Ok::<_, SpotifyApiError>(new_tokens.clone()),
                 |t| &t.access_token,
             );
             let committed = matches!(outcome, CasOutcome::Committed(_));
@@ -1408,7 +1555,7 @@ mod tests {
         // format placeholders inside string literals are balanced, so they
         // do not perturb the count.
         let after_sig = prod_source
-            .split("fn cas_refresh_or_discard<T, F, G>(")
+            .split("fn cas_refresh_or_discard<T, E, F, G>(")
             .nth(1)
             .expect("cas_refresh_or_discard definition not found");
         let open = after_sig
@@ -1439,24 +1586,27 @@ mod tests {
         );
 
         // All persistence must happen at the call sites, after the CAS call
-        // returns (guard provably dropped): the two invalid_grant clear paths
-        // (proactive + 401-retry) plus the three refresh-success call sites
-        // (Spotify proactive, Spotify 401-retry, Teams).
+        // returns (guard provably dropped): the three invalid_grant/dead-token
+        // clear paths (Spotify proactive, Spotify 401-retry, Teams) plus the
+        // three refresh-success call sites (Spotify proactive, Spotify
+        // 401-retry, Teams).
         let persist_count = prod_source.matches("token_io::persist_tokens(").count();
         assert_eq!(
-            persist_count, 5,
-            "expected exactly 5 persist_tokens call sites in production (2 invalid_grant \
-             clear (proactive + 401-retry) + 3 refresh-success call sites); found {}. If a \
-             call-site persist is removed, refreshed tokens stop being flushed to disk; if \
-             one is added inside cas_refresh_or_discard, the #180 self-deadlock returns.",
+            persist_count, 6,
+            "expected exactly 6 persist_tokens call sites in production (3 provider \
+             clear paths + 3 refresh-success call sites); found {}. If a call-site \
+             persist is removed, refreshed/cleared tokens stop being flushed to disk; \
+             if one is added inside cas_refresh_or_discard, the #180 self-deadlock \
+             returns.",
             persist_count
         );
     }
 
-    /// Regression guard for issue #72 drift point #1: the two no-track
-    /// code paths (main `Ok(None)` arm and 401-retry `Ok(None)` arm)
-    /// must both funnel through `record_no_track_outcome` so they
-    /// cannot drift apart.
+    /// Regression guard for issue #72 drift point #1: every no-track
+    /// code path (main `Ok(None)` arm, 401-retry `Ok(None)` arm, and —
+    /// since issue #242 — the idle 304 arm in `not_modified_iteration`)
+    /// must funnel through `record_no_track_outcome` so they cannot
+    /// drift apart.
     ///
     /// Note: `process_track`'s paused-but-tracked branch also
     /// increments `consecutive_pauses` (issue #38). That increment is
@@ -1472,21 +1622,21 @@ mod tests {
             .split("#[cfg(test)]\nmod tests")
             .next()
             .expect("poll_once.rs has no #[cfg(test)] mod tests block");
-        // Call sites of `record_no_track_outcome(` in production code.
-        // We don't need to subtract the `fn` definition because the
-        // `fn record_no_track_outcome(` definition includes the
-        // open-paren but is on its own line in the source, so it WILL
-        // match the substring. We want exactly 3 matches in prod
-        // source: 2 call sites (lines 183 + 249) plus the 1 fn
-        // definition (line 309). Anything else is a regression.
+        // Occurrences of `record_no_track_outcome(` in production code.
+        // The `fn record_no_track_outcome(` definition matches too, so
+        // the expected total is 1 definition + one call site per no-track
+        // path: main `Ok(None)`, 401-retry `Ok(None)`, and the idle 304
+        // (`not_modified_iteration`, issue #242). All three funnel the
+        // increment through the same helper; a fourth site outside a
+        // shared helper is a regression. See issue #72 drift point #1.
         let call_count = prod_source.matches("record_no_track_outcome(").count();
         assert_eq!(
-            call_count, 3,
-            "Expected 3 occurrences in production (2 call sites: main \
-             Ok(None) + 401-retry Ok(None), plus the fn definition). \
-             Found {}. If a future contributor adds a third no-track \
-             handling site outside the helper, the increment order \
-             can drift again. See issue #72 drift point #1.",
+            call_count, 4,
+            "Expected 4 occurrences in production (3 call sites: main \
+             Ok(None), 401-retry Ok(None), idle 304 in not_modified_iteration, \
+             plus the fn definition). Found {}. If a future contributor adds \
+             a no-track handling site outside the shared helper, the \
+             increment order can drift again. See issue #72 drift point #1.",
             call_count
         );
     }
@@ -1916,20 +2066,19 @@ mod tests {
         );
     }
 
-    /// Candidate C11 (docs/scope-3.3.md §C11): a 304 Not Modified is a
-    /// pure no-op iteration — default-interval sleep, pause/transient
-    /// counters reset exactly like the unchanged-track path, and the
-    /// stored ETag survives for the next conditional poll.
+    /// Candidate C11 (docs/scope-3.3.md §C11): a 304 Not Modified with a
+    /// tracked track is a pure no-op iteration — default-interval sleep,
+    /// pause/transient counters reset exactly like the unchanged-track path.
+    /// The stored ETag survives structurally: the 304 path never touches it,
+    /// so the next poll stays conditional.
     #[test]
     fn test_not_modified_keeps_state_and_sleeps_default_interval() {
         let config = Some(crate::config::AppConfig::default());
-        let mut last_etag = Some("\"etag-1\"".to_string());
         let mut consecutive_pauses: u8 = 3;
         let mut transient_failure_count: u8 = 2;
 
         let iteration = not_modified_iteration(
             &Some("Artist - Track".to_string()),
-            &mut last_etag,
             &mut consecutive_pauses,
             &mut transient_failure_count,
             &config,
@@ -1948,37 +2097,37 @@ mod tests {
             transient_failure_count, 0,
             "a 304 counts as success for the 5-strikes counter"
         );
-        assert_eq!(
-            last_etag.as_deref(),
-            Some("\"etag-1\""),
-            "the validator must survive for the next conditional poll"
-        );
     }
 
-    /// Candidate C11: an ETag with no tracked track refers to nothing
-    /// actionable (e.g. the previous 200 carried an episode/ad item) —
-    /// drop it so the next poll re-establishes ground truth
-    /// unconditionally.
+    /// Issue #242: a 304 with no tracked track means "still nothing playing".
+    /// It must advance the pause backoff exactly like an unconditional 204
+    /// no-track (steady conditional GETs, no 304/drop/unconditional
+    /// oscillation, no stalled backoff).
     #[test]
-    fn test_not_modified_without_tracked_track_drops_etag() {
+    fn test_not_modified_without_tracked_track_advances_pause_backoff() {
         let config = Some(crate::config::AppConfig::default());
-        let mut last_etag = Some("\"orphan\"".to_string());
-        let mut consecutive_pauses: u8 = 4;
+        let mut consecutive_pauses: u8 = 1;
         let mut transient_failure_count: u8 = 1;
 
         let iteration = not_modified_iteration(
             &None,
-            &mut last_etag,
             &mut consecutive_pauses,
             &mut transient_failure_count,
             &config,
         );
 
-        assert!(
-            matches!(iteration, PollIteration::Sleep { .. }),
-            "304 must yield a Sleep iteration"
+        let seconds = match iteration {
+            PollIteration::Sleep { seconds } => seconds,
+            _ => panic!("304 must yield a Sleep iteration"),
+        };
+        assert_eq!(
+            seconds, 60,
+            "idle 304 must sleep the pause backoff (2x default at pauses=1), matching 204 no-track"
         );
-        assert_eq!(last_etag, None, "orphan validator must be dropped");
+        assert_eq!(
+            consecutive_pauses, 2,
+            "idle 304 must advance the pause counter like a 204 no-track"
+        );
         assert_eq!(
             transient_failure_count, 0,
             "a 304 counts as success for the 5-strikes counter"
@@ -2003,7 +2152,7 @@ mod tests {
         );
     }
 
-    /// Issue #262: the 5-strikes transient-failure counter must break the
+/// Issue #262: the 5-strikes transient-failure counter must break the
     /// polling loop at exactly `TRANSIENT_FAILURE_EXIT_THRESHOLD` — no
     /// sooner (a transient blip must not kill the session) and no later
     /// (a permanently broken token must stop hammering the API).
@@ -2031,6 +2180,64 @@ mod tests {
         assert!(
             matches!(transient_outcome(u8::MAX), Some(PollIteration::Break)),
             "a saturated counter must still break"
+        );
+    }
+
+    /// Issue #295 regression guard: only a genuinely dead Teams credential
+    /// forces re-auth. Pre-fix the `RefreshFailed` arm matched every error
+    /// unconditionally, so a single 5xx/dropped connection discarded the
+    /// session and drove a full device-code re-auth.
+    #[test]
+    fn test_teams_refresh_reauth_policy_is_dead_token_only() {
+        assert!(
+            teams_refresh_requires_reauth(&TeamsApiError::InvalidGrant),
+            "a dead refresh token (invalid_grant) must force re-auth"
+        );
+        assert!(
+            teams_refresh_requires_reauth(&TeamsApiError::ExpiredToken(401)),
+            "a rejected access token (401) must force re-auth"
+        );
+        for transient in [
+            TeamsApiError::Transient("Failed to send refresh token request: boom".to_string()),
+            TeamsApiError::RateLimited(Some(30)),
+            TeamsApiError::RateLimited(None),
+            TeamsApiError::Other(400, "invalid_client".to_string()),
+            TeamsApiError::Forbidden(403, "denied".to_string()),
+        ] {
+            assert!(
+                !teams_refresh_requires_reauth(&transient),
+                "transient Teams refresh failure must keep the session: {:?}",
+                transient
+            );
+        }
+    }
+
+    /// Issue #296 regression guard: an expired access token with a cold
+    /// keychain cache (empty secret) must be classified as
+    /// `CredentialsUnavailable` rather than attempted — and the guard must
+    /// not fire when the token is still fresh or both credentials are
+    /// present.
+    #[test]
+    fn test_spotify_refresh_plan_requires_non_empty_credentials() {
+        assert_eq!(
+            spotify_refresh_plan(true, "client-id", ""),
+            SpotifyRefreshPlan::CredentialsUnavailable,
+            "an empty client_secret (cold keychain cache) must not be attempted"
+        );
+        assert_eq!(
+            spotify_refresh_plan(true, "", "client-secret"),
+            SpotifyRefreshPlan::CredentialsUnavailable,
+            "an empty client_id must not be attempted"
+        );
+        assert_eq!(
+            spotify_refresh_plan(true, "client-id", "client-secret"),
+            SpotifyRefreshPlan::Refresh,
+            "expired token + both credentials present must refresh"
+        );
+        assert_eq!(
+            spotify_refresh_plan(false, "", ""),
+            SpotifyRefreshPlan::Fresh,
+            "a token still inside its window is used as-is regardless of credentials"
         );
     }
 }

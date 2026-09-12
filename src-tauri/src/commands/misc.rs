@@ -68,7 +68,11 @@ pub async fn update_tray_menu_state(
 /// blocking thread will exit the process; the async wrapper simply awaits
 /// the blocking task (which never returns on success).
 #[tauri::command]
-pub async fn relaunch_app(app: AppHandle) -> Result<(), String> {
+pub async fn relaunch_app(window: tauri::Window, app: AppHandle) -> Result<(), String> {
+    // Issue #241: process restart is main-window-only (UpdatePrompt is gated
+    // to the main window in +layout.svelte); a detached window must never
+    // restart the app out from under the user.
+    super::require_main_window(&window)?;
     log::info!("{CMD} relaunch_app: ENTRY");
     tauri::async_runtime::spawn_blocking(move || {
         app.restart();
