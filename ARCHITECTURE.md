@@ -212,11 +212,16 @@ back in), VS Code detached-panel style:
   `Settings` in detached mode. `tauri.conf.json`'s `app.windows` is untouched —
   the app still boots single-window.
 - **Main window stays the source of truth:** `currentView` remains
-  main-window-only; detached panes invoke the same app-global Tauri commands,
-  so config/polling state is shared by construction. Popping back in re-mounts
-  Settings via `loadConfig()` (backend truth). `src/lib/stores/detach.ts`
-  tracks pane→popped-out state in the main window only; dashboard nav shows a
-  dot badge and focuses the child instead of navigating while detached.
+  main-window-only. Detached panes read and write the same app-global state
+  (they call `save_config` / `load_config`, reconnect and `poll_teams_auth`
+  directly), so config/polling state is shared by construction — but the 11
+  commands that assume the main window (auth *starts*, `relaunch_app`,
+  `app_exit`, `start_syncing` / `stop_syncing`, …) are rejected by
+  `require_main_window` (issue #241), so a detached pane cannot drive them.
+  Popping back in re-mounts Settings via `loadConfig()` (backend truth).
+  `src/lib/stores/detach.ts` tracks pane→popped-out state in the main window
+  only; dashboard nav shows a dot badge and focuses the child instead of
+  navigating while detached.
 - **Capabilities:** new `src-tauri/capabilities/detached.json` scopes the two
   child labels to a minimal mirrored set (`core/event/log/opener/notification`);
   `default.json` gains `core:window:allow-create` +
@@ -463,7 +468,7 @@ Two `TeamsConfig` flags shape what the polling loop writes:
 
 - **`presence_gate` (default ON, issue #3.0-P2):** on a *track change*
   only, the loop calls `get_teams_presence` *before* the status write.
-  If `availability ∈ {busy, doNotDisturb}` or
+  If `availability ∈ {busy, doNotDisturb, focusing}` or
   `activity ∈ {inAMeeting, inACall, presenting}` it skips the write and
   emits `presence-gated` (the Dashboard shows a "suppressed" chip); the
   next track change re-evaluates. Writes proceed when presence is clear
@@ -530,9 +535,15 @@ sequenceDiagram
 | `polling-thread-panicked` | `null` | Polling thread panicked and was caught by `catch_unwind` |
 | `tray-click` | — | User clicks tray icon |
 | `toggle-pause` | — | User clicks Pause in tray menu |
-| `presence-gated` | `{reason}` | Status write suppressed by busy/DND/in-meeting/in-call/presenting presence (v3.0) |
+| `presence-gated` | `{reason}` | Status write suppressed by busy/DND/**focusing** availability or in-meeting/in-call/presenting activity (v3.0; `focusing` added in #254) |
 | `presence-availability-updated` | `{available, label, timestamp}` | Availability session armed (`Available`) or cleared (v3.0) |
 | `playback-error` | `{message}` | Tray playback command failed — no active device, non-Premium 403, etc. (v3.0) |
+| `spotify-auth-complete` | `null` | Spotify sign-in finished and tokens were persisted (no token value in the payload — #299) |
+| `teams-auth-complete` | `null` | Teams device-code sign-in finished and tokens were persisted (no token value — #299) |
+| `teams-auth-failed` | `{message}` | Teams device-code sign-in failed |
+| `sync-started` | `null` | Polling started (or resumed) |
+| `sync-stopped` | `null` | Polling paused |
+| `navigate` | `{view}` | Deep-link callback resolved; app should land on `dashboard` or `settings` (C2) |
 
 ## Deep Link Routing
 
