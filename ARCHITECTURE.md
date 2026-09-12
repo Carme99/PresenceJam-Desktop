@@ -543,14 +543,14 @@ sequenceDiagram
 | `toggle-pause` | — | User clicks Pause in tray menu |
 | `presence-gated` | `{reason}` | Status write suppressed by busy/DND/**focusing** availability or in-meeting/in-call/presenting activity (v3.0; `focusing` added in #254) |
 | `presence-availability-updated` | `{available, label, timestamp}` | Availability session armed (`Available`) or cleared (v3.0) |
-| `playback-error` | `{message}` | Tray playback command failed — no active device, non-Premium 403, etc. (v3.0) |
+| `playback-error` | `string` (error message) | Tray playback command failed — no active device, non-Premium 403, etc. (v3.0) |
 | `spotify-auth-complete` | `null` | Spotify sign-in finished and tokens were persisted (no token value in the payload — #299) |
 | `teams-auth-complete` | `null` | Teams device-code sign-in finished and tokens were persisted (no token value — #299) |
-| `teams-auth-failed` | `{message}` | Teams device-code sign-in failed |
-| `spotify-auth-failed` | `{message}` | Spotify sign-in (deep-link callback) failed |
+| `teams-auth-failed` | `string` (error message) | Teams device-code sign-in failed — listener is `listen<string>` |
+| `spotify-auth-failed` | `string` (error message) | Spotify sign-in (deep-link callback) failed — listener is `listen<string>` |
 | `sync-started` | `null` | Polling started (or resumed) |
 | `sync-stopped` | `null` | Polling paused |
-| `navigate` | `{view}` | Deep-link callback resolved; app should land on `dashboard` or `settings` (C2) |
+| `navigate` | `"dashboard"` \| `"logs"` \| `"settings"` (bare string; the listener is `listen<string>`) | A tray/menu item or a completed auth flow asks the UI to switch view (C2) |
 | `open-logs-folder` | `null` | User picks "Open Logs Folder" in the tray or app menu |
 | `app-shutdown` | `null` | User picks Quit in the tray or app menu |
 | `show-about` | `null` | User picks About in the app menu |
