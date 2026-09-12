@@ -2436,8 +2436,7 @@ mod tests {
         // Same track, flipped filter → one rewrite with the stored track.
         let mut flipped = crate::config::AppConfig::default();
         flipped.teams.profanity_filter = false;
-        let rewrite =
-            config_flip_rewrite_track(&state, &Some(key), &Some(flipped));
+        let rewrite = config_flip_rewrite_track(&state, &Some(key), &Some(flipped));
         let rewrite = rewrite.expect("a config flip must force one rewrite");
         assert_eq!(rewrite.title, "T");
         assert_eq!(rewrite.artist, "A");
