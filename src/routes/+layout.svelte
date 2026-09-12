@@ -21,7 +21,7 @@
   // side-effect import above.
   const isMainWindow = getCurrentWindow().label === 'main';
   import { authFlow, setTeamsPhase, setTeamsDeviceCode, setSpotifyPhase } from '$lib/stores/authFlow.svelte';
-  import type { DeviceCodeResponse, TeamsTokens, AppConfig } from '$lib/types';
+  import type { DeviceCodeResponse, AppConfig } from '$lib/types';
 
   devLog(`[LAYOUT] PresenceJam build: ${import.meta.env.VITE_APP_BUILD ?? 'dev build'}`);
 
@@ -125,13 +125,11 @@
       if (!authFlow.teams.deviceCode) return;
       setTeamsPhase('waiting');
       try {
-        const tokens = await invoke<TeamsTokens>('poll_teams_auth', {
+        await invoke('poll_teams_auth', {
           deviceCode: authFlow.teams.deviceCode,
           interval: authFlow.teams.interval
         });
-        if (tokens) {
-          setTeamsPhase('done');
-        }
+        setTeamsPhase('done');
       } catch (e) {
         console.error('[LAYOUT] poll_teams_auth failed:', e);
         setTeamsPhase('error', String(e));

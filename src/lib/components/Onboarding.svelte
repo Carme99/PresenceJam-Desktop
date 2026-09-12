@@ -2,8 +2,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import { onMount, onDestroy } from 'svelte';
   import { configStore, saveConfig } from '$lib/stores/config';
-  import type { AppConfig } from '$lib/types';
-  import type { DeviceCodeResponse, SpotifyTokens, TeamsTokens } from '$lib/types';
+  import type { AppConfig, DeviceCodeResponse } from '$lib/types';
   import { currentView } from '$lib/stores/app';
   import { authFlow, setSpotifyPhase, setTeamsPhase, setTeamsDeviceCode } from '$lib/stores/authFlow.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
@@ -136,16 +135,14 @@
         devLog('[ONBOARDING] handleManualUrlPaste: calling invoke complete_spotify_auth_manual');
         // Pass the OAuth `state` through so the backend can validate it
         // against the stored value (CSRF check) — see issue #162.
-        const tokens = await invoke<SpotifyTokens>('complete_spotify_auth_manual', {
+        await invoke('complete_spotify_auth_manual', {
           code: extracted.code,
           oauthState: extracted.state
         });
-        devLog('[ONBOARDING] handleManualUrlPaste: invoke SUCCESS, tokens=', tokens ? 'present' : 'null');
+        devLog('[ONBOARDING] handleManualUrlPaste: invoke SUCCESS');
 
-        if (tokens) {
-          setSpotifyPhase('done');
-          devLog('[ONBOARDING] handleManualUrlPaste: setSpotifyPhase(done)');
-        }
+        setSpotifyPhase('done');
+        devLog('[ONBOARDING] handleManualUrlPaste: setSpotifyPhase(done)');
       } else {
         devLog('[ONBOARDING] handleManualUrlPaste: no code extracted');
         validationError = t('validation.noCodeInUrl');
@@ -228,16 +225,14 @@
       devLog('[ONBOARDING] pollTeamsAuth: calling invoke poll_teams_auth');
       devLog('[ONBOARDING] pollTeamsAuth: deviceCode.length=', authFlow.teams.deviceCode.length);
 
-      const tokens = await invoke<TeamsTokens>('poll_teams_auth', {
+      await invoke('poll_teams_auth', {
         deviceCode: authFlow.teams.deviceCode,
         interval: authFlow.teams.interval
       });
-      devLog('[ONBOARDING] pollTeamsAuth: invoke SUCCESS, tokens=', tokens ? 'present' : 'null');
+      devLog('[ONBOARDING] pollTeamsAuth: invoke SUCCESS');
 
-      if (tokens) {
-        setTeamsPhase('done');
-        devLog('[ONBOARDING] pollTeamsAuth: setTeamsPhase(done)');
-      }
+      setTeamsPhase('done');
+      devLog('[ONBOARDING] pollTeamsAuth: setTeamsPhase(done)');
     } catch (e) {
       console.error('[ONBOARDING] pollTeamsAuth: FAILED:', e);
       setTeamsPhase('error', String(e));

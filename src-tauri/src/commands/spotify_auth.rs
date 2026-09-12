@@ -5,7 +5,6 @@
 //! plus the manual-code fallback (`complete_spotify_auth_manual`) and the
 //! in-flight token refresher (`refresh_spotify`).
 
-use crate::spotify::SpotifyTokens;
 use crate::token_io;
 use crate::{AppState, PendingSpotifyAuth};
 use std::sync::Arc;
@@ -250,7 +249,7 @@ pub async fn complete_spotify_auth_manual(
     oauth_state: String,
     app: AppHandle,
     state: tauri::State<'_, Arc<AppState>>,
-) -> Result<SpotifyTokens, String> {
+) -> Result<(), String> {
     // Issue #241: detached windows never legitimately complete the OAuth flow.
     super::require_main_window(&window)?;
     log::info!(
@@ -352,7 +351,7 @@ pub async fn complete_spotify_auth_manual(
 
     {
         let mut tokens_guard = state.tokens.spotify_mut();
-        *tokens_guard = Some(tokens.clone());
+        *tokens_guard = Some(tokens);
         log::info!("{CMD} complete_spotify_auth_manual: tokens stored in AppState");
     }
     token_io::persist_tokens(state.inner(), &app)?;
@@ -363,10 +362,10 @@ pub async fn complete_spotify_auth_manual(
     log::info!("{CMD} complete_spotify_auth_manual: onboarding_cache invalidated");
 
     log::info!("{CMD} complete_spotify_auth_manual: EMIT spotify-auth-complete event");
-    let _ = app.emit("spotify-auth-complete", &tokens);
+    let _ = app.emit("spotify-auth-complete", ());
 
     log::info!("{CMD} complete_spotify_auth_manual: SUCCESS (manual fallback)");
-    Ok(tokens)
+    Ok(())
 }
 
 // See issue #16: the cache-first, store-fallback pattern used to live in

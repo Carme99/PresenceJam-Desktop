@@ -13,7 +13,7 @@
   // redirect forwards the navigation to the main window first.
   let { detached = false }: { detached?: boolean } = $props();
   import { configStore, saveConfig, loadConfig, defaultConfig } from '$lib/stores/config';
-  import type { AppConfig, SyncStatus, TeamsTokens } from '$lib/types';
+  import type { AppConfig, SyncStatus } from '$lib/types';
   import { authFlow, setSpotifyPhase, setTeamsPhase } from '$lib/stores/authFlow.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
   import PageHeader from './PageHeader.svelte';
@@ -273,14 +273,12 @@
     if (!authFlow.teams.deviceCode) return;
     setTeamsPhase('waiting');
     try {
-      const tokens = await invoke<TeamsTokens>('poll_teams_auth', {
+      await invoke('poll_teams_auth', {
         deviceCode: authFlow.teams.deviceCode,
         interval: authFlow.teams.interval
       });
-      if (tokens) {
-        setTeamsPhase('done');
-        teamsStatusConnected = true;
-      }
+      setTeamsPhase('done');
+      teamsStatusConnected = true;
     } catch (e) {
       console.error('[SETTINGS] poll_teams_auth failed:', e);
       setTeamsPhase('error', String(e));
