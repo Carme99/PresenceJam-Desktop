@@ -541,7 +541,7 @@ sequenceDiagram
 | `polling-thread-panicked` | `null` | Polling thread panicked and was caught by `catch_unwind` |
 | `tray-click` | — | User clicks tray icon |
 | `toggle-pause` | — | User clicks Pause in tray menu |
-| `presence-gated` | `{reason}` | Status write suppressed by busy/DND/**focusing** availability or in-meeting/in-call/presenting activity (v3.0; `focusing` added in #254) |
+| `presence-gated` | `{reason, availability, activity, timestamp}` | Status write suppressed by busy/DND/**focusing** availability or in-meeting/in-call/presenting activity (v3.0; `focusing` added in #254) |
 | `presence-availability-updated` | `{available, label, timestamp}` | Availability session armed (`Available`) or cleared (v3.0) |
 | `playback-error` | `string` (error message) | Tray playback command failed — no active device, non-Premium 403, etc. (v3.0) |
 | `spotify-auth-complete` | `null` | Spotify sign-in finished and tokens were persisted (no token value in the payload — #299) |
