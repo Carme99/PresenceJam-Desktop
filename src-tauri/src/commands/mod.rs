@@ -126,13 +126,7 @@ mod tests {
     #[test]
     fn test_is_main_window_label() {
         assert!(super::is_main_window_label("main"));
-        for rejected in &[
-            "logs-detached",
-            "settings-detached",
-            "",
-            "Main",
-            "main ",
-        ] {
+        for rejected in &["logs-detached", "settings-detached", "", "Main", "main "] {
             assert!(
                 !super::is_main_window_label(rejected),
                 "label {:?} must not pass the main-window guard (issue #241)",
