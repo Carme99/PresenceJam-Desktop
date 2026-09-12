@@ -63,7 +63,7 @@ Edit the template that formats your Teams status message. Supports `{artist}`, `
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| Clear on pause | On | Clears your Teams status when Spotify pauses or stops |
+| Clear on pause | On | Clears your Teams status when Spotify pauses or stops. There is no Settings toggle for this — edit `teams.clear_on_pause` in `config.json` directly (consumed at `src-tauri/src/polling/poll_once.rs`). |
 | Profanity filter | On | Replaces profane track/artist names with a safe placeholder |
 | Profanity placeholder | `Currently Listening to Spotify` | Shown when a track name is filtered. Supports `{emoji}`. |
 
@@ -81,13 +81,12 @@ Edit the template that formats your Teams status message. Supports `{artist}`, `
 | Setting | Default | Description |
 |---------|---------|-------------|
 | Interval | 30s | How often to check Spotify when a track is playing (minimum 10s) |
-| Smart sleep | On | Sleep until the track ends instead of polling continuously — no wasted API calls |
 
 ### General
 
 | Launch at login | Start PresenceJam automatically when your OS boots |
 | Language | Interface language: English, Deutsch (German), or Français (French). Defaults to your browser/OS language; the choice persists. |
-| Start minimized | Open the app minimized to the tray (window hidden on launch). On macOS, `start_minimized` also switches the app's activation policy to `Accessory`, removing the dock icon and menu-bar app menu — the app becomes a pure tray-resident app. The dock icon reappears when you disable this setting in Settings (no restart needed). (v2.7.3+) |
+| Start minimized | Open the app minimized to the tray (window hidden on launch). There is no Settings toggle — set `teams.start_minimized` to `true` in `config.json` (consumed at `src-tauri/src/lib.rs`). On macOS, it also switches the app's activation policy to `Accessory`, removing the dock icon and menu-bar app menu — the app becomes a pure tray-resident app. The dock icon reappears when you set the field back to `false` (no restart needed). |
 
 ---
 
@@ -151,7 +150,7 @@ The current log level is set in `config.json` under `logging.log_level`.
 
 ## Status Expiry
 
-Teams custom status messages automatically expire. PresenceJam sets the message's expiry (`expiryDateTime`) to the **track's end time + a buffer** (default 10 s; `polling.expiry_buffer_seconds` in `config.json`). This is an app-side choice — the Graph API doesn't shorten it. When playback pauses or stops, PresenceJam replaces the message with a non-expiring placeholder.
+Teams custom status messages automatically expire. PresenceJam sets the message's expiry (`expiryDateTime`) to the **track's end time + a buffer** (default 10 s; `polling.expiry_buffer_seconds` in `config.json`). This is an app-side choice — the Graph API doesn't shorten it. When playback pauses or stops, PresenceJam replaces the message with a `🎵 Paused` / `🎵 Nothing playing on Spotify` placeholder that **expires 60 s after it is posted** (`placeholder_expiry_str()` in `src-tauri/src/polling/poll_once.rs` sets a fixed now + 60 s, on both the paused and the no-track path) — the pause placeholder does *not* inherit the track-end buffer. Graph has no "clear status message" action, so the short-lived placeholder is the documented clear mechanism: it self-removes ~1 min after the last successful post even if the app quits.
 
 ---
 

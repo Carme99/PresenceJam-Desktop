@@ -105,7 +105,7 @@ If a track or artist name contains profanity, PresenceJam replaces the entire st
 | Setting | Description |
 |---------|-------------|
 | Polling interval | How often to check Spotify (minimum 10s) |
-| Clear on pause | Automatically clear Teams status when Spotify pauses |
+| Clear on pause | Automatically clear Teams status when Spotify pauses. `config.json` only — `teams.clear_on_pause`; there is no Settings toggle for it |
 | Launch at login | Start PresenceJam when your OS boots |
 
 ---
@@ -129,7 +129,7 @@ Your `tokens.json` migrates automatically: on first read, v3.0 detects a ≤2.x 
 %APPDATA%\PresenceJam\          (Windows)
 ~/Library/Application Support/PresenceJam/  (macOS)
 ├── config.json       # Your settings
-└── logs\            # Daily rotating application logs
+└── logs\            # Single PresenceJam.log — no rotation, no retention pruning
 %APPDATA%\com.presencejam.app\PresenceJam\  (Windows — bundle-id folder)
 ~/Library/Application Support/com.presencejam.app/PresenceJam/  (macOS)
 └── tokens.json       # Spotify + Teams tokens (AES-256-GCM ciphertext; decryption key in the OS keychain — see SECURITY.md)

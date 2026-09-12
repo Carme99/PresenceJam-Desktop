@@ -148,15 +148,15 @@ Before diving in, check these basics:
 **Cause:** The `clear_on_pause` config option may be disabled, or you're using Spotify Web Player instead of the desktop app.
 
 **Fix:**
-1. Check Settings → polling config
+1. Open `config.json` and check `teams.clear_on_pause` is `true` — there is no Settings toggle for it
 2. Ensure you're using the Spotify desktop app (not web player) — the API detects both, but desktop is more reliable
 
 ### Status shows but disappears quickly
 
-**Cause:** PresenceJam sets the status message's expiry (`expiryDateTime`) to the track's end time plus a buffer (default 10 s; `polling.expiry_buffer_seconds` in `config.json`). When the track ends, pauses, or stops, the app expires or clears/replaces the status on the next poll. There is no server-side 24-hour cap — the Teams client's "Clear status message after" dropdown (which includes 24 h) affects only messages you set in the Teams UI, not Graph-set messages.
+**Cause:** PresenceJam sets a playing track's status expiry (`expiryDateTime`) to the track's end time plus a buffer (default 10 s; `polling.expiry_buffer_seconds` in `config.json`). When the track ends, pauses, or stops, the app replaces the status on the next poll with a `🎵 Paused` / `🎵 Nothing playing on Spotify` placeholder that has its **own fixed 60 s expiry** (`placeholder_expiry_str()`), so it self-removes about a minute after posting. There is no server-side 24-hour cap — the Teams client's "Clear status message after" dropdown (which includes 24 h) affects only messages you set in the Teams UI, not Graph-set messages.
 
 **Fix:**
-This is the app's own expiry/clear mechanism, not a Teams limitation. To keep the status visible longer, raise the buffer in `config.json` (`polling.expiry_buffer_seconds`) or disable Clear on pause.
+This is the app's own expiry/clear mechanism, not a Teams limitation. To keep the status visible longer, raise the buffer in `config.json` (`polling.expiry_buffer_seconds`) or set `teams.clear_on_pause` to `false` in `config.json` (there is no Settings toggle for it).
 
 ## Profanity Filter
 
