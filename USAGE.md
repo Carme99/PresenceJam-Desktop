@@ -25,7 +25,7 @@ PresenceJam lives in your **system tray** (Windows taskbar or macOS menu bar). T
 | Up Next | Peek at the next tracks in your queue |
 | Quit | Fully exit the app |
 
-> **Tray playback** (Play/Pause, Previous, Next, Devices, Up Next) requires a **Spotify Premium** account and the one-time reconnect that adds the `user-modify-playback-state` scope (see [SETUP.md — Upgrading from 2.x](./SETUP.md#upgrading-from-2x)). Until then, Settings shows a "Playback control needs a one-time reconnect" banner.
+> **Tray playback** (Play/Pause, Previous, Next, Devices, Up Next) requires a **Spotify Premium** account and a one-time reconnect that adds the `user-modify-playback-state` scope — needed only if your Spotify tokens predate that scope (see [SETUP.md — Upgrading from 2.x](./SETUP.md#upgrading-from-2x)). Until then, Settings shows a "Playback control needs a one-time reconnect" banner.
 
 > **Closing the window (X button) doesn't quit the app** — it minimizes to the tray. This is intentional so sync keeps running in the background. Use **Quit** from the tray menu to fully exit.
 
@@ -74,7 +74,7 @@ Edit the template that formats your Teams status message. Supports `{artist}`, `
 | Show Available while listening | Off | Sets your Teams presence to **Available** while a track plays (re-armed every few minutes, cleared on pause). It shows *Available*, not *Busy* — Microsoft's `setPresence` API only supports the Busy/**InACall** combination, so "busy" would display an in-call bubble to your colleagues. |
 | Pause status during meetings/calls/DND | On | Reads your Teams presence before writing a status update and skips the write while you're busy, in a meeting, in a call, or presenting. The status resumes on the next track change once your presence clears. |
 
-> Both toggles need the one-time Teams reconnect (see [SETUP.md — Upgrading from 2.x](./SETUP.md#upgrading-from-2x)) — the new `Presence.Read` and `profile` scopes are only granted on a fresh sign-in.
+> Both toggles need a one-time Teams reconnect if your tokens predate the `Presence.Read` and `profile` scopes — those are only granted on a fresh sign-in (see [SETUP.md — Upgrading from 2.x](./SETUP.md#upgrading-from-2x)).
 
 ### Polling
 
@@ -87,7 +87,7 @@ Edit the template that formats your Teams status message. Supports `{artist}`, `
 
 | Launch at login | Start PresenceJam automatically when your OS boots |
 | Language | Interface language: English, Deutsch (German), or Français (French). Defaults to your browser/OS language; the choice persists. |
-| Start minimized | Open the app minimized to the tray (window hidden on launch). On macOS, `start_minimized` also switches the app's activation policy to `Accessory`, removing the dock icon and menu-bar app menu — the app becomes a pure tray-resident app. The dock icon reappears when you disable this setting in Settings (no restart needed). (v2.7.3+) |
+| Start minimized | Open the app minimized to the tray (window hidden on launch). On macOS, `start_minimized` also switches the app's activation policy to `Accessory`, removing the dock icon and menu-bar app menu — the app becomes a pure tray-resident app. The dock icon reappears when you disable this setting in Settings (no restart needed). |
 
 ---
 
