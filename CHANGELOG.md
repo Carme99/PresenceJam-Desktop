@@ -5,9 +5,44 @@ All notable changes to PresenceJam are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [4.1.0] - 2026-09-12
+
+A correctness and hardening pass over the 4.0.0 surface: a startup panic on a
+truncated credential file, OAuth tokens no longer crossing into the webview, a
+retry/re-auth policy that no longer discards a healthy session on a transient
+blip, and a documentation sweep that reconciled drifted claims with the code.
+
+### Security
+- **OAuth tokens no longer reach the webview (#299):** the Spotify and Teams auth commands return `()` and their completion events carry no payload, so no `access_token`/`refresh_token` value is handed to a caller or broadcast on the event bus.
+- **Single-use OAuth state binding routed through constant-time compares (#239):** full-state comparisons go through `pkce::ct_eq`, closing a timing side channel on the CSRF check.
+- **Truncated credentials rejected instead of panicking (#294):** `decrypt_tokens` indexed the version byte before its length guard, so a 5-byte `tokens.json` panicked at startup. A malformed file now returns an error and drives re-authentication.
+- **Main-window-only guards on 12 sensitive commands (#241):** detached Logs/Settings panes can no longer invoke config, auth, or window-management commands that assume the main window.
+- **Unused `opener:default` permission dropped (#240)** from both the detached and default capability sets.
+
+### Fixed
+- **Settings save was completely broken (#285):** `structuredClone` in `toSavePayload` rejected the Svelte 5 `$state` proxy with a DataCloneError, aborting every save before IPC. The config is now snapshotted to a plain object first.
+- **Clamped config reached disk but not memory (#297):** `save_config` persisted a clamped copy while `AppState` and the frontend store kept the raw input, so a typed `999` was recorded as `30` on disk but polled at `999` until restart. `clamped_config()` is now the single definition of what is persisted, and the command stores and returns it.
+- **A transient Teams refresh failure forced a full re-auth (#295):** the `RefreshFailed` arm matched every error, so one 5xx or dropped connection discarded the session and drove a device-code sign-in. Only `invalid_grant` and a rejected access token now force re-auth.
+- **Expired Spotify token with a cold keychain cache looped silently (#296):** the refresh path retried every 30 s with no user-visible escape. Missing credentials are now classified as unavailable, routed to reconnect, and counted toward the five-strike threshold.
+- **Idle 304 responses discarded the ETag (#242):** the validator was dropped on every unchanged-track poll, so idle polling alternated conditional and unconditional GETs and doubled the request rate. The validator is retained and the pause backoff advances as it does on the 200-body path.
+- **The presence gate omitted `focusing` (#254):** the documented Do-Not-Disturb-class state now suppresses status writes like `busy` and `presenting`.
+- **Failed exit-time update installs were invisible (#244):** a marker recorded by the staged-update path is now surfaced in Diagnostics on the next launch.
+- **Dashboard leaked all ten event listeners when unmounted mid-`onMount` (#287)**, and **sync-toggle failures became unhandled rejections (#289)**; a failed Spotify reconnect in Settings was likewise silent (#288).
+- **Auth phase was set on mount rather than on flow start (#286)**, leaving Onboarding wedged in a permanent spinner when credentials were missing.
+- **Release re-cut could publish onto the wrong tag's Release (#265)** and collided with the run it was recovering (#266); the Homebrew formula re-render also no-op'd on a stale version line (#268). The re-cut path now resolves and validates the tag once.
+- **Max-interval input accepted values stricter than the backend clamp (#243):** its `min` is derived from `clamp_polling`'s effective minimum rather than hardcoded.
+
+### Changed
+- **Dependency refresh:** the npm and Cargo minor/patch groups were bumped (8 and 10 packages); Dependabot subjects no longer emit a doubled scope.
+- **CI gates:** `cargo fmt --check` is now enforced alongside clippy and the test suite; CodeRabbit and Sourcery reviews are opt-in.
+- **Documentation sweep:** drifted claims were reconciled with the code — OAuth scope sets, the `tokens.json`/`config.json` directory split, the 60 s placeholder expiry, the pause backoff ladder, the device-code cadence, the absence of a Disconnect control, Linux artifact filenames, and the dependency credits.
+
+### Added
+- **Regression coverage:** the five-strike transient threshold, `status_expiry_str` arithmetic, a previously vacuous guard, profanity case-insensitivity, and 0600-at-creation for `tokens.json`.
+
 ## [4.0.0] - 2026-08-23
 
-The scope-3.3 polish wave beyond Stratus: supply-chain and OAuth hardening, a local diagnostics page, silent background updates with install-on-quit, multi-window detach for Logs/Settings, conditional-GET polling, settings/notification UX polish, and a WCAG 2.2 AA accessibility pass. Landing separately (not yet in this history): i18n with an en/de/fr language picker (scope item C6).
+The scope-3.3 polish wave beyond Stratus: supply-chain and OAuth hardening, a local diagnostics page, silent background updates with install-on-quit, multi-window detach for Logs/Settings, conditional-GET polling, settings/notification UX polish, and a WCAG 2.2 AA accessibility pass, and i18n with an en/de/fr language picker (scope item C6).
 
 ### Security
 - **Dependency prune (C13):** dropped the last remaining `@tauri-apps/plugin-shell` entry from `package.json` (+ `package-lock.json`) and pruned `tauri-plugin-shell`/`tauri-plugin-store` from `Cargo.lock`; removed their four ACKNOWLEDGEMENTS.md rows and reworded stale comments naming the store crate. No imports existed in Rust or Svelte code and no capability granted shell/store IPC — bundle-size and attack-surface reduction only, no behavior change.
@@ -653,13 +688,14 @@ Closes #60 #61 #62 #63
 
 - PowerShell script version — this is a full rewrite
 
-[4.0.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v3.2.0...HEAD
+[4.1.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.0.0...v4.1.0
+[4.0.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v3.2.0...v4.0.0
 [3.2.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v3.2.0
 [3.1.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v3.1.0
 [3.0.1]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v3.0.1
 [3.0.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v3.0.0
 [2.9.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.9.0
-[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v3.2.0...HEAD
+[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.1.0...HEAD
 [2.6.2]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.6.2
 [2.6.1]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.6.1
 [2.6.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.6.0
