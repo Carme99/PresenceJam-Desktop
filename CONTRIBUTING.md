@@ -35,7 +35,6 @@ npm run tauri dev
 | `cargo test` | Run Rust unit tests |
 | `cargo fmt` | Format Rust code |
 | `npm run check` | Type-check Svelte/TypeScript |
-| `npm run lint` | Lint Svelte/TypeScript (if configured) |
 
 ## Coding Standards
 

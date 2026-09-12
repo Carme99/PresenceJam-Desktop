@@ -21,7 +21,6 @@
   let snapshot = $state<DiagnosticsSnapshot | null>(null);
   let loadError = $state('');
   let feedback = $state('');
-
   let loading = $derived(snapshot === null && loadError === '');
 
   function goBack() {
@@ -66,6 +65,23 @@
     return v ? t('common.yes') : t('common.no');
   }
 
+  /**
+   * Issue #244: exit-time update installs happen after the event loop
+   * ends, so a failure cannot be shown in that session. It is recorded
+   * on disk and surfaced here (via the snapshot) on the next launch;
+   * Dismiss discards the record both on disk and in the snapshot, so
+   * "Copy diagnostics"/"Save to file" agree with the UI.
+   */
+  async function dismissFailedInstall() {
+    try {
+      await invoke('clear_failed_update_install');
+      if (snapshot) snapshot.failed_update_install = null;
+    } catch (e) {
+      console.warn('[DIAGNOSTICS] clear_failed_update_install failed:', e);
+      feedback = t('diagnostics.failedInstallDismissFailed');
+    }
+  }
+
   onMount(async () => {
     try {
       snapshot = await invoke<DiagnosticsSnapshot>('get_diagnostics_snapshot');
@@ -74,6 +90,7 @@
       loadError = String(e);
     }
   });
+
 </script>
 
 <div class="diagnostics">
@@ -106,6 +123,21 @@
           <dt>{t('diagnostics.os')}</dt><dd>{snapshot.os.platform} ({snapshot.os.arch}, {snapshot.os.family})</dd>
         </dl>
       </section>
+
+      {#if snapshot.failed_update_install}
+        {@const failedInstall = snapshot.failed_update_install}
+        <section class="failed-install" aria-label={t('diagnostics.failedInstallTitle')}>
+          <h2>{t('diagnostics.failedInstallTitle')}</h2>
+          <dl>
+            <dt>{t('diagnostics.failedInstallVersion')}</dt><dd>{failedInstall.version}</dd>
+            <dt>{t('diagnostics.failedInstallError')}</dt><dd class="mono">{failedInstall.error}</dd>
+            <dt>{t('diagnostics.failedInstallTimestamp')}</dt><dd>{failedInstall.timestamp}</dd>
+          </dl>
+          <div class="failed-install-actions">
+            <button class="btn-secondary" onclick={dismissFailedInstall}>{t('common.dismiss')}</button>
+          </div>
+        </section>
+      {/if}
 
       <section aria-label={t('diagnostics.configuration')}>
         <h2>{t('diagnostics.configuration')}</h2>
@@ -231,6 +263,23 @@
   }
   dd.mono {
     font-family: var(--font-mono);
+  }
+
+  .failed-install {
+    border-color: var(--danger);
+  }
+  .failed-install h2 {
+    color: var(--danger);
+  }
+  .failed-install-actions {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: var(--sp-2);
+  }
+  .failed-install-actions .btn-secondary {
+    width: auto;
+    padding: var(--sp-2) var(--sp-4);
+    font-size: var(--fs-sm);
   }
 
   .log-list {

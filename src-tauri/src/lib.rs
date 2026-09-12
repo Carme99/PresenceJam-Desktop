@@ -426,7 +426,7 @@ async fn handle_spotify_callback(
 
     // Verify state matches to prevent CSRF attacks
     if let Some(state_str) = state_param {
-        if state_str != pending.state {
+        if !crate::pkce::ct_eq(state_str, &pending.state) {
             log::error!(
                 "[CALLBACK] handle_spotify_callback: state mismatch - CSRF attack detected"
             );
@@ -976,6 +976,7 @@ pub fn run() {
             commands::misc::update_tray_menu_state,
             commands::misc::relaunch_app,
             updater_bg::stage_deferred_update,
+            updater_bg::clear_failed_update_install,
             commands::playback::playback_play,
             commands::playback::playback_pause,
             commands::playback::playback_next,

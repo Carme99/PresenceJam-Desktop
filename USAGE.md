@@ -37,7 +37,7 @@ The main screen showing your current sync status.
 
 **Connection status badges:**
 - Green — connected and authenticated
-- Red — disconnected or token expired — click to reconnect
+- Red — not connected or token expired — follow the Reconnect view to sign in again
 
 **Sync toggle:**
 - **Start Syncing** — begins polling Spotify and updating your Teams status
@@ -160,16 +160,16 @@ Tokens refresh automatically:
 - **Spotify tokens** — refreshed by PresenceJam when needed (no action required)
 - **Teams tokens** — same. The device-code sign-in requests `offline_access`, so Microsoft issues a refresh token that PresenceJam rotates before the access token expires.
 
-If your connection drops unexpectedly, PresenceJam will emit a reconnect prompt. Go to **Settings → disconnect and reconnect** the affected service.
+If your connection drops unexpectedly, PresenceJam opens the Reconnect view. You can also re-authenticate the affected service anytime with its **Reconnect** button in **Settings**.
 
 ---
 
 ## Switching Accounts
 
-To switch your Spotify or Teams account:
+To switch your Spotify or Teams account — there is no Disconnect button:
 
 1. Open PresenceJam → **Settings**
-2. Under the service you want to switch, click **Disconnect**
-3. Run the onboarding step again for that service
+2. Under the service you want to switch, click **Reconnect** — this clears the stored tokens and starts a fresh sign-in
+3. Complete the browser sign-in with the other account
 
-This clears the old tokens and prompts fresh OAuth for the new account.
+If the browser signs you straight back into the old account, quit the app, delete `tokens.json` (`%APPDATA%\com.presencejam.app\PresenceJam\` on Windows, `~/Library/Application Support/com.presencejam.app/PresenceJam/` on macOS, `$XDG_CONFIG_HOME/com.presencejam.app/PresenceJam/` on Linux), restart, and re-onboard.
