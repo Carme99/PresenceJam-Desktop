@@ -21,6 +21,7 @@
 ## Checklist
 
 - [ ] Code compiles (`cargo check` passes)
+- [ ] Code is formatted (`cargo fmt --all --check` passes)
 - [ ] TypeScript type-checks (`npm run check` passes)
 - [ ] Commit messages follow [conventional commits](https://www.conventionalcommits.org/) format
 - [ ] PR title matches commit format (e.g. `feat: add dark mode`)

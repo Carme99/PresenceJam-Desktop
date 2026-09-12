@@ -137,9 +137,9 @@ App settings are stored in two files:
 %APPDATA%\PresenceJam\config.json   (Windows)
 ~/Library/Application Support/PresenceJam/config.json   (macOS)
 $XDG_CONFIG_HOME/PresenceJam/config.json   (Linux; falls back to ~/.config/)
-%APPDATA%\PresenceJam\tokens.json   (Windows; same dir as config.json)
-~/Library/Application Support/PresenceJam/tokens.json   (macOS)
-$XDG_CONFIG_HOME/PresenceJam/tokens.json   (Linux)
+%APPDATA%\com.presencejam.app\PresenceJam\tokens.json   (Windows — bundle-id folder, NOT the same dir as config.json; issue #300)
+~/Library/Application Support/com.presencejam.app/PresenceJam/tokens.json   (macOS)
+$XDG_CONFIG_HOME/com.presencejam.app/PresenceJam/tokens.json   (Linux)
 ```
 
 `config.json` contains:
@@ -325,7 +325,7 @@ For a more secure experience:
 2. **Keep Windows updated** to receive DPAPI security patches
 3. **Use a password/PIN** on your Windows account — no blank login
 4. **Don't share your machine** with untrusted parties while tokens are active
-5. **Uninstall the app** and delete `%APPDATA%\PresenceJam` when done
+5. **Uninstall the app** and delete both `%APPDATA%\PresenceJam` and `%APPDATA%\com.presencejam.app\PresenceJam` when done (tokens survive in the second folder if you only delete the first — issue #300)
 6. **Rotate credentials** if you suspect compromise (Spotify Developer Dashboard → your app overview page → **ROTATE**)
 
 

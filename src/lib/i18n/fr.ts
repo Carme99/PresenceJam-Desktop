@@ -66,6 +66,8 @@ export const fr: Dict = {
     "La synchronisation s'est arrêtée de manière inattendue. Veuillez redémarrer PresenceJam.",
   'dashboard.credentialCheckFailed':
     "Impossible de vérifier les identifiants — veuillez réessayer.",
+  'dashboard.syncToggleFailed':
+    "Impossible de modifier l'état de la synchronisation. Veuillez réessayer.",
   'dashboard.statusNotConfigured': 'Non configuré',
   'dashboard.statusNoTrack': 'Aucun titre en lecture',
   'dashboard.live': 'En direct',
@@ -209,6 +211,12 @@ export const fr: Dict = {
     "Les valeurs des tokens ne sont jamais incluses — uniquement les horodatages d'expiration et les indicateurs de présence.",
   'diagnostics.noLogLinesYet':
     'Aucune ligne de journal disponible pour le moment.',
+  'diagnostics.failedInstallTitle': "Échec de l'installation de la mise à jour",
+  'diagnostics.failedInstallVersion': 'Version',
+  'diagnostics.failedInstallError': 'Erreur',
+  'diagnostics.failedInstallTimestamp': 'Tentative le',
+  'diagnostics.failedInstallDismissFailed':
+    "Impossible d'ignorer l'enregistrement de l'échec d'installation.",
 
   // ── reconnect ─────────────────────────────────────────────────────
   'reconnect.title': 'Reconnexion',

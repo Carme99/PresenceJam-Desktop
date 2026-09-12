@@ -1,5 +1,6 @@
 # Tauri
 src-tauri/target/
+src-tauri/target
 src-tauri/.cargo/
 
 # SvelteKit
