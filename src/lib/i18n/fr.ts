@@ -23,6 +23,10 @@ export const fr: Dict = {
   'common.themeToggle': 'Changer de thème',
   'common.waiting': 'En attente…',
   'common.waitingForSignIn': "En attente de connexion…",
+  // Best-effort translation (no native review yet) — see wave/slice-e PR body.
+  'common.codeExpiresIn': 'Le code expire dans {time}',
+  'common.codeExpired': 'Ce code a expiré — il ne peut plus être utilisé.',
+  'common.getNewCode': 'Obtenir un nouveau code',
   'common.yes': 'Oui',
   'common.no': 'Non',
   'common.tagline': 'Spotify → Statut Teams',
