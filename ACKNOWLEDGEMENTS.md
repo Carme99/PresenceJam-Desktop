@@ -44,10 +44,12 @@ PresenceJam uses the following open-source projects. We're grateful to all the m
 | [@tauri-apps/plugin-updater](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Updater plugin |
 | [@tauri-apps/plugin-notification](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Notification plugin |
 | [@tauri-apps/plugin-opener](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Opener plugin |
+| [@tauri-apps/cli](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Tauri CLI (`npm run tauri`) |
 | [@sveltejs/adapter-static](https://github.com/sveltejs/kit) | 3.x | MIT | Static site adapter |
 | [@sveltejs/kit](https://github.com/sveltejs/kit) | 2.x | MIT | Svelte app framework |
 | [@sveltejs/vite-plugin-svelte](https://github.com/sveltejs/vite-plugin-svelte) | 5.x | MIT | Vite Svelte plugin |
 | [svelte](https://github.com/sveltejs/svelte) | 5.x | MIT | UI framework |
+| [svelte-check](https://github.com/sveltejs/language-tools) | 4.x | MIT | Type-checking for the Svelte components (`npm run check`) |
 | [typescript](https://github.com/microsoft/TypeScript) | 5.x | Apache-2.0 | TypeScript language |
 | [vite](https://github.com/vitejs/vite) | 6.x | MIT | Build tool |
 
@@ -62,4 +64,4 @@ Neither the app nor its author is affiliated with Spotify AB or Microsoft Corpor
 
 ---
 
-*This list was generated from Cargo.toml and package.json dependencies.*
+*This list was generated from Cargo.toml and the `dependencies` + `devDependencies` in package.json.*

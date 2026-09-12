@@ -34,7 +34,7 @@ Types: `feat`, `fix`, `docs`, `test`, `refactor`, `chore`
 
 - Run `cargo check` before committing
 - Use `cargo fmt` to format code before committing
-- Error handling with `Result` types — no `unwrap()` in production code
+- Error handling with `Result` types — no `unwrap()` on fallible I/O or parse paths in production code; the sole exception is the `tray.rs` `cached_devices` cache-hit fast path, which unwraps a snapshot it just proved is `Some`
 - Use `log::info!` / `log::debug!` over `println!`
 - Prefix module-level log tags in square brackets: `[MODULE]`
 
@@ -71,7 +71,7 @@ Types: `feat`, `fix`, `docs`, `test`, `refactor`, `chore`
 ## Auth Flows
 
 - **Spotify:** PKCE OAuth — `code_verifier` generated, `code_challenge` sent to Spotify, browser redirects to `presencejam://callback`
-- **Teams:** Device Code flow — app polls `login.microsoftonline.com` every 5s while user completes browser auth
+- **Teams:** Device Code flow — app polls `login.microsoftonline.com` at the server-provided device-code `interval` clamped to 1–15s, with +5s RFC 8628 `slow_down` backoff, while the user completes browser auth
 
 ---
 

@@ -4,7 +4,9 @@ Get PresenceJam running on your machine.
 
 ## Prerequisites
 
-- **Windows 10/11** (64-bit) or **macOS** (Apple Silicon)
+- **Windows 10/11** (64-bit), **macOS** (Apple Silicon), or **Linux** (64-bit)
+- On **Linux**, a running Secret Service keyring daemon is required — see
+  **Linux: System Keyring Required** below
 - A **Spotify Premium** account (required for the Web API)
 - A **Microsoft 365 Teams** account (work or school — the Graph
   presence APIs don't support personal Microsoft accounts)
@@ -16,6 +18,7 @@ Download the latest release from the [GitHub Releases page](https://github.com/C
 | OS | File | Notes |
 |----|------|-------|
 | Windows | see [Releases page](https://github.com/Carme99/PresenceJam-Desktop/releases/latest) | Run the installer, follow the prompts |
+| Linux | `PresenceJam-<version>-linux-amd64.deb` | Install with `sudo apt install ./PresenceJam-<version>-linux-amd64.deb`; requires a running keyring daemon (see **Linux: System Keyring Required** below) |
 | macOS | see [Releases page](https://github.com/Carme99/PresenceJam-Desktop/releases/latest) | Drag PresenceJam to Applications |
 
 Filenames follow the pattern `PresenceJam-<version>-<os>.<ext>` (e.g. `PresenceJam-<version>-linux-amd64.deb`); see the [latest release](https://github.com/Carme99/PresenceJam-Desktop/releases/latest) for the current values.
