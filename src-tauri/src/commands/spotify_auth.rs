@@ -46,6 +46,31 @@ fn validate_spotify_client_secret(secret: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The only Spotify redirect URI this app registers with the Spotify
+/// dashboard. Single source of truth for the IPC allowlist — the frontend
+/// (Onboarding/Reconnect) and `config::default_redirect_uri` must send
+/// exactly this value. See issue #349.
+const SPOTIFY_REDIRECT_URI: &str = "presencejam://callback";
+
+/// Validates the Spotify `redirect_uri` at the IPC boundary (issue #349).
+/// Pins the value to `SPOTIFY_REDIRECT_URI` (scheme `presencejam` + fixed
+/// path); anything else is rejected before it reaches the authorize URL or
+/// pending-auth storage. The error is user-safe: it names only the expected
+/// value and never echoes caller input or secrets.
+fn validate_spotify_redirect_uri(uri: &str) -> Result<(), String> {
+    if uri == SPOTIFY_REDIRECT_URI {
+        return Ok(());
+    }
+    log::error!(
+        "{CMD} validate_spotify_redirect_uri: rejected redirect_uri len={}",
+        uri.len()
+    );
+    Err(format!(
+        "Invalid redirect_uri: must be exactly '{}'",
+        SPOTIFY_REDIRECT_URI
+    ))
+}
+
 /// Common PKCE OAuth flow for Spotify authorization. Builds the auth
 /// URL, generates verifier/challenge/state, stores the pending auth
 /// in AppState (in-memory only — never persisted), and opens the
@@ -174,6 +199,10 @@ pub async fn start_spotify_auth(
     // accepted before this check.
     validate_spotify_client_id(&client_id)?;
     validate_spotify_client_secret(&client_secret)?;
+    // Issue #349: pin redirect_uri at the IPC boundary — a devtools caller
+    // can pass any string, so reject anything but presencejam://callback
+    // before it reaches the authorize URL or pending-auth storage.
+    validate_spotify_redirect_uri(&redirect_uri)?;
 
     // #215: keychain I/O is blocking (OS keychain + file). Offload to
     // the blocking pool so the async runtime stays responsive, matching
@@ -235,6 +264,8 @@ pub fn start_spotify_reconnect(
     // secret here because it's already in the keychain (validated at
     // Onboarding time).
     validate_spotify_client_id(&client_id)?;
+    // Issue #349: same IPC-boundary pin as start_spotify_auth.
+    validate_spotify_redirect_uri(&redirect_uri)?;
 
     run_spotify_oauth_flow(client_id, redirect_uri, &state)?;
 
