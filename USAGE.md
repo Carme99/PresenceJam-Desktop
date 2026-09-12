@@ -25,7 +25,7 @@ PresenceJam lives in your **system tray** (Windows taskbar or macOS menu bar). T
 | Up Next | Peek at the next tracks in your queue |
 | Quit | Fully exit the app |
 
-> **Tray playback** (Play/Pause, Previous, Next, Devices, Up Next) requires a **Spotify Premium** account and the one-time reconnect that adds the `user-modify-playback-state` scope (see [SETUP.md — Upgrading from 2.x](./SETUP.md#upgrading-from-2x)). Until then, Settings shows a "Playback control needs a one-time reconnect" banner.
+> **Tray playback** (Play/Pause, Previous, Next, Devices, Up Next) requires a **Spotify Premium** account and a one-time reconnect that adds the `user-modify-playback-state` scope — needed only if your Spotify tokens predate that scope (see [SETUP.md — Upgrading from 2.x](./SETUP.md#upgrading-from-2x)). Until then, Settings shows a "Playback control needs a one-time reconnect" banner.
 
 > **Closing the window (X button) doesn't quit the app** — it minimizes to the tray. This is intentional so sync keeps running in the background. Use **Quit** from the tray menu to fully exit.
 
@@ -40,8 +40,8 @@ The main screen showing your current sync status.
 - Red — not connected or token expired — follow the Reconnect view to sign in again
 
 **Sync toggle:**
-- **Start Syncing** — begins polling Spotify and updating your Teams status
-- **Stop Syncing** — pauses polling, your Teams status remains unchanged
+- An icon-only **▶** / **⏸** button in the Dashboard header — its tooltip and screen-reader label read **Resume sync** / **Pause sync**
+- **▶** starts polling Spotify and updating your Teams status; **⏸** pauses polling, and your Teams status remains unchanged
 
 **Currently playing card:**
 - Shows the active track (artist, track name, album art if available)
@@ -74,7 +74,7 @@ Edit the template that formats your Teams status message. Supports `{artist}`, `
 | Show Available while listening | Off | Sets your Teams presence to **Available** while a track plays (re-armed every few minutes, cleared on pause). It shows *Available*, not *Busy* — Microsoft's `setPresence` API only supports the Busy/**InACall** combination, so "busy" would display an in-call bubble to your colleagues. |
 | Pause status during meetings/calls/DND | On | Reads your Teams presence before writing a status update and skips the write while you're busy, in a meeting, in a call, or presenting. The status resumes on the next track change once your presence clears. |
 
-> Both toggles need the one-time Teams reconnect (see [SETUP.md — Upgrading from 2.x](./SETUP.md#upgrading-from-2x)) — the new `Presence.Read` and `profile` scopes are only granted on a fresh sign-in.
+> Both toggles need a one-time Teams reconnect if your tokens predate the `Presence.Read` and `profile` scopes — those are only granted on a fresh sign-in (see [SETUP.md — Upgrading from 2.x](./SETUP.md#upgrading-from-2x)).
 
 ### Polling
 
