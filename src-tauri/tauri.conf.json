@@ -52,7 +52,7 @@
       "certificateThumbprint": null,
       "digestAlgorithm": "sha256",
       "timestampUrl": "https://timestamp.comodoca.com",
-      "allowDowngrades": true,
+      "allowDowngrades": false,
       "nsis": {
         "installMode": "currentUser"
       }

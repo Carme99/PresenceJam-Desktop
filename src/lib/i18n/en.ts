@@ -254,6 +254,16 @@ export const en = {
   'update.installOnQuit': 'Install on quit',
   'update.preparing': 'Preparing…',
   'update.dismissAria': 'Dismiss update banner',
+  'update.confirmQuitInstall':
+    'Install v{staged} when you quit? Current version: v{current}.',
+  'update.confirmQuitInstallUnknown': 'Install v{staged} when you quit?',
+  'update.stagedVsCurrent':
+    'v{staged} will be installed when you quit (current v{current})',
+  'update.staleSkipped':
+    'v{staged} was skipped — your current v{current} is newer.',
+  'update.staleSkippedUnknown':
+    'v{staged} was skipped — it is not newer than your current version.',
+  'update.installAnyway': 'Install anyway',
 
   // ── onboarding ────────────────────────────────────────────────────
   'onboarding.stepOf': 'Step {step} of 3',
