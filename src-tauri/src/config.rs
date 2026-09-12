@@ -2,10 +2,10 @@ use crate::profanity;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Emitter;
 
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
@@ -785,10 +785,7 @@ mod tests {
     /// keychain "BBB".
     #[test]
     fn test_decide_legacy_secret_conflict_keychain_differs() {
-        let outcome = decide_legacy_secret_outcome(
-            Some("AAA"),
-            &Ok("BBB".to_string()),
-        );
+        let outcome = decide_legacy_secret_outcome(Some("AAA"), &Ok("BBB".to_string()));
         assert_eq!(outcome, LegacySecretOutcome::ConflictKeychainDiffers);
     }
     #[test]
