@@ -18,15 +18,46 @@ const CMD: &str = "[CMD.MISC]";
 /// the `{artist}` / `{track}` / `{album}` / `{emoji}` substitution rules.
 /// See issue #74.
 ///
-/// #215 decision: stays synchronous. This is pure string substitution via
-/// `spotify::preview_status_with_sample` — no disk, network, or keychain
-/// IO (see `spotify.rs:preview_status_with_sample` which builds a sample
-/// TrackInfo and calls `format_status`). Offloading to spawn_blocking
-/// would add overhead with no benefit.
+/// Issue #342: when the filter is enabled the formatted sample is routed
+/// through `filter_status` exactly like the runtime polling loop does, so
+/// the preview demonstrates the effective fallback (a whitespace-only
+/// placeholder renders the canonical default, not the raw format). The
+/// optional profane sample lets the user see that fallback path with a
+/// clean-looking template.
+///
+/// #215 decision: stays synchronous — pure string substitution, no disk,
+/// network, or keychain IO. Offloading to spawn_blocking would add
+/// overhead with no benefit.
 #[tauri::command]
-pub fn preview_status(format: String) -> String {
+pub fn preview_status(
+    format: String,
+    filter_enabled: Option<bool>,
+    placeholder: Option<String>,
+    profane_sample: Option<bool>,
+) -> String {
     log::debug!("{CMD} preview_status: ENTRY - format.len={}", format.len());
-    let result = crate::spotify::preview_status_with_sample(&format);
+    let result = if filter_enabled.unwrap_or(false) {
+        let sample = TrackInfo {
+            title: if profane_sample.unwrap_or(false) {
+                "Shit".to_string()
+            } else {
+                "Sample Track".to_string()
+            },
+            artist: "Sample Artist".to_string(),
+            album: "Sample Album".to_string(),
+            album_art_url: String::new(),
+            is_playing: true,
+            progress_ms: Some(0),
+            duration_ms: 0,
+        };
+        let formatted = crate::spotify::format_status(&sample, &format);
+        let effective_placeholder = placeholder
+            .as_deref()
+            .unwrap_or(crate::profanity::safe_placeholder_default());
+        crate::profanity::filter_status(&formatted, effective_placeholder, sample.is_playing)
+    } else {
+        crate::spotify::preview_status_with_sample(&format)
+    };
     log::debug!("{CMD} preview_status: SUCCESS");
     result
 }

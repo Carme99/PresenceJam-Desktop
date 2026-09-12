@@ -139,6 +139,7 @@ export const fr: Dict = {
   'settings.placeholderTextHint':
     "Utilisez {emoji} pour l'état de lecture (🎵 en lecture / ⏸ en pause). Affiché quand des grossièretés sont détectées dans les informations du titre.",
   'settings.placeholderTextPlaceholder': 'Écoute actuellement Spotify',
+  'settings.profaneSampleToggle': 'Aperçu avec un titre grossier',
   'settings.defaultIntervalLabel': 'Intervalle par défaut : {seconds}s',
   'settings.minIntervalLabel': 'Intervalle min (s)',
   'settings.maxIntervalLabel': 'Intervalle max (s)',

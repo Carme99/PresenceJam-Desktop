@@ -275,7 +275,10 @@ pub(crate) fn run(
             etag,
         }) => {
             *last_etag = etag;
-            log::info!(
+            // Issue #344: debug, not info — title/artist at info level
+            // land verbatim in the diagnostics `recent_logs` tail (a
+            // paste-able support artifact). No raw track metadata there.
+            log::debug!(
                 "[POLLING] poll_once: track found - {} by {}",
                 track.title,
                 track.artist
@@ -323,6 +326,33 @@ pub(crate) fn run(
             // carries no body — nothing to parse, format, filter or
             // rebuild. Behave exactly like the unchanged-track path minus
             // that work.
+            //
+            // Issue #343: unless relevant status config flipped mid-track
+            // (filter/placeholder/format). The 304 path never reaches
+            // `process_track`, so without this the stale status stays
+            // posted until the next track change. Force one rewrite on
+            // the last observed track; it re-keys `last_track_key`, so
+            // the following 304s return to the no-op path.
+            if let Some(track) = config_flip_rewrite_track(state, last_track_key, &config) {
+                log::info!(
+                    "[POLLING] poll_once: 304 but status config changed mid-track, forcing one rewrite"
+                );
+                let sleep = process_track(
+                    app,
+                    state,
+                    &config,
+                    &track,
+                    last_track_key,
+                    last_poll_instant,
+                    last_teams_update,
+                    last_posted_placeholder,
+                    consecutive_pauses,
+                    gated_track_key,
+                    last_availability_arm,
+                );
+                *transient_failure_count = 0;
+                return PollIteration::Sleep { seconds: sleep };
+            }
             not_modified_iteration(
                 last_track_key,
                 consecutive_pauses,
@@ -384,7 +414,9 @@ pub(crate) fn run(
                                         etag,
                                     }) => {
                                         *last_etag = etag;
-                                        log::info!(
+                                        // Issue #344: debug — see the main
+                                        // track-found site above.
+                                        log::debug!(
                                             "[POLLING] poll_once: retry track found - {} by {}",
                                             track.title,
                                             track.artist
@@ -428,7 +460,33 @@ pub(crate) fn run(
                                         return iteration;
                                     }
                                     Ok(CurrentlyPlaying::NotModified) => {
-                                        // Same no-op as the main path's 304.
+                                        // Same no-op as the main path's 304 —
+                                        // plus the issue #343 config-flip
+                                        // force-rewrite (see the main arm).
+                                        if let Some(track) = config_flip_rewrite_track(
+                                            state,
+                                            last_track_key,
+                                            &config,
+                                        ) {
+                                            log::info!(
+                                                "[POLLING] poll_once: 304 but status config changed mid-track, forcing one rewrite"
+                                            );
+                                            let sleep = process_track(
+                                                app,
+                                                state,
+                                                &config,
+                                                &track,
+                                                last_track_key,
+                                                last_poll_instant_retry,
+                                                last_teams_update,
+                                                last_posted_placeholder,
+                                                consecutive_pauses,
+                                                gated_track_key,
+                                                last_availability_arm,
+                                            );
+                                            *transient_failure_count = 0;
+                                            return PollIteration::Sleep { seconds: sleep };
+                                        }
                                         return not_modified_iteration(
                                             last_track_key,
                                             consecutive_pauses,
@@ -717,6 +775,64 @@ fn should_rearm_availability(last_arm: Option<Instant>, now: Instant) -> bool {
     }
 }
 
+/// Issue #343: fingerprint of the status-shaping config. Embedded in the
+/// track change key so a filter/placeholder/format flip mid-track reads as
+/// a change and forces one rewrite on the next poll, instead of leaving
+/// the stale status posted until the next track change.
+///
+/// The `None`-config fallbacks mirror `process_track`'s exactly — a
+/// mismatch here would flap the key on every poll.
+fn status_config_fingerprint(config: &Option<crate::config::AppConfig>) -> String {
+    let filter = config
+        .as_ref()
+        .map(|c| c.teams.profanity_filter)
+        .unwrap_or(true);
+    let placeholder = config
+        .as_ref()
+        .map(|c| c.teams.profanity_placeholder.as_str())
+        .unwrap_or(profanity::safe_placeholder_default());
+    let format = config
+        .as_ref()
+        .map(|c| c.teams.status_format.as_str())
+        .unwrap_or("🎵 {artist} - {track} 🎧");
+    format!("filter={filter} placeholder={placeholder} format={format}")
+}
+
+/// Issue #343: the change key compared against `last_track_key`. Track
+/// identity plus the status-shaping config fingerprint.
+fn status_track_key(
+    track: &crate::spotify::TrackInfo,
+    config: &Option<crate::config::AppConfig>,
+) -> String {
+    format!(
+        "{} - {} | {}",
+        track.title,
+        track.artist,
+        status_config_fingerprint(config)
+    )
+}
+
+/// Issue #343: 304 steady-state force-rewrite. A 304 carries no body, so
+/// `process_track` never runs and the change key above is never compared —
+/// a config flip mid-track would stay stale until the next track change.
+/// Returns the last observed track when the stored key no longer matches
+/// the current track+config, so `run()` can push one fresh write through
+/// `process_track`; `None` otherwise (no tracked track, or nothing
+/// changed).
+fn config_flip_rewrite_track(
+    state: &AppState,
+    last_track_key: &Option<String>,
+    config: &Option<crate::config::AppConfig>,
+) -> Option<crate::spotify::TrackInfo> {
+    let tracked = state.polling.current_track().clone()?;
+    let expected = status_track_key(&tracked, config);
+    if last_track_key.as_ref() != Some(&expected) {
+        Some(tracked)
+    } else {
+        None
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn process_track(
     app: &AppHandle,
@@ -741,7 +857,11 @@ pub(crate) fn process_track(
     // the server-directed delay.
     let mut teams_backoff_secs: u64 = 0;
 
-    let track_key = format!("{} - {}", track.title, track.artist);
+    // Issue #343: the change key carries the status-shaping config
+    // (filter flag + placeholder + format) alongside the track identity,
+    // so a relevant config flip mid-track forces one rewrite on the next
+    // poll instead of leaving the stale status until the next track.
+    let track_key = status_track_key(track, config);
     let changed = last_track_key.as_ref() != Some(&track_key);
 
     if changed {
@@ -2239,5 +2359,87 @@ mod tests {
             SpotifyRefreshPlan::Fresh,
             "a token still inside its window is used as-is regardless of credentials"
         );
+    }
+    /// Issue #343: the change-key fingerprint must move with each of the
+    /// status-shaping config values (filter flag, placeholder, format) —
+    /// otherwise a mid-track flip reads as "unchanged" and the stale
+    /// status stays posted.
+    #[test]
+    fn test_status_config_fingerprint_tracks_filter_placeholder_format() {
+        let base = Some(crate::config::AppConfig::default());
+        let fp = status_config_fingerprint(&base);
+
+        let mut off = crate::config::AppConfig::default();
+        off.teams.profanity_filter = false;
+        assert_ne!(
+            fp,
+            status_config_fingerprint(&Some(off)),
+            "toggling the filter must change the fingerprint"
+        );
+
+        let mut ph = crate::config::AppConfig::default();
+        ph.teams.profanity_placeholder = "something else".to_string();
+        assert_ne!(
+            fp,
+            status_config_fingerprint(&Some(ph)),
+            "editing the placeholder must change the fingerprint"
+        );
+
+        let mut fmt = crate::config::AppConfig::default();
+        fmt.teams.status_format = "{track}".to_string();
+        assert_ne!(
+            fp,
+            status_config_fingerprint(&Some(fmt)),
+            "editing the format must change the fingerprint"
+        );
+
+        assert_eq!(
+            fp,
+            status_config_fingerprint(&base),
+            "identical config must fingerprint identically"
+        );
+    }
+
+    /// Issue #343: the 304 force-rewrite fires exactly when the stored key
+    /// no longer matches the current track+config — no tracked track, no
+    /// rewrite; matching key, no rewrite; flipped config, one rewrite
+    /// carrying the last observed track.
+    #[test]
+    fn test_config_flip_rewrite_track_fires_only_on_mismatch() {
+        let config = Some(crate::config::AppConfig::default());
+        let track = crate::spotify::TrackInfo {
+            title: "T".to_string(),
+            artist: "A".to_string(),
+            album: String::new(),
+            album_art_url: String::new(),
+            is_playing: true,
+            progress_ms: Some(0),
+            duration_ms: 0,
+        };
+        let state = Arc::new(AppState::new());
+
+        // No tracked track → no rewrite.
+        assert!(
+            config_flip_rewrite_track(&state, &None, &config).is_none(),
+            "nothing tracked means nothing to rewrite"
+        );
+
+        *state.polling.current_track_mut() = Some(track.clone());
+        let key = status_track_key(&track, &config);
+
+        // Matching key → steady-state 304 stays a no-op.
+        assert!(
+            config_flip_rewrite_track(&state, &Some(key.clone()), &config).is_none(),
+            "a matching key must not force a rewrite"
+        );
+
+        // Same track, flipped filter → one rewrite with the stored track.
+        let mut flipped = crate::config::AppConfig::default();
+        flipped.teams.profanity_filter = false;
+        let rewrite =
+            config_flip_rewrite_track(&state, &Some(key), &Some(flipped));
+        let rewrite = rewrite.expect("a config flip must force one rewrite");
+        assert_eq!(rewrite.title, "T");
+        assert_eq!(rewrite.artist, "A");
     }
 }

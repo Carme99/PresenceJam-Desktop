@@ -12,8 +12,11 @@ export const defaultConfig: AppConfig = {
     status_format: '🎵 {artist} - {track} 🎧',
     clear_on_pause: true,
     profanity_filter: true,
-    // NOTE: The Rust backend (profanity::safe_placeholder_default) is the canonical source.
-    // This default is only used if load_config fails. Both must stay in sync manually.
+    // Canonical frontend default for the profanity placeholder (issue
+    // #342). Onboarding and Settings import it from here instead of
+    // hardcoding their own copies. The Rust backend's canonical default
+    // (profanity::safe_placeholder_default, via config.rs) carries the
+    // same text at runtime and owns the whitespace fallback.
     profanity_placeholder: 'Currently Listening to Spotify',
     start_minimized: false,
     availability_sync: false,
@@ -31,6 +34,14 @@ export const defaultConfig: AppConfig = {
   },
   autostart: false
 };
+
+/**
+ * Single frontend canonical source for the profanity placeholder default
+ * (issue #342). Import this instead of hardcoding the string — Onboarding
+ * uses it for the first-run config, Settings uses `defaultConfig` for
+ * reset-to-default.
+ */
+export const DEFAULT_PROFANITY_PLACEHOLDER = defaultConfig.teams.profanity_placeholder;
 
 export const configStore = writable<AppConfig>(defaultConfig);
 

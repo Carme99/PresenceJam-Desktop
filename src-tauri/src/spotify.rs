@@ -772,11 +772,17 @@ pub fn decode_spotify_granted_scopes(access_token: &str) -> Vec<String> {
 pub fn format_status(track: &TrackInfo, format: &str) -> String {
     let emoji = if track.is_playing { "🎵" } else { "⏸️" };
 
+    // Issue #341: `{emoji}` substitutes FIRST. Track metadata may
+    // literally contain "{emoji}" (or "{artist}"/"{track}"/"{album}");
+    // substituting data fields first would let this final pass re-expand
+    // data-inserted tokens ("{emoji}" artist → "🎵"), while the other
+    // tokens survive verbatim — asymmetric data injection. Emoji-first
+    // means data-inserted tokens are never re-scanned.
     format
+        .replace("{emoji}", emoji)
         .replace("{artist}", &track.artist)
         .replace("{track}", &track.title)
         .replace("{album}", &track.album)
-        .replace("{emoji}", emoji)
 }
 
 /// Renders `format` against a sample TrackInfo so the Svelte Settings page
@@ -876,6 +882,15 @@ mod tests {
         let track = make_track("Karma Police", "Radiohead", "OK Computer", false);
         let result = format_status(&track, "{artist} - {track} {emoji}");
         assert_eq!(result, "Radiohead - Karma Police ⏸️");
+    }
+    // Issue #341: track metadata containing a literal "{emoji}" must
+    // survive verbatim. `{emoji}` substitutes before the data fields, so
+    // the data-inserted token is never re-scanned and re-expanded.
+    #[test]
+    fn format_status_does_not_expand_data_inserted_emoji_token() {
+        let track = make_track("x", "{emoji}", "z", true);
+        let result = format_status(&track, "{artist} - {track}");
+        assert_eq!(result, "{emoji} - x");
     }
 
     #[test]
