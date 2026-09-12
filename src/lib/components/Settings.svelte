@@ -19,6 +19,7 @@
   import PageHeader from './PageHeader.svelte';
   import { t, i18n, type Locale } from '$lib/i18n';
   import { theme } from '$lib/stores/theme';
+  import { devLog } from '$lib/utils/dev';
 
   let localConfig = $state<AppConfig>(structuredClone($configStore));
   let isConnected = $state(false);
@@ -79,6 +80,11 @@
   let playbackScopeMissing = $derived(
     isConnected && !grantedScopes.includes('user-modify-playback-state')
   );
+  // Issue #376: set when the setup-path migration emits the one-time
+  // `spotify-secret-conflict` event (legacy plaintext in config.json
+  // differs from the keychain entry). The banner below prompts a
+  // Spotify reconnect; the plaintext is left untouched until then.
+  let spotifySecretConflict = $state(false);
 
   async function refreshGrantedScopes() {
     try {
@@ -147,6 +153,11 @@
 
   let unlistenFns: UnlistenFn[] = [];
   let unlistenAuth: (() => void) | null = null;
+  // Issue #376 conflict listener handle + unmount race flag (issue #392
+  // pattern from +layout.svelte: `listen()` resolves async, so an unmount
+  // before resolution must immediately release the subscription).
+  let unlistenSecretConflict: UnlistenFn | null = null;
+  let secretConflictDestroyed = false;
 
   onMount(async () => {
     try { notificationsEnabled = localStorage.getItem('notificationsEnabled') === 'true'; } catch {}
@@ -190,6 +201,10 @@
         console.log('[SETTINGS] spotify-auth-complete received');
         setSpotifyPhase('done');
         isConnected = true;
+        // A completed reconnect resolves the #376 secret conflict (the
+        // current secret is in the keychain; next launch strips the stale
+        // plaintext), so dismiss the banner.
+        spotifySecretConflict = false;
         // The new token carries the freshly-granted scope set — refresh so
         // the playback banner disappears. Issue #3.0-P3.
         refreshGrantedScopes();
@@ -211,6 +226,19 @@
         setTeamsPhase('error', String(payload));
       }
     });
+    // Issue #376: one-time `spotify-secret-conflict` event from the
+    // setup-path migration (config.json holds a legacy plaintext secret
+    // that differs from the keychain entry). `useAuthListeners` only
+    // covers the four auth events, so subscribe directly; the payload
+    // message stays Rust-side English (documented limitation) and is
+    // only dev-logged — the banner copy below goes through `t()`.
+    listen<{ action: string; message: string }>('spotify-secret-conflict', (event) => {
+      devLog('[SETTINGS] spotify-secret-conflict received:', event.payload);
+      spotifySecretConflict = true;
+    }).then((u) => {
+      if (secretConflictDestroyed) u();
+      else unlistenSecretConflict = u;
+    });
   });
 
   onDestroy(() => {
@@ -226,6 +254,8 @@
       unlisten();
     }
     if (unlistenAuth) unlistenAuth();
+    secretConflictDestroyed = true;
+    if (unlistenSecretConflict) unlistenSecretConflict();
   });
 
   async function handleSave() {
@@ -378,6 +408,12 @@
       {#if playbackScopeMissing}
         <div class="scope-banner">
           <span class="hint">{t('settings.playbackScopeBanner')}</span>
+          <button type="button" class="btn-link" onclick={reconnectSpotify} disabled={spotifyAuthWaiting}>{t('common.reconnect')}</button>
+        </div>
+      {/if}
+      {#if spotifySecretConflict}
+        <div class="scope-banner">
+          <span class="hint">{t('settings.spotifySecretConflict')}</span>
           <button type="button" class="btn-link" onclick={reconnectSpotify} disabled={spotifyAuthWaiting}>{t('common.reconnect')}</button>
         </div>
       {/if}

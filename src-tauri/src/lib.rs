@@ -825,9 +825,11 @@ pub fn run() {
 
             // One-shot startup migration: strip plaintext Spotify client_secret
             // from config.json (legacy ≤ v2.5.0) into the OS keychain. Safe to
-            // call on every launch; no-op once the field is gone. See audit Q3
-            // and issue #9.
-            config::migrate_legacy_client_secret();
+            // call on every launch; no-op once the field is gone. The `_with_app`
+            // variant surfaces a keychain conflict to Settings via a one-time
+            // `spotify-secret-conflict` event (issue #376). See audit Q3 and
+            // issue #9.
+            config::migrate_legacy_client_secret_with_app(app.handle());
 
             // Load persisted tokens (Spotify + Teams) into AppState. We bypass
             // any plugin store for the tokens file and read it directly

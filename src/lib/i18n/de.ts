@@ -110,6 +110,8 @@ export const de: Dict = {
     'Schließen Sie die Authentifizierung im Browser ab.',
   'settings.playbackScopeBanner':
     'Die Wiedergabesteuerung erfordert eine einmalige Neuverbindung.',
+  'settings.spotifySecretConflict':
+    'Das Client-Secret in der Konfigurationsdatei weicht vom Schlüsselbund-Eintrag ab. Spotify neu verbinden, um das Problem zu beheben.',
   'settings.teamsAuthHint':
     'Die Teams-Authentifizierung verwendet Ihr Microsoft-365-Konto. Keine zusätzliche Konfiguration erforderlich.',
   'settings.presenceScopeBanner':
