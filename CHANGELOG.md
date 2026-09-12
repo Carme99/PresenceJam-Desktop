@@ -5,6 +5,31 @@ All notable changes to PresenceJam are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [4.2.0] - 2026-09-12
+
+Trust-wave release: expired-but-refreshable sessions no longer force a full
+re-auth, device-code sign-ins show a live expiry countdown with one-click
+recovery, quit-time deferred updates ask before installing anything stale,
+and two secret-hygiene leaks (device-code bearer in logs, absolute log path
+in diagnostics) are closed. Spotify HTTP clients are bounded and the
+redirect URI is pinned at the IPC boundary.
+
+### Added
+- **Never-re-auth refresh-and-retry (#428, #367, #375):** an expired Teams token on status write now gets one `refresh_teams_token` + CAS-commit + persist + single retry before `teams-reconnect-required` is emitted; all six tray/playback commands share the same proactive-plus-one-retry policy, so only `InvalidGrant` (or a failed refresh) asks the user to sign in again.
+- **Device-code expiry countdown with one-click fresh code (#429):** Onboarding, Settings, and Reconnect show a live countdown while a device code is valid and swap to an expired state with a Get-new-code button on the existing sign-in path; expired codes are refused at poll time.
+- **Quit-time deferred-update confirmation with version check (#431):** Install-on-quit opens a candidate-vs-current confirm surface with install/skip; a stale stage (`staged <= current`) is skipped with a log + marker instead of installing, and a declined stale candidate shows a skipped state with an explicit Install-anyway (`force:true`) override. `allowDowngrades` is now `false`.
+- **Keychain secret-conflict prompt (#376):** a legacy plaintext `spotify.client_secret` in `config.json` that conflicts with the keychain value now surfaces a one-time `spotify-secret-conflict` event with a Settings banner and reconnect action; the plaintext is never deleted.
+
+### Fixed
+- **Spotify token exchange + refresh had no HTTP timeout (#347):** all Spotify calls go through a shared `build_spotify_client()` (10 s timeout, `PresenceJam/<version>` User-Agent), matching the Teams client.
+- **Device-code bearer was info-logged (#348):** the raw device-code response body and both `Err` paths are length-only in logs and errors; receipt logs carry `expires_in`/`interval` only.
+- **`redirect_uri` unvalidated at the Spotify IPC boundary (#349):** exact-match allowlist against `SPOTIFY_REDIRECT_URI` (`presencejam://callback`) enforced in `start_spotify_auth` and `start_spotify_reconnect`.
+- **Spotify clients sent no User-Agent (#353):** closed as a drive-by of the shared-client fix above.
+- **Diagnostics embedded the absolute log path (#409):** snapshot statuses carry only `PresenceJam.log`; the full path stays in local error logs.
+- **Vite config tripped `svelte-check` (#501):** removed the unused `@ts-expect-error` directive; no behavior change.
+
+> **i18n note:** the new German and French strings in this release are best-effort and need native-speaker review (see the individual PR bodies).
+
 ## [4.1.1] - 2026-09-12
 
 Profanity-filter correctness pass: the matcher no longer censors innocent
@@ -716,6 +741,7 @@ Closes #60 #61 #62 #63
 
 - PowerShell script version — this is a full rewrite
 
+[4.2.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.1.1...v4.2.0
 [4.1.1]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.1.0...v4.1.1
 [4.1.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.0.0...v4.1.0
 [4.0.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v3.2.0...v4.0.0
@@ -724,7 +750,7 @@ Closes #60 #61 #62 #63
 [3.0.1]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v3.0.1
 [3.0.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v3.0.0
 [2.9.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.9.0
-[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.1.1...HEAD
+[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.2.0...HEAD
 [2.6.2]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.6.2
 [2.6.1]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.6.1
 [2.6.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.6.0

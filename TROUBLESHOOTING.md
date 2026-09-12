@@ -70,6 +70,12 @@ Before diving in, check these basics:
 
 **Fix:** Click **Reconnect** in the banner (or Settings → reconnect Spotify) once. You only need to do this once after upgrading.
 
+### "Spotify secret conflict" banner in Settings
+
+**Cause:** A legacy plaintext `spotify.client_secret` left in `config.json` disagrees with the value stored in the OS keychain (#376). The app keeps the plaintext (nothing is deleted) and asks you to resolve it.
+
+**Fix:** Click **Reconnect** in the banner (or Settings → reconnect Spotify) once — the fresh sign-in reconciles the stored secret and the banner dismisses on reconnect.
+
 ## Microsoft Teams
 
 ### "Teams not updating" after connecting
@@ -83,12 +89,13 @@ Before diving in, check these basics:
 
 ### Device code sign-in times out
 
-**Cause:** The 15-minute window for entering the code expired.
+**Cause:** The sign-in window for entering the code expired.
 
 **Fix:**
-1. Click "Sign in with Microsoft" again to get a fresh code
-2. Complete the sign-in within 15 minutes
-3. Make sure you're visiting the correct verification URL
+1. While the code is still valid, the app shows a live countdown of the remaining time (#429)
+2. If the code expired, the app shows an expired state — click **Get new code** (or "Sign in with Microsoft" again) for a fresh code
+3. Complete the sign-in before the countdown runs out
+4. Make sure you're visiting the correct verification URL
 
 ### Sign-in loop / "authorization_declined"
 
@@ -133,7 +140,7 @@ Before diving in, check these basics:
 
 **Cause:** With *Install on quit*, the update is applied while the app is exiting — there is no window left to show progress or an error in. If staging or applying fails at that point, the failure is visible **only in the log file** (`PresenceJam.log`), not in the UI (#244).
 
-**Fix:** Quit again (or relaunch) and check `PresenceJam.log` for `[UPDATER]` lines. If the staged update keeps failing, use **Download & Install** from the update banner instead — that path reports errors in-app.
+**Fix:** Quit again (or relaunch) and check `PresenceJam.log` for `[UPDATER]` lines. If the staged update keeps failing, use **Download & Install** from the update banner instead — that path reports errors in-app. Note: since v4.2.0, a staged update that is stale (same version or older than your current install) is *deliberately* skipped with an `[UPDATER]` log line, not installed — the banner shows a skipped state with an **Install anyway** override (#431). Downgrades are off by default (`allowDowngrades: false`).
 
 
 ### No status appears on Teams
