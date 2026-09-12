@@ -212,16 +212,22 @@ back in), VS Code detached-panel style:
   `Settings` in detached mode. `tauri.conf.json`'s `app.windows` is untouched —
   the app still boots single-window.
 - **Main window stays the source of truth:** `currentView` remains
-  main-window-only. Detached panes read and write the same app-global state
-  (they call `save_config` / `load_config`, reconnect and `poll_teams_auth`
-  directly), so config/polling state is shared by construction — but the 11
-  commands that assume the main window (auth *starts*, `relaunch_app`,
-  `app_exit`, `start_syncing` / `stop_syncing`, …) are rejected by
-  `require_main_window` (issue #241), so a detached pane cannot drive them.
-  Popping back in re-mounts Settings via `loadConfig()` (backend truth).
-  `src/lib/stores/detach.ts` tracks pane→popped-out state in the main window
-  only; dashboard nav shows a dot badge and focuses the child instead of
-  navigating while detached.
+  main-window-only. Detached panes read and write the same app-global state —
+  they call `save_config` / `load_config`, `reconnect_spotify` /
+  `reconnect_teams`, `poll_teams_auth` and `open_logs_folder` directly, none
+  of which take a `window` argument — so config/polling state is shared by
+  construction. The 12 commands that assume the main window (auth *starts*,
+  the token refreshes, `relaunch_app`, `app_exit`, `stage_deferred_update`,
+  `start_syncing` / `stop_syncing`, …) are rejected by
+  `require_main_window` (issue #241). That does not strand a detached user:
+  `reconnect_spotify` / `reconnect_teams` are unguarded and emit
+  `*-reconnect-required` app-wide, and `+layout.svelte` registers its
+  reconnect/update listeners **only** in the main window
+  (`if (!isMainWindow) return`), so the main window drives the guarded
+  re-auth steps. Popping back in re-mounts Settings via `loadConfig()`
+  (backend truth). `src/lib/stores/detach.ts` tracks pane→popped-out state in
+  the main window only; dashboard nav shows a dot badge and focuses the child
+  instead of navigating while detached.
 - **Capabilities:** new `src-tauri/capabilities/detached.json` scopes the two
   child labels to a minimal mirrored set (`core/event/log/opener/notification`);
   `default.json` gains `core:window:allow-create` +
@@ -541,9 +547,13 @@ sequenceDiagram
 | `spotify-auth-complete` | `null` | Spotify sign-in finished and tokens were persisted (no token value in the payload — #299) |
 | `teams-auth-complete` | `null` | Teams device-code sign-in finished and tokens were persisted (no token value — #299) |
 | `teams-auth-failed` | `{message}` | Teams device-code sign-in failed |
+| `spotify-auth-failed` | `{message}` | Spotify sign-in (deep-link callback) failed |
 | `sync-started` | `null` | Polling started (or resumed) |
 | `sync-stopped` | `null` | Polling paused |
 | `navigate` | `{view}` | Deep-link callback resolved; app should land on `dashboard` or `settings` (C2) |
+| `open-logs-folder` | `null` | User picks "Open Logs Folder" in the tray or app menu |
+| `app-shutdown` | `null` | User picks Quit in the tray or app menu |
+| `show-about` | `null` | User picks About in the app menu |
 
 ## Deep Link Routing
 
