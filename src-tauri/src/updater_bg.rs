@@ -266,7 +266,10 @@ struct StaleSkippedUpdate {
 /// core plus the release-vs-prerelease rule.
 fn parse_semver_core(v: &str) -> Option<(u64, u64, u64, Option<String>)> {
     let s = v.trim();
-    let s = s.strip_prefix('v').or_else(|| s.strip_prefix('V')).unwrap_or(s);
+    let s = s
+        .strip_prefix('v')
+        .or_else(|| s.strip_prefix('V'))
+        .unwrap_or(s);
     let s = s.split('+').next().unwrap_or(s);
     let (core, prerelease) = match s.split_once('-') {
         Some((c, p)) => (c, Some(p.to_string())),
@@ -766,20 +769,14 @@ mod tests {
 
     #[test]
     fn test_parse_semver_core_triple() {
-        assert_eq!(
-            parse_semver_core("4.1.1"),
-            Some((4, 1, 1, None))
-        );
+        assert_eq!(parse_semver_core("4.1.1"), Some((4, 1, 1, None)));
         // Leading `v`, surrounding whitespace, and build metadata are
         // tolerated/ignored; prereleases are captured.
         assert_eq!(
             parse_semver_core("  v4.2.0-beta.1+build.5 "),
             Some((4, 2, 0, Some("beta.1".to_string())))
         );
-        assert_eq!(
-            parse_semver_core("1.0.0+nightly"),
-            Some((1, 0, 0, None))
-        );
+        assert_eq!(parse_semver_core("1.0.0+nightly"), Some((1, 0, 0, None)));
     }
 
     #[test]
