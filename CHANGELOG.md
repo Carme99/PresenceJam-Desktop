@@ -37,12 +37,15 @@ blip, and a documentation sweep that reconciled drifted claims with the code.
 - **CI gates:** `cargo fmt --check` is now enforced alongside clippy and the test suite; CodeRabbit and Sourcery reviews are opt-in.
 - **Documentation sweep:** drifted claims were reconciled with the code — OAuth scope sets, the `tokens.json`/`config.json` directory split, the 60 s placeholder expiry, the pause backoff ladder, the device-code cadence, the absence of a Disconnect control, Linux artifact filenames, and the dependency credits.
 
+### Note on the 4.0.0 entry
+- The 4.0.0 section says i18n was "landing separately (not yet in this history)". That is inaccurate: both i18n commits (`577b047`, `e205fa0`) are ancestors of the `v4.0.0` tag and are present in the published 4.0.0 installers. The entry is left as shipped rather than rewritten; the i18n language picker is part of v4.0.0.
+
 ### Added
 - **Regression coverage:** the five-strike transient threshold, `status_expiry_str` arithmetic, a previously vacuous guard, profanity case-insensitivity, and 0600-at-creation for `tokens.json`.
 
 ## [4.0.0] - 2026-08-23
 
-The scope-3.3 polish wave beyond Stratus: supply-chain and OAuth hardening, a local diagnostics page, silent background updates with install-on-quit, multi-window detach for Logs/Settings, conditional-GET polling, settings/notification UX polish, and a WCAG 2.2 AA accessibility pass, and i18n with an en/de/fr language picker (scope item C6).
+The scope-3.3 polish wave beyond Stratus: supply-chain and OAuth hardening, a local diagnostics page, silent background updates with install-on-quit, multi-window detach for Logs/Settings, conditional-GET polling, settings/notification UX polish, and a WCAG 2.2 AA accessibility pass. Landing separately (not yet in this history): i18n with an en/de/fr language picker (scope item C6).
 
 ### Security
 - **Dependency prune (C13):** dropped the last remaining `@tauri-apps/plugin-shell` entry from `package.json` (+ `package-lock.json`) and pruned `tauri-plugin-shell`/`tauri-plugin-store` from `Cargo.lock`; removed their four ACKNOWLEDGEMENTS.md rows and reworded stale comments naming the store crate. No imports existed in Rust or Svelte code and no capability granted shell/store IPC — bundle-size and attack-surface reduction only, no behavior change.
