@@ -111,8 +111,8 @@ fn strip_diacritic(c: char) -> Option<&'static str> {
     })
 }
 
-/// Leet map. `6` folds to `b` (covers `6itch`); `2` folds to `z`,
-/// which matches no list word but keeps the map total.
+/// Leet map. `6` folds to `b` (covers `6itch`); `2` folds to `i`
+/// (covers `sh2t`; no list word contains `z`, so `2` -> `z` was dead weight).
 fn leet_fold(c: char) -> (char, bool) {
     match c {
         '1' | '!' | '|' => ('i', true),
@@ -121,7 +121,7 @@ fn leet_fold(c: char) -> (char, bool) {
         '@' | '4' => ('a', true),
         '0' => ('o', true),
         '7' => ('t', true),
-        '2' => ('z', true),
+        '2' => ('i', true),
         '6' | '8' => ('b', true),
         '9' => ('g', true),
         '+' => ('t', true),
@@ -132,7 +132,8 @@ fn leet_fold(c: char) -> (char, bool) {
 
 fn normalize(text: &str) -> Vec<NormChar> {
     let mut result = Vec::with_capacity(text.len());
-    let mut chars = text.to_lowercase().chars().peekable();
+    let lowered = text.to_lowercase();
+    let mut chars = lowered.chars().peekable();
 
     while let Some(c) = chars.next() {
         // Multi-char leet: `\/` reads as `v`.
@@ -179,53 +180,57 @@ fn normalize(text: &str) -> Vec<NormChar> {
 ///   char (#337), or a repeat of an already-matched word char.
 /// Separator skips are formatting, not stretching; every other skip sets
 /// `stretched`, which callers must gate on a right-side word boundary
-/// (#332: `shiitake` must stay clean).
+/// (#332: `shiitake` must stay clean). Any separator skip (or wildcard
+/// consumption) also sets `sep_skipped`, which callers must gate on
+/// original-string word boundaries on BOTH sides (`Push It` joins to
+/// `pushit`, which fabricates `shit`).
 fn match_from(
     text: &[NormChar],
     word: &[char],
     si: usize,
     wi: usize,
     stretched: bool,
-) -> Option<(usize, bool)> {
+    sep_skipped: bool,
+) -> Option<(usize, bool, bool)> {
     if wi == word.len() {
-        return Some((si, stretched));
+        return Some((si, stretched, sep_skipped));
     }
     if si == text.len() {
         return None;
     }
     let t = text[si];
     if t.ch == word[wi] {
-        return match_from(text, word, si + 1, wi + 1, stretched);
+        return match_from(text, word, si + 1, wi + 1, stretched, sep_skipped);
     }
     if !t.ch.is_alphanumeric() {
-        if let Some(found) = match_from(text, word, si + 1, wi, stretched) {
+        if let Some(found) = match_from(text, word, si + 1, wi, stretched, true) {
             return Some(found);
         }
-        if let Some((end, _)) = match_from(text, word, si + 1, wi + 1, true) {
-            return Some((end, true));
+        if let Some((end, _, _)) = match_from(text, word, si + 1, wi + 1, true, true) {
+            return Some((end, true, true));
         }
         return None;
     }
     if si > 0 && t.ch == text[si - 1].ch {
-        if let Some(found) = match_from(text, word, si + 1, wi, true) {
+        if let Some(found) = match_from(text, word, si + 1, wi, true, sep_skipped) {
             return Some(found);
         }
     }
     if t.leet {
-        if let Some(found) = match_from(text, word, si + 1, wi, true) {
+        if let Some(found) = match_from(text, word, si + 1, wi, true, sep_skipped) {
             return Some(found);
         }
     }
     if word[..wi].contains(&t.ch) {
-        if let Some(found) = match_from(text, word, si + 1, wi, true) {
+        if let Some(found) = match_from(text, word, si + 1, wi, true, sep_skipped) {
             return Some(found);
         }
     }
     None
 }
 
-fn matches_at_pos(text: &[NormChar], word: &[char], start: usize) -> Option<(usize, bool)> {
-    match_from(text, word, start, 0, false)
+fn matches_at_pos(text: &[NormChar], word: &[char], start: usize) -> Option<(usize, bool, bool)> {
+    match_from(text, word, start, 0, false, false)
 }
 
 /// Whitelist scoped per stem: only `cock` + `tail` is a known-clean
@@ -241,6 +246,13 @@ fn is_clean_compound(stem: &str, token: &str) -> bool {
 /// word (#328).
 fn is_profane_continuation(token: &str) -> bool {
     ["ing", "er", "ed", "es", "s", "head"].iter().any(|p| token.starts_with(p))
+}
+
+/// `y`-tail scoped per stem: `shitty`/`bitchy`/`fucky` flag, while
+/// `cocky` (cock), `spicy` (spic) and `tardy` (tard) stay clean.
+/// `shitty` doubles the `t`, so its remainder reads `ty`.
+fn is_y_tail(stem: &str, token: &str) -> bool {
+    matches!(stem, "shit" | "bitch" | "fuck") && (token == "y" || token == "ty")
 }
 
 /// Stems unambiguous enough that a clean right edge suffices even when
@@ -275,13 +287,28 @@ fn contains_profanity(text: &str) -> bool {
         }
 
         for start in 0..=(chars.len() - word_len) {
-            let Some((end, stretched)) = matches_at_pos(&chars, &word_chars, start) else {
+            let Some((end, stretched, sep_skipped)) = matches_at_pos(&chars, &word_chars, start)
+            else {
                 continue;
             };
 
             let right_clean = end >= chars.len() || !chars[end].ch.is_alphanumeric();
             if stretched && !right_clean {
                 continue;
+            }
+
+            // Separator-spanning matches join across formatting (`Push It`
+            // reads `pushit`, which fabricates `shit`): require
+            // original-string word boundaries on BOTH sides. Standalone
+            // evasions (`f u c k`, `s.h.i.t`, `f*ck`) satisfy this;
+            // mid-word fabrications (`Push It`) do not. Matches spanning
+            // no separator keep the glued strong-stem rule below.
+            if sep_skipped {
+                let left_boundary = start == 0 || !chars[start - 1].ch.is_alphanumeric();
+                if !(left_boundary && right_clean) {
+                    continue;
+                }
+                return true;
             }
 
             // Legacy fuck-derivation carve-out (`motherfucker`):
@@ -313,6 +340,9 @@ fn contains_profanity(text: &str) -> bool {
                 if is_clean_compound(word, &token) {
                     continue;
                 }
+                if is_y_tail(word, &token) {
+                    return true;
+                }
                 if is_profane_continuation(&token) {
                     return true;
                 }
@@ -328,6 +358,9 @@ fn contains_profanity(text: &str) -> bool {
             let token = first_token(&chars, end);
             if is_clean_compound(word, &token) {
                 continue;
+            }
+            if is_y_tail(word, &token) {
+                return true;
             }
             if is_profane_continuation(&token) {
                 return true;
@@ -421,7 +454,7 @@ mod tests {
         assert!(contains_profanity("ni99er"));
         assert!(contains_profanity("shi+"));
         assert!(contains_profanity("(ock"));
-        assert_eq!(norm_str("2"), "z");
+        assert_eq!(norm_str("2"), "i");
         assert_eq!(norm_str("\\/"), "v");
     }
 
@@ -442,6 +475,16 @@ mod tests {
         assert!(contains_profanity("f-ck"));
         assert!(contains_profanity("f u c k"));
         assert!(contains_profanity("s.h.i.t"));
+    }
+
+    #[test]
+    fn test_issue_refinements() {
+        assert!(contains_profanity("sh2t"));
+        assert!(contains_profanity("shitty"));
+        assert!(contains_profanity("bitchy"));
+        assert!(!contains_profanity("Push It"));
+        assert!(!contains_profanity("push it"));
+        assert!(!contains_profanity("cocky"));
     }
 
     #[test]
