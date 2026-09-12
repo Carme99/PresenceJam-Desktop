@@ -122,13 +122,13 @@ pub fn handle_app_menu_event(app: &AppHandle, event_id: &str) {
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 log::info!("[MENU] quit: forced exit fallback");
-                // `AppHandle::exit` returns `()` on every platform
-                // (tauri 2.11.5 app.rs:574 — it handles its own error
-                // internally). The `let_unit_value` allow is therefore
-                // needed because clippy reads `let _ = unit;` as a no-op
-                // let. Do not rewrite this as `if let Err(e) = ...`:
-                // that fails to compile everywhere (E0308), which is why
-                // the superseded `fix-quit-handler` branch was never merged.
+                // `AppHandle::exit` returns `()` on every platform — it
+                // handles its own error internally. The `let_unit_value`
+                // allow is therefore needed because clippy reads
+                // `let _ = unit;` as a no-op let. Do not rewrite this as
+                // `if let Err(e) = ...`: that fails to compile everywhere
+                // (E0308), which is why the superseded `fix-quit-handler`
+                // branch was never merged.
                 #[allow(clippy::let_unit_value)]
                 {
                     let _ = app_handle.exit(0);
