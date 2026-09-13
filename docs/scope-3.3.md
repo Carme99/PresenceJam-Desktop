@@ -69,7 +69,7 @@ Grouped thematically (CHANGELOG.md §[3.2.0] lines 16-48 is the source of truth;
 | #224 | Playback errors silent | Layout-level `playback-error` toast (string, 6 s auto-dismiss). |
 | #225 | Frontend hygiene batch | `show_window`/`open_logs_folder`/`is_spotify_client_secret_set` wrapped, `isPermissionGranted` dead check removed, `preview_status` 300 ms debounce + seq guard, `AppConfig` via generated `../types` (BigInt ↔ Number helpers for `PollingConfig`), `package.json` store removal + `package-lock.json` sync; follow-up BigInt `structuredClone` fix. |
 
-*Grounding:* [Tauri tray-icon plugin](https://v2.tauri.app/plugin/tray-icon/) — `set_menu` holds a lock, must not hold across network I/O; [Svelte 5 runes `$state`/`$effect` reactivity](https://svelte.dev/docs/svelte/$state) — micro-race guards required.
+*Grounding:* [Tauri tray-icon plugin](https://v2.tauri.app/learn/system-tray/) — `set_menu` holds a lock, must not hold across network I/O; [Svelte 5 runes `$state`/`$effect` reactivity](https://svelte.dev/docs/svelte/$state) — micro-race guards required.
 
 ---
 
@@ -139,7 +139,7 @@ Grouped thematically (CHANGELOG.md §[3.2.0] lines 16-48 is the source of truth;
 - **Effort:** **M — 12–16 h** (1–2 d). OS-specific: Windows `HKCU\Software\Classes`, Linux `~/.local/share/applications` + `xdg-mime` (already done for `presencejam://`), macOS `CFBundleURLSchemes` + `LSSetDefaultHandlerForURLScheme` FFI.
 - **Risk:** Medium — Spotify dashboard exact-match may reject the dynamic scheme (unknown until tested); macOS FFI is new unsafe code.
 - **Priority:** P2 (security polish, not a blocker — current secret-in-state is sufficient per audit).
-- **Grounding:** [Tauri Deep Link plugin](https://v2.tauri.app/plugin/deep-link/) — `register()` returns `UnsupportedPlatform` on macOS; Apple [LaunchServices — `LSSetDefaultHandlerForURLScheme`](https://developer.apple.com/documentation/coreservices/launch_services); [Spotify — Redirect URI exact match](https://developer.spotify.com/documentation/web-api/tutorials/code-flow) ("The redirect URI must match exactly"); [RFC 8252 §7.3 — loopback vs custom scheme](https://datatracker.ietf.org/doc/html/rfc8252#section-7.3).
+- **Grounding:** [Tauri Deep Link plugin](https://v2.tauri.app/plugin/deep-linking/) — `register()` returns `UnsupportedPlatform` on macOS; Apple [LaunchServices — `LSSetDefaultHandlerForURLScheme`](https://developer.apple.com/documentation/coreservices/launch_services); [Spotify — Redirect URI exact match](https://developer.spotify.com/documentation/web-api/tutorials/code-flow) ("The redirect URI must match exactly"); [RFC 8252 §7.3 — loopback vs custom scheme](https://datatracker.ietf.org/doc/html/rfc8252#section-7.3).
 - **Blocks 3.3?** **No — defer to 3.4** unless a macOS hijack is observed in the wild. The current secret-in-state (shipped in 3.2.0) is the correct short-term fix and buys time.
 
 ### C2  Deep-link single-instance UX — foreground + navigate
@@ -170,7 +170,7 @@ Grouped thematically (CHANGELOG.md §[3.2.0] lines 16-48 is the source of truth;
 - **Effort:** **S — 3–4 h** (tooltip + checked-state are one-line `tray.set_tooltip`/`MenuItem` builder changes; badge needs `window.set_badge_count`).
 - **Risk:** Low — `tauri-plugin-tray` is well-tested; badge is macOS-only `#[cfg]`.
 - **Priority:** P1 — most visible surface after Dashboard.
-- **Grounding:** [Tauri Tray Icon — `TrayIcon::set_tooltip`](https://v2.tauri.app/plugin/tray-icon/), [Tauri Window — `setBadgeCount` (macOS)](https://v2.tauri.app/reference/javascript/api/window/).
+- **Grounding:** [Tauri Tray Icon — `TrayIcon::set_tooltip`](https://v2.tauri.app/learn/system-tray/), [Tauri Window — `setBadgeCount` (macOS)](https://v2.tauri.app/reference/javascript/api/namespacewindow/).
 - **Blocks 3.3?** **Recommend for 3.3** — S-sized, high delight.
 
 ### C5  Telemetry-free diagnostics page
@@ -199,7 +199,7 @@ Grouped thematically (CHANGELOG.md §[3.2.0] lines 16-48 is the source of truth;
 - **Effort:** **M — 12–16 h** (1.5–2 d). Window state sync is the complexity — `currentView` store would become per-window.
 - **Risk:** Medium — multi-window is the #1 source of Tauri focus/activation bugs on Linux (Wayland) and macOS (Accessory policy hid dock icon).
 - **Priority:** P3 — no user request; single-window is correct for a tray-resident app.
-- **Grounding:** [Tauri Window — `WebviewWindow`](https://v2.tauri.app/reference/javascript/api/window/#webviewwindow), [Tauri Config — `app.windows`](https://v2.tauri.app/reference/config/#windows).
+- **Grounding:** [Tauri Window — `WebviewWindow`](https://v2.tauri.app/reference/javascript/api/namespacewindow/#webviewwindow), [Tauri Config — `app.windows`](https://v2.tauri.app/reference/config/#windows).
 - **Blocks 3.3?** **No — defer to 3.4+** (or never — consider if requested).
 
 ### C8  Notification grouping, throttle, and actions
@@ -236,7 +236,7 @@ Grouped thematically (CHANGELOG.md §[3.2.0] lines 16-48 is the source of truth;
 - **Effort:** **M — 8–12 h** (OIDC + attest in `release.yml`, verify on a test tag, docs in `SECURITY.md` "Release Pipeline Token Rotation" section).
 - **Risk:** Medium — OIDC misconfig breaks the release job and blocks the next tag; keep `GITHUB_TOKEN` fallback for one cycle.
 - **Priority:** P1 — supply-chain hardening; 3.2.0 already ships `SHA256SUMS.txt` + `digest-mismatch: error`, so this is the next rung.
-- **Grounding:** [GitHub — OIDC in Actions](https://docs.github.com/en/actions/security-for-github-actions/security-hardening-your-deployments/configuring-openid-connect-in-cloud-providers), [Sigstore — Cosign / SLSA](https://docs.sigstore.dev/), [GitHub — Artifact Attestations](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations-to-establish-provenance-for-builds).
+- **Grounding:** [GitHub — OIDC in Actions](https://docs.github.com/en/actions/security-for-github-actions/security-hardening-your-deployments/configuring-openid-connect-in-cloud-providers), [Sigstore — Cosign / SLSA](https://docs.sigstore.dev/), [GitHub — Artifact Attestations](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations/using-artifact-attestations-to-establish-provenance-for-builds).
 - **Blocks 3.3?** **Recommend for 3.3** — non-user-visible but high trust-per-hour; no frontend change, so it doesn't compete with C2/C4/C5 for review bandwidth.
 
 ### C11  Polling optimization — conditional GET / adaptive jitter
@@ -310,11 +310,11 @@ Grouped thematically (CHANGELOG.md §[3.2.0] lines 16-48 is the source of truth;
 
 ## 6  Source map (every grounding citation used above)
 
-- **Tauri:** [Capabilities](https://v2.tauri.app/security/capabilities/), [Deep Link plugin](https://v2.tauri.app/plugin/deep-link/), [Updater plugin](https://v2.tauri.app/plugin/updater/), [Tray Icon](https://v2.tauri.app/plugin/tray-icon/), [Single Instance](https://v2.tauri.app/plugin/single-instance/), [Window / WebviewWindow](https://v2.tauri.app/reference/javascript/api/window/), [Notification](https://v2.tauri.app/plugin/notification/), [OS Info](https://v2.tauri.app/plugin/os-info/), [Clipboard](https://v2.tauri.app/plugin/clipboard/), [Config — `app.windows`](https://v2.tauri.app/reference/config/#windows), [Async commands + `spawn_blocking`](https://v2.tauri.app/develop/calling-rust/#async-commands), [Events `emit`/`listen`](https://v2.tauri.app/develop/calling-frontend/#events).
+- **Tauri:** [Capabilities](https://v2.tauri.app/security/capabilities/), [Deep Link plugin](https://v2.tauri.app/plugin/deep-linking/), [Updater plugin](https://v2.tauri.app/plugin/updater/), [Tray Icon](https://v2.tauri.app/learn/system-tray/), [Single Instance](https://v2.tauri.app/plugin/single-instance/), [Window / WebviewWindow](https://v2.tauri.app/reference/javascript/api/namespacewindow/), [Notification](https://v2.tauri.app/plugin/notification/), [OS Info](https://v2.tauri.app/plugin/os-info/), [Clipboard](https://v2.tauri.app/plugin/clipboard/), [Config — `app.windows`](https://v2.tauri.app/reference/config/#windows), [Async commands + `spawn_blocking`](https://v2.tauri.app/develop/calling-rust/#async-commands), [Events `emit`/`listen`](https://v2.tauri.app/develop/calling-frontend/#events).
 - **Microsoft Learn:** [presence-setPresence](https://learn.microsoft.com/en-us/graph/api/presence-setpresence), [presence-clearPresence](https://learn.microsoft.com/en-us/graph/api/presence-clearpresence), [presence-get](https://learn.microsoft.com/en-us/graph/api/presence-get), [permissions reference — `Presence.ReadWrite`](https://learn.microsoft.com/en-us/graph/permissions-reference), [Entra error codes — `invalid_grant`](https://learn.microsoft.com/en-us/entra/identity-platform/reference-error-codes), [Throttling limits](https://learn.microsoft.com/en-us/graph/throttling-limits).
 - **Spotify:** [Authorization Code + PKCE](https://developer.spotify.com/documentation/web-api/tutorials/code-flow), [Refreshing tokens](https://developer.spotify.com/documentation/web-api/tutorials/refreshing-tokens), [`GET /me/player/currently-playing`](https://developer.spotify.com/documentation/web-api/reference/get-the-users-currently-playing-track), [Scopes](https://developer.spotify.com/documentation/web-api/concepts/scopes).
 - **IETF:** [RFC 7636 — PKCE](https://datatracker.ietf.org/doc/html/rfc7636), [RFC 8252 — OAuth 2.0 for Native Apps §7.3](https://datatracker.ietf.org/doc/html/rfc8252#section-7.3), [RFC 8628 — Device Authorization Grant §3.5](https://datatracker.ietf.org/doc/html/rfc8628#section-3.5), [RFC 7232 §3.3 — `If-None-Match` / ETag](https://datatracker.ietf.org/doc/html/rfc7232#section-3.3).
-- **Supply chain:** [GitHub — OIDC in Actions](https://docs.github.com/en/actions/security-for-github-actions/security-hardening-your-deployments/configuring-openid-connect-in-cloud-providers), [GitHub — Artifact Attestations / SLSA](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations-to-establish-provenance-for-builds), [Sigstore — Cosign](https://docs.sigstore.dev/).
+- **Supply chain:** [GitHub — OIDC in Actions](https://docs.github.com/en/actions/security-for-github-actions/security-hardening-your-deployments/configuring-openid-connect-in-cloud-providers), [GitHub — Artifact Attestations / SLSA](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations/using-artifact-attestations-to-establish-provenance-for-builds), [Sigstore — Cosign](https://docs.sigstore.dev/).
 - **A11y / i18n:** [WCAG 2.2](https://www.w3.org/TR/WCAG22/), [svelte-i18n](https://github.com/kaisermann/svelte-i18n).
 - **Repo anchors:** `CHANGELOG.md:16-48` (3.2.0 28 issues), `src-tauri/src/lib.rs:499-540` (secret binding), `src-tauri/src/polling/poll_once.rs:68-180` (smart sleep + backoff), `src-tauri/capabilities/default.json` (24 perms), `src-tauri/tauri.conf.json:40` (CSP), `.github/workflows/release.yml:1-466` (release matrix + attestation gap), `docs/STATE-OF-FEATURES.md` (verified vs out-of-scope), `docs/windows-update-chain-v3.2.md` (fleet rescue).
 
