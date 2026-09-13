@@ -80,7 +80,7 @@ Edit the template that formats your Teams status message. Supports `{artist}`, `
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| Interval | 30s | How often to check Spotify when a track is playing (minimum 10s) |
+| Interval | 30s | How often to check Spotify when a track is playing (minimum 5s) |
 
 ### General
 

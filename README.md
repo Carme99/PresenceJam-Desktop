@@ -68,7 +68,7 @@ chmod +x PresenceJam-linux-amd64.AppImage
 ./PresenceJam-linux-amd64.AppImage
 ```
 
-For autostart with an AppImage, see the [Tauri Linux docs](https://tauri.app/distribute/linux/) — a `.desktop` file in `~/.local/share/applications/` plus the binary in `~/.local/bin/` is the standard pattern.
+For autostart with an AppImage, see the [Tauri Linux docs](https://v2.tauri.app/distribute/) — a `.desktop` file in `~/.local/share/applications/` plus the binary in `~/.local/bin/` is the standard pattern.
 
 ### macOS first-run note
 

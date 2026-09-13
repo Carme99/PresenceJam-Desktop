@@ -107,7 +107,7 @@ If a track or artist name contains profanity, PresenceJam replaces the entire st
 
 | Setting | Description |
 |---------|-------------|
-| Polling interval | How often to check Spotify (minimum 10s) |
+| Polling interval | How often to check Spotify (default 10s; clamped 5-300s) |
 | Clear on pause | Automatically clear Teams status when Spotify pauses. `config.json` only — `teams.clear_on_pause`; there is no Settings toggle for it |
 | Launch at login | Start PresenceJam when your OS boots |
 
