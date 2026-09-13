@@ -9,7 +9,7 @@ Thank you for your interest in contributing!
 - **Rust** 1.75+ ([rustup](https://rustup.rs/))
 - **Node.js** 18+ ([nodejs.org](https://nodejs.org/))
 - **npm** 9+
-- **Tauri CLI** v2 (`npm install -g @tauri-apps/cli@^2`)
+- **Tauri CLI** v2 — provided by repo-pinned local `@tauri-apps/cli`; use `npm run tauri ...`. A global install is unnecessary.
 
 ### Getting Started
 

@@ -222,7 +222,9 @@ encrypted at rest with AES-256-GCM since v3.0 (issue #140 — see
 Application logs are written to:
 
 ```
-%APPDATA%\PresenceJam\logs\
+%APPDATA%\PresenceJam\logs\          (Windows)
+~/Library/Logs/PresenceJam/          (macOS)
+~/.local/share/PresenceJam/logs/     (Linux)
 ```
 
 Logs may contain:
