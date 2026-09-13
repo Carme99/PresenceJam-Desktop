@@ -5,6 +5,23 @@ All notable changes to PresenceJam are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [4.2.1] - 2026-09-13
+
+Docs-alignment patch: dead outbound links repaired, drifted claims corrected,
+and CHANGELOG link hygiene pinned by CI so the file cannot rot again.
+
+### Fixed
+- **Scope-3.3 grounding links (#435):** 9 outbound URLs repaired after Tauri v2
+  and GitHub Actions docs restructures (tray-icon, deep-link, window namespace,
+  artifact-attestations IA).
+- **README/USAGE/SETUP/CONTRIBUTING/SECURITY drift (#436, #439, #366, #440, #441):**
+  Linux distribute link, polling-minimum 5s floor in both files, repo-pinned
+  Tauri CLI note, three-platform log paths.
+- **CHANGELOG link hygiene (#437, #438, #442):** 14 missing version link defs
+  added, orphan [3.0.1] def deleted, missing ## [2.3.7] section reconstructed,
+  def block sorted descending with [Unreleased] first, CI `changelog-links`
+  job fails on any future header-without-def.
+
 ## [4.2.0] - 2026-09-12
 
 Trust-wave release: expired-but-refreshable sessions no longer force a full
@@ -755,7 +772,8 @@ Closes #60 #61 #62 #63
 
 - PowerShell script version — this is a full rewrite
 
-[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.2.0...HEAD
+[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.2.1...HEAD
+[4.2.1]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.2.0...v4.2.1
 [4.2.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.1.1...v4.2.0
 [4.1.1]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.1.0...v4.1.1
 [4.1.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.0.0...v4.1.0
