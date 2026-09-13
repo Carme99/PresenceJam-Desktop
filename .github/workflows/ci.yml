@@ -220,3 +220,27 @@ jobs:
         env:
           CARGO_INCREMENTAL: 0
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+  # CHANGELOG: every `## [X]` section header must have a matching `[X]:`
+  # link definition at the bottom of the file, otherwise the version link
+  # renders dead (see #437, #438). Fails the run on the first missing def.
+  changelog-links:
+    name: CHANGELOG link definitions
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check CHANGELOG headers have link definitions
+        run: |
+          missing=0
+          for v in $(grep -oE '^## \[[^]]+\]' CHANGELOG.md | grep -oE '\[[^]]+\]' | tr -d '[]'); do
+            if ! grep -q "^\[$v\]:" CHANGELOG.md; then
+              echo "MISSING link definition for [$v]"
+              missing=1
+            fi
+          done
+          exit $missing
