@@ -600,6 +600,20 @@ Closes #60 #61 #62 #63
 
 - `update_menu_state` command renamed to `update_tray_menu_state` for clarity
 
+## [2.3.7] - 2026-04-27
+
+### Fixed
+
+- Spotify auth: crash recovery now properly restores pending OAuth state from persistent store on app restart (fixes #1)
+- Teams auth: proactively refresh Teams token before use in polling loop to avoid 401 errors mid-session (fixes #4)
+- Config: `start_minimized` now properly wired — app window hides on startup when configured (fixes #7)
+- Config: `clear_on_pause` now functional — respects user setting when pausing Spotify playback (fixes #6)
+- Onboarding: Spotify client ID/secret now validated before initiating auth (min 20 chars) (fixes #19)
+
+### Developer
+
+- Frontend: replaced ~130 verbose `console.log` calls with `devLog()` utility that only outputs in development builds — production builds are no longer polluted with dev traces
+
 ## [2.3.5] - 2026-04-23
 
 ### Fixed
@@ -741,20 +755,33 @@ Closes #60 #61 #62 #63
 
 - PowerShell script version — this is a full rewrite
 
+[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.2.0...HEAD
 [4.2.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.1.1...v4.2.0
 [4.1.1]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.1.0...v4.1.1
 [4.1.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.0.0...v4.1.0
 [4.0.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v3.2.0...v4.0.0
 [3.2.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v3.2.0
 [3.1.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v3.1.0
-[3.0.1]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v3.0.1
 [3.0.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v3.0.0
+[2.10.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.10.0
+[2.9.1]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.9.1
 [2.9.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.9.0
-[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.2.0...HEAD
+[2.8.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.8.0
+[2.7.5]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.7.5
+[2.7.4]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.7.4
+[2.7.3]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.7.3
+[2.7.2]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.7.2
+[2.7.1]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.7.1
+[2.7.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.7.0
+[2.6.4]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.6.4
+[2.6.3]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.6.3
 [2.6.2]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.6.2
 [2.6.1]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.6.1
 [2.6.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.6.0
 [2.5.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.5.0
+[2.4.2]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.4.2
+[2.4.1]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.4.1
+[2.4.0]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.4.0
 [2.3.7]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.3.7
 [2.3.6]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.3.6
 [2.3.5]: https://github.com/Carme99/PresenceJam-Desktop/releases/tag/v2.3.5
