@@ -21,6 +21,14 @@ export async function useAuthListeners(handlers: AuthListeners): Promise<() => P
     listen<string>('teams-auth-failed', (e) => handlers.onTeamsFailed(e.payload)),
   ]);
   return async () => {
-    await Promise.all(unlistens.map((fn) => fn()));
+    await Promise.all(
+      unlistens.map(async (fn) => {
+        try {
+          await fn();
+        } catch (err) {
+          console.warn('[useAuthListeners] unlisten failed:', err);
+        }
+      }),
+    );
   };
 }
