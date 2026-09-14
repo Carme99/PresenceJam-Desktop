@@ -34,14 +34,26 @@ fn validate_spotify_client_id(id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Validates a Spotify client_secret (>= 32 chars, non-empty).
-/// See issue #67.
+/// Validates a Spotify client_secret (32-512 ASCII alphanumeric chars).
+/// See issue #67 (length floor) and issue #354 (charset check mirroring
+/// `validate_spotify_client_id` plus the 512-char IPC cap).
 fn validate_spotify_client_secret(secret: &str) -> Result<(), String> {
     if secret.len() < 32 {
         return Err(format!(
             "Invalid client_secret: must be at least 32 characters (got len={})",
             secret.len()
         ));
+    }
+    if secret.len() > 512 {
+        return Err(format!(
+            "Invalid client_secret: must be at most 512 characters (got len={})",
+            secret.len()
+        ));
+    }
+    if !secret.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(
+            "Invalid client_secret: must contain only ASCII alphanumeric characters".to_string(),
+        );
     }
     Ok(())
 }
@@ -69,6 +81,40 @@ fn validate_spotify_redirect_uri(uri: &str) -> Result<(), String> {
         "Invalid redirect_uri: must be exactly '{}'",
         SPOTIFY_REDIRECT_URI
     ))
+}
+
+/// Outcome of validating a manual-code paste (issue #351). The peek helper
+/// below covers expiry + `state` only and never touches the single-use
+/// launch binding, so it is pure and unit-testable without Tauri state;
+/// the binding step runs later in the handler, after the peek guard is
+/// dropped, so a wrong-state paste never burns the single-use slot.
+#[derive(Debug, PartialEq, Eq)]
+enum ManualPasteOutcome {
+    /// Peek passed; the caller may run the binding check and then `take()`.
+    Accept,
+    /// Pending expired.
+    Expired,
+    /// `state` missing or mismatched.
+    StateMismatch,
+}
+
+/// Pure peek validation for a manual-code paste: expiry, then `state`
+/// equality (issue #351). Never consumes the launch binding — the caller
+/// runs `validate_and_consume` only on `Accept`, after dropping the peek
+/// guard, so a wrong-state paste leaves both the pending and the binding
+/// slot intact for the retry.
+fn decide_manual_paste_peek(
+    pending: &PendingSpotifyAuth,
+    oauth_state: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> ManualPasteOutcome {
+    if pending.expires_at < now {
+        return ManualPasteOutcome::Expired;
+    }
+    if oauth_state.is_empty() || !crate::pkce::ct_eq(oauth_state, &pending.state) {
+        return ManualPasteOutcome::StateMismatch;
+    }
+    ManualPasteOutcome::Accept
 }
 
 /// Common PKCE OAuth flow for Spotify authorization. Builds the auth
@@ -289,59 +335,67 @@ pub async fn complete_spotify_auth_manual(
         oauth_state.len()
     );
 
-    // Get pending auth from AppState
-    let pending = {
-        let mut guard = state.pending.spotify_mut();
-        log::info!("{CMD} complete_spotify_auth_manual: taking pending auth from AppState");
-        guard.take().ok_or_else(|| {
+    // Issue #351: peek-then-validate-then-take, mirroring the deep-link peek
+    // at lib.rs:559-563. Phase 1 peeks under a READ guard (expiry + state
+    // only — never the single-use binding, which must not burn on a
+    // wrong-state paste). Phase 2 runs `validate_and_consume` on a clone
+    // after the guard is dropped. Phase 3 takes the pending and verifies
+    // `taken.state == peeked.state`, restoring on mismatch so a concurrent
+    // flow's pending is never stolen. A wrong-state paste therefore leaves
+    // both the pending and the binding slot intact for the correct retry.
+    // Phase 1 — peek under the read guard.
+    let peeked = {
+        let guard = state.pending.spotify();
+        let peeked = guard.as_ref().ok_or_else(|| {
             log::error!("{CMD} complete_spotify_auth_manual: No pending Spotify auth");
             "No pending Spotify auth. Please start auth again.".to_string()
-        })?
-    };
-    log::info!(
-        "{CMD} complete_spotify_auth_manual: pending auth found - verifier.len={}",
-        pending.verifier.len()
-    );
-
-    // Re-check expiry at submit time, mirroring handle_spotify_callback in
-    // lib.rs (issue #162). Spotify authorization codes expire 10 minutes
-    // after creation; a stale pending must not be consumable later.
-    if pending.expires_at < chrono::Utc::now() {
-        log::error!("{CMD} complete_spotify_auth_manual: auth state expired at submit time");
-        return Err("Auth state expired — please try signing in again.".to_string());
-    }
-
-    // Verify the OAuth `state` parameter against the stored value to prevent
-    // CSRF, mirroring handle_spotify_callback in lib.rs (issue #162). The
-    // manual-paste path is exactly where a socially engineered URL could
-    // land, so a missing or mismatched state rejects the flow.
-    // #228: never log raw state values — compare lengths/prefixes only in logs.
-    if oauth_state.is_empty() {
-        log::error!("{CMD} complete_spotify_auth_manual: missing state parameter");
-        return Err("Missing state parameter - possible CSRF attack".to_string());
-    }
-    if !crate::pkce::ct_eq(&oauth_state, &pending.state) {
-        log::error!(
-            "{CMD} complete_spotify_auth_manual: state mismatch - CSRF attack detected [REDACTED len {} vs {}]",
-            oauth_state.len(),
-            pending.state.len()
+        })?;
+        log::info!(
+            "{CMD} complete_spotify_auth_manual: pending auth found - verifier.len={}",
+            peeked.verifier.len()
         );
-        return Err("State mismatch - possible CSRF attack".to_string());
-    }
-    log::info!("{CMD} complete_spotify_auth_manual: state verified successfully");
-
-    // scope-3.3 §C1: the manual-paste path must satisfy the same launch
-    // binding as the deep-link path — constant-time secret-component compare,
-    // PKCE verifier-hash linkage, and single-use consumption (a replayed
-    // state/code pair fails closed, RFC 6749 §10.12). The full-state equality
-    // check above already rejected mismatches; this consumes the binding.
+        // Re-check expiry at submit time, mirroring handle_spotify_callback in
+        // lib.rs (issue #162). Spotify authorization codes expire 10 minutes
+        // after creation; a stale pending must not be consumable later.
+        // #228: never log raw state values — compare lengths/prefixes only.
+        match decide_manual_paste_peek(peeked, &oauth_state, chrono::Utc::now()) {
+            ManualPasteOutcome::Accept => {
+                log::info!("{CMD} complete_spotify_auth_manual: state verified successfully");
+                peeked.clone()
+            }
+            ManualPasteOutcome::Expired => {
+                log::error!(
+                    "{CMD} complete_spotify_auth_manual: auth state expired at submit time"
+                );
+                return Err("Auth state expired — please try signing in again.".to_string());
+            }
+            ManualPasteOutcome::StateMismatch if oauth_state.is_empty() => {
+                log::error!("{CMD} complete_spotify_auth_manual: missing state parameter");
+                return Err("Missing state parameter - possible CSRF attack".to_string());
+            }
+            ManualPasteOutcome::StateMismatch => {
+                log::error!(
+                    "{CMD} complete_spotify_auth_manual: state mismatch - CSRF attack detected [REDACTED len {} vs {}]",
+                    oauth_state.len(),
+                    peeked.state.len()
+                );
+                return Err("State mismatch - possible CSRF attack".to_string());
+            }
+        }
+    };
+    // Phase 2 — launch binding on the clone, guard already dropped.
+    // scope-3.3 §C1: same binding as the deep-link path (constant-time
+    // secret-component compare, PKCE verifier-hash linkage, single-use
+    // consumption so a replayed state/code pair fails closed, RFC 6749
+    // §10.12). Runs only after the state check passed, so a wrong-state
+    // paste never reaches — and never burns — the single-use slot.
     {
         let app_state = state.inner();
         match app_state.launch_binding.get() {
             Some(binding) => {
                 let secret_component = oauth_state.rsplit('.').next().unwrap_or("");
                 if let Err(reason) =
-                    binding.validate_and_consume(secret_component, &pending.verifier)
+                    binding.validate_and_consume(secret_component, &peeked.verifier)
                 {
                     log::error!(
                         "{CMD} complete_spotify_auth_manual: launch binding rejected ({}) [REDACTED]",
@@ -359,6 +413,28 @@ pub async fn complete_spotify_auth_manual(
             }
         }
     }
+    // Phase 3 — take + verify: consume the pending and confirm it is still
+    // the flow we validated. On mismatch (a concurrent flow replaced it),
+    // restore what we took and fail closed — never steal another flow's
+    // pending (#351).
+    let pending = {
+        let mut guard = state.pending.spotify_mut();
+        match guard.take() {
+            Some(taken) if taken.state == peeked.state => taken,
+            Some(taken) => {
+                *guard = Some(taken);
+                log::error!(
+                    "{CMD} complete_spotify_auth_manual: pending changed during validation"
+                );
+                return Err("No pending Spotify auth. Please start auth again.".to_string());
+            }
+            None => {
+                log::error!("{CMD} complete_spotify_auth_manual: pending consumed concurrently");
+                return Err("No pending Spotify auth. Please start auth again.".to_string());
+            }
+        }
+    };
+    log::info!("{CMD} complete_spotify_auth_manual: checks passed, consuming pending auth");
 
     // #215: HTTPS token exchange + keychain I/O are blocking (reqwest::blocking
     // + OS keychain). Offload to the blocking pool so the async runtime stays
@@ -482,4 +558,158 @@ pub fn refresh_spotify(
 #[tauri::command]
 pub fn is_spotify_client_secret_set() -> bool {
     crate::keychain::has_spotify_client_secret()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Issue #354: 32+ char non-alphanumeric secrets are rejected, >512 is
+    // rejected, and a 32-char alphanumeric secret passes.
+    #[test]
+    fn secret_validator_rejects_non_alphanumeric_and_overlong() {
+        assert!(
+            validate_spotify_client_secret(&"a".repeat(32)).is_ok(),
+            "32-char alphanumeric must pass"
+        );
+        let punctuated = format!("{}!", "a".repeat(31));
+        assert_eq!(punctuated.len(), 32);
+        assert!(
+            validate_spotify_client_secret(&punctuated).is_err(),
+            "32-char secret with non-alphanumeric must fail"
+        );
+        assert!(
+            validate_spotify_client_secret(&"a".repeat(513)).is_err(),
+            ">512 chars must fail"
+        );
+        assert!(
+            validate_spotify_client_secret(&"a".repeat(512)).is_ok(),
+            "512-char alphanumeric must pass"
+        );
+        assert!(
+            validate_spotify_client_secret("short").is_err(),
+            "short secret must fail"
+        );
+    }
+
+    // Issue #351: peek-then-validate-then-take. The peek helper never touches
+    // the single-use binding, so a wrong-state paste keeps both the pending
+    // and the binding slot; a correct paste then still accepts. The handler
+    // below mirrors the deep-link peek at lib.rs:559-563 (read guard for
+    // peek, binding after the guard drops, take + state-verify last).
+    fn sample_pending(state: &str) -> PendingSpotifyAuth {
+        PendingSpotifyAuth {
+            verifier: crate::pkce::generate_verifier(),
+            state: state.to_string(),
+            client_id: "cid".to_string(),
+            redirect_uri: "presencejam://callback".to_string(),
+            expires_at: chrono::Utc::now() + chrono::Duration::seconds(600),
+        }
+    }
+
+    #[test]
+    fn peek_wrong_state_then_correct_state_succeeds() {
+        let verifier = crate::pkce::generate_verifier();
+        let binding = crate::pkce::LaunchBinding::new(crate::pkce::generate_launch_secret());
+        binding.bind_verifier(&verifier);
+        // The state must carry THIS binding's launch secret as its
+        // `<csrf>.<secret>` tail — otherwise `validate_and_consume` rejects
+        // even the correct paste (the secret would belong to no binding).
+        let state = format!("csrf.{}", binding.launch_secret);
+        let pending = PendingSpotifyAuth {
+            verifier,
+            state,
+            client_id: "cid".to_string(),
+            redirect_uri: "presencejam://callback".to_string(),
+            expires_at: chrono::Utc::now() + chrono::Duration::seconds(600),
+        };
+        let now = chrono::Utc::now();
+        // Wrong-state paste: peek rejects WITHOUT consuming the binding slot.
+        assert_eq!(
+            decide_manual_paste_peek(&pending, "wrong-state", now),
+            ManualPasteOutcome::StateMismatch
+        );
+        // Correct paste still passes the peek, then consumes the binding once.
+        assert_eq!(
+            decide_manual_paste_peek(&pending, &pending.state.clone(), now),
+            ManualPasteOutcome::Accept
+        );
+        let secret_component = pending.state.rsplit('.').next().unwrap_or("");
+        assert!(binding
+            .validate_and_consume(secret_component, &pending.verifier)
+            .is_ok());
+    }
+
+    #[test]
+    fn peek_rejects_expired_and_empty_state() {
+        let mut pending = sample_pending("csrf-state.secret-part");
+        let now = chrono::Utc::now();
+        assert_eq!(
+            decide_manual_paste_peek(&pending, &pending.state.clone(), now),
+            ManualPasteOutcome::Accept
+        );
+        assert_eq!(
+            decide_manual_paste_peek(&pending, "", now),
+            ManualPasteOutcome::StateMismatch
+        );
+        pending.expires_at = now - chrono::Duration::seconds(1);
+        assert_eq!(
+            decide_manual_paste_peek(&pending, &pending.state.clone(), now),
+            ManualPasteOutcome::Expired
+        );
+    }
+
+    // Structural source guard: the handler must peek under a READ guard,
+    // run the single-use binding only after the peek, and take() only last
+    // with a state re-verify — so no future refactor can reintroduce
+    // take-first or burn the binding slot on a wrong-state paste. The body
+    // is isolated with the shared literal-aware scanner
+    // (`crate::token_io::test_scan`), not a next-function boundary anchor:
+    // a naive `{`/`}` byte counter breaks on braces inside string literals
+    // (`"{CMD} … {} …"`), so strings, char literals and comments are
+    // skipped. This scan is a deliberate, load-bearing proxy for handler
+    // ordering that cannot be driven in a unit test without Tauri state —
+    // but the guarded behavior itself is covered behaviorally by
+    // `peek_wrong_state_then_correct_state_succeeds` (peek-then-bind order
+    // through the real helper and binding).
+    #[test]
+    fn manual_path_takes_pending_only_after_validation() {
+        let src = include_str!("spotify_auth.rs");
+        let body = crate::token_io::test_scan::fn_body(src, "fn complete_spotify_auth_manual(");
+        let peek_pos = body
+            .find("state.pending.spotify()")
+            .expect("body must peek under the read guard");
+        let mismatch_pos = body
+            .find("State mismatch - possible CSRF attack")
+            .expect("body must keep the state-mismatch rejection");
+        // NOTE: anchors must be code-specific call shapes, not bare
+        // identifiers — the handler's own header comment names
+        // `validate_and_consume` and `taken.state == peeked.state` in
+        // backticks, which a bare `find` would hit before the real code.
+        let bind_pos = body
+            .find("validate_and_consume(secret_component")
+            .expect("body must run the launch binding");
+        let take_pos = body
+            .find("guard.take()")
+            .expect("body must take the pending");
+        let verify_pos = body
+            .find("Some(taken) if taken.state == peeked.state")
+            .expect("body must re-verify the taken pending against the peek");
+        assert!(
+            peek_pos < mismatch_pos,
+            "read-guard peek must come before the state-mismatch rejection"
+        );
+        assert!(
+            mismatch_pos < bind_pos,
+            "binding consume must come after the state check so a wrong-state paste never burns the slot"
+        );
+        assert!(
+            bind_pos < take_pos && take_pos < verify_pos,
+            "take() must come after the binding check and the taken pending must be verified against the peek"
+        );
+        assert!(
+            body.find("decide_manual_paste_peek").is_some(),
+            "handler must validate through the peek helper"
+        );
+    }
 }

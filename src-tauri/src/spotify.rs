@@ -243,24 +243,43 @@ pub fn complete_spotify_auth(
         return Err(format!("Token request failed: {} - {}", status, body));
     }
 
+    // Issue #350: the exchange body is parsed by `parse_exchange_token_response`
+    // below so the mapping is unit-testable without a live HTTP response.
+    // `refresh_token` is `Option` there (a `String` would collapse "field
+    // absent" into "Failed to parse token response"); a missing field now
+    // surfaces as `token response omitted refresh_token`. Spotify always
+    // sends a refresh token on the authorization_code grant, so its absence
+    // means the response is unusable for persistent auth.
+    let body = response
+        .text()
+        .map_err(|e| format!("Failed to read token response: {}", e))?;
+    parse_exchange_token_response(&body)
+}
+
+/// Parse an OAuth authorization_code exchange body into [`SpotifyTokens`].
+/// Split out of `complete_spotify_auth` so the mapping is unit-testable
+/// without a live `reqwest::blocking::Response` (issue #350).
+fn parse_exchange_token_response(body: &str) -> Result<SpotifyTokens, String> {
     #[derive(Deserialize)]
     struct TokenResponse {
         access_token: String,
-        refresh_token: String,
+        refresh_token: Option<String>,
         expires_in: u64,
         #[allow(dead_code)]
         token_type: String,
     }
 
-    let token_resp: TokenResponse = response
-        .json()
-        .map_err(|e| format!("Failed to parse token response: {}", e))?;
+    let token_resp: TokenResponse =
+        serde_json::from_str(body).map_err(|e| format!("Failed to parse token response: {}", e))?;
+    let refresh_token = token_resp.refresh_token.ok_or_else(|| {
+        "token response omitted refresh_token - please try signing in again.".to_string()
+    })?;
 
     let expires_at = Utc::now() + chrono::Duration::seconds(token_resp.expires_in as i64);
 
     Ok(SpotifyTokens {
         access_token: token_resp.access_token,
-        refresh_token: token_resp.refresh_token,
+        refresh_token,
         expires_at,
     })
 }
@@ -1087,5 +1106,34 @@ mod tests {
         // Unparseable stays None (callers fall back to exponential backoff).
         assert_eq!(super::parse_retry_after_value("not-a-date"), None);
         assert_eq!(super::parse_retry_after_value(""), None);
+    }
+
+    // Issue #350: a token response without `refresh_token` must yield the
+    // precise `omitted refresh_token` error, not a generic parse failure;
+    // a response carrying it must store it.
+    #[test]
+    fn exchange_without_refresh_token_yields_precise_error() {
+        let body = r#"{"access_token":"at","expires_in":3600,"token_type":"Bearer"}"#;
+        let err =
+            super::parse_exchange_token_response(body).expect_err("missing refresh must fail");
+        assert!(
+            err.contains("token response omitted refresh_token"),
+            "precise error expected, got: {}",
+            err
+        );
+        assert!(
+            !err.contains("Failed to parse token response"),
+            "must not be the generic parse error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn exchange_with_refresh_token_stores_it() {
+        let body =
+            r#"{"access_token":"at","refresh_token":"rt","expires_in":3600,"token_type":"Bearer"}"#;
+        let tokens = super::parse_exchange_token_response(body).expect("full body must parse");
+        assert_eq!(tokens.access_token, "at");
+        assert_eq!(tokens.refresh_token, "rt");
     }
 }
