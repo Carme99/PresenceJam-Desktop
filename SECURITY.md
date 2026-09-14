@@ -149,6 +149,9 @@ $XDG_CONFIG_HOME/com.presencejam.app/PresenceJam/tokens.json   (Linux)
   lives in the **OS keychain** (see "Status" note below). Older v2.5.0 and
   earlier configs that still carry the plaintext secret are auto-migrated
   to the keychain on first run after upgrade and the plaintext is stripped.
+  Both values are validated at the IPC boundary before any keychain write
+  or authorize URL: `client_id` must be exactly 32 ASCII-alphanumeric chars;
+  `client_secret` 32–512 ASCII-alphanumeric (issues #67/#354).
 - Status format template (`status_format`)
 - Profanity filter settings (`profanity_filter`, `profanity_placeholder`)
 - Polling configuration
@@ -232,6 +235,8 @@ Logs may contain:
 - Timestamps and operational messages
 - Error details (including API error messages)
 - Redacted profanity filter events (the original profane status is **never** written to logs)
+
+A Spotify token response without `refresh_token` surfaces the precise `token response omitted refresh_token` error (not a generic parse failure) — issue #350.
 
 Logs are written to the `tauri-plugin-log` default log directory. **Log retention/rotation is currently managed by the logging plugin defaults and is not user-configurable.** A previous version of this document claimed logs were "rotated daily and retained for 30 days"; that claim has been removed because no rotation code exists in the application — the v2.5.0 `logging.retention_days` config field was a no-op and has been removed in v2.6.0.
 

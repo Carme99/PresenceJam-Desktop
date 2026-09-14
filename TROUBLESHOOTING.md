@@ -47,10 +47,7 @@ Before diving in, check these basics:
 
 **Cause:** Spotify credentials expired or changed.
 
-**Fix:**
-1. Go to Settings in the app
-2. Disconnect Spotify
-3. Re-run the onboarding Spotify step
+**Fix:** In Settings click **Reconnect** next to Spotify and complete the browser sign-in. You only need to reconnect when the refresh itself fails (invalid grant / revoked credentials); transient network/5xx errors retry automatically.
 
 ### Tray playback controls do nothing ("no active device")
 
@@ -82,9 +79,8 @@ Before diving in, check these basics:
 
 **Cause:** Token expired, or the Microsoft account differs from Teams account.
 
-**Fix:**
 1. Verify you're signed into the same Microsoft account in the app and in Teams
-2. Go to Settings → Disconnect Teams → reconnect
+2. Go to Settings → **Reconnect** next to Teams → complete the device-code sign-in
 3. Check the in-app log viewer for specific API error codes
 
 ### Device code sign-in times out
