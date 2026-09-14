@@ -153,15 +153,26 @@ pub struct KeychainStatus {
 
 /// Keys whose inline value must never survive into diagnostics. Matched
 /// case-insensitively as whole identifiers followed by `=` or `:` (both
-/// shell style `code=abc` and JSON style `"code": "abc"`).
+/// shell style `code=abc` and JSON style `"code": "abc"`, either quote
+/// style). Compound keys (`id_token`, `code_verifier`, `code_challenge`) are listed
+/// explicitly because the whole-identifier check rejects `_`-flanked
+/// substrings, so bare `token`/`code`/`verifier` never match inside them
+/// (and vice versa: bare `token` cannot match inside `access_token`).
 const SECRET_KEYS: &[&str] = &[
+    "api_key",
     "code",
     "state",
     "access_token",
     "refresh_token",
+    "id_token",
+    "token",
     "client_secret",
     "secret",
+    "password",
+    "passwd",
     "verifier",
+    "code_challenge",
+    "code_verifier",
     "device_code",
     "user_code",
     "authorization",
@@ -175,12 +186,18 @@ const SECRET_KEYS: &[&str] = &[
 /// anything that reaches the log file unredacted (third-party messages,
 /// reqwest debug output, future regressions). Two passes:
 ///
-/// 1. **Keyed values** — `<secret-key>` followed by `=` or `:` masks the
-///    value up to the next delimiter (whitespace, `&`, `"`, `,`, `}`, or
-///    end of line). Handles `code=abc`, `"state": "xyz"`,
-///    `Authorization: Bearer abc…`.
-/// 2. **Long opaque runs** — any run of ≥ 32 `[A-Za-z0-9_-]` characters
-///    (base64/JWT-shaped) is masked regardless of context.
+/// 1. **Keyed values** — `<secret-key>` followed by `=` or `:` (either
+///    quote style) masks the value up to the next delimiter
+///    (whitespace, `&`, `"`, `'`, `,`, `}`, or end of line). Handles
+///    `code=abc`, `"state": "xyz"`, `'token': 'abc'`,
+///    `Authorization: Bearer abc…`. The device-code keys (`user_code`,
+///    `device_code`) additionally accept a bare-whitespace gap
+///    (`user_code XXXX-XXXX`).
+/// 2. **Long opaque runs** — any run of ≥ 32
+///    `[A-Za-z0-9_./+-]` characters (base64/JWT-shaped, including
+///    dotted segments) is masked regardless of context. `=` joins the
+///    run unless it acts as a `key=value` separator, so `value=<long>`
+///    keeps its key name while `a.b/c+d=e…` masks whole.
 ///
 /// Conservative by design: over-redaction is acceptable because the
 /// page's purpose is human support triage, not log forensics.
@@ -206,42 +223,53 @@ pub fn redact_sensitive(line: &str) -> String {
                 && (i == 0 || !is_ident_char(lower[i - 1]))
                 && (i + k.len() == n || !is_ident_char(lower[i + k.len()]))
             {
-                // Find the separator: optional whitespace/quotes then '=' or ':'.
+                // Find the separator: optional whitespace/quotes (either
+                // quote style) then '=' or ':'. Device-code style
+                // `user_code XXXX-XXXX` has no separator at all, so the
+                // device-code keys additionally accept a bare-whitespace
+                // gap. Other keys require '=' or ':' — otherwise prose
+                // like `token expired` would mask `expired`.
                 let mut j = i + k.len();
-                while j < n && (chars[j].is_whitespace() || chars[j] == '"') {
+                let mut saw_gap = false;
+                while j < n && (chars[j].is_whitespace() || chars[j] == '"' || chars[j] == '\'') {
+                    if chars[j].is_whitespace() {
+                        saw_gap = true;
+                    }
                     j += 1;
                 }
+                let whitespace_gap_ok = saw_gap && (*key == "user_code" || *key == "device_code");
                 if j < n && (chars[j] == '=' || chars[j] == ':') {
                     j += 1;
                     // Value starts after optional whitespace and opening quote.
-                    while j < n && (chars[j].is_whitespace() || chars[j] == '"') {
-                        j += 1;
-                    }
-                    let value_start = j;
-                    while j < n
-                        && !chars[j].is_whitespace()
-                        && chars[j] != '&'
-                        && chars[j] != '"'
-                        && chars[j] != ','
-                        && chars[j] != '}'
+                    while j < n && (chars[j].is_whitespace() || chars[j] == '"' || chars[j] == '\'')
                     {
                         j += 1;
                     }
-                    for m in value_start..j {
-                        masked[m] = true;
-                    }
-                    i = j;
+                } else if !(whitespace_gap_ok && j < n && is_value_char(chars[j])) {
+                    i += 1;
                     continue;
                 }
+                let value_start = j;
+                while j < n && is_value_char(chars[j]) {
+                    j += 1;
+                }
+                for m in value_start..j {
+                    masked[m] = true;
+                }
+                i = j;
+                continue;
             }
             i += 1;
         }
     }
 
-    // Pass 2: long opaque runs.
+    // Pass 2: long opaque runs. `=` joins a run unless it acts as a
+    // `key=value` separator (see `is_kv_separator`), so `value=<40 chars>`
+    // keeps its key name while `a.b/c+d=e…` masks as one run.
     let mut run_start: Option<usize> = None;
     for idx in 0..=n {
-        let is_opaque = idx < n && is_opaque_char(chars[idx]);
+        let is_opaque = idx < n
+            && (is_opaque_char(chars[idx]) || (chars[idx] == '=' && !is_kv_separator(&chars, idx)));
         if is_opaque {
             if run_start.is_none() {
                 run_start = Some(idx);
@@ -255,7 +283,6 @@ pub fn redact_sensitive(line: &str) -> String {
             run_start = None;
         }
     }
-
     // Rebuild: each masked run becomes `[REDACTED len N]` — same pattern
     // as `pkce::redact_len` (#228), inlined here to avoid allocating a
     // dummy string just to measure its length.
@@ -281,7 +308,37 @@ fn is_ident_char(c: char) -> bool {
 }
 
 fn is_opaque_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_' || c == '-'
+    c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '/' || c == '+'
+}
+
+/// Value characters for a keyed secret: everything up to the next
+/// delimiter (whitespace, `&`, either quote style, `,`, or `}`).
+fn is_value_char(c: char) -> bool {
+    !c.is_whitespace() && c != '&' && c != '"' && c != '\'' && c != ',' && c != '}'
+}
+
+/// True when `chars[idx] == '='` acts as a `key=value` separator: an
+/// identifier character immediately to the left and a non-`=` value
+/// character immediately to the right. Base64 padding (`…e=`, trailing or
+/// mid-run) never has an identifier run ending exactly at the `=`, so it
+/// stays part of the opaque run.
+fn is_kv_separator(chars: &[char], idx: usize) -> bool {
+    if chars[idx] != '=' || idx == 0 || idx + 1 >= chars.len() {
+        return false;
+    }
+    // Left: end of an identifier run (`value=…`).
+    if !is_ident_char(chars[idx - 1]) {
+        return false;
+    }
+    let mut back = idx - 1;
+    while back > 0 && is_ident_char(chars[back - 1]) {
+        back -= 1;
+    }
+    // …that starts at a word boundary (not mid-run base64 like `a.b/c+d`).
+    if back > 0 && is_opaque_char(chars[back - 1]) {
+        return false;
+    }
+    is_value_char(chars[idx + 1]) && chars[idx + 1] != '='
 }
 
 // ---------------------------------------------------------------------
@@ -515,6 +572,102 @@ mod tests {
         assert_eq!(redact_sensitive("status codes=200"), "status codes=200");
         let out = redact_sensitive("client_secret=hunter2 do-not-leak");
         assert!(!out.contains("hunter2"));
+    }
+
+    #[test]
+    fn test_redact_password_value() {
+        let out = redact_sensitive("login password=hunter2 failed");
+        assert!(!out.contains("hunter2"));
+        assert!(out.contains("password=[REDACTED"));
+    }
+
+    #[test]
+    fn test_redact_bare_token_value() {
+        // Bare `token` is its own whole identifier: it must redact
+        // `token=abc123` without disturbing `access_token`/`refresh_token`.
+        let out = redact_sensitive("got token=abc123 done");
+        assert!(!out.contains("abc123"));
+        assert!(out.contains("token=[REDACTED len 6]"));
+        let access = redact_sensitive("got access_token=abc123 done");
+        assert!(!access.contains("abc123"));
+        assert!(access.contains("access_token=[REDACTED len 6]"));
+        assert!(!access.contains("access_token=[REDACTED len 6][REDACTED"));
+        let refresh = redact_sensitive("got refresh_token=abc123 done");
+        assert!(!refresh.contains("abc123"));
+        assert!(refresh.contains("refresh_token=[REDACTED len 6]"));
+    }
+
+    #[test]
+    fn test_redact_id_token_value() {
+        let out = redact_sensitive("login id_token=shortsecret1 ok");
+        assert!(!out.contains("shortsecret1"));
+        assert!(out.contains("id_token=[REDACTED len 12]"));
+    }
+
+    #[test]
+    fn test_redact_code_verifier_value() {
+        // `verifier` alone does NOT match inside `code_verifier`
+        // (whole-identifier check rejects `_`-flanked substrings), so the
+        // compound key must be listed explicitly. The 13-char canary is
+        // well under the 32-char opaque-run threshold, so only the keyed
+        // pass can mask it.
+        let out = redact_sensitive("pkce code_verifier=shortsecret00 ok");
+        assert!(!out.contains("shortsecret00"));
+        assert!(out.contains("code_verifier=[REDACTED len 13]"));
+    }
+
+    #[test]
+    fn test_redact_passwd_value() {
+        let out = redact_sensitive("login passwd=hunter2 failed");
+        assert!(!out.contains("hunter2"));
+        assert!(out.contains("passwd=[REDACTED"));
+    }
+
+    #[test]
+    fn test_redact_api_key_value() {
+        // Bare `api_key` is its own whole identifier: it redacts
+        // `api_key=...` without disturbing the other keys.
+        let out = redact_sensitive("call api_key=shortsecret1 ok");
+        assert!(!out.contains("shortsecret1"));
+        assert!(out.contains("api_key=[REDACTED len 12]"));
+    }
+
+    #[test]
+    fn test_redact_code_challenge_value() {
+        // Like `code_verifier`, the compound key must be listed
+        // explicitly: the whole-identifier check rejects `_`-flanked
+        // substrings, so bare `code` never matches inside
+        // `code_challenge`. The 13-char canary is well under the 32-char
+        // opaque-run threshold, so only the keyed pass can mask it.
+        let out = redact_sensitive("pkce code_challenge=shortsecret00 ok");
+        assert!(!out.contains("shortsecret00"));
+        assert!(out.contains("code_challenge=[REDACTED len 13]"));
+    }
+
+    #[test]
+    fn test_redact_single_quoted_pair() {
+        let out = redact_sensitive("'token': 'abc' done");
+        assert!(!out.contains("abc"));
+        assert!(out.contains("[REDACTED len 3]"));
+    }
+
+    #[test]
+    fn test_redact_user_code_whitespace_gap() {
+        let out = redact_sensitive("enter user_code XXXX-XXXX now");
+        assert!(!out.contains("XXXX-XXXX"));
+        assert!(out.contains("user_code [REDACTED"));
+    }
+
+    #[test]
+    fn test_redact_jwt_shaped_run() {
+        // Dotted-base64/JWT with `/`, `+`, and `=` inside: the whole run
+        // masks as one regardless of context. Every `/`-delimited chunk
+        // is under the 32-char threshold on its own, so pre-fix code
+        // (which splits on `/`, `+`, `=`) leaves the secret visible.
+        let jwt = "eyJh.bGc-ab/CD+ef.SflKx-wRJSMeKKF2QT4fwpMeJf36P.Ok6yJVadQssw5c=";
+        let out = redact_sensitive(&format!("bearer {}", jwt));
+        assert!(!out.contains("SflKx-wRJSMeKKF2QT4fwpMeJf36P"));
+        assert!(out.contains(&format!("[REDACTED len {}]", jwt.len())));
     }
 
     #[test]
