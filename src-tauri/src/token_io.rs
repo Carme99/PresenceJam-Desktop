@@ -229,6 +229,20 @@ pub fn read_tokens_at(app: &tauri::AppHandle) -> Result<TokensFile, String> {
     tokens_from_bytes(&path, &bytes)
 }
 
+/// Parse legacy ≤ v2.10.0 plaintext tokens JSON (issue #352). Shared by the
+/// legacy decode paths (`decode_legacy_with_key_fetcher` and
+/// [`tokens_from_bytes_with_key`]), so the plaintext→ciphertext migration
+/// has a single error string.
+fn parse_legacy_tokens_file(bytes: &[u8], path: &Path) -> Result<TokensFile, String> {
+    serde_json::from_slice::<TokensFile>(bytes).map_err(|e| {
+        format!(
+            "Failed to parse legacy plaintext tokens file '{}': {}",
+            path.display(),
+            e
+        )
+    })
+}
+
 /// Decode the raw bytes of a `tokens.json` file into a [`TokensFile`],
 /// fetching the decryption key from the OS keychain.
 ///
@@ -236,22 +250,58 @@ pub fn read_tokens_at(app: &tauri::AppHandle) -> Result<TokensFile, String> {
 ///   exist (`keychain::get_tokens_aes_key`); a missing key is an error
 ///   that drives re-auth, exactly like a corrupt file.
 /// - Legacy plaintext JSON (starts with `{`, i.e. any release ≤ v2.10.0):
-///   parsed, then immediately re-written encrypted — the atomic write
-///   replaces the plaintext file and pre-clears any stale plaintext
-///   sidecar, so the plaintext is gone from the tokens path.
+///   parsed (via [`parse_legacy_tokens_file`]), then immediately
+///   re-written encrypted — the atomic write replaces the plaintext file
+///   and pre-clears any stale plaintext sidecar, so the plaintext is gone
+///   from the tokens path.
 fn tokens_from_bytes(path: &Path, bytes: &[u8]) -> Result<TokensFile, String> {
     if bytes.starts_with(TOKENS_MAGIC) {
         let key = crate::keychain::get_tokens_aes_key()?;
         tokens_from_bytes_with_key(path, bytes, &key)
     } else if bytes.starts_with(b"{") {
-        let key = crate::keychain::get_or_create_tokens_aes_key()?;
-        tokens_from_bytes_with_key(path, bytes, &key)
+        // Issue #352: parse the legacy plaintext BEFORE touching the OS
+        // keychain — see `decode_legacy_with_key_fetcher`, which parses
+        // once, fetches the key only for valid JSON, and threads the value
+        // into the migration write.
+        decode_legacy_with_key_fetcher(path, bytes, crate::keychain::get_or_create_tokens_aes_key)
     } else {
         Err(format!(
             "tokens file '{}' is neither PJENC-encrypted nor plaintext JSON; refusing to parse",
             path.display()
         ))
     }
+}
+
+/// Legacy `{` branch with an injectable key fetcher (issue #352). Parses
+/// the plaintext FIRST, then fetches the key, then migrates to ciphertext:
+/// a corrupt legacy file surfaces the parse error without ever touching
+/// the OS keychain. [`tokens_from_bytes`] passes the real keychain
+/// fetcher; tests inject a failing fetcher to observe the ordering
+/// behaviorally (`legacy_key_fetch_follows_parse`).
+fn decode_legacy_with_key_fetcher(
+    path: &Path,
+    bytes: &[u8],
+    fetch_key: impl FnOnce() -> Result<[u8; 32], String>,
+) -> Result<TokensFile, String> {
+    let parsed = parse_legacy_tokens_file(bytes, path)?;
+    let key = fetch_key()?;
+    migrate_parsed_legacy(path, parsed, &key)
+}
+
+/// Re-write an already-parsed legacy [`TokensFile`] as ciphertext (issue
+/// #352). Exists so the gate in [`tokens_from_bytes`] can parse once and
+/// hand the value over instead of re-parsing in the migration path.
+fn migrate_parsed_legacy(
+    path: &Path,
+    parsed: TokensFile,
+    key: &[u8; 32],
+) -> Result<TokensFile, String> {
+    write_tokens_atomic_with_key(&path.to_path_buf(), &parsed, key)?;
+    log::info!(
+        "[TOKEN_IO] migrated legacy plaintext tokens.json to AES-256-GCM ciphertext at {}",
+        path.display()
+    );
+    Ok(parsed)
 }
 
 /// Core decode with an explicit key — used by [`tokens_from_bytes`] and
@@ -278,21 +328,12 @@ fn tokens_from_bytes_with_key(
         );
         Ok(tf)
     } else if bytes.starts_with(b"{") {
-        // Legacy ≤ v2.10.0 plaintext JSON → parse and migrate to
-        // ciphertext on the spot.
-        let tf = serde_json::from_slice::<TokensFile>(bytes).map_err(|e| {
-            format!(
-                "Failed to parse legacy plaintext tokens file '{}': {}",
-                path.display(),
-                e
-            )
-        })?;
-        write_tokens_atomic_with_key(&path.to_path_buf(), &tf, key)?;
-        log::info!(
-            "[TOKEN_IO] migrated legacy plaintext tokens.json to AES-256-GCM ciphertext at {}",
-            path.display()
-        );
-        Ok(tf)
+        // Legacy ≤ v2.10.0 plaintext JSON → migrate to ciphertext on the
+        // spot. The gate in [`tokens_from_bytes`] already parsed before
+        // touching the keychain; this key-injected path parses here because
+        // tests inject the key directly (no keychain involved).
+        let tf = parse_legacy_tokens_file(bytes, path)?;
+        migrate_parsed_legacy(path, tf, key)
     } else {
         Err(format!(
             "tokens file '{}' is neither PJENC-encrypted nor plaintext JSON; refusing to parse",
@@ -461,6 +502,131 @@ pub fn clear_tokens_file(app: &tauri::AppHandle) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// Shared structural-source scanner for `#[cfg(test)]` ordering guards
+/// (issues #351/#352). Isolates a function body by depth-counting from
+/// its opening `{` while skipping string/byte-string/raw-string literals,
+/// char literals, and line/block comments — a naive `{`/`}` byte counter
+/// breaks on braces inside literals (e.g. `"{CMD} … {} …"` or `b"{"`).
+#[cfg(test)]
+pub(crate) mod test_scan {
+    /// Return the body of the function whose signature contains
+    /// `fn_marker` (e.g. `"fn complete_spotify_auth_manual("`), without
+    /// the outer braces. The signature must carry no string literals, so
+    /// the first `{` after the marker opens the body.
+    pub(crate) fn fn_body<'a>(src: &'a str, fn_marker: &str) -> &'a str {
+        let sig = src.find(fn_marker).expect("function must exist");
+        // The signature carries no string literals, so the first `{` after
+        // it opens the body.
+        let rel = src[sig..].find('{').expect("function must have a body");
+        let b = src.as_bytes();
+        let n = b.len();
+        let mut i = sig + rel;
+        let mut depth: u32 = 0;
+        let end = loop {
+            assert!(i < n, "function body has unbalanced braces");
+            let c = b[i];
+            // Line comment: skip to newline.
+            if c == b'/' && i + 1 < n && b[i + 1] == b'/' {
+                while i < n && b[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            // Block comment (nesting, as in Rust): skip to close.
+            if c == b'/' && i + 1 < n && b[i + 1] == b'*' {
+                let mut nest: u32 = 1;
+                i += 2;
+                while i < n && nest > 0 {
+                    if b[i] == b'/' && i + 1 < n && b[i + 1] == b'*' {
+                        nest += 1;
+                        i += 2;
+                    } else if b[i] == b'*' && i + 1 < n && b[i + 1] == b'/' {
+                        nest -= 1;
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                continue;
+            }
+            // Raw string `r"…"`, `r#"…"#`, or byte-raw `br"…"`: skip to the
+            // closing quote plus matching hashes.
+            let raw_hashes = if c == b'r' && i + 1 < n && (b[i + 1] == b'"' || b[i + 1] == b'#') {
+                Some(i + 1)
+            } else if c == b'b' && i + 1 < n && b[i + 1] == b'r' && i + 2 < n {
+                Some(i + 2)
+            } else {
+                None
+            };
+            if let Some(mut j) = raw_hashes {
+                let mut hashes = 0;
+                while j < n && b[j] == b'#' {
+                    hashes += 1;
+                    j += 1;
+                }
+                if j < n && b[j] == b'"' {
+                    j += 1;
+                    loop {
+                        assert!(j < n, "raw string never terminates");
+                        if b[j] == b'"' {
+                            let mut k = j + 1;
+                            let mut seen = 0;
+                            while seen < hashes && k < n && b[k] == b'#' {
+                                seen += 1;
+                                k += 1;
+                            }
+                            if seen == hashes {
+                                i = k;
+                                break;
+                            }
+                        }
+                        j += 1;
+                    }
+                    continue;
+                }
+            }
+            // Ordinary `"…"` or byte `"…"` string: skip with `\` escapes.
+            if c == b'"' || (c == b'b' && i + 1 < n && b[i + 1] == b'"') {
+                i += if c == b'"' { 1 } else { 2 };
+                while i < n && b[i] != b'"' {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+                continue;
+            }
+            // Char `'x'` / byte-char `b'x'` literal (with `\` escapes); a
+            // bare `'` (lifetime) just advances one byte.
+            if c == b'\'' || (c == b'b' && i + 1 < n && b[i + 1] == b'\'') {
+                let q = if c == b'\'' { i } else { i + 1 };
+                if q + 2 < n && b[q + 1] == b'\\' {
+                    let mut k = q + 2;
+                    while k < n && b[k] != b'\'' {
+                        k += 1;
+                    }
+                    i = k + 1;
+                } else if q + 2 < n && b[q + 2] == b'\'' {
+                    i = q + 3;
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+            match c {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break i;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        };
+        &src[sig + rel + 1..end]
+    }
 }
 
 #[cfg(test)]
@@ -740,5 +906,85 @@ mod tests {
 
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(&sidecar);
+    }
+
+    // Issue #352 (wiring guard): the legacy `{` branch in `tokens_from_bytes`
+    // must delegate to `decode_legacy_with_key_fetcher`, which parses the
+    // JSON before fetching the key (pinned behaviorally by
+    // `legacy_key_fetch_follows_parse` below). This source scan is a
+    // deliberate, load-bearing proxy: `tokens_from_bytes` touches the real
+    // OS keychain, so no unit test can drive it without keychain side
+    // effects — the scan only guards that a future refactor keeps the
+    // delegation instead of inlining a fetch-first branch. The body is
+    // isolated with the shared literal-aware scanner (`test_scan`), not a
+    // next-function boundary anchor: the dispatch arms contain `b"{"`,
+    // whose brace would corrupt a naive byte counter.
+    #[test]
+    fn legacy_branch_delegates_to_ordered_decoder() {
+        let src = include_str!("token_io.rs");
+        let body = test_scan::fn_body(src, "fn tokens_from_bytes(");
+        assert!(
+            body.contains("decode_legacy_with_key_fetcher(path, bytes"),
+            "legacy branch must delegate to the parse-before-keychain decoder"
+        );
+    }
+
+    // Issue #352 (behavioral): the injectable legacy decoder parses BEFORE
+    // fetching the key. Corrupt legacy input with a spy fetcher must
+    // surface the parse error without ever calling the fetcher; valid
+    // legacy input must reach the fetcher (its error surfacing here proves
+    // the key is fetched only after the JSON proves valid).
+    #[test]
+    fn legacy_key_fetch_follows_parse() {
+        use std::cell::Cell;
+        let path = tmp_path("legacy-order.json");
+        // Corrupt legacy bytes: parse fails, fetcher must never run.
+        let called = Cell::new(false);
+        let bytes = b"{not valid json";
+        let err = decode_legacy_with_key_fetcher(&path, bytes, || {
+            called.set(true);
+            Ok(test_key())
+        })
+        .expect_err("corrupt legacy must fail");
+        assert!(
+            err.contains("Failed to parse legacy plaintext tokens file"),
+            "parse error expected, got: {}",
+            err
+        );
+        assert!(
+            !called.get(),
+            "key fetcher must not run for corrupt legacy input"
+        );
+        // Valid legacy bytes: parse succeeds, so the fetcher runs and its
+        // error surfaces (no migration write happens — the fetch fails
+        // first, so no file is created).
+        let valid = serde_json::to_vec(&sample_file()).unwrap();
+        let called = Cell::new(false);
+        let err = decode_legacy_with_key_fetcher(&path, &valid, || {
+            called.set(true);
+            Err::<[u8; 32], String>("keychain unavailable".to_string())
+        })
+        .expect_err("failing fetcher must fail");
+        assert!(called.get(), "key fetcher must run for valid legacy input");
+        assert!(
+            err.contains("keychain unavailable"),
+            "fetcher error expected, got: {}",
+            err
+        );
+    }
+
+    // Issue #352 (behavioral): corrupt legacy `{` bytes surface the legacy
+    // parse error through the key-injected path (no keychain involved).
+    #[test]
+    fn corrupt_legacy_plaintext_yields_parse_error() {
+        let path = tmp_path("corrupt-legacy.json");
+        let bytes = b"{not valid json";
+        let err = tokens_from_bytes_with_key(&path, bytes, &test_key())
+            .expect_err("corrupt legacy must fail");
+        assert!(
+            err.contains("Failed to parse legacy plaintext tokens file"),
+            "legacy parse error expected, got: {}",
+            err
+        );
     }
 }
