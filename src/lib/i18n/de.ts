@@ -87,6 +87,8 @@ export const de: Dict = {
   'logs.level.error': 'Fehler',
   'logs.countOne': '{count} Eintrag',
   'logs.countOther': '{count} Einträge',
+  'logs.showingOf': '{shown} von {total} angezeigt',
+  'logs.jumpToLatest': 'Zum Neuesten springen',
   'logs.popOut': 'Abkoppeln',
   'logs.clear': 'Leeren',
   'logs.openFolder': 'Ordner öffnen',

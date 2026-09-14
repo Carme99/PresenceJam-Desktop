@@ -1,7 +1,7 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import PageHeader from './PageHeader.svelte';
   import { currentView } from '$lib/stores/app';
   import type { LogPayload } from '$lib/types';
@@ -15,11 +15,20 @@
   let { detached = false }: { detached?: boolean } = $props();
 
   interface LogEntry {
+    seq: number;
     timestamp: string;
     level: string;
     message: string;
   }
 
+  // #399: render-window cap (buffer stays 500, DOM renders the tail only).
+  const RENDER_WINDOW = 100;
+  // #400: stickiness threshold in px (scrollHeight - scrollTop - clientHeight).
+  const SCROLL_THRESHOLD = 48;
+
+  let seqCounter = 0;
+  // #400: true while the list is pinned to the bottom.
+  let atBottom = $state(true);
   let logs = $state<LogEntry[]>([]);
 
   // Filter buttons show canonical English level values (compared against
@@ -44,26 +53,70 @@
   let unlisten: (() => void)[] = [];
   let logContainer: HTMLDivElement;
 
+  // #400: stickiness helpers — single source for "pinned to bottom".
+  function isAtBottom(): boolean {
+    if (!logContainer) return atBottom;
+    return logContainer.scrollHeight - logContainer.scrollTop - logContainer.clientHeight < SCROLL_THRESHOLD;
+  }
+
+  // Recompute stickiness and snap when pinned. Pinned state survives
+  // content swaps (e.g. filter tabs); an unpinned view only auto-pins
+  // when the new content fits entirely in view, hiding the Jump button.
+  function updateStickinessAndSnap() {
+    if (!logContainer) return;
+    if (logContainer.scrollHeight <= logContainer.clientHeight + SCROLL_THRESHOLD) {
+      atBottom = true;
+    }
+    if (!atBottom) {
+      atBottom = isAtBottom();
+      if (!atBottom) return;
+    }
+    // Snap inside rAF only, after re-reading: a mid-frame scroll-up
+    // must not get yanked back to the bottom.
+    const el = logContainer;
+    requestAnimationFrame(() => {
+      // Re-read geometry: a mid-frame scroll-up must not get yanked back.
+      const still =
+        el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_THRESHOLD;
+      atBottom = still;
+      if (still) {
+        el.scrollTop = el.scrollHeight;
+      }
+    });
+  }
+
+  // Filter tabs swap the visible list: wait a tick for the DOM, then
+  // recompute stickiness (pinned stays pinned and snaps).
+  function selectFilter(f: string) {
+    filter = f;
+    void tick().then(() => updateStickinessAndSnap());
+  }
+
+  // Three-way count label without a nested template ternary.
+  function describeCount(shown: number, total: number): string {
+    if (shown < total) return t('logs.showingOf', { shown, total });
+    if (total === 1) return t('logs.countOne', { count: total });
+    return t('logs.countOther', { count: total });
+  }
   onMount(async () => {
     // Note: get_recent_logs is a placeholder in v2 — tauri_plugin_log streams live via Webview
     // The listener below handles all log entries in real-time.
 
     unlisten.push(await listen<LogPayload>('log://log', (event) => {
+      // #400: capture stickiness BEFORE the push changes the scroll height.
+      atBottom = isAtBottom();
       // Map numeric level (1=Trace, 2=Debug, 3=Info, 4=Warning, 5=Error) to string
       const levelMap: Record<number, string> = { 1: 'Trace', 2: 'Debug', 3: 'Info', 4: 'Warning', 5: 'Error' };
       const numericLevel = event.payload?.level;
       const levelStr = typeof numericLevel === 'number' ? (levelMap[numericLevel] ?? 'Info') : (numericLevel ?? 'Info');
       logs.push({
+        seq: seqCounter++,
         timestamp: new Date().toLocaleTimeString(),
         level: levelStr,
         message: event.payload?.message || ''
       });
       if (logs.length > 500) logs.shift();
-      if (logContainer) {
-        requestAnimationFrame(() => {
-          logContainer.scrollTop = logContainer.scrollHeight;
-        });
-      }
+      updateStickinessAndSnap();
     }));
   });
 
@@ -72,6 +125,23 @@
   let filteredLogs = $derived(
     filter === 'All' ? logs : logs.filter(l => l.level === filter)
   );
+
+  // #399: render-window over the tail — buffer keeps 500, DOM renders <= 100.
+  let visibleLogs = $derived(filteredLogs.slice(-RENDER_WINDOW));
+
+  // Count label as a derived string (cases live in describeCount).
+  let countLabel = $derived(describeCount(visibleLogs.length, filteredLogs.length));
+
+  function handleScroll() {
+    atBottom = isAtBottom();
+  }
+
+  function jumpToLatest() {
+    atBottom = true;
+    if (logContainer) {
+      logContainer.scrollTop = logContainer.scrollHeight;
+    }
+  }
 
   async function openFolder() {
     try {
@@ -112,11 +182,11 @@
       {#each (Object.keys(LEVEL_LABELS) as (keyof typeof LEVEL_LABELS)[]) as f}
         <button type="button" class="seg-btn btn-secondary"
           class:is-active={filter === f}
-          onclick={() => (filter = f)} role="tab"
+          onclick={() => selectFilter(f)} role="tab"
           aria-selected={filter === f}>{t(LEVEL_LABELS[f])}</button>
       {/each}
     </div>
-    <span class="count" aria-live="polite">{filteredLogs.length === 1 ? t('logs.countOne', { count: filteredLogs.length }) : t('logs.countOther', { count: filteredLogs.length })}</span>
+    <span class="count" aria-live="polite">{countLabel}</span>
     {#if !detached}
       <button class="btn-secondary" onclick={() => popOut('logs')}>{t('logs.popOut')}</button>
     {/if}
@@ -124,20 +194,25 @@
     <button class="btn-secondary" onclick={openFolder}>{t('logs.openFolder')}</button>
   </div>
 
-  <div class="log-list" bind:this={logContainer}>
-    {#if filteredLogs.length === 0}
-      <div class="empty-state">
-        <p>{t('logs.empty')}</p>
-        <p class="hint">{t('logs.emptyHint')}</p>
-      </div>
-    {:else}
-      {#each filteredLogs as log}
-        <div class="log-entry">
-          <span class="timestamp">{log.timestamp}</span>
-          <span class="level-badge {getLevelClass(log.level)}">{LEVEL_KEYS[log.level] ? t(LEVEL_KEYS[log.level]) : log.level}</span>
-          <span class="message">{log.message}</span>
+  <div class="log-wrap">
+    <div class="log-list" bind:this={logContainer} onscroll={handleScroll}>
+      {#if filteredLogs.length === 0}
+        <div class="empty-state">
+          <p>{t('logs.empty')}</p>
+          <p class="hint">{t('logs.emptyHint')}</p>
         </div>
-      {/each}
+      {:else}
+        {#each visibleLogs as log (log.seq)}
+          <div class="log-entry">
+            <span class="timestamp">{log.timestamp}</span>
+            <span class="level-badge {getLevelClass(log.level)}">{LEVEL_KEYS[log.level] ? t(LEVEL_KEYS[log.level]) : log.level}</span>
+            <span class="message">{log.message}</span>
+          </div>
+        {/each}
+      {/if}
+    </div>
+    {#if !atBottom && filteredLogs.length > 0}
+      <button class="jump-latest" onclick={jumpToLatest}>{t('logs.jumpToLatest')}</button>
     {/if}
   </div>
 </div>
@@ -197,7 +272,12 @@
     color: var(--fg);
     box-shadow: var(--shadow-1);
   }
-
+  .log-wrap {
+    position: relative;
+    flex: 1;
+    display: flex;
+    min-height: 0;
+  }
   .log-list {
     flex: 1;
     overflow-y: auto;
@@ -206,6 +286,20 @@
     border-radius: var(--r-md);
     padding: var(--sp-2);
     font-family: var(--font-mono);
+  }
+  .jump-latest {
+    position: absolute;
+    bottom: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: var(--sp-2) var(--sp-4);
+    font-size: var(--fs-sm);
+    background: var(--bg-elevated);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    box-shadow: var(--shadow-1);
+    cursor: pointer;
   }
   .empty-state {
     display: flex;

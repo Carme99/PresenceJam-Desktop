@@ -92,6 +92,8 @@ export const fr: Dict = {
   'logs.level.error': 'Erreur',
   'logs.countOne': '{count} entrée',
   'logs.countOther': '{count} entrées',
+  'logs.showingOf': '{shown} sur {total} affichées',
+  'logs.jumpToLatest': 'Aller aux plus récents',
   'logs.popOut': 'Détacher',
   'logs.clear': 'Effacer',
   'logs.openFolder': 'Ouvrir le dossier',
