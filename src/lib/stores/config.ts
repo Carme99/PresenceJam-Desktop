@@ -32,7 +32,11 @@ export const defaultConfig: AppConfig = {
     enabled: true,
     log_level: 'Info'
   },
-  autostart: false
+  autostart: false,
+  // Mirrors Rust AppConfig::default_schema_version (issue #379). Required:
+  // ts-rs emits schema_version as a required number, and unknown-key
+  // `extra` is #[ts(skip)] so it is absent here by design.
+  schema_version: 1
 };
 
 /**

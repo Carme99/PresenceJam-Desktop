@@ -1,5 +1,6 @@
 use crate::profanity;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
 #[cfg(unix)]
@@ -134,6 +135,10 @@ fn default_log_level() -> String {
     "Info".to_string()
 }
 
+fn default_schema_version() -> u32 {
+    1
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct AppConfig {
@@ -147,6 +152,19 @@ pub struct AppConfig {
     pub logging: LoggingConfig,
     #[serde(default)]
     pub autostart: bool,
+    /// Config schema version (issue #379). Files written before 4.3.0 carry
+    /// no such key and load as version 1.
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
+    /// Unknown / future top-level keys, retained across load→save so a newer
+    /// config file is never silently stripped by an older binary (issue #379).
+    /// Skipped in the TS export (and omitted from JSON while empty) so
+    /// `extra` stays byte-identical when empty. (Note: `schema_version`
+    /// serializes on every save, so full-file byte-identity is not claimed
+    /// across versions — only `extra` introduces no new bytes.)
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[ts(skip)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 impl Default for SpotifyConfig {
@@ -206,6 +224,8 @@ impl Default for AppConfig {
             polling: PollingConfig::default(),
             logging: LoggingConfig::default(),
             autostart: false,
+            extra: BTreeMap::new(),
+            schema_version: default_schema_version(),
         }
     }
 }
@@ -238,6 +258,50 @@ pub fn config_dir() -> Result<PathBuf, String> {
 pub fn get_config_path() -> Result<PathBuf, String> {
     let dir = config_dir()?;
     Ok(dir.join("config.json"))
+}
+
+/// Set when `load_config` finds a corrupt config.json and quarantines it to
+/// `<config>.bak` (issue #379). Diagnostics-visible via
+/// [`config_was_quarantined`]; warn-log-only otherwise — no other channel is
+/// touched by this slice.
+static CONFIG_QUARANTINED: AtomicBool = AtomicBool::new(false);
+
+/// Diagnostics-visible flag: true once this process has quarantined a corrupt
+/// config.json to `.bak` and fallen back to defaults (issue #379).
+pub fn config_was_quarantined() -> bool {
+    CONFIG_QUARANTINED.load(Ordering::SeqCst)
+}
+
+/// Backup path alongside the original: `config.json` → `config.json.bak`.
+fn quarantine_backup_path(path: &std::path::Path) -> PathBuf {
+    let mut backup = path.as_os_str().to_owned();
+    backup.push(".bak");
+    PathBuf::from(backup)
+}
+
+/// Rename a corrupt config file alongside itself (`<name>.bak`), raise the
+/// diagnostics-visible quarantine flag, and warn. Never fails the load:
+/// rename errors are logged and swallowed so the caller falls back to
+/// defaults either way (issue #379).
+fn quarantine_corrupt_config(path: &std::path::Path, parse_err: impl std::fmt::Display) -> PathBuf {
+    let backup = quarantine_backup_path(path);
+    match fs::rename(path, &backup) {
+        Ok(()) => log::warn!(
+            "[CFG] corrupt config '{}' quarantined to '{}': {} — loading defaults",
+            path.display(),
+            backup.display(),
+            parse_err
+        ),
+        Err(rename_err) => log::warn!(
+            "[CFG] corrupt config '{}' failed to parse ({}) and quarantine rename to '{}' failed ({}); loading defaults",
+            path.display(),
+            parse_err,
+            backup.display(),
+            rename_err
+        ),
+    }
+    CONFIG_QUARANTINED.store(true, Ordering::SeqCst);
+    backup
 }
 
 pub fn load_config() -> Result<AppConfig, String> {
@@ -285,8 +349,16 @@ pub fn load_config() -> Result<AppConfig, String> {
     file.read_to_string(&mut contents)
         .map_err(|e| format!("Failed to read config file '{}': {}", path.display(), e))?;
 
-    let mut config: AppConfig = serde_json::from_str(&contents)
-        .map_err(|e| format!("Failed to parse config file '{}': {}", path.display(), e))?;
+    let mut config: AppConfig = match serde_json::from_str(&contents) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            // Issue #379: never lose the evidence — quarantine the corrupt
+            // file to `<config>.bak` alongside the original and boot on
+            // defaults. Observable via `config_was_quarantined()`.
+            quarantine_corrupt_config(&path, &e);
+            return Ok(with_keychain_flags(AppConfig::default()));
+        }
+    };
     clamp_polling(&mut config.polling);
 
     log::info!("Loaded configuration from '{}'", path.display());
@@ -430,10 +502,12 @@ fn run_legacy_secret_migration() -> LegacySecretOutcome {
             return LegacySecretOutcome::NoLegacyField;
         }
     };
-    // Parse as raw Value so we can inspect unknown / pre-v2.6.0 fields
-    // without AppConfig's silent-drop on unknown keys. (AppConfig does
-    // not declare `client_secret`, so `serde_json::from_str::<AppConfig>`
-    // would discard it before we got a chance to migrate.)
+    // Parse as raw Value so we can inspect the pre-v2.6.0 nested
+    // `spotify.client_secret` field. (`SpotifyConfig` declares no such
+    // field, so `serde_json::from_str::<AppConfig>` would discard it
+    // before we got a chance to migrate. Top-level unknown keys are
+    // retained in `AppConfig::extra` since issue #379, but nested unknown
+    // keys are still dropped — hence the raw `Value` here.)
     let mut root: serde_json::Value = match serde_json::from_str(&contents) {
         Ok(v) => v,
         Err(e) => {
@@ -823,5 +897,156 @@ mod tests {
     #[test]
     fn test_spotify_secret_conflict_event_name_contract() {
         assert_eq!(SPOTIFY_SECRET_CONFLICT_EVENT, "spotify-secret-conflict");
+    }
+
+    /// Issue #379: files written before `schema_version` existed must load
+    /// as version 1.
+    #[test]
+    fn test_schema_version_defaults_to_1_when_absent() {
+        let cfg: AppConfig = serde_json::from_str("{}").expect("empty object must parse");
+        assert_eq!(cfg.schema_version, 1);
+        assert_eq!(AppConfig::default().schema_version, 1);
+    }
+
+    /// Issue #379: an explicit schema_version round-trips untouched.
+    #[test]
+    fn test_schema_version_round_trip() {
+        let cfg: AppConfig = serde_json::from_str(r#"{"schema_version": 3}"#).expect("must parse");
+        assert_eq!(cfg.schema_version, 3);
+        let json = serde_json::to_string(&cfg).expect("must serialize");
+        let back: AppConfig = serde_json::from_str(&json).expect("must re-parse");
+        assert_eq!(back.schema_version, 3);
+    }
+
+    /// Issue #379: unknown top-level keys survive a save round-trip via
+    /// `extra` instead of being silently stripped.
+    #[test]
+    fn test_unknown_future_key_survives_save_round_trip() {
+        let cfg: AppConfig =
+            serde_json::from_str(r#"{"autostart": true, "future_key": {"nested": [1, 2, 3]}}"#)
+                .expect("must parse");
+        assert_eq!(
+            cfg.extra
+                .get("future_key")
+                .expect("future_key must be retained"),
+            &serde_json::json!({"nested": [1, 2, 3]})
+        );
+        // `save_config` serialises the `clamped_config` clone with
+        // `to_string_pretty`; `clamped_config` only touches polling, so this
+        // exercises the same serde path as a real save.
+        let json = serde_json::to_string_pretty(&clamped_config(&cfg)).expect("must serialize");
+        assert!(
+            json.contains("future_key"),
+            "serialised config must still carry the unknown key"
+        );
+        let back: AppConfig = serde_json::from_str(&json).expect("must re-parse");
+        assert_eq!(back.extra.get("future_key"), cfg.extra.get("future_key"));
+        assert!(back.autostart);
+    }
+
+    /// Issue #379: a corrupt config file is quarantined to `<name>.bak`
+    /// alongside the original and the diagnostics-visible flag is raised.
+    #[test]
+    fn test_corrupt_config_quarantined_to_bak() {
+        // Process-wide CONFIG_QUARANTINED is global: save/restore so the
+        // suite stays hermetic regardless of test execution order.
+        let prev = CONFIG_QUARANTINED.load(Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "pj-test-quarantine-{}-{}",
+            std::process::id(),
+            chrono_like_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(&path, b"{ NOT VALID JSON !!!").unwrap();
+        // Precondition: the file is genuinely unparsable as AppConfig.
+        assert!(
+            serde_json::from_str::<AppConfig>(&std::fs::read_to_string(&path).unwrap()).is_err()
+        );
+
+        let backup = quarantine_corrupt_config(&path, "test corrupt sentinel");
+        assert_eq!(backup, dir.join("config.json.bak"));
+        assert!(!path.exists(), "corrupt original must be renamed away");
+        assert_eq!(
+            std::fs::read(&backup).unwrap(),
+            b"{ NOT VALID JSON !!!",
+            "quarantined copy must preserve the corrupt bytes"
+        );
+        assert!(
+            config_was_quarantined(),
+            "diagnostics-visible flag must be raised after quarantine"
+        );
+        // Defaults remain loadable alongside the quarantine.
+        assert_eq!(AppConfig::default().schema_version, 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+        CONFIG_QUARANTINED.store(prev, Ordering::SeqCst);
+    }
+
+    /// Issue #379: when the quarantine rename itself fails (e.g. a
+    /// directory already occupies the `<name>.bak` target), the load must
+    /// still fall back to defaults — the corrupt original is preserved and
+    /// the diagnostics-visible flag is raised either way.
+    #[test]
+    fn test_corrupt_config_quarantine_rename_failure_preserves_original() {
+        // Process-wide CONFIG_QUARANTINED is global: save/restore so the
+        // suite stays hermetic regardless of test execution order.
+        let prev = CONFIG_QUARANTINED.load(Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "pj-test-quarantine-fail-{}-{}",
+            std::process::id(),
+            chrono_like_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let corrupt_bytes = b"{ NOT VALID JSON !!!";
+        std::fs::write(&path, corrupt_bytes).unwrap();
+        // Colliding target: a directory at the backup path makes
+        // `fs::rename(file, dir)` fail on both POSIX and Windows.
+        std::fs::create_dir_all(dir.join("config.json.bak")).unwrap();
+
+        let backup = quarantine_corrupt_config(&path, "test rename-failure sentinel");
+        assert_eq!(backup, dir.join("config.json.bak"));
+        // Rename failed → the corrupt original must still be in place with
+        // its bytes untouched, and the flag is raised so diagnostics still
+        // observe the quarantine attempt.
+        assert!(
+            path.exists(),
+            "corrupt original must be preserved when the quarantine rename fails"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            corrupt_bytes,
+            "failed quarantine must not truncate or alter the original"
+        );
+        assert!(
+            config_was_quarantined(),
+            "diagnostics-visible flag must be raised even when the rename fails"
+        );
+        // Defaults remain loadable alongside the failed quarantine.
+        assert_eq!(AppConfig::default().schema_version, 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+        CONFIG_QUARANTINED.store(prev, Ordering::SeqCst);
+    }
+
+    /// Issue #379: `extra` keys serialize in deterministic (sorted) order so
+    /// multi-key future payloads do not flap between saves.
+    #[test]
+    fn test_extra_keys_serialize_in_sorted_order() {
+        let mut cfg = AppConfig::default();
+        cfg.extra.insert("zeta".to_string(), serde_json::json!(1));
+        cfg.extra.insert("alpha".to_string(), serde_json::json!(2));
+        cfg.extra.insert("mid".to_string(), serde_json::json!(3));
+        let json = serde_json::to_string(&cfg).expect("must serialize");
+        let alpha = json.find("\"alpha\"").expect("alpha must serialize");
+        let mid = json.find("\"mid\"").expect("mid must serialize");
+        let zeta = json.find("\"zeta\"").expect("zeta must serialize");
+        assert!(
+            alpha < mid && mid < zeta,
+            "extra keys must serialize in sorted order, got: {json}"
+        );
+        let back: AppConfig = serde_json::from_str(&json).expect("must re-parse");
+        assert_eq!(back.extra, cfg.extra);
     }
 }
