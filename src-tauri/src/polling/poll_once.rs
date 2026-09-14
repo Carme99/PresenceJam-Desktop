@@ -686,6 +686,11 @@ fn run_inner(
 
             if let Some(iteration) = transient_outcome(*transient_failure_count) {
                 log::error!("[POLLING] poll_once: 5 consecutive transient failures, exiting and requiring reconnect");
+                // Issue #389: the 5-strikes exit must carry the
+                // provider-specific signal alongside the generic one —
+                // mirror the `InvalidGrant` arms above, which emit both, so
+                // the frontend can start a real Spotify OAuth flow.
+                let _ = app.emit("spotify-reconnect-required", json!(null));
                 let _ = app.emit("reconnect-required", json!(null));
                 return iteration;
             }
@@ -1780,7 +1785,99 @@ pub(crate) fn handle_no_track(
     }
 
     let expiry_str = placeholder_expiry_str();
-    match clear_teams_status_message(&teams_tok.access_token, placeholder, Some(&expiry_str)) {
+    // Issue #455-residual: mirror the process_track ExpiredToken
+    // refresh+single-retry (see the write path above) — a 401 here can mean
+    // the token expired mid-sequence even though the pre-write expiry check
+    // in `teams_token_for_write` passed. Only a dead refresh token surfaces
+    // `teams-reconnect-required`.
+    let clear_outcome: Result<(), TeamsApiError> = match clear_teams_status_message(
+        &teams_tok.access_token,
+        placeholder,
+        Some(&expiry_str),
+    ) {
+        Ok(_) => Ok(()),
+        Err(TeamsApiError::ExpiredToken(status)) => {
+            log::info!("[POLLING] handle_no_track: Teams clear hit ExpiredToken, attempting one refresh + retry");
+            let pre_refresh_access_token = teams_tok.access_token.clone();
+            match refresh_teams_token(&teams_tok) {
+                Ok(new_tokens) => {
+                    let committed = match cas_refresh_or_discard(
+                        "teams",
+                        &mut *state.tokens.teams_mut(),
+                        &pre_refresh_access_token,
+                        || Ok::<_, TeamsApiError>(new_tokens.clone()),
+                        |t| &t.access_token,
+                    ) {
+                        CasOutcome::Committed(_) => true,
+                        CasOutcome::Discarded { .. } => false,
+                        CasOutcome::RefreshFailed(_) => {
+                            unreachable!("inner refresh_fn is Ok-wrapping")
+                        }
+                    };
+                    if committed {
+                        // Issue #180: the write guard reborrowed into the
+                        // CAS call above is dropped at the end of that
+                        // statement. Persist here — in a later statement
+                        // — so the read lock inside persist_tokens (same
+                        // RwLock) cannot self-deadlock.
+                        if let Err(persist_err) = token_io::persist_tokens(state, app) {
+                            log::warn!(
+                                    "[POLLING] handle_no_track: failed to persist reactively refreshed teams tokens: {}",
+                                    persist_err
+                                );
+                        }
+                        match clear_teams_status_message(
+                            &new_tokens.access_token,
+                            placeholder,
+                            Some(&expiry_str),
+                        ) {
+                            Ok(()) => Ok(()),
+                            Err(retry_err) => {
+                                log::error!(
+                                        "[POLLING] handle_no_track: Teams clear retry after refresh also failed: {}",
+                                        retry_err
+                                    );
+                                Err(retry_err)
+                            }
+                        }
+                    } else {
+                        // CAS lost (mirrors the process_track path): keep
+                        // the original error for classification below.
+                        Err(TeamsApiError::ExpiredToken(status))
+                    }
+                }
+                Err(refresh_err) => {
+                    log::error!(
+                        "[POLLING] handle_no_track: Teams reactive refresh failed: {}",
+                        refresh_err
+                    );
+                    // Issue #295 policy: only a dead credential clears the
+                    // session; a transient refresh failure keeps it. Either
+                    // way the typed refresh error (not the stale write
+                    // error) is what gets classified.
+                    if teams_refresh_requires_reauth(&refresh_err) {
+                        log::warn!("[POLLING] handle_no_track: Teams refresh token is dead, discarding tokens");
+                        *state.tokens.teams_mut() = None;
+                        // Issue #180: the write guard in the clearing
+                        // statement above dies at the end of that
+                        // statement. Persist in a LATER statement, when
+                        // the guard is provably dropped.
+                        if let Err(persist_err) = token_io::persist_tokens(state, app) {
+                            log::warn!(
+                                    "[POLLING] handle_no_track: failed to persist cleared teams tokens: {}",
+                                    persist_err
+                                );
+                        }
+                    } else {
+                        log::warn!("[POLLING] handle_no_track: Teams reactive refresh failed (transient), keeping session");
+                    }
+                    Err(refresh_err)
+                }
+            }
+        }
+        Err(other) => Err(other),
+    };
+    match clear_outcome {
         Ok(_) => {
             *last_posted_placeholder = Some(placeholder.to_string());
             // Issue #384: Teams now shows a placeholder, so the recorded
@@ -1797,8 +1894,28 @@ pub(crate) fn handle_no_track(
                 "[POLLING] handle_no_track: Failed to clear Teams status: {}",
                 e
             );
-            // Issue #154: honor the server's Retry-After on a throttled clear.
-            teams_backoff_secs.max(rate_limit_sleep_secs(&e))
+            // Issue #154: honor the server's Retry-After on a throttled clear
+            // (read before the classifier below moves `e`).
+            let backoff = teams_backoff_secs.max(rate_limit_sleep_secs(&e));
+            // Mirror the process_track classifier: only a dead token means
+            // re-auth; 403 is a permission/license problem re-auth cannot fix.
+            match e {
+                TeamsApiError::ExpiredToken(_) | TeamsApiError::InvalidGrant => {
+                    log::warn!("[POLLING] handle_no_track: Teams auth failure detected, emitting teams-reconnect-required");
+                    let _ = app.emit("teams-reconnect-required", json!(null));
+                }
+                TeamsApiError::Forbidden(_, _) => {
+                    log::error!("[POLLING] handle_no_track: Teams clear forbidden (permission/license) — re-auth cannot fix this; skipping teams-reconnect-required");
+                }
+                TeamsApiError::RateLimited(_)
+                | TeamsApiError::Transient(_)
+                | TeamsApiError::Other(_, _) => {
+                    log::warn!(
+                        "[POLLING] handle_no_track: Teams clear failed (transient), continuing"
+                    );
+                }
+            }
+            backoff
         }
     }
 }
@@ -2119,13 +2236,15 @@ mod tests {
         // four refresh-success call sites (Spotify proactive, Spotify
         // 401-retry, Teams proactive, Teams write-retry for issues #367/#428).
         // The Teams write-retry contributes two sites (refresh-success persist
-        // + dead-credential clear persist), so the total is eight.
+        // + dead-credential clear persist), and the handle_no_track clear
+        // retry (issue #455-residual) contributes two more, so the total is
+        // ten.
         let persist_count = prod_source.matches("token_io::persist_tokens(").count();
         assert!(
-            persist_count >= 8,
-            "expected at least 8 persist_tokens call sites in production (3 provider \
+            persist_count >= 10,
+            "expected at least 10 persist_tokens call sites in production (3 provider \
              clear paths + 4 refresh-success call sites + 1 reactive dead-credential \
-             clear); found {}. If a call-site \
+             clear + 2 no-track reactive clear-retry); found {}. If a call-site \
              persist is removed, refreshed/cleared tokens stop being flushed to disk; \
              if one is added inside cas_refresh_or_discard, the #180 self-deadlock \
              returns.",
@@ -3101,6 +3220,91 @@ mod tests {
         assert!(
             !should_skip_identical_write(false, Some("status"), "status", None, now),
             "no write on record must write"
+        );
+    }
+
+    /// Issue #389: the 5-strikes transient-failure exit must emit the
+    /// provider-specific `spotify-reconnect-required` alongside the generic
+    /// `reconnect-required` — mirroring the `InvalidGrant` arms — so the
+    /// frontend can start a real Spotify OAuth flow instead of seeing only
+    /// the generic banner. Brace-counted body isolation (house style —
+    /// never boundary anchors, which drift).
+    #[test]
+    fn test_five_strikes_exit_emits_spotify_reconnect() {
+        let source = include_str!("poll_once.rs");
+        let prod_source = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("poll_once.rs has no #[cfg(test)] mod tests block");
+        let marker = "5 consecutive transient failures, exiting and requiring reconnect";
+        let exit_pos = prod_source
+            .find(marker)
+            .expect("the 5-strikes exit log line must exist");
+        let window = &prod_source[exit_pos..];
+        let window_end = window
+            .find("return iteration;")
+            .expect("5-strikes exit must return");
+        let window = &window[..window_end];
+        assert!(
+            window.contains(r#"emit("spotify-reconnect-required""#),
+            "the 5-strikes exit must emit spotify-reconnect-required (issue #389)"
+        );
+        assert!(
+            window.contains(r#"emit("reconnect-required""#),
+            "the 5-strikes exit must keep the generic reconnect-required"
+        );
+    }
+
+    /// Issue #455-residual: the no-track clear path must mirror the
+    /// process_track ExpiredToken refresh+single-retry — a 401 on the clear
+    /// can mean the token expired mid-sequence even though the pre-write
+    /// expiry check passed. Brace-counted `handle_no_track` body isolation
+    /// (house style — never boundary anchors, which drift).
+    #[test]
+    fn test_no_track_clear_retries_expired_token_after_refresh() {
+        let source = include_str!("poll_once.rs");
+        let prod_source = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("poll_once.rs has no #[cfg(test)] mod tests block");
+        let after_sig = prod_source
+            .split("pub(crate) fn handle_no_track(")
+            .nth(1)
+            .expect("handle_no_track definition not found");
+        let open = after_sig
+            .find('{')
+            .expect("handle_no_track has no opening brace");
+        let mut depth = 0usize;
+        let mut end = None;
+        for (i, ch) in after_sig[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(open + i + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let body = &after_sig[..end.expect("handle_no_track body never closed")];
+        assert!(
+            body.contains("TeamsApiError::ExpiredToken(status)"),
+            "handle_no_track must reactively match ExpiredToken on the clear (issue #455-residual)"
+        );
+        assert!(
+            body.contains("refresh_teams_token(&teams_tok)"),
+            "handle_no_track must refresh once before blaming the credential"
+        );
+        assert!(
+            body.contains("clear_teams_status_message("),
+            "handle_no_track must retry the clear with the refreshed token"
+        );
+        assert!(
+            body.contains("teams-reconnect-required"),
+            "a dead-credential clear must surface teams-reconnect-required"
         );
     }
 }
