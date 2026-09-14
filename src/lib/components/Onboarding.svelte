@@ -309,7 +309,10 @@
           enabled: true,
           log_level: 'Info'
         },
-        autostart: launchAtLogin
+        autostart: launchAtLogin,
+        // Mirrors Rust AppConfig::default_schema_version (issue #379).
+        // Required by the ts-rs AppConfig contract.
+        schema_version: 1
       };
       devLog('[ONBOARDING] finish: config built');
 
