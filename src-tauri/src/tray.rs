@@ -320,6 +320,14 @@ static QUEUE_CACHE: std::sync::LazyLock<
 static LAST_PLAYING_STATE: std::sync::LazyLock<std::sync::atomic::AtomicBool> =
     std::sync::LazyLock::new(|| std::sync::atomic::AtomicBool::new(false));
 
+/// Coalescing guard for the delayed one-shot refresh kicked after a
+/// successful tray player action: rapid next/previous clicks must not pile
+/// up unbounded 2 s-sleep threads each firing blocking Spotify+Teams HTTP.
+/// First claimant spawns; losers skip (their track change is covered by the
+/// in-flight refresh's unconditional GET plus the polling loop).
+static DELAYED_REFRESH_IN_FLIGHT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Returns cached devices when the throttle window hasn't elapsed, else
 /// fetches fresh ones. On a fetch failure the stale cache is returned so
 /// the submenu doesn't flicker to "(no devices)" on a transient error.
@@ -509,6 +517,50 @@ fn run_player_action(
                 LAST_PLAYING_STATE.store(playing, Ordering::Release);
             }
             force_tray_refresh(app);
+            // Immediate Teams catch-up after a successful player action:
+            // wait 2 s for Spotify's currently-playing to catch up after
+            // a skip, then run a one-shot poll (no-op when sync is off).
+            // Coalesced: rapid clicks skip while a delayed refresh is
+            // already pending; its unconditional GET covers their tracks.
+            if DELAYED_REFRESH_IN_FLIGHT
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                let app_clone = app.clone();
+                let label_owned = label.to_string();
+                std::thread::spawn(move || {
+                    // RAII: a panic in run_oneshot must not wedge future
+                    // refreshes (a manual clear on each return path would).
+                    struct ResetOnDrop;
+                    impl Drop for ResetOnDrop {
+                        fn drop(&mut self) {
+                            DELAYED_REFRESH_IN_FLIGHT.store(false, Ordering::Release);
+                        }
+                    }
+                    let _reset = ResetOnDrop;
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    let state = app_clone.state::<std::sync::Arc<crate::AppState>>();
+                    if !state.polling.is_syncing(Ordering::Acquire) {
+                        log::debug!("[TRAY] {}: delayed refresh skipped (sync off)", label_owned);
+                        return;
+                    }
+                    crate::polling::run_oneshot(state.inner(), &app_clone);
+                    let is_syncing = state.polling.is_syncing(Ordering::Acquire);
+                    let current_track = state.polling.current_track().clone();
+                    if let Err(e) = update_tray_menu(&app_clone, is_syncing, current_track) {
+                        log::warn!(
+                            "[TRAY] {}: delayed refresh tray update failed: {}",
+                            label_owned,
+                            e
+                        );
+                    }
+                });
+            } else {
+                log::debug!(
+                    "[TRAY] {}: delayed refresh already pending, coalesced",
+                    label
+                );
+            }
         }
         Err(crate::spotify::SpotifyApiError::NoActiveDevice) => {
             log::warn!(

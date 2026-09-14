@@ -60,6 +60,16 @@ pub(crate) enum PollIteration {
     Break,
 }
 
+/// Execution mode for one poll iteration. `Loop` is the polling-thread
+/// path (parking sleeps); `OneShot` is an explicit refresh that must
+/// never park a thread on a sleep — every sleep site returns `Break`
+/// immediately after its usual event/log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunMode {
+    Loop,
+    OneShot,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run(
     state: &Arc<AppState>,
@@ -75,6 +85,77 @@ pub(crate) fn run(
     // Candidate C11: ETag validator from the previous conditional GET;
     // stored from each 200/204, echoed as If-None-Match on the next poll.
     last_etag: &mut Option<String>,
+) -> PollIteration {
+    run_inner(
+        state,
+        app,
+        stop_rx,
+        last_track_key,
+        last_teams_update,
+        last_posted_placeholder,
+        consecutive_pauses,
+        transient_failure_count,
+        gated_track_key,
+        last_availability_arm,
+        last_etag,
+        RunMode::Loop,
+    )
+}
+
+/// One-shot entry: runs a single iteration with fresh ephemeral locals
+/// (current track always counts as changed, so it always re-POSTs —
+/// exactly what an explicit refresh wants) and a throwaway stop channel
+/// that never fires. Never parks: `RunMode::OneShot` turns every sleep
+/// site into an immediate `Break`. Success paths (`process_track`,
+/// `handle_no_track`) contain no hidden sleeps — only natural blocking
+/// HTTP. Duplicated Teams POSTs are idempotent and harmless.
+pub(crate) fn run_oneshot(state: &Arc<AppState>, app: &AppHandle) {
+    // `_tx` is a live binding (not `let _`), so the channel stays
+    // connected for the whole call: the top stop-check treats
+    // `Disconnected` as Break, and a dropped sender here would make every
+    // one-shot a silent no-op. Never collapse this to `let _`.
+    let (_tx, rx) = mpsc::channel::<()>();
+    let mut last_track_key: Option<String> = None;
+    let mut last_teams_update: Option<Instant> = None;
+    let mut last_posted_placeholder: Option<String> = None;
+    let mut consecutive_pauses: u8 = 0;
+    let mut transient_failure_count: u8 = 0;
+    let mut gated_track_key: Option<String> = None;
+    let mut last_availability_arm: Option<Instant> = None;
+    // `None` ⇒ unconditional GET (fresh locals, no prior validator).
+    let mut last_etag: Option<String> = None;
+    let _ = run_inner(
+        state,
+        app,
+        &rx,
+        &mut last_track_key,
+        &mut last_teams_update,
+        &mut last_posted_placeholder,
+        &mut consecutive_pauses,
+        &mut transient_failure_count,
+        &mut gated_track_key,
+        &mut last_availability_arm,
+        &mut last_etag,
+        RunMode::OneShot,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_inner(
+    state: &Arc<AppState>,
+    app: &AppHandle,
+    stop_rx: &mpsc::Receiver<()>,
+    last_track_key: &mut Option<String>,
+    last_teams_update: &mut Option<Instant>,
+    last_posted_placeholder: &mut Option<String>,
+    consecutive_pauses: &mut u8,
+    transient_failure_count: &mut u8,
+    gated_track_key: &mut Option<String>,
+    last_availability_arm: &mut Option<Instant>,
+    // Candidate C11: ETag validator from the previous conditional GET;
+    // stored from each 200/204, echoed as If-None-Match on the next poll.
+    last_etag: &mut Option<String>,
+    mode: RunMode,
 ) -> PollIteration {
     log::debug!("[POLLING] poll_once: iteration start");
 
@@ -110,6 +191,7 @@ pub(crate) fn run(
                 stop_rx,
                 with_jitter(ERROR_RETRY_INTERVAL_SECONDS),
                 "no-token sleep",
+                mode,
             );
         }
     };
@@ -175,6 +257,7 @@ pub(crate) fn run(
                                 stop_rx,
                                 with_jitter(ERROR_RETRY_INTERVAL_SECONDS),
                                 "CAS-fail sleep",
+                                mode,
                             );
                         }
                     },
@@ -206,6 +289,7 @@ pub(crate) fn run(
                         stop_rx,
                         with_jitter(ERROR_RETRY_INTERVAL_SECONDS),
                         "invalid-grant sleep",
+                        mode,
                     );
                 }
                 emit_error(
@@ -218,6 +302,7 @@ pub(crate) fn run(
                     stop_rx,
                     with_jitter(ERROR_RETRY_INTERVAL_SECONDS),
                     "error retry sleep",
+                    mode,
                 );
             }
         }
@@ -257,6 +342,7 @@ pub(crate) fn run(
             stop_rx,
             with_jitter(ERROR_RETRY_INTERVAL_SECONDS),
             "credentials-unavailable sleep",
+            mode,
         );
     } else {
         spotify_tokens
@@ -566,7 +652,7 @@ pub(crate) fn run(
                 format!("Failed to get currently playing: {}", final_err),
                 ErrorSeverity::Warning,
             );
-            interruptible_sleep(stop_rx, backoff_secs, "backoff sleep")
+            interruptible_sleep(stop_rx, backoff_secs, "backoff sleep", mode)
         }
     }
 }
@@ -636,7 +722,19 @@ fn not_modified_iteration(
     record_no_track_outcome(consecutive_pauses, config)
 }
 
-fn interruptible_sleep(stop_rx: &mpsc::Receiver<()>, seconds: u64, label: &str) -> PollIteration {
+fn interruptible_sleep(
+    stop_rx: &mpsc::Receiver<()>,
+    seconds: u64,
+    label: &str,
+    mode: RunMode,
+) -> PollIteration {
+    if mode == RunMode::OneShot {
+        log::info!(
+            "[POLLING] poll_once: one-shot, skipping {} (returning Break)",
+            label
+        );
+        return PollIteration::Break;
+    }
     match stop_rx.recv_timeout(std::time::Duration::from_secs(seconds)) {
         Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
             log::info!(

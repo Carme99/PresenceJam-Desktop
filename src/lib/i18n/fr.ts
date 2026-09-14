@@ -75,6 +75,11 @@ export const fr: Dict = {
   'dashboard.statusNotConfigured': 'Non configuré',
   'dashboard.statusNoTrack': 'Aucun titre en lecture',
   'dashboard.live': 'En direct',
+  'dashboard.refreshStatus': 'Actualiser le statut',
+  'dashboard.refreshing': 'Actualisation…',
+  'dashboard.refreshFailed':
+    "Impossible d'actualiser le statut. Veuillez réessayer.",
+  'dashboard.refreshAria': 'Actualiser le statut Teams maintenant',
 
   // ── logs ──────────────────────────────────────────────────────────
   'logs.title': 'Journaux',

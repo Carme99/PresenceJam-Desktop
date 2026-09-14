@@ -70,6 +70,11 @@ export const de: Dict = {
   'dashboard.statusNotConfigured': 'Nicht konfiguriert',
   'dashboard.statusNoTrack': 'Kein Titel wird abgespielt',
   'dashboard.live': 'Live',
+  'dashboard.refreshStatus': 'Status aktualisieren',
+  'dashboard.refreshing': 'Wird aktualisiert…',
+  'dashboard.refreshFailed':
+    'Status konnte nicht aktualisiert werden. Bitte versuchen Sie es erneut.',
+  'dashboard.refreshAria': 'Teams-Status jetzt aktualisieren',
 
   // ── logs ──────────────────────────────────────────────────────────
   'logs.title': 'Protokolle',

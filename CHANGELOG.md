@@ -5,6 +5,17 @@ All notable changes to PresenceJam are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Manual status refresh:** new `refresh_status` command runs one full poll iteration on demand (main window only, no-op while sync is idle) with a Refresh button on the Dashboard track card; successful tray transport actions (play/pause/next/previous/transfer) kick a coalesced delayed refresh so Teams catches up ~2 s after a skip instead of waiting for the next scheduled poll.
+
+### Fixed
+- **Diagnostics snapshot always failed:** `get_diagnostics_snapshot` looked up `AppState` but setup manages `Arc<AppState>` — every call panicked with `state() called before manage()`.
+- **Tray next/previous failed with 411 Length Required:** empty-body Spotify player POSTs/PUTs now send `Content-Length: 0` via `.body("")`.
+
+> **i18n note:** the new `dashboard.refresh*` German and French strings are best-effort and need native-speaker review.
+
 ## [4.2.1] - 2026-09-13
 
 Docs-alignment patch: dead outbound links repaired, drifted claims corrected,

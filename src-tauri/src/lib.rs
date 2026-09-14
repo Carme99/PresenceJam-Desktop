@@ -965,6 +965,7 @@ pub fn run() {
             commands::sync::start_syncing,
             commands::sync::stop_syncing,
             commands::sync::get_sync_status,
+            commands::sync::refresh_status,
             commands::sync::app_exit,
             commands::window::show_window,
             commands::window::set_autostart_enabled,

@@ -450,7 +450,7 @@ pub async fn get_diagnostics_snapshot(app: AppHandle) -> Result<DiagnosticsSnaps
     log::info!("{CMD} get_diagnostics_snapshot: ENTRY");
     let app_clone = app.clone();
     let snapshot = tauri::async_runtime::spawn_blocking(move || {
-        let state = app_clone.state::<crate::AppState>();
+        let state = app_clone.state::<std::sync::Arc<crate::AppState>>();
         let log_dir = app_clone.path().app_log_dir().ok();
         build_snapshot(&state, log_dir, probe_keychain())
     })

@@ -14,6 +14,7 @@
 
   let isSyncing = $state(false);
   let isToggling = $state(false);
+  let isRefreshing = $state(false);
   let spotifyConnected = $state(false);
   let teamsConnected = $state(false);
   let currentTrack = $state<TrackInfo | null>(null);
@@ -241,6 +242,35 @@
     devLog('[DASHBOARD] toggleSync: EXIT');
   }
 
+  async function refreshStatus() {
+    if (isRefreshing || !isSyncing) return;
+    devLog('[DASHBOARD] refreshStatus: ENTRY');
+    devLog('[DASHBOARD] refreshStatus: isSyncing=', isSyncing);
+
+    isRefreshing = true;
+    try {
+      devLog('[DASHBOARD] refreshStatus: calling invoke refresh_status');
+      await invoke('refresh_status');
+      devLog('[DASHBOARD] refreshStatus: calling invoke get_sync_status');
+      const status = await invoke<SyncStatus>('get_sync_status');
+      isSyncing = status.is_syncing;
+      spotifyConnected = status.spotify_connected;
+      teamsConnected = status.teams_connected;
+      currentTrack = status.current_track;
+      devLog('[DASHBOARD] refreshStatus: status re-read complete');
+      await updateMenuState();
+    } catch (e) {
+      console.error('[DASHBOARD] refreshStatus failed:', e);
+      if (displayErrorTimeout) clearTimeout(displayErrorTimeout);
+      displayError = t('dashboard.refreshFailed');
+      displayErrorTimeout = setTimeout(() => { displayError = ''; displayErrorTimeout = null; }, 5000);
+    } finally {
+      isRefreshing = false;
+    }
+
+    devLog('[DASHBOARD] refreshStatus: EXIT');
+  }
+
   function openSettings() {
     devLog('[DASHBOARD] openSettings: ENTRY');
     // C7: while Settings is popped out, focus the detached window
@@ -431,6 +461,13 @@
               <span class="live-label" aria-label={t('dashboard.liveStreamAria')}>{t('dashboard.live')}</span>
             {/if}
           </div>
+          <button
+            class="btn-refresh"
+            onclick={refreshStatus}
+            disabled={!isSyncing || isRefreshing}
+            aria-label={t('dashboard.refreshAria')}
+            aria-busy={isRefreshing}
+          >⟳ {isRefreshing ? t('dashboard.refreshing') : t('dashboard.refreshStatus')}</button>
         </div>
       </div>
 
@@ -701,6 +738,32 @@
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.08em;
+  }
+  .btn-refresh {
+    margin-top: var(--sp-3);
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-2);
+    padding: var(--sp-1) var(--sp-3);
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    color: var(--accent-text);
+    background: var(--accent-soft);
+    border: 1px solid var(--accent);
+    border-radius: var(--r-md);
+    cursor: pointer;
+  }
+  .btn-refresh:hover:not(:disabled) {
+    filter: brightness(1.08);
+  }
+  .btn-refresh:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .btn-refresh {
+      transition: none;
+    }
   }
 
   .status-preview {

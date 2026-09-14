@@ -23,6 +23,7 @@ mod loop_;
 mod poll_once;
 mod state;
 
+pub(crate) use poll_once::run_oneshot;
 pub use state::{start_polling, stop_polling};
 
 use tauri::{AppHandle, Emitter};

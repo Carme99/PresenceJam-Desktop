@@ -359,3 +359,32 @@ pub fn get_sync_status(state: tauri::State<'_, Arc<AppState>>) -> Result<SyncSta
         teams_connected,
     })
 }
+#[tauri::command]
+pub async fn refresh_status(
+    window: tauri::Window,
+    state: tauri::State<'_, Arc<AppState>>,
+    app: AppHandle,
+) -> Result<(), String> {
+    super::require_main_window(&window)?;
+    log::debug!("{CMD} refresh_status: ENTRY");
+
+    if !state.polling.is_syncing(Ordering::Acquire) {
+        return Err("Sync is not running".to_string());
+    }
+
+    let state_inner = Arc::clone(state.inner());
+    let app_clone = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::polling::run_oneshot(&state_inner, &app_clone);
+        let is_syncing = state_inner.polling.is_syncing(Ordering::Acquire);
+        let current_track = state_inner.polling.current_track().clone();
+        if let Err(e) = crate::tray::update_tray_menu(&app_clone, is_syncing, current_track) {
+            log::warn!("{CMD} refresh_status: failed to update tray menu: {}", e);
+        }
+    })
+    .await
+    .map_err(|e| format!("refresh_status spawn_blocking panicked: {:?}", e))?;
+
+    log::info!("{CMD} refresh_status: SUCCESS");
+    Ok(())
+}

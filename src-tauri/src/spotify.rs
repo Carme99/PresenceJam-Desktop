@@ -546,6 +546,12 @@ fn send_player_command(
         .timeout(Duration::from_secs(10));
     if let Some(payload) = body {
         request = request.json(&payload);
+    } else {
+        // Empty-body POST/PUT (next/previous/play/pause): Spotify's edge
+        // 411s without an explicit length. `.body("")` forces reqwest to
+        // emit `Content-Length: 0`; the manual header is belt-and-braces
+        // in case a layer strips one form.
+        request = request.body("").header("Content-Length", "0");
     }
     let response = request.send().map_err(|e| {
         SpotifyApiError::Other(format!("Failed to send {} request: {}", context, e))

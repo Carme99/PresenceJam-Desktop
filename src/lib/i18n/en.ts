@@ -78,6 +78,10 @@ export const en = {
   'dashboard.statusNotConfigured': 'Not configured',
   'dashboard.statusNoTrack': 'No track playing',
   'dashboard.live': 'Live',
+  'dashboard.refreshStatus': 'Refresh status',
+  'dashboard.refreshing': 'Refreshing…',
+  'dashboard.refreshFailed': 'Could not refresh status. Please try again.',
+  'dashboard.refreshAria': 'Refresh Teams status now',
 
   // ── logs ──────────────────────────────────────────────────────────
   'logs.title': 'Logs',
