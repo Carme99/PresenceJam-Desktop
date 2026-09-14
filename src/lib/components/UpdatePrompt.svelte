@@ -255,6 +255,7 @@
         onclick={() => (dismissed = true)}
         aria-label={t('update.dismissAria')}
         title={t('common.dismiss')}
+        disabled={downloading || staging}
       >
         ×
       </button>

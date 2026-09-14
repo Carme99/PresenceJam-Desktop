@@ -42,8 +42,12 @@
     Error: 'logs.level.error'
   };
   // Backend level strings -> i18n keys; unknown levels render raw.
+  // #401: Trace is kept — the listener levelMap (~:112) produces Trace
+  // entries, so LEVEL_LABELS must match LEVEL_KEYS or Trace logs are
+  // unfilterable.
   const LEVEL_LABELS: Record<string, TKey> = {
     All: LEVEL_KEYS.All,
+    Trace: LEVEL_KEYS.Trace,
     Debug: LEVEL_KEYS.Debug,
     Info: LEVEL_KEYS.Info,
     Warning: LEVEL_KEYS.Warning,
@@ -151,13 +155,21 @@
     }
   }
 
+  // #403: catch-and-surface — WebviewWindow creation/focus can reject;
+  // never leave the promise floating from an inline onclick.
+  function handlePopOut() {
+    popOut('logs').catch((e: unknown) => console.warn('[LOGVIEWER] popOut failed:', e));
+  }
+
   function clearLogs() {
     logs = [];
   }
 
   function goBack() {
     if (detached) {
-      void popIn('logs');
+      // #403: catch-and-surface — a detached window close can reject
+      // (e.g. the window was already closed); never leave it floating.
+      popIn('logs').catch((e: unknown) => console.warn('[LOGVIEWER] popIn failed:', e));
       return;
     }
     currentView.set('dashboard');
@@ -165,6 +177,9 @@
 
   function getLevelClass(level: string): string {
     const l = level.toLowerCase();
+    // #401: Trace shares the muted debug badge until it gets its own
+    // accent; must not silently fall through to level-info.
+    if (l === 'trace') return 'level-debug';
     if (l === 'debug') return 'level-debug';
     if (l === 'info') return 'level-info';
     if (l === 'warning' || l === 'warn') return 'level-warning';
@@ -188,7 +203,7 @@
     </div>
     <span class="count" aria-live="polite">{countLabel}</span>
     {#if !detached}
-      <button class="btn-secondary" onclick={() => popOut('logs')}>{t('logs.popOut')}</button>
+      <button class="btn-secondary" onclick={handlePopOut}>{t('logs.popOut')}</button>
     {/if}
     <button class="btn-secondary" onclick={clearLogs}>{t('logs.clear')}</button>
     <button class="btn-secondary" onclick={openFolder}>{t('logs.openFolder')}</button>

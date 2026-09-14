@@ -82,13 +82,19 @@
     }
   }
 
-  onMount(async () => {
+  async function loadSnapshot() {
+    loadError = '';
+    snapshot = null;
     try {
       snapshot = await invoke<DiagnosticsSnapshot>('get_diagnostics_snapshot');
     } catch (e) {
       console.warn('[DIAGNOSTICS] get_diagnostics_snapshot failed:', e);
       loadError = String(e);
     }
+  }
+
+  onMount(() => {
+    void loadSnapshot();
   });
 
 </script>
@@ -113,6 +119,7 @@
       <div class="empty-state" role="alert">
         <p>{t('diagnostics.collectFailed')}</p>
         <p class="hint">{loadError}</p>
+        <button class="btn-secondary" onclick={loadSnapshot}>{t('common.retry')}</button>
       </div>
     {:else if snapshot}
       <section aria-label={t('diagnostics.versions')}>

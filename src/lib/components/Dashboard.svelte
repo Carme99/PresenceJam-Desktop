@@ -27,6 +27,9 @@
   // ('Listening (Available)' / 'Availability cleared').
   let availabilityLabel = $state('');
   let displayErrorTimeout: ReturnType<typeof setTimeout> | null = null;
+  // #408: goToSetup re-enable timer must be cleared on destroy so a
+  // late callback cannot touch state after unmount.
+  let goToSetupTimeout: ReturnType<typeof setTimeout> | null = null;
   let unlisten: (() => void)[] = [];
   // #287: onMount is async and awaits get_sync_status / updateMenuState
   // before registering listeners, so a destroy while it is suspended
@@ -50,6 +53,7 @@
     destroyed = true;
     unlisten.forEach(fn => fn());
     if (displayErrorTimeout) clearTimeout(displayErrorTimeout);
+    if (goToSetupTimeout) clearTimeout(goToSetupTimeout);
   });
 
   onMount(async () => {
@@ -332,7 +336,8 @@
       console.warn('[DASHBOARD] goToSetup failed:', e);
       goToSetupHint = t('dashboard.credentialCheckFailed');
       goToSetupDisabled = true;
-      setTimeout(() => { goToSetupHint = ''; goToSetupDisabled = false; }, 4000);
+      if (goToSetupTimeout) clearTimeout(goToSetupTimeout);
+      goToSetupTimeout = setTimeout(() => { goToSetupHint = ''; goToSetupDisabled = false; goToSetupTimeout = null; }, 4000);
     }
     devLog('[DASHBOARD] goToSetup: EXIT');
   }
