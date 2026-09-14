@@ -154,11 +154,12 @@ pub struct KeychainStatus {
 /// Keys whose inline value must never survive into diagnostics. Matched
 /// case-insensitively as whole identifiers followed by `=` or `:` (both
 /// shell style `code=abc` and JSON style `"code": "abc"`, either quote
-/// style). Compound keys (`id_token`, `code_verifier`) are listed
+/// style). Compound keys (`id_token`, `code_verifier`, `code_challenge`) are listed
 /// explicitly because the whole-identifier check rejects `_`-flanked
 /// substrings, so bare `token`/`code`/`verifier` never match inside them
 /// (and vice versa: bare `token` cannot match inside `access_token`).
 const SECRET_KEYS: &[&str] = &[
+    "api_key",
     "code",
     "state",
     "access_token",
@@ -168,7 +169,9 @@ const SECRET_KEYS: &[&str] = &[
     "client_secret",
     "secret",
     "password",
+    "passwd",
     "verifier",
+    "code_challenge",
     "code_verifier",
     "device_code",
     "user_code",
@@ -611,6 +614,34 @@ mod tests {
         let out = redact_sensitive("pkce code_verifier=shortsecret00 ok");
         assert!(!out.contains("shortsecret00"));
         assert!(out.contains("code_verifier=[REDACTED len 13]"));
+    }
+
+    #[test]
+    fn test_redact_passwd_value() {
+        let out = redact_sensitive("login passwd=hunter2 failed");
+        assert!(!out.contains("hunter2"));
+        assert!(out.contains("passwd=[REDACTED"));
+    }
+
+    #[test]
+    fn test_redact_api_key_value() {
+        // Bare `api_key` is its own whole identifier: it redacts
+        // `api_key=...` without disturbing the other keys.
+        let out = redact_sensitive("call api_key=shortsecret1 ok");
+        assert!(!out.contains("shortsecret1"));
+        assert!(out.contains("api_key=[REDACTED len 12]"));
+    }
+
+    #[test]
+    fn test_redact_code_challenge_value() {
+        // Like `code_verifier`, the compound key must be listed
+        // explicitly: the whole-identifier check rejects `_`-flanked
+        // substrings, so bare `code` never matches inside
+        // `code_challenge`. The 13-char canary is well under the 32-char
+        // opaque-run threshold, so only the keyed pass can mask it.
+        let out = redact_sensitive("pkce code_challenge=shortsecret00 ok");
+        assert!(!out.contains("shortsecret00"));
+        assert!(out.contains("code_challenge=[REDACTED len 13]"));
     }
 
     #[test]
