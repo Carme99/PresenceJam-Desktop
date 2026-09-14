@@ -349,7 +349,8 @@
 
   function goBack() {
     if (detached) {
-      void popIn('settings');
+      // #403: same catch-and-surface guard as goToOnboarding above.
+      popIn('settings').catch((e: unknown) => console.warn('[SETTINGS] popIn failed:', e));
       return;
     }
     currentView.set('dashboard');
@@ -362,6 +363,13 @@
     if (enabled) { try { if (!(await isPermissionGranted())) await requestPermission(); } catch {} }
   }
 
+  // #403: catch-and-surface — WebviewWindow creation/focus can reject
+  // (e.g. the window was already closed); never leave a floating promise
+  // from the PageHeader action slot.
+  function handlePopOut() {
+    popOut('settings').catch((e: unknown) => console.warn('[SETTINGS] popOut failed:', e));
+  }
+
   function goToOnboarding() {
     // Used by the Spotify Client Secret hint when the keychain entry is
     // missing. Re-running Onboarding places a fresh secret in the keychain.
@@ -370,7 +378,8 @@
       // C7: currentView is main-window-only — forward the navigation to
       // the main window and close this detached pane.
       void emitTo('main', 'navigate', 'onboarding');
-      void popIn('settings');
+      // #403: fire-and-forget close with the same catch-and-surface guard.
+      popIn('settings').catch((e: unknown) => console.warn('[SETTINGS] popIn failed:', e));
       return;
     }
     currentView.set('onboarding');
@@ -380,7 +389,7 @@
 <div class="settings">
   <PageHeader title={t('settings.title')} onBack={goBack}
     backLabel={detached ? t('settings.popBackIn') : t('common.back')}
-    onAction={detached ? undefined : () => popOut('settings')}
+    onAction={detached ? undefined : handlePopOut}
     actionTitle={detached ? '' : t('settings.popOutActionTitle')} />
   {#if isDirty}
     <div class="dirty-banner" role="status">{t('settings.unsavedChanges')}</div>

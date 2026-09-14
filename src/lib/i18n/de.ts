@@ -19,6 +19,8 @@ export const de: Dict = {
   'common.notConnected': 'Nicht verbunden',
   'common.reconnecting': 'Neuverbindung…',
   'common.reconnect': 'Erneut verbinden',
+  'common.retry': 'Wiederholen',
+  'common.bootFailed': 'App-Status konnte nicht geladen werden.',
   'common.resetToDefault': 'Auf Standard zurücksetzen',
   'common.themeToggle': 'Design umschalten',
   'common.waiting': 'Warten…',

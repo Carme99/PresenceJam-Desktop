@@ -21,28 +21,52 @@
   const BUILD = import.meta.env.VITE_APP_BUILD ?? 'dev build';
 
   let ready = $state(false);
+  let bootError = $state('');
   let unlisten: (() => void)[] = [];
 
+  // #405: bounded boot — the invoke below must never hang the loading
+  // screen forever (e.g. an IPC stall). The race rejects after
+  // BOOT_TIMEOUT_MS so `ready` always resolves; failures fall back to
+  // onboarding with a visible retry banner instead of a dead spinner.
+  const BOOT_TIMEOUT_MS = 8000;
+
+  function withBootTimeout<T>(p: Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('timed out')), BOOT_TIMEOUT_MS);
+      p.then(
+        (v) => { clearTimeout(timer); resolve(v); },
+        (e) => { clearTimeout(timer); reject(e instanceof Error ? e : new Error(String(e))); }
+      );
+    });
+  }
+
+  async function boot() {
+    devLog('[PAGE] boot: calling invoke is_onboarding_complete');
+    bootError = '';
+    try {
+      const complete = await withBootTimeout(invoke<boolean>('is_onboarding_complete'));
+      devLog('[PAGE] boot: is_onboarding_complete SUCCESS, complete=', complete);
+      currentView.set(complete ? 'dashboard' : 'onboarding');
+      devLog('[PAGE] boot: currentView set to:', complete ? 'dashboard' : 'onboarding');
+    } catch (e) {
+      console.error('[PAGE] boot: is_onboarding_complete FAILED:', e);
+      bootError = e instanceof Error ? e.message : String(e);
+      currentView.set('onboarding');
+      devLog('[PAGE] boot: currentView set to onboarding (from error)');
+    }
+    ready = true;
+    devLog('[PAGE] boot: ready=true');
+  }
+
+  function retryBoot() {
+    ready = false;
+    void boot();
+  }
   onMount(() => {
     devLog('[PAGE] onMount: ENTRY');
+    void boot();
     let unlistenTray: (() => void) | undefined;
     let unlistenShutdown: (() => void) | undefined;
-
-    (async () => {
-      devLog('[PAGE] onMount: calling invoke is_onboarding_complete');
-      try {
-        const complete = await invoke<boolean>('is_onboarding_complete');
-        devLog('[PAGE] onMount: is_onboarding_complete SUCCESS, complete=', complete);
-        currentView.set(complete ? 'dashboard' : 'onboarding');
-        devLog('[PAGE] onMount: currentView set to:', complete ? 'dashboard' : 'onboarding');
-      } catch (e) {
-        console.error('[PAGE] onMount: is_onboarding_complete FAILED:', e);
-        currentView.set('onboarding');
-        devLog('[PAGE] onMount: currentView set to onboarding (from error)');
-      }
-      ready = true;
-      devLog('[PAGE] onMount: ready=true');
-    })();
 
     devLog('[PAGE] onMount: setting up tray-click listener');
     let destroyed = false;
@@ -138,13 +162,18 @@
 
   devLog('[PAGE] currentView value:', $currentView);
 </script>
-
 {#if !ready}
   <div class="loading">
     <span>{t('common.loading')}</span>
   </div>
 {:else}
   <div class="app-container" id="main-content" tabindex="-1">
+    {#if bootError}
+      <div class="boot-error" role="alert">
+        <span>{t('common.bootFailed')}{bootError ? `: ${bootError}` : ''}</span>
+        <button type="button" class="btn-secondary" onclick={retryBoot}>{t('common.retry')}</button>
+      </div>
+    {/if}
     {#if $currentView === 'onboarding'}
       <Onboarding />
     {:else if $currentView === 'dashboard'}
@@ -173,6 +202,16 @@
     background: var(--bg-base);
     color: var(--fg-muted);
     font-size: 16px;
+  }
+  .boot-error {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 10px 16px;
+    background: var(--danger-soft);
+    color: var(--danger);
+    font-size: 14px;
   }
   .app-container {
     height: 100vh;

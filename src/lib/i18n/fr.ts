@@ -21,6 +21,8 @@ export const fr: Dict = {
   'common.reconnect': 'Reconnecter',
   'common.resetToDefault': 'Rétablir les valeurs par défaut',
   'common.themeToggle': 'Changer de thème',
+  'common.retry': 'Réessayer',
+  'common.bootFailed': "Impossible de charger l'état de l'application.",
   'common.waiting': 'En attente…',
   'common.waitingForSignIn': "En attente de connexion…",
   // Best-effort translation (no native review yet) — see wave/slice-e PR body.

@@ -31,6 +31,8 @@ export const en = {
   'common.notConnected': 'Not connected',
   'common.reconnecting': 'Reconnecting…',
   'common.reconnect': 'Reconnect',
+  'common.retry': 'Retry',
+  'common.bootFailed': 'Could not load app state',
   'common.resetToDefault': 'Reset to default',
   'common.themeToggle': 'Toggle theme',
   'common.waiting': 'Waiting…',
