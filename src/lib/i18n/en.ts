@@ -32,7 +32,6 @@ export const en = {
   'common.reconnecting': 'Reconnecting…',
   'common.reconnect': 'Reconnect',
   'common.retry': 'Retry',
-  'common.retrying': 'Retrying…',
   'common.bootFailed': 'Could not load app state',
   'common.resetToDefault': 'Reset to default',
   'common.themeToggle': 'Toggle theme',
