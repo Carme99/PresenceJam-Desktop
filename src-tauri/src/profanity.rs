@@ -116,6 +116,7 @@ fn strip_diacritic(c: char) -> Option<&'static str> {
 
 /// Leet map. `6` folds to `b` (covers `6itch`); `2` folds to `i`
 /// (covers `sh2t`; no list word contains `z`, so `2` -> `z` was dead weight).
+/// `z` folds to `s` (covers `niggaz`/`bitchez` plurals; still no `z` in the list).
 fn leet_fold(c: char) -> (char, bool) {
     match c {
         '1' | '!' | '|' => ('i', true),
@@ -129,6 +130,7 @@ fn leet_fold(c: char) -> (char, bool) {
         '9' => ('g', true),
         '+' => ('t', true),
         '(' => ('c', true),
+        'z' => ('s', true),
         _ => (c, false),
     }
 }
@@ -148,6 +150,16 @@ fn normalize(text: &str) -> Vec<NormChar> {
             });
             continue;
         }
+        // Multi-char digraph: `ph` reads as `f` (#377: `phuck`).
+        // Runs on the lowered text, mirroring the `\/` fold above.
+        if c == 'p' && chars.peek() == Some(&'h') {
+            chars.next();
+            result.push(NormChar {
+                ch: 'f',
+                leet: true,
+            });
+            continue;
+        }
         if is_format_char(c) || is_combining_mark(c) {
             continue;
         }
@@ -157,6 +169,19 @@ fn normalize(text: &str) -> Vec<NormChar> {
             if let Some(ascii) = char::from_u32(c as u32 - 0xFEE0) {
                 folded = ascii;
             }
+        }
+        // Multi-char leet: `x` reads as `ck` (#377: `fux`).
+        // Placed after the fullwidth fold so fullwidth `ｘ` expands too.
+        if folded == 'x' {
+            result.push(NormChar {
+                ch: 'c',
+                leet: true,
+            });
+            result.push(NormChar {
+                ch: 'k',
+                leet: true,
+            });
+            continue;
         }
         let folded_is_lossy = folded != c;
         if let Some(base) = strip_diacritic(folded) {
@@ -170,6 +195,14 @@ fn normalize(text: &str) -> Vec<NormChar> {
             continue;
         }
         let (mapped, leet) = leet_fold(folded);
+        // Dropped-`c` evasion: `uk` reads as `uck` (#377: `fuk`).
+        // Scoped to `u` so innocent `k` words (`like`, `book`) are untouched.
+        if mapped == 'k' && result.last().is_some_and(|n| n.ch == 'u') {
+            result.push(NormChar {
+                ch: 'c',
+                leet: true,
+            });
+        }
         result.push(NormChar {
             ch: mapped,
             leet: leet || folded_is_lossy,
@@ -627,5 +660,31 @@ mod tests {
         assert!(!contains_profanity("cockpit"));
         assert!(!contains_profanity("spicy"));
         assert!(!contains_profanity("tardy"));
+    }
+
+    // issues #377/#470: the most common real-world evasions — `ph` for `f`,
+    // dropped-`c` `uk` for `uck`, `x` for `ck`, and `z` for plural `s` —
+    // must flag under the same boundary gating as the plain forms, while
+    // innocent `ph`/`x`/`z` words stay clean (`skillz` has no profane root:
+    // no `kill`/`skill` list entry, so it is a boundary control).
+    #[test]
+    fn test_issue_377_ph_fuk_x_z_evasions() {
+        assert!(contains_profanity("phuck"));
+        assert!(contains_profanity("PHUCK"));
+        assert!(contains_profanity("fuk"));
+        assert!(contains_profanity("fux"));
+        assert!(contains_profanity("niggaz"));
+        assert!(contains_profanity("bitchez"));
+        assert!(contains_profanity("niggas"));
+        assert!(contains_profanity("bitches"));
+        assert!(!contains_profanity("phone"));
+        assert!(!contains_profanity("photo"));
+        assert!(!contains_profanity("Phoenix"));
+        assert!(!contains_profanity("skillz"));
+        assert!(!contains_profanity("Fukushima"));
+        assert!(!contains_profanity("Jukebox Hero"));
+        assert!(!contains_profanity("Uptown Funk"));
+        assert!(!contains_profanity("Explicit"));
+        assert!(!contains_profanity("Zombie"));
     }
 }
