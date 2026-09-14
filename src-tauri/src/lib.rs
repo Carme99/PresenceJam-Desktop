@@ -692,7 +692,7 @@ pub fn run() {
         log::info!("[APP] run: updater plugin registered");
     }
 
-    builder
+    let built = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(
@@ -997,19 +997,30 @@ pub fn run() {
                 api.prevent_close();
             }
         })
-        .build(tauri::generate_context!())
-        .expect("error while running tauri application")
-        .run(|app, event| {
-            // C3(c) "install on quit": both real exit paths (tray Quit in
-            // menu.rs and the app_exit command) funnel into
-            // AppHandle::exit, which fires RunEvent::Exit once the event
-            // loop has finished — the safe point to apply a staged update
-            // (the plugin requires the app to be quitting on Windows).
-            #[cfg(desktop)]
-            if matches!(event, tauri::RunEvent::Exit) {
-                updater_bg::install_pending_on_exit(app);
-            }
-        });
+        .build(tauri::generate_context!());
+    // Issue #417: a build failure (missing icon, bad capability, plugin
+    // init) must not panic the release binary with `.expect` — log the
+    // cause and exit non-zero. No panic backtrace, but the OS launcher
+    // still sees the failure via the exit code and the log tail.
+    let app = match built {
+        Ok(app) => app,
+        Err(e) => {
+            log::error!("[APP] run: failed to build tauri application: {}", e);
+            std::process::exit(1);
+        }
+    };
+    app.run(|app, event| {
+        // C3(c) "install on quit": both real exit paths (the shared
+        // request_graceful_shutdown in menu.rs backing tray + app-menu
+        // Quit, and the app_exit command) funnel into AppHandle::exit,
+        // which fires RunEvent::Exit once the event loop has finished —
+        // the safe point to apply a staged update (the plugin requires
+        // the app to be quitting on Windows).
+        #[cfg(desktop)]
+        if matches!(event, tauri::RunEvent::Exit) {
+            updater_bg::install_pending_on_exit(app);
+        }
+    });
 }
 
 #[cfg(test)]
@@ -1240,5 +1251,50 @@ mod tests {
                 }
             }
         }
+    }
+    /// Issue #417: `run()` must never `.expect` on the Tauri build in
+    /// production — a build failure must log and exit non-zero instead of
+    /// panicking the release binary. Brace-counted body isolation
+    /// (order-independent): do not anchor on the next fn.
+    #[test]
+    fn test_run_build_failure_logs_and_exits() {
+        let source = include_str!("lib.rs");
+        let prod_source = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("lib.rs has no #[cfg(test)] mod tests block");
+        let after_sig = prod_source
+            .split("pub fn run()")
+            .nth(1)
+            .expect("run definition not found");
+        let open = after_sig.find('{').expect("run has no opening brace");
+        let mut depth = 0usize;
+        let mut end = None;
+        for (i, ch) in after_sig[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(open + i + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let body = &after_sig[open..end.expect("run body never closed")];
+        assert!(
+            !body.contains(".expect("),
+            "run() must not .expect on the Tauri build (issue #417)"
+        );
+        assert!(
+            body.contains("std::process::exit(1)"),
+            "run() build failure must exit non-zero"
+        );
+        assert!(
+            body.contains("failed to build tauri application"),
+            "run() build failure must log the cause"
+        );
     }
 }

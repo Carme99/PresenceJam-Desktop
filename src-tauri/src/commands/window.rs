@@ -46,6 +46,9 @@ pub fn show_window(app: AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("main") {
         log::info!("{CMD} show_window: window found, showing and focusing");
         let _ = window.show();
+        // Issue #391: a minimized window stays minimized after show() —
+        // unminimize first (mirrors the single-instance raise in lib.rs).
+        let _ = window.unminimize();
         let _ = window.set_focus();
     } else {
         log::warn!("{CMD} show_window: main window not found");
@@ -161,4 +164,53 @@ pub async fn open_external_url(url: String) -> Result<(), String> {
     })
     .await
     .map_err(|e| format!("open_external_url spawn_blocking panicked: {:?}", e))?
+}
+
+#[cfg(test)]
+mod tests {
+    /// Issue #391: show_window must unminimize (a minimized window stays
+    /// minimized after show()). Brace-counted body isolation
+    /// (order-independent): do not anchor on the next fn.
+    #[test]
+    fn show_window_unminimizes() {
+        let src = include_str!("window.rs");
+        let sig_idx = src
+            .find("pub fn show_window(")
+            .expect("show_window must exist");
+        let brace_open_rel = src[sig_idx..]
+            .find('{')
+            .expect("function body must have an opening brace");
+        let body_start = sig_idx + brace_open_rel;
+        let mut depth: u32 = 0;
+        let mut i = body_start;
+        let body_end = loop {
+            match src.as_bytes()[i] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break i;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+            if i >= src.len() {
+                panic!("unbalanced braces in show_window");
+            }
+        };
+        let body = &src[body_start + 1..body_end];
+        assert!(
+            body.contains("window.unminimize()"),
+            "show_window must unminimize (mirror lib.rs single-instance raise)"
+        );
+        assert!(
+            body.contains("window.show()"),
+            "show_window must still show the window"
+        );
+        assert!(
+            body.contains("window.set_focus()"),
+            "show_window must still focus the window"
+        );
+    }
 }

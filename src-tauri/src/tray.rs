@@ -16,8 +16,8 @@ const ID_OPEN_SETTINGS: &str = "settings";
 const ID_OPEN_LOGS: &str = "open_logs";
 const ID_QUIT: &str = "quit";
 // Spotify playback control (issue #3.0-P3). Device submenu items carry
-// ids of the form `{ID_DEVICES}|{index}` so the click handler can look
-// the selected device up in the cached device list.
+// ids of the form `{ID_DEVICES}|{spotify device id}` so the click handler
+// resolves the stable id instead of racing a list index (issue #388).
 const ID_PLAY_PAUSE: &str = "play_pause";
 /// Static label for the Play/Pause check item — the playing state is
 /// conveyed by the native checked mark instead of a swapped label
@@ -27,7 +27,7 @@ const ID_PREVIOUS: &str = "previous";
 const ID_NEXT: &str = "next";
 const ID_DEVICES: &str = "devices";
 const ID_QUEUE: &str = "queue";
-/// Menu-item id prefix for device submenu entries (`{ID_DEVICES}|{index}`).
+/// Menu-item id prefix for device submenu entries (`{ID_DEVICES}|{device id}`).
 /// `concat!` cannot take a const, so this mirrors `ID_DEVICES` literally;
 /// keep the two in sync when either changes.
 const DEVICE_ITEM_PREFIX: &str = "devices|";
@@ -72,10 +72,12 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
                 let _ = app.emit("toggle-pause", ());
             }
             ID_QUIT => {
-                let _ = app.emit("app-shutdown", ());
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.hide();
-                }
+                // Issue #383: Quit must terminate the process even with no
+                // frontend listener — the old hide-only arm wedged the app
+                // in the tray with no way out. Route through the shared
+                // graceful shutdown (emits app-shutdown, then exits
+                // unconditionally after SHUTDOWN_GRACE).
+                crate::menu::request_graceful_shutdown(app);
             }
             // Menu items handled by app menu (settings, open_logs) also come through here
             ID_OPEN_SETTINGS => {
@@ -90,9 +92,12 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
             }
             // Spotify playback control (issue #3.0-P3). These dispatch
             // directly against the Spotify API with the stored access
-            // token — no frontend roundtrip — and force a tray rebuild on
-            // success so the new state is reflected immediately.
             ID_PLAY_PAUSE => {
+                // Issue #386: the click-path blocking Spotify HTTP must not
+                // run on the menu-event thread — a slow network would wedge
+                // the tray menu. Snapshot the token and offload everything
+                // (the currently-playing GET plus the play/pause action)
+                // to a worker thread.
                 let state = app.state::<std::sync::Arc<crate::AppState>>();
                 let token = match state.tokens.spotify().as_ref() {
                     Some(t) => t.access_token.clone(),
@@ -101,69 +106,83 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
                         return;
                     }
                 };
-                // Resolve the ACTUAL playing state from the API rather than
-                // the stored track: the polling loop's `is_playing` goes
-                // stale on a same-track pause (it's only re-stored on
-                // title/artist change), and an external device may have
-                // changed state since. One extra GET per click is fine —
-                // this is user-initiated. Unknown → resume (play).
-                // Unconditional GET (`None`): this is a user-initiated
-                // one-off click with no stored validator. C11 signature.
-                let should_pause = match crate::spotify::get_currently_playing(&token, None) {
-                    Ok(crate::spotify::CurrentlyPlaying::Modified {
-                        track: Some(track), ..
-                    }) => track.is_playing,
-                    _ => false,
-                };
-                if should_pause {
-                    run_player_action(app, "pause", Some(false), |t| {
-                        crate::spotify::player_pause(t, None)
-                    });
-                } else {
-                    run_player_action(app, "play", Some(true), |t| {
-                        crate::spotify::player_play(t, None)
-                    });
-                }
+                let app_handle = app.clone();
+                std::thread::spawn(move || {
+                    // Resolve the ACTUAL playing state from the API rather
+                    // than the stored track: the polling loop's `is_playing`
+                    // goes stale on a same-track pause (it's only re-stored
+                    // on title/artist change), and an external device may
+                    // have changed state since. One extra GET per click is
+                    // fine — this is user-initiated. Unknown → resume.
+                    // Unconditional GET (`None`): user-initiated one-off
+                    // click with no stored validator. C11 signature.
+                    let should_pause = match crate::spotify::get_currently_playing(&token, None) {
+                        Ok(crate::spotify::CurrentlyPlaying::Modified {
+                            track: Some(track),
+                            ..
+                        }) => track.is_playing,
+                        _ => false,
+                    };
+                    if should_pause {
+                        run_player_action(&app_handle, "pause", Some(false), |t| {
+                            crate::spotify::player_pause(t, None)
+                        });
+                    } else {
+                        run_player_action(&app_handle, "play", Some(true), |t| {
+                            crate::spotify::player_play(t, None)
+                        });
+                    }
+                });
             }
             ID_PREVIOUS => {
-                // Skipping doesn't change the playing state.
-                run_player_action(app, "previous", None, |token| {
-                    crate::spotify::player_previous(token, None)
+                // Issue #386: offload the blocking Spotify HTTP off the
+                // menu-event thread. Skipping doesn't change playing state.
+                let app_handle = app.clone();
+                std::thread::spawn(move || {
+                    run_player_action(&app_handle, "previous", None, |token| {
+                        crate::spotify::player_previous(token, None)
+                    });
                 });
             }
             ID_NEXT => {
-                run_player_action(app, "next", None, |token| {
-                    crate::spotify::player_next(token, None)
+                // Issue #386: offload the blocking Spotify HTTP off the
+                // menu-event thread. Skipping doesn't change playing state.
+                let app_handle = app.clone();
+                std::thread::spawn(move || {
+                    run_player_action(&app_handle, "next", None, |token| {
+                        crate::spotify::player_next(token, None)
+                    });
                 });
             }
             id if id.starts_with(DEVICE_ITEM_PREFIX) => {
-                // Device submenu item: `{ID_DEVICES}|{index}` into the
-                // cached device list.
-                let index = id
+                // Device submenu item: `{ID_DEVICES}|{stable device id}`
+                // resolved by id (issue #388), with a live re-fetch fallback
+                // when the cached list went stale. Issue #386: the whole
+                // resolution + transfer runs on a worker thread so no HTTP
+                // touches the menu-event thread.
+                let raw = id
                     .strip_prefix(DEVICE_ITEM_PREFIX)
-                    .and_then(|s| s.parse::<usize>().ok());
-                let device_id = index
-                    .and_then(|i| {
-                        DEVICES_CACHE
-                            .lock()
-                            .as_ref()
-                            .and_then(|(_, devices)| devices.get(i).cloned())
-                    })
-                    .and_then(|device| device.id);
-                match device_id {
-                    Some(device_id) => {
-                        // Transfer starts playback on the target device.
-                        run_player_action(app, "transfer", Some(true), |token| {
-                            crate::spotify::player_transfer(token, &device_id, true)
-                        });
+                    .unwrap_or("")
+                    .to_string();
+                let selected = parse_device_menu_id(&raw);
+                let app_handle = app.clone();
+                std::thread::spawn(move || {
+                    let device_id = resolve_device_id(&app_handle, &selected);
+                    match device_id {
+                        Some(device_id) => {
+                            // Transfer starts playback on the target device.
+                            run_player_action(&app_handle, "transfer", Some(true), |token| {
+                                crate::spotify::player_transfer(token, &device_id, true)
+                            });
+                        }
+                        None => {
+                            log::warn!(
+                                "[TRAY] transfer: unknown or id-less device selected (id={})",
+                                selected_for_log(&selected)
+                            );
+                        }
                     }
-                    None => {
-                        log::warn!(
-                            "[TRAY] transfer: unknown or id-less device selected (id={})",
-                            id
-                        );
-                    }
-                }
+                });
             }
             _ => {}
         })
@@ -299,8 +318,9 @@ fn tray_write_lock() -> &'static parking_lot::Mutex<()> {
 const TRAY_SPOTIFY_FETCH_THROTTLE: Duration = Duration::from_secs(60);
 
 /// Cache slot for the throttled devices fetch: `(fetched_at, devices)`.
-/// Also serves as the source of truth for the device submenu's click
-/// dispatch — menu item ids are `{ID_DEVICES}|{index}` into this list.
+/// Fast path for the device submenu's click dispatch, which resolves the
+/// stable `{ID_DEVICES}|{device id}` against this list and falls back to a
+/// live re-fetch when stale (issue #388).
 type DeviceCacheSlot = Option<(Instant, Vec<crate::spotify::DeviceInfo>)>;
 
 static DEVICES_CACHE: std::sync::LazyLock<parking_lot::Mutex<DeviceCacheSlot>> =
@@ -396,6 +416,92 @@ fn cached_queue(access_token: &str) -> Option<crate::spotify::QueueInfo> {
     }
 }
 
+/// What the `{ID_DEVICES}|{…}` suffix resolved to. Device menu ids carry the
+/// stable Spotify device id (issue #388); the `LegacyIndex` variant accepts
+/// ids minted by an older menu build still on screen when the app updated.
+#[derive(Debug, PartialEq, Eq)]
+enum DeviceMenuSelection {
+    DeviceId(String),
+    LegacyIndex(usize),
+    Invalid,
+}
+
+/// Parses the suffix of a device menu-item id. A numeric suffix from an old
+/// menu build is kept as `LegacyIndex` for back-compat; anything else is a
+/// stable Spotify device id (`DeviceId`), including the empty string and the
+/// `none` placeholder, which both resolve to `Invalid` downstream.
+fn parse_device_menu_id(suffix: &str) -> DeviceMenuSelection {
+    if suffix == "none" {
+        return DeviceMenuSelection::Invalid;
+    }
+    // Spotify device ids are opaque base62 strings; a pure-ASCII-digit
+    // suffix can only have come from the old `{index}` scheme.
+    if !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()) {
+        if let Ok(i) = suffix.parse::<usize>() {
+            return DeviceMenuSelection::LegacyIndex(i);
+        }
+    }
+    if suffix.is_empty() {
+        return DeviceMenuSelection::Invalid;
+    }
+    DeviceMenuSelection::DeviceId(suffix.to_string())
+}
+
+/// Redacted label for the unknown-device warn log: ids are bearer-adjacent,
+/// so log only the length, never the id itself.
+fn selected_for_log(selected: &DeviceMenuSelection) -> String {
+    match selected {
+        DeviceMenuSelection::DeviceId(id) => format!("<id len={}>", id.len()),
+        DeviceMenuSelection::LegacyIndex(i) => format!("<legacy index={}>", i),
+        DeviceMenuSelection::Invalid => "<invalid>".to_string(),
+    }
+}
+
+/// Resolves a parsed device-menu selection to a live Spotify device id.
+/// Cache first (no IO), then a live `get_devices` re-fetch when the cached
+/// list went stale (issue #388: the old `devices.get(i)` raced the
+/// 60 s-throttled cache against the live device list). MUST run off the
+/// menu-event thread — the fallback performs blocking HTTP (issue #386).
+fn resolve_device_id(app: &AppHandle, selected: &DeviceMenuSelection) -> Option<String> {
+    let state = app.state::<std::sync::Arc<crate::AppState>>();
+    let token = state.tokens.spotify().as_ref()?.access_token.clone();
+    match selected {
+        DeviceMenuSelection::DeviceId(id) => {
+            // Fast path: still in the cached list and transferable.
+            let cached = DEVICES_CACHE.lock().as_ref().and_then(|(_, devices)| {
+                devices
+                    .iter()
+                    .find(|d| d.id.as_deref() == Some(id.as_str()))
+                    .and_then(|d| d.id.clone())
+            });
+            if cached.is_some() {
+                return cached;
+            }
+            // Slow path: live re-fetch; the device may have appeared after
+            // the submenu was built, or the cache may be stale.
+            match crate::spotify::get_devices(&token) {
+                Ok(devices) => {
+                    *DEVICES_CACHE.lock() = Some((Instant::now(), devices.clone()));
+                    devices
+                        .into_iter()
+                        .find(|d| d.id.as_deref() == Some(id.as_str()))
+                        .and_then(|d| d.id)
+                }
+                Err(e) => {
+                    log::warn!("[TRAY] transfer: live device re-fetch failed: {}", e);
+                    None
+                }
+            }
+        }
+        DeviceMenuSelection::LegacyIndex(i) => DEVICES_CACHE
+            .lock()
+            .as_ref()
+            .and_then(|(_, devices)| devices.get(*i).cloned())
+            .and_then(|device| device.id),
+        DeviceMenuSelection::Invalid => None,
+    }
+}
+
 /// Builds the Devices submenu. `access_token` is `None` before the app has
 /// Spotify tokens (initial menu build) — the submenu then shows a single
 /// disabled "(no devices)" placeholder.
@@ -425,7 +531,7 @@ fn build_devices_submenu_from_devices(
             .map_err(|e| e.to_string())?;
         submenu.append(&empty).map_err(|e| e.to_string())?;
     } else {
-        for (index, device) in devices.iter().enumerate() {
+        for device in devices.iter() {
             let label = if device.is_active {
                 format!("✓ {}", device.name)
             } else {
@@ -433,7 +539,13 @@ fn build_devices_submenu_from_devices(
             };
             // The active device (and id-less devices) can't be transferred to.
             let enabled = !device.is_active && device.id.is_some();
-            let item = MenuItemBuilder::with_id(format!("{}|{}", ID_DEVICES, index), label)
+            // Issue #388: carry the stable Spotify device id (not the list
+            // index) so a click resolves even when the cached list raced a
+            // live device change. Id-less devices reuse the `none` id: they
+            // are disabled and parse back to `Invalid`, which the click
+            // handler rejects with a warn.
+            let suffix = device.id.as_deref().unwrap_or("none");
+            let item = MenuItemBuilder::with_id(format!("{}|{}", ID_DEVICES, suffix), label)
                 .enabled(enabled)
                 .build(app)
                 .map_err(|e| e.to_string())?;
@@ -932,3 +1044,137 @@ pub fn set_presence_gated_badge(app: &AppHandle, gated: bool) {
 
 #[cfg(not(target_os = "macos"))]
 pub fn set_presence_gated_badge(_app: &AppHandle, _gated: bool) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Issue #388: device menu ids must parse to stable Spotify device ids,
+    /// never to a list index. Pure helper — no Tauri runtime needed.
+    #[test]
+    fn parse_device_menu_id_carries_stable_id() {
+        assert_eq!(
+            parse_device_menu_id("abc123XYZ"),
+            DeviceMenuSelection::DeviceId("abc123XYZ".to_string())
+        );
+        assert_eq!(
+            parse_device_menu_id("0"),
+            DeviceMenuSelection::LegacyIndex(0)
+        );
+        assert_eq!(
+            parse_device_menu_id("12"),
+            DeviceMenuSelection::LegacyIndex(12)
+        );
+        assert_eq!(parse_device_menu_id("none"), DeviceMenuSelection::Invalid);
+        assert_eq!(parse_device_menu_id(""), DeviceMenuSelection::Invalid);
+    }
+
+    /// Issue #388: the click handler must resolve by id with a live
+    /// re-fetch fallback instead of `devices.get(i)`. Brace-counted body
+    /// isolation (order-independent): do not anchor on the next fn.
+    #[test]
+    fn device_click_resolves_by_id_with_live_fallback() {
+        let src = include_str!("tray.rs");
+        let sig_idx = src
+            .find("fn resolve_device_id(")
+            .expect("resolve_device_id must exist");
+        let brace_open_rel = src[sig_idx..]
+            .find('{')
+            .expect("function body must have an opening brace");
+        let body_start = sig_idx + brace_open_rel;
+        let mut depth: u32 = 0;
+        let mut i = body_start;
+        let body_end = loop {
+            match src.as_bytes()[i] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break i;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+            if i >= src.len() {
+                panic!("unbalanced braces in resolve_device_id");
+            }
+        };
+        let body = &src[body_start + 1..body_end];
+        assert!(
+            body.contains("get_devices(&token)"),
+            "resolve_device_id must live re-fetch when the cache misses"
+        );
+        assert!(
+            !body.contains("devices.get(*i).cloned()") || body.contains("LegacyIndex"),
+            "index lookup must survive only on the LegacyIndex back-compat path"
+        );
+    }
+
+    /// Issues #383/#386: the tray Quit arm must terminate via the shared
+    /// graceful shutdown, and the playback/device click arms must offload
+    /// blocking Spotify HTTP onto worker threads. Brace-counted body
+    /// isolation (order-independent): do not anchor on the next fn.
+    #[test]
+    fn tray_click_arms_quit_and_offload() {
+        let src = include_str!("tray.rs");
+        let sig_idx = src
+            .find("pub fn setup_tray(")
+            .expect("setup_tray must exist");
+        let brace_open_rel = src[sig_idx..]
+            .find('{')
+            .expect("function body must have an opening brace");
+        let body_start = sig_idx + brace_open_rel;
+        let mut depth: u32 = 0;
+        let mut i = body_start;
+        let body_end = loop {
+            match src.as_bytes()[i] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break i;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+            if i >= src.len() {
+                panic!("unbalanced braces in setup_tray");
+            }
+        };
+        let body = &src[body_start + 1..body_end];
+        // #383: Quit terminates even with no frontend listener.
+        let quit_pos = body
+            .find("ID_QUIT =>")
+            .expect("setup_tray must handle ID_QUIT");
+        let quit_tail = &body[quit_pos..quit_pos + 600.min(body.len() - quit_pos)];
+        assert!(
+            quit_tail.contains("request_graceful_shutdown"),
+            "tray ID_QUIT arm must route through request_graceful_shutdown"
+        );
+        assert!(
+            !quit_tail.contains("window.hide()"),
+            "the hide-only quit arm (issue #383) must stay gone"
+        );
+        // #386: no blocking Spotify HTTP directly on the menu-event thread.
+        for marker in [
+            "get_currently_playing(&token, None)",
+            "player_pause(t, None)",
+            "player_play(t, None)",
+            "player_previous(token, None)",
+            "player_next(token, None)",
+            "player_transfer(token,",
+        ] {
+            let pos = body
+                .find(marker)
+                .unwrap_or_else(|| panic!("expected click-path marker `{}` in setup_tray", marker));
+            let before = &body[..pos];
+            assert!(
+                before.rfind("std::thread::spawn").is_some(),
+                "blocking call `{}` must run inside a spawned worker thread",
+                marker
+            );
+        }
+    }
+}
