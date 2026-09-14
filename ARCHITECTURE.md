@@ -161,8 +161,10 @@ never blocks the UI.
   a `stage_deferred_update` command that performs its own check + download +
   signature verification on the blocking pool and holds the verified bytes in
   managed `PendingUpdate` state. `lib.rs` runs the app via `build().run()` with
-  a **`RunEvent::Exit` arm**: when the user quits (tray Quit and `app_exit` both
-  funnel into `AppHandle::exit`), the staged update is applied during exit. The
+  a **`RunEvent::Exit` arm**: when the user quits (tray + menu Quit share a bounded
+  graceful-shutdown — `request_graceful_shutdown` emits `app-shutdown`, waits up to an 8 s
+  drain acknowledgement, then exits unconditionally — and `app_exit` funnels into
+  `AppHandle::exit`), the staged update is applied during exit. The
   Windows installer relaunches automatically; macOS/Linux pick up the replaced
   bundle/AppImage on next launch.
 
@@ -189,9 +191,8 @@ matching SECURITY.md's No Telemetry promise. The snapshot contains:
   read from the marker `updater_bg::install_pending_on_exit` writes, so a failed
   install is visible on the next launch instead of silently lost.
 - The last 50 lines of the on-disk `PresenceJam.log` tail, passed through a
-  defensive second-pass redaction helper that reuses the `[REDACTED len N]`
-  pattern from v3.2 (#228) — keyed values and any ≥32-char opaque run are
-  scrubbed.
+  defensive second-pass redaction helper (`redact_sensitive`) that reuses the `[REDACTED len N]`
+  pattern from v3.2 (#228) — a keyed allowlist (`token`, `password`/`passwd`, `id_token`, `code_verifier`/`code_challenge`, `api_key`, …) with single-quote + whitespace-gap separators, plus any ≥32-char JWT/base64 opaque run, is scrubbed.
 
 The command is async with `spawn_blocking` per the v3.2 main-thread-stall
 convention (file IO + keychain reads). Regression tests cover the redaction
@@ -534,7 +535,7 @@ resolved to 🎵 or ⏸️. The replaced status is logged at info level; the
 **original profane text is never written to logs**.
 
 Detection features (curated word list, compounds like `asshole`/`bullshit`/`sonofabitch` (#411) — see `profanity.rs`):
-- **Leetspeak normalization:** `1/2→i, 3→e, $→s, @→a, 0→o, 5→s, 7→t, !→i, |→i, 6/8→b, 9→g, +→t, (→c, 4→a`, plus `/→v` folding, fullwidth→ASCII and a diacritic table; zero-width/format characters stripped.
+- **Leetspeak normalization:** `1/2→i, 3→e, $→s, @→a, 0→o, 5→s, 7→t, !→i, |→i, 6/8→b, 9→g, +→t, (→c, 4→a`, plus `/→v` folding, `ph→f` pre-fold, `x→ck` expansion, dropped-`c` `uk→uck` (scoped to `u`), terminal `z→s` (#377/#470), fullwidth→ASCII and a diacritic table; zero-width/format characters stripped.
 - **Repeated-character collapse:** generic run-collapse (`shiiit → shit` regardless of excess length).
 - **Word-boundary safety:** prevents false positives on `class`, `assassin`, `cocktail bar`, `cockpit`, `Spice Girls`, `Push It`; separator skipping gated on both-side boundaries.
 - **Compound-word safe-suffixes:** `tail, head, hand, ...` allow `fishtail`, `forehead`, `handheld`.
@@ -571,7 +572,7 @@ sequenceDiagram
 | `error` | `{source, message, severity}` | Any API error (Spotify, Teams, or auth); `severity` is `warning` or `error` |
 | `spotify-reconnect-required` | `null` | Spotify token expired or auth failure requiring re-auth |
 | `teams-reconnect-required` | `null` | Teams token expired or auth failure requiring re-auth |
-| `reconnect-required` | `null` | Transient failure retry limit exhausted, polling loop exiting |
+| `reconnect-required` | `null` | Transient failure retry limit exhausted, polling loop exiting (5-strikes exit also emits provider-specific `spotify-reconnect-required` alongside, #389) |
 | `polling-thread-panicked` | `null` | Polling thread panicked and was caught by `catch_unwind` |
 | `tray-click` | — | User clicks tray icon |
 | `toggle-pause` | — | User clicks Pause in tray menu |
