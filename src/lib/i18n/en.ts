@@ -94,6 +94,8 @@ export const en = {
   'logs.level.error': 'Error',
   'logs.countOne': '{count} entry',
   'logs.countOther': '{count} entries',
+  'logs.showingOf': 'Showing {shown} of {total}',
+  'logs.jumpToLatest': 'Jump to latest',
   'logs.popOut': 'Pop out',
   'logs.clear': 'Clear',
   'logs.openFolder': 'Open folder',
