@@ -4,7 +4,7 @@
   import { configStore, saveConfig, DEFAULT_PROFANITY_PLACEHOLDER } from '$lib/stores/config';
   import type { AppConfig, DeviceCodeResponse } from '$lib/types';
   import { currentView } from '$lib/stores/app';
-  import { authFlow, setSpotifyPhase, setTeamsPhase, setTeamsDeviceCode, expiresAtFromResponse, formatCountdownMs } from '$lib/stores/authFlow.svelte';
+  import { authFlow, setSpotifyPhase, setTeamsPhase, setTeamsDeviceCode, expiresAtFromResponse, formatCountdownMs, resetAuthFlow, teamsPollMutex, tryAcquireTeamsPoll, releaseTeamsPoll, isSafeHttpUrl } from '$lib/stores/authFlow.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
   import { devLog } from '$lib/utils/dev';
   import Logo from './Logo.svelte';
@@ -49,42 +49,58 @@
   let pollingInterval = $state(30);
   let validationError = $state('');
   let isFinishing = $state(false);
-
-  let unlisten: (() => void) | null = null;
+  // #394: in-flight guards — set BEFORE the first await so a double-click
+  // cannot start two flows. Mirrors Settings.svelte / Reconnect.svelte.
+  let spotifyConnecting = $state(false);
+  let teamsConnecting = $state(false);
+  // #392: `useAuthListeners` resolves async, so an unmount before
+  // resolution must immediately release the subscription (Dashboard.svelte:31-33 pattern).
+  let destroyed = false;
+  let unlistenAuth: (() => Promise<void>) | null = null;
 
   onMount(async () => {
     devLog('[ONBOARDING] onMount: ENTRY');
 
-    unlisten = await useAuthListeners({
+    const unlisten = await useAuthListeners({
       onSpotifyComplete: () => {
+        if (destroyed) return;
         devLog('[ONBOARDING] EVENT: spotify-auth-complete received');
         setSpotifyPhase('done');
         validationError = '';
         devLog('[ONBOARDING] EVENT: setSpotifyPhase(done), validationError cleared');
       },
       onSpotifyFailed: (payload) => {
+        if (destroyed) return;
         console.error('[ONBOARDING] EVENT: spotify-auth-failed received:', payload);
         setSpotifyPhase('error', String(payload));
         devLog('[ONBOARDING] EVENT: setSpotifyPhase(error)');
       },
       onTeamsComplete: () => {
+        if (destroyed) return;
         devLog('[ONBOARDING] EVENT: teams-auth-complete received');
         setTeamsPhase('done');
         validationError = '';
         devLog('[ONBOARDING] EVENT: setTeamsPhase(done), validationError cleared');
       },
       onTeamsFailed: (payload) => {
+        if (destroyed) return;
         console.error('[ONBOARDING] EVENT: teams-auth-failed received:', payload);
         setTeamsPhase('error', String(payload));
         devLog('[ONBOARDING] EVENT: setTeamsPhase(error)');
       }
     });
+    if (destroyed) {
+      await unlisten();
+    } else {
+      unlistenAuth = unlisten;
+    }
     devLog('[ONBOARDING] onMount: listeners registered');
   });
 
   onDestroy(() => {
     devLog('[ONBOARDING] onDestroy: cleaning up listeners');
-    if (unlisten) unlisten();
+    destroyed = true;
+    if (unlistenAuth) void unlistenAuth();
     devLog('[ONBOARDING] onDestroy: listeners cleaned up');
   });
 
@@ -115,10 +131,19 @@
       return;
     }
 
+    // #394: in-flight flag set BEFORE the first await blocks double-clicks.
+    // Placed after (sync) validation so a failed validation cannot latch
+    // the flag and permanently disable the button; no await runs between
+    // entry and here, so no interleave window exists.
+    if (spotifyConnecting) return;
+    spotifyConnecting = true;
+    // #421: fresh entry clears stale phases from a prior attempt.
+    resetAuthFlow();
     devLog('[ONBOARDING] connectSpotify: ENTRY');
     devLog('[ONBOARDING] connectSpotify: spotifyClientId.length=', spotifyClientId.length);
     devLog('[ONBOARDING] connectSpotify: redirectUri=presencejam://callback');
 
+    setSpotifyPhase('waiting');
     try {
       devLog('[ONBOARDING] connectSpotify: calling invoke start_spotify_auth');
       await invoke('start_spotify_auth', {
@@ -127,12 +152,13 @@
         redirectUri: 'presencejam://callback'
       });
       devLog('[ONBOARDING] connectSpotify: invoke SUCCESS');
-      setSpotifyPhase('waiting');
       devLog('[ONBOARDING] connectSpotify: setSpotifyPhase(waiting)');
     } catch (e) {
       console.error('[ONBOARDING] connectSpotify: invoke FAILED:', e);
       setSpotifyPhase('error', e instanceof Error ? e.message : String(e));
       devLog('[ONBOARDING] connectSpotify: setSpotifyPhase(error)');
+    } finally {
+      spotifyConnecting = false;
     }
 
     devLog('[ONBOARDING] connectSpotify: EXIT');
@@ -191,7 +217,13 @@
   }
 
   async function connectTeams() {
+    // #394: in-flight flag set BEFORE the first await blocks double-clicks.
+    if (teamsConnecting) return;
+    teamsConnecting = true;
+    // #421: fresh entry clears stale phases from a prior attempt.
+    resetAuthFlow();
     devLog('[ONBOARDING] connectTeams: ENTRY');
+    setTeamsPhase('waiting');
 
     try {
       devLog('[ONBOARDING] connectTeams: calling invoke start_teams_auth_device_code');
@@ -223,10 +255,12 @@
       }
 
       // Auto-poll once the user opens the browser. The user can also retry manually.
-      pollTeamsAuth();
+      void pollTeamsAuth();
     } catch (e) {
       console.error('[ONBOARDING] connectTeams: FAILED:', e);
       setTeamsPhase('error', String(e));
+    } finally {
+      teamsConnecting = false;
     }
 
     devLog('[ONBOARDING] connectTeams: EXIT');
@@ -237,6 +271,12 @@
     // Never poll a dead code — the expired box offers a fresh one (#429).
     if (teamsCodeExpired) {
       devLog('[ONBOARDING] pollTeamsAuth: code expired, refusing to poll');
+      return;
+    }
+    // #396: shared poll mutex — only one poll_teams_auth at a time across
+    // Onboarding/Settings/Reconnect/+layout.
+    if (!tryAcquireTeamsPoll()) {
+      devLog('[ONBOARDING] pollTeamsAuth: another poll in flight, skipping');
       return;
     }
     setTeamsPhase('waiting');
@@ -258,6 +298,8 @@
       console.error('[ONBOARDING] pollTeamsAuth: FAILED:', e);
       setTeamsPhase('error', String(e));
       devLog('[ONBOARDING] pollTeamsAuth: setTeamsPhase(error)');
+    } finally {
+      releaseTeamsPoll();
     }
 
     devLog('[ONBOARDING] pollTeamsAuth: EXIT');
@@ -417,7 +459,7 @@
 
         {#if !spotifyConnected && !spotifyWaiting}
           <button class="btn-full" onclick={connectSpotify}
-            disabled={!spotifyClientId || !spotifyClientSecret}>
+            disabled={!spotifyClientId || !spotifyClientSecret || spotifyConnecting}>
             {t('onboarding.connectSpotify')}
           </button>
         {:else if spotifyWaiting}
@@ -448,11 +490,15 @@
         </p>
 
         {#if !teamsConnected && !teamsPolling}
-          <button class="btn-full" onclick={connectTeams}>{t('onboarding.startMicrosoftSignIn')}</button>
+          <button class="btn-full" onclick={connectTeams} disabled={teamsConnecting}>{t('onboarding.startMicrosoftSignIn')}</button>
         {:else if teamsPolling}
           <div class="device-code-box">
             <p class="hint">{t('common.goTo')}</p>
-            <a class="verification-url" href={teamsVerificationUrl} target="_blank" rel="noopener">{teamsVerificationUrl}</a>
+            {#if isSafeHttpUrl(teamsVerificationUrl)}
+              <a class="verification-url" href={teamsVerificationUrl} target="_blank" rel="noopener">{teamsVerificationUrl}</a>
+            {:else}
+              <span class="verification-url">{teamsVerificationUrl}</span>
+            {/if}
             <p class="hint">{t('common.andEnterCode')}</p>
             <div class="code-display" aria-live="polite">{teamsUserCode}</div>
             {#if teamsCodeExpired}
@@ -464,7 +510,7 @@
               {/if}
               <div class="spinner" aria-hidden="true"></div>
               <p>{t('common.waitingForSignIn')}</p>
-              <button class="btn-secondary" onclick={pollTeamsAuth}>{t('common.checkNow')}</button>
+              <button class="btn-secondary" onclick={pollTeamsAuth} disabled={teamsPollMutex.inFlight}>{t('common.checkNow')}</button>
             {/if}
           </div>
         {:else}

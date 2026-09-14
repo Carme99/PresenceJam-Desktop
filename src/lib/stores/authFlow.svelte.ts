@@ -79,3 +79,34 @@ export function resetAuthFlow() {
   authFlow.teams.interval = 5;
   authFlow.teams.expiresAt = null;
 }
+
+/** Shared `poll_teams_auth` mutex (issue #396). The device-code poll is a
+ * long-blocking invoke issued from four call sites (Onboarding, Settings,
+ * Reconnect, +layout); only one may run at a time. Call sites use
+ * `tryAcquireTeamsPoll()` + `finally { releaseTeamsPoll(); }`. */
+export const teamsPollMutex = $state({ inFlight: false });
+
+/** Acquire the shared poll mutex. Returns false when a poll is already running. */
+export function tryAcquireTeamsPoll(): boolean {
+  if (teamsPollMutex.inFlight) return false;
+  teamsPollMutex.inFlight = true;
+  return true;
+}
+
+/** Release the shared poll mutex. Always call in a `finally` block. */
+export function releaseTeamsPoll() {
+  teamsPollMutex.inFlight = false;
+}
+
+/**
+ * Issue #410: only `https:` URLs are safe to render as verification-URL
+ * anchors. The URL arrives from the backend device-code response; a
+ * non-HTTP(S) scheme (e.g. `javascript:`) must render as inert text.
+ */
+export function isSafeHttpUrl(url: string): boolean {
+  try {
+    return new URL(url).protocol === 'https:';
+  } catch {
+    return false;
+  }
+}

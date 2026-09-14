@@ -20,7 +20,7 @@
   // when both windows mount. Detached windows only inherit the theme
   // side-effect import above.
   const isMainWindow = getCurrentWindow().label === 'main';
-  import { authFlow, setTeamsPhase, setTeamsDeviceCode, setSpotifyPhase } from '$lib/stores/authFlow.svelte';
+  import { authFlow, setTeamsPhase, setTeamsDeviceCode, setSpotifyPhase, expiresAtFromResponse, resetAuthFlow, tryAcquireTeamsPoll, releaseTeamsPoll } from '$lib/stores/authFlow.svelte';
   import type { DeviceCodeResponse, AppConfig } from '$lib/types';
 
   devLog(`[LAYOUT] PresenceJam build: ${import.meta.env.VITE_APP_BUILD ?? 'dev build'}`);
@@ -49,6 +49,8 @@
 
     listen('teams-reconnect-required', async () => {
       devLog('[LAYOUT] teams-reconnect-required received');
+      // #421: fresh entry clears stale phases from a prior attempt.
+      resetAuthFlow();
       currentView.set('settings');
       try {
         const response = await invoke<DeviceCodeResponse>('start_teams_auth_device_code');
@@ -56,7 +58,10 @@
           userCode: response.user_code,
           verificationUrl: response.verification_url,
           deviceCode: response.device_code,
-          interval: response.interval
+          interval: response.interval,
+          // #397: carry expiry through the shared helper so the
+          // countdown renders for layout-started flows too.
+          expiresAt: expiresAtFromResponse(response)
         });
         setTeamsPhase('waiting');
         try {
@@ -123,6 +128,12 @@
     // honored — see issue #152.
     async function pollTeamsAuth() {
       if (!authFlow.teams.deviceCode) return;
+      // #396: shared poll mutex — only one poll_teams_auth at a time
+      // across Onboarding/Settings/Reconnect/+layout.
+      if (!tryAcquireTeamsPoll()) {
+        devLog('[LAYOUT] pollTeamsAuth: another poll in flight, skipping');
+        return;
+      }
       setTeamsPhase('waiting');
       try {
         await invoke('poll_teams_auth', {
@@ -133,6 +144,8 @@
       } catch (e) {
         console.error('[LAYOUT] poll_teams_auth failed:', e);
         setTeamsPhase('error', String(e));
+      } finally {
+        releaseTeamsPoll();
       }
     }
 
