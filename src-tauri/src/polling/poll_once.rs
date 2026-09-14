@@ -62,8 +62,10 @@ pub(crate) enum PollIteration {
 
 /// Execution mode for one poll iteration. `Loop` is the polling-thread
 /// path (parking sleeps); `OneShot` is an explicit refresh that must
-/// never park a thread on a sleep — every sleep site returns `Break`
-/// immediately after its usual event/log.
+/// never park a thread on a sleep — every parking sleep site (the
+/// `interruptible_sleep` error/no-token/backoff tails) returns `Break`
+/// immediately after its usual event/log. Success-path `Sleep` values
+/// flow through unchanged but `run_oneshot` discards them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RunMode {
     Loop,
@@ -105,10 +107,11 @@ pub(crate) fn run(
 /// One-shot entry: runs a single iteration with fresh ephemeral locals
 /// (current track always counts as changed, so it always re-POSTs —
 /// exactly what an explicit refresh wants) and a throwaway stop channel
-/// that never fires. Never parks: `RunMode::OneShot` turns every sleep
-/// site into an immediate `Break`. Success paths (`process_track`,
+/// that never fires. Never parks: `RunMode::OneShot` turns every parking
+/// sleep site into an immediate `Break`. Success paths (`process_track`,
 /// `handle_no_track`) contain no hidden sleeps — only natural blocking
-/// HTTP. Duplicated Teams POSTs are idempotent and harmless.
+/// HTTP — and their returned `Sleep` is discarded. Duplicated Teams POSTs
+/// are idempotent and harmless.
 pub(crate) fn run_oneshot(state: &Arc<AppState>, app: &AppHandle) {
     // `_tx` is a live binding (not `let _`), so the channel stays
     // connected for the whole call: the top stop-check treats
