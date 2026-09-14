@@ -268,7 +268,7 @@ fn is_y_tail(stem: &str, token: &str) -> bool {
 /// the left side is glued (#331: `bullshit`). Deliberately narrow:
 /// `tard` must stay out (`mustard`), `cock` must stay out (`peacock`).
 fn is_strong_stem(word: &str) -> bool {
-    matches!(word, "shit" | "fuck")
+    matches!(word, "shit" | "fuck" | "bitch")
 }
 
 /// First alphanumeric token at `idx`, skipping separators.
@@ -612,5 +612,20 @@ mod tests {
         assert!(contains_profanity("You BITCH"));
         assert!(contains_profanity("Fucking Great"));
         assert_eq!(filter_status("SHIT", "Placeholder", true), "Placeholder");
+    }
+
+    // issue #411: `bitch` is a strong stem, so glued compounds like
+    // `sonofabitch` flag; tard/cock/spic carve-outs stay exactly as-is.
+    #[test]
+    fn test_issue_411_sonofabitch() {
+        assert!(contains_profanity("sonofabitch"));
+        assert!(contains_profanity("SONOFABITCH"));
+        assert!(contains_profanity("bullshit"));
+        assert!(contains_profanity("bitchy"));
+        assert!(!contains_profanity("mustard"));
+        assert!(!contains_profanity("peacock"));
+        assert!(!contains_profanity("cockpit"));
+        assert!(!contains_profanity("spicy"));
+        assert!(!contains_profanity("tardy"));
     }
 }
