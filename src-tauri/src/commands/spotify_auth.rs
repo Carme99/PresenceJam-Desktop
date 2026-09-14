@@ -592,6 +592,35 @@ mod tests {
         );
     }
 
+    // Issue #446: valid 32-char alphanumeric client_ids pass; empty,
+    // short/overlong, and illegal-char inputs are rejected. Mirrors
+    // `secret_validator_rejects_non_alphanumeric_and_overlong` above.
+    #[test]
+    fn client_id_validator_accepts_valid_shape_and_rejects_bad() {
+        assert!(
+            validate_spotify_client_id(&"a".repeat(32)).is_ok(),
+            "32-char alphanumeric must pass"
+        );
+        assert!(
+            validate_spotify_client_id("").is_err(),
+            "empty client_id must fail"
+        );
+        assert!(
+            validate_spotify_client_id(&"a".repeat(31)).is_err(),
+            "31 chars must fail"
+        );
+        assert!(
+            validate_spotify_client_id(&"a".repeat(33)).is_err(),
+            "33 chars must fail"
+        );
+        let punctuated = format!("{}!", "a".repeat(31));
+        assert_eq!(punctuated.len(), 32);
+        assert!(
+            validate_spotify_client_id(&punctuated).is_err(),
+            "32-char id with non-alphanumeric must fail"
+        );
+    }
+
     // Issue #351: peek-then-validate-then-take. The peek helper never touches
     // the single-use binding, so a wrong-state paste keeps both the pending
     // and the binding slot; a correct paste then still accepts. The handler

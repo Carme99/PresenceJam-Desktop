@@ -1136,4 +1136,60 @@ mod tests {
         assert_eq!(tokens.access_token, "at");
         assert_eq!(tokens.refresh_token, "rt");
     }
+
+    // Issues #444/#446/#450: every accounts.spotify.com token request must
+    // go through `build_spotify_client` (10s timeout + PresenceJam UA), so
+    // re-adding a bare `Client::new()` token request fails the suite. The
+    // builder body is isolated with the shared literal-aware scanner
+    // (`crate::token_io::test_scan`), not a next-function boundary anchor.
+    #[test]
+    fn token_requests_go_through_shared_client_builder() {
+        let src = include_str!("spotify.rs");
+        let prod = src
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("spotify.rs has no #[cfg(test)] mod tests block");
+        // Strip line/doc comments: the builder's own docs name the
+        // historical bare `Client::new()` (issue #347), which must not trip
+        // the guard — only live code counts.
+        let code_lines: Vec<&str> = prod
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect();
+        let code = code_lines.join("\n");
+        assert!(
+            !code.contains("Client::new()"),
+            "prod code must not build a bare Client::new(): all token requests go through build_spotify_client (issue #444)"
+        );
+        let token_posts = prod.matches("accounts.spotify.com").count();
+        assert_eq!(
+            token_posts, 2,
+            "expected exactly the exchange + refresh token posts, got {}",
+            token_posts
+        );
+        let builder_uses = prod.matches("build_spotify_client()").count();
+        assert!(
+            builder_uses >= token_posts,
+            "every accounts.spotify.com request must go through build_spotify_client: {} posts but {} builder uses",
+            token_posts,
+            builder_uses
+        );
+        let body = crate::token_io::test_scan::fn_body(src, "fn build_spotify_client(");
+        assert!(
+            body.contains("Duration::from_secs(10)"),
+            "builder must set a 10s timeout (issue #444)"
+        );
+        assert!(
+            body.contains("user_agent"),
+            "builder must set a User-Agent (issue #450)"
+        );
+        assert!(
+            body.contains("PresenceJam/"),
+            "builder User-Agent must be PresenceJam/<version> (issue #450)"
+        );
+        assert!(
+            body.contains("CARGO_PKG_VERSION"),
+            "builder User-Agent version must track Cargo.toml via env! (issue #450)"
+        );
+    }
 }
