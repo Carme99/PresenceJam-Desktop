@@ -690,6 +690,7 @@ pub fn save_config(config: &AppConfig) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    static QUARANTINE_TEST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
     #[test]
     fn test_default_config() {
@@ -948,8 +949,9 @@ mod tests {
     /// alongside the original and the diagnostics-visible flag is raised.
     #[test]
     fn test_corrupt_config_quarantined_to_bak() {
-        // Process-wide CONFIG_QUARANTINED is global: save/restore so the
-        // suite stays hermetic regardless of test execution order.
+        // Process-wide CONFIG_QUARANTINED is global: serialize the two
+        // quarantine tests so parallel save/restore cannot interleave.
+        let _guard = QUARANTINE_TEST_LOCK.lock();
         let prev = CONFIG_QUARANTINED.load(Ordering::SeqCst);
         let dir = std::env::temp_dir().join(format!(
             "pj-test-quarantine-{}-{}",
@@ -989,8 +991,9 @@ mod tests {
     /// the diagnostics-visible flag is raised either way.
     #[test]
     fn test_corrupt_config_quarantine_rename_failure_preserves_original() {
-        // Process-wide CONFIG_QUARANTINED is global: save/restore so the
-        // suite stays hermetic regardless of test execution order.
+        // Process-wide CONFIG_QUARANTINED is global: serialize the two
+        // quarantine tests so parallel save/restore cannot interleave.
+        let _guard = QUARANTINE_TEST_LOCK.lock();
         let prev = CONFIG_QUARANTINED.load(Ordering::SeqCst);
         let dir = std::env::temp_dir().join(format!(
             "pj-test-quarantine-fail-{}-{}",

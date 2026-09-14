@@ -445,14 +445,33 @@ flowchart TD
     RefreshSpot --> Poll
     Poll --> Changed{Track changed?}
     Changed -->|No track, paused| Consec[consecutive_pauses++]
-    Changed -->|yes| Format[format_status template]
+    Changed -->|yes| Debounce{Debounce? ≤500 ms<br/>since last write}
+    Debounce -->|inside window| Retry[1 s fixed retry,<br/>no side effects]
+    Retry --> Tick
+    Debounce -->|clear| TokWrite[teams_token_for_write<br/>shared refresh]
+    TokWrite --> Gate{presence_gate<br/>+ mid-track re-check}
+    Gate -->|gated| GateSleep[re-read ≤ every 240 s<br/>on own clock]
+    GateSleep --> Tick
+    Gate -->|clear| Format[format_status template]
     Format --> Prof[profanity::filter_status if enabled]
-    Prof --> Set[POST /me/presence<br/>setStatusMessage]
+    Prof --> KeepSkip{Identical status<br/>+ write < 5 min?}
+    KeepSkip -->|yes| SmartSleep
+    KeepSkip -->|no| Set[POST /me/presence<br/>setStatusMessage]
     Set --> SmartSleep[Smart sleep until track ends - 5s]
     Consec --> Backoff[Pause-aware exponential backoff:<br/>30s → 60s → 120s → 300s cap]
     SmartSleep --> Tick
     Backoff --> Tick
 ```
+
+One paragraph on the 4.3.0 helpers: `teams_token_for_write` is the single
+shared Teams refresh (both `process_track` and `handle_no_track`);
+`DEBOUNCE_RETRY_SECONDS` (1 s) parks a change inside the 500 ms window
+with every tracked field untouched so the retry posts exactly once;
+`STATUS_KEEPALIVE_SECONDS` (300 s) with `last_posted_status` skips
+byte-identical writes but force-writes after lapse; `last_gate_check`
+times mid-track gate re-checks off the write clocks; `first_iteration`
+makes a fresh thread attempt one clear; `RunMode::OneShot` never parks —
+`run_oneshot` discards sleeps.
 
 ### Smart sleep + pause-aware backoff (PR #45)
 
@@ -462,24 +481,36 @@ Two complementary rate-limits:
   immediately when the track changes. ~240 seconds of silence per 4-min track.
 - **Pause-aware backoff:** after consecutive non-playing responses
   (`Ok(None)`, or a track with `is_playing == false`) the loop doubles its
-  interval up to a 5-min cap (30 → 60 → 120 → 300 s). It resets only once
-  a *playing* track is observed again. At the 30 s default cadence a
+  interval up to a 5-min cap (30 → 60 → 120 → 300 s). It resets once
+  a *playing* track is observed again, and also on any tracked 304 Not
+  Modified (see `not_modified_iteration`). At the 30 s default cadence a
   fully-polled day is ~2880 calls; paused, the loop settles at 1 call per
   300 s — ~288-291 calls per 24 h (steady state 288), ~72-75 per 6 h: a
   ~10× reduction, not ~28×.
+- **Debounce + keepalive guards (4.3.0):** a 500 ms post-write debounce
+  parks a track change on a 1 s fixed retry with no side effects
+  (`DEBOUNCE_RETRY_SECONDS`); a 5-min identical-status keepalive skip
+  (`STATUS_KEEPALIVE_SECONDS` + `last_posted_status`) suppresses
+  byte-identical writes but force-writes after lapse so the Graph expiry
+  never lapses. 304 Not Modified resets backoff via
+  `not_modified_iteration`.
 
 ### Presence gating + availability sync (v3.0)
 
 Two `TeamsConfig` flags shape what the polling loop writes:
 
 - **`presence_gate` (default ON, issue #3.0-P2):** on a *track change*
-  only, the loop calls `get_teams_presence` *before* the status write.
+  the loop calls `get_teams_presence` *before* the status write.
   If `availability ∈ {busy, doNotDisturb, focusing}` or
   `activity ∈ {inAMeeting, inACall, presenting}` it skips the write and
-  emits `presence-gated` (the Dashboard shows a "suppressed" chip); the
-  next track change re-evaluates. Writes proceed when presence is clear
-  (`Available`, `Away`, …). A transient gate-read failure degrades to a
-  logged warning and the write proceeds.
+  emits `presence-gated` once (the Dashboard shows a "suppressed" chip).
+  While gated, the loop re-reads presence at most every 240 s on its own
+  `last_gate_check` clock — never touching the debounce/keepalive write
+  clocks — and posts late if the gate cleared mid-track (#380).
+  Fail-safe: a failed re-read keeps the suppression. Writes proceed when
+  presence is clear (`Available`, `Away`, …); a transient gate-read
+  failure at change time degrades to a logged warning and the write
+  proceeds.
 - **`availability_sync` (default OFF, issue #3.0-P1):** while a track
   plays, re-arm the Graph `Available`/`Available` presence session via
   `set_teams_presence` at most every 4 minutes — Available sessions
@@ -502,11 +533,14 @@ Graph. If matched, the status is replaced with `config.teams.profanity_placehold
 resolved to 🎵 or ⏸️. The replaced status is logged at info level; the
 **original profane text is never written to logs**.
 
-Detection features (curated word list, see `profanity.rs`):
-- **Leetspeak normalization:** `1→i, 3→e, $→s, @→a, 0→o, 5→s, 7→t, !→i, |→i`.
-- **Repeated-character collapse:** `shiiit → shiit` (up to 2 excess chars).
-- **Word-boundary safety:** prevents false positives on `class`, `assassin`, `cocktail`, `vacuum`.
+Detection features (curated word list, compounds like `asshole`/`bullshit`/`sonofabitch` (#411) — see `profanity.rs`):
+- **Leetspeak normalization:** `1/2→i, 3→e, $→s, @→a, 0→o, 5→s, 7→t, !→i, |→i, 6/8→b, 9→g, +→t, (→c, 4→a`, plus `/→v` folding, fullwidth→ASCII and a diacritic table; zero-width/format characters stripped.
+- **Repeated-character collapse:** generic run-collapse (`shiiit → shit` regardless of excess length).
+- **Word-boundary safety:** prevents false positives on `class`, `assassin`, `cocktail bar`, `cockpit`, `Spice Girls`, `Push It`; separator skipping gated on both-side boundaries.
 - **Compound-word safe-suffixes:** `tail, head, hand, ...` allow `fishtail`, `forehead`, `handheld`.
+- **Strong stems + y-tail:** `shit/fuck/bitch` flag glued compounds; `shitty/bitchy/fucky` flag while `cocky/spicy/tardy` stay clean.
+- **Placeholder fallback:** empty/profane placeholder falls back to the default (`Currently Listening to Spotify`); `{emoji}` is case-insensitive.
+
 
 
 ## Event Bus
@@ -553,6 +587,7 @@ sequenceDiagram
 | `navigate` | `"dashboard"` \| `"logs"` \| `"settings"` (bare string; the listener is `listen<string>`) | A tray/menu item or a completed auth flow asks the UI to switch view (C2) |
 | `open-logs-folder` | `null` | User picks "Open Logs Folder" in the tray or app menu |
 | `app-shutdown` | `null` | User picks Quit in the tray or app menu |
+| `spotify-secret-conflict` | `{action: "reconnect-spotify", ...}` (once per process) | Legacy plaintext secret in `config.json` conflicts with a *different* keychain secret — plaintext left untouched, Settings prompts Reconnect Spotify (#376) |
 | `show-about` | `null` | User picks About in the app menu |
 
 ## Deep Link Routing

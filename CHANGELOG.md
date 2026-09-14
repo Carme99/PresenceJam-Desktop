@@ -5,16 +5,41 @@ All notable changes to PresenceJam are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [4.3.0] - 2026-09-14
+
+Poll-loop correctness wave: track changes inside the debounce window no
+longer vanish, the no-track clear refreshes expired Teams tokens, fresh
+threads clear stale status once, gated tracks re-check presence mid-track,
+and byte-identical statuses skip the Graph write. Plus auth hardening,
+config schema versioning with quarantine, the `sonofabitch` profanity gap,
+and a LogViewer render-window with scroll stickiness.
 
 ### Added
 - **Manual status refresh:** new `refresh_status` command runs one full poll iteration on demand (main window only, no-op while sync is idle) with a Refresh button on the Dashboard track card; successful tray transport actions (play/pause/next/previous/transfer) kick a coalesced delayed refresh so Teams catches up ~2 s after a skip instead of waiting for the next scheduled poll.
+- **Config schema versioning with unknown-field retention and corrupt quarantine (#379):** `AppConfig` gains `schema_version` (default 1) plus a flattened `extra` map retained across load→save, so unknown future keys survive settings saves; corrupt `config.json` is quarantined to `.bak` with a diagnostics-visible flag and defaults loaded.
 
 ### Fixed
 - **Diagnostics snapshot always failed:** `get_diagnostics_snapshot` looked up `AppState` but setup manages `Arc<AppState>` — every call panicked with `state() called before manage()`.
 - **Tray next/previous failed with 411 Length Required:** empty-body Spotify player POSTs/PUTs now send `Content-Length: 0` via `.body("")`.
+- **Debounced track change recorded but never posted (#364, #383):** the debounce check now runs before every side effect; a change inside the 500 ms window parks untouched on a 1 s fixed retry, so the retry re-detects the change and emits/posts exactly once instead of losing short tracks for up to 60 s.
+- **No-track clear never refreshed expired token (#370, #388):** the Teams refresh block is now `teams_token_for_write()`, called from both `process_track` and `handle_no_track` — the clear refreshes instead of failing forever.
+- **Fresh thread + no-track skipped Teams clear (#373, #391):** a `first_iteration` flag makes a fresh thread attempt one clear on first no-track poll (pre-restart status no longer survives for hours); later idle polls stay no-ops and one-shot refreshes stay silent when idle.
+- **Presence gate never re-evaluated mid-track (#380):** the gated branch re-reads presence at most every 240 s on its own `last_gate_check` clock and posts late if the gate cleared; failed re-reads keep suppression (fail-safe).
+- **Identical status re-POSTed every cycle (#384):** `last_posted_status` skips byte-identical writes inside a 5-min keepalive; fingerprint changes and lapsed keepalives force-write so Graph expiry never lapses.
+- **Spotify exchange hard-failed without refresh_token (#350):** exchange-path `TokenResponse.refresh_token` is `Option`; omission surfaces a precise `token response omitted refresh_token` error instead of a generic parse failure after the single-use code is consumed.
+- **Manual-code path destroyed pending auth before validation (#351):** peek-then-validate-then-take — a typo'd paste no longer burns the pending auth, so retrying works.
+- **Legacy-plaintext read failed when keychain locked (#352):** legacy branch parses JSON before touching the keychain; the key is fetched only on parse success, and parse/migration share one helper.
+- **Client-secret length-only validation (#354):** `validate_spotify_client_secret` enforces the sibling charset plus a 512-char cap at the IPC boundary.
+- **Glued `sonofabitch` bypass (#411, #472, #378):** `is_strong_stem` now matches `shit | fuck | bitch`; carve-outs (`mustard`, `peacock`, `cockpit`, `spicy`, `tardy`) stay clean.
+- **LogViewer re-render + scroll theft (#399, #400):** 500-entry buffer kept, newest 100 rendered keyed with a showing-X-of-Y note; stickiness captured before push and inside the rAF snap, filter switches share the helper, floating Jump-to-latest button; new `logs.showingOf` + `logs.jumpToLatest` strings in en/de/fr.
+- **Stale polling default in SETUP:** polling-interval default corrected 10s → 30s.
+- **Nonexistent Disconnect in TROUBLESHOOTING:** token-refresh and Teams-update fixes now say Reconnect (no Disconnect control exists).
+- **Presence-gating prose vs mid-track re-check:** ARCHITECTURE polling flowchart + gating section describe the 4.3.0 helpers (`teams_token_for_write`, debounce, keepalive, `last_gate_check`, `first_iteration`).
+- **Missing `spotify-secret-conflict` event row:** ARCHITECTURE event table gains the row; `show-about` row restored.
+- **Never-re-auth SOF line ref:** STATE-OF-FEATURES points at `teams_token_for_write` (~line 984); 8 new 4.3.0 rows added.
+- **Secret validation coverage:** SECURITY documents IPC charset+cap rules and the precise omitted-refresh error.
 
-> **i18n note:** the new `dashboard.refresh*` German and French strings are best-effort and need native-speaker review.
+> **i18n note:** the new `logs.showingOf` / `logs.jumpToLatest` German and French strings are best-effort and need native-speaker review (the `dashboard.refresh*` strings above likewise).
 
 ## [4.2.1] - 2026-09-13
 
@@ -782,8 +807,8 @@ Closes #60 #61 #62 #63
 ### Removed
 
 - PowerShell script version — this is a full rewrite
-
-[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.2.1...HEAD
+[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.3.0...HEAD
+[4.3.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.2.1...v4.3.0
 [4.2.1]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.2.0...v4.2.1
 [4.2.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.1.1...v4.2.0
 [4.1.1]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.1.0...v4.1.1

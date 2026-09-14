@@ -55,7 +55,7 @@ Types: `feat`, `fix`, `docs`, `test`, `refactor`, `chore`
 
 - Run `cargo check` before committing
 - Use `cargo fmt` to format code before committing
-- Error handling with `Result` types — no `unwrap()` in production code
+- Error handling with `Result` types — no `unwrap()` on fallible I/O or parse paths in production code; the sole exception is the `tray.rs` `cached_devices` cache-hit fast path, which unwraps a snapshot it just proved is `Some`
 - Use `log::info!` / `log::debug!` over `println!`
 - Prefix module-level log tags in square brackets: `[MODULE]`
 - User-Agent and any version-stamped payload must use `env!("CARGO_PKG_VERSION")` — never hardcode the version. `Cargo.toml` is the single source of truth (mirrored into `tauri.conf.json` → `version`).
