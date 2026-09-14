@@ -234,13 +234,11 @@ pub fn redact_sensitive(line: &str) -> String {
                     }
                     j += 1;
                 }
-                let whitespace_gap_ok =
-                    saw_gap && (*key == "user_code" || *key == "device_code");
+                let whitespace_gap_ok = saw_gap && (*key == "user_code" || *key == "device_code");
                 if j < n && (chars[j] == '=' || chars[j] == ':') {
                     j += 1;
                     // Value starts after optional whitespace and opening quote.
-                    while j < n
-                        && (chars[j].is_whitespace() || chars[j] == '"' || chars[j] == '\'')
+                    while j < n && (chars[j].is_whitespace() || chars[j] == '"' || chars[j] == '\'')
                     {
                         j += 1;
                     }
@@ -268,8 +266,7 @@ pub fn redact_sensitive(line: &str) -> String {
     let mut run_start: Option<usize> = None;
     for idx in 0..=n {
         let is_opaque = idx < n
-            && (is_opaque_char(chars[idx])
-                || (chars[idx] == '=' && !is_kv_separator(&chars, idx)));
+            && (is_opaque_char(chars[idx]) || (chars[idx] == '=' && !is_kv_separator(&chars, idx)));
         if is_opaque {
             if run_start.is_none() {
                 run_start = Some(idx);
