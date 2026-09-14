@@ -5,6 +5,43 @@ All notable changes to PresenceJam are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [4.4.0] - 2026-09-14
+
+Hardening wave: diagnostics redaction closes 10 secret shapes, profanity
+folds shut `ph`/`fuk`/`fux`/z-plural evasions with clean controls intact,
+Quit paths share one bounded graceful shutdown, click-path Spotify HTTP
+moves off the menu-event thread, device menus pin stable ids with live
+re-fetch, polling lifecycle recovers cleanly, playback paths share one
+refresh policy, and the frontend auth + boot surfaces shed their races.
+
+### Fixed
+- **Diagnostics redaction allowlist gaps (#487):** `SECRET_KEYS` gains `passwd`, `api_key`, `code_challenge` and 7 sibling shapes (10 secret shapes closed); single-quote separators, whitespace-gap separators, and opaque JWT-shaped tokens now redact instead of leaking into the support snapshot.
+- **Profanity evasions `ph`/`fuk`/`fux`/z-plurals (#377, #470):** `ph` → `f` pre-fold plus `x` → `ck` / `z` → `s` folds under unchanged boundary gating close `phuck`, `fuk`, `fux`, `niggaz`, `bitchez` (incl. case variants); `skillz`, `phone`, `photo`, `Phoenix`, `Fukushima`, `Jukebox`, `Explicit`, `Zombie` stay clean.
+- **Tray + menu Quit shared graceful shutdown (#383, #415):** both Quit paths share `request_graceful_shutdown` with an 8 s bounded `is_syncing` drain and unconditional process exit — no more fixed-sleep race, no more surviving process.
+- **Click-path Spotify HTTP off the menu-event thread (#386):** all tray/menu playback and device actions run on worker threads so Spotify network latency never blocks the UI.
+- **Stable device-id menu ids with live re-fetch (#388):** tray device selection resolves by stable Spotify device id with live refresh; legacy index-based menu items keep working.
+- **Show window unminimizes (#391):** showing the main window restores it from minimized before focusing.
+- **Startup build-failure log + exit(1) (#417):** Tauri build failures log and exit non-zero instead of panicking.
+- **5-strikes provider-specific reconnect event (#389):** polling exit after five consecutive transient failures emits the provider-matching reconnect event, consistent with the `InvalidGrant` arms.
+- **Stop-polling no-handle recovery (#395):** the no-handle branch warn-logs and clears the wedged flag while preserving ownership during in-flight joins.
+- **Atomic `get_sync_status` snapshot (#398):** related sync state reads under one critical section so the status surface never mixes generations.
+- **No-track clear `ExpiredToken` refresh + retry (#455):** `handle_no_track` mirrors `process_track` with a single Teams refresh + retry before reconnect classification.
+- **Playback source guards pin all player paths (#464):** every Spotify playback/query command routes through `player_with_refresh` with concurrent-refresh protection; persist-guard bound 8 → 10.
+- **Spotify client builder pins for timeout/UA/`client_id` (#444, #446, #450):** test pins force `accounts.spotify.com` builders through `build_spotify_client` (10 s timeout, `PresenceJam/<version>` UA); `client_id` validator mirrors the secret validator (test-only, no prod change).
+- **Frontend auth submit guards (#394):** Onboarding in-flight flags set pre-await plus a Reconnect `spotifyReconnecting` flag, so double-clicks no longer start duplicate auth flows.
+- **Shared Teams poll mutex (#396):** one `teamsPollMutex` with finally-release at all 4 poll sites; Check-now stays disabled while held.
+- **`expiresAt` plumbing (#397):** device-code expiry passed at the layout start site so layout-started flows keep their countdown.
+- **HTTPS-only `verificationUrl` (#410):** `isSafeHttpUrl` gates all 3 verification anchors with a span fallback for unsafe URLs.
+- **Honest async teardown with observed rejections (#419):** auth-listener teardown is honestly async with no floating promises.
+- **Flow-scoped resets (#421):** `resetSpotifyAuthFlow` / `resetTeamsAuthFlow` at all 7 entries — starting one flow no longer wipes the other.
+- **Destroyed guards on listeners (#392):** destroyed guards plus late-resolve release on all 3 listener setups.
+- **Boot timeout + retry banner (#405):** bounded boot timeout surfaces a retry banner instead of hanging.
+- **Diagnostics retry button (#404):** diagnostics surface gains a retry action on failure.
+- **Dismiss guard during download/staging (#402):** update dismiss disabled while a download or stage is in flight.
+- **Tracked `goToSetup` timer (#408):** setup-navigation timer tracked for lifecycle cleanup.
+- **Live Trace tab (#401):** LogViewer Trace tab mirrors the backend level map.
+- **PopOut rejection handling (#403):** catch-and-surface on all popOut/popIn sites.
+
 ## [4.3.0] - 2026-09-14
 
 Poll-loop correctness wave: track changes inside the debounce window no
@@ -807,7 +844,8 @@ Closes #60 #61 #62 #63
 ### Removed
 
 - PowerShell script version — this is a full rewrite
-[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.3.0...HEAD
+[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.4.0...HEAD
+[4.4.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.3.0...v4.4.0
 [4.3.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.2.1...v4.3.0
 [4.2.1]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.2.0...v4.2.1
 [4.2.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.1.1...v4.2.0
