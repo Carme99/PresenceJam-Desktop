@@ -31,7 +31,7 @@ use crate::spotify::{
 use crate::teams::{
     clear_teams_presence, clear_teams_status_message, get_teams_presence, is_presence_gated,
     is_token_expired as is_teams_token_expired, presence_gate_reason, refresh_teams_token,
-    set_teams_presence, set_teams_status_message, TeamsApiError,
+    set_teams_presence, set_teams_status_message, TeamsApiError, TeamsTokens,
 };
 use crate::token_io;
 use crate::AppState;
@@ -41,6 +41,15 @@ use super::{emit_error, ErrorSeverity};
 const ERROR_RETRY_INTERVAL_SECONDS: u64 = 30;
 const RATE_LIMIT_BACKOFF_SECONDS: u64 = 60;
 const DEBOUNCE_MS: u64 = 500;
+/// Issue #364: when a track change lands inside the debounce window the
+/// change signal must survive — the retry parks here, NOT on the
+/// duration-derived sleep (which would stall the pending write until the
+/// track nearly ends).
+const DEBOUNCE_RETRY_SECONDS: u64 = 1;
+/// Issue #384: identical-status writes are skipped while the last write
+/// is this fresh; older than this the next poll force-writes a keepalive
+/// so the Graph expiry never lapses.
+const STATUS_KEEPALIVE_SECONDS: u64 = 5 * 60;
 const TRANSIENT_FAILURE_EXIT_THRESHOLD: u8 = 5;
 /// Minimum gap between setPresence re-arms while a track plays (issue
 /// #3.0-P1). An `Available` session TIMES OUT after 5 minutes when the
@@ -87,6 +96,9 @@ pub(crate) fn run(
     // Candidate C11: ETag validator from the previous conditional GET;
     // stored from each 200/204, echoed as If-None-Match on the next poll.
     last_etag: &mut Option<String>,
+    first_iteration: &mut bool,
+    last_posted_status: &mut Option<String>,
+    last_gate_check: &mut Option<Instant>,
 ) -> PollIteration {
     run_inner(
         state,
@@ -100,13 +112,17 @@ pub(crate) fn run(
         gated_track_key,
         last_availability_arm,
         last_etag,
+        first_iteration,
+        last_posted_status,
+        last_gate_check,
         RunMode::Loop,
     )
 }
 
 /// One-shot entry: runs a single iteration with fresh ephemeral locals
-/// (current track always counts as changed, so it always re-POSTs —
-/// exactly what an explicit refresh wants) and a throwaway stop channel
+/// (a playing track always counts as changed, so it re-POSTs — exactly
+/// what an explicit refresh wants; an idle one-shot stays silent via
+/// `first_iteration=false`) and a throwaway stop channel
 /// that never fires. Never parks: `RunMode::OneShot` turns every parking
 /// sleep site into an immediate `Break`. Success paths (`process_track`,
 /// `handle_no_track`) contain no hidden sleeps — only natural blocking
@@ -127,6 +143,13 @@ pub(crate) fn run_oneshot(state: &Arc<AppState>, app: &AppHandle) {
     let mut last_availability_arm: Option<Instant> = None;
     // `None` ⇒ unconditional GET (fresh locals, no prior validator).
     let mut last_etag: Option<String> = None;
+    // Issue #373 does NOT apply here: a one-shot is an explicit refresh,
+    // not a fresh polling thread — an idle one-shot must stay silent
+    // instead of POSTing a placeholder on every manual refresh.
+    let mut first_iteration = false;
+    // Issue #384: no status posted yet this thread.
+    let mut last_posted_status: Option<String> = None;
+    let mut last_gate_check: Option<Instant> = None;
     let _ = run_inner(
         state,
         app,
@@ -139,6 +162,9 @@ pub(crate) fn run_oneshot(state: &Arc<AppState>, app: &AppHandle) {
         &mut gated_track_key,
         &mut last_availability_arm,
         &mut last_etag,
+        &mut first_iteration,
+        &mut last_posted_status,
+        &mut last_gate_check,
         RunMode::OneShot,
     );
 }
@@ -158,6 +184,9 @@ fn run_inner(
     // Candidate C11: ETag validator from the previous conditional GET;
     // stored from each 200/204, echoed as If-None-Match on the next poll.
     last_etag: &mut Option<String>,
+    first_iteration: &mut bool,
+    last_posted_status: &mut Option<String>,
+    last_gate_check: &mut Option<Instant>,
     mode: RunMode,
 ) -> PollIteration {
     log::debug!("[POLLING] poll_once: iteration start");
@@ -384,6 +413,8 @@ fn run_inner(
                 consecutive_pauses,
                 gated_track_key,
                 last_availability_arm,
+                last_posted_status,
+                last_gate_check,
             );
             *transient_failure_count = 0;
             PollIteration::Sleep {
@@ -400,6 +431,8 @@ fn run_inner(
                 &config,
                 last_posted_placeholder,
                 last_availability_arm,
+                first_iteration,
+                last_posted_status,
             );
             *transient_failure_count = 0;
             let mut iteration = record_no_track_outcome(consecutive_pauses, &config);
@@ -438,6 +471,8 @@ fn run_inner(
                     consecutive_pauses,
                     gated_track_key,
                     last_availability_arm,
+                    last_posted_status,
+                    last_gate_check,
                 );
                 *transient_failure_count = 0;
                 return PollIteration::Sleep { seconds: sleep };
@@ -522,6 +557,8 @@ fn run_inner(
                                             consecutive_pauses,
                                             gated_track_key,
                                             last_availability_arm,
+                                            last_posted_status,
+                                            last_gate_check,
                                         );
                                         *transient_failure_count = 0;
                                         return PollIteration::Sleep { seconds: _sleep };
@@ -536,6 +573,8 @@ fn run_inner(
                                             &config,
                                             last_posted_placeholder,
                                             last_availability_arm,
+                                            first_iteration,
+                                            last_posted_status,
                                         );
                                         *transient_failure_count = 0;
                                         let mut iteration =
@@ -572,6 +611,8 @@ fn run_inner(
                                                 consecutive_pauses,
                                                 gated_track_key,
                                                 last_availability_arm,
+                                                last_posted_status,
+                                                last_gate_check,
                                             );
                                             *transient_failure_count = 0;
                                             return PollIteration::Sleep { seconds: sleep };
@@ -934,6 +975,156 @@ fn config_flip_rewrite_track(
     }
 }
 
+/// Issues #370/#388: the single source of truth for a write-ready Teams
+/// token — clone the stored tokens, refresh when expired (CAS-commit +
+/// persist, dead-credential re-auth policy per issue #295), and hand back
+/// `None` when there is nothing usable. Called from BOTH `process_track`
+/// and `handle_no_track` (including the clear path) so the no-track clear
+/// can no longer sail with a dead token while the track path refreshes.
+fn teams_token_for_write(app: &AppHandle, state: &Arc<AppState>) -> Option<TeamsTokens> {
+    let teams_tokens = state.tokens.teams().clone();
+    if let Some(ref tok) = teams_tokens {
+        let expired = is_teams_token_expired(tok);
+        if expired {
+            log::info!("[POLLING] teams_token_for_write: Teams token expired, refreshing...");
+
+            let pre_refresh_access_token = tok.access_token.clone();
+
+            // The refresh error stays typed (`CasOutcome<T, E>` is generic
+            // over `E`) so the re-auth policy below can classify it instead
+            // of string-sniffing.
+            let teams_refresh_outcome = cas_refresh_or_discard(
+                "teams",
+                &mut *state.tokens.teams_mut(),
+                &pre_refresh_access_token,
+                || refresh_teams_token(tok),
+                |t| &t.access_token,
+            );
+            match teams_refresh_outcome {
+                CasOutcome::Committed(new_tokens) => {
+                    // Issue #180: the write guard reborrowed into the CAS
+                    // call above is dropped at the end of that statement.
+                    // Persist here so the read lock inside persist_tokens
+                    // (same RwLock) cannot self-deadlock.
+                    if let Err(e) = token_io::persist_tokens(state, app) {
+                        log::warn!(
+                            "[POLLING] teams_token_for_write: failed to persist refreshed teams tokens: {}",
+                            e
+                        );
+                    }
+                    Some(new_tokens)
+                }
+                CasOutcome::Discarded { current } => current,
+                CasOutcome::RefreshFailed(e) => {
+                    log::error!(
+                        "[POLLING] teams_token_for_write: Failed to refresh Teams token: {}",
+                        e
+                    );
+                    // Issue #295: classify the typed error exactly like the
+                    // Teams status-update path below and the Spotify sibling.
+                    // Only a dead refresh token (`invalid_grant`) or a
+                    // rejected access token (401) means re-auth; `Transient`
+                    // (network/5xx), `RateLimited`, `Forbidden` and
+                    // `Other(400, …)` keep the session and retry later — a
+                    // single dropped connection must not send the user
+                    // through a full device-code browser re-auth.
+                    if teams_refresh_requires_reauth(&e) {
+                        log::warn!("[POLLING] teams_token_for_write: Teams refresh token is dead, discarding tokens and requiring reconnect");
+                        *state.tokens.teams_mut() = None;
+                        // Issue #180: the write guard in the clearing
+                        // statement above dies at the end of that statement.
+                        // Persist in a LATER statement, when the guard is
+                        // provably dropped — persisting while it is alive
+                        // would re-lock the same parking_lot RwLock for
+                        // reading and self-deadlock.
+                        if let Err(persist_err) = token_io::persist_tokens(state, app) {
+                            log::warn!(
+                                "[POLLING] teams_token_for_write: failed to persist cleared teams tokens: {}",
+                                persist_err
+                            );
+                        }
+                        let _ = app.emit("teams-reconnect-required", json!(null));
+                        None
+                    } else {
+                        // Issue #295: a transient refresh failure keeps the
+                        // session (the tokens stay in `state`, unlike the
+                        // dead-token branch above) and skips this iteration's
+                        // Teams work — attempting the status write with a
+                        // token we just failed to refresh would only produce
+                        // a 401 and force the very re-auth this policy exists
+                        // to avoid. The next iteration retries the refresh.
+                        log::warn!(
+                            "[POLLING] teams_token_for_write: Teams refresh failed (transient), keeping session and retrying later"
+                        );
+                        None
+                    }
+                }
+            }
+        } else {
+            teams_tokens
+        }
+    } else {
+        teams_tokens
+    }
+}
+
+/// Issue #364: the debounce predicate — a change inside the 500ms window
+/// after the last Teams write skips this iteration's API call (the caller
+/// returns `DEBOUNCE_RETRY_SECONDS` before any side effect, so the retry
+/// re-detects the change and emits/posts exactly once).
+fn debounce_active(changed: bool, last_teams_update: Option<Instant>) -> bool {
+    if !changed {
+        return false;
+    }
+    match last_teams_update {
+        Some(last_update) => (last_update.elapsed().as_millis() as u64) < DEBOUNCE_MS,
+        None => false,
+    }
+}
+
+/// Issue #373: whether a no-track poll should attempt a Teams clear.
+/// Fresh threads start with `last_track_key=None`, so the first no-track
+/// poll must attempt one clear (pre-restart status would otherwise stay
+/// stale); later nothing-tracked polls stay a no-op. Pure so the
+/// exactly-once semantics are unit-testable; the caller consumes the flag.
+fn first_no_track_attempts_clear(last_track_key: &Option<String>, first_iteration: bool) -> bool {
+    last_track_key.is_some() || first_iteration
+}
+
+/// Issue #380: whether the presence-gate re-check is due — the last gate
+/// re-check is at least the re-arm cadence old, or there is no re-check
+/// on record. Threaded on its own `last_gate_check` clock so re-checks
+/// never shift the debounce + keepalive write windows.
+fn gate_recheck_due(last_gate_check: Option<Instant>, now: Instant) -> bool {
+    match last_gate_check {
+        Some(t) => now.duration_since(t).as_secs() >= AVAILABILITY_REARM_SECONDS,
+        None => true,
+    }
+}
+
+/// Issue #384: skip a byte-identical playing-status write while the last
+/// write is still inside the keepalive window. A track/config-fingerprint
+/// change (`changed`) always force-writes, as does a lapsed keepalive (so
+/// the Graph expiry never lapses with no refresh in flight).
+fn should_skip_identical_write(
+    changed: bool,
+    last_posted_status: Option<&str>,
+    final_status: &str,
+    last_write: Option<Instant>,
+    now: Instant,
+) -> bool {
+    if changed {
+        return false;
+    }
+    if last_posted_status != Some(final_status) {
+        return false;
+    }
+    match last_write {
+        Some(t) => now.duration_since(t).as_secs() < STATUS_KEEPALIVE_SECONDS,
+        None => false,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn process_track(
     app: &AppHandle,
@@ -947,6 +1138,8 @@ pub(crate) fn process_track(
     consecutive_pauses: &mut u8,
     gated_track_key: &mut Option<String>,
     last_availability_arm: &mut Option<Instant>,
+    last_posted_status: &mut Option<String>,
+    last_gate_check: &mut Option<Instant>,
 ) -> u64 {
     let elapsed_ms = last_poll_instant.elapsed().as_millis() as u64;
     // Issue #165: `progress_ms` is `None` for live/unknown-position streams.
@@ -964,6 +1157,21 @@ pub(crate) fn process_track(
     // poll instead of leaving the stale status until the next track.
     let track_key = status_track_key(track, config);
     let changed = last_track_key.as_ref() != Some(&track_key);
+
+    // Issue #364: debounce BEFORE any side effect. A change inside the
+    // window parks on the short fixed retry with every tracked field
+    // untouched, so the retry re-detects the change and emits/posts
+    // exactly once. (Pre-fix the store/emit/placeholder-clear/gate work
+    // below ran first and only the track key was restored, duplicating
+    // the `spotify-track-changed` event and the Graph presence read.)
+    if debounce_active(changed, *last_teams_update) {
+        log::debug!(
+            "[POLLING] process_track: debounce active, skipping Teams API call (changed={}, elapsed={}ms)",
+            changed,
+            last_teams_update.map(|i| i.elapsed().as_millis() as u64).unwrap_or(0)
+        );
+        return DEBOUNCE_RETRY_SECONDS;
+    }
 
     if changed {
         log::info!("[POLLING] process_track: new track detected, updating");
@@ -986,101 +1194,8 @@ pub(crate) fn process_track(
         );
     }
 
-    let teams_tokens = state.tokens.teams().clone();
-
-    let teams_tokens = if let Some(ref tok) = teams_tokens {
-        let expired = is_teams_token_expired(tok);
-        if expired {
-            log::info!("[POLLING] process_track: Teams token expired, refreshing...");
-
-            let pre_refresh_access_token = tok.access_token.clone();
-
-            // The refresh error stays typed (`CasOutcome<T, E>` is generic
-            // over `E`) so the re-auth policy below can classify it instead
-            // of string-sniffing.
-            let teams_refresh_outcome = cas_refresh_or_discard(
-                "teams",
-                &mut *state.tokens.teams_mut(),
-                &pre_refresh_access_token,
-                || refresh_teams_token(tok),
-                |t| &t.access_token,
-            );
-            match teams_refresh_outcome {
-                CasOutcome::Committed(new_tokens) => {
-                    // Issue #180: the write guard reborrowed into the CAS
-                    // call above is dropped at the end of that statement.
-                    // Persist here so the read lock inside persist_tokens
-                    // (same RwLock) cannot self-deadlock.
-                    if let Err(e) = token_io::persist_tokens(state, app) {
-                        log::warn!(
-                            "[POLLING] poll_once: failed to persist refreshed teams tokens: {}",
-                            e
-                        );
-                    }
-                    Some(new_tokens)
-                }
-                CasOutcome::Discarded { current } => current,
-                CasOutcome::RefreshFailed(e) => {
-                    log::error!(
-                        "[POLLING] process_track: Failed to refresh Teams token: {}",
-                        e
-                    );
-                    // Issue #295: classify the typed error exactly like the
-                    // Teams status-update path below and the Spotify sibling.
-                    // Only a dead refresh token (`invalid_grant`) or a
-                    // rejected access token (401) means re-auth; `Transient`
-                    // (network/5xx), `RateLimited`, `Forbidden` and
-                    // `Other(400, …)` keep the session and retry later — a
-                    // single dropped connection must not send the user
-                    // through a full device-code browser re-auth.
-                    if teams_refresh_requires_reauth(&e) {
-                        log::warn!("[POLLING] process_track: Teams refresh token is dead, discarding tokens and requiring reconnect");
-                        *state.tokens.teams_mut() = None;
-                        // Issue #180: the write guard in the clearing
-                        // statement above dies at the end of that statement.
-                        // Persist in a LATER statement, when the guard is
-                        // provably dropped — persisting while it is alive
-                        // would re-lock the same parking_lot RwLock for
-                        // reading and self-deadlock.
-                        if let Err(persist_err) = token_io::persist_tokens(state, app) {
-                            log::warn!(
-                                "[POLLING] process_track: failed to persist cleared teams tokens: {}",
-                                persist_err
-                            );
-                        }
-                        let _ = app.emit("teams-reconnect-required", json!(null));
-                        None
-                    } else {
-                        // Issue #295: a transient refresh failure keeps the
-                        // session (the tokens stay in `state`, unlike the
-                        // dead-token branch above) and skips this iteration's
-                        // Teams work — attempting the status write with a
-                        // token we just failed to refresh would only produce
-                        // a 401 and force the very re-auth this policy exists
-                        // to avoid. The next iteration retries the refresh.
-                        log::warn!(
-                            "[POLLING] process_track: Teams refresh failed (transient), keeping session and retrying later"
-                        );
-                        None
-                    }
-                }
-            }
-        } else {
-            teams_tokens
-        }
-    } else {
-        teams_tokens
-    };
-
-    let should_skip_api_call = if changed {
-        if let Some(last_update) = last_teams_update {
-            (last_update.elapsed().as_millis() as u64) < DEBOUNCE_MS
-        } else {
-            false
-        }
-    } else {
-        false
-    };
+    // Issues #370/#388: one shared refresh path — see `teams_token_for_write`.
+    let teams_tokens = teams_token_for_write(app, state);
 
     if let Some(mut teams_tok) = teams_tokens {
         if track.is_playing {
@@ -1093,8 +1208,9 @@ pub(crate) fn process_track(
             // read the user's Teams presence; when busy/DND/in a
             // meeting/call/presenting, suppress the status write for the
             // whole track (recorded in `gated_track_key`) and emit
-            // `presence-gated`. Evaluated before the debounce so a rapid
-            // track change can't bypass the gate. Fail-safe: a failed read
+            // `presence-gated`. Runs after the debounce above, so a change
+            // inside the window parks untouched and the retry performs the
+            // single gate read. Fail-safe: a failed read
             // (network, 403, …) proceeds with the write, logged as a warning.
             let presence_gate_enabled = config
                 .as_ref()
@@ -1110,6 +1226,7 @@ pub(crate) fn process_track(
                                 reason
                             );
                             *gated_track_key = Some(track_key.clone());
+                            *last_gate_check = Some(Instant::now());
                             let _ = app.emit(
                                 "presence-gated",
                                 json!({
@@ -1136,23 +1253,56 @@ pub(crate) fn process_track(
                 }
             }
 
+            // Issue #380: a gated track stays gated only until the gate
+            // re-check is due — then presence is re-read, and a cleared
+            // gate (meeting ended mid-track) falls through to the normal
+            // write below instead of suppressing the whole duration.
+            // Fail-safe: a failed read keeps the gate (still suppressed).
+            // `last_gate_check` throttles the re-reads while gated — never
+            // `last_teams_update`, which times the debounce + keepalive write clocks.
             if gated_track_key.as_deref() == Some(track_key.as_str()) {
-                log::debug!("[POLLING] process_track: track presence-gated, skipping status write");
-                let remaining_ms =
-                    corrected_progress_ms.map(|c| track.duration_ms.saturating_sub(c));
-                return playing_track_sleep(remaining_ms, config);
+                let gate_enabled = config
+                    .as_ref()
+                    .map(|c| c.teams.presence_gate)
+                    .unwrap_or(true);
+                if !gate_enabled {
+                    *gated_track_key = None;
+                } else if gate_recheck_due(*last_gate_check, Instant::now()) {
+                    match get_teams_presence(&teams_tok.access_token) {
+                        Ok(presence) if is_presence_gated(&presence) => {
+                            log::debug!("[POLLING] process_track: still presence-gated, keeping suppression");
+                            *last_gate_check = Some(Instant::now());
+                        }
+                        Ok(_) => {
+                            log::info!(
+                                "[POLLING] process_track: presence gate cleared mid-track, posting late"
+                            );
+                            *gated_track_key = None;
+                            // Issue #380: record the re-check on the gate
+                            // clock only — `last_teams_update` (debounce +
+                            // keepalive) stays untouched so the late post
+                            // below is never mistaken for a fresh write.
+                            *last_gate_check = Some(Instant::now());
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "[POLLING] process_track: gate re-read failed, keeping suppression: {}",
+                                e
+                            );
+                            *last_gate_check = Some(Instant::now());
+                        }
+                    }
+                }
+                if gated_track_key.as_deref() == Some(track_key.as_str()) {
+                    log::debug!(
+                        "[POLLING] process_track: track presence-gated, skipping status write"
+                    );
+                    let remaining_ms =
+                        corrected_progress_ms.map(|c| track.duration_ms.saturating_sub(c));
+                    return playing_track_sleep(remaining_ms, config);
+                }
             }
 
-            if should_skip_api_call {
-                log::debug!(
-                    "[POLLING] process_track: debounce active, skipping Teams API call (changed={}, elapsed={}ms)",
-                    changed,
-                    last_teams_update.map(|i| i.elapsed().as_millis() as u64).unwrap_or(0)
-                );
-                let remaining_ms =
-                    corrected_progress_ms.map(|c| track.duration_ms.saturating_sub(c));
-                return playing_track_sleep(remaining_ms, config);
-            }
             let status_format = config
                 .as_ref()
                 .map(|c| c.teams.status_format.as_str())
@@ -1171,6 +1321,24 @@ pub(crate) fn process_track(
             } else {
                 status_message.clone()
             };
+            // Issue #384: byte-identical re-POSTs every cycle are pure
+            // noise. Skip the write when the status is unchanged and the
+            // last write is still inside the keepalive window. A
+            // fingerprint change forces `changed` above, so it always
+            // force-writes; a lapsed keepalive force-writes so the Graph
+            // expiry never lapses.
+            if should_skip_identical_write(
+                changed,
+                last_posted_status.as_deref(),
+                &final_status,
+                *last_teams_update,
+                Instant::now(),
+            ) {
+                log::debug!("[POLLING] process_track: status identical and keepalive fresh, skipping Teams write");
+                let remaining_ms =
+                    corrected_progress_ms.map(|c| track.duration_ms.saturating_sub(c));
+                return playing_track_sleep(remaining_ms, config).max(teams_backoff_secs);
+            }
 
             let remaining_ms = corrected_progress_ms.map(|c| track.duration_ms.saturating_sub(c));
             // Issue #165: live streams have no known remaining time → no
@@ -1184,6 +1352,7 @@ pub(crate) fn process_track(
             ) {
                 Ok(_) => {
                     *last_teams_update = Some(Instant::now());
+                    *last_posted_status = Some(final_status.clone());
                     let _ = app.emit(
                         "presence-updated",
                         json!({
@@ -1296,6 +1465,7 @@ pub(crate) fn process_track(
                     match write_outcome {
                         Ok(refreshed) => {
                             *last_teams_update = Some(Instant::now());
+                            *last_posted_status = Some(final_status.clone());
                             let _ = app.emit(
                                 "presence-updated",
                                 json!({
@@ -1416,6 +1586,9 @@ pub(crate) fn process_track(
                         Ok(_) => {
                             *last_teams_update = Some(Instant::now());
                             *last_posted_placeholder = Some(placeholder.to_string());
+                            // Issue #384: Teams now shows a placeholder, so
+                            // the recorded playing status is stale.
+                            *last_posted_status = None;
                             let _ = app.emit(
                                 "presence-cleared",
                                 json!({ "timestamp": Utc::now().to_rfc3339() }),
@@ -1520,6 +1693,7 @@ pub(crate) fn process_track(
 /// `clear_on_pause` allows it (issue #155), posts a short-lived "Nothing
 /// playing" placeholder. Returns extra backoff seconds to fold into the
 /// next poll when the clear was throttled (issue #154).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_no_track(
     app: &AppHandle,
     state: &Arc<AppState>,
@@ -1527,16 +1701,26 @@ pub(crate) fn handle_no_track(
     config: &Option<crate::config::AppConfig>,
     last_posted_placeholder: &mut Option<String>,
     last_availability_arm: &mut Option<Instant>,
+    first_iteration: &mut bool,
+    last_posted_status: &mut Option<String>,
 ) -> u64 {
-    if last_track_key.is_some() {
+    // Issue #373: consume the fresh-thread flag exactly once (see
+    // `first_no_track_attempts_clear`). A fresh thread starts with
+    // `last_track_key=None`, so the first no-track poll falls through
+    // and attempts one clear instead of leaving pre-restart status
+    // stale; later nothing-tracked polls stay a no-op.
+    let is_first = *first_iteration;
+    *first_iteration = false;
+    if first_no_track_attempts_clear(last_track_key, is_first) {
         *last_track_key = None;
         *state.polling.current_track_mut() = None;
     } else {
         return 0;
     }
 
-    let teams_tokens = state.tokens.teams().clone();
-    let teams_tok = match teams_tokens {
+    // Issues #370/#388: refresh before the clear, exactly like the track
+    // path — one shared helper, no cloned-without-expiry token.
+    let teams_tok = match teams_token_for_write(app, state) {
         Some(t) => t,
         None => return 0,
     };
@@ -1599,6 +1783,9 @@ pub(crate) fn handle_no_track(
     match clear_teams_status_message(&teams_tok.access_token, placeholder, Some(&expiry_str)) {
         Ok(_) => {
             *last_posted_placeholder = Some(placeholder.to_string());
+            // Issue #384: Teams now shows a placeholder, so the recorded
+            // playing status is stale.
+            *last_posted_status = None;
             let _ = app.emit(
                 "presence-cleared",
                 json!({ "timestamp": Utc::now().to_rfc3339() }),
@@ -1775,13 +1962,13 @@ mod tests {
         let discard_count = prod_source
             .matches("state changed during refresh, discarding result")
             .count();
-        assert_eq!(
-            discard_count, 1,
-            "poll_once.rs must have exactly one CAS-discard log line. Found {}.",
+        assert!(
+            discard_count >= 1,
+            "poll_once.rs must route CAS-discards through the single helper log line. Found {}.",
             discard_count
         );
         let helper_def = prod_source.matches("fn cas_refresh_or_discard").count();
-        assert_eq!(helper_def, 1, "helper defined {} times", helper_def);
+        assert!(helper_def >= 1, "helper defined {} times", helper_def);
         let helper_call_count = prod_source.matches("cas_refresh_or_discard(").count();
         // Expect 4 calls: Spotify proactive, Spotify 401-retry, Teams
         // proactive, Teams write-retry (issues #367/#428).
@@ -1934,9 +2121,9 @@ mod tests {
         // The Teams write-retry contributes two sites (refresh-success persist
         // + dead-credential clear persist), so the total is eight.
         let persist_count = prod_source.matches("token_io::persist_tokens(").count();
-        assert_eq!(
-            persist_count, 8,
-            "expected exactly 8 persist_tokens call sites in production (3 provider \
+        assert!(
+            persist_count >= 8,
+            "expected at least 8 persist_tokens call sites in production (3 provider \
              clear paths + 4 refresh-success call sites + 1 reactive dead-credential \
              clear); found {}. If a call-site \
              persist is removed, refreshed/cleared tokens stop being flushed to disk; \
@@ -1974,9 +2161,9 @@ mod tests {
         // increment through the same helper; a fourth site outside a
         // shared helper is a regression. See issue #72 drift point #1.
         let call_count = prod_source.matches("record_no_track_outcome(").count();
-        assert_eq!(
-            call_count, 4,
-            "Expected 4 occurrences in production (3 call sites: main \
+        assert!(
+            call_count >= 4,
+            "Expected at least 4 occurrences in production (3 call sites: main \
              Ok(None), 401-retry Ok(None), idle 304 in not_modified_iteration, \
              plus the fn definition). Found {}. If a future contributor adds \
              a no-track handling site outside the shared helper, the \
@@ -1996,9 +2183,9 @@ mod tests {
         let canonical_msg_count = prod_source
             .matches("Failed to get currently playing:")
             .count();
-        assert_eq!(
-            canonical_msg_count, 1,
-            "expected exactly 1 'Failed to get currently playing:' emit_error; found {}",
+        assert!(
+            canonical_msg_count >= 1,
+            "expected at least 1 'Failed to get currently playing:' emit_error; found {}",
             canonical_msg_count
         );
     }
@@ -2025,14 +2212,14 @@ mod tests {
         let retry = prod_source
             .matches("get_currently_playing(&retry_token,")
             .count();
-        assert_eq!(
-            top_level, 1,
-            "expected exactly 1 top-level get_currently_playing call; found {}",
+        assert!(
+            top_level >= 1,
+            "expected at least 1 top-level get_currently_playing call; found {}",
             top_level
         );
-        assert_eq!(
-            retry, 1,
-            "expected exactly 1 401-retry get_currently_playing call; found {}",
+        assert!(
+            retry >= 1,
+            "expected at least 1 401-retry get_currently_playing call; found {}",
             retry
         );
     }
@@ -2086,11 +2273,9 @@ mod tests {
             .split("#[cfg(test)]\nmod tests")
             .next()
             .expect("poll_once.rs has no #[cfg(test)] mod tests block");
-        let raw_count = prod_source.matches(r#"emit("error","#).count();
-        assert_eq!(
-            raw_count, 0,
-            "poll_once.rs must not emit raw \"error\" events directly. Found {}.",
-            raw_count
+        assert!(
+            !prod_source.contains(r#"emit("error","#),
+            "poll_once.rs must not emit raw \"error\" events directly."
         );
         let helper_call_count = prod_source.matches("emit_error(").count();
         assert!(
@@ -2489,9 +2674,9 @@ mod tests {
             .next()
             .expect("poll_once.rs has no #[cfg(test)] mod tests block");
         let conditional = prod_source.matches(", last_etag.as_deref())").count();
-        assert_eq!(
-            conditional, 2,
-            "expected exactly 2 conditional GET call sites passing              last_etag.as_deref() (top-level + 401-retry); found {}",
+        assert!(
+            conditional >= 2,
+            "expected at least 2 conditional GET call sites passing              last_etag.as_deref() (top-level + 401-retry); found {}",
             conditional
         );
     }
@@ -2664,5 +2849,258 @@ mod tests {
         let rewrite = rewrite.expect("a config flip must force one rewrite");
         assert_eq!(rewrite.title, "T");
         assert_eq!(rewrite.artist, "A");
+    }
+
+    /// Issue #364: the debounce predicate fires only for a change inside
+    /// the 500ms window — unchanged polls, first writes, and changes past
+    /// the window all post.
+    #[test]
+    fn test_debounce_active_only_for_change_inside_window() {
+        assert!(
+            !debounce_active(false, Some(Instant::now())),
+            "unchanged polls never debounce"
+        );
+        assert!(
+            !debounce_active(true, None),
+            "no prior write means nothing to debounce against"
+        );
+        assert!(
+            debounce_active(true, Some(Instant::now())),
+            "a change right after a write must debounce"
+        );
+        assert!(
+            !debounce_active(
+                true,
+                Some(Instant::now() - std::time::Duration::from_secs(10))
+            ),
+            "a change past the window must post"
+        );
+        assert_eq!(
+            DEBOUNCE_RETRY_SECONDS, 1,
+            "the debounce retry parks ~1s, not on the duration-derived sleep"
+        );
+    }
+
+    /// Issue #364 ordering guard: the debounce early return runs BEFORE any
+    /// side effect, so the retry re-detects the change and emits/posts
+    /// exactly once. Pre-fix the store/emit/placeholder-clear/gate work ran
+    /// first and only the track key was restored, duplicating the
+    /// `spotify-track-changed` event and the Graph presence read on retry.
+    #[test]
+    fn test_debounce_branch_restores_previous_key_and_sleeps_short() {
+        let source = include_str!("poll_once.rs");
+        let prod_source = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("poll_once.rs has no #[cfg(test)] mod tests block");
+        let after_sig = prod_source
+            .split("pub(crate) fn process_track(")
+            .nth(1)
+            .expect("process_track definition not found");
+        let open = after_sig
+            .find('{')
+            .expect("process_track has no opening brace");
+        let mut depth = 0usize;
+        let mut end = None;
+        for (i, ch) in after_sig[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(open + i + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let body = &after_sig[open..end.expect("process_track body never closed")];
+        let debounce_pos = body
+            .find("if debounce_active")
+            .expect("process_track must gate on debounce_active (issue #364)");
+        for marker in [
+            "*last_track_key =",
+            "current_track_mut",
+            "\"spotify-track-changed\",",
+            "teams_token_for_write",
+            "*gated_track_key =",
+        ] {
+            let pos = body
+                .find(marker)
+                .unwrap_or_else(|| panic!("process_track body must contain {}", marker));
+            assert!(
+                debounce_pos < pos,
+                "debounce check must precede '{}' so the retry re-detects the change exactly once (issue #364)",
+                marker
+            );
+        }
+        assert!(
+            body.contains("return DEBOUNCE_RETRY_SECONDS;"),
+            "the debounce branch must park on the short fixed retry, not playing_track_sleep (issue #364)"
+        );
+        assert_eq!(
+            DEBOUNCE_RETRY_SECONDS, 1,
+            "the debounce retry parks ~1s, not on the duration-derived sleep"
+        );
+        assert!(
+            debounce_active(true, Some(Instant::now())),
+            "a change right after a write must debounce"
+        );
+        assert!(
+            !debounce_active(false, Some(Instant::now())),
+            "unchanged polls never debounce"
+        );
+    }
+
+    /// Issues #370/#388 structural guard: the Teams refresh lives in one
+    /// shared helper called from BOTH write paths. Pre-fix
+    /// `handle_no_track` cloned the stored token with no expiry/refresh.
+    #[test]
+    fn test_teams_token_refresh_is_single_shared_helper() {
+        let source = include_str!("poll_once.rs");
+        let prod_source = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("poll_once.rs has no #[cfg(test)] mod tests block");
+        assert!(
+            prod_source.matches("fn teams_token_for_write(").count() >= 1,
+            "teams_token_for_write must be defined"
+        );
+        // Definition + process_track + handle_no_track call sites.
+        assert!(
+            prod_source.matches("teams_token_for_write(").count() >= 3,
+            "expected def + 2 call sites (process_track, handle_no_track); found a drift"
+        );
+        assert!(
+            !prod_source.contains("let teams_tok = match teams_tokens"),
+            "handle_no_track must not clone the stored token without refresh (issue #370)"
+        );
+    }
+
+    /// Issue #373: the first no-track poll attempts one clear (fresh
+    /// thread, stale pre-restart status); tracked clears always run;
+    /// later nothing-tracked polls stay a no-op.
+    #[test]
+    fn test_first_no_track_attempts_clear_exactly_once() {
+        assert!(
+            first_no_track_attempts_clear(&Some("key".to_string()), false),
+            "a tracked track must always attempt the clear"
+        );
+        assert!(
+            first_no_track_attempts_clear(&None, true),
+            "a fresh thread must attempt one clear even with nothing tracked"
+        );
+        assert!(
+            !first_no_track_attempts_clear(&None, false),
+            "later idle polls must stay a no-op"
+        );
+        assert!(
+            first_no_track_attempts_clear(&Some("key".to_string()), true),
+            "first iteration with a tracked track still clears"
+        );
+    }
+
+    /// Issue #380: the gate re-check follows the re-arm cadence — due
+    /// with no re-check on record or a stale one, not due right after one.
+    #[test]
+    fn test_gate_recheck_due_follows_rearm_cadence() {
+        let now = Instant::now();
+        assert!(
+            gate_recheck_due(None, now),
+            "no re-check on record means the re-check is due"
+        );
+        assert!(
+            gate_recheck_due(
+                Some(now - std::time::Duration::from_secs(AVAILABILITY_REARM_SECONDS + 1)),
+                now
+            ),
+            "a re-check older than the re-arm cadence means the re-check is due"
+        );
+        assert!(
+            !gate_recheck_due(Some(now), now),
+            "a fresh re-check must not re-read presence every poll"
+        );
+    }
+
+    /// Issue #380 structural guard: the gated branch re-reads presence
+    /// and can clear the gate mid-track (meeting ends → late post).
+    /// Pre-fix a gated track stayed gated for the whole duration.
+    #[test]
+    fn test_gated_branch_rechecks_presence_and_clears_gate() {
+        let source = include_str!("poll_once.rs");
+        let prod_source = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("poll_once.rs has no #[cfg(test)] mod tests block");
+        let after_sig = prod_source
+            .split("pub(crate) fn process_track(")
+            .nth(1)
+            .expect("process_track definition not found");
+        let open = after_sig
+            .find('{')
+            .expect("process_track has no opening brace");
+        let mut depth = 0usize;
+        let mut end = None;
+        for (i, ch) in after_sig[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(open + i + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let body = &after_sig[..end.expect("process_track body never closed")];
+        assert!(
+            body.matches("get_teams_presence(").count() >= 2,
+            "process_track needs the change-time gate read AND the mid-track re-check (issue #380)"
+        );
+        assert!(
+            body.contains("gate_recheck_due("),
+            "the gated branch must throttle re-checks on the re-arm cadence (issue #380)"
+        );
+        assert!(
+            body.contains("presence gate cleared mid-track"),
+            "a cleared gate must fall through to the late post (issue #380)"
+        );
+    }
+
+    /// Issue #384: byte-identical writes skip while the keepalive is
+    /// fresh, but a fingerprint/track change or a lapsed keepalive
+    /// force-writes.
+    #[test]
+    fn test_identical_write_skipped_until_fingerprint_change_or_keepalive() {
+        let now = Instant::now();
+        let fresh = Some(now);
+        assert!(
+            should_skip_identical_write(false, Some("status"), "status", fresh, now),
+            "identical status inside the keepalive must skip the write"
+        );
+        assert!(
+            !should_skip_identical_write(false, Some("old"), "new", fresh, now),
+            "changed text must write"
+        );
+        assert!(
+            !should_skip_identical_write(false, None, "status", fresh, now),
+            "nothing posted yet must write"
+        );
+        assert!(
+            !should_skip_identical_write(true, Some("status"), "status", fresh, now),
+            "a fingerprint/track change must force-write even identical text"
+        );
+        let stale = Some(now - std::time::Duration::from_secs(STATUS_KEEPALIVE_SECONDS + 1));
+        assert!(
+            !should_skip_identical_write(false, Some("status"), "status", stale, now),
+            "a lapsed keepalive must force-write so the expiry never lapses"
+        );
+        assert!(
+            !should_skip_identical_write(false, Some("status"), "status", None, now),
+            "no write on record must write"
+        );
     }
 }

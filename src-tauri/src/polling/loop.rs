@@ -3,7 +3,8 @@
 //! `polling_loop` is the outermost loop: it owns the per-thread mutable
 //! state whose lifetime spans iterations (`last_track_key`, `last_etag`,
 //! `last_teams_update`, `last_posted_placeholder`, `consecutive_pauses`,
-//! `transient_failure_count`, `gated_track_key`, `last_availability_arm`),
+//! `transient_failure_count`, `gated_track_key`, `last_availability_arm`,
+//! `first_iteration`, `last_posted_status`, `last_gate_check`),
 //! checks the stop channel and the `is_syncing` flag, dispatches one
 //! iteration to [`super::poll_once::run`], refreshes the tray, and
 //! sleeps for the duration the iteration returned.
@@ -69,6 +70,19 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
     // the next poll. Absent ⇒ unconditional GET (graceful degradation:
     // Spotify's ETag support is empirical, not documented).
     let mut last_etag: Option<String> = None;
+    // Issue #373: fresh threads start with `last_track_key=None` — this
+    // flag lets the first no-track poll attempt one clear instead of
+    // returning early and leaving pre-restart status stale. Consumed
+    // exactly once; `poll_once` owns the consumption.
+    let mut first_iteration = true;
+    // Issue #384: the last playing-track status text posted, alongside
+    // `last_teams_update` (which times the keepalive). `poll_once` sets
+    // it on a successful write and clears it when a placeholder replaces it.
+    let mut last_posted_status: Option<String> = None;
+    // Issue #380: when the presence-gate re-check last ran. Own clock so
+    // re-checks never shift the debounce + keepalive write windows timed
+    // by `last_teams_update`.
+    let mut last_gate_check: Option<Instant> = None;
 
     loop {
         log::debug!("[POLLING] polling_loop: iteration start");
@@ -108,6 +122,9 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
             &mut gated_track_key,
             &mut last_availability_arm,
             &mut last_etag,
+            &mut first_iteration,
+            &mut last_posted_status,
+            &mut last_gate_check,
         );
 
         // Post-iteration tray sync — independent of the API result.
