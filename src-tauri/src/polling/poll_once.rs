@@ -1790,90 +1790,93 @@ pub(crate) fn handle_no_track(
     // the token expired mid-sequence even though the pre-write expiry check
     // in `teams_token_for_write` passed. Only a dead refresh token surfaces
     // `teams-reconnect-required`.
-    let clear_outcome: Result<(), TeamsApiError> =
-        match clear_teams_status_message(&teams_tok.access_token, placeholder, Some(&expiry_str)) {
-            Ok(_) => Ok(()),
-            Err(TeamsApiError::ExpiredToken(status)) => {
-                log::info!("[POLLING] handle_no_track: Teams clear hit ExpiredToken, attempting one refresh + retry");
-                let pre_refresh_access_token = teams_tok.access_token.clone();
-                match refresh_teams_token(&teams_tok) {
-                    Ok(new_tokens) => {
-                        let committed = match cas_refresh_or_discard(
-                            "teams",
-                            &mut *state.tokens.teams_mut(),
-                            &pre_refresh_access_token,
-                            || Ok::<_, TeamsApiError>(new_tokens.clone()),
-                            |t| &t.access_token,
-                        ) {
-                            CasOutcome::Committed(_) => true,
-                            CasOutcome::Discarded { .. } => false,
-                            CasOutcome::RefreshFailed(_) => {
-                                unreachable!("inner refresh_fn is Ok-wrapping")
-                            }
-                        };
-                        if committed {
-                            // Issue #180: the write guard reborrowed into the
-                            // CAS call above is dropped at the end of that
-                            // statement. Persist here — in a later statement
-                            // — so the read lock inside persist_tokens (same
-                            // RwLock) cannot self-deadlock.
-                            if let Err(persist_err) = token_io::persist_tokens(state, app) {
-                                log::warn!(
+    let clear_outcome: Result<(), TeamsApiError> = match clear_teams_status_message(
+        &teams_tok.access_token,
+        placeholder,
+        Some(&expiry_str),
+    ) {
+        Ok(_) => Ok(()),
+        Err(TeamsApiError::ExpiredToken(status)) => {
+            log::info!("[POLLING] handle_no_track: Teams clear hit ExpiredToken, attempting one refresh + retry");
+            let pre_refresh_access_token = teams_tok.access_token.clone();
+            match refresh_teams_token(&teams_tok) {
+                Ok(new_tokens) => {
+                    let committed = match cas_refresh_or_discard(
+                        "teams",
+                        &mut *state.tokens.teams_mut(),
+                        &pre_refresh_access_token,
+                        || Ok::<_, TeamsApiError>(new_tokens.clone()),
+                        |t| &t.access_token,
+                    ) {
+                        CasOutcome::Committed(_) => true,
+                        CasOutcome::Discarded { .. } => false,
+                        CasOutcome::RefreshFailed(_) => {
+                            unreachable!("inner refresh_fn is Ok-wrapping")
+                        }
+                    };
+                    if committed {
+                        // Issue #180: the write guard reborrowed into the
+                        // CAS call above is dropped at the end of that
+                        // statement. Persist here — in a later statement
+                        // — so the read lock inside persist_tokens (same
+                        // RwLock) cannot self-deadlock.
+                        if let Err(persist_err) = token_io::persist_tokens(state, app) {
+                            log::warn!(
                                     "[POLLING] handle_no_track: failed to persist reactively refreshed teams tokens: {}",
                                     persist_err
                                 );
-                            }
-                            match clear_teams_status_message(
-                                &new_tokens.access_token,
-                                placeholder,
-                                Some(&expiry_str),
-                            ) {
-                                Ok(()) => Ok(()),
-                                Err(retry_err) => {
-                                    log::error!(
+                        }
+                        match clear_teams_status_message(
+                            &new_tokens.access_token,
+                            placeholder,
+                            Some(&expiry_str),
+                        ) {
+                            Ok(()) => Ok(()),
+                            Err(retry_err) => {
+                                log::error!(
                                         "[POLLING] handle_no_track: Teams clear retry after refresh also failed: {}",
                                         retry_err
                                     );
-                                    Err(retry_err)
-                                }
+                                Err(retry_err)
                             }
-                        } else {
-                            // CAS lost (mirrors the process_track path): keep
-                            // the original error for classification below.
-                            Err(TeamsApiError::ExpiredToken(status))
                         }
+                    } else {
+                        // CAS lost (mirrors the process_track path): keep
+                        // the original error for classification below.
+                        Err(TeamsApiError::ExpiredToken(status))
                     }
-                    Err(refresh_err) => {
-                        log::error!(
-                            "[POLLING] handle_no_track: Teams reactive refresh failed: {}",
-                            refresh_err
-                        );
-                        // Issue #295 policy: only a dead credential clears the
-                        // session; a transient refresh failure keeps it. Either
-                        // way the typed refresh error (not the stale write
-                        // error) is what gets classified.
-                        if teams_refresh_requires_reauth(&refresh_err) {
-                            log::warn!("[POLLING] handle_no_track: Teams refresh token is dead, discarding tokens");
-                            *state.tokens.teams_mut() = None;
-                            // Issue #180: the write guard in the clearing
-                            // statement above dies at the end of that
-                            // statement. Persist in a LATER statement, when
-                            // the guard is provably dropped.
-                            if let Err(persist_err) = token_io::persist_tokens(state, app) {
-                                log::warn!(
+                }
+                Err(refresh_err) => {
+                    log::error!(
+                        "[POLLING] handle_no_track: Teams reactive refresh failed: {}",
+                        refresh_err
+                    );
+                    // Issue #295 policy: only a dead credential clears the
+                    // session; a transient refresh failure keeps it. Either
+                    // way the typed refresh error (not the stale write
+                    // error) is what gets classified.
+                    if teams_refresh_requires_reauth(&refresh_err) {
+                        log::warn!("[POLLING] handle_no_track: Teams refresh token is dead, discarding tokens");
+                        *state.tokens.teams_mut() = None;
+                        // Issue #180: the write guard in the clearing
+                        // statement above dies at the end of that
+                        // statement. Persist in a LATER statement, when
+                        // the guard is provably dropped.
+                        if let Err(persist_err) = token_io::persist_tokens(state, app) {
+                            log::warn!(
                                     "[POLLING] handle_no_track: failed to persist cleared teams tokens: {}",
                                     persist_err
                                 );
-                            }
-                        } else {
-                            log::warn!("[POLLING] handle_no_track: Teams reactive refresh failed (transient), keeping session");
                         }
-                        Err(refresh_err)
+                    } else {
+                        log::warn!("[POLLING] handle_no_track: Teams reactive refresh failed (transient), keeping session");
                     }
+                    Err(refresh_err)
                 }
             }
-            Err(other) => Err(other),
-        };
+        }
+        Err(other) => Err(other),
+    };
     match clear_outcome {
         Ok(_) => {
             *last_posted_placeholder = Some(placeholder.to_string());
@@ -1907,7 +1910,9 @@ pub(crate) fn handle_no_track(
                 TeamsApiError::RateLimited(_)
                 | TeamsApiError::Transient(_)
                 | TeamsApiError::Other(_, _) => {
-                    log::warn!("[POLLING] handle_no_track: Teams clear failed (transient), continuing");
+                    log::warn!(
+                        "[POLLING] handle_no_track: Teams clear failed (transient), continuing"
+                    );
                 }
             }
             backoff
@@ -3236,7 +3241,9 @@ mod tests {
             .find(marker)
             .expect("the 5-strikes exit log line must exist");
         let window = &prod_source[exit_pos..];
-        let window_end = window.find("return iteration;").expect("5-strikes exit must return");
+        let window_end = window
+            .find("return iteration;")
+            .expect("5-strikes exit must return");
         let window = &window[..window_end];
         assert!(
             window.contains(r#"emit("spotify-reconnect-required""#),
