@@ -49,10 +49,7 @@ pub fn request_graceful_shutdown(app: &AppHandle) {
             // drained so Quit exits fast instead of idling the full grace.
             let drained = app_handle
                 .try_state::<std::sync::Arc<crate::AppState>>()
-                .map(|s| {
-                    !s.polling
-                        .is_syncing(std::sync::atomic::Ordering::Acquire)
-                })
+                .map(|s| !s.polling.is_syncing(std::sync::atomic::Ordering::Acquire))
                 .unwrap_or(true);
             if drained {
                 std::thread::sleep(std::time::Duration::from_millis(300));

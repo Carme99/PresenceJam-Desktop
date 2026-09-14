@@ -116,14 +116,13 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
                     // fine — this is user-initiated. Unknown → resume.
                     // Unconditional GET (`None`): user-initiated one-off
                     // click with no stored validator. C11 signature.
-                    let should_pause =
-                        match crate::spotify::get_currently_playing(&token, None) {
-                            Ok(crate::spotify::CurrentlyPlaying::Modified {
-                                track: Some(track),
-                                ..
-                            }) => track.is_playing,
-                            _ => false,
-                        };
+                    let should_pause = match crate::spotify::get_currently_playing(&token, None) {
+                        Ok(crate::spotify::CurrentlyPlaying::Modified {
+                            track: Some(track),
+                            ..
+                        }) => track.is_playing,
+                        _ => false,
+                    };
                     if should_pause {
                         run_player_action(&app_handle, "pause", Some(false), |t| {
                             crate::spotify::player_pause(t, None)
@@ -1167,9 +1166,9 @@ mod tests {
             "player_next(token, None)",
             "player_transfer(token,",
         ] {
-            let pos = body.find(marker).unwrap_or_else(|| {
-                panic!("expected click-path marker `{}` in setup_tray", marker)
-            });
+            let pos = body
+                .find(marker)
+                .unwrap_or_else(|| panic!("expected click-path marker `{}` in setup_tray", marker));
             let before = &body[..pos];
             assert!(
                 before.rfind("std::thread::spawn").is_some(),

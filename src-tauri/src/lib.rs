@@ -1267,9 +1267,7 @@ mod tests {
             .split("pub fn run()")
             .nth(1)
             .expect("run definition not found");
-        let open = after_sig
-            .find('{')
-            .expect("run has no opening brace");
+        let open = after_sig.find('{').expect("run has no opening brace");
         let mut depth = 0usize;
         let mut end = None;
         for (i, ch) in after_sig[open..].char_indices() {
