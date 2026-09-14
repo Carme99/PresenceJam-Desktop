@@ -4,7 +4,7 @@
   import { currentView } from '$lib/stores/app';
   import { configStore, loadConfig } from '$lib/stores/config';
   import type { AppConfig, DeviceCodeResponse, SyncStatus } from '$lib/types';
-  import { authFlow, setSpotifyPhase, setTeamsPhase, setTeamsDeviceCode, expiresAtFromResponse, formatCountdownMs } from '$lib/stores/authFlow.svelte';
+  import { authFlow, setSpotifyPhase, setTeamsPhase, setTeamsDeviceCode, expiresAtFromResponse, formatCountdownMs, resetSpotifyAuthFlow, resetTeamsAuthFlow, teamsPollMutex, tryAcquireTeamsPoll, releaseTeamsPoll, isSafeHttpUrl } from '$lib/stores/authFlow.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
   import { devLog } from '$lib/utils/dev';
   import PageHeader from './PageHeader.svelte';
@@ -28,19 +28,28 @@
     return () => clearInterval(id);
   });
 
-  let unlisten: (() => void) | null = null;
+  // #419: combined teardown is async — call sites must await it.
+  let unlisten: (() => Promise<void>) | null = null;
+  // #392: onMount awaits config/keychain/sync IPC before registering auth
+  // listeners, so an unmount while suspended must drop the late
+  // subscription (Dashboard.svelte:31-33 pattern).
+  let destroyed = false;
 
   onMount(async () => {
     devLog('[RECONNECT] onMount: ENTRY');
+    if (destroyed) return;
     await loadConfig();
+    if (destroyed) return;
 
     // The client_secret no longer lives in the config — it lives in the OS
     // keychain. We check both client_id (in config) and the keychain
     // presence. See issue #9.
     const hasClientId = !!$configStore.spotify.client_id
       && $configStore.spotify.client_id.trim() !== '';
+    if (destroyed) return;
     let hasClientSecret = false;
     try { hasClientSecret = await invoke<boolean>('is_spotify_client_secret_set'); } catch { hasClientSecret = false; }
+    if (destroyed) return;
     needsSpotify = !hasClientId || !hasClientSecret;
     // Teams re-auth is NOT auto-refreshing in general (device-code
     // refresh failures land the user in a re-auth flow — see #151,
@@ -50,31 +59,42 @@
     // re-auth.
     try {
       const status = await invoke<SyncStatus>('get_sync_status');
+      if (destroyed) return;
       needsTeams = !status.teams_connected;
     } catch {
+      if (destroyed) return;
       needsTeams = true;
     }
 
     devLog('[RECONNECT] needsSpotify=', needsSpotify, 'needsTeams=', needsTeams);
 
-    unlisten = await useAuthListeners({
+    const unlistenFn = await useAuthListeners({
       onSpotifyComplete: () => {
+        if (destroyed) return;
         devLog('[RECONNECT] EVENT: spotify-auth-complete received');
         setSpotifyPhase('done');
       },
       onSpotifyFailed: (payload) => {
+        if (destroyed) return;
         devLog('[RECONNECT] EVENT: spotify-auth-failed:', payload);
         setSpotifyPhase('error', String(payload));
       },
       onTeamsComplete: () => {
+        if (destroyed) return;
         devLog('[RECONNECT] EVENT: teams-auth-complete received');
         setTeamsPhase('done');
       },
       onTeamsFailed: (payload) => {
+        if (destroyed) return;
         devLog('[RECONNECT] EVENT: teams-auth-failed:', payload);
         setTeamsPhase('error', String(payload));
       }
     });
+    if (destroyed) {
+      await unlistenFn();
+      return;
+    }
+    unlisten = unlistenFn;
 
     // Auto-start Spotify reconnect only if credentials exist
     if (!needsSpotify && authFlow.spotify.phase !== 'done' && authFlow.spotify.phase !== 'waiting') {
@@ -83,40 +103,54 @@
   });
 
   onDestroy(() => {
-    if (unlisten) unlisten();
+    destroyed = true;
+    if (unlisten) void unlisten();
   });
 
+  // #394: explicit in-flight flag — the phase check above is only set
+  // after the keychain await, so set this BEFORE the first await.
+  let spotifyReconnecting = false;
   async function reconnectSpotify() {
+    if (spotifyReconnecting) return;
     if (authFlow.spotify.phase === 'waiting' || authFlow.spotify.phase === 'done' || needsSpotify) return;
+    spotifyReconnecting = true;
+    // #421: fresh entry clears this flow's stale phase only; never the sibling's.
+    resetSpotifyAuthFlow();
     devLog('[RECONNECT] reconnectSpotify: ENTRY');
-    // Re-check the keychain: the user may have wiped it since the page
-    // loaded. If the secret is gone we cannot complete the auth flow
-    // without re-onboarding, so bail. See issue #9.
-    let hasSecret = false;
-    try { hasSecret = await invoke<boolean>('is_spotify_client_secret_set'); } catch { hasSecret = false; }
-    if (!hasSecret) {
-      devLog('[RECONNECT] reconnectSpotify: keychain empty, redirecting to onboarding');
-      needsSpotify = true;
-      return;
-    }
-    setSpotifyPhase('waiting');
     try {
-      // Use the dedicated reconnect IPC — reads client_secret from the
-      // OS keychain (set during Onboarding) instead of overwriting it
-      // with an empty string. See issues #9, #67.
-      await invoke('start_spotify_reconnect', {
-        clientId: $configStore.spotify.client_id,
-        redirectUri: 'presencejam://callback'
-      });
-    } catch (e) {
-      devLog('[RECONNECT] reconnectSpotify: invoke failed:', e);
-      setSpotifyPhase('error', String(e));
+      // Re-check the keychain: the user may have wiped it since the page
+      // loaded. If the secret is gone we cannot complete the auth flow
+      // without re-onboarding, so bail. See issue #9.
+      let hasSecret = false;
+      try { hasSecret = await invoke<boolean>('is_spotify_client_secret_set'); } catch { hasSecret = false; }
+      if (!hasSecret) {
+        devLog('[RECONNECT] reconnectSpotify: keychain empty, redirecting to onboarding');
+        needsSpotify = true;
+        return;
+      }
+      setSpotifyPhase('waiting');
+      try {
+        // Use the dedicated reconnect IPC — reads client_secret from the
+        // OS keychain (set during Onboarding) instead of overwriting it
+        // with an empty string. See issues #9, #67.
+        await invoke('start_spotify_reconnect', {
+          clientId: $configStore.spotify.client_id,
+          redirectUri: 'presencejam://callback'
+        });
+      } catch (e) {
+        devLog('[RECONNECT] reconnectSpotify: invoke failed:', e);
+        setSpotifyPhase('error', String(e));
+      }
+    } finally {
+      spotifyReconnecting = false;
     }
   }
 
   async function reconnectTeams() {
     if (authFlow.teams.phase === 'waiting') return;
     devLog('[RECONNECT] reconnectTeams: ENTRY');
+    // #421: fresh entry clears this flow's stale phase only; never the sibling's.
+    resetTeamsAuthFlow();
     setTeamsPhase('waiting');
     try {
       const response = await invoke<DeviceCodeResponse>('start_teams_auth_device_code');
@@ -146,6 +180,12 @@
       devLog('[RECONNECT] pollTeamsAuth: code expired, refusing to poll');
       return;
     }
+    // #396: shared poll mutex — only one poll_teams_auth at a time across
+    // Onboarding/Settings/Reconnect/+layout.
+    if (!tryAcquireTeamsPoll()) {
+      devLog('[RECONNECT] pollTeamsAuth: another poll in flight, skipping');
+      return;
+    }
     setTeamsPhase('waiting');
     try {
       await invoke('poll_teams_auth', {
@@ -157,6 +197,8 @@
     } catch (e) {
       devLog('[RECONNECT] pollTeamsAuth failed:', e);
       setTeamsPhase('error', String(e));
+    } finally {
+      releaseTeamsPoll();
     }
   }
 
@@ -226,7 +268,7 @@
       {#if authFlow.teams.phase === 'done' || !needsTeams}
         <p class="hint">{t('reconnect.teamsOk')}</p>
       {:else if authFlow.teams.phase === 'waiting'}
-        <p class="hint">{t('common.goTo')} <a href={authFlow.teams.verificationUrl} target="_blank" rel="noopener">{authFlow.teams.verificationUrl}</a> {t('common.andEnterCode')} <strong>{authFlow.teams.userCode}</strong></p>
+        <p class="hint">{t('common.goTo')} {#if isSafeHttpUrl(authFlow.teams.verificationUrl)}<a href={authFlow.teams.verificationUrl} target="_blank" rel="noopener">{authFlow.teams.verificationUrl}</a>{:else}<span>{authFlow.teams.verificationUrl}</span>{/if} {t('common.andEnterCode')} <strong>{authFlow.teams.userCode}</strong></p>
         {#if teamsCodeExpired}
           <p class="error-message" role="alert">{t('common.codeExpired')}</p>
           <button class="btn-full" onclick={reconnectTeams}>{t('common.getNewCode')}</button>
@@ -235,7 +277,7 @@
             <p class="hint" aria-live="polite">{t('common.codeExpiresIn', { time: formatCountdownMs(teamsRemainingMs) })}</p>
           {/if}
           <p class="hint">{t('common.waitingForSignIn')}</p>
-          <button class="btn-full" onclick={pollTeamsAuth}>{t('common.checkNow')}</button>
+          <button class="btn-full" onclick={pollTeamsAuth} disabled={teamsPollMutex.inFlight}>{t('common.checkNow')}</button>
         {/if}
         {#if authFlow.teams.error}
           <p class="error-message" role="alert">{authFlow.teams.error}</p>

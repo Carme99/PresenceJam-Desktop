@@ -14,7 +14,7 @@
   let { detached = false }: { detached?: boolean } = $props();
   import { configStore, saveConfig, loadConfig, defaultConfig } from '$lib/stores/config';
   import type { AppConfig, SyncStatus } from '$lib/types';
-  import { authFlow, setSpotifyPhase, setTeamsPhase, formatCountdownMs } from '$lib/stores/authFlow.svelte';
+  import { authFlow, setSpotifyPhase, setTeamsPhase, formatCountdownMs, resetSpotifyAuthFlow, resetTeamsAuthFlow, teamsPollMutex, tryAcquireTeamsPoll, releaseTeamsPoll, isSafeHttpUrl } from '$lib/stores/authFlow.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
   import PageHeader from './PageHeader.svelte';
   import { t, i18n, type Locale } from '$lib/i18n';
@@ -169,7 +169,12 @@
   });
 
   let unlistenFns: UnlistenFn[] = [];
-  let unlistenAuth: (() => void) | null = null;
+  // #419: combined teardown is async — call sites must await it.
+  let unlistenAuth: (() => Promise<void>) | null = null;
+  // #392: onMount awaits config/sync/scope IPC before registering auth
+  // listeners, so an unmount while suspended must drop the late
+  // subscription (Dashboard.svelte:31-33 pattern).
+  let authListenersDestroyed = false;
   // Issue #376 conflict listener handle + unmount race flag (issue #392
   // pattern from +layout.svelte: `listen()` resolves async, so an unmount
   // before resolution must immediately release the subscription).
@@ -178,7 +183,9 @@
 
   onMount(async () => {
     try { notificationsEnabled = localStorage.getItem('notificationsEnabled') === 'true'; } catch {}
+    if (authListenersDestroyed) return;
     await loadConfig();
+    if (authListenersDestroyed) return;
     localConfig = structuredClone($configStore);
 
     try {
@@ -213,8 +220,9 @@
     // device-code flow; Settings renders the code/URI from the store.
 
     // Auth completion/failure events via the shared helper.
-    unlistenAuth = await useAuthListeners({
+    const unlisten = await useAuthListeners({
       onSpotifyComplete: () => {
+        if (authListenersDestroyed) return;
         console.log('[SETTINGS] spotify-auth-complete received');
         setSpotifyPhase('done');
         isConnected = true;
@@ -227,10 +235,12 @@
         refreshGrantedScopes();
       },
       onSpotifyFailed: (payload) => {
+        if (authListenersDestroyed) return;
         console.error('[SETTINGS] spotify-auth-failed:', payload);
         setSpotifyPhase('error', String(payload));
       },
       onTeamsComplete: () => {
+        if (authListenersDestroyed) return;
         console.log('[SETTINGS] teams-auth-complete received');
         setTeamsPhase('done');
         teamsStatusConnected = true;
@@ -239,10 +249,16 @@
         refreshTeamsGrantedScopes();
       },
       onTeamsFailed: (payload) => {
+        if (authListenersDestroyed) return;
         console.error('[SETTINGS] teams-auth-failed:', payload);
         setTeamsPhase('error', String(payload));
       }
     });
+    if (authListenersDestroyed) {
+      await unlisten();
+    } else {
+      unlistenAuth = unlisten;
+    }
     // Issue #376: one-time `spotify-secret-conflict` event from the
     // setup-path migration (config.json holds a legacy plaintext secret
     // that differs from the keychain entry). `useAuthListeners` only
@@ -267,10 +283,11 @@
       clearTimeout(previewDebounce);
       previewDebounce = null;
     }
+    authListenersDestroyed = true;
     for (const unlisten of unlistenFns) {
       unlisten();
     }
-    if (unlistenAuth) unlistenAuth();
+    if (unlistenAuth) void unlistenAuth();
     secretConflictDestroyed = true;
     if (unlistenSecretConflict) unlistenSecretConflict();
   });
@@ -302,6 +319,8 @@
 
   async function reconnectSpotify() {
     if (spotifyAuthWaiting || !localConfig.spotify.client_id) return;
+    // #421: fresh entry clears this flow's stale phase only; never the sibling's.
+    resetSpotifyAuthFlow();
     setSpotifyPhase('waiting');
     try {
       await invoke('reconnect_spotify');
@@ -313,6 +332,8 @@
 
   async function reconnectTeams() {
     if (teamsAuthWaiting) return;
+    // #421: fresh entry clears this flow's stale phase only; never the sibling's.
+    resetTeamsAuthFlow();
     setTeamsPhase('waiting');
     try {
       await invoke('reconnect_teams');
@@ -333,6 +354,12 @@
       console.warn('[SETTINGS] pollTeamsAuth: code expired, refusing to poll');
       return;
     }
+    // #396: shared poll mutex — only one poll_teams_auth at a time across
+    // Onboarding/Settings/Reconnect/+layout.
+    if (!tryAcquireTeamsPoll()) {
+      devLog('[SETTINGS] pollTeamsAuth: another poll in flight, skipping');
+      return;
+    }
     setTeamsPhase('waiting');
     try {
       await invoke('poll_teams_auth', {
@@ -344,6 +371,8 @@
     } catch (e) {
       console.error('[SETTINGS] poll_teams_auth failed:', e);
       setTeamsPhase('error', String(e));
+    } finally {
+      releaseTeamsPoll();
     }
   }
 
@@ -467,7 +496,11 @@
         {:else if teamsAuthWaiting}
           <div class="device-code-box">
             <p class="hint">{t('common.goTo')}</p>
-            <a class="verification-url" href={authFlow.teams.verificationUrl} target="_blank" rel="noopener">{authFlow.teams.verificationUrl}</a>
+            {#if isSafeHttpUrl(authFlow.teams.verificationUrl)}
+              <a class="verification-url" href={authFlow.teams.verificationUrl} target="_blank" rel="noopener">{authFlow.teams.verificationUrl}</a>
+            {:else}
+              <span class="verification-url">{authFlow.teams.verificationUrl}</span>
+            {/if}
             <p class="hint">{t('common.andEnterCode')}</p>
             <div class="code-display" aria-live="polite">{authFlow.teams.userCode}</div>
             {#if teamsCodeExpired}
@@ -479,7 +512,7 @@
               {/if}
               <div class="spinner" aria-hidden="true"></div>
               <p>{t('common.waitingForSignIn')}</p>
-              <button class="btn-secondary" onclick={pollTeamsAuth}>{t('common.checkNow')}</button>
+              <button class="btn-secondary" onclick={pollTeamsAuth} disabled={teamsPollMutex.inFlight}>{t('common.checkNow')}</button>
             {/if}
           </div>
           {#if authFlow.teams.error}
