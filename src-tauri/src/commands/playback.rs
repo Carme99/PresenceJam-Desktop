@@ -94,6 +94,13 @@ fn try_refresh_spotify_token(
     }
 }
 
+/// Issue #464: pure predicate for the `ExpiredToken` retry path — true when
+/// a concurrent refresh already replaced the attempted token, so the retry
+/// can use the current token directly instead of refreshing again.
+fn concurrent_refresh_won(current_access_token: &str, attempted_token: &str) -> bool {
+    current_access_token != attempted_token
+}
+
 /// Runs a Spotify player call with never-re-auth semantics (issues #375,
 /// #428): proactive `refreshed_access_token`, then on `ExpiredToken` one
 /// refresh + single retry before surfacing the reconnect message. All six
@@ -111,7 +118,9 @@ fn player_with_refresh<T>(
             log::info!("{CMD} {label}: ExpiredToken, attempting one refresh + retry");
             let current = state.tokens.spotify().clone();
             match current {
-                Some(current_tokens) if current_tokens.access_token != token => {
+                Some(current_tokens)
+                    if concurrent_refresh_won(&current_tokens.access_token, &token) =>
+                {
                     // A concurrent refresh already won; retry once with it.
                     call(&current_tokens.access_token).map_err(friendly_playback_error)
                 }
@@ -290,5 +299,124 @@ pub fn get_spotify_granted_scopes(state: State<'_, Arc<crate::AppState>>) -> Vec
     match state.tokens.spotify().as_ref() {
         Some(tokens) => decode_spotify_granted_scopes(&tokens.access_token),
         None => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::concurrent_refresh_won;
+
+    /// Brace-counted body isolation (house style — never boundary anchors,
+    /// which drift). Returns the byte range of the fn body starting at its
+    /// opening `{`.
+    fn fn_body<'a>(prod_source: &'a str, sig: &str) -> &'a str {
+        let after_sig = prod_source
+            .split(sig)
+            .nth(1)
+            .unwrap_or_else(|| panic!("playback.rs has no `{}`", sig));
+        let open = after_sig
+            .find('{')
+            .unwrap_or_else(|| panic!("{} has no opening brace", sig));
+        let mut depth = 0usize;
+        let mut end = None;
+        for (i, ch) in after_sig[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(open + i + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        &after_sig[..end.unwrap_or_else(|| panic!("{} body never closed", sig))]
+    }
+
+    /// Issue #464: every Spotify player command must route through the
+    /// single `player_with_refresh` policy (proactive refresh + one
+    /// ExpiredToken refresh+retry). Pre-fix each command hand-rolled its
+    /// own token handling and they drifted.
+    #[test]
+    fn test_all_player_commands_route_through_player_with_refresh() {
+        let source = include_str!("playback.rs");
+        let prod_source = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("playback.rs has no #[cfg(test)] mod tests block");
+        // The five transport controls plus devices/queue: all six player
+        // commands plus the two query commands share the one refresh policy.
+        for sig in [
+            "pub async fn playback_play(",
+            "pub async fn playback_pause(",
+            "pub async fn playback_next(",
+            "pub async fn playback_previous(",
+            "pub async fn playback_transfer(",
+            "pub async fn get_playback_devices(",
+            "pub async fn get_playback_queue(",
+        ] {
+            let body = fn_body(prod_source, sig);
+            assert!(
+                body.contains("player_with_refresh("),
+                "{} must route through player_with_refresh (issue #464)",
+                sig
+            );
+        }
+        // The scopes reader is informational (base64url-decodes the stored
+        // JWT) and makes no API call, so it must NOT go through the refresh
+        // policy — pin the intentional exclusion.
+        let scopes_body = fn_body(prod_source, "pub fn get_spotify_granted_scopes(");
+        assert!(
+            !scopes_body.contains("player_with_refresh("),
+            "get_spotify_granted_scopes makes no API call and must not route through player_with_refresh"
+        );
+    }
+
+    /// Issue #464: the shared policy itself must proactively refresh via
+    /// `refreshed_access_token` and reactively retry via
+    /// `try_refresh_spotify_token`, so the policy lives in one place.
+    #[test]
+    fn test_player_with_refresh_owns_both_refresh_paths() {
+        let source = include_str!("playback.rs");
+        let prod_source = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("playback.rs has no #[cfg(test)] mod tests block");
+        let body = fn_body(prod_source, "fn player_with_refresh<T>(");
+        assert!(
+            body.contains("refreshed_access_token("),
+            "player_with_refresh must proactively refresh via refreshed_access_token"
+        );
+        assert!(
+            body.contains("try_refresh_spotify_token("),
+            "player_with_refresh must reactively refresh via try_refresh_spotify_token on ExpiredToken"
+        );
+        assert!(
+            body.contains("concurrent_refresh_won("),
+            "player_with_refresh must consult concurrent_refresh_won before refreshing"
+        );
+    }
+
+    /// Unit tests for the extracted `concurrent_refresh_won` predicate.
+    #[test]
+    fn test_concurrent_refresh_won_compares_tokens() {
+        assert!(
+            concurrent_refresh_won("fresh-token", "stale-token"),
+            "a replaced token means a concurrent refresh already won"
+        );
+        assert!(
+            !concurrent_refresh_won("same-token", "same-token"),
+            "an unchanged token means this call owns the refresh"
+        );
+        assert!(
+            !concurrent_refresh_won("", ""),
+            "two empty tokens are equal — no concurrent refresh happened"
+        );
+        assert!(
+            concurrent_refresh_won("a", ""),
+            "any difference counts as a concurrent refresh win"
+        );
     }
 }

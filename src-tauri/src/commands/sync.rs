@@ -192,19 +192,34 @@ async fn stop_polling_and_join(state: Arc<AppState>, context: &'static str) {
             *state.polling.thread_id_mut() = None;
         }
     } else {
-        // No handle was stored — either we raced with another drain that
-        // already took it, or the thread self-exited (5-strikes). Ensure
-        // flag is cleared if no thread is live. The ownership-checked
-        // cleanup in state.rs will have cleared it for self-exit, but
-        // for the race we clear here.
-        if !state.polling.is_syncing(Ordering::Acquire) {
-            // already cleared
+        // Issue #395: no handle was stored — either we raced with another
+        // drain that already took it, or the thread self-exited (5-strikes
+        // exit) and the ownership-checked cleanup in state.rs already ran.
+        // Warn with the caller context and defensively clear a wedged flag
+        // (set but owned by no live thread) so a future start is never
+        // stuck; when another thread still owns the state, its in-flight
+        // join owns the clear and we leave the flag alone.
+        if state.polling.is_syncing(Ordering::Acquire) {
+            let owner = *state.polling.thread_id();
+            match owner {
+                None => {
+                    log::warn!(
+                        "{CMD} {context}: no polling handle and no owner thread while is_syncing is set; clearing wedged flag"
+                    );
+                    state.polling.set_syncing(false, Ordering::Release);
+                    *state.polling.thread_id_mut() = None;
+                }
+                Some(tid) => {
+                    log::warn!(
+                        "{CMD} {context}: no polling handle but thread {:?} still owns polling state; leaving flag for the in-flight join",
+                        tid
+                    );
+                }
+            }
         } else {
-            // Check if any thread is still considered owner — if handle
-            // is None and flag is true, the join is still in flight on
-            // another task. Don't clear here; let that task clear.
-            // This branch is for the case where handle was None and flag
-            // was true but no join is in flight (should not happen).
+            log::debug!(
+                "{CMD} {context}: no polling handle and is_syncing already false; nothing to drain"
+            );
         }
     }
 }
@@ -319,31 +334,44 @@ pub async fn app_exit(
     Ok(())
 }
 
+/// Issue #398: snapshot consistency + lock ordering.
+///
+/// `SyncStatus` is assembled from four independent slots (the atomic
+/// `is_syncing` flag, the polling `current_track`, the Spotify tokens, the
+/// config, and the Teams tokens). There is no single lock covering all of
+/// them, so a fully atomic snapshot is impossible; instead this fn takes a
+/// single critical section over the read guards in a FIXED order —
+/// `polling.current_track` -> `tokens.spotify` -> `config` -> `tokens.teams`
+/// — and clones every field while all four guards are held. Holding all
+/// readers simultaneously means no writer (token refresh, config save,
+/// track store) can interleave the clones, so impossible combinations such
+/// as "track present but both providers disconnected at the same instant"
+/// are unobservable in the returned struct. The atomic `is_syncing` flag is
+/// loaded while the guards are held so it reflects the snapshot instant,
+/// not an earlier read. New code MUST acquire these locks in the same order
+/// (never `teams` before `spotify`, never `config` before `current_track`)
+/// or risk a lock-ordering deadlock with this critical section.
 #[tauri::command]
 pub fn get_sync_status(state: tauri::State<'_, Arc<AppState>>) -> Result<SyncStatus, String> {
     log::debug!("{CMD} get_sync_status: ENTRY");
 
+    // Single critical section: all read guards held at once, clones below
+    // cannot observe a writer interleaving between fields.
+    let track_guard = state.polling.current_track();
+    let spotify_guard = state.tokens.spotify();
+    let config_guard = state.config.get();
+    let teams_guard = state.tokens.teams();
     let is_syncing = state.polling.is_syncing(Ordering::Acquire);
 
-    let current_track = {
-        let guard = state.polling.current_track();
-        guard.clone()
-    };
+    let current_track = track_guard.clone();
 
-    let spotify_connected = {
-        let tokens = state.tokens.spotify();
-        let config = state.config.get();
-        tokens.is_some()
-            && config
-                .as_ref()
-                .map(|c| !c.spotify.client_id.is_empty())
-                .unwrap_or(false)
-    };
+    let spotify_connected = spotify_guard.is_some()
+        && config_guard
+            .as_ref()
+            .map(|c| !c.spotify.client_id.is_empty())
+            .unwrap_or(false);
 
-    let teams_connected = {
-        let guard = state.tokens.teams();
-        guard.is_some()
-    };
+    let teams_connected = teams_guard.is_some();
 
     log::info!(
         "{CMD} get_sync_status: is_syncing={}, spotify_connected={}, teams_connected={}",
@@ -387,4 +415,90 @@ pub async fn refresh_status(
 
     log::info!("{CMD} refresh_status: SUCCESS");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// Brace-counted body isolation (house style — never boundary anchors,
+    /// which drift).
+    fn fn_body<'a>(prod_source: &'a str, sig: &str) -> &'a str {
+        let after_sig = prod_source
+            .split(sig)
+            .nth(1)
+            .unwrap_or_else(|| panic!("sync.rs has no `{}`", sig));
+        let open = after_sig
+            .find('{')
+            .unwrap_or_else(|| panic!("{} has no opening brace", sig));
+        let mut depth = 0usize;
+        let mut end = None;
+        for (i, ch) in after_sig[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(open + i + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        &after_sig[..end.unwrap_or_else(|| panic!("{} body never closed", sig))]
+    }
+
+    /// Issue #395: the no-handle branch of `stop_polling_and_join` must
+    /// warn-log with the caller context and defensively clear a wedged
+    /// syncing flag (set but owned by no live thread), while leaving the
+    /// flag alone when another thread still owns the state.
+    #[test]
+    fn test_no_handle_branch_warns_and_clears_wedged_flag() {
+        let source = include_str!("sync.rs");
+        let prod_source = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("sync.rs has no #[cfg(test)] mod tests block");
+        let body = fn_body(prod_source, "async fn stop_polling_and_join(");
+        assert!(
+            body.contains("no polling handle"),
+            "the no-handle branch must log the drain outcome (issue #395)"
+        );
+        assert!(
+            body.contains("clearing wedged flag"),
+            "the no-handle branch must clear a wedged flag when no thread owns the state (issue #395)"
+        );
+        assert!(
+            body.contains("leaving flag for the in-flight join"),
+            "the no-handle branch must not steal the flag from a live owner's in-flight join (issue #395)"
+        );
+    }
+
+    /// Issue #398: `get_sync_status` must read under a single critical
+    /// section — all four read guards held at once — so torn snapshots are
+    /// unobservable, with the lock order documented.
+    #[test]
+    fn test_get_sync_status_reads_under_single_critical_section() {
+        let source = include_str!("sync.rs");
+        let prod_source = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("sync.rs has no #[cfg(test)] mod tests block");
+        let body = fn_body(prod_source, "pub fn get_sync_status(");
+        for marker in [
+            "state.polling.current_track()",
+            "state.tokens.spotify()",
+            "state.config.get()",
+            "state.tokens.teams()",
+        ] {
+            assert!(
+                body.contains(marker),
+                "get_sync_status must hold {} inside its critical section (issue #398)",
+                marker
+            );
+        }
+        assert!(
+            prod_source.contains("Single critical section"),
+            "the lock-ordering contract must stay documented on get_sync_status (issue #398)"
+        );
+    }
 }
