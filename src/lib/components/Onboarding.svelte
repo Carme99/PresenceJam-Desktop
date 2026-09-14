@@ -4,7 +4,7 @@
   import { configStore, saveConfig, DEFAULT_PROFANITY_PLACEHOLDER } from '$lib/stores/config';
   import type { AppConfig, DeviceCodeResponse } from '$lib/types';
   import { currentView } from '$lib/stores/app';
-  import { authFlow, setSpotifyPhase, setTeamsPhase, setTeamsDeviceCode, expiresAtFromResponse, formatCountdownMs, resetAuthFlow, teamsPollMutex, tryAcquireTeamsPoll, releaseTeamsPoll, isSafeHttpUrl } from '$lib/stores/authFlow.svelte';
+  import { authFlow, setSpotifyPhase, setTeamsPhase, setTeamsDeviceCode, expiresAtFromResponse, formatCountdownMs, resetSpotifyAuthFlow, resetTeamsAuthFlow, teamsPollMutex, tryAcquireTeamsPoll, releaseTeamsPoll, isSafeHttpUrl } from '$lib/stores/authFlow.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
   import { devLog } from '$lib/utils/dev';
   import Logo from './Logo.svelte';
@@ -137,8 +137,8 @@
     // entry and here, so no interleave window exists.
     if (spotifyConnecting) return;
     spotifyConnecting = true;
-    // #421: fresh entry clears stale phases from a prior attempt.
-    resetAuthFlow();
+    // #421: fresh entry clears this flow's stale phase only; never the sibling's.
+    resetSpotifyAuthFlow();
     devLog('[ONBOARDING] connectSpotify: ENTRY');
     devLog('[ONBOARDING] connectSpotify: spotifyClientId.length=', spotifyClientId.length);
     devLog('[ONBOARDING] connectSpotify: redirectUri=presencejam://callback');
@@ -220,8 +220,8 @@
     // #394: in-flight flag set BEFORE the first await blocks double-clicks.
     if (teamsConnecting) return;
     teamsConnecting = true;
-    // #421: fresh entry clears stale phases from a prior attempt.
-    resetAuthFlow();
+    // #421: fresh entry clears this flow's stale phase only; never the sibling's.
+    resetTeamsAuthFlow();
     devLog('[ONBOARDING] connectTeams: ENTRY');
     setTeamsPhase('waiting');
 

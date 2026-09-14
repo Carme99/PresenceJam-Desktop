@@ -20,7 +20,7 @@
   // when both windows mount. Detached windows only inherit the theme
   // side-effect import above.
   const isMainWindow = getCurrentWindow().label === 'main';
-  import { authFlow, setTeamsPhase, setTeamsDeviceCode, setSpotifyPhase, expiresAtFromResponse, resetAuthFlow, tryAcquireTeamsPoll, releaseTeamsPoll } from '$lib/stores/authFlow.svelte';
+  import { authFlow, setTeamsPhase, setTeamsDeviceCode, setSpotifyPhase, expiresAtFromResponse, resetTeamsAuthFlow, tryAcquireTeamsPoll, releaseTeamsPoll } from '$lib/stores/authFlow.svelte';
   import type { DeviceCodeResponse, AppConfig } from '$lib/types';
 
   devLog(`[LAYOUT] PresenceJam build: ${import.meta.env.VITE_APP_BUILD ?? 'dev build'}`);
@@ -49,8 +49,8 @@
 
     listen('teams-reconnect-required', async () => {
       devLog('[LAYOUT] teams-reconnect-required received');
-      // #421: fresh entry clears stale phases from a prior attempt.
-      resetAuthFlow();
+      // #421: fresh entry clears this flow's stale phase only; never the sibling's.
+      resetTeamsAuthFlow();
       currentView.set('settings');
       try {
         const response = await invoke<DeviceCodeResponse>('start_teams_auth_device_code');

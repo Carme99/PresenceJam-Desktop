@@ -69,8 +69,18 @@ export function setTeamsDeviceCode(state: TeamsDeviceCodeState) {
 }
 
 export function resetAuthFlow() {
+  resetSpotifyAuthFlow();
+  resetTeamsAuthFlow();
+}
+
+/** Clear only the Spotify flow; never touches Teams state. */
+export function resetSpotifyAuthFlow() {
   authFlow.spotify.phase = 'idle';
   authFlow.spotify.error = null;
+}
+
+/** Clear only the Teams flow; never touches Spotify state. */
+export function resetTeamsAuthFlow() {
   authFlow.teams.phase = 'idle';
   authFlow.teams.error = null;
   authFlow.teams.userCode = '';

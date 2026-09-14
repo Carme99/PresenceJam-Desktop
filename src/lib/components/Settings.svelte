@@ -14,7 +14,7 @@
   let { detached = false }: { detached?: boolean } = $props();
   import { configStore, saveConfig, loadConfig, defaultConfig } from '$lib/stores/config';
   import type { AppConfig, SyncStatus } from '$lib/types';
-  import { authFlow, setSpotifyPhase, setTeamsPhase, formatCountdownMs, resetAuthFlow, teamsPollMutex, tryAcquireTeamsPoll, releaseTeamsPoll, isSafeHttpUrl } from '$lib/stores/authFlow.svelte';
+  import { authFlow, setSpotifyPhase, setTeamsPhase, formatCountdownMs, resetSpotifyAuthFlow, resetTeamsAuthFlow, teamsPollMutex, tryAcquireTeamsPoll, releaseTeamsPoll, isSafeHttpUrl } from '$lib/stores/authFlow.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
   import PageHeader from './PageHeader.svelte';
   import { t, i18n, type Locale } from '$lib/i18n';
@@ -319,8 +319,8 @@
 
   async function reconnectSpotify() {
     if (spotifyAuthWaiting || !localConfig.spotify.client_id) return;
-    // #421: fresh entry clears stale phases from a prior attempt.
-    resetAuthFlow();
+    // #421: fresh entry clears this flow's stale phase only; never the sibling's.
+    resetSpotifyAuthFlow();
     setSpotifyPhase('waiting');
     try {
       await invoke('reconnect_spotify');
@@ -332,8 +332,8 @@
 
   async function reconnectTeams() {
     if (teamsAuthWaiting) return;
-    // #421: fresh entry clears stale phases from a prior attempt.
-    resetAuthFlow();
+    // #421: fresh entry clears this flow's stale phase only; never the sibling's.
+    resetTeamsAuthFlow();
     setTeamsPhase('waiting');
     try {
       await invoke('reconnect_teams');

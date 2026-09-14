@@ -4,7 +4,7 @@
   import { currentView } from '$lib/stores/app';
   import { configStore, loadConfig } from '$lib/stores/config';
   import type { AppConfig, DeviceCodeResponse, SyncStatus } from '$lib/types';
-  import { authFlow, setSpotifyPhase, setTeamsPhase, setTeamsDeviceCode, expiresAtFromResponse, formatCountdownMs, resetAuthFlow, teamsPollMutex, tryAcquireTeamsPoll, releaseTeamsPoll, isSafeHttpUrl } from '$lib/stores/authFlow.svelte';
+  import { authFlow, setSpotifyPhase, setTeamsPhase, setTeamsDeviceCode, expiresAtFromResponse, formatCountdownMs, resetSpotifyAuthFlow, resetTeamsAuthFlow, teamsPollMutex, tryAcquireTeamsPoll, releaseTeamsPoll, isSafeHttpUrl } from '$lib/stores/authFlow.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
   import { devLog } from '$lib/utils/dev';
   import PageHeader from './PageHeader.svelte';
@@ -114,31 +114,33 @@
     if (spotifyReconnecting) return;
     if (authFlow.spotify.phase === 'waiting' || authFlow.spotify.phase === 'done' || needsSpotify) return;
     spotifyReconnecting = true;
-    // #421: fresh entry clears stale phases from a prior attempt.
-    resetAuthFlow();
+    // #421: fresh entry clears this flow's stale phase only; never the sibling's.
+    resetSpotifyAuthFlow();
     devLog('[RECONNECT] reconnectSpotify: ENTRY');
-    // Re-check the keychain: the user may have wiped it since the page
-    // loaded. If the secret is gone we cannot complete the auth flow
-    // without re-onboarding, so bail. See issue #9.
-    let hasSecret = false;
-    try { hasSecret = await invoke<boolean>('is_spotify_client_secret_set'); } catch { hasSecret = false; }
-    if (!hasSecret) {
-      devLog('[RECONNECT] reconnectSpotify: keychain empty, redirecting to onboarding');
-      needsSpotify = true;
-      return;
-    }
-    setSpotifyPhase('waiting');
     try {
-      // Use the dedicated reconnect IPC — reads client_secret from the
-      // OS keychain (set during Onboarding) instead of overwriting it
-      // with an empty string. See issues #9, #67.
-      await invoke('start_spotify_reconnect', {
-        clientId: $configStore.spotify.client_id,
-        redirectUri: 'presencejam://callback'
-      });
-    } catch (e) {
-      devLog('[RECONNECT] reconnectSpotify: invoke failed:', e);
-      setSpotifyPhase('error', String(e));
+      // Re-check the keychain: the user may have wiped it since the page
+      // loaded. If the secret is gone we cannot complete the auth flow
+      // without re-onboarding, so bail. See issue #9.
+      let hasSecret = false;
+      try { hasSecret = await invoke<boolean>('is_spotify_client_secret_set'); } catch { hasSecret = false; }
+      if (!hasSecret) {
+        devLog('[RECONNECT] reconnectSpotify: keychain empty, redirecting to onboarding');
+        needsSpotify = true;
+        return;
+      }
+      setSpotifyPhase('waiting');
+      try {
+        // Use the dedicated reconnect IPC — reads client_secret from the
+        // OS keychain (set during Onboarding) instead of overwriting it
+        // with an empty string. See issues #9, #67.
+        await invoke('start_spotify_reconnect', {
+          clientId: $configStore.spotify.client_id,
+          redirectUri: 'presencejam://callback'
+        });
+      } catch (e) {
+        devLog('[RECONNECT] reconnectSpotify: invoke failed:', e);
+        setSpotifyPhase('error', String(e));
+      }
     } finally {
       spotifyReconnecting = false;
     }
@@ -147,8 +149,8 @@
   async function reconnectTeams() {
     if (authFlow.teams.phase === 'waiting') return;
     devLog('[RECONNECT] reconnectTeams: ENTRY');
-    // #421: fresh entry clears stale phases from a prior attempt.
-    resetAuthFlow();
+    // #421: fresh entry clears this flow's stale phase only; never the sibling's.
+    resetTeamsAuthFlow();
     setTeamsPhase('waiting');
     try {
       const response = await invoke<DeviceCodeResponse>('start_teams_auth_device_code');
