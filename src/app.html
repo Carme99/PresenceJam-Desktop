@@ -5,6 +5,23 @@
     <link rel="icon" href="%sveltekit.assets%/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>PresenceJam</title>
+    <!-- Issue #433: pre-paint theme so detached windows hydrate without a
+      flash of the wrong theme. Reads the same `presencejam:theme` key the
+      theme store persists (plus the `?theme=` override the opener appends)
+      before SvelteKit paints. No dependencies, no imports — key literal
+      duplicated deliberately so this file never couples to the store. -->
+    <script>
+      try {
+        var __pjTheme = new URLSearchParams(location.search).get('theme');
+        if (__pjTheme !== 'dark' && __pjTheme !== 'light') {
+          __pjTheme = localStorage.getItem('presencejam:theme') || null;
+        }
+        if (__pjTheme !== 'dark' && __pjTheme !== 'light') {
+          __pjTheme = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+        }
+        document.documentElement.setAttribute('data-theme', __pjTheme);
+      } catch (e) { /* storage blocked — theme store applies its default */ }
+    </script>
     %sveltekit.head%
   </head>
   <body data-sveltekit-preload-data="hover">

@@ -33,6 +33,8 @@ export const defaultConfig: AppConfig = {
     log_level: 'Info'
   },
   autostart: false,
+  // Issue #432: mirrors Rust StatusRulesConfig::default (empty rule lists).
+  status_rules: { quiet_hours: [], track_rules: [] },
   // Mirrors Rust AppConfig::default_schema_version (issue #379). Required:
   // ts-rs emits schema_version as a required number, and unknown-key
   // `extra` is #[ts(skip)] so it is absent here by design.
@@ -76,6 +78,13 @@ function normalizeLoadedConfig(cfg: AppConfig): AppConfig {
     } else if (typeof p.expiry_buffer_seconds === 'string') {
       p.expiry_buffer_seconds = BigInt(p.expiry_buffer_seconds as string);
     }
+  }
+  // Issue #432: pre-4.5 backends omit `status_rules` (Rust serde default
+  // covers the backend side); backfill here so the Settings rules card
+  // never binds against undefined.
+  const r = cfg as unknown as { status_rules?: unknown };
+  if (r.status_rules == null) {
+    r.status_rules = { quiet_hours: [], track_rules: [] };
   }
   return cfg;
 }

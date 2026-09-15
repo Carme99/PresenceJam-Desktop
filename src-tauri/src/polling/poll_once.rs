@@ -922,13 +922,83 @@ fn should_rearm_availability(last_arm: Option<Instant>, now: Instant) -> bool {
     }
 }
 
+/// Issue #432: quiet-hours evaluation. `now_minutes` is local minutes-since-
+/// midnight and `weekday` the ISO weekday number 1 (Mon)..=7 (Sun), passed
+/// in so the pure predicate stays unit-testable without clock injection.
+/// An entry matches when it is enabled, the weekday filter passes (empty =
+/// every day), and the time falls in `[start, end)` — with wrap-around
+/// (e.g. 22:00→07:00) handled as `now >= start || now < end`.
+/// Minutes are clamped to 0..=1439 so a hand-edited config can't wedge
+/// the comparison.
+fn quiet_hours_active(
+    rules: &crate::config::StatusRulesConfig,
+    now_minutes: u16,
+    weekday: u8,
+) -> bool {
+    let now = now_minutes.min(1439);
+    rules.quiet_hours.iter().any(|entry| {
+        if !entry.enabled {
+            return false;
+        }
+        if !entry.days.is_empty() && !entry.days.contains(&weekday) {
+            return false;
+        }
+        let start = entry.start_minutes.min(1439);
+        let end = entry.end_minutes.min(1439);
+        if start == end {
+            return false;
+        }
+        if start < end {
+            now >= start && now < end
+        } else {
+            now >= start || now < end
+        }
+    })
+}
+
+/// Issue #432: local clock projection for [`quiet_hours_active`].
+/// Minute-of-day plus ISO weekday (`number_from_monday`, 1..=7).
+fn local_minutes_and_weekday() -> (u16, u8) {
+    use chrono::{Datelike, Timelike};
+    let now = chrono::Local::now();
+    let minutes = (now.hour() as u16 * 60 + now.minute() as u16).min(1439);
+    (minutes, now.weekday().number_from_monday() as u8)
+}
+
+/// Issue #432: track-rule match. Both non-empty substrings must match
+/// (case-insensitive); an empty substring matches everything. Pure so the
+/// matching semantics are unit-testable.
+fn track_rule_hit(rule: &crate::config::TrackRuleEntry, artist: &str, title: &str) -> bool {
+    if !rule.enabled {
+        return false;
+    }
+    let artist_lc = artist.to_lowercase();
+    let title_lc = title.to_lowercase();
+    let artist_ok = rule.artist_substring.is_empty()
+        || artist_lc.contains(&rule.artist_substring.to_lowercase());
+    let title_ok = rule.track_substring.is_empty()
+        || title_lc.contains(&rule.track_substring.to_lowercase());
+    artist_ok && title_ok
+}
+
+/// Issue #432: first matching enabled track rule for this track, if any.
+fn matching_track_rule<'a>(
+    rules: &'a crate::config::StatusRulesConfig,
+    artist: &str,
+    title: &str,
+) -> Option<&'a crate::config::TrackRuleEntry> {
+    rules
+        .track_rules
+        .iter()
+        .find(|rule| track_rule_hit(rule, artist, title))
+}
+
 /// Issue #343: fingerprint of the status-shaping config. Embedded in the
 /// track change key so a filter/placeholder/format flip mid-track reads as
 /// a change and forces one rewrite on the next poll, instead of leaving
 /// the stale status posted until the next track change.
 ///
 /// The `None`-config fallbacks mirror `process_track`'s exactly — a
-/// mismatch here would flap the key on every poll.
 fn status_config_fingerprint(config: &Option<crate::config::AppConfig>) -> String {
     let filter = config
         .as_ref()
@@ -942,7 +1012,38 @@ fn status_config_fingerprint(config: &Option<crate::config::AppConfig>) -> Strin
         .as_ref()
         .map(|c| c.teams.status_format.as_str())
         .unwrap_or("🎵 {artist} - {track} 🎧");
-    format!("filter={filter} placeholder={placeholder} format={format}")
+    // Issue #432: rule edits flip the key too, so enabling/disabling a
+    // rule or quiet-hours entry mid-track forces one rewrite pass instead
+    // of leaving the stale gate decision until the next track change.
+    // Counts + enabled flags only (substrings/replacements are
+    // user content, not key material — excluded deliberately).
+    let rules = config.as_ref().map(|c| {
+        let q: Vec<String> = c
+            .status_rules
+            .quiet_hours
+            .iter()
+            .map(|e| format!("{}:{}-{}:{:?}", e.enabled, e.start_minutes, e.end_minutes, e.days))
+            .collect();
+        let t: Vec<String> = c
+            .status_rules
+            .track_rules
+            .iter()
+            .map(|r| {
+                format!(
+                    "{}:{}:{}:{}",
+                    r.enabled,
+                    r.artist_substring.len(),
+                    r.track_substring.len(),
+                    r.replacement_status.len()
+                )
+            })
+            .collect();
+        format!("quiet=[{}] rules=[{}]", q.join(","), t.join(","))
+    });
+    format!(
+        "filter={filter} placeholder={placeholder} format={format} rules={}",
+        rules.as_deref().unwrap_or("quiet=[] rules=[]")
+    )
 }
 
 /// Issue #343: the change key compared against `last_track_key`. Track
@@ -1217,12 +1318,67 @@ pub(crate) fn process_track(
             // inside the window parks untouched and the retry performs the
             // single gate read. Fail-safe: a failed read
             // (network, 403, …) proceeds with the write, logged as a warning.
+            // Issue #432: rule-based gating, evaluated alongside the
+            // presence gate on every track change. Quiet hours suppress
+            // unconditionally (time-based — no presence read needed); a
+            // matching track rule with an empty replacement suppresses like
+            // the presence gate. Both record into `gated_track_key` so the
+            // #380 re-check path below re-evaluates them mid-track
+            // (quiet-hours expiry clears like a cleared presence gate) and
+            // the write below stays the single late-post path — no
+            // duplicate/spam writes beyond #384 dedup. A rule carrying a
+            // non-empty `replacement_status` never gates: its text becomes
+            // `final_status` below, still flowing through the #384
+            // identical-write suppression.
+            let (now_minutes, weekday) = local_minutes_and_weekday();
+            let matched_rule = config.as_ref().and_then(|c| {
+                matching_track_rule(&c.status_rules, &track.artist, &track.title)
+            });
+            let quiet_active = config.as_ref().map_or(false, |c| {
+                quiet_hours_active(&c.status_rules, now_minutes, weekday)
+            });
+            // Owned clone — `matched_rule` borrows `config`; the write path
+            // below must not hold that borrow.
+            let rule_replacement: Option<String> = matched_rule
+                .filter(|m| !m.replacement_status.is_empty())
+                .map(|m| m.replacement_status.clone());
+            let rule_suppress = matched_rule.map_or(false, |m| m.replacement_status.is_empty());
             let presence_gate_enabled = config
                 .as_ref()
                 .map(|c| c.teams.presence_gate)
                 .unwrap_or(true);
             if changed {
-                if presence_gate_enabled {
+                if quiet_active {
+                    log::info!(
+                        "[POLLING] process_track: quiet hours active, skipping status write"
+                    );
+                    *gated_track_key = Some(track_key.clone());
+                    *last_gate_check = Some(Instant::now());
+                    let _ = app.emit(
+                        "presence-gated",
+                        json!({
+                            "reason": "quiet-hours",
+                            "availability": "",
+                            "activity": "",
+                            "timestamp": Utc::now().to_rfc3339()
+                        }),
+                    );
+                } else if rule_suppress {
+                    log::info!(
+                        "[POLLING] process_track: track rule matched, skipping status write"
+                    );
+                    *gated_track_key = Some(track_key.clone());
+                    *last_gate_check = Some(Instant::now());
+                    let _ = app.emit(
+                        "presence-gated",
+                        json!({
+                            "reason": "track-rule",
+                            "availability": "",
+                            "activity": "",
+                            "timestamp": Utc::now().to_rfc3339()
+                        }),
+                    );
+                } else if presence_gate_enabled {
                     match get_teams_presence(&teams_tok.access_token) {
                         Ok(presence) if is_presence_gated(&presence) => {
                             let reason = presence_gate_reason(&presence);
@@ -1257,7 +1413,6 @@ pub(crate) fn process_track(
                     *gated_track_key = None;
                 }
             }
-
             // Issue #380: a gated track stays gated only until the gate
             // re-check is due — then presence is re-read, and a cleared
             // gate (meeting ended mid-track) falls through to the normal
@@ -1265,7 +1420,27 @@ pub(crate) fn process_track(
             // Fail-safe: a failed read keeps the gate (still suppressed).
             // `last_gate_check` throttles the re-reads while gated — never
             // `last_teams_update`, which times the debounce + keepalive write clocks.
+            // Issue #432: rule gates re-evaluate here too. The clock is
+            // re-projected (a long-lived track can span a quiet-hours
+            // boundary) and the track rule re-matched; a still-matching
+            // rule keeps the suppression without a presence read, while a
+            // cleared rule falls into the presence re-check below.
             if gated_track_key.as_deref() == Some(track_key.as_str()) {
+                let (cur_minutes, cur_weekday) = local_minutes_and_weekday();
+                let rules_still_gating = config.as_ref().map_or(false, |c| {
+                    quiet_hours_active(&c.status_rules, cur_minutes, cur_weekday)
+                        || matching_track_rule(&c.status_rules, &track.artist, &track.title)
+                            .map_or(false, |m| m.replacement_status.is_empty())
+                });
+                if rules_still_gating {
+                    if gate_recheck_due(*last_gate_check, Instant::now()) {
+                        *last_gate_check = Some(Instant::now());
+                    }
+                    log::debug!("[POLLING] process_track: still rule-gated, keeping suppression");
+                    let remaining_ms =
+                        corrected_progress_ms.map(|c| track.duration_ms.saturating_sub(c));
+                    return playing_track_sleep(remaining_ms, config);
+                }
                 let gate_enabled = config
                     .as_ref()
                     .map(|c| c.teams.presence_gate)
@@ -1321,7 +1496,14 @@ pub(crate) fn process_track(
                 .as_ref()
                 .map(|c| c.teams.profanity_placeholder.as_str())
                 .unwrap_or(profanity::safe_placeholder_default());
-            let final_status = if profanity_filter_enabled {
+            // Issue #432: a matching rule's non-empty `replacement_status`
+            // becomes the posted text (the "busy/focus" alternative to
+            // suppression). It still flows through the #384 identical-write
+            // suppression below — a byte-identical replacement inside the
+            // keepalive window skips the write exactly like normal text.
+            let final_status = if let Some(replacement) = rule_replacement.as_deref() {
+                replacement.to_string()
+            } else if profanity_filter_enabled {
                 profanity::filter_status(&status_message, placeholder, track.is_playing)
             } else {
                 status_message.clone()
@@ -2926,6 +3108,21 @@ mod tests {
             status_config_fingerprint(&base),
             "identical config must fingerprint identically"
         );
+
+        // Issue #432: enabling a rule or quiet-hours entry must flip the
+        // fingerprint so the change takes effect mid-track.
+        let mut ruled = crate::config::AppConfig::default();
+        ruled.status_rules.quiet_hours.push(crate::config::QuietHoursEntry {
+            enabled: true,
+            start_minutes: 0,
+            end_minutes: 1439,
+            days: Vec::new(),
+        });
+        assert_ne!(
+            fp,
+            status_config_fingerprint(&Some(ruled)),
+            "adding a quiet-hours entry must change the fingerprint"
+        );
     }
 
     /// Issue #343: the 304 force-rewrite fires exactly when the stored key
@@ -3140,6 +3337,75 @@ mod tests {
             !gate_recheck_due(Some(now), now),
             "a fresh re-check must not re-read presence every poll"
         );
+    }
+    /// Issue #432: quiet-hours predicate — plain range, wrap-around,
+    /// weekday filter, disabled entry, and degenerate equal bounds.
+    #[test]
+    fn test_quiet_hours_active_predicate() {
+        use crate::config::{QuietHoursEntry, StatusRulesConfig};
+        let rules = |entries: Vec<QuietHoursEntry>| StatusRulesConfig {
+            quiet_hours: entries,
+            track_rules: Vec::new(),
+        };
+        let entry = |enabled: bool, start: u16, end: u16, days: Vec<u8>| QuietHoursEntry {
+            enabled,
+            start_minutes: start,
+            end_minutes: end,
+            days,
+        };
+        // Plain range 09:00→17:00 on a Wednesday (3).
+        let r = rules(vec![entry(true, 540, 1020, vec![])]);
+        assert!(quiet_hours_active(&r, 600, 3));
+        assert!(!quiet_hours_active(&r, 500, 3));
+        assert!(!quiet_hours_active(&r, 1020, 3), "end bound is exclusive");
+        // Wrap-around 22:00→07:00.
+        let w = rules(vec![entry(true, 1320, 420, vec![])]);
+        assert!(quiet_hours_active(&w, 1380, 3));
+        assert!(quiet_hours_active(&w, 300, 3));
+        assert!(!quiet_hours_active(&w, 600, 3));
+        // Weekday filter: Mondays only.
+        let d = rules(vec![entry(true, 0, 1439, vec![1])]);
+        assert!(quiet_hours_active(&d, 600, 1));
+        assert!(!quiet_hours_active(&d, 600, 2));
+        // Disabled entry never gates; degenerate equal bounds never gate.
+        assert!(!quiet_hours_active(
+            &rules(vec![entry(false, 0, 1439, vec![])]),
+            600,
+            3
+        ));
+        assert!(!quiet_hours_active(
+            &rules(vec![entry(true, 600, 600, vec![])]),
+            600,
+            3
+        ));
+        // No entries at all.
+        assert!(!quiet_hours_active(&rules(vec![]), 600, 3));
+    }
+
+    /// Issue #432: track-rule matching — case-insensitive substrings,
+    /// empty-matches-all, disabled rules never hit, first-match wins.
+    #[test]
+    fn test_track_rule_hit_matching() {
+        use crate::config::{StatusRulesConfig, TrackRuleEntry};
+        let rule = |enabled: bool, artist: &str, track: &str| TrackRuleEntry {
+            enabled,
+            artist_substring: artist.to_string(),
+            track_substring: track.to_string(),
+            replacement_status: String::new(),
+        };
+        assert!(track_rule_hit(&rule(true, "lofi", ""), "LoFi Girl", "Anything"));
+        assert!(track_rule_hit(&rule(true, "", "rain"), "Anyone", "Rain Sounds"));
+        assert!(!track_rule_hit(&rule(true, "lofi", "rain"), "Lofi Girl", "Sunshine"));
+        assert!(!track_rule_hit(&rule(false, "", ""), "Anyone", "Anything"));
+        let rules = StatusRulesConfig {
+            quiet_hours: Vec::new(),
+            // First rule disabled (never hits even though empty matches
+            // all) so the enabled second rule wins for artist "b".
+            track_rules: vec![rule(false, "", ""), rule(true, "b", "")],
+        };
+        let hit = matching_track_rule(&rules, "b", "anything").expect("must hit second rule");
+        assert_eq!(hit.artist_substring, "b");
+        assert!(matching_track_rule(&rules, "a", "zzz").is_none());
     }
 
     /// Issue #380 structural guard: the gated branch re-reads presence

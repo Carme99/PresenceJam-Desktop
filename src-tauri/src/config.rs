@@ -139,6 +139,66 @@ fn default_schema_version() -> u32 {
     1
 }
 
+/// One quiet-hours entry for issue #432: status writes are suppressed while
+/// the local time falls inside `[start_minutes, end_minutes)` (minutes
+/// since midnight; wrap-around ranges like 22:00→07:00 are supported).
+/// `days` holds ISO weekday numbers 1 (Mon)..=7 (Sun); empty means every
+/// day. All fields `#[serde(default)]` individually so a hand-edited
+/// config missing one still loads.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
+pub struct QuietHoursEntry {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Minutes since midnight, clamped to 0..=1439 on read.
+    #[serde(default)]
+    pub start_minutes: u16,
+    /// Minutes since midnight, clamped to 0..=1439 on read.
+    #[serde(default = "default_quiet_end")]
+    pub end_minutes: u16,
+    /// ISO weekday numbers 1..=7; empty = every day.
+    #[serde(default)]
+    pub days: Vec<u8>,
+}
+
+fn default_quiet_end() -> u16 {
+    420
+}
+
+/// One track-matching rule for issue #432: when `artist_substring` /
+/// `track_substring` (case-insensitive) both match the current track, the
+/// rule suppresses the status write for this track exactly like the
+/// presence gate — flowing through the same `gated_track_key`
+/// suppression + mid-track re-evaluation path. Empty substrings match
+/// everything (so a rule with only one field set still works).
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
+pub struct TrackRuleEntry {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub artist_substring: String,
+    #[serde(default)]
+    pub track_substring: String,
+    /// Optional fixed status posted instead of suppressing (issue #432
+    /// "busy/focus" alternative). Empty = suppress silently.
+    #[serde(default)]
+    pub replacement_status: String,
+}
+
+/// User-defined status rules for issue #432 (quiet hours + track
+/// matching). Additive on `AppConfig` with `#[serde(default)]` so
+/// pre-4.5 config files load unchanged (issue #379 versioning untouched:
+/// `schema_version` stays 1, `extra` retention untouched).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
+pub struct StatusRulesConfig {
+    #[serde(default)]
+    pub quiet_hours: Vec<QuietHoursEntry>,
+    #[serde(default)]
+    pub track_rules: Vec<TrackRuleEntry>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct AppConfig {
@@ -152,6 +212,8 @@ pub struct AppConfig {
     pub logging: LoggingConfig,
     #[serde(default)]
     pub autostart: bool,
+    #[serde(default)]
+    pub status_rules: StatusRulesConfig,
     /// Config schema version (issue #379). Files written before 4.3.0 carry
     /// no such key and load as version 1.
     #[serde(default = "default_schema_version")]
@@ -224,6 +286,7 @@ impl Default for AppConfig {
             polling: PollingConfig::default(),
             logging: LoggingConfig::default(),
             autostart: false,
+            status_rules: StatusRulesConfig::default(),
             extra: BTreeMap::new(),
             schema_version: default_schema_version(),
         }
@@ -1051,5 +1114,38 @@ mod tests {
         );
         let back: AppConfig = serde_json::from_str(&json).expect("must re-parse");
         assert_eq!(back.extra, cfg.extra);
+    }
+
+    /// Issue #432: pre-4.5 config files without `status_rules` load with
+    /// empty rule lists (serde default), and the #379 versioning is
+    /// untouched — schema_version still defaults to 1.
+    #[test]
+    fn test_status_rules_default_empty_when_absent() {
+        let cfg: AppConfig = serde_json::from_str(r#"{"autostart": true}"#).expect("must parse");
+        assert!(cfg.status_rules.quiet_hours.is_empty());
+        assert!(cfg.status_rules.track_rules.is_empty());
+        assert_eq!(cfg.schema_version, 1);
+        assert_eq!(AppConfig::default().status_rules.quiet_hours.len(), 0);
+    }
+
+    /// Issue #432: rules round-trip through serde with per-field defaults
+    /// (a hand-edited entry missing optional fields still loads).
+    #[test]
+    fn test_status_rules_round_trip() {
+        let cfg: AppConfig = serde_json::from_str(
+            r#"{"status_rules": {"quiet_hours": [{"enabled": true, "start_minutes": 1320}], "track_rules": [{"enabled": true, "artist_substring": "lofi"}]}}"#,
+        )
+        .expect("must parse");
+        assert_eq!(cfg.status_rules.quiet_hours.len(), 1);
+        assert_eq!(cfg.status_rules.quiet_hours[0].start_minutes, 1320);
+        // `end_minutes` absent → default_quiet_end (07:00).
+        assert_eq!(cfg.status_rules.quiet_hours[0].end_minutes, 420);
+        assert!(cfg.status_rules.quiet_hours[0].days.is_empty());
+        assert_eq!(cfg.status_rules.track_rules.len(), 1);
+        assert!(cfg.status_rules.track_rules[0].replacement_status.is_empty());
+        let json = serde_json::to_string(&cfg).expect("must serialize");
+        let back: AppConfig = serde_json::from_str(&json).expect("must re-parse");
+        assert_eq!(back.status_rules.quiet_hours.len(), 1);
+        assert_eq!(back.status_rules.track_rules.len(), 1);
     }
 }

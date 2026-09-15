@@ -214,6 +214,8 @@ export const fr: Dict = {
   'diagnostics.loggingEnabled': 'activée ({level})',
   'diagnostics.loggingDisabled': 'désactivée',
   'diagnostics.launchAtLogin': "Lancer à l'ouverture de session",
+  'diagnostics.statusRules': 'Règles de statut',
+  'diagnostics.statusRulesValue': '{quiet}/{quietTotal} heures silencieuses, {rules}/{rulesTotal} règles de piste actives',
   'diagnostics.spotifyConnected': 'Spotify connecté',
   'diagnostics.spotifyTokenExpires': "Expiration du token Spotify",
   'diagnostics.teamsConnected': 'Teams connecté',
@@ -348,5 +350,26 @@ export const fr: Dict = {
 
   // ── routes / chrome ───────────────────────────────────────────────
   'routes.skipToMainContent': 'Aller au contenu principal',
-  'routes.unknownPane': 'Volet inconnu : {pane}'
+  'routes.unknownPane': 'Volet inconnu : {pane}',
+
+  // ── feat/45-features: status rules (#432) + support snapshot (#434) ──
+  'rules.sectionTitle': 'Règles de statut',
+  'rules.sectionHint':
+    'Les heures silencieuses et les règles de piste suppriment le statut Teams via le même chemin de gate — une règle levée publie automatiquement en cours de piste.',
+  'rules.quietHoursLabel': 'Heures silencieuses',
+  'rules.noQuietHours': 'Aucune heure silencieuse définie — le statut se synchronise à toute heure.',
+  'rules.quietStart': 'Début des heures silencieuses',
+  'rules.quietEnd': 'Fin des heures silencieuses',
+  'rules.addQuietHours': 'Ajouter des heures silencieuses',
+  'rules.trackRulesLabel': 'Règles de piste',
+  'rules.noTrackRules': 'Aucune règle de piste définie — toutes les pistes se synchronisent normalement.',
+  'rules.artistPlaceholder': 'Artiste contient…',
+  'rules.trackPlaceholder': 'Titre contient…',
+  'rules.replacementPlaceholder': 'Publier ceci à la place (vide = supprimer)',
+  'rules.addTrackRule': 'Ajouter une règle de piste',
+  'rules.removeRule': 'Supprimer',
+  'rules.ruleEnabled': 'Activé',
+  'logs.copySnapshot': 'Copier le snapshot',
+  'logs.snapshotCopied': 'Snapshot expurgé copié dans le presse-papiers.',
+  'logs.snapshotCopyFailed': 'Impossible de copier le snapshot.'
 };

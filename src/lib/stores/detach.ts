@@ -63,8 +63,19 @@ export async function popOut(pane: DetachablePane): Promise<void> {
   }
 
   const size = PANE_SIZE[pane];
+  // Issue #433: carry the current theme on the URL so the child's
+  // pre-paint snippet (app.html) applies it before first paint — no
+  // flash of the wrong theme even before the storage event converges.
+  // Read by literal key (no store import — this module never imports it).
+  let themeParam = '';
+  try {
+    const stored = window.localStorage.getItem('presencejam:theme');
+    if (stored === 'dark' || stored === 'light') themeParam = `?theme=${stored}`;
+  } catch {
+    // localStorage may be blocked; the child falls back to OS preference.
+  }
   const win = new WebviewWindow(label, {
-    url: `/detached/${pane}`,
+    url: `/detached/${pane}${themeParam}`,
     title: PANE_TITLE[pane],
     width: size.width,
     height: size.height,

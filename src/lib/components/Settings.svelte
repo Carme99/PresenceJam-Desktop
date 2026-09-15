@@ -62,6 +62,26 @@
     localConfig.teams.profanity_filter = defaultConfig.teams.profanity_filter;
     localConfig.teams.profanity_placeholder = defaultConfig.teams.profanity_placeholder;
   }
+  // Issue #432: reset the rules section to its (empty) default. Rules are
+  // additive with serde defaults, so a default section is always valid.
+  function resetRulesDefaults() {
+    localConfig.status_rules = structuredClone(defaultConfig.status_rules);
+  }
+  // Issue #432: format minutes-since-midnight as HH:MM for time inputs.
+  function minutesToTime(m: number): string {
+    const h = Math.floor(m / 60) % 24;
+    const mm = m % 60;
+    return `${String(h).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+  }
+  // Issue #432: parse an HH:MM time input back to minutes-since-midnight;
+  // garbage falls back to the previous value (never NaN into config).
+  function timeToMinutes(value: string, fallback: number): number {
+    const match = /^(\d{1,2}):(\d{2})/.exec(value.trim());
+    if (!match) return fallback;
+    const h = Math.min(23, Math.max(0, Number(match[1])));
+    const mm = Math.min(59, Math.max(0, Number(match[2])));
+    return h * 60 + mm;
+  }
   function resetPollingDefaults() {
     localConfig.polling = structuredClone(defaultConfig.polling);
   }
@@ -559,6 +579,93 @@
     </section>
     <section class="card">
       <header class="section-header">
+        <h2>{t('rules.sectionTitle')}</h2>
+        <button type="button" class="btn-link" onclick={resetRulesDefaults}>{t('common.resetToDefault')}</button>
+      </header>
+      <p class="hint">{t('rules.sectionHint')}</p>
+      {#if localConfig.status_rules == null}
+        <p class="hint">{t('rules.noQuietHours')}</p>
+      {:else}
+      <div class="form-group">
+        <span class="form-label">{t('rules.quietHoursLabel')}</span>
+        {#if localConfig.status_rules.quiet_hours.length === 0}
+          <p class="hint">{t('rules.noQuietHours')}</p>
+        {/if}
+        {#each localConfig.status_rules.quiet_hours as entry, i}
+          <div class="rule-row" role="group" aria-label={t('rules.quietHoursLabel')}>
+            <input type="checkbox" bind:checked={entry.enabled} aria-label={t('rules.ruleEnabled')} />
+            <input
+              type="time"
+              value={minutesToTime(entry.start_minutes)}
+              onchange={(e) => { entry.start_minutes = timeToMinutes((e.currentTarget as HTMLInputElement).value, entry.start_minutes); }}
+              aria-label={t('rules.quietStart')}
+            />
+            <span aria-hidden="true">–</span>
+            <input
+              type="time"
+              value={minutesToTime(entry.end_minutes)}
+              onchange={(e) => { entry.end_minutes = timeToMinutes((e.currentTarget as HTMLInputElement).value, entry.end_minutes); }}
+              aria-label={t('rules.quietEnd')}
+            />
+            <button
+              type="button"
+              class="btn-link"
+              onclick={() => { localConfig.status_rules.quiet_hours.splice(i, 1); }}
+            >{t('rules.removeRule')}</button>
+          </div>
+        {/each}
+        <button
+          type="button"
+          class="btn-secondary"
+          onclick={() => { localConfig.status_rules.quiet_hours.push({ enabled: true, start_minutes: 1320, end_minutes: 420, days: [] }); }}
+        >{t('rules.addQuietHours')}</button>
+      </div>
+      <div class="form-group">
+        <span class="form-label">{t('rules.trackRulesLabel')}</span>
+        {#if localConfig.status_rules.track_rules.length === 0}
+          <p class="hint">{t('rules.noTrackRules')}</p>
+        {/if}
+        {#each localConfig.status_rules.track_rules as rule, j}
+          <div class="rule-row rule-col" role="group" aria-label={t('rules.trackRulesLabel')}>
+            <label class="rule-check">
+              <input type="checkbox" bind:checked={rule.enabled} />
+              <span>{t('rules.ruleEnabled')}</span>
+            </label>
+            <input
+              type="text"
+              bind:value={rule.artist_substring}
+              placeholder={t('rules.artistPlaceholder')}
+              aria-label={t('rules.artistPlaceholder')}
+            />
+            <input
+              type="text"
+              bind:value={rule.track_substring}
+              placeholder={t('rules.trackPlaceholder')}
+              aria-label={t('rules.trackPlaceholder')}
+            />
+            <input
+              type="text"
+              bind:value={rule.replacement_status}
+              placeholder={t('rules.replacementPlaceholder')}
+              aria-label={t('rules.replacementPlaceholder')}
+            />
+            <button
+              type="button"
+              class="btn-link"
+              onclick={() => { localConfig.status_rules.track_rules.splice(j, 1); }}
+            >{t('rules.removeRule')}</button>
+          </div>
+        {/each}
+        <button
+          type="button"
+          class="btn-secondary"
+          onclick={() => { localConfig.status_rules.track_rules.push({ enabled: true, artist_substring: '', track_substring: '', replacement_status: '' }); }}
+        >{t('rules.addTrackRule')}</button>
+      </div>
+      {/if}
+    </section>
+    <section class="card">
+      <header class="section-header">
         <h2>{t('settings.sectionStatusFormat')}</h2>
         <button type="button" class="btn-link" onclick={resetStatusFormatDefaults}>{t('common.resetToDefault')}</button>
       </header>
@@ -933,6 +1040,31 @@
   }
   .toggle-row label {
     font-size: var(--fs-base);
+    color: var(--fg);
+  }
+  /* Issue #432: status-rule rows reuse the card's form rhythm — a
+  wrapping flex row for quiet-hours entries, column variant for the
+  four-field track rules. */
+  .rule-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--sp-2);
+  }
+  .rule-row input[type='text'],
+  .rule-row input[type='time'] {
+    flex: 1 1 120px;
+    min-width: 0;
+  }
+  .rule-col {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .rule-check {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    font-size: var(--fs-sm);
     color: var(--fg);
   }
 

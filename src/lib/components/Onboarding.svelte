@@ -352,6 +352,8 @@
           log_level: 'Info'
         },
         autostart: launchAtLogin,
+        // Issue #432: new installs start with no rules (Rust default).
+        status_rules: { quiet_hours: [], track_rules: [] },
         // Mirrors Rust AppConfig::default_schema_version (issue #379).
         // Required by the ts-rs AppConfig contract.
         schema_version: 1

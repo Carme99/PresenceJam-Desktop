@@ -201,6 +201,8 @@ export const en = {
   'diagnostics.loggingEnabled': 'enabled ({level})',
   'diagnostics.loggingDisabled': 'disabled',
   'diagnostics.launchAtLogin': 'Launch at login',
+  'diagnostics.statusRules': 'Status rules',
+  'diagnostics.statusRulesValue': '{quiet}/{quietTotal} quiet hours, {rules}/{rulesTotal} track rules on',
   'diagnostics.spotifyConnected': 'Spotify connected',
   'diagnostics.spotifyTokenExpires': 'Spotify token expires',
   'diagnostics.teamsConnected': 'Teams connected',
@@ -324,7 +326,28 @@ export const en = {
 
   // ── routes / chrome ───────────────────────────────────────────────
   'routes.skipToMainContent': 'Skip to main content',
-  'routes.unknownPane': 'Unknown pane: {pane}'
+  'routes.unknownPane': 'Unknown pane: {pane}',
+
+  // ── feat/45-features: status rules (#432) + support snapshot (#434) ──
+  'rules.sectionTitle': 'Status rules',
+  'rules.sectionHint':
+    'Quiet hours and track rules suppress the Teams status write, reusing the same presence-gate path — a cleared rule posts automatically mid-track.',
+  'rules.quietHoursLabel': 'Quiet hours',
+  'rules.noQuietHours': 'No quiet hours defined — status syncs at all hours.',
+  'rules.quietStart': 'Quiet hours start',
+  'rules.quietEnd': 'Quiet hours end',
+  'rules.addQuietHours': 'Add quiet hours',
+  'rules.trackRulesLabel': 'Track rules',
+  'rules.noTrackRules': 'No track rules defined — all tracks sync normally.',
+  'rules.artistPlaceholder': 'Artist contains…',
+  'rules.trackPlaceholder': 'Track title contains…',
+  'rules.replacementPlaceholder': 'Post this instead (empty = suppress)',
+  'rules.addTrackRule': 'Add track rule',
+  'rules.removeRule': 'Remove',
+  'rules.ruleEnabled': 'Enabled',
+  'logs.copySnapshot': 'Copy snapshot',
+  'logs.snapshotCopied': 'Redacted snapshot copied to clipboard.',
+  'logs.snapshotCopyFailed': 'Could not copy the snapshot.'
 };
 
 export type Dict = { readonly [K in keyof typeof en]: string };
