@@ -537,10 +537,25 @@ struct ExpiryDateTime {
     time_zone: String,
 }
 
-/// POSTs a status message body to the Graph setStatusMessage endpoint and
-/// maps the response to a typed error. Shared by the set and clear paths so
-/// both get identical status-code discrimination (401 vs 403 vs 429 vs 5xx)
-/// and `Retry-After` parsing. See issues #153/#154.
+/// Maps a Graph response to the typed error. Shared by the set and clear
+/// paths so both get identical status-code discrimination (401 vs 403 vs
+/// 429 vs 5xx) and Retry-After parsing. See issues #153/#154.
+
+/// Pure status-code to error-variant decision (issue #493): every Graph
+/// call site funnels through this so the 401/403/429/5xx discrimination
+/// lives in one unit-testable place. Takes the already-parsed Retry-After
+/// value and the response body text. Callers truncate bodies for log
+/// safety before display; the stored body here stays raw for diagnosis.
+fn classify_teams_status(status_code: u16, retry_after: Option<u64>, body: &str) -> TeamsApiError {
+    match status_code {
+        401 => TeamsApiError::ExpiredToken(status_code),
+        403 => TeamsApiError::Forbidden(status_code, body.to_string()),
+        429 => TeamsApiError::RateLimited(retry_after),
+        500..=599 => TeamsApiError::Transient(format!("server error {}: {}", status_code, body)),
+        _ => TeamsApiError::Other(status_code, body.to_string()),
+    }
+}
+
 fn post_status_message(
     access_token: &str,
     body: &StatusMessageRequest,
@@ -572,15 +587,7 @@ fn post_status_message(
             status,
             body_text
         );
-        return Err(match status_code {
-            401 => TeamsApiError::ExpiredToken(status_code),
-            403 => TeamsApiError::Forbidden(status_code, body_text),
-            429 => TeamsApiError::RateLimited(retry_after),
-            500..=599 => {
-                TeamsApiError::Transient(format!("server error {}: {}", status_code, body_text))
-            }
-            _ => TeamsApiError::Other(status_code, body_text),
-        });
+        return Err(classify_teams_status(status_code, retry_after, &body_text));
     }
 
     Ok(())
@@ -805,15 +812,7 @@ fn post_presence<T: Serialize>(
             status,
             body_text
         );
-        return Err(match status_code {
-            401 => TeamsApiError::ExpiredToken(status_code),
-            403 => TeamsApiError::Forbidden(status_code, body_text),
-            429 => TeamsApiError::RateLimited(retry_after),
-            500..=599 => {
-                TeamsApiError::Transient(format!("server error {}: {}", status_code, body_text))
-            }
-            _ => TeamsApiError::Other(status_code, body_text),
-        });
+        return Err(classify_teams_status(status_code, retry_after, &body_text));
     }
 
     Ok(())
@@ -930,15 +929,7 @@ pub fn get_teams_presence(access_token: &str) -> Result<PresenceInfo, TeamsApiEr
 
     if !status.is_success() {
         log::error!("Failed to get Teams presence: {} - {}", status, body_text);
-        return Err(match status_code {
-            401 => TeamsApiError::ExpiredToken(status_code),
-            403 => TeamsApiError::Forbidden(status_code, body_text),
-            429 => TeamsApiError::RateLimited(retry_after),
-            500..=599 => {
-                TeamsApiError::Transient(format!("server error {}: {}", status_code, body_text))
-            }
-            _ => TeamsApiError::Other(status_code, body_text),
-        });
+        return Err(classify_teams_status(status_code, retry_after, &body_text));
     }
 
     parse_presence_body(&body_text)
@@ -981,22 +972,10 @@ pub fn validate_teams_token(tokens: &TeamsTokens) -> Result<(), TeamsApiError> {
         // 401 = token missing/invalid → re-auth required; 403 = no
         // permission/license (or conditional-access insufficient_claims)
         // → re-auth won't help, surface as its own error. See #153.
-        401 => Err(TeamsApiError::ExpiredToken(status_code)),
-        403 => {
+        // All other codes share the single classifier (issue #493).
+        other => {
             let body = response.text().unwrap_or_default();
-            Err(TeamsApiError::Forbidden(status_code, body))
-        }
-        429 => Err(TeamsApiError::RateLimited(retry_after)),
-        500..=599 => {
-            let body = response.text().unwrap_or_default();
-            Err(TeamsApiError::Transient(format!(
-                "server error {}: {}",
-                status_code, body
-            )))
-        }
-        _ => {
-            let body = response.text().unwrap_or_default();
-            Err(TeamsApiError::Other(status_code, body))
+            Err(classify_teams_status(other, retry_after, &body))
         }
     }
 }
@@ -1017,6 +996,50 @@ mod tests {
     fn test_truncate_under_limit() {
         let body = "short body".to_string();
         assert_eq!(truncate_for_log(&body), body);
+    }
+    /// Issue #493: the Graph status classifier must map bodies to typed
+    /// variants by status code -- a comment or log mentioning "401" must not
+    /// change classification, and reintroducing string-sniffing under any
+    /// token breaks this test.
+    #[test]
+    fn test_classify_teams_status_maps_codes_to_variants() {
+        use super::classify_teams_status;
+        use super::TeamsApiError;
+        assert!(matches!(
+            classify_teams_status(401, None, "unauthorized noise"),
+            TeamsApiError::ExpiredToken(401)
+        ));
+        assert!(matches!(
+            classify_teams_status(403, None, "forbidden noise"),
+            TeamsApiError::Forbidden(403, _)
+        ));
+        assert!(matches!(
+            classify_teams_status(429, Some(90), "throttled"),
+            TeamsApiError::RateLimited(Some(90))
+        ));
+        assert!(matches!(
+            classify_teams_status(429, None, "throttled"),
+            TeamsApiError::RateLimited(None)
+        ));
+        assert!(matches!(
+            classify_teams_status(503, None, "boom"),
+            TeamsApiError::Transient(_)
+        ));
+        assert!(matches!(
+            classify_teams_status(418, None, "teapot"),
+            TeamsApiError::Other(418, _)
+        ));
+        // Bodies ride through untouched -- no string sniffing: a 403 whose
+        // body mentions "401" is still Forbidden, and a 200-range code
+        // with an "unauthorized" body is still Other.
+        match classify_teams_status(403, None, "error 401 inside body") {
+            TeamsApiError::Forbidden(403, b) => assert!(b.contains("401")),
+            other => panic!("expected Forbidden, got {:?}", other),
+        }
+        match classify_teams_status(418, None, "unauthorized words here") {
+            TeamsApiError::Other(418, b) => assert!(b.contains("unauthorized")),
+            other => panic!("expected Other, got {:?}", other),
+        }
     }
 
     #[test]
@@ -1157,6 +1180,29 @@ mod tests {
         );
         assert_eq!(json["interval"].as_u64(), Some(5));
         assert_eq!(json["expires_in"].as_u64(), Some(900));
+    }
+    /// Issue #490: the backend provides `expires_in` and it must stay on
+    /// the wire as a JSON number through the IPC boundary -- the frontend
+    /// expiry countdown (`expiresAt = now + expires_in*1000`) depends on
+    /// it. Dropping or stringifying the field strands users on a dead
+    /// device code with no recovery path.
+    #[test]
+    fn device_code_response_preserves_expires_in() {
+        let resp = DeviceCodeResponse {
+            user_code: "X".to_string(),
+            verification_url: "https://example.test".to_string(),
+            device_code: "d".to_string(),
+            interval: 5,
+            expires_in: 899,
+        };
+        // Field survives struct round-trip.
+        assert_eq!(resp.expires_in, 899);
+        // Field survives serde (the IPC path): number, exact value.
+        let json: serde_json::Value = serde_json::to_value(&resp).expect("to_value");
+        assert_eq!(json["expires_in"].as_u64(), Some(899));
+        let back: DeviceCodeResponse = serde_json::from_value(json).expect("from_value");
+        assert_eq!(back.expires_in, 899);
+        assert_eq!(back.interval, 5);
     }
 
     // Issue #152: RFC 8628 §3.5 — `slow_down` carries no interval of its

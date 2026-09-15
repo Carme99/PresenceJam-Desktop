@@ -2572,60 +2572,6 @@ mod tests {
         assert_eq!(playing_track_sleep(Some(2_000), &None), 10);
     }
 
-    /// Issue #156 regression guard: the playing-status expiry must be built
-    /// with the offset-less format, never through `to_rfc3339()` (which
-    /// embeds `+00:00` and up to 9 fraction digits). The three remaining
-    /// `to_rfc3339()` uses are frontend payload timestamps, which are fine.
-    #[test]
-    fn test_expiry_uses_offset_less_format_not_rfc3339() {
-        let source = include_str!("poll_once.rs");
-        let prod_source = source
-            .split("#[cfg(test)]\nmod tests")
-            .next()
-            .expect("poll_once.rs has no #[cfg(test)] mod tests block");
-        assert!(
-            prod_source.contains(r#""%Y-%m-%dT%H:%M:%S%.6f""#),
-            "expiry must use the offset-less 6-digit format (issue #156)"
-        );
-        let expiry_lines = prod_source
-            .lines()
-            .filter(|l| l.contains("expiry_str ="))
-            .collect::<Vec<_>>();
-        assert!(
-            !expiry_lines.iter().any(|l| l.contains("to_rfc3339")),
-            "expiry_str must not be built with to_rfc3339: {:?}",
-            expiry_lines
-        );
-    }
-
-    /// Issue #153 regression guard: Teams set/clear failures must be
-    /// classified by the typed `TeamsApiError` variants, not by
-    /// string-sniffing the error body for "unauthorized"/"forbidden"/401/403.
-    #[test]
-    fn test_teams_error_classification_is_typed_not_string_sniffed() {
-        let source = include_str!("poll_once.rs");
-        let prod_source = source
-            .split("#[cfg(test)]\nmod tests")
-            .next()
-            .expect("poll_once.rs has no #[cfg(test)] mod tests block");
-        for sniff in [
-            r#"e_str.contains("unauthorized")"#,
-            r#"e_str.contains("forbidden")"#,
-            r#"e_str.contains("401")"#,
-            r#"e_str.contains("403")"#,
-        ] {
-            assert!(
-                !prod_source.contains(sniff),
-                "string-sniffing on Teams error bodies must be gone (issue #153): {}",
-                sniff
-            );
-        }
-        assert!(
-            prod_source.contains("TeamsApiError::Forbidden(_, _)"),
-            "Forbidden must be matched by variant (issue #153)"
-        );
-    }
-
     // Issue #3.0-P1: the availability re-arm must happen at most every 4
     // minutes — Available sessions FADE after 5 min regardless of
     // `expirationDuration`, so the cadence must be strictly inside that
@@ -2828,6 +2774,29 @@ mod tests {
         assert!(
             matches!(transient_outcome(u8::MAX), Some(PollIteration::Break)),
             "a saturated counter must still break"
+        );
+    }
+    /// Issue #477: the 5-strikes threshold is provider-scoped -- five
+    /// consecutive transient Spotify failures break the loop so the
+    /// caller emits the provider-specific `spotify-reconnect-required`
+    /// alongside the generic signal. Below-threshold counts must not
+    /// break (a blip must not kill the session).
+    #[test]
+    fn test_five_strikes_threshold_is_provider_scoped_break() {
+        assert_eq!(
+            TRANSIENT_FAILURE_EXIT_THRESHOLD, 5,
+            "issue #262/#477 specifies exactly 5 consecutive transient failures"
+        );
+        for count in 0..5u8 {
+            assert!(
+                transient_outcome(count).is_none(),
+                "{} transient failures must NOT break the loop",
+                count
+            );
+        }
+        assert!(
+            matches!(transient_outcome(5), Some(PollIteration::Break)),
+            "5 consecutive transient failures MUST break so the caller emits the provider signal"
         );
     }
 

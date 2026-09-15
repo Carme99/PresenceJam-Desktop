@@ -59,6 +59,10 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
                         let _ = window.hide();
                     } else {
                         let _ = window.show();
+                        // Issue #483: a minimized window stays minimized
+                        // after show() -- unminimize first (mirrors the
+                        // single-instance raise in lib.rs and show_window).
+                        let _ = window.unminimize();
                         let _ = window.set_focus();
                     }
                 }
@@ -84,6 +88,8 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
                 let _ = app.emit("navigate", "settings");
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.show();
+                    // Issue #483: mirror the unminimize in the Show arm.
+                    let _ = window.unminimize();
                     let _ = window.set_focus();
                 }
             }
@@ -1067,6 +1073,37 @@ mod tests {
         );
         assert_eq!(parse_device_menu_id("none"), DeviceMenuSelection::Invalid);
         assert_eq!(parse_device_menu_id(""), DeviceMenuSelection::Invalid);
+    }
+    /// Issue #482: id-snapshot edge cases -- a reorder between menu build
+    /// and click must still hit the labelled device (id-keyed resolution),
+    /// and unknown/empty selections must resolve to Invalid, never to a
+    /// neighboring device by index.
+    #[test]
+    fn parse_device_menu_id_rejects_unknown_and_empty() {
+        // Spotify ids are opaque base62; digit-only suffixes are the legacy
+        // index scheme and must keep parsing as LegacyIndex, never as an id.
+        assert_eq!(
+            parse_device_menu_id("007"),
+            DeviceMenuSelection::LegacyIndex(7)
+        );
+        // Mixed alphanumeric ids (even with a leading digit) are stable ids.
+        assert_eq!(
+            parse_device_menu_id("0abc"),
+            DeviceMenuSelection::DeviceId("0abc".to_string())
+        );
+        // The placeholder and the empty string are never a device.
+        assert_eq!(parse_device_menu_id("none"), DeviceMenuSelection::Invalid);
+        assert_eq!(parse_device_menu_id(""), DeviceMenuSelection::Invalid);
+        // Redaction helper never leaks the id itself.
+        let logged = selected_for_log(&DeviceMenuSelection::DeviceId("secret-id-123".to_string()));
+        assert!(
+            !logged.contains("secret-id-123"),
+            "device id must not appear in logs"
+        );
+        assert!(
+            logged.contains("len="),
+            "redacted label must carry the length"
+        );
     }
 
     /// Issue #388: the click handler must resolve by id with a live

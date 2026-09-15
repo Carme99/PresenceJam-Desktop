@@ -671,6 +671,22 @@ mod tests {
             timestamp: chrono::Utc::now().to_rfc3339(),
         }
     }
+    /// Issue #484: `tauri.conf.json` must keep `allowDowngrades: false`
+    /// so a stale staged update can never silently downgrade the app --
+    /// the `is_stale_version` skip is the only downgrade path (explicit
+    /// force through the quit-time confirmation surface).
+    #[test]
+    fn test_tauri_conf_disallows_downgrades() {
+        let conf = include_str!("../tauri.conf.json");
+        let value: serde_json::Value =
+            serde_json::from_str(conf).expect("tauri.conf.json must parse");
+        let flag = value.pointer("/bundle/windows/allowDowngrades");
+        assert_eq!(
+            flag,
+            Some(&serde_json::Value::Bool(false)),
+            "allowDowngrades must be false (issue #484)"
+        );
+    }
 
     #[test]
     fn test_marker_round_trip() {
