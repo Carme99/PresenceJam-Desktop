@@ -57,6 +57,13 @@
   // resolution must immediately release the subscription (Dashboard.svelte:31-33 pattern).
   let destroyed = false;
   let unlistenAuth: (() => Promise<void>) | null = null;
+  // #387: after a step change the removed Continue button drops focus to
+  // <body> — move it to the new step heading (tabindex -1, no visual change).
+  function focusStepHeading() {
+    requestAnimationFrame(() => {
+      document.getElementById('onboarding-step-heading')?.focus();
+    });
+  }
 
   onMount(async () => {
     devLog('[ONBOARDING] onMount: ENTRY');
@@ -396,7 +403,7 @@
 <div class="onboarding">
   <header class="brand">
     <Logo size={32} withWordmark />
-    <span class="step-label">{t('onboarding.stepOf', { step })}</span>
+    <span class="step-label" role="status">{t('onboarding.stepOf', { step })}</span>
   </header>
 
   <div class="progress" aria-hidden="true">
@@ -413,7 +420,7 @@
   <div class="step">
     {#if step === 1}
       <div class="card">
-        <h2>{t('onboarding.step1Title')}</h2>
+        <h2 id="onboarding-step-heading" tabindex="-1">{t('onboarding.step1Title')}</h2>
         <p>
           {t('onboarding.step1Intro')}
         </p>
@@ -466,11 +473,14 @@
           <div class="waiting-box">
             <div class="spinner" aria-hidden="true"></div>
             <p>{t('onboarding.signInWaiting')}</p>
-            <p class="hint">{t('onboarding.manualUrlHint')}</p>
+            <p class="hint" id="manual-url-hint">{t('onboarding.manualUrlHint')}</p>
+            <label class="sr-only" for="manual-url">{t('onboarding.manualUrlLabel')}</label>
             <input
+              id="manual-url"
               type="text"
               bind:value={spotifyManualUrl}
               placeholder="presencejam://callback?code=…"
+              aria-describedby="manual-url-hint"
               onkeydown={(e) => e.key === 'Enter' && handleManualUrlPaste()}
             />
             <button class="btn-secondary" onclick={handleManualUrlPaste}>{t('onboarding.submitCode')}</button>
@@ -479,12 +489,12 @@
           <div class="success-badge">
             <span aria-hidden="true">✓</span> {t('onboarding.connectedToSpotify')}
           </div>
-          <button class="btn-full" onclick={() => { step = 2; devLog('[ONBOARDING] step changed to 2'); }}>{t('onboarding.continue')}</button>
+          <button class="btn-full" onclick={() => { step = 2; devLog('[ONBOARDING] step changed to 2'); focusStepHeading(); }}>{t('onboarding.continue')}</button>
         {/if}
       </div>
     {:else if step === 2}
       <div class="card">
-        <h2>{t('onboarding.step2Title')}</h2>
+        <h2 id="onboarding-step-heading" tabindex="-1">{t('onboarding.step2Title')}</h2>
         <p>
           {t('onboarding.step2Intro')}
         </p>
@@ -517,7 +527,7 @@
           <div class="success-badge">
             <span aria-hidden="true">✓</span> {t('onboarding.connectedToTeams')}
           </div>
-          <button class="btn-full" onclick={() => { step = 3; devLog('[ONBOARDING] step changed to 3'); }}>{t('onboarding.continue')}</button>
+          <button class="btn-full" onclick={() => { step = 3; devLog('[ONBOARDING] step changed to 3'); focusStepHeading(); }}>{t('onboarding.continue')}</button>
         {/if}
 
         {#if teamsAuthError}
@@ -526,7 +536,7 @@
       </div>
     {:else}
       <div class="card">
-        <h2>{t('onboarding.step3Title')}</h2>
+        <h2 id="onboarding-step-heading" tabindex="-1">{t('onboarding.step3Title')}</h2>
         <p>
           {t('onboarding.step3Intro')}
         </p>
@@ -565,8 +575,19 @@
     {/if}
   </div>
 </div>
-
 <style>
+  /* Visually-hidden label for the manual-URL paste input (#385). */
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
+  }
   .onboarding {
     padding: var(--sp-7) var(--sp-5);
     max-width: 480px;

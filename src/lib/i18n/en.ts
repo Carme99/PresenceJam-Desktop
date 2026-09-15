@@ -21,11 +21,14 @@ export const en = {
   // ── common ────────────────────────────────────────────────────────
   'common.back': 'Back',
   'common.backToDashboard': 'Back to dashboard',
-  'common.checkNow': "I've signed in — check now",
+  'common.checkNow': 'Check sign-in status',
   'common.connected': 'Connected',
   'common.dismiss': 'Dismiss',
   'common.goTo': 'Go to',
   'common.andEnterCode': 'and enter this code',
+  'common.openSignInPage': 'Open the Microsoft sign-in page:',
+  'common.enterCodeWhenAsked': 'Enter this code when asked:',
+  'common.moreActions': 'More actions',
   'common.launchAtLogin': 'Launch at login',
   'common.loading': 'Loading...',
   'common.notConnected': 'Not connected',
@@ -62,7 +65,7 @@ export const en = {
   'dashboard.aboutAria': 'About PresenceJam',
   'dashboard.pauseSync': 'Pause sync',
   'dashboard.resumeSync': 'Resume sync',
-  'dashboard.presenceGated': "Status paused while you're busy/in a meeting",
+  'dashboard.presenceGated': "Status paused — you're busy, in a call, or presenting",
   'dashboard.setupRequired': 'Setup required',
   'dashboard.setupHint':
     'Connect Spotify and Microsoft Teams so your now-playing tracks can drive your Teams status.',
@@ -73,10 +76,10 @@ export const en = {
   'dashboard.yourTeamsStatus': 'Your Teams status',
   'dashboard.nothingPlaying': 'Nothing playing',
   'dashboard.nothingPlayingHint':
-    "Start something on Spotify and we'll pipe it through to Teams.",
-  'dashboard.syncCrashed': 'Sync stopped unexpectedly. Please restart PresenceJam.',
-  'dashboard.credentialCheckFailed': 'Unable to check credentials — please try again.',
-  'dashboard.syncToggleFailed': 'Could not change sync state. Please try again.',
+    'Play something on Spotify and it will show in your Teams status.',
+  'dashboard.syncCrashed': 'Sync stopped unexpectedly. Press resume (▶) to restart it.',
+  'dashboard.credentialCheckFailed': "Couldn't check your credentials. Check your connection and try again.",
+  'dashboard.syncToggleFailed': "Couldn't start/stop sync. Try again — if it persists, open Diagnostics from the dashboard header.",
   'dashboard.statusNotConfigured': 'Not configured',
   'dashboard.statusNoTrack': 'No track playing',
   'dashboard.live': 'Live',
@@ -102,7 +105,7 @@ export const en = {
   'logs.clear': 'Clear',
   'logs.openFolder': 'Open folder',
   'logs.empty': 'No log entries yet',
-  'logs.emptyHint': 'Live entries stream here as the polling loop runs.',
+  'logs.emptyHint': 'Live entries appear here once sync starts and Spotify is playing.',
 
   // ── settings ──────────────────────────────────────────────────────
   'settings.title': 'Settings',
@@ -113,28 +116,28 @@ export const en = {
   'settings.sectionTeams': 'Microsoft Teams',
   'settings.sectionPresence': 'Presence',
   'settings.sectionStatusFormat': 'Status format',
-  'settings.sectionPolling': 'Polling',
+  'settings.sectionPolling': 'Sync frequency',
   'settings.sectionNotifications': 'Notifications',
   'settings.sectionAppearance': 'Appearance',
   'settings.clientId': 'Client ID',
   'settings.clientIdPlaceholder': 'Enter Spotify Client ID',
   'settings.clientSecret': 'Client secret',
   'settings.secretStoredHint':
-    "Stored securely in your operating system's keychain. To replace it, run Onboarding again.",
+    "Stored securely in your operating system's keychain. To replace it, go back to the dashboard and choose Continue setup.",
   'settings.secretNotConfigured': 'Not configured.',
   'settings.runOnboarding': 'Run Onboarding',
   'settings.toSetUpSpotify': 'to set up Spotify.',
   'settings.reconnectSpotify': 'Reconnect Spotify',
   'settings.completeAuthInBrowser': 'Complete authentication in the browser.',
-  'settings.playbackScopeBanner': 'Playback control needs a one-time reconnect.',
+  'settings.playbackScopeBanner': 'Spotify added playback controls. Click Reconnect next to this message to enable them.',
   'settings.spotifySecretConflict':
     'The client secret in your config file differs from the one in the keychain. Reconnect Spotify to resolve.',
   'settings.teamsAuthHint':
     'Teams authentication uses your Microsoft 365 account. No additional configuration required.',
-  'settings.presenceScopeBanner': 'Presence features need a one-time Teams reconnect.',
+  'settings.presenceScopeBanner': 'Teams added meeting/call detection. Click Reconnect next to this message to enable it.',
   'settings.availabilitySyncLabel': 'Show Available while listening',
   'settings.availabilitySyncHint':
-    'Off by default. Shows Available (not Busy) in Teams while a track plays, because setPresence only supports the Busy/InACall combination — see the setPresence limitation.',
+    'Off by default. When on, Teams shows you as Available (instead of Busy) while music plays. Note: Teams still shows Busy during calls and meetings.',
   'settings.presenceGateLabel': 'Pause status during meetings/calls/DND',
   'settings.presenceGateHint':
     "On by default. Skips writing your Spotify status while Teams says you're busy, in a meeting, in a call, or presenting.",
@@ -164,8 +167,8 @@ export const en = {
   'settings.autostartError': 'Failed to update launch-at-login: {error}',
   'settings.saveChanges': 'Save changes',
   'settings.saving': 'Saving…',
-  'settings.saved': 'Settings saved!',
-  'settings.failedToSave': 'Failed to save',
+  'settings.saved': 'Settings saved.',
+  'settings.failedToSave': "Couldn't save settings — your edits are still here. Try again.",
   'settings.openLogsFolder': 'Open logs folder',
   'settings.previewUnavailable': '(preview unavailable)',
 
@@ -219,11 +222,11 @@ export const en = {
 
   // ── reconnect ─────────────────────────────────────────────────────
   'reconnect.title': 'Reconnect',
-  'reconnect.description': 'Your session expired. Reconnect below to resume syncing.',
+  'reconnect.description': 'Sync needs your attention. Reconnect below to resume.',
   'reconnect.missingCredentials': 'Missing credentials',
   'reconnect.failed': 'Failed',
   'reconnect.readyToReconnect': 'Ready to reconnect',
-  'reconnect.needsReconnect': 'Needs reconnect',
+  'reconnect.needsReconnect': 'Ready to reconnect',
   'reconnect.spotifyOk': 'Spotify reconnected successfully.',
   'reconnect.spotifyNotConfigured':
     'Spotify credentials are not configured on this machine.',
@@ -244,11 +247,11 @@ export const en = {
   // ── about ─────────────────────────────────────────────────────────
   'about.version': 'Version {version}',
   'about.description':
-    "Pipes what you're playing on Spotify into your Microsoft Teams status — automatically.",
+    "Shows what you're playing on Spotify in your Microsoft Teams status — automatically.",
   'about.statusSync': 'Status sync',
   'about.live': 'Live',
-  'about.auth': 'Auth',
-  'about.authMethod': 'PKCE / Device Code',
+  'about.auth': 'Sign-in',
+  'about.authMethod': 'Spotify + Microsoft',
   'about.storage': 'Storage',
   'about.osKeychain': 'OS keychain',
   'about.githubRepo': 'GitHub repository',
@@ -259,7 +262,7 @@ export const en = {
   'update.available': 'Update v{version} available',
   'update.stagedQuit': 'v{version} will be installed when you quit PresenceJam',
   'update.downloadFailed': 'Download failed — {error}',
-  'update.downloadAndInstall': 'Download & Install',
+  'update.downloadAndInstall': 'Download and install',
   'update.downloading': 'Downloading…',
   'update.installOnQuit': 'Install on quit',
   'update.preparing': 'Preparing…',
@@ -279,11 +282,11 @@ export const en = {
   'onboarding.stepOf': 'Step {step} of 3',
   'onboarding.step1Title': 'Connect Spotify',
   'onboarding.step1Intro':
-    "Paste your Spotify application's Client ID and Client Secret. We'll start the sign-in flow once you click the button.",
+    "Paste your Spotify Client ID and Client Secret below, then choose Connect Spotify — we'll open the Spotify sign-in page.",
   'onboarding.getCredentials': 'Get your Spotify credentials',
   'onboarding.instruction1':
     'Open the Spotify developer dashboard and create an app.',
-  'onboarding.instruction2': 'Add presencejam://callback as a redirect URI.',
+  'onboarding.instruction2': 'Under Redirect URIs, add presencejam://callback (this tells Spotify where to send you back).',
   'onboarding.instruction3':
     "Copy the Client ID and Client Secret from the app's settings.",
   'onboarding.clientIdPlaceholder': '32-character Spotify Client ID',
@@ -291,21 +294,22 @@ export const en = {
   'onboarding.connectSpotify': 'Connect Spotify',
   'onboarding.signInWaiting': 'Spotify sign-in is waiting…',
   'onboarding.manualUrlHint':
-    'Complete the authorisation in your browser, or paste the redirect URL below.',
+    'Finish signing in with Spotify in your browser, then paste the full address from the address bar below.',
+  'onboarding.manualUrlLabel': 'Spotify redirect URL',
   'onboarding.submitCode': 'Submit code',
   'onboarding.connectedToSpotify': 'Connected to Spotify',
   'onboarding.continue': 'Continue →',
-  'onboarding.step2Title': 'Sign in with Microsoft',
+  'onboarding.step2Title': 'Connect Microsoft Teams',
   'onboarding.step2Intro':
     "We use Microsoft's device-code flow — a one-time code you enter at a Microsoft page. No extra setup required.",
-  'onboarding.startMicrosoftSignIn': 'Start Microsoft sign-in',
+  'onboarding.startMicrosoftSignIn': 'Connect Microsoft Teams',
   'onboarding.connectedToTeams': 'Connected to Microsoft Teams',
   'onboarding.step3Title': 'Finishing touches',
   'onboarding.step3Intro':
     'Choose how your status message should look and whether PresenceJam should launch when you sign in.',
   'onboarding.statusTemplate': 'Status template',
   'onboarding.placeholdersHint': 'Placeholders: {artist}, {track}, {album}, {emoji}',
-  'onboarding.pollInterval': 'Default poll interval: {seconds}s',
+  'onboarding.pollInterval': 'How often to check Spotify: {seconds}s',
   'onboarding.settingUp': 'Setting up…',
   'onboarding.finishSetup': 'Finish setup',
 
@@ -315,9 +319,9 @@ export const en = {
     'Spotify Client ID must be exactly 32 hexadecimal characters.',
   'validation.clientSecretRequired': 'Spotify Client Secret is required.',
   'validation.clientSecretTooShort':
-    'Spotify Client Secret appears to be invalid (too short — must be at least 32 characters).',
+    'That Client Secret looks too short — it should be at least 32 characters. Check for a copy-paste slip.',
   'validation.noCodeInUrl':
-    'No code found in URL — paste the full redirect URL with ?code=…',
+    "That URL has no sign-in code in it — paste the full address from your browser's address bar after Spotify redirects you.",
   'validation.connectBothFirst':
     'Please connect both Spotify and Teams before finishing setup.',
   'validation.setupFailed': 'Setup failed: {error}',

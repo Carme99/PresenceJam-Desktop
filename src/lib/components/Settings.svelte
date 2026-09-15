@@ -223,7 +223,7 @@
     const unlisten = await useAuthListeners({
       onSpotifyComplete: () => {
         if (authListenersDestroyed) return;
-        console.log('[SETTINGS] spotify-auth-complete received');
+        devLog('[SETTINGS] spotify-auth-complete received');
         setSpotifyPhase('done');
         isConnected = true;
         // A completed reconnect resolves the #376 secret conflict (the
@@ -241,7 +241,7 @@
       },
       onTeamsComplete: () => {
         if (authListenersDestroyed) return;
-        console.log('[SETTINGS] teams-auth-complete received');
+        devLog('[SETTINGS] teams-auth-complete received');
         setTeamsPhase('done');
         teamsStatusConnected = true;
         // The new token carries the freshly-granted scope set — refresh so
