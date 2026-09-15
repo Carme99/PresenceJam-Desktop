@@ -55,11 +55,15 @@ export async function popOut(pane: DetachablePane): Promise<void> {
   if (existing) {
     try {
       await existing.setFocus();
+      markDetached(pane, true);
+      return;
     } catch (e) {
-      console.warn(`[DETACH] focus ${label} failed:`, e);
+      // #422: stale/zombie label — the window handle exists but focus
+      // rejects. Clear the flag and fall through to re-creation so the
+      // badge never claims a detached window that cannot be focused.
+      console.warn(`[DETACH] focus ${label} failed (stale handle, recreating):`, e);
+      markDetached(pane, false);
     }
-    markDetached(pane, true);
-    return;
   }
 
   const size = PANE_SIZE[pane];
@@ -106,7 +110,13 @@ export async function focusDetached(pane: DetachablePane): Promise<void> {
     try {
       await win.setFocus();
     } catch (e) {
-      console.warn('[DETACH] focusDetached failed:', e);
+      // #422: zombie label with no focusable window — clear the badge so
+      // the Dashboard stops offering focus-instead-of-navigate.
+      console.warn('[DETACH] focusDetached failed (clearing stale flag):', e);
+      markDetached(pane, false);
     }
+  } else {
+    // #422: no window behind the flag — clear it so the badge clears.
+    markDetached(pane, false);
   }
 }

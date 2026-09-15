@@ -2,7 +2,7 @@ import { writable } from 'svelte/store';
 
 export type Theme = 'dark' | 'light';
 
-const STORAGE_KEY = 'presencejam:theme';
+export const STORAGE_KEY = 'presencejam:theme';
 
 function readInitial(): Theme {
   if (typeof window === 'undefined') return 'dark';
@@ -24,6 +24,19 @@ if (typeof document !== 'undefined') {
       // localStorage may be blocked; ignore.
     }
     window.dispatchEvent(new CustomEvent('presencejam:theme-changed', { detail: value }));
+  });
+}
+
+// #423: cross-window convergence — every webview (main + detached Logs /
+// Settings) owns an independent `theme` instance, so an already-open
+// detached window never saw a toggle made in the main window. `storage`
+// events fire in every OTHER same-origin webview on write, giving us
+// convergence with no backend round-trip. The CustomEvent above stays as
+// the same-window fan-out; this is the cross-window half.
+if (typeof window !== 'undefined') {
+  window.addEventListener('storage', (e) => {
+    if (e.key !== STORAGE_KEY) return;
+    if (e.newValue === 'light' || e.newValue === 'dark') theme.set(e.newValue);
   });
 }
 

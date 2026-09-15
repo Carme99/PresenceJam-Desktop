@@ -31,11 +31,16 @@ export function t(
   key: TKey,
   params?: Record<string, string | number>
 ): string {
-  let text: string = DICTS[i18n.locale][key] ?? en[key];
+  // #424: runtime degradation — Dict parity makes a miss impossible at
+  // compile time, but a stale chunk / hand-cast TKey can still miss at
+  // runtime. Fall back to the key itself instead of throwing in split.
+  const text: string = DICTS[i18n.locale][key] ?? en[key] ?? (key as string);
   if (params) {
+    let out = text;
     for (const [name, value] of Object.entries(params)) {
-      text = text.split(`{${name}}`).join(String(value));
+      out = out.split(`{${name}}`).join(String(value));
     }
+    return out;
   }
   return text;
 }

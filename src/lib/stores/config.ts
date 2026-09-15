@@ -47,7 +47,7 @@ export const defaultConfig: AppConfig = {
  */
 export const DEFAULT_PROFANITY_PLACEHOLDER = defaultConfig.teams.profanity_placeholder;
 
-export const configStore = writable<AppConfig>(defaultConfig);
+export const configStore = writable<AppConfig>(structuredClone(defaultConfig));
 
 let loadPromise: Promise<AppConfig> | null = null;
 let savePromise: Promise<AppConfig> | null = null;
@@ -103,8 +103,9 @@ export async function loadConfig(): Promise<AppConfig> {
       return normalized;
     } catch (e) {
       console.error('[CONFIG] loadConfig failed:', e);
-      configStore.set(defaultConfig);
-      return defaultConfig;
+      const fallback = structuredClone(defaultConfig);
+      configStore.set(fallback);
+      return fallback;
     } finally {
       loadPromise = null;
     }
@@ -123,8 +124,9 @@ export async function saveConfig(cfg: AppConfig): Promise<AppConfig> {
       // adopt that value for the store. Storing `cfg` here left the UI
       // showing a value (e.g. a typed 999) that was never written to disk.
       const persisted = await invoke<AppConfig>('save_config', { config: payload });
-      configStore.set(persisted);
-      return persisted;
+      const normalized = normalizeLoadedConfig(persisted);
+      configStore.set(normalized);
+      return normalized;
     } finally {
       savePromise = null;
     }

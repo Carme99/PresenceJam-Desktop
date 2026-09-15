@@ -885,7 +885,59 @@ pub fn run() {
                          relying on #65 PKCE-only mitigation for scheme hijack defence"
                     );
                     #[cfg(not(target_os = "macos"))]
-                    log::error!("[APP] setup: Failed to register deep links: {}", e);
+                    {
+                        // #497: name the missing step. The plugin's Linux
+                        // branch writes the .desktop file then shells out to
+                        // `update-desktop-database` + `xdg-mime default`; an
+                        // ENOENT there aborts before the association, so the
+                        // file can exist while the scheme stays unassociated.
+                        log::error!(
+                            "[APP] setup: Failed to register deep links: {e} \
+                             (check `update-desktop-database`/`xdg-mime` presence; \
+                             if ~/.local/share/applications/presence-jam-handler.desktop \
+                             exists but `xdg-mime query default x-scheme-handler/presencejam` \
+                             is empty, run `xdg-mime default presence-jam-handler.desktop \
+                             x-scheme-handler/presencejam` manually)"
+                        );
+                        // Best-effort fallback: associate directly when the
+                        // database helper is absent (minimal Linux without a
+                        // full desktop metapackage). HOME resolves via dirs
+                        // (already a dependency); unknown home skips quietly.
+                        let apps_dir = dirs::home_dir().map(|h| h.join(".local/share/applications"));
+                        let db_missing = match &apps_dir {
+                            Some(dir) => std::process::Command::new("update-desktop-database")
+                                .arg(dir)
+                                .status()
+                                .is_err(),
+                            None => {
+                                log::warn!(
+                                    "[APP] setup: home dir unknown; skipping deep-link fallback association"
+                                );
+                                false
+                            }
+                        };
+                        if db_missing {
+                            match std::process::Command::new("xdg-mime")
+                                .args([
+                                    "default",
+                                    "presence-jam-handler.desktop",
+                                    "x-scheme-handler/presencejam",
+                                ])
+                                .status()
+                            {
+                                Ok(s) if s.success() => log::info!(
+                                    "[APP] setup: xdg-mime fallback association succeeded"
+                                ),
+                                Ok(s) => log::warn!(
+                                    "[APP] setup: xdg-mime fallback exited with status {s}"
+                                ),
+                                Err(mime_err) => log::warn!(
+                                    "[APP] setup: xdg-mime fallback failed ({mime_err}); \
+                                     see SETUP.md Linux prerequisites"
+                                ),
+                            }
+                        }
+                    }
                 } else {
                     log::info!("[APP] setup: deep links registered successfully");
                 }
@@ -947,7 +999,7 @@ pub fn run() {
                 });
             }
 
-            log::info!("[APP] setup: PresenceJam 2.0 started successfully");
+            log::info!("[APP] setup: PresenceJam {} started successfully", env!("CARGO_PKG_VERSION"));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
