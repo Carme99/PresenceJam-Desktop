@@ -1,5 +1,16 @@
 # Scope 3.3 — Stratus Follow-on Polish
 
+> **Superseded (issue #369):** this scope doc is a stale v3.2.0-era draft
+> (base `600074a`, CHANGELOG was 69 KB then). Most S3 candidates shipped in
+> v4.0.0 per CHANGELOG §[4.0.0]: C13 dep prune, C10 attestations+re-cut,
+> C2 deep-link navigate, C4 tray polish, C5 diagnostics page, C11
+> conditional-GET, C9 settings UX, C8 notification throttle, C12 a11y pass,
+> C3a/C3c background updates, C7 multi-window detach, plus C1 OAuth binding
+> (C6 i18n landed separately per the §[4.0.0] note). S2.7's "hard-coded
+> English" claim is false since v4.0 i18n, and the "not committed" status
+> below is wrong (the file is committed). Kept for history per its own
+> §maintenance rule; do not plan new work from it.
+
 **Date:** 2026-08-22 · **Base:** `main` @ `600074a` (v3.2.0 Stratus, CHANGELOG 69 KB) · **Author:** Scope33 (read-only research)
 **Status:** Draft outline — not committed, no tag. For maintainer triage into 3.3.0 vs 3.4.0.
 
