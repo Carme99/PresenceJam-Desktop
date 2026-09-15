@@ -346,11 +346,19 @@ export const de: Dict = {
   // ── feat/45-features: status rules (#432) + support snapshot (#434) ──
   'rules.sectionTitle': 'Statusregeln',
   'rules.sectionHint':
-    'Ruhezeiten und Track-Regeln unterdrücken die Teams-Statusmeldung über denselben Presence-Gate-Pfad — eine aufgehobene Regel wird automatisch mitten im Track gepostet.',
+    'Ruhezeiten und Track-Regeln unterdrücken die Teams-Statusmeldung über denselben Anwesenheits-Gate-Pfad — eine abgelaufene Regel wird automatisch mitten im Track gepostet.',
   'rules.quietHoursLabel': 'Ruhezeiten',
   'rules.noQuietHours': 'Keine Ruhezeiten definiert — der Status wird zu allen Zeiten synchronisiert.',
   'rules.quietStart': 'Beginn der Ruhezeit',
   'rules.quietEnd': 'Ende der Ruhezeit',
+  'rules.quietDays': 'Aktive Tage (nichts gewählt = jeden Tag)',
+  'rules.day1': 'Mo',
+  'rules.day2': 'Di',
+  'rules.day3': 'Mi',
+  'rules.day4': 'Do',
+  'rules.day5': 'Fr',
+  'rules.day6': 'Sa',
+  'rules.day7': 'So',
   'rules.addQuietHours': 'Ruhezeit hinzufügen',
   'rules.trackRulesLabel': 'Track-Regeln',
   'rules.noTrackRules': 'Keine Track-Regeln definiert — alle Tracks werden normal synchronisiert.',
@@ -361,6 +369,6 @@ export const de: Dict = {
   'rules.removeRule': 'Entfernen',
   'rules.ruleEnabled': 'Aktiviert',
   'logs.copySnapshot': 'Snapshot kopieren',
-  'logs.snapshotCopied': 'Redigierter Snapshot in die Zwischenablage kopiert.',
+  'logs.snapshotCopied': 'Geschwärzter Snapshot in die Zwischenablage kopiert.',
   'logs.snapshotCopyFailed': 'Der Snapshot konnte nicht kopiert werden.'
 };

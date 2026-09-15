@@ -9,7 +9,17 @@
       flash of the wrong theme. Reads the same `presencejam:theme` key the
       theme store persists (plus the `?theme=` override the opener appends)
       before SvelteKit paints. No dependencies, no imports — key literal
-      duplicated deliberately so this file never couples to the store. -->
+      duplicated deliberately so this file never couples to the store.
+      CSP status (checked 2026-09-16): tauri.conf.json `security.csp` sets
+      `default-src 'self'` with NO `script-src` directive, so this first-
+      party inline script is allowed (script-src falls back to default-src
+      and 'self' permits same-origin inline in the Tauri webview, which
+      does not apply a separate HTML-spec inline ban). If a future CSP
+      adds `script-src` without 'unsafe-inline', move this block to an
+      external asset and re-verify detached hydration.
+      Scope note (#434): this slice ships snapshot-copy ONLY — LogViewer
+      virtualization/jump-to-latest already landed separately, no
+      virtualization work here. -->
     <script>
       try {
         var __pjTheme = new URLSearchParams(location.search).get('theme');

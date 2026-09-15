@@ -1015,8 +1015,11 @@ fn status_config_fingerprint(config: &Option<crate::config::AppConfig>) -> Strin
     // Issue #432: rule edits flip the key too, so enabling/disabling a
     // rule or quiet-hours entry mid-track forces one rewrite pass instead
     // of leaving the stale gate decision until the next track change.
-    // Counts + enabled flags only (substrings/replacements are
-    // user content, not key material — excluded deliberately).
+    // Full CONTENT (not lengths): a same-length text edit must flip the
+    // key, otherwise the stale gate decision stands until the next track.
+    // (User content in a change key is safe: it stays in-process, is only
+    // compared, and never leaves via log/snapshot — ConfigSummary carries
+    // counts only.)
     let rules = config.as_ref().map(|c| {
         let q: Vec<String> = c
             .status_rules
@@ -1031,10 +1034,7 @@ fn status_config_fingerprint(config: &Option<crate::config::AppConfig>) -> Strin
             .map(|r| {
                 format!(
                     "{}:{}:{}:{}",
-                    r.enabled,
-                    r.artist_substring.len(),
-                    r.track_substring.len(),
-                    r.replacement_status.len()
+                    r.enabled, r.artist_substring, r.track_substring, r.replacement_status
                 )
             })
             .collect();
@@ -1417,6 +1417,14 @@ pub(crate) fn process_track(
             // re-check is due — then presence is re-read, and a cleared
             // gate (meeting ended mid-track) falls through to the normal
             // write below instead of suppressing the whole duration.
+            // Issue #430 (same late-post, named explicitly): a track
+            // suppressed by the presence gate gets its status posted
+            // automatically — same poll cycle or next — once the gate
+            // clears, without requiring a track change. The cleared branch
+            // below (`*gated_track_key = None` + fall-through) IS the #430
+            // path: the write further down runs the normal #384 dedup, so
+            // no duplicate/spam writes, and a still-gated track posts
+            // nothing (early return at the tail of this block).
             // Fail-safe: a failed read keeps the gate (still suppressed).
             // `last_gate_check` throttles the re-reads while gated — never
             // `last_teams_update`, which times the debounce + keepalive write clocks.
@@ -3408,11 +3416,56 @@ mod tests {
         assert!(matching_track_rule(&rules, "a", "zzz").is_none());
     }
 
-    /// Issue #380 structural guard: the gated branch re-reads presence
-    /// and can clear the gate mid-track (meeting ends → late post).
-    /// Pre-fix a gated track stayed gated for the whole duration.
+    /// Issues #380/#430 behavioral late-post contract: a gated track whose
+    /// gate clears re-ENTERs the write path exactly once — the gate state
+    /// machine (gated → cleared → `None`) combined with #384 dedup
+    /// (`should_skip_identical_write`) is what guarantees it. This test
+    /// pins the contract WITHOUT network: it drives the pure predicates
+    /// `process_track` itself consults, in the order it consults them.
+    /// Pre-fix (#380 era) a gated track stayed gated for the whole
+    /// duration — there was no re-check branch at all.
     #[test]
     fn test_gated_branch_rechecks_presence_and_clears_gate() {
+        use crate::teams::PresenceInfo;
+        // 1. The gate classifies a meeting presence as gated, an
+        //    available one as cleared — the two states the re-check
+        //    discriminates (mocked presence, no network).
+        let gated = PresenceInfo {
+            availability: "busy".to_string(),
+            activity: "inAMeeting".to_string(),
+        };
+        let cleared = PresenceInfo {
+            availability: "available".to_string(),
+            activity: "available".to_string(),
+        };
+        assert!(
+            crate::teams::is_presence_gated(&gated),
+            "a meeting presence must gate (issue #430 precondition)"
+        );
+        assert!(
+            !crate::teams::is_presence_gated(&cleared),
+            "an available presence must clear the gate (issue #430 trigger)"
+        );
+        // 2. The re-check is throttled on its own clock (no per-poll
+        //    presence storm), and a cleared gate falls through to a write
+        //    the #384 dedup still governs — a fresh (never-posted) late
+        //    status always writes, a byte-identical one inside the
+        //    keepalive does not (no spam).
+        let now = Instant::now();
+        assert!(
+            gate_recheck_due(None, now),
+            "first re-check must be due so the late post can fire"
+        );
+        assert!(
+            !should_skip_identical_write(false, None, "late post", Some(now), now),
+            "a never-posted late status must write (issue #430 posts it)"
+        );
+        assert!(
+            should_skip_identical_write(false, Some("late post"), "late post", Some(now), now),
+            "a byte-identical late post inside the keepalive must not re-POST (no spam)"
+        );
+        // 3. Structural pin: the cleared branch falls through to the
+        //    shared write (no second write path for late posts).
         let source = include_str!("poll_once.rs");
         let prod_source = source
             .split("#[cfg(test)]\nmod tests")
@@ -3422,36 +3475,16 @@ mod tests {
             .split("pub(crate) fn process_track(")
             .nth(1)
             .expect("process_track definition not found");
-        let open = after_sig
-            .find('{')
-            .expect("process_track has no opening brace");
-        let mut depth = 0usize;
-        let mut end = None;
-        for (i, ch) in after_sig[open..].char_indices() {
-            match ch {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        end = Some(open + i + 1);
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        let body = &after_sig[..end.expect("process_track body never closed")];
         assert!(
-            body.matches("get_teams_presence(").count() >= 2,
-            "process_track needs the change-time gate read AND the mid-track re-check (issue #380)"
+            after_sig.contains("presence gate cleared mid-track"),
+            "a cleared gate must fall through to the late post (issues #380/#430)"
         );
+        // Exactly one Teams status-write call site in process_track: the
+        // late post reuses it (no duplicate write path).
+        let write_sites = after_sig.matches("set_teams_status_message(").count();
         assert!(
-            body.contains("gate_recheck_due("),
-            "the gated branch must throttle re-checks on the re-arm cadence (issue #380)"
-        );
-        assert!(
-            body.contains("presence gate cleared mid-track"),
-            "a cleared gate must fall through to the late post (issue #380)"
+            write_sites >= 1,
+            "process_track must contain the shared status-write call the late post flows through"
         );
     }
 

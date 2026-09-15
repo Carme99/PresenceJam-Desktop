@@ -355,11 +355,19 @@ export const fr: Dict = {
   // ── feat/45-features: status rules (#432) + support snapshot (#434) ──
   'rules.sectionTitle': 'Règles de statut',
   'rules.sectionHint':
-    'Les heures silencieuses et les règles de piste suppriment le statut Teams via le même chemin de gate — une règle levée publie automatiquement en cours de piste.',
+    "Les heures silencieuses et les règles de piste suppriment le statut Teams via le même chemin de contrôle de présence — une règle expirée publie automatiquement en cours de piste.",
   'rules.quietHoursLabel': 'Heures silencieuses',
   'rules.noQuietHours': 'Aucune heure silencieuse définie — le statut se synchronise à toute heure.',
   'rules.quietStart': 'Début des heures silencieuses',
   'rules.quietEnd': 'Fin des heures silencieuses',
+  'rules.quietDays': 'Jours actifs (aucun = tous les jours)',
+  'rules.day1': 'Lun',
+  'rules.day2': 'Mar',
+  'rules.day3': 'Mer',
+  'rules.day4': 'Jeu',
+  'rules.day5': 'Ven',
+  'rules.day6': 'Sam',
+  'rules.day7': 'Dim',
   'rules.addQuietHours': 'Ajouter des heures silencieuses',
   'rules.trackRulesLabel': 'Règles de piste',
   'rules.noTrackRules': 'Aucune règle de piste définie — toutes les pistes se synchronisent normalement.',
@@ -370,6 +378,6 @@ export const fr: Dict = {
   'rules.removeRule': 'Supprimer',
   'rules.ruleEnabled': 'Activé',
   'logs.copySnapshot': 'Copier le snapshot',
-  'logs.snapshotCopied': 'Snapshot expurgé copié dans le presse-papiers.',
+  'logs.snapshotCopied': 'Snapshot censuré copié dans le presse-papiers.',
   'logs.snapshotCopyFailed': 'Impossible de copier le snapshot.'
 };

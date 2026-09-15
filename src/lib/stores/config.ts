@@ -80,11 +80,17 @@ function normalizeLoadedConfig(cfg: AppConfig): AppConfig {
     }
   }
   // Issue #432: pre-4.5 backends omit `status_rules` (Rust serde default
-  // covers the backend side); backfill here so the Settings rules card
-  // never binds against undefined.
-  const r = cfg as unknown as { status_rules?: unknown };
+  // covers the backend side); deep-backfill here so the Settings rules
+  // card never binds against undefined — including hand-edited configs
+  // that carry the section but lack one of the arrays.
+  const r = cfg as unknown as {
+    status_rules?: { quiet_hours?: unknown[]; track_rules?: unknown[] } | null;
+  };
   if (r.status_rules == null) {
     r.status_rules = { quiet_hours: [], track_rules: [] };
+  } else {
+    if (!Array.isArray(r.status_rules.quiet_hours)) r.status_rules.quiet_hours = [];
+    if (!Array.isArray(r.status_rules.track_rules)) r.status_rules.track_rules = [];
   }
   return cfg;
 }

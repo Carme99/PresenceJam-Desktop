@@ -73,10 +73,8 @@
     const mm = m % 60;
     return `${String(h).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
   }
-  // Issue #432: parse an HH:MM time input back to minutes-since-midnight;
-  // garbage falls back to the previous value (never NaN into config).
   function timeToMinutes(value: string, fallback: number): number {
-    const match = /^(\d{1,2}):(\d{2})/.exec(value.trim());
+    const match = /^(\d{1,2}):(\d{2})$/.exec(value.trim());
     if (!match) return fallback;
     const h = Math.min(23, Math.max(0, Number(match[1])));
     const mm = Math.min(59, Math.max(0, Number(match[2])));
@@ -592,26 +590,45 @@
           <p class="hint">{t('rules.noQuietHours')}</p>
         {/if}
         {#each localConfig.status_rules.quiet_hours as entry, i}
-          <div class="rule-row" role="group" aria-label={t('rules.quietHoursLabel')}>
-            <input type="checkbox" bind:checked={entry.enabled} aria-label={t('rules.ruleEnabled')} />
-            <input
-              type="time"
-              value={minutesToTime(entry.start_minutes)}
-              onchange={(e) => { entry.start_minutes = timeToMinutes((e.currentTarget as HTMLInputElement).value, entry.start_minutes); }}
-              aria-label={t('rules.quietStart')}
-            />
-            <span aria-hidden="true">–</span>
-            <input
-              type="time"
-              value={minutesToTime(entry.end_minutes)}
-              onchange={(e) => { entry.end_minutes = timeToMinutes((e.currentTarget as HTMLInputElement).value, entry.end_minutes); }}
-              aria-label={t('rules.quietEnd')}
-            />
-            <button
-              type="button"
-              class="btn-link"
-              onclick={() => { localConfig.status_rules.quiet_hours.splice(i, 1); }}
-            >{t('rules.removeRule')}</button>
+          <div class="rule-row rule-col" role="group" aria-label={t('rules.quietHoursLabel')}>
+            <div class="rule-row">
+              <input type="checkbox" bind:checked={entry.enabled} aria-label={t('rules.ruleEnabled')} />
+              <input
+                type="time"
+                value={minutesToTime(entry.start_minutes)}
+                onchange={(e) => { entry.start_minutes = timeToMinutes((e.currentTarget as HTMLInputElement).value, entry.start_minutes); }}
+                aria-label={t('rules.quietStart')}
+              />
+              <span aria-hidden="true">–</span>
+              <input
+                type="time"
+                value={minutesToTime(entry.end_minutes)}
+                onchange={(e) => { entry.end_minutes = timeToMinutes((e.currentTarget as HTMLInputElement).value, entry.end_minutes); }}
+                aria-label={t('rules.quietEnd')}
+              />
+              <button
+                type="button"
+                class="btn-link"
+                onclick={() => { localConfig.status_rules.quiet_hours.splice(i, 1); }}
+              >{t('rules.removeRule')}</button>
+            </div>
+            <div class="rule-row days-row" role="group" aria-label={t('rules.quietDays')}>
+              {#each [1, 2, 3, 4, 5, 6, 7] as day}
+                <label class="rule-check day-check">
+                  <input
+                    type="checkbox"
+                    checked={entry.days.includes(day)}
+                    onchange={(e) => {
+                      const on = (e.currentTarget as HTMLInputElement).checked;
+                      entry.days = on
+                        ? [...entry.days, day].sort()
+                        : entry.days.filter((d) => d !== day);
+                    }}
+                  />
+                  <span>{t(`rules.day${day}` as 'rules.day1')}</span>
+                </label>
+              {/each}
+            </div>
           </div>
         {/each}
         <button
@@ -659,7 +676,7 @@
         <button
           type="button"
           class="btn-secondary"
-          onclick={() => { localConfig.status_rules.track_rules.push({ enabled: true, artist_substring: '', track_substring: '', replacement_status: '' }); }}
+          onclick={() => { localConfig.status_rules.track_rules.push({ enabled: false, artist_substring: '', track_substring: '', replacement_status: '' }); }}
         >{t('rules.addTrackRule')}</button>
       </div>
       {/if}
