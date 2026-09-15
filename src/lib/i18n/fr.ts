@@ -12,8 +12,6 @@ export const fr: Dict = {
   'common.checkNow': 'Vérifier l’état de connexion',
   'common.connected': 'Connecté',
   'common.dismiss': 'Fermer',
-  'common.goTo': 'Allez sur',
-  'common.andEnterCode': 'et saisissez ce code',
   'common.openSignInPage': 'Ouvrez la page de connexion Microsoft :',
   'common.enterCodeWhenAsked': 'Saisissez ce code quand on vous le demande :',
   'common.moreActions': 'Plus d’actions',
@@ -254,7 +252,6 @@ export const fr: Dict = {
   'reconnect.clickBelowSpotify':
     'Cliquez ci-dessous pour reconnecter votre compte Spotify.',
   'reconnect.teamsOk': 'Teams reconnecté avec succès.',
-  'reconnect.reconnectSpotify': 'Reconnecter Spotify',
   'reconnect.clickBelowTeams':
     'Cliquez ci-dessous pour reconnecter votre compte Microsoft Teams.',
   'reconnect.missingCredsTitle': 'Identifiants Spotify manquants ?',
@@ -317,6 +314,7 @@ export const fr: Dict = {
   'onboarding.manualUrlHint':
     'Terminez la connexion Spotify dans votre navigateur, puis collez ci-dessous l’adresse complète de la barre d’adresse.',
   'onboarding.manualUrlLabel': 'URL de redirection Spotify',
+  'onboarding.manualUrlPlaceholder': 'presencejam://callback?code=…',
   'onboarding.submitCode': 'Envoyer le code',
   'onboarding.connectedToSpotify': 'Connecté à Spotify',
   'onboarding.continue': 'Continuer →',

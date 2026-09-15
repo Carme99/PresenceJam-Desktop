@@ -479,7 +479,7 @@
               id="manual-url"
               type="text"
               bind:value={spotifyManualUrl}
-              placeholder="presencejam://callback?code=…"
+              placeholder={t('onboarding.manualUrlPlaceholder')}
               aria-describedby="manual-url-hint"
               onkeydown={(e) => e.key === 'Enter' && handleManualUrlPaste()}
             />
@@ -503,13 +503,13 @@
           <button class="btn-full" onclick={connectTeams} disabled={teamsConnecting}>{t('onboarding.startMicrosoftSignIn')}</button>
         {:else if teamsPolling}
           <div class="device-code-box">
-            <p class="hint">{t('common.goTo')}</p>
+            <p class="hint">{t('common.openSignInPage')}</p>
             {#if isSafeHttpUrl(teamsVerificationUrl)}
               <a class="verification-url" href={teamsVerificationUrl} target="_blank" rel="noopener">{teamsVerificationUrl}</a>
             {:else}
               <span class="verification-url">{teamsVerificationUrl}</span>
             {/if}
-            <p class="hint">{t('common.andEnterCode')}</p>
+            <p class="hint">{t('common.enterCodeWhenAsked')}</p>
             <div class="code-display" aria-live="polite">{teamsUserCode}</div>
             {#if teamsCodeExpired}
               <p class="error-message" role="alert">{t('common.codeExpired')}</p>
@@ -547,7 +547,7 @@
             id="status-format-onb"
             type="text"
             bind:value={statusFormat}
-            placeholder="🎵 {'{artist}'} - {'{track}'} 🎧"
+            placeholder={t('settings.formatTemplatePlaceholder')}
           />
           <p class="hint">
             {t('onboarding.placeholdersHint')}

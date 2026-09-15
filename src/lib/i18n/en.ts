@@ -24,8 +24,6 @@ export const en = {
   'common.checkNow': 'Check sign-in status',
   'common.connected': 'Connected',
   'common.dismiss': 'Dismiss',
-  'common.goTo': 'Go to',
-  'common.andEnterCode': 'and enter this code',
   'common.openSignInPage': 'Open the Microsoft sign-in page:',
   'common.enterCodeWhenAsked': 'Enter this code when asked:',
   'common.moreActions': 'More actions',
@@ -233,7 +231,6 @@ export const en = {
   'reconnect.completeAuthInOpenedBrowser':
     'Complete authentication in the opened browser window.',
   'reconnect.tryAgain': 'Try again',
-  'reconnect.reconnectSpotify': 'Reconnect Spotify',
   'reconnect.clickBelowSpotify': 'Click below to reconnect your Spotify account.',
   'reconnect.teamsOk': 'Teams reconnected successfully.',
   'reconnect.clickBelowTeams':
@@ -296,6 +293,7 @@ export const en = {
   'onboarding.manualUrlHint':
     'Finish signing in with Spotify in your browser, then paste the full address from the address bar below.',
   'onboarding.manualUrlLabel': 'Spotify redirect URL',
+  'onboarding.manualUrlPlaceholder': 'presencejam://callback?code=…',
   'onboarding.submitCode': 'Submit code',
   'onboarding.connectedToSpotify': 'Connected to Spotify',
   'onboarding.continue': 'Continue →',

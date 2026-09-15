@@ -495,13 +495,13 @@
           <button class="btn-secondary" onclick={reconnectTeams} disabled={teamsAuthWaiting}>{t('reconnect.reconnectTeams')}</button>
         {:else if teamsAuthWaiting}
           <div class="device-code-box">
-            <p class="hint">{t('common.goTo')}</p>
+            <p class="hint">{t('common.openSignInPage')}</p>
             {#if isSafeHttpUrl(authFlow.teams.verificationUrl)}
               <a class="verification-url" href={authFlow.teams.verificationUrl} target="_blank" rel="noopener">{authFlow.teams.verificationUrl}</a>
             {:else}
               <span class="verification-url">{authFlow.teams.verificationUrl}</span>
             {/if}
-            <p class="hint">{t('common.andEnterCode')}</p>
+            <p class="hint">{t('common.enterCodeWhenAsked')}</p>
             <div class="code-display" aria-live="polite">{authFlow.teams.userCode}</div>
             {#if teamsCodeExpired}
               <p class="error-message" role="alert">{t('common.codeExpired')}</p>

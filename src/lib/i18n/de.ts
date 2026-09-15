@@ -12,8 +12,6 @@ export const de: Dict = {
   'common.checkNow': 'Anmeldestatus prüfen',
   'common.connected': 'Verbunden',
   'common.dismiss': 'Ausblenden',
-  'common.goTo': 'Wechseln Sie zu',
-  'common.andEnterCode': 'und geben Sie diesen Code ein',
   'common.openSignInPage': 'Öffnen Sie die Microsoft-Anmeldeseite:',
   'common.enterCodeWhenAsked': 'Geben Sie diesen Code ein, wenn Sie dazu aufgefordert werden:',
   'common.moreActions': 'Weitere Aktionen',
@@ -252,7 +250,6 @@ export const de: Dict = {
   'reconnect.reenterCredsHint':
     'Sie müssen Ihre Client-ID und Ihr Client-Secret erneut eingeben.',
   'reconnect.goToFullSetup': 'Zur vollständigen Einrichtung',
-  'reconnect.reconnectSpotify': 'Spotify neu verbinden',
   'reconnect.reconnectTeams': 'Teams neu verbinden',
 
   // ── about ─────────────────────────────────────────────────────────
@@ -309,6 +306,7 @@ export const de: Dict = {
   'onboarding.manualUrlHint':
     'Schließen Sie die Anmeldung bei Spotify in Ihrem Browser ab und fügen Sie unten die vollständige Adresse aus der Adressleiste ein.',
   'onboarding.manualUrlLabel': 'Spotify-Weiterleitungs-URL',
+  'onboarding.manualUrlPlaceholder': 'presencejam://callback?code=…',
   'onboarding.submitCode': 'Code übermitteln',
   'onboarding.connectedToSpotify': 'Mit Spotify verbunden',
   'onboarding.continue': 'Weiter →',
