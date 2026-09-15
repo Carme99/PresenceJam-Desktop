@@ -36,6 +36,20 @@ The app lives in your system tray, syncs while you work, and stays out of the wa
 - **Launch at login** — optional auto-start on boot.
 - **Secure auth** — Authorization Code + PKCE OAuth for Spotify (confidential client), Device Code flow for Teams.
 
+## Screenshots
+
+![Dashboard](docs/screenshots/dashboard.png)
+*Main dashboard — connection badges, currently playing card, and your live Teams status.*
+
+![Tray menu](docs/screenshots/tray-menu.png)
+*System tray menu — playback controls, Devices and Up Next submenus, Settings and Logs shortcuts.*
+
+![Teams status toast](docs/screenshots/teams-status-toast.png)
+*The result in Teams — your status follows what's playing on Spotify.*
+
+![About page](docs/screenshots/about.png)
+*About page — version, sync/auth/storage summary, and support links.*
+
 ## Downloads
 
 Latest release: [GitHub Releases](https://github.com/Carme99/PresenceJam-Desktop/releases/latest). See [CHANGELOG.md](CHANGELOG.md) for the full version history.

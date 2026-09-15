@@ -12,6 +12,8 @@ PresenceJam lives in your **system tray** (Windows taskbar or macOS menu bar). T
 
 **Tray menu options:**
 
+![Tray menu](docs/screenshots/tray-menu.png)
+
 | Option | What it does |
 |--------|-------------|
 | Show Window | Bring the app window to the foreground |
@@ -32,6 +34,8 @@ PresenceJam lives in your **system tray** (Windows taskbar or macOS menu bar). T
 ---
 
 ## Dashboard
+
+![Dashboard](docs/screenshots/dashboard.png)
 
 The main screen showing your current sync status.
 
