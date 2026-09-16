@@ -87,10 +87,18 @@ Grouped thematically (CHANGELOG.md §[3.2.0] lines 16-48 is the source of truth;
 ## 2  Codebase health audit (read-only, 2026-08-22)
 
 ### 2.1 TODO / FIXME / HACK (repo-wide grep)
-- **Result:** 2 hits, both documented and intentional:
-  - `CHANGELOG.md:571` — `Polling: added TODO note about future refactor to filter raw Spotify fields before formatting` — tracks profanity-filter ordering improvement (filter raw fields before `format_status` template). Not a bug, a planned refactor; covered by candidate C9.
-  - `TROUBLESHOOTING.md:154-155` — references the same `ARCHITECTURE.md#profanity-filter` TODO note.
-  - **No `FIXME`/`HACK`/`XXX` left in `src-tauri/src` or `src/`.** Clean.
+- **Result:** 0 actionable markers. A repo-wide regex
+  (`\b(TODO|FIXME|HACK|XXX)\b`, `(?i)\btodo\b`, `todo!()`, `unimplemented!()`)
+  over `src-tauri/src`, `src`, `tests`, `docs/`, all root markdown and
+  `.github/` returns no code hits — the only near-matches are the `XXXX-XXXX`
+  device-code placeholders in `diagnostics.rs`, which are redaction test data.
+  - **No `FIXME`/`HACK`/`XXX` in `src-tauri/src` or `src/`.** Clean.
+  - The "profanity-filter ordering" note this section originally cited was never
+    a code marker: `ARCHITECTURE.md#profanity-filter` documents shipped
+    behaviour, and the only `TODO` string in the tree is a shipped historical
+    CHANGELOG entry. Re-verified in the 4.6 doc pass — the two bullets naming
+    `CHANGELOG.md:571` and `TROUBLESHOOTING.md:154-155` were dead and have been
+    removed.
 
 ### 2.2 STATE-OF-FEATURES — remaining P2/P3?
 - `docs/STATE-OF-FEATURES.md` @ v3.2.0: **0 open P2/P3 for the v3.2.0 surface.** Every row is either ✅ (verified, 15 features) or an explicitly out-of-scope / partial-with-maintainer-note:
@@ -100,7 +108,7 @@ Grouped thematically (CHANGELOG.md §[3.2.0] lines 16-48 is the source of truth;
   - ❌ Explicitly out of scope: Free Spotify, custom emoji, lyrics, Slack/Discord — correctly closed.
 
 ### 2.3 Open issues after 28 closures
-- **Expected:** 0 open code issues (28 closures landed on `main`). **Verified read-only:** `grep -r "TODO\|FIXME"` clean (above), CHANGELOG §3.2.0 lists 28 issues closed by PRs #232/#233/#234/#235/#236/#237, and no `// TODO` remains in Rust `src-tauri/src` (the only remaining TODO is the profanity-refactor note, which is not an issue-tracked blocker).
+- **Expected:** 0 open code issues (28 closures landed on `main`). **Verified read-only:** the repo-wide marker grep is clean (above), and CHANGELOG §3.2.0 lists 28 issues closed by PRs #232/#233/#234/#235/#236/#237.
 - **Dependabot:** 3 open PRs expected on `Carme99/PresenceJam-Desktop` (npm minor/patch, cargo minor/patch, github-actions minor/patch) per `dependabot.yml` `open-pull-requests-limit: 5` × 3 ecosystems — not counted as code-issue backlog; handled by weekly batch.
 - **Winget/Homebrew:** formula taps are not GitHub issues in this repo; no tracker gap.
 

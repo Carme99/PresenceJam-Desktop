@@ -66,6 +66,74 @@ end-to-end; the few rows that can't be sourced inline are explicitly flagged
 | Multi-platform CI + secret scan + dep audit | ✅     | `ci.yml` macOS + Windows check legs, gitleaks secret-scan, cargo/npm advisory audit; macOS/Windows cfg code compiles in CI (#355, #356, #357). |
 | Maintained path/rand crates | ✅     | `dirs` → `directories` 6, `rand` 0.9 with `try_fill_bytes` propagation; single keyring feature set (#418). |
 
+## Release smoke (run once against the published release)
+
+Two rows above are ⚠ **Partial** because their end-to-end legs need a real
+release to observe — not because anything is missing in code. Run this
+checklist once after the release tag is published, record the results in the
+release notes, and only then flip the row. If a step fails, the row stays ⚠
+and the failure becomes its own issue.
+
+### 1. Install-on-quit updates (C3c)
+
+The smoke must start from the **previously published** build:
+`allowDowngrades: false` (`tauri.conf.json`) plus the stale-stage guard
+(`updater_bg.rs::install_pending_on_exit` skips `staged <= current` unless
+`forced`) mean the running build can never stage itself.
+
+```bash
+# 1. Install the previous published build (e.g. PresenceJam-v4.5.2.msi /
+#    PresenceJam-macos.dmg / PresenceJam-linux-amd64.AppImage) and launch it.
+# 2. Tail the log while the startup update check runs:
+tail -f ~/Library/Logs/com.presencejam.app/PresenceJam.log                 # macOS
+tail -f ~/.local/share/com.presencejam.app/logs/PresenceJam.log           # Linux
+# PowerShell: Get-Content -Wait "$env:LOCALAPPDATA\com.presencejam.app\logs\PresenceJam.log"
+```
+
+3. When the banner shows *Update vX.Y.Z available*, pick **Install on quit** and
+   confirm. Expect `[UPDATER.BG] stage_deferred_update: SUCCESS`.
+4. Tray → **Quit**. Expect, in order:
+
+```
+[UPDATER.BG] install_pending_on_exit: installing vX.Y.Z on quit
+[UPDATER.BG] install_pending_on_exit: vX.Y.Z installed; takes effect on next launch (Windows installer relaunches automatically)
+```
+
+5. Relaunch (Windows does it for you) and check About → the new version.
+   Record per platform whether the app relaunched itself or needed the manual
+   relaunch — "installed, but the old UI is up until the next launch" is the
+   documented macOS/Linux behaviour, not a failure.
+
+**Flips:** *Install-on-quit updates (C3c)* → ✅, annotated with the release tag
+and the three platform results.
+
+### 2. Sign-in survives a long idle period
+
+The condition cannot be seeded — `tokens.json` is AES-256-GCM ciphertext
+(`token_io.rs`), so an expired `expires_at` cannot be hand-written. The
+wall-clock wait **is** the driver.
+
+1. Sign in to both providers on the new build, confirm a status posts, quit.
+2. Leave the app closed for **more than 1 hour** (the access-token lifetime).
+3. Relaunch. Expect the **Dashboard**, not the wizard, and in the log:
+
+```
+[CMD.ONBOARDING] is_onboarding_complete: spotify session refreshed (access token was expired at launch)
+[CMD.ONBOARDING] is_onboarding_complete: teams session refreshed (access token was expired at launch)
+[CMD.ONBOARDING] is_onboarding_complete: result=true (spotify_configured=true, spotify_valid=true, teams_configured=true, teams_valid=true)
+```
+
+Record the platform and the actual wall-clock gap beside the result.
+
+**Flips:** *Sign-in survives a long idle period* → ✅. If the wait cannot be
+run, the honest alternative is to leave the row ⚠ and reword it to
+"⚠ Partial — decision table unit-tested (`onboarding.rs::session_verdict`);
+end-to-end relaunch smoke pending" rather than promoting it on a unit test.
+
+> The third ⚠ Partial row — *macOS deep-link hijack defence* — is not a smoke
+> item: it needs the `LSSetDefaultHandlerForURLScheme` FFI path (issue #66) and
+> stays ⚠ until that ships.
+
 ## Documented gaps (do work; deliberately out of scope for the version tested)
 
 | Area                                               | Status | Notes                                                                                                                                  |
