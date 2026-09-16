@@ -12,6 +12,7 @@
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { currentView } from '$lib/stores/app';
   import { t } from '$lib/i18n';
+  import { reconcileDetachedPanes } from '$lib/stores/detach';
 
   // C7: this layout is shared by every webview window (the SPA fallback
   // hydrates it for detached Logs/Settings windows too). Reconnect flows,
@@ -49,6 +50,10 @@
   onMount(() => {
     // #498: never touch Tauri IPC outside the runtime (plain browser).
     if (!isTauriRuntime || !isMainWindow) return;
+    // #601: the badge map is empty on every load, but detached windows
+    // survive a main-window reload — adopt the real window set before the
+    // Dashboard can offer "navigate" for a pane that is already out.
+    void reconcileDetachedPanes();
     let unlistenTeams: (() => void) | null = null;
     let unlistenSpotify: (() => void) | null = null;
     let unlistenPlayback: (() => void) | null = null;
