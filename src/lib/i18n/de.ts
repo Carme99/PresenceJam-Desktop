@@ -384,4 +384,6 @@ export const de: Dict = {
   'diagnostics.expiryBuffer': 'Puffer vor Token-Ablauf',
   'diagnostics.teamsRefreshTokenPresent': 'Teams-Aktualisierungstoken gespeichert',
   'reconnect.restartSignIn': 'Anmeldung neu starten',
+  'update.stagingProgress': 'Update wird vorbereitet — {percent} %',
+  'update.cancelStage': 'Abbrechen'
 };

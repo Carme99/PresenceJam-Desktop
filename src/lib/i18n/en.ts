@@ -369,6 +369,8 @@ export const en = {
   'diagnostics.expiryBuffer': 'Token refresh buffer',
   'diagnostics.teamsRefreshTokenPresent': 'Teams refresh token stored',
   'reconnect.restartSignIn': 'Restart sign-in',
+  'update.stagingProgress': 'Preparing update — {percent}%',
+  'update.cancelStage': 'Cancel'
 };
 
 export type Dict = { readonly [K in keyof typeof en]: string };
