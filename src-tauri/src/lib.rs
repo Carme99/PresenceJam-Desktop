@@ -334,14 +334,12 @@ pub struct AppState {
     /// (single-use) at callback time, so a replayed callback fails
     /// closed per RFC 6749 §10.12:
     /// https://datatracker.ietf.org/doc/html/rfc6749#section-10.12 .
-    /// **macOS limitation:** the `presencejam://`
-    /// scheme is registered at build time via `tauri.conf.json`; runtime
-    /// re-registration (`register_all`) is unsupported on macOS (returns
-    /// `UnsupportedPlatform`), so a hostile app that pre-registered the
-    /// scheme could still intercept the redirect. The intercepted `code`
-    /// is useless without the secret + PKCE verifier (both in our
-    /// AppState, never on disk / IPC), but the hijack itself is not
-    /// prevented on macOS.
+    /// **macOS:** the `presencejam://`
+    /// scheme is registered at build time via `tauri.conf.json`, and
+    /// `tauri-plugin-deep-link`'s runtime `register_all()` is unsupported
+    /// there. `macos_deeplink` closes that gap by re-claiming the scheme
+    /// through CoreServices' `LSSetDefaultHandlerForURLScheme` at every
+    /// launch, which overrides a hostile app's earlier registration.
     pub launch_binding: OnceLock<crate::pkce::LaunchBinding>,
 }
 
@@ -378,6 +376,7 @@ pub mod commands;
 pub mod config;
 pub mod diagnostics;
 pub mod keychain;
+pub mod macos_deeplink;
 pub mod menu;
 pub mod pkce;
 pub mod polling;
@@ -441,9 +440,11 @@ async fn handle_spotify_callback(
         log::error!("[CALLBACK] handle_spotify_callback: missing state parameter in callback URL");
         return Err("Missing state parameter - possible CSRF attack".to_string());
     }
+
     // Note on #66: deep-link interception by another app is mitigated by
-    // the verifier being in AppState only (#65). A full fix needs per-launch
-    // custom-scheme registration (OS-specific) and is tracked in issue #66.
+    // the verifier being in AppState only (#65) and, at the OS level, by
+    // re-claiming the scheme at every launch — `macos_deeplink` on macOS,
+    // `tauri-plugin-deep-link`'s `register_all()` on Windows/Linux.
     // Fetch the client_secret from the OS keychain. It was placed there by
     // `start_spotify_auth` and is never persisted to disk. See issue #9.
     log::info!("[CALLBACK] handle_spotify_callback: reading client_secret from keychain");
@@ -962,19 +963,53 @@ pub fn run() {
                 // `HKCU\Software\Classes\<scheme>` on Windows and
                 // `~/.local/share/applications/<scheme>.desktop` plus
                 // `xdg-mime default` on Linux; it returns
-                // `Err(UnsupportedPlatform)` on macOS — we log that case
-                // and continue, since startup must not block on a known
-                // platform gap. PKCE verifier in AppState only (#65)
-                // remains the macOS mitigation: an interceptor can read
-                // the `code` from the callback URL but cannot exchange it
-                // for tokens.
+                // `Err(UnsupportedPlatform)` on macOS, where the claim has to
+                // go through CoreServices instead — `macos_deeplink` does that
+                // in the error arm below. Startup must not block on either
+                // path: PKCE verifier in AppState only (#65) remains the
+                // cryptographic mitigation — an interceptor can read the
+                // `code` from the callback URL but cannot exchange it for
+                // tokens.
                 log::info!("[APP] setup: registering deep links");
                 if let Err(e) = app.deep_link().register_all() {
                     #[cfg(target_os = "macos")]
-                    log::warn!(
-                        "[APP] setup: deep_link::register_all unsupported on macOS ({e}); \
-                         relying on #65 PKCE-only mitigation for scheme hijack defence"
-                    );
+                    {
+                        // Issue #66: macOS claims a URL scheme through the app
+                        // bundle's `CFBundleURLTypes`, and LaunchServices gives
+                        // the *first* claimant priority, so the plugin call
+                        // above cannot take `presencejam://` back from an app
+                        // that registered it first. CoreServices'
+                        // `LSSetDefaultHandlerForURLScheme` writes the user's
+                        // preferred handler and does override that. The bundle
+                        // id and the scheme list both come from the same
+                        // tauri.conf.json the plugin reads, so a scheme added
+                        // there is re-claimed automatically. Failure is only
+                        // logged — expected under `tauri dev`, where the
+                        // process is not an installed bundle.
+                        log::warn!(
+                            "[APP] setup: deep_link::register_all unsupported on macOS ({e}); \
+                             re-claiming the scheme via LSSetDefaultHandlerForURLScheme"
+                        );
+                        let config = app.config();
+                        let schemes = macos_deeplink::configured_schemes(&config.plugins.0);
+                        match macos_deeplink::claim(&schemes, &config.identifier) {
+                            Ok(true) => log::info!(
+                                "[APP] setup: macOS scheme re-claimed via \
+                                 LSSetDefaultHandlerForURLScheme for {schemes:?} \
+                                 (bundle id {})",
+                                config.identifier
+                            ),
+                            Ok(false) => log::info!(
+                                "[APP] setup: macOS scheme re-claim already performed this \
+                                 launch; skipping"
+                            ),
+                            Err(err) => log::warn!(
+                                "[APP] setup: macOS scheme re-claim failed ({err}); falling \
+                                 back to the #65 PKCE launch-binding defence against scheme \
+                                 hijack"
+                            ),
+                        }
+                    }
                     #[cfg(not(target_os = "macos"))]
                     {
                         // #497: name the missing step. The plugin's Linux
@@ -1339,10 +1374,10 @@ mod tests {
     /// re-gate `app.deep_link().register_all()` to `#[cfg(windows)]`
     /// alone. Per-launch re-registration of the `presencejam://`
     /// scheme is required on Windows AND Linux to defend against a
-    /// foreign app pre-registering the scheme. The macOS path is a
-    /// known gap handled inside the call site (logs a warning, does
-    /// not crash startup) — the platform gap is documented in #66
-    /// and the changelog; do NOT reintroduce the Windows-only gate.
+    /// foreign app pre-registering the scheme. macOS is handled by
+    /// `macos_deeplink` inside the call site's error arm (see
+    /// `test_macos_deeplink_reclaim_is_wired`) — do NOT reintroduce the
+    /// Windows-only gate.
     #[test]
     fn test_register_all_not_gated_to_windows_only() {
         let source = include_str!("lib.rs");
@@ -1384,11 +1419,52 @@ mod tests {
         assert!(
             !window.contains("#[cfg(windows)]"),
             "Regression: `{}` is gated to Windows only. Issue #66 \
-             requires per-launch re-registration on Windows AND Linux. \
-             The macOS gap is handled inside the call site (logs \
-             a warning, does not crash) — do NOT reintroduce \
+             requires per-launch re-registration on Windows AND Linux (and \
+             the CoreServices re-claim on macOS). Do NOT reintroduce \
              `#[cfg(windows)]` around this call. Offending context:\n{}",
             needle,
+            window
+        );
+    }
+
+    /// Regression guard for the macOS half of issue #66: the CoreServices
+    /// re-claim must stay attached to `register_all()`'s failure arm and
+    /// stay gated to macOS. Deleting it silently restores the pre-4.6
+    /// state where `presencejam://` could be intercepted by whichever app
+    /// registered it first, and running it unconditionally would mean
+    /// linking CoreServices on Windows/Linux.
+    #[test]
+    fn test_macos_deeplink_reclaim_is_wired() {
+        let source = include_str!("lib.rs");
+        assert!(
+            source.contains("pub mod macos_deeplink;"),
+            "the macos_deeplink module must stay registered in lib.rs"
+        );
+
+        let needle = "macos_deeplink::claim(";
+        let byte_offset = source.find(needle).unwrap_or_else(|| {
+            panic!(
+                "no call to `{}` found in lib.rs — the macOS scheme re-claim \
+                 must remain in the deep-link setup block",
+                needle
+            )
+        });
+        let window_start = byte_offset.saturating_sub(2_000);
+        let window_end = (byte_offset + 2_000).min(source.len());
+        let window = &source[window_start..window_end];
+
+        assert!(
+            window.contains("#[cfg(target_os = \"macos\")]"),
+            "the CoreServices re-claim must be `#[cfg(target_os = \"macos\")]` — it \
+             pulls in macOS-only dependencies and must not be compiled or linked \
+             on other targets. Offending context:\n{}",
+            window
+        );
+        assert!(
+            window.contains("app.deep_link().register_all()"),
+            "the CoreServices re-claim must be reached from \
+             `register_all()`'s failure arm, not from a second call site. \
+             Offending context:\n{}",
             window
         );
     }
