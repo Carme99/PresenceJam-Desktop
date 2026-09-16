@@ -5,8 +5,8 @@
 //! unchanged from the pre-split single file; this is a cut-and-paste refactor.
 //!
 //! Submodule map (each lists every `#[tauri::command]` it owns):
-//!   - `config` — load_config, save_config
-//!   - `spotify_auth` — start_spotify_auth, start_spotify_reconnect, complete_spotify_auth_manual, refresh_spotify, is_spotify_client_secret_set
+//!   - `config` — load_config, save_config, update_config
+//!   - `spotify_auth` — start_spotify_auth, start_spotify_reconnect, complete_spotify_auth_manual, refresh_spotify, is_spotify_client_secret_set, reconnect_spotify_session
 //!   - `playback` — playback_play, playback_pause, playback_next, playback_previous, playback_transfer, get_playback_devices, get_playback_queue, get_spotify_granted_scopes
 //!   - `teams_auth` — start_teams_auth_device_code, poll_teams_auth, refresh_teams, get_teams_granted_scopes
 //!   - `sync` — start_syncing, stop_syncing, get_sync_status, app_exit
@@ -87,7 +87,9 @@ pub fn require_main_window(window: &tauri::Window) -> Result<(), String> {
 /// Settings/LogViewer by design): reconnect_spotify, reconnect_teams,
 /// poll_teams_auth, set_autostart_enabled, open_logs_folder,
 /// open_external_url (Teams verification-URL open during detached
-/// device-code flow).
+/// device-code flow), save_config (whole-document config write) and
+/// update_config (field-level config write, issue #535) — both are reached
+/// from Settings, which is one of the two detached-hosting views.
 #[cfg(test)]
 mod tests {
     /// Regression guard for issue #76: the `commands` module must declare all

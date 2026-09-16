@@ -51,6 +51,12 @@ pub struct TeamsConfig {
     /// meeting/in a call/presenting. ON by default.
     #[serde(default = "default_presence_gate")]
     pub presence_gate: bool,
+    /// User-supplied extra words for the status profanity filter
+    /// (CfgDiag#3(b), issue #538). Normalized once and matched under the
+    /// same boundary gates as the built-in lexicon. Empty by default;
+    /// bounded to 64 entries of 32 chars by `clamp_teams`.
+    #[serde(default)]
+    pub profanity_extra_words: Vec<String>,
 }
 
 fn default_status_format() -> String {
@@ -92,6 +98,11 @@ pub struct PollingConfig {
     pub max_interval_seconds: u64,
     #[serde(default = "default_expiry_buffer_seconds")]
     pub expiry_buffer_seconds: u64,
+    /// Ceiling for the "paused playback" exponential backoff (CfgDiag#3(c),
+    /// issue #538). `pause_backoff` hardcoded 300 s in three places; the
+    /// value is now clamped into 60..=3600 by `clamp_polling`.
+    #[serde(default = "default_pause_backoff_max")]
+    pub pause_backoff_max_seconds: u64,
 }
 
 fn default_interval_seconds() -> u64 {
@@ -109,13 +120,40 @@ fn default_max_interval_seconds() -> u64 {
 fn default_expiry_buffer_seconds() -> u64 {
     10
 }
+
+fn default_pause_backoff_max() -> u64 {
+    300
+}
 fn clamp_polling(cfg: &mut PollingConfig) {
     cfg.default_interval_seconds = cfg.default_interval_seconds.clamp(5, 300);
     cfg.minimum_interval_seconds = cfg.minimum_interval_seconds.clamp(5, 30);
     cfg.max_interval_seconds = cfg
         .max_interval_seconds
         .clamp(cfg.minimum_interval_seconds, 300);
+    // CfgDiag#5 (#540): `default` is pinned to the pair AFTER both ends are
+    // clamped, so `minimum <= default <= maximum` always holds. Without this
+    // a persisted `{default: 300, minimum: 10, maximum: 30}` was accepted and
+    // drove the no-track sleep (poll_once's `pause_backoff`) five minutes
+    // past the ceiling the UI was showing as one minute.
+    cfg.default_interval_seconds = cfg
+        .default_interval_seconds
+        .clamp(cfg.minimum_interval_seconds, cfg.max_interval_seconds);
     cfg.expiry_buffer_seconds = cfg.expiry_buffer_seconds.clamp(0, 60);
+    // CfgDiag#3(c) (#538): the pause-backoff ceiling is user-configurable,
+    // so clamp it into a sane band whatever the file (or the UI) said.
+    cfg.pause_backoff_max_seconds = cfg.pause_backoff_max_seconds.clamp(60, 3600);
+}
+
+/// Bound the user-supplied profanity lexicon (CfgDiag#3(b), issue #538):
+/// at most 64 entries, each at most 32 characters. `clamped_config` is the
+/// only normalizer, so this runs on load and on every save.
+fn clamp_teams(cfg: &mut TeamsConfig) {
+    cfg.profanity_extra_words.truncate(64);
+    for word in &mut cfg.profanity_extra_words {
+        if word.chars().count() > 32 {
+            *word = word.chars().take(32).collect();
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
@@ -135,8 +173,76 @@ fn default_log_level() -> String {
     "Info".to_string()
 }
 
+/// Single place the logger's max level is wired from `logging.enabled` /
+/// `logging.log_level` (CfgDiag#4, issue #539).
+///
+/// Called once from the `lib.rs` setup block after the startup config load
+/// and again by every config write that can change logging, so a
+/// `logging.enabled: false` (or a Debug-to-reproduce-a-bug switch) takes
+/// effect immediately instead of at the next launch. An unrecognised level
+/// string falls back to Info rather than silently disabling logging.
+pub fn apply_log_level(cfg: &LoggingConfig) {
+    let level_str = cfg.log_level.to_lowercase();
+    let max_level = if !cfg.enabled {
+        log::LevelFilter::Off
+    } else {
+        match level_str.as_str() {
+            "off" => log::LevelFilter::Off,
+            "error" => log::LevelFilter::Error,
+            "warn" => log::LevelFilter::Warn,
+            "info" => log::LevelFilter::Info,
+            "debug" => log::LevelFilter::Debug,
+            "trace" => log::LevelFilter::Trace,
+            _ => log::LevelFilter::Info,
+        }
+    };
+    log::set_max_level(max_level);
+    log::info!(
+        "[CFG] log level applied: {:?} (enabled={})",
+        max_level,
+        cfg.enabled
+    );
+}
+
+/// The config schema version THIS binary writes (CfgDiag#1, issue #536).
+/// Bump whenever the persisted shape gains or changes a field that needs a
+/// migration.
+///
+/// Deliberately separate from [`default_schema_version`]: a file with no
+/// `schema_version` key predates 4.3.0 and is therefore a *v1* file, so the
+/// dispatcher must still run for it.
+pub const SCHEMA_VERSION: u32 = 2;
+
 fn default_schema_version() -> u32 {
     1
+}
+
+/// Make the binary — never the client — authoritative for `schema_version`
+/// (CfgDiag#1, issue #536). A stale frontend payload (or a wizard literal
+/// that still sends `1`) can no longer erase the record that a migration
+/// already ran.
+pub fn stamp_schema_version(cfg: &mut AppConfig) {
+    cfg.schema_version = SCHEMA_VERSION;
+}
+
+/// Version-directed fixups run by `load_config` BEFORE the clamps (issue
+/// #536). Fail-safe by construction: a file written by a newer binary keeps
+/// its own (higher) version and is passed through untouched, so unknown
+/// fields are never relabelled as if this binary had produced them.
+fn migrate_config(cfg: &mut AppConfig, from: u32) {
+    match from {
+        // v1 → v2 (4.6): the three additions of CfgDiag#3 (#538) are all
+        // additive with serde defaults, so there is nothing to backfill —
+        // the step exists so a future breaking change has a home.
+        1 => {}
+        n if n > SCHEMA_VERSION => log::warn!(
+            "[CFG] config written by a newer binary (schema {} > {}); passing through unknown fields",
+            n,
+            SCHEMA_VERSION
+        ),
+        _ => {}
+    }
+    cfg.schema_version = cfg.schema_version.max(SCHEMA_VERSION);
 }
 
 /// One quiet-hours entry for issue #432: status writes are suppressed while
@@ -159,6 +265,12 @@ pub struct QuietHoursEntry {
     /// ISO weekday numbers 1..=7; empty = every day.
     #[serde(default)]
     pub days: Vec<u8>,
+    /// Optional fixed status posted while this window is active instead of
+    /// suppressing the write (CfgDiag#3(a), issue #538) — e.g. "Busy" during
+    /// focus hours. Empty = suppress, mirroring
+    /// [`TrackRuleEntry::replacement_status`].
+    #[serde(default)]
+    pub replacement_status: String,
 }
 
 fn default_quiet_end() -> u16 {
@@ -249,6 +361,7 @@ impl Default for TeamsConfig {
             start_minimized: default_start_minimized(),
             availability_sync: default_availability_sync(),
             presence_gate: default_presence_gate(),
+            profanity_extra_words: Vec::new(),
         }
     }
 }
@@ -260,6 +373,7 @@ impl Default for PollingConfig {
             minimum_interval_seconds: default_min_interval_seconds(),
             max_interval_seconds: default_max_interval_seconds(),
             expiry_buffer_seconds: default_expiry_buffer_seconds(),
+            pause_backoff_max_seconds: default_pause_backoff_max(),
         }
     }
 }
@@ -293,6 +407,57 @@ impl Default for AppConfig {
     }
 }
 
+/// Field-level update to [`AppConfig`] for callers that only know part of
+/// the document (CfgDiag#0, issue #535).
+///
+/// `save_config` is a whole-document replace, so every caller had to
+/// already hold a complete, current `AppConfig`. A caller that did not — the
+/// setup wizard being the first — silently reset everything it omitted,
+/// which is the backend half of the #531 config-clobber family. A patch can
+/// only ever touch the fields it explicitly names.
+///
+/// Every field is `Option` and skipped when absent, so an older or partial
+/// payload cannot express "reset this section to empty".
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+pub struct ConfigPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spotify: Option<SpotifyConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub teams: Option<TeamsConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polling: Option<PollingConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logging: Option<LoggingConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autostart: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_rules: Option<StatusRulesConfig>,
+}
+
+/// Overwrite only the sections the patch names; everything else — including
+/// `extra` and the binary-owned `schema_version` — is left exactly as it was.
+/// Pure, so the merge guarantee is unit-testable without touching disk.
+pub fn apply_patch(base: &mut AppConfig, patch: &ConfigPatch) {
+    if let Some(spotify) = &patch.spotify {
+        base.spotify = spotify.clone();
+    }
+    if let Some(teams) = &patch.teams {
+        base.teams = teams.clone();
+    }
+    if let Some(polling) = &patch.polling {
+        base.polling = polling.clone();
+    }
+    if let Some(logging) = &patch.logging {
+        base.logging = logging.clone();
+    }
+    if let Some(autostart) = patch.autostart {
+        base.autostart = autostart;
+    }
+    if let Some(status_rules) = &patch.status_rules {
+        base.status_rules = status_rules.clone();
+    }
+}
+
 pub fn config_dir() -> Result<PathBuf, String> {
     // Maintained replacement for the unmaintained `dirs` crate (issue #418):
     // `directories::BaseDirs::new()` resolves the same platform config
@@ -319,7 +484,7 @@ pub fn config_dir() -> Result<PathBuf, String> {
         {
             let _ = fs::set_permissions(&app_dir, std::fs::Permissions::from_mode(0o700));
         }
-        log::info!("Created config directory at '{}'", app_dir.display());
+        log::info!("[CFG] Created config directory at '{}'", app_dir.display());
     }
 
     Ok(app_dir)
@@ -347,6 +512,27 @@ fn quarantine_backup_path(path: &std::path::Path) -> PathBuf {
     let mut backup = path.as_os_str().to_owned();
     backup.push(".bak");
     PathBuf::from(backup)
+}
+
+/// Bare file name of the quarantine backup for `path` when one exists,
+/// else `None`. Deliberately a bare name and never an absolute path, so the
+/// diagnostics snapshot can surface it without breaching the #409
+/// no-absolute-path rule (CfgDiag#2, issue #537).
+fn quarantine_backup_name_for(path: &std::path::Path) -> Option<String> {
+    let backup = quarantine_backup_path(path);
+    if backup.is_file() {
+        backup
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+    } else {
+        None
+    }
+}
+
+/// [`quarantine_backup_name_for`] against this process's real config path.
+/// `None` when nothing was quarantined or the `.bak` has since been removed.
+pub fn config_quarantine_backup_name() -> Option<String> {
+    quarantine_backup_name_for(&get_config_path().ok()?)
 }
 
 /// Rename a corrupt config file alongside itself (`<name>.bak`), raise the
@@ -379,7 +565,7 @@ pub fn load_config() -> Result<AppConfig, String> {
 
     if !path.exists() {
         log::info!(
-            "Config file not found at '{}', using defaults",
+            "[CFG] Config file not found at '{}', using defaults",
             path.display()
         );
         return Ok(with_keychain_flags(AppConfig::default()));
@@ -397,7 +583,7 @@ pub fn load_config() -> Result<AppConfig, String> {
         let current_mode = current.mode() & 0o777;
         if current_mode != 0o600 {
             log::warn!(
-                "Tightening config.json mode from {:o} to 0600 (issue #135)",
+                "[CFG] Tightening config.json mode from {:o} to 0600 (issue #135)",
                 current_mode
             );
             let mut tightened = current;
@@ -429,9 +615,16 @@ pub fn load_config() -> Result<AppConfig, String> {
             return Ok(with_keychain_flags(AppConfig::default()));
         }
     };
+    // CfgDiag#1 (#536): the version dispatcher runs BEFORE the clamps, so a
+    // migration can never have its rewritten values re-clamped away, and
+    // `schema_version` is raised even for a file that was never saved by
+    // this binary.
+    let from_version = config.schema_version;
+    migrate_config(&mut config, from_version);
     clamp_polling(&mut config.polling);
+    clamp_teams(&mut config.teams);
 
-    log::info!("Loaded configuration from '{}'", path.display());
+    log::info!("[CFG] Loaded configuration from '{}'", path.display());
     Ok(with_keychain_flags(config))
 }
 
@@ -722,7 +915,7 @@ fn atomic_write_json(path: &std::path::Path, json: &str) -> Result<(), String> {
         if let Some(parent) = path.parent() {
             if let Ok(dir) = std::fs::File::open(parent) {
                 if let Err(e) = dir.sync_all() {
-                    log::warn!("Failed to fsync config dir '{}': {}", parent.display(), e);
+                    log::warn!("[CFG] Failed to fsync config dir '{}': {}", parent.display(), e);
                 }
             }
         }
@@ -741,19 +934,23 @@ fn atomic_write_json(path: &std::path::Path, json: &str) -> Result<(), String> {
 pub fn clamped_config(config: &AppConfig) -> AppConfig {
     let mut cfg = config.clone();
     clamp_polling(&mut cfg.polling);
+    clamp_teams(&mut cfg.teams);
     cfg
 }
 
 pub fn save_config(config: &AppConfig) -> Result<(), String> {
     let path = get_config_path()?;
 
-    let cfg = clamped_config(config);
+    let mut cfg = clamped_config(config);
+    // CfgDiag#1 (#536): the client's `schema_version` is a suggestion, not
+    // an instruction — a stale payload can never lower the version.
+    stamp_schema_version(&mut cfg);
     let json = serde_json::to_string_pretty(&cfg)
         .map_err(|e| format!("Failed to serialize config to JSON: {}", e))?;
 
     atomic_write_json(&path, &json)?;
 
-    log::info!("Saved configuration to '{}'", path.display());
+    log::info!("[CFG] Saved configuration to '{}'", path.display());
     Ok(())
 }
 
@@ -996,9 +1193,10 @@ mod tests {
                 .expect("future_key must be retained"),
             &serde_json::json!({"nested": [1, 2, 3]})
         );
-        // `save_config` serialises the `clamped_config` clone with
-        // `to_string_pretty`; `clamped_config` only touches polling, so this
-        // exercises the same serde path as a real save.
+        // `save_config` serialises a `clamped_config` clone with
+        // `to_string_pretty`; clamping only touches polling and the
+        // profanity lexicon, so this exercises the same serde path as a real
+        // save without touching the user's config file.
         let json = serde_json::to_string_pretty(&clamped_config(&cfg)).expect("must serialize");
         assert!(
             json.contains("future_key"),
@@ -1150,5 +1348,478 @@ mod tests {
         let back: AppConfig = serde_json::from_str(&json).expect("must re-parse");
         assert_eq!(back.status_rules.quiet_hours.len(), 1);
         assert_eq!(back.status_rules.track_rules.len(), 1);
+    }
+
+    // ---------------------------------------------------------------
+    // CfgDiag#5 (#540): `minimum <= default <= maximum` is an invariant.
+    // ---------------------------------------------------------------
+
+    /// Hostile-but-persistable inputs (the Settings number inputs' `min`/
+    /// `max` attributes do not constrain a typed value, and `clamp_polling`
+    /// is the only normalizer) must land on the invariant, not merely on
+    /// each field's own range.
+    #[test]
+    fn test_clamp_polling_pins_default_between_min_and_max() {
+        let mut polling = PollingConfig {
+            default_interval_seconds: 300,
+            minimum_interval_seconds: 10,
+            max_interval_seconds: 30,
+            expiry_buffer_seconds: 10,
+            pause_backoff_max_seconds: 300,
+        };
+        clamp_polling(&mut polling);
+        assert_eq!(polling.max_interval_seconds, 30);
+        assert_eq!(polling.minimum_interval_seconds, 10);
+        assert_eq!(
+            polling.default_interval_seconds, 30,
+            "a default above the max must be pulled down to the max"
+        );
+
+        // The mirror case: a default below the minimum.
+        let mut polling = PollingConfig {
+            default_interval_seconds: 5,
+            minimum_interval_seconds: 20,
+            max_interval_seconds: 60,
+            expiry_buffer_seconds: 10,
+            pause_backoff_max_seconds: 300,
+        };
+        clamp_polling(&mut polling);
+        assert_eq!(polling.default_interval_seconds, 20);
+
+        // Out-of-range fields still clamp to their own bands first, and the
+        // invariant survives the combination.
+        let mut polling = PollingConfig {
+            default_interval_seconds: 9999,
+            minimum_interval_seconds: 9999,
+            max_interval_seconds: 9999,
+            expiry_buffer_seconds: 9999,
+            pause_backoff_max_seconds: 9999,
+        };
+        clamp_polling(&mut polling);
+        assert!(polling.minimum_interval_seconds <= polling.default_interval_seconds);
+        assert!(polling.default_interval_seconds <= polling.max_interval_seconds);
+        assert_eq!(polling.expiry_buffer_seconds, 60);
+        assert_eq!(polling.pause_backoff_max_seconds, 3600);
+
+        // CfgDiag#3(c): the backoff ceiling has a floor too.
+        let mut polling = PollingConfig {
+            pause_backoff_max_seconds: 1,
+            ..PollingConfig::default()
+        };
+        clamp_polling(&mut polling);
+        assert_eq!(polling.pause_backoff_max_seconds, 60);
+    }
+
+    // ---------------------------------------------------------------
+    // CfgDiag#0 (#535): a partial-knowledge caller cannot lose fields.
+    // ---------------------------------------------------------------
+
+    /// The #531 failure mode in one test: a patch that carries only
+    /// `teams.status_format` must leave the stored quiet hours, track rules,
+    /// `start_minimized` and logging exactly as they were.
+    ///
+    /// Asserted through the same `clamped_config` + `stamp_schema_version` +
+    /// serde path `save_config` uses — writing the real config.json from a
+    /// unit test is not acceptable, and the merge itself is pure.
+    #[test]
+    fn test_apply_patch_preserves_unpatched_fields() {
+        let mut base = AppConfig {
+            autostart: true,
+            schema_version: SCHEMA_VERSION,
+            ..AppConfig::default()
+        };
+        base.teams.start_minimized = true;
+        base.teams.profanity_filter = false;
+        base.teams.profanity_extra_words = vec!["spam".to_string()];
+        base.logging.log_level = "Debug".to_string();
+        base.polling.minimum_interval_seconds = 15;
+        base.polling.max_interval_seconds = 90;
+        base.status_rules.quiet_hours.push(QuietHoursEntry {
+            enabled: true,
+            start_minutes: 1320,
+            end_minutes: 420,
+            days: vec![1, 2, 3, 4, 5],
+            replacement_status: "Busy".to_string(),
+        });
+        base.status_rules.track_rules.push(TrackRuleEntry {
+            enabled: true,
+            artist_substring: "lofi".to_string(),
+            track_substring: String::new(),
+            replacement_status: "Focus".to_string(),
+        });
+
+        let patch: ConfigPatch =
+            serde_json::from_str(r#"{"teams": {"status_format": "NEW {track}"}}"#)
+                .expect("patch must parse");
+        assert!(patch.spotify.is_none());
+        assert!(patch.autostart.is_none());
+
+        let mut merged = base.clone();
+        apply_patch(&mut merged, &patch);
+
+        // The one patched field took the new value.
+        assert_eq!(merged.teams.status_format, "NEW {track}");
+        // Everything else survived.
+        assert_eq!(merged.status_rules.quiet_hours.len(), 1);
+        assert_eq!(merged.status_rules.quiet_hours[0].replacement_status, "Busy");
+        assert_eq!(merged.status_rules.track_rules.len(), 1);
+        assert_eq!(merged.status_rules.track_rules[0].replacement_status, "Focus");
+        assert!(merged.teams.start_minimized);
+        assert!(!merged.teams.profanity_filter);
+        assert_eq!(merged.teams.profanity_extra_words, vec!["spam".to_string()]);
+        assert_eq!(merged.logging.log_level, "Debug");
+        assert!(merged.autostart);
+        assert_eq!(merged.polling.minimum_interval_seconds, 15);
+        assert_eq!(merged.polling.max_interval_seconds, 90);
+
+        // What actually lands on disk round-trips with the same values.
+        let mut persisted = clamped_config(&merged);
+        stamp_schema_version(&mut persisted);
+        let json = serde_json::to_string_pretty(&persisted).expect("must serialize");
+        let back: AppConfig = serde_json::from_str(&json).expect("must re-parse");
+        assert_eq!(back.status_rules.quiet_hours.len(), 1);
+        assert_eq!(back.status_rules.track_rules.len(), 1);
+        assert!(back.teams.start_minimized);
+        assert!(!back.teams.profanity_filter);
+        assert_eq!(back.teams.status_format, "NEW {track}");
+        assert_eq!(back.schema_version, SCHEMA_VERSION);
+    }
+
+    /// A patch that names nothing must change nothing (`update_config`'s
+    /// base-config path relies on this).
+    #[test]
+    fn test_apply_patch_is_identity_when_empty() {
+        let mut base = AppConfig::default();
+        base.autostart = true;
+        base.status_rules.track_rules.push(TrackRuleEntry {
+            enabled: true,
+            artist_substring: String::new(),
+            track_substring: String::new(),
+            replacement_status: String::new(),
+        });
+        let before = serde_json::to_string(&base).expect("must serialize");
+        let patch = ConfigPatch {
+            spotify: None,
+            teams: None,
+            polling: None,
+            logging: None,
+            autostart: None,
+            status_rules: None,
+        };
+        apply_patch(&mut base, &patch);
+        assert_eq!(
+            serde_json::to_string(&base).expect("must serialize"),
+            before
+        );
+    }
+
+    /// `extra` (the #379 forward-compat bucket) is never touched by a patch.
+    #[test]
+    fn test_apply_patch_leaves_extra_untouched() {
+        let mut base = AppConfig::default();
+        base.extra
+            .insert("future_key".to_string(), serde_json::json!({"a": 1}));
+        let patch: ConfigPatch = serde_json::from_str(r#"{"autostart": true}"#).expect("must parse");
+        apply_patch(&mut base, &patch);
+        assert!(base.autostart);
+        assert_eq!(base.extra.get("future_key"), Some(&serde_json::json!({"a": 1})));
+    }
+
+    // ---------------------------------------------------------------
+    // CfgDiag#1 (#536): schema_version is the binary's to set.
+    // ---------------------------------------------------------------
+
+    /// A client payload stuck on the pre-4.6 version must not lower the
+    /// version that is actually persisted.
+    #[test]
+    fn test_stamp_schema_version_overrides_stale_client_value() {
+        let mut cfg: AppConfig =
+            serde_json::from_str(r#"{"schema_version": 1}"#).expect("must parse");
+        assert_eq!(cfg.schema_version, 1);
+        stamp_schema_version(&mut cfg);
+        assert_eq!(cfg.schema_version, SCHEMA_VERSION);
+        assert!(SCHEMA_VERSION > 1, "4.6 must have bumped the schema");
+    }
+
+    /// The dispatcher raises an old (or absent → v1) file to the current
+    /// version and never relabels a file written by a newer binary.
+    #[test]
+    fn test_migrate_config_raises_old_and_preserves_newer() {
+        let mut old = AppConfig::default();
+        old.schema_version = 1;
+        let from = old.schema_version;
+        migrate_config(&mut old, from);
+        assert_eq!(old.schema_version, SCHEMA_VERSION);
+
+        let mut newer = AppConfig::default();
+        newer.schema_version = 99;
+        let from = newer.schema_version;
+        migrate_config(&mut newer, from);
+        assert_eq!(
+            newer.schema_version, 99,
+            "a newer file must not be relabelled downward"
+        );
+
+        // v0 (a hand-edited or truncated key) is treated as old, not newer.
+        let mut zero = AppConfig::default();
+        zero.schema_version = 0;
+        let from = zero.schema_version;
+        migrate_config(&mut zero, from);
+        assert_eq!(zero.schema_version, SCHEMA_VERSION);
+    }
+
+    // ---------------------------------------------------------------
+    // CfgDiag#4 (#539): logging changes take effect without a restart.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_apply_log_level_maps_enabled_and_level() {
+        // `log::set_max_level` is process-global: serialize this test against
+        // itself so a parallel sibling cannot observe the transient value.
+        static LOG_LEVEL_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+        let _guard = LOG_LEVEL_LOCK.lock();
+
+        apply_log_level(&LoggingConfig {
+            enabled: false,
+            log_level: "Debug".to_string(),
+        });
+        assert_eq!(
+            log::max_level(),
+            log::LevelFilter::Off,
+            "logging.enabled = false must silence the logger immediately"
+        );
+
+        apply_log_level(&LoggingConfig {
+            enabled: true,
+            log_level: "DEBUG".to_string(),
+        });
+        assert_eq!(log::max_level(), log::LevelFilter::Debug);
+
+        apply_log_level(&LoggingConfig {
+            enabled: true,
+            log_level: "not-a-level".to_string(),
+        });
+        assert_eq!(
+            log::max_level(),
+            log::LevelFilter::Info,
+            "an unrecognised level must never disable logging"
+        );
+
+        // Restore the level the rest of the suite runs under.
+        apply_log_level(&LoggingConfig::default());
+        assert_eq!(log::max_level(), log::LevelFilter::Info);
+    }
+
+    // ---------------------------------------------------------------
+    // CfgDiag#3 (#538): the three additive 4.6 config fields.
+    // ---------------------------------------------------------------
+
+    /// Pre-4.6 files keep loading: every new field carries a serde default.
+    #[test]
+    fn test_four_six_additions_default_on_old_files() {
+        let cfg: AppConfig = serde_json::from_str(
+            r#"{"teams": {}, "polling": {}, "status_rules": {"quiet_hours": [{"enabled": true}]}}"#,
+        )
+        .expect("a pre-4.6 document must still parse");
+        assert!(cfg.teams.profanity_extra_words.is_empty());
+        assert_eq!(cfg.polling.pause_backoff_max_seconds, 300);
+        assert!(cfg.status_rules.quiet_hours[0].replacement_status.is_empty());
+    }
+
+    /// The new fields round-trip through serde.
+    #[test]
+    fn test_four_six_additions_round_trip() {
+        let cfg: AppConfig = serde_json::from_str(
+            r#"{
+                "teams": {"profanity_extra_words": ["spam", "spammer"]},
+                "polling": {"pause_backoff_max_seconds": 120},
+                "status_rules": {"quiet_hours": [{"enabled": true, "replacement_status": "Busy"}]}
+            }"#,
+        )
+        .expect("must parse");
+        assert_eq!(cfg.teams.profanity_extra_words.len(), 2);
+        assert_eq!(cfg.polling.pause_backoff_max_seconds, 120);
+        assert_eq!(
+            cfg.status_rules.quiet_hours[0].replacement_status,
+            "Busy"
+        );
+
+        let json = serde_json::to_string(&cfg).expect("must serialize");
+        let back: AppConfig = serde_json::from_str(&json).expect("must re-parse");
+        assert_eq!(back.teams.profanity_extra_words, cfg.teams.profanity_extra_words);
+        assert_eq!(back.polling.pause_backoff_max_seconds, 120);
+        assert_eq!(
+            back.status_rules.quiet_hours[0].replacement_status,
+            "Busy"
+        );
+    }
+
+    /// An oversized user lexicon is bounded, not rejected: the filter must
+    /// never take an unbounded amount of work from a hand-edited file.
+    #[test]
+    fn test_clamp_teams_bounds_extra_words() {
+        let mut teams = TeamsConfig {
+            profanity_extra_words: (0..100)
+                .map(|i| if i == 0 { "x".repeat(64) } else { format!("w{i}") })
+                .collect(),
+            ..TeamsConfig::default()
+        };
+        clamp_teams(&mut teams);
+        assert_eq!(teams.profanity_extra_words.len(), 64);
+        assert_eq!(teams.profanity_extra_words[0].chars().count(), 32);
+
+        // Multi-byte truncation must stay on a char boundary.
+        let mut teams = TeamsConfig {
+            profanity_extra_words: vec!["ü".repeat(40)],
+            ..TeamsConfig::default()
+        };
+        clamp_teams(&mut teams);
+        assert_eq!(teams.profanity_extra_words[0].chars().count(), 32);
+    }
+
+    /// `clamped_config` is applied on load AND on save, so the bounded
+    /// lexicon survives both directions.
+    #[test]
+    fn test_clamped_config_bounds_lexicon_on_save() {
+        let mut cfg = AppConfig::default();
+        cfg.teams.profanity_extra_words = vec!["y".repeat(50)];
+        let json = serde_json::to_string_pretty(&clamped_config(&cfg)).expect("must serialize");
+        let back: AppConfig = serde_json::from_str(&json).expect("must re-parse");
+        assert_eq!(back.teams.profanity_extra_words[0].chars().count(), 32);
+    }
+
+    // ---------------------------------------------------------------
+    // CfgDiag#2 (#537): the quarantine backup is name-only.
+    // ---------------------------------------------------------------
+
+    /// The diagnostics snapshot must be able to say "config.json.bak"
+    /// without leaking the user's home directory (#409).
+    #[test]
+    fn test_quarantine_backup_name_is_a_bare_file_name() {
+        let dir = std::env::temp_dir().join(format!(
+            "pj-test-bakname-{}-{}",
+            std::process::id(),
+            chrono_like_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        assert_eq!(
+            quarantine_backup_name_for(&path),
+            None,
+            "no backup on disk means no name to report"
+        );
+
+        std::fs::write(quarantine_backup_path(&path), b"OLD").unwrap();
+        let name = quarantine_backup_name_for(&path).expect("backup must be reported");
+        assert_eq!(name, "config.json.bak");
+        assert!(
+            !name.contains('/') && !name.contains('\\'),
+            "the reported name must carry no directory component, got {name}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---------------------------------------------------------------
+    // IssueTriage#3 (#478): the config.rs log-tag guard.
+    // ---------------------------------------------------------------
+
+    /// Extract the argument region of the macro call whose opening `(` is
+    /// at `open`, i.e. everything up to the matching `)`. String literals,
+    /// char literals and `//` comments are skipped, so a `)` inside a format
+    /// string cannot end the region early.
+    fn macro_arg_region(src: &str, open: usize) -> Option<&str> {
+        let bytes = src.as_bytes();
+        if bytes.get(open) != Some(&b'(') {
+            return None;
+        }
+        let mut depth: i32 = 0;
+        let mut i = open;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(&src[open + 1..i]);
+                    }
+                }
+                b'"' => {
+                    i += 1;
+                    while i < bytes.len() {
+                        match bytes[i] {
+                            b'\\' => i += 1,
+                            b'"' => break,
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                }
+                b'\'' => {
+                    // A char literal (`'x'`, `'\n'`) — a lifetime never
+                    // appears in a log macro argument.
+                    let mut j = i + 1;
+                    if bytes.get(j) == Some(&b'\\') {
+                        j += 2;
+                    } else {
+                        j += 1;
+                    }
+                    if bytes.get(j) == Some(&b'\'') {
+                        i = j;
+                    }
+                }
+                b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                    while i < bytes.len() && bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        None
+    }
+
+    /// IssueTriage#2/#3 (#393/#478): every log macro in this file must carry
+    /// the `[CFG]` module tag.
+    ///
+    /// Macro-aware on purpose: a per-line scan is red on green code, because
+    /// ten of the call sites put the format string on the line AFTER the
+    /// `log::warn!` opener. Whole argument regions are extracted instead.
+    ///
+    /// The needles are assembled with `concat!` so this test's own source
+    /// never contains the literal it searches for — otherwise an
+    /// `include_str!` scan would match the test itself and pass vacuously.
+    #[test]
+    fn test_config_log_tags_use_cfg_prefix() {
+        let src = include_str!("config.rs");
+        let needles = [
+            concat!("log::", "info!("),
+            concat!("log::", "warn!("),
+            concat!("log::", "error!("),
+            concat!("log::", "debug!("),
+            concat!("log::", "trace!("),
+        ];
+        let mut checked = 0usize;
+        for needle in needles {
+            let mut from = 0usize;
+            while let Some(rel) = src[from..].find(needle) {
+                let i = from + rel;
+                let open = i + needle.len() - 1;
+                let region = macro_arg_region(src, open)
+                    .unwrap_or_else(|| panic!("unbalanced macro arguments at byte {i}"));
+                assert!(
+                    region.contains("[CFG]"),
+                    "config.rs log at byte {i} lacks the [CFG] tag: {}",
+                    region.replace('\n', " ")
+                );
+                checked += 1;
+                from = open;
+            }
+        }
+        assert!(
+            checked >= 20,
+            "the scan found only {checked} log macros — the needles are wrong"
+        );
     }
 }

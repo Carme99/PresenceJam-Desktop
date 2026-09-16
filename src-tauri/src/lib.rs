@@ -862,25 +862,11 @@ pub fn run() {
             // Load config into AppState
             match config::load_config() {
                 Ok(cfg) => {
-                    // #226: wire logging.enabled / log_level into the logger after config load.
-                    {
-                        let level_str = cfg.logging.log_level.to_lowercase();
-                        let max_level = if !cfg.logging.enabled {
-                            log::LevelFilter::Off
-                        } else {
-                            match level_str.as_str() {
-                                "off" => log::LevelFilter::Off,
-                                "error" => log::LevelFilter::Error,
-                                "warn" => log::LevelFilter::Warn,
-                                "info" => log::LevelFilter::Info,
-                                "debug" => log::LevelFilter::Debug,
-                                "trace" => log::LevelFilter::Trace,
-                                _ => log::LevelFilter::Info,
-                            }
-                        };
-                        log::set_max_level(max_level);
-                        log::info!("[APP] setup: log level set to {:?} (enabled={})", max_level, cfg.logging.enabled);
-                    }
+                    // #226: wire logging.enabled / log_level into the logger after
+                    // config load. The mapping lives in `config::apply_log_level`
+                    // (CfgDiag#4, issue #539) so a later save can re-arm the logger
+                    // from the same code instead of waiting for a relaunch.
+                    config::apply_log_level(&cfg.logging);
                     let mut config_guard = state.config.get_mut();
                     *config_guard = Some(cfg.clone());
                     log::info!("[APP] setup: config loaded into AppState");
@@ -1113,6 +1099,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::config::load_config,
             commands::config::save_config,
+            commands::config::update_config,
             commands::spotify_auth::start_spotify_auth,
             commands::spotify_auth::start_spotify_reconnect,
             commands::spotify_auth::reconnect_spotify_session,
