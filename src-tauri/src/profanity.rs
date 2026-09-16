@@ -330,9 +330,11 @@ fn is_clean_compound(stem: &str, token: &str) -> bool {
 /// `wad`/`post` — #579: `fuckboy`, `fuckface`, `shitposting`). Anything
 /// else (`pit`, `ens`, `ake`) is a distinct clean word (#328).
 fn is_profane_continuation(token: &str) -> bool {
-    ["ing", "er", "ed", "es", "s", "head", "boy", "face", "wad", "post"]
-        .iter()
-        .any(|p| token.starts_with(p))
+    [
+        "ing", "er", "ed", "es", "s", "head", "boy", "face", "wad", "post",
+    ]
+    .iter()
+    .any(|p| token.starts_with(p))
 }
 
 /// `y`-tail scoped per stem: `shitty`/`bitchy`/`fucky` flag, while
