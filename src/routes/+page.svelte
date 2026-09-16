@@ -13,6 +13,7 @@
   import About from '$lib/components/About.svelte';
   import Reconnect from '$lib/components/Reconnect.svelte';
   import { bootView } from '$lib/utils/boot';
+  import { clientSecretStateOf } from '$lib/stores/config';
   import type { AppConfig } from '$lib/types';
   import { t } from '$lib/i18n';
 
@@ -102,7 +103,13 @@
     try {
       const cfg = await invoke<AppConfig>('load_config');
       if (!cfg.spotify.client_id?.trim()) return false;
-      return await invoke<boolean>('is_spotify_client_secret_set');
+      // #560: only a *positively absent* secret means there is nothing to
+      // reuse. `is_spotify_client_secret_set` is the `Present`-only projection
+      // of a tri-state, so it answers `false` both for "no credential" and for
+      // "the keychain could not answer" (locked Secret Service, no daemon) —
+      // and this gate then re-onboarded a user whose secret was still stored.
+      // The config carries the state, so no extra probe is needed.
+      return clientSecretStateOf(cfg) !== 'absent';
     } catch (e) {
       console.warn('[PAGE] boot: credential probe failed:', e);
       return false;

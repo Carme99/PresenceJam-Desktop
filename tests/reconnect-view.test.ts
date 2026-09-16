@@ -43,9 +43,20 @@ function mockBackend() {
   invoke.mockImplementation(async (cmd: string) => {
     switch (cmd) {
       case 'load_config':
-        return { ...structuredClone(defaultConfig), spotify: { ...defaultConfig.spotify, client_id: CLIENT_ID } };
-      case 'is_spotify_client_secret_set':
-        return true;
+        // #560: the keychain answer now travels with the config, so the view
+        // reads it from there instead of probing the bool-only command. The
+        // `is_spotify_client_secret_set` case is gone on purpose: if a future
+        // change reintroduces that probe, it must answer `undefined` here and
+        // fail these tests rather than quietly pass.
+        return {
+          ...structuredClone(defaultConfig),
+          spotify: {
+            ...defaultConfig.spotify,
+            client_id: CLIENT_ID,
+            client_secret_set: true,
+            client_secret_state: 'present'
+          }
+        };
       case 'get_sync_status':
         return { ...SYNC_CONNECTED };
       default:
@@ -89,7 +100,7 @@ describe('Reconnect view (#557, #558)', () => {
     setSpotifyPhase('waiting');
 
     const { container, getByRole } = render(Reconnect);
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith('is_spotify_client_secret_set'));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('get_sync_status'));
 
     // The waiting branch is no longer a dead end.
     expect(container.querySelector('#spotify-manual-url')).not.toBeNull();
@@ -111,7 +122,7 @@ describe('Reconnect view (#557, #558)', () => {
     setSpotifyPhase('waiting');
 
     const { container, getByRole } = render(Reconnect);
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith('is_spotify_client_secret_set'));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('get_sync_status'));
 
     const input = container.querySelector('#spotify-manual-url') as HTMLInputElement;
     await fireEvent.input(input, {
@@ -134,7 +145,7 @@ describe('Reconnect view (#557, #558)', () => {
     setSpotifyPhase('waiting');
 
     const { container, getByRole } = render(Reconnect);
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith('is_spotify_client_secret_set'));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('get_sync_status'));
 
     const input = container.querySelector('#spotify-manual-url') as HTMLInputElement;
     await fireEvent.input(input, { target: { value: 'https://example.com/not-a-redirect' } });

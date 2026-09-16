@@ -2,7 +2,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import { onMount, onDestroy } from 'svelte';
   import { currentView } from '$lib/stores/app';
-  import { configStore, loadConfig } from '$lib/stores/config';
+  import { configStore, loadConfig, clientSecretStateOf } from '$lib/stores/config';
   import type { AppConfig, DeviceCodeResponse, SyncStatus } from '$lib/types';
   import { authFlow, setSpotifyPhase, setTeamsPhase, setTeamsDeviceCode, expiresAtFromResponse, formatCountdownMs, resetSpotifyAuthFlow, resetTeamsAuthFlow, teamsPollMutex, tryAcquireTeamsPoll, releaseTeamsPoll, isSafeHttpUrl } from '$lib/stores/authFlow.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
@@ -13,6 +13,12 @@
 
   let needsSpotify = $state(false);
   let needsTeams = $state(false);
+
+  // #560: the keychain could not be read at all (locked Secret Service, no
+  // daemon, denied access), as opposed to `needsSpotify`'s "there really is no
+  // stored credential". The two demand opposite advice — unlock the keychain
+  // versus re-enter the Client ID/Secret — so they must never be conflated.
+  let keychainUnavailable = $state(false);
   // #530: whether Spotify itself has a session to repair. `needsSpotify` only
   // says the credentials are missing, so it cannot answer that on its own —
   // without this, a user whose Teams token alone lapsed got an unsolicited
@@ -62,13 +68,25 @@
     // The client_secret no longer lives in the config — it lives in the OS
     // keychain. We check both client_id (in config) and the keychain
     // presence. See issue #9.
+    //
+    // #560: `loadConfig` (just awaited above) stamps `client_secret_state`
+    // from one keychain probe, so it answers both questions the old
+    // `is_spotify_client_secret_set` probe asked — and answers the second one
+    // truthfully. That command is a bool, so a locked keyring read as "there is
+    // no secret" and sent the user to full setup with their secret still
+    // stored.
     const hasClientId = !!$configStore.spotify.client_id
       && $configStore.spotify.client_id.trim() !== '';
     if (destroyed) return;
-    let hasClientSecret = false;
-    try { hasClientSecret = await invoke<boolean>('is_spotify_client_secret_set'); } catch { hasClientSecret = false; }
+    const secretState = clientSecretStateOf($configStore);
+    const hasClientSecret = secretState === 'present';
+    keychainUnavailable = secretState === 'unavailable';
     if (destroyed) return;
-    needsSpotify = !hasClientId || !hasClientSecret;
+    // Only a positively absent credential is a missing credential. An
+    // unavailable keychain is not: it gets the "unlock it" banner instead of
+    // the setup redirect, and `needsSpotify` stays false so the card does not
+    // claim the credentials are gone.
+    needsSpotify = !hasClientId || (!hasClientSecret && !keychainUnavailable);
     // Teams re-auth is NOT auto-refreshing in general (device-code
     // refresh failures land the user in a re-auth flow — see #151,
     // #157), so surface the Teams reconnect path honestly.
@@ -115,9 +133,13 @@
 
     // Auto-start only when Spotify is the provider that needs the sign-in: an
     // unsolicited OAuth window for a healthy session is user-hostile (#530).
+    // An unavailable keychain is folded into `credentialsMissing` for the same
+    // reason a missing credential is: the flow cannot read the secret it needs,
+    // so opening the browser would only produce a failure the user cannot act
+    // on. The view explains how to unlock it instead.
     if (
       shouldAutoStartSpotifyReconnect({
-        credentialsMissing: needsSpotify,
+        credentialsMissing: needsSpotify || keychainUnavailable,
         spotifyConnected,
         phase: authFlow.spotify.phase
       })
@@ -142,12 +164,21 @@
     resetSpotifyAuthFlow();
     devLog('[RECONNECT] reconnectSpotify: ENTRY');
     try {
-      // Re-check the keychain: the user may have wiped it since the page
-      // loaded. If the secret is gone we cannot complete the auth flow
-      // without re-onboarding, so bail. See issue #9.
-      let hasSecret = false;
-      try { hasSecret = await invoke<boolean>('is_spotify_client_secret_set'); } catch { hasSecret = false; }
-      if (!hasSecret) {
+      // Re-check the config (and therefore the keychain) before opening a
+      // browser window: the user may have wiped, locked or unlocked it since
+      // this view mounted. `loadConfig` is the surface that carries the
+      // tri-state, so one call distinguishes "the secret is gone" from "the
+      // keychain would not answer" — the bool-only probe collapsed the second
+      // into the first and sent the user to setup for a secret that is still
+      // stored. See issues #9, #560.
+      await loadConfig();
+      const secretState = clientSecretStateOf($configStore);
+      keychainUnavailable = secretState === 'unavailable';
+      if (keychainUnavailable) {
+        devLog('[RECONNECT] reconnectSpotify: keychain unavailable, not starting a flow');
+        return;
+      }
+      if (secretState !== 'present') {
         devLog('[RECONNECT] reconnectSpotify: keychain empty, redirecting to onboarding');
         needsSpotify = true;
         return;
@@ -307,10 +338,11 @@
         <span class="badge"
           class:success={authFlow.spotify.phase === 'done'}
           class:warning={authFlow.spotify.phase === 'waiting'}
-          class:error={!!authFlow.spotify.error || needsSpotify}>
+          class:error={!!authFlow.spotify.error || needsSpotify || keychainUnavailable}>
           <span class="dot"></span>
           {#if authFlow.spotify.phase === 'done'}{t('common.connected')}
           {:else if needsSpotify}{t('reconnect.missingCredentials')}
+          {:else if keychainUnavailable}{t('reconnect.keychainUnavailableBadge')}
           {:else if authFlow.spotify.phase === 'waiting'}{t('common.waiting')}
           {:else if authFlow.spotify.error}{t('reconnect.failed')}
           {:else}{t('reconnect.readyToReconnect')}{/if}
@@ -343,6 +375,13 @@
       {:else if authFlow.spotify.error}
         <p class="error-message" role="alert">{authFlow.spotify.error}</p>
         <button class="btn-full" onclick={reconnectSpotify}>{t('reconnect.tryAgain')}</button>
+      {:else if keychainUnavailable}
+        <!-- #560: no reconnect button here on purpose — the flow reads the
+             secret from the very keychain that cannot answer, so offering it
+             would only open a browser window that fails. Replaceable action:
+             unlock the keychain, then try again (this view re-probes on every
+             entry). -->
+        <p class="hint">{t('reconnect.keychainUnavailableHint')}</p>
       {:else}
         <p class="hint">{t('reconnect.clickBelowSpotify')}</p>
         <button class="btn-full" onclick={reconnectSpotify}>{t('settings.reconnectSpotify')}</button>

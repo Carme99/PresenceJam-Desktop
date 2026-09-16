@@ -388,4 +388,10 @@ export const de: Dict = {
   'onboarding.submitting': 'Wird übermittelt…',
   'settings.episodeFormatHint':
     'Podcasts und Hörbücher nutzen eine eigene Vorlage – 🎙️ {show} - {episode} – Ihre Musikvorlage oben wird dafür nicht verwendet.',
+  'reconnect.keychainUnavailableBadge':
+    'Schlüsselbund nicht verfügbar',
+  'reconnect.keychainUnavailableHint':
+    'PresenceJam konnte Ihr gespeichertes Spotify-Client-Geheimnis nicht lesen: Der Systemschlüsselbund ist gesperrt oder fehlt. Entsperren Sie ihn (oder installieren Sie einen Secret-Service-Anbieter wie gnome-keyring) und versuchen Sie es erneut — das Geheimnis ist weiterhin gespeichert, Sie müssen Spotify also nicht erneut einrichten.',
+  'settings.secretKeychainUnavailable':
+    'Systemschlüsselbund nicht verfügbar — er ist möglicherweise gesperrt oder fehlt. Entsperren Sie ihn (oder installieren Sie einen Secret-Service-Anbieter), um Ihr gespeichertes Geheimnis zu verwenden; es ist weiterhin gespeichert.',
 };

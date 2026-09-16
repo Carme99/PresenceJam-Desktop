@@ -6,7 +6,7 @@
   import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
   import { currentView } from '$lib/stores/app';
   import { detachedPanes, focusDetached } from '$lib/stores/detach';
-  import { configStore, loadConfig } from '$lib/stores/config';
+  import { configStore, loadConfig, clientSecretStateOf } from '$lib/stores/config';
   import type { ErrorEventPayload, SyncStatus, TrackInfo } from '$lib/types';
   import { devLog } from '$lib/utils/dev';
   import { theme, toggleTheme } from '$lib/stores/theme';
@@ -358,9 +358,16 @@
       await loadConfig();
       // The client_secret now lives in the OS keychain. We check both the
       // config (client_id) and the keychain (client_secret). See issue #9.
+      //
+      // #560: the keychain answer is tri-state, and only a *positively absent*
+      // secret means there is nothing to reconnect with. The old bool probe
+      // also answered `false` for an unavailable keychain (locked Secret
+      // Service, no daemon, denied storage access), which sent a user whose
+      // secret was still stored into full setup. `loadConfig` above already
+      // carries the state, so this costs one fewer IPC round-trip too.
       const hasClientId = !!$configStore.spotify.client_id
         && $configStore.spotify.client_id.trim() !== '';
-      const hasClientSecret = await invoke<boolean>('is_spotify_client_secret_set');
+      const hasClientSecret = clientSecretStateOf($configStore) !== 'absent';
       const hasSpotifyCredentials = hasClientId && hasClientSecret;
       devLog('[DASHBOARD] goToSetup: hasSpotifyCredentials=', hasSpotifyCredentials);
 

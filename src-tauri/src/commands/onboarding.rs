@@ -175,7 +175,15 @@ fn spotify_session_verdict(
         }
         let client_secret = boot_gate_client_secret(
             keychain::peek_spotify_client_secret(),
-            keychain::spotify_client_secret_presence,
+            || {
+                let presence = keychain::spotify_client_secret_presence();
+                // Issue #560: this is the only probe the boot gate makes, and
+                // it runs before any frontend config surface has loaded. Leave
+                // its answer in the in-memory config so a later save cannot
+                // hand the UI a `client_secret_state` that contradicts it.
+                record_client_secret_state(state, &presence);
+                presence
+            },
             keychain::get_spotify_client_secret,
         )?;
 
@@ -208,6 +216,27 @@ fn spotify_session_verdict(
             CasOutcome::RefreshFailed(_) => Err(RefreshFailure::Transient),
         }
     })
+}
+
+/// Mirror a keychain observation into the in-memory config (issue #560).
+///
+/// [`config::with_keychain_flags`] stamps the derived `client_secret_state`
+/// on every config *load*, but the boot gate probes the keychain on its own
+/// path and can learn something the loaded copy does not know yet (a keyring
+/// that locked between launch and the verdict, or a credential deleted from
+/// the OS UI). Without this, a config write later in the session
+/// (`update_config` bases its merge on the in-memory copy) would return the
+/// stale state to the UI, which is exactly where "the keychain is locked"
+/// silently degrades back into "not configured".
+fn record_client_secret_state(state: &Arc<AppState>, presence: &KeychainPresence) {
+    let mut guard = state.config.get_mut();
+    let Some(config) = guard.as_mut() else {
+        // The frontend has not loaded a config yet: there is nothing to
+        // correct, and the next load stamps the state itself.
+        return;
+    };
+    config.spotify.client_secret_state = config::ClientSecretState::from(presence);
+    config.spotify.client_secret_set = matches!(presence, KeychainPresence::Present);
 }
 
 /// Resolve the Spotify `client_secret` for the boot gate.
@@ -470,8 +499,14 @@ pub fn reconnect_teams(
 
 #[cfg(test)]
 mod tests {
-    use super::{boot_gate_client_secret, session_verdict, RefreshFailure, SessionVerdict};
+    use super::{
+        boot_gate_client_secret, record_client_secret_state, session_verdict, RefreshFailure,
+        SessionVerdict,
+    };
+    use crate::config::{AppConfig, ClientSecretState};
     use crate::keychain::KeychainPresence;
+    use crate::AppState;
+    use std::sync::Arc;
 
     /// Issue #530: the boot gate must spend the refresh token for a
     /// locally-expired access token instead of reporting a dead session.
@@ -627,5 +662,53 @@ mod tests {
         )
         .expect("a readable secret must refresh");
         assert_eq!(secret, "live-secret");
+    }
+
+    /// Issue #560: the boot gate's observation has to reach the in-memory
+    /// config, not just the log. `update_config` merges onto that copy and
+    /// returns it to the UI, so without this a keyring that locked before the
+    /// verdict would be laundered back into `absent` — the state that sends
+    /// the user through re-onboarding.
+    #[test]
+    fn boot_gate_observation_lands_in_the_in_memory_config() {
+        let state = Arc::new(AppState::new());
+        *state.config.get_mut() = Some(AppConfig::default());
+
+        record_client_secret_state(&state, &KeychainPresence::Unavailable("locked".into()));
+        let config = state.config.get().clone().expect("config was just stored");
+        assert_eq!(
+            config.spotify.client_secret_state,
+            ClientSecretState::Unavailable
+        );
+        assert!(
+            !config.spotify.client_secret_set,
+            "the Present-only projection must agree with the tri-state"
+        );
+
+        // The other two observations are mirrored the same way.
+        record_client_secret_state(&state, &KeychainPresence::Present);
+        let config = state.config.get().clone().unwrap();
+        assert_eq!(
+            config.spotify.client_secret_state,
+            ClientSecretState::Present
+        );
+        assert!(config.spotify.client_secret_set);
+
+        record_client_secret_state(&state, &KeychainPresence::Absent);
+        let config = state.config.get().clone().unwrap();
+        assert_eq!(
+            config.spotify.client_secret_state,
+            ClientSecretState::Absent
+        );
+        assert!(!config.spotify.client_secret_set);
+    }
+
+    /// Before the frontend has loaded a config there is nothing to correct,
+    /// and the boot gate must not panic on that path.
+    #[test]
+    fn recording_without_a_loaded_config_is_a_no_op() {
+        let state = Arc::new(AppState::new());
+        record_client_secret_state(&state, &KeychainPresence::Unavailable("locked".into()));
+        assert!(state.config.get().is_none());
     }
 }

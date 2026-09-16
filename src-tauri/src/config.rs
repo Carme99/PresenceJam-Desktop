@@ -9,6 +9,48 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Emitter;
 
+/// Three-way view of the OS-keychain `client_secret` slot (issue #560).
+///
+/// [`SpotifyConfig::client_secret_set`] cannot express this: it is the
+/// `Present`-only projection, so a locked or missing Secret Service collapsed
+/// into `false` — the same answer as "the user never configured a secret".
+/// Every UI gate that read it then pushed a fully credentialed Linux user
+/// through re-onboarding while their secret was still in the keychain,
+/// merely unreadable at that moment. This is the type those gates read
+/// instead. The keychain-side classification lives in
+/// [`crate::keychain::KeychainPresence`]; the conversion below is the single
+/// place the two vocabularies meet.
+///
+/// Serialized lowercase — `present`/`absent`/`unavailable` is the on-the-wire
+/// and on-disk spelling the frontend switches on, so `rename_all` is part of
+/// the contract, not cosmetics.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
+pub enum ClientSecretState {
+    /// Stored in the OS keychain and readable right now. The only state a
+    /// sign-in flow can complete from.
+    Present,
+    /// No entry for the slot: the genuine "onboarding needed" answer.
+    #[default]
+    Absent,
+    /// The keychain could not answer (no Secret Service daemon, a locked
+    /// keyring, denied storage access). The secret is still there — the UI
+    /// must never render this as "not configured".
+    Unavailable,
+}
+
+impl From<&crate::keychain::KeychainPresence> for ClientSecretState {
+    fn from(presence: &crate::keychain::KeychainPresence) -> Self {
+        use crate::keychain::KeychainPresence;
+        match presence {
+            KeychainPresence::Present => ClientSecretState::Present,
+            KeychainPresence::Absent => ClientSecretState::Absent,
+            KeychainPresence::Unavailable(_) => ClientSecretState::Unavailable,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct SpotifyConfig {
@@ -19,6 +61,12 @@ pub struct SpotifyConfig {
     /// in the keychain, not in `config.json`. See issue #9.
     #[serde(default)]
     pub client_secret_set: bool,
+    /// Tri-state companion of [`Self::client_secret_set`] (issue #560), same
+    /// derived/display contract: stamped by [`with_keychain_flags`] on load,
+    /// never a durable statement about the keychain. `unavailable` is the
+    /// case the bool cannot carry.
+    #[serde(default)]
+    pub client_secret_state: ClientSecretState,
     #[serde(default = "default_redirect_uri")]
     pub redirect_uri: String,
 }
@@ -346,6 +394,7 @@ impl Default for SpotifyConfig {
         Self {
             client_id: String::new(),
             client_secret_set: false,
+            client_secret_state: ClientSecretState::Absent,
             redirect_uri: default_redirect_uri(),
         }
     }
@@ -409,9 +458,9 @@ impl Default for AppConfig {
 
 /// Field-level patch for the `spotify` section (CfgDiag#0, issue #535).
 ///
-/// `client_secret_set` is deliberately absent: it is a derived display flag
-/// filled in by [`with_keychain_flags`] from the OS keychain and is never
-/// persisted, so a client must not be able to assert it.
+/// `client_secret_set` and `client_secret_state` are deliberately absent:
+/// both are derived display values filled in by [`with_keychain_flags`] from
+/// the OS keychain, so a client must not be able to assert them.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
 pub struct SpotifyPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -761,10 +810,19 @@ pub fn load_config() -> Result<AppConfig, String> {
 
 /// Populate derived/display fields that are not persisted to disk.
 ///
-/// Currently this only covers `spotify.client_secret_set`, which reflects
-/// whether the OS keychain holds a Spotify client secret. See issue #9.
+/// Covers the two Spotify keychain views: `client_secret_set` (the pre-#560
+/// `Present`-only flag) and `client_secret_state` (the tri-state that can say
+/// "the keychain could not answer"). See issues #9 and #560.
+///
+/// One probe feeds both: `spotify_client_secret_presence` never reads the
+/// in-process cache, so it still notices a credential deleted from the OS UI
+/// while the app runs — and this function only runs on config load, off the
+/// polling hot path (issue #69).
 fn with_keychain_flags(mut config: AppConfig) -> AppConfig {
-    config.spotify.client_secret_set = crate::keychain::has_spotify_client_secret();
+    let presence = crate::keychain::spotify_client_secret_presence();
+    config.spotify.client_secret_set =
+        matches!(presence, crate::keychain::KeychainPresence::Present);
+    config.spotify.client_secret_state = ClientSecretState::from(&presence);
     config
 }
 /// Frontend event emitted (once per process) when the legacy-plaintext
@@ -1110,6 +1168,59 @@ mod tests {
         assert!(config.teams.presence_gate);
         assert_eq!(config.polling.default_interval_seconds, 30);
         assert!(config.logging.enabled);
+    }
+
+    /// Issue #560: the whole point of the tri-state is that `Unavailable`
+    /// survives the keychain → config → wire boundary as a *distinct* state.
+    /// Anything that folded it into `Absent` (or into the `Present`-only
+    /// bool) would put a locked-keyring user back in the setup wizard with
+    /// their secret still stored.
+    #[test]
+    fn client_secret_state_maps_keychain_presence() {
+        use crate::keychain::KeychainPresence;
+        assert_eq!(
+            ClientSecretState::from(&KeychainPresence::Present),
+            ClientSecretState::Present
+        );
+        assert_eq!(
+            ClientSecretState::from(&KeychainPresence::Absent),
+            ClientSecretState::Absent
+        );
+        assert_eq!(
+            ClientSecretState::from(&KeychainPresence::Unavailable("keyring locked".into())),
+            ClientSecretState::Unavailable
+        );
+    }
+
+    /// The frontend switches on these three literals, so the spelling is part
+    /// of the wire contract — and both directions must round-trip.
+    #[test]
+    fn client_secret_state_wire_spelling() {
+        for (state, wire) in [
+            (ClientSecretState::Present, "\"present\""),
+            (ClientSecretState::Absent, "\"absent\""),
+            (ClientSecretState::Unavailable, "\"unavailable\""),
+        ] {
+            assert_eq!(serde_json::to_string(&state).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_str::<ClientSecretState>(wire).unwrap(),
+                state
+            );
+        }
+    }
+
+    /// A `config.json` written before #560 has no `client_secret_state` key;
+    /// it must still load, defaulting to the state that does not accuse the
+    /// keychain of anything (`with_keychain_flags` re-stamps it on every load
+    /// anyway — the default only has to be safe, never authoritative).
+    #[test]
+    fn pre_4_6_config_json_still_loads() {
+        let legacy: SpotifyConfig = serde_json::from_str(
+            r#"{"client_id":"abc","client_secret_set":true,"redirect_uri":"presencejam://callback"}"#,
+        )
+        .expect("a config.json written before #560 must still deserialize");
+        assert_eq!(legacy.client_secret_state, ClientSecretState::Absent);
+        assert!(legacy.client_secret_set);
     }
 
     /// Regression guard for issue found in PR review: a redundant

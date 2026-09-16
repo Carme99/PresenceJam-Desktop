@@ -13,6 +13,7 @@
   import { currentView } from '$lib/stores/app';
   import { t } from '$lib/i18n';
   import { reconcileDetachedPanes } from '$lib/stores/detach';
+  import { clientSecretStateOf } from '$lib/stores/config';
 
   // C7: this layout is shared by every webview window (the SPA fallback
   // hydrates it for detached Logs/Settings windows too). Reconnect flows,
@@ -95,15 +96,21 @@
       devLog('[LAYOUT] spotify-reconnect-required received');
       currentView.set('settings');
       try {
-        const hasSecret = await invoke<boolean>('is_spotify_client_secret_set');
+        // #560: the config is read first because it carries the keychain
+        // tri-state, and the tri-state is the only way to tell "no credential
+        // stored" from "the keychain could not answer". The old bool probe
+        // collapsed the second into the first, so a locked Secret Service at
+        // the moment Spotify asked for a reconnect bounced the user to
+        // onboarding over a secret that was still stored. Only a positively
+        // absent secret means this flow has nothing to reuse.
+        const cfg = await invoke<AppConfig>('load_config');
+        const hasSecret = clientSecretStateOf(cfg) !== 'absent';
         if (!hasSecret) {
-          console.warn('[LAYOUT] spotify-reconnect-required: keychain empty, redirecting to onboarding');
+          console.warn('[LAYOUT] spotify-reconnect-required: no stored client_secret, redirecting to onboarding');
           setSpotifyPhase('idle');
           currentView.set('onboarding');
           return;
         }
-        // Client ID lives in config; fetch it to drive start_spotify_reconnect.
-        const cfg = await invoke<AppConfig>('load_config');
         const clientId = cfg.spotify.client_id;
         if (!clientId) {
           console.warn('[LAYOUT] spotify-reconnect-required: client_id empty, redirecting to onboarding');

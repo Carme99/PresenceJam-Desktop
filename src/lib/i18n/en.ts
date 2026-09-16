@@ -374,6 +374,12 @@ export const en = {
   'onboarding.submitting': 'Submitting…',
   'settings.episodeFormatHint':
     'Podcasts and audiobooks use their own template — 🎙️ {show} - {episode} — so your music template above is not applied to them.',
+  'reconnect.keychainUnavailableBadge':
+    'Keychain unavailable',
+  'reconnect.keychainUnavailableHint':
+    'PresenceJam could not read your saved Spotify Client Secret: the system keychain is locked or missing. Unlock it (or install a Secret Service provider such as gnome-keyring), then try again — your secret is still stored, so you do not need to set Spotify up again.',
+  'settings.secretKeychainUnavailable':
+    'System keychain unavailable — it may be locked or missing. Unlock it (or install a Secret Service provider) to use your saved secret; it is still stored.',
 };
 
 export type Dict = { readonly [K in keyof typeof en]: string };
