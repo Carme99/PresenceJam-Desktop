@@ -178,6 +178,8 @@ The 🩺 button in the Dashboard header opens the **Diagnostics** page: a one-cl
 
 **Copy** puts the snapshot on your clipboard; **Save to file** writes it next to your logs. The page makes **no network calls** — nothing leaves your machine unless you paste or attach the snapshot yourself.
 
+If `config.json` was ever unreadable, the page opens with an amber **Settings were reset** banner on top of that snapshot: it says the settings file could not be read, names the `config.json.bak` backup so you can find it, and points at the folder it lives in. The banner also appears on a **later** launch, because the backup on disk outlives the run that produced it. Dismissing it only hides it for this session — nothing on disk is deleted, since the backup is the only copy of the settings you lost (see [TROUBLESHOOTING.md — The app came up with default settings](./TROUBLESHOOTING.md#the-app-came-up-with-default-settings)).
+
 ---
 
 ## Log Viewer

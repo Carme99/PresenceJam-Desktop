@@ -166,6 +166,7 @@ Settings shows the same state on the credential row ("System keychain unavailabl
 
 **Fix:**
 1. Look for that `[CFG]` line in the log viewer — it names both the original and the backup.
+   The **Diagnostics** page (🩺 in the Dashboard header) shows an amber *Settings were reset* banner for this too — and it keeps showing it on later launches, naming the backup file, because the per-process log line is gone by then.
 2. Your old settings are all still in the `.bak`. Repair the JSON by hand and put it back as `config.json`, or simply re-apply the settings in the app.
 3. Where to look (the backup sits beside the config file):
 
@@ -176,6 +177,8 @@ Settings shows the same state on the credential row ("System keychain unavailabl
    | Linux | `$XDG_CONFIG_HOME/PresenceJam/config.json.bak` (usually `~/.config/PresenceJam/`) |
 
 The backup name is fixed — `config.json.bak`, never timestamped — and the rename is best-effort: if it fails, the app logs that too and still boots on defaults, leaving your original file untouched. `tokens.json` is unaffected and lives in a different folder entirely (see [SETUP.md — What Gets Installed](./SETUP.md#what-gets-installed)).
+
+The banner names the `.bak` when one is still on disk. When the banner appears **without** a backup name, the rename could not move your file — so the unreadable original is still there as `config.json`, and the banner says exactly that.
 
 
 ### No status appears on Teams

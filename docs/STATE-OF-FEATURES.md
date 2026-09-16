@@ -141,16 +141,18 @@ run, the honest alternative is to leave the row ⚠ and reword it to
 "⚠ Partial — decision table unit-tested (`onboarding.rs::session_verdict`);
 end-to-end relaunch smoke pending" rather than promoting it on a unit test.
 
-> The third ⚠ Partial row — *macOS deep-link hijack defence* — is not a smoke
-> item: it needs the `LSSetDefaultHandlerForURLScheme` FFI path (issue #66) and
-> stays ⚠ until that ships.
+> The third ⚠ Partial row — *macOS deep-link hijack defence* — is no longer a
+> smoke item either: 4.6 shipped the `LSSetDefaultHandlerForURLScheme`
+> CoreServices path (issue #66, #628), so macOS re-claims the scheme on every
+> launch like Windows and Linux. The residual risk is an attacker that registers
+> *between* our launch and the callback, which PKCE + `state` covers.
 
 ## Documented gaps (do work; deliberately out of scope for the version tested)
 
 | Area                                               | Status | Notes                                                                                                                                  |
 |----------------------------------------------------|--------|----------------------------------------------------------------------------------------------------------------------------------------|
 | Spotify **Free** (non-Premium) users                | ❌     | Spotify's Web API requires a Premium subscription for `/me/player/currently-playing`. This is a Spotify platform restriction — PresenceJam cannot work around it. Don't try to install without Premium. |
-| macOS deep-link hijack defence (full)              | ⚠ Partial | `tauri-plugin-deep-link`'s `register()` returns `Err(UnsupportedPlatform)` on macOS. v2.8.0 logs a warning and continues; macOS relies on PKCE + `state`-matching alone. The full `LSSetDefaultHandlerForURLScheme` native-FFI path for macOS is tracked separately — see issue #66. |
+| macOS deep-link hijack defence (full)              | ✅     | `tauri-plugin-deep-link`'s `register()` returns `Err(UnsupportedPlatform)` on macOS, but that error arm is now load-bearing: `macos_deeplink::claim` issues CoreServices' `LSSetDefaultHandlerForURLScheme`, which writes the user's *preferred* handler and so overrides LaunchServices' first-come-first-served rule (`tauri.conf.json` scheme added → re-claimed automatically; latched once per process). 4.6, #66/#628. Failure is logged only and the #65 PKCE launch-binding defence stands in. The residual gap is an attacker registering between our launch and the callback. |
 | `digest-mismatch: error`                           | ✅     | v3.2.0 sets `digest-mismatch: error` in both `actions/download-artifact` invocations (v8 default is error; explicit error is correct). Flipped from `warn` after one clean release cycle v2.8.0 → v3.2.0. |
 | Code signing & notarization (Windows + macOS)      | ⚠ Not signed | Binary downloads are unsigned (or unsigned-plus-AppleGatekeeper Bypass for macOS). The README documents the `Right-click → Open` workaround for macOS. Microsoft SmartScreen will warn on first install of an unsigned `.msi`. **v3.0's auto-update works without OS signing**: the update payload is signed separately (minisign) and verified against the pubkey baked into the app, so updated builds keep the same unsigned/Gatekeeper story. |
 
