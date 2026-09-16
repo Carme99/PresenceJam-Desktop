@@ -524,7 +524,7 @@ fn resolve_device_id(app: &AppHandle, selected: &DeviceMenuSelection) -> Option<
                 state.inner(),
                 app,
                 "transfer device list",
-                |token| crate::spotify::get_devices(token),
+                crate::spotify::get_devices,
             ) {
                 Ok(devices) => {
                     *DEVICES_CACHE.lock() = Some((Instant::now(), devices.clone()));
@@ -1249,7 +1249,7 @@ mod tests {
         let src = include_str!("tray.rs");
         let body = body_of(prod_source(src), "fn resolve_device_id(");
         assert!(
-            body.contains("get_devices(token)"),
+            body.contains("crate::spotify::get_devices"),
             "resolve_device_id must live re-fetch when the cache misses"
         );
         assert!(
