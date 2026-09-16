@@ -9,9 +9,15 @@
   import { devLog } from '$lib/utils/dev';
   import PageHeader from './PageHeader.svelte';
   import { t } from '$lib/i18n';
+  import { shouldAutoStartSpotifyReconnect } from '$lib/utils/reconnect';
 
   let needsSpotify = $state(false);
   let needsTeams = $state(false);
+  // #530: whether Spotify itself has a session to repair. `needsSpotify` only
+  // says the credentials are missing, so it cannot answer that on its own —
+  // without this, a user whose Teams token alone lapsed got an unsolicited
+  // Spotify OAuth window on mount.
+  let spotifyConnected = $state(false);
 
   // #500: in-session Teams completion flag — distinguishes "reconnected
   // just now" (success wording) from "was already connected, no action
@@ -58,16 +64,20 @@
     // Teams re-auth is NOT auto-refreshing in general (device-code
     // refresh failures land the user in a re-auth flow — see #151,
     // #157), so surface the Teams reconnect path honestly.
-    // Derive needsTeams from sync status (teams_connected) rather than
-    // hard-coding true, so the card only shows when Teams actually needs
-    // re-auth.
+    // Both flags come from sync status rather than hard-coded true, so a card
+    // only shows for the provider that actually needs a sign-in: teams_connected
+    // is "tokens present", spotify_connected is "tokens present + client_id set"
+    // (commands/sync.rs), and the boot gate clears a session whose refresh token
+    // is dead (#530).
     try {
       const status = await invoke<SyncStatus>('get_sync_status');
       if (destroyed) return;
       needsTeams = !status.teams_connected;
+      spotifyConnected = status.spotify_connected;
     } catch {
       if (destroyed) return;
       needsTeams = true;
+      spotifyConnected = false;
     }
 
     devLog('[RECONNECT] needsSpotify=', needsSpotify, 'needsTeams=', needsTeams);
@@ -101,8 +111,15 @@
     }
     unlisten = unlistenFn;
 
-    // Auto-start Spotify reconnect only if credentials exist
-    if (!needsSpotify && authFlow.spotify.phase !== 'done' && authFlow.spotify.phase !== 'waiting') {
+    // Auto-start only when Spotify is the provider that needs the sign-in: an
+    // unsolicited OAuth window for a healthy session is user-hostile (#530).
+    if (
+      shouldAutoStartSpotifyReconnect({
+        credentialsMissing: needsSpotify,
+        spotifyConnected,
+        phase: authFlow.spotify.phase
+      })
+    ) {
       await reconnectSpotify();
     }
   });

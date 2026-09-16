@@ -5,6 +5,23 @@ All notable changes to PresenceJam are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [4.5.2] - 2026-09-16
+
+Follow-up to 4.5.1: a returning user whose Teams session alone needs a sign-in
+no longer gets an unsolicited Spotify OAuth window.
+
+### Fixed
+- **Reconnect auto-started Spotify OAuth for a healthy session (#530):** 4.5.1
+  routes an incomplete-but-configured install to the Reconnect view, and
+  Reconnect's mount started `start_spotify_reconnect` whenever the Spotify
+  *credentials* were present — `needsSpotify` never meant "the Spotify session
+  is dead". A user whose Microsoft refresh token had lapsed while the Spotify one
+  was still alive (idle long enough for the 90-day Teams window, not the 6-month
+  Spotify one) therefore got a browser sign-in window they did not need. The
+  auto-start now requires `SyncStatus.spotify_connected` to be false, via
+  `src/lib/utils/reconnect.ts::shouldAutoStartSpotifyReconnect` (the Spotify card
+  and its manual Reconnect button are unchanged).
+
 ## [4.5.1] - 2026-09-16
 
 Sign-in persistence fix: relaunching after the app has been closed longer than
@@ -959,7 +976,8 @@ Closes #60 #61 #62 #63
 ### Removed
 
 - PowerShell script version — this is a full rewrite
-[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.5.1...HEAD
+[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.5.2...HEAD
+[4.5.2]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.5.1...v4.5.2
 [4.5.1]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.5.0...v4.5.1
 [4.5.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.4.0...v4.5.0
 [4.4.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.3.0...v4.4.0
