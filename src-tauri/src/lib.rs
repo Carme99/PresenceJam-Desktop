@@ -1455,10 +1455,7 @@ mod tests {
             "the autostart argv must be recognised"
         );
         assert!(
-            has_minimized_flag(vec![
-                "presencejam".to_string(),
-                MINIMIZED_FLAG.to_string()
-            ]),
+            has_minimized_flag(vec!["presencejam".to_string(), MINIMIZED_FLAG.to_string()]),
             "OsString argv elements must be recognised too"
         );
         assert!(

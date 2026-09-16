@@ -1104,7 +1104,11 @@ mod tests {
     fn test_percent_of_guards_zero_total_and_overflow() {
         assert_eq!(percent_of(0, Some(0)), 0, "a zero total has no percentage");
         assert_eq!(percent_of(5, Some(10)), 50);
-        assert_eq!(percent_of(u64::MAX, Some(1)), 100, "overshoot clamps to 100");
+        assert_eq!(
+            percent_of(u64::MAX, Some(1)),
+            100,
+            "overshoot clamps to 100"
+        );
         assert_eq!(
             percent_of(u64::MAX, Some(u64::MAX)),
             1,

@@ -129,10 +129,8 @@ pub(crate) fn player_with_refresh_typed<T>(
                     // A concurrent refresh already won; retry once with it.
                     call(&current_tokens.access_token)
                 }
-                Some(current_tokens) => {
-                    try_refresh_spotify_token(state, app, &current_tokens)
-                        .and_then(|retry_token| call(&retry_token))
-                }
+                Some(current_tokens) => try_refresh_spotify_token(state, app, &current_tokens)
+                    .and_then(|retry_token| call(&retry_token)),
                 None => Err(SpotifyApiError::Other(
                     "Spotify is not connected".to_string(),
                 )),

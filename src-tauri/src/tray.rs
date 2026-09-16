@@ -500,10 +500,11 @@ fn selected_for_log(selected: &DeviceMenuSelection) -> String {
 /// Cache first (no IO), then a live `get_devices` re-fetch when the cached
 /// list went stale (issue #388: the old `devices.get(i)` raced the
 /// 60 s-throttled cache against the live device list). MUST run off the
-/// menu-event thread — the fallback performs blocking HTTP (issue #386).
+/// menu-event thread — the fallback performs blocking HTTP (issue #386) —
+/// and resolves its token through the shared refresh-aware policy, so an
+/// expired access token does not strand a transfer on "unknown device"
+/// (issue #586).
 fn resolve_device_id(app: &AppHandle, selected: &DeviceMenuSelection) -> Option<String> {
-    let state = app.state::<std::sync::Arc<crate::AppState>>();
-    let token = state.tokens.spotify().as_ref()?.access_token.clone();
     match selected {
         DeviceMenuSelection::DeviceId(id) => {
             // Fast path: still in the cached list and transferable.
@@ -518,7 +519,13 @@ fn resolve_device_id(app: &AppHandle, selected: &DeviceMenuSelection) -> Option<
             }
             // Slow path: live re-fetch; the device may have appeared after
             // the submenu was built, or the cache may be stale.
-            match crate::spotify::get_devices(&token) {
+            let state = app.state::<std::sync::Arc<crate::AppState>>();
+            match crate::commands::playback::player_with_refresh_typed(
+                state.inner(),
+                app,
+                "transfer device list",
+                |token| crate::spotify::get_devices(token),
+            ) {
                 Ok(devices) => {
                     *DEVICES_CACHE.lock() = Some((Instant::now(), devices.clone()));
                     devices
@@ -742,7 +749,10 @@ const TOGGLE_SETTLE_POLL: Duration = Duration::from_millis(150);
 /// lapsed. `context` only labels the failure log.
 fn repaint_tray_from_state(app: &AppHandle, context: &str) {
     let Some(state) = app.try_state::<std::sync::Arc<crate::AppState>>() else {
-        log::debug!("[TRAY] {}: AppState not registered yet, skipping repaint", context);
+        log::debug!(
+            "[TRAY] {}: AppState not registered yet, skipping repaint",
+            context
+        );
         return;
     };
     let is_syncing = state.polling.is_syncing(Ordering::Acquire);
@@ -1231,40 +1241,24 @@ mod tests {
     }
 
     /// Issue #388: the click handler must resolve by id with a live
-    /// re-fetch fallback instead of `devices.get(i)`. Brace-counted body
-    /// isolation (order-independent): do not anchor on the next fn.
+    /// re-fetch fallback instead of `devices.get(i)`. Issue #586: that
+    /// re-fetch must resolve its token through the shared refresh-aware
+    /// policy, so an expired token does not strand a transfer.
     #[test]
     fn device_click_resolves_by_id_with_live_fallback() {
         let src = include_str!("tray.rs");
-        let sig_idx = src
-            .find("fn resolve_device_id(")
-            .expect("resolve_device_id must exist");
-        let brace_open_rel = src[sig_idx..]
-            .find('{')
-            .expect("function body must have an opening brace");
-        let body_start = sig_idx + brace_open_rel;
-        let mut depth: u32 = 0;
-        let mut i = body_start;
-        let body_end = loop {
-            match src.as_bytes()[i] {
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        break i;
-                    }
-                }
-                _ => {}
-            }
-            i += 1;
-            if i >= src.len() {
-                panic!("unbalanced braces in resolve_device_id");
-            }
-        };
-        let body = &src[body_start + 1..body_end];
+        let body = body_of(prod_source(src), "fn resolve_device_id(");
         assert!(
-            body.contains("get_devices(&token)"),
+            body.contains("get_devices(token)"),
             "resolve_device_id must live re-fetch when the cache misses"
+        );
+        assert!(
+            body.contains("player_with_refresh_typed("),
+            "the live re-fetch must use the refresh-aware token policy (issue #586)"
+        );
+        assert!(
+            !body.contains("tokens.spotify()"),
+            "resolve_device_id must not snapshot the raw access token (issue #586)"
         );
         assert!(
             !body.contains("devices.get(*i).cloned()") || body.contains("LegacyIndex"),
@@ -1274,37 +1268,13 @@ mod tests {
 
     /// Issues #383/#386: the tray Quit arm must terminate via the shared
     /// graceful shutdown, and the playback/device click arms must offload
-    /// blocking Spotify HTTP onto worker threads. Brace-counted body
-    /// isolation (order-independent): do not anchor on the next fn.
+    /// blocking Spotify HTTP onto worker threads. Issue #587: the Show/Hide
+    /// repaint rebuilds a menu that can fetch Spotify over the network, so
+    /// it must be offloaded too.
     #[test]
     fn tray_click_arms_quit_and_offload() {
         let src = include_str!("tray.rs");
-        let sig_idx = src
-            .find("pub fn setup_tray(")
-            .expect("setup_tray must exist");
-        let brace_open_rel = src[sig_idx..]
-            .find('{')
-            .expect("function body must have an opening brace");
-        let body_start = sig_idx + brace_open_rel;
-        let mut depth: u32 = 0;
-        let mut i = body_start;
-        let body_end = loop {
-            match src.as_bytes()[i] {
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        break i;
-                    }
-                }
-                _ => {}
-            }
-            i += 1;
-            if i >= src.len() {
-                panic!("unbalanced braces in setup_tray");
-            }
-        };
-        let body = &src[body_start + 1..body_end];
+        let body = body_of(prod_source(src), "pub fn setup_tray(");
         // #383: Quit terminates even with no frontend listener.
         let quit_pos = body
             .find("ID_QUIT =>")
@@ -1383,10 +1353,36 @@ mod tests {
         );
     }
 
-    /// Brace-counted body isolation (order-independent): do not anchor on
-    /// the next fn. Mirrors the helper style used across this crate.
-    fn body_of<'a>(prod_source: &'a str, sig: &str) -> &'a str {
-        let after_sig = prod_source
+    /// Production half of `src` — everything before the inline test module,
+    /// so a scan can never match the assertions themselves.
+    fn prod_source(src: &str) -> &str {
+        src.split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("tray.rs has no #[cfg(test)] mod tests block")
+    }
+
+    /// Drops `//` line comments so a source-scan assertion is not fooled by
+    /// prose that quotes the very construct it forbids: a comment saying
+    /// "never snapshot `state.tokens.spotify()`" must not read as a
+    /// snapshot. String literals are not parsed, so a `//` inside a literal
+    /// truncates the rest of that line — that can only lose trailing text,
+    /// never invent it. Stripping also removes any brace a comment mentions,
+    /// which keeps the brace counting below from being unbalanced by prose.
+    fn strip_line_comments(src: &str) -> String {
+        src.lines()
+            .map(|line| match line.find("//") {
+                Some(i) => &line[..i],
+                None => line,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Comment-stripped, brace-counted body isolation for `sig`'s fn.
+    /// Order-independent: never anchor on the next fn.
+    fn body_of(prod: &str, sig: &str) -> String {
+        let stripped = strip_line_comments(prod);
+        let after_sig = stripped
             .split(sig)
             .nth(1)
             .unwrap_or_else(|| panic!("tray.rs has no `{}`", sig));
@@ -1408,7 +1404,7 @@ mod tests {
                 _ => {}
             }
         }
-        &after_sig[..end.unwrap_or_else(|| panic!("{} body never closed", sig))]
+        after_sig[..end.unwrap_or_else(|| panic!("{} body never closed", sig))].to_string()
     }
 
     /// Issue #586: tray player actions used to snapshot
