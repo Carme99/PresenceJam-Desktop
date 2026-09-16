@@ -30,6 +30,13 @@ first-run setup.
   OAuth flow with the credentials already on disk instead of re-asking for
   them.
 
+### Fixed (CI)
+- **Dependency-audit job was red on every run (#357):** the npm audit step's
+  `run` value was a plain YAML scalar containing ` #357`, so YAML ended the
+  value at "see" and bash received an unterminated double quote ("unexpected
+  EOF while looking for matching `"`") — the npm leg never executed. The value
+  is now a block scalar, so the issue reference stays literal.
+
 ### Known issues
 - The wizard's `finish()` still overwrites the stored config with defaults when
   it is completed by an existing user — tracked as #531.

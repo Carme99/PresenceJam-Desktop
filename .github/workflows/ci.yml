@@ -345,4 +345,9 @@ jobs:
           cache: 'npm'
 
       - name: npm audit (advisory)
-        run: npm audit --audit-level=high || echo "::warning::npm audit found advisories (advisory-only, see #357)"
+        # `run` is a block scalar on purpose: a plain scalar cannot contain
+        # " #", so the `#357` reference used to end the YAML value early
+        # ("unexpected EOF while looking for matching \"" — the npm leg never
+        # ran at all). Keep the value on its own line if it cites an issue.
+        run: |
+          npm audit --audit-level=high || echo "::warning::npm audit found advisories (advisory-only, see issue #357)"
