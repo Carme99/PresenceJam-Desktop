@@ -1,9 +1,11 @@
 //! Spotify authentication Tauri commands.
 //!
-//! See issue #76. This module owns the PKCE OAuth flow for both initial
-//! Onboarding (`start_spotify_auth`) and Reconnect (`start_spotify_reconnect`),
-//! plus the manual-code fallback (`complete_spotify_auth_manual`) and the
-//! in-flight token refresher (`refresh_spotify`).
+//! See issue #76. This module owns the PKCE OAuth flow for initial Onboarding
+//! (`start_spotify_auth`), the two Reconnect entry points —
+//! `start_spotify_reconnect` (flow only) and `reconnect_spotify_session` (drop
+//! the session, then flow; keychain untouched, issue #554) — plus the
+//! manual-code fallback (`complete_spotify_auth_manual`) and the in-flight
+//! token refresher (`refresh_spotify`).
 
 use crate::token_io;
 use crate::{AppState, PendingSpotifyAuth};
@@ -338,6 +340,89 @@ pub fn start_spotify_reconnect(
     run_spotify_oauth_flow(client_id, redirect_uri, &state)?;
 
     log::info!("{CMD} start_spotify_reconnect: SUCCESS - Spotify reconnect started");
+    Ok(())
+}
+
+/// State half of [`clear_spotify_session`]: drop the in-memory Spotify session
+/// and any pending auth — nothing else, no keychain I/O. Split out so the
+/// re-authorize contract stays unit-testable (the persist step below needs a
+/// Tauri `AppHandle`).
+fn clear_spotify_session_state(state: &AppState) {
+    *state.tokens.spotify_mut() = None;
+    *state.pending.spotify_mut() = None;
+}
+
+/// Drop the in-memory Spotify session plus any pending auth, persist the
+/// cleared file, and drop the onboarding cache. Deliberately performs **no
+/// keychain I/O** — the stored `client_secret` survives, which is the whole
+/// point of the re-authorize contract (issue #554).
+fn clear_spotify_session(state: &Arc<AppState>, app: &AppHandle) {
+    clear_spotify_session_state(state);
+    log::info!("{CMD} clear_spotify_session: cleared spotify_tokens + pending_spotify_auth");
+
+    // Persist the cleared state to disk atomically. Failure is logged, not
+    // propagated: the in-memory session is already gone, and the next persist
+    // rewrites the file.
+    if let Err(e) = token_io::persist_tokens(state, app) {
+        log::warn!(
+            "{CMD} clear_spotify_session: failed to persist cleared state - {}",
+            e
+        );
+    }
+
+    // Issue #70: invalidate the onboarding cache so the UI sees the cleared state.
+    state.onboarding_cache.invalidate();
+    log::info!("{CMD} clear_spotify_session: Spotify session cleared (keychain untouched)");
+}
+
+/// Re-authorize Spotify for an already-configured install: drop the current
+/// session and start a fresh PKCE flow **without touching the stored
+/// credential** (issue #554).
+///
+/// This is the re-authorize half of what used to be one overloaded command.
+/// The destructive disconnect still deletes the keychain `client_secret` — and
+/// therefore forces a full Onboarding pass — whereas this command leaves the
+/// Client ID + Secret intact, so a routine re-consent (the playback-scope
+/// banner, a revoked refresh token, a stale scope set) no longer destroys
+/// working credentials. The frontend still sends the user to Onboarding when
+/// the keychain entry is genuinely missing; that decision stays where it
+/// already is (`is_spotify_client_secret_set`), and the presence check below
+/// keeps the two in agreement.
+#[tauri::command]
+pub fn reconnect_spotify_session(
+    window: tauri::Window,
+    client_id: String,
+    redirect_uri: String,
+    app: AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    // Issue #241: detached windows never legitimately start the OAuth flow.
+    super::require_main_window(&window)?;
+    log::info!(
+        "{CMD} reconnect_spotify_session: ENTRY - client_id.len={}, redirect_uri={}",
+        client_id.len(),
+        redirect_uri
+    );
+
+    if client_id.is_empty() {
+        log::error!("{CMD} reconnect_spotify_session: client_id is empty");
+        return Err("client_id is required".to_string());
+    }
+
+    // #67 / #349: same IPC-boundary validation as the other two flow starters.
+    validate_spotify_client_id(&client_id)?;
+    validate_spotify_redirect_uri(&redirect_uri)?;
+
+    // Presence check only — the value is never stored back. A missing entry
+    // means re-onboarding is the only way forward; the error propagates so the
+    // caller can route there.
+    let _client_secret = crate::keychain::get_spotify_client_secret()?;
+    log::info!("{CMD} reconnect_spotify_session: client_secret present in keychain");
+
+    clear_spotify_session(state.inner(), &app);
+    run_spotify_oauth_flow(client_id, redirect_uri, &state)?;
+
+    log::info!("{CMD} reconnect_spotify_session: SUCCESS - Spotify re-authorization started");
     Ok(())
 }
 
@@ -859,6 +944,71 @@ mod tests {
         assert!(
             body.find("decide_manual_paste_peek").is_some(),
             "handler must validate through the peek helper"
+        );
+    }
+
+    // Issue #554: the re-authorize command's contract is "drop the session,
+    // keep the credential". The state half is exercised behaviourally here;
+    // the keychain half cannot be (it would hit the real OS keychain), so it is
+    // pinned by the source guard below.
+    #[test]
+    fn re_authorize_clears_only_the_spotify_session() {
+        let state = AppState::new();
+        *state.tokens.spotify_mut() = Some(crate::spotify::SpotifyTokens {
+            access_token: "access".to_string(),
+            refresh_token: "refresh".to_string(),
+            expires_at: chrono::Utc::now() + chrono::Duration::seconds(3600),
+        });
+        *state.tokens.teams_mut() = Some(crate::teams::TeamsTokens {
+            access_token: "teams-access".to_string(),
+            refresh_token: Some("teams-refresh".to_string()),
+            expires_at: chrono::Utc::now() + chrono::Duration::seconds(3600),
+        });
+        *state.pending.spotify_mut() = Some(sample_pending("csrf.secret"));
+
+        clear_spotify_session_state(&state);
+
+        assert!(
+            state.tokens.spotify().is_none(),
+            "the session being re-authorized must be dropped"
+        );
+        assert!(
+            state.pending.spotify().is_none(),
+            "a stale pending must not survive into the fresh flow"
+        );
+        assert!(
+            state.tokens.teams().is_some(),
+            "re-authorizing Spotify must never sign Teams out"
+        );
+    }
+
+    // Issue #554: the split between the destructive `disconnect_spotify`
+    // (keychain delete → full onboarding) and this re-authorize command is the
+    // whole point of the fix, and it is a keychain-side effect that no
+    // unit-testable helper can express — hence a source guard. The command
+    // itself takes Tauri state, so its body is isolated with the shared
+    // literal-aware scanner rather than driven directly.
+    #[test]
+    fn re_authorize_command_never_deletes_the_stored_credential() {
+        let src = include_str!("spotify_auth.rs");
+        let body = crate::token_io::test_scan::fn_body(src, "pub fn reconnect_spotify_session(");
+        assert!(
+            !body.contains("delete_spotify_client_secret"),
+            "reconnect_spotify_session must not delete the keychain client_secret — that is what disconnect_spotify is for"
+        );
+        assert!(
+            !body.contains("keychain::store_spotify_client_secret"),
+            "reconnect_spotify_session must not rewrite the stored secret either"
+        );
+        assert!(
+            body.contains("clear_spotify_session(") && body.contains("run_spotify_oauth_flow("),
+            "reconnect_spotify_session must clear the session and then start the flow"
+        );
+        // The credential is only ever read, and its absence is the "you must
+        // re-onboard" signal the frontend already routes on.
+        assert!(
+            body.contains("get_spotify_client_secret()?"),
+            "reconnect_spotify_session must prove the credential exists before starting the flow"
         );
     }
 }

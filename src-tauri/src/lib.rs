@@ -1115,6 +1115,7 @@ pub fn run() {
             commands::config::save_config,
             commands::spotify_auth::start_spotify_auth,
             commands::spotify_auth::start_spotify_reconnect,
+            commands::spotify_auth::reconnect_spotify_session,
             commands::spotify_auth::complete_spotify_auth_manual,
             commands::spotify_auth::refresh_spotify,
             commands::spotify_auth::is_spotify_client_secret_set,
