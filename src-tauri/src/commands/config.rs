@@ -177,7 +177,8 @@ async fn after_persist(app: &AppHandle, persisted: &AppConfig) {
     // now async (it touches the autostart registry/file), so we await it.
     #[cfg(desktop)]
     {
-        if let Err(e) = super::window::set_autostart_enabled(app.clone(), persisted.autostart).await {
+        if let Err(e) = super::window::set_autostart_enabled(app.clone(), persisted.autostart).await
+        {
             log::warn!("{CMD} failed to sync autostart state: {}", e);
         }
     }

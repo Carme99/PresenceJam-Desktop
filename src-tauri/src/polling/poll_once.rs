@@ -3466,6 +3466,7 @@ mod tests {
             .status_rules
             .quiet_hours
             .push(crate::config::QuietHoursEntry {
+                replacement_status: String::new(),
                 enabled: true,
                 start_minutes: 0,
                 end_minutes: 1439,
@@ -3701,6 +3702,7 @@ mod tests {
             track_rules: Vec::new(),
         };
         let entry = |enabled: bool, start: u16, end: u16, days: Vec<u8>| QuietHoursEntry {
+            replacement_status: String::new(),
             enabled,
             start_minutes: start,
             end_minutes: end,

@@ -915,7 +915,11 @@ fn atomic_write_json(path: &std::path::Path, json: &str) -> Result<(), String> {
         if let Some(parent) = path.parent() {
             if let Ok(dir) = std::fs::File::open(parent) {
                 if let Err(e) = dir.sync_all() {
-                    log::warn!("[CFG] Failed to fsync config dir '{}': {}", parent.display(), e);
+                    log::warn!(
+                        "[CFG] Failed to fsync config dir '{}': {}",
+                        parent.display(),
+                        e
+                    );
                 }
             }
         }
@@ -1461,9 +1465,15 @@ mod tests {
         assert_eq!(merged.teams.status_format, "NEW {track}");
         // Everything else survived.
         assert_eq!(merged.status_rules.quiet_hours.len(), 1);
-        assert_eq!(merged.status_rules.quiet_hours[0].replacement_status, "Busy");
+        assert_eq!(
+            merged.status_rules.quiet_hours[0].replacement_status,
+            "Busy"
+        );
         assert_eq!(merged.status_rules.track_rules.len(), 1);
-        assert_eq!(merged.status_rules.track_rules[0].replacement_status, "Focus");
+        assert_eq!(
+            merged.status_rules.track_rules[0].replacement_status,
+            "Focus"
+        );
         assert!(merged.teams.start_minimized);
         assert!(!merged.teams.profanity_filter);
         assert_eq!(merged.teams.profanity_extra_words, vec!["spam".to_string()]);
@@ -1519,10 +1529,14 @@ mod tests {
         let mut base = AppConfig::default();
         base.extra
             .insert("future_key".to_string(), serde_json::json!({"a": 1}));
-        let patch: ConfigPatch = serde_json::from_str(r#"{"autostart": true}"#).expect("must parse");
+        let patch: ConfigPatch =
+            serde_json::from_str(r#"{"autostart": true}"#).expect("must parse");
         apply_patch(&mut base, &patch);
         assert!(base.autostart);
-        assert_eq!(base.extra.get("future_key"), Some(&serde_json::json!({"a": 1})));
+        assert_eq!(
+            base.extra.get("future_key"),
+            Some(&serde_json::json!({"a": 1}))
+        );
     }
 
     // ---------------------------------------------------------------
@@ -1623,7 +1637,9 @@ mod tests {
         .expect("a pre-4.6 document must still parse");
         assert!(cfg.teams.profanity_extra_words.is_empty());
         assert_eq!(cfg.polling.pause_backoff_max_seconds, 300);
-        assert!(cfg.status_rules.quiet_hours[0].replacement_status.is_empty());
+        assert!(cfg.status_rules.quiet_hours[0]
+            .replacement_status
+            .is_empty());
     }
 
     /// The new fields round-trip through serde.
@@ -1639,19 +1655,16 @@ mod tests {
         .expect("must parse");
         assert_eq!(cfg.teams.profanity_extra_words.len(), 2);
         assert_eq!(cfg.polling.pause_backoff_max_seconds, 120);
-        assert_eq!(
-            cfg.status_rules.quiet_hours[0].replacement_status,
-            "Busy"
-        );
+        assert_eq!(cfg.status_rules.quiet_hours[0].replacement_status, "Busy");
 
         let json = serde_json::to_string(&cfg).expect("must serialize");
         let back: AppConfig = serde_json::from_str(&json).expect("must re-parse");
-        assert_eq!(back.teams.profanity_extra_words, cfg.teams.profanity_extra_words);
-        assert_eq!(back.polling.pause_backoff_max_seconds, 120);
         assert_eq!(
-            back.status_rules.quiet_hours[0].replacement_status,
-            "Busy"
+            back.teams.profanity_extra_words,
+            cfg.teams.profanity_extra_words
         );
+        assert_eq!(back.polling.pause_backoff_max_seconds, 120);
+        assert_eq!(back.status_rules.quiet_hours[0].replacement_status, "Busy");
     }
 
     /// An oversized user lexicon is bounded, not rejected: the filter must
@@ -1660,7 +1673,13 @@ mod tests {
     fn test_clamp_teams_bounds_extra_words() {
         let mut teams = TeamsConfig {
             profanity_extra_words: (0..100)
-                .map(|i| if i == 0 { "x".repeat(64) } else { format!("w{i}") })
+                .map(|i| {
+                    if i == 0 {
+                        "x".repeat(64)
+                    } else {
+                        format!("w{i}")
+                    }
+                })
                 .collect(),
             ..TeamsConfig::default()
         };
