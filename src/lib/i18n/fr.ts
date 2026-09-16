@@ -403,4 +403,15 @@ export const fr: Dict = {
     'PresenceJam n’a pas pu lire votre secret client Spotify enregistré : le trousseau du système est verrouillé ou absent. Déverrouillez-le (ou installez un fournisseur Secret Service comme gnome-keyring), puis réessayez — le secret est toujours stocké, vous n’avez donc pas à reconfigurer Spotify.',
   'settings.secretKeychainUnavailable':
     'Trousseau du système indisponible — il est peut-être verrouillé ou absent. Déverrouillez-le (ou installez un fournisseur Secret Service) pour utiliser votre secret enregistré ; il est toujours stocké.',
+  'diagnostics.quarantineTitle': 'Les réglages ont été réinitialisés',
+  'diagnostics.quarantineBodyNow':
+    "PresenceJam n'a pas pu lire votre fichier de réglages et a donc réinitialisé tous les réglages à leur valeur par défaut.",
+  'diagnostics.quarantineBodyEarlier':
+    "Un lancement précédent n'a pas pu lire votre fichier de réglages et l'a réinitialisé à ses valeurs par défaut.",
+  'diagnostics.quarantineBackupPresent':
+    "L'original illisible a été conservé à côté de votre fichier de réglages sous le nom {name}, afin que les valeurs qu'il contenait puissent être récupérées.",
+  'diagnostics.quarantineBackupMissing':
+    "L'original illisible se trouve toujours à côté de votre fichier de réglages sous le nom config.json.",
+  'diagnostics.quarantineWhere':
+    "Les deux fichiers se trouvent dans le dossier PresenceJam de votre dossier de configuration utilisateur — la sauvegarde à côté de config.json.",
 };

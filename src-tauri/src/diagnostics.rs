@@ -130,6 +130,18 @@ pub struct ConfigSummary {
     pub quiet_hours_enabled_count: usize,
     pub track_rules_count: usize,
     pub track_rules_enabled_count: usize,
+    /// CfgDiag#2 (issue #537, completing #379): true when this process
+    /// found `config.json` unreadable, quarantined it to `<name>.bak` and
+    /// booted on `AppConfig::default()`. Every value above is therefore a
+    /// factory default, not the user's — without this flag the reset is
+    /// invisible (the `[CFG]` warn line sits in a log nobody opens).
+    pub config_quarantined: bool,
+    /// Bare file name of the quarantine backup (`config.json.bak`) when one
+    /// is still on disk, never a path — see [`quarantine_backup_field`] and
+    /// the #409 rule it enforces. A `.bak` can outlive the quarantining
+    /// launch, so this is also how a later session can point the user at
+    /// the settings it lost.
+    pub config_quarantine_backup: Option<String>,
 }
 
 /// Token metadata ONLY. There is deliberately no field that could carry
@@ -160,6 +172,40 @@ pub struct KeychainStatus {
     pub spotify_client_secret_present: bool,
     /// `tokens.json` AES-256-GCM key present (issue #140 slot).
     pub tokens_encryption_key_present: bool,
+}
+
+/// Quarantine state of the config file, read at the command boundary and
+/// carried into [`ConfigSummary`] (CfgDiag#2, issue #537).
+///
+/// `config::load_config` already quarantines an unreadable `config.json` to
+/// `<name>.bak` and boots on defaults, and `config_was_quarantined()` already
+/// says so — but nothing observed it, so the user's client id, polling and
+/// #432 rules vanished without a word (issue #379's "diagnostics-visible"
+/// contract was only claimable from the unit tests).
+///
+/// Deliberately a plain value rather than a second live read inside
+/// [`build_snapshot`]: the assembly boundary stays drivable with a planted
+/// quarantine, exactly like the failed-install marker (#603), so the
+/// snapshot contract is testable without a real corrupt config on disk.
+#[derive(Debug, Clone, Default)]
+pub struct ConfigQuarantine {
+    /// [`crate::config::config_was_quarantined`] — true once *this* process
+    /// renamed a corrupt config aside.
+    pub quarantined: bool,
+    /// [`crate::config::config_quarantine_backup_name`] — bare file name of
+    /// the backup if it is still next to the config, else `None`.
+    pub backup_name: Option<String>,
+}
+
+impl ConfigQuarantine {
+    /// Production read of the process flag plus an existence probe on the
+    /// `.bak` sibling of the real config path.
+    fn observe() -> Self {
+        Self {
+            quarantined: crate::config::config_was_quarantined(),
+            backup_name: crate::config::config_quarantine_backup_name(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -438,6 +484,29 @@ fn strip_absolute_paths(text: &str) -> String {
     out
 }
 
+/// Snapshot form of the quarantine backup: the bare file name only, or
+/// `None` when there is no name safe enough to publish (issue #537).
+///
+/// `config::config_quarantine_backup_name` already drops the directory, but
+/// this is the boundary that has to *hold* the #409 rule, not a caller that
+/// happens to satisfy it: an absolute path is reduced to its last component
+/// by the same pass the #603 updater text goes through, and a name that
+/// still carries a separator (a relative path, which that pass deliberately
+/// leaves alone) is dropped rather than published.
+///
+/// Interaction with the log-redaction pass in this module: the name is
+/// short and separator-free, so [`redact_sensitive`] is the identity on it
+/// (no key match, no 32-char opaque run) — pinned by the tests below, since
+/// a future redaction change that masked `config.json.bak` would silently
+/// remove the one pointer the user has to their lost settings.
+fn quarantine_backup_field(name: &str) -> Option<String> {
+    let stripped = strip_absolute_paths(name);
+    if stripped.is_empty() || stripped.contains('/') || stripped.contains('\\') {
+        return None;
+    }
+    Some(stripped)
+}
+
 /// Keys whose value may be preceded by an RFC 7235 auth scheme.
 fn is_auth_scheme_key(key: &str) -> bool {
     key == "authorization" || key == "bearer"
@@ -509,7 +578,13 @@ fn token_metadata(state: &crate::AppState) -> TokenMetadata {
     }
 }
 
-fn config_summary(state: &crate::AppState, spotify_client_secret_present: bool) -> ConfigSummary {
+/// `quarantine` is read by the command (see [`ConfigQuarantine::observe`])
+/// and only projected here, so the snapshot shape is fixed in one place.
+fn config_summary(
+    state: &crate::AppState,
+    spotify_client_secret_present: bool,
+    quarantine: &ConfigQuarantine,
+) -> ConfigSummary {
     let cfg = state.config.get().clone().unwrap_or_default();
     ConfigSummary {
         spotify_client_id: cfg.spotify.client_id,
@@ -544,6 +619,11 @@ fn config_summary(state: &crate::AppState, spotify_client_secret_present: bool) 
             .iter()
             .filter(|r| r.enabled)
             .count(),
+        config_quarantined: quarantine.quarantined,
+        config_quarantine_backup: quarantine
+            .backup_name
+            .as_deref()
+            .and_then(quarantine_backup_field),
     }
 }
 
@@ -613,11 +693,17 @@ fn read_from_offset(path: &std::path::Path, offset: u64) -> Result<Vec<u8>, Stri
 /// Core assembly, separated from the `#[tauri::command]` wrapper so it
 /// stays unit-testable without an `AppHandle` and without touching the
 /// OS keychain (tests inject an explicit [`KeychainStatus`]).
+///
+/// The quarantine state is a parameter for the same reason as the
+/// failed-install marker: the assembly boundary must be drivable with a
+/// planted quarantine, and the sanitization that keeps a path out of the
+/// payload belongs on this side of it.
 fn build_snapshot(
     state: &crate::AppState,
     log_dir: Option<std::path::PathBuf>,
     keychain: KeychainStatus,
     failed_update_install: Option<crate::updater_bg::FailedUpdateInstall>,
+    quarantine: ConfigQuarantine,
 ) -> DiagnosticsSnapshot {
     log::debug!("{CMD} build_snapshot: collecting local diagnostics");
     let (recent_logs, log_source_status) = tail_log_file(log_dir);
@@ -629,7 +715,7 @@ fn build_snapshot(
             arch: std::env::consts::ARCH.to_string(),
             family: std::env::consts::FAMILY.to_string(),
         },
-        config: config_summary(state, keychain.spotify_client_secret_present),
+        config: config_summary(state, keychain.spotify_client_secret_present, &quarantine),
         tokens: token_metadata(state),
         keychain,
         recent_logs,
@@ -671,9 +757,16 @@ pub async fn get_diagnostics_snapshot(app: AppHandle) -> Result<DiagnosticsSnaps
         let log_dir = app_clone.path().app_log_dir().ok();
         // Read here, like `log_dir`, so `build_snapshot` stays an assembly
         // plus sanitization boundary that tests can drive with a planted
-        // marker record (#603).
+        // marker record (#603) or a planted quarantine (#537).
         let failed_update_install = crate::updater_bg::read_failed_install_marker();
-        build_snapshot(&state, log_dir, probe_keychain(), failed_update_install)
+        let quarantine = ConfigQuarantine::observe();
+        build_snapshot(
+            &state,
+            log_dir,
+            probe_keychain(),
+            failed_update_install,
+            quarantine,
+        )
     })
     .await
     .map_err(|e| format!("get_diagnostics_snapshot spawn_blocking panicked: {:?}", e))?;
@@ -952,7 +1045,13 @@ mod tests {
             spotify_client_secret_present: true,
             tokens_encryption_key_present: true,
         };
-        let snapshot = build_snapshot(&state, Some(dir), keychain, None);
+        let snapshot = build_snapshot(
+            &state,
+            Some(dir),
+            keychain,
+            None,
+            ConfigQuarantine::default(),
+        );
         let json = serde_json::to_string_pretty(&snapshot).expect("serialize snapshot");
         assert!(
             !json.contains(FAKE_ACCESS),
@@ -1056,7 +1155,13 @@ mod tests {
             spotify_client_secret_present: false,
             tokens_encryption_key_present: false,
         };
-        let snapshot = build_snapshot(&state, None, keychain, Some(record));
+        let snapshot = build_snapshot(
+            &state,
+            None,
+            keychain,
+            Some(record),
+            ConfigQuarantine::default(),
+        );
         let json = serde_json::to_string_pretty(&snapshot).expect("serialize snapshot");
         let failed = snapshot
             .failed_update_install
@@ -1153,5 +1258,117 @@ mod tests {
         assert!(name.starts_with("presencejam-diagnostics-"));
         assert!(name.ends_with(".json"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---------------------------------------------------------------
+    // CfgDiag#2 (#537): the quarantine is visible in the snapshot.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_snapshot_reports_config_quarantine_and_keeps_the_backup_name_bare() {
+        // #379 quarantines a corrupt config to `<name>.bak` and boots on
+        // defaults; #537 requires the snapshot to say so. A later session
+        // has `quarantined == false` (the flag is per-process) but can still
+        // point at the backup, so both fields travel independently.
+        let state = crate::AppState::default();
+        let keychain = KeychainStatus {
+            spotify_client_secret_present: false,
+            tokens_encryption_key_present: false,
+        };
+        let snapshot = build_snapshot(
+            &state,
+            None,
+            keychain,
+            None,
+            ConfigQuarantine {
+                quarantined: true,
+                backup_name: Some("config.json.bak".to_string()),
+            },
+        );
+        assert!(snapshot.config.config_quarantined);
+        assert_eq!(
+            snapshot.config.config_quarantine_backup.as_deref(),
+            Some("config.json.bak")
+        );
+
+        // What the page renders and copies is the serialized payload: both
+        // fields must survive it, and neither may carry a directory (the
+        // #409 rule) nor anything a redaction pass would eat.
+        let json = serde_json::to_string_pretty(&snapshot).expect("serialize snapshot");
+        assert!(json.contains("\"config_quarantined\": true"), "{json}");
+        assert!(
+            json.contains("\"config_quarantine_backup\": \"config.json.bak\""),
+            "{json}"
+        );
+        assert_eq!(
+            strip_absolute_paths("config.json.bak"),
+            "config.json.bak",
+            "the reported name must already satisfy the path-hygiene pass"
+        );
+        assert_eq!(
+            redact_sensitive("config.json.bak"),
+            "config.json.bak",
+            "log redaction must treat the backup name as an ordinary short file name"
+        );
+    }
+
+    #[test]
+    fn test_quarantine_backup_field_never_publishes_a_path() {
+        // The producer (`config::config_quarantine_backup_name`) is already
+        // name-only; this boundary holds the #409 rule on its own, so any
+        // future route into the field is safe by construction.
+        assert_eq!(
+            quarantine_backup_field("/home/jack/.config/PresenceJam/config.json.bak").as_deref(),
+            Some("config.json.bak")
+        );
+        assert_eq!(
+            quarantine_backup_field(r"C:\Users\jack\AppData\PresenceJam\config.json.bak")
+                .as_deref(),
+            Some("config.json.bak")
+        );
+        assert_eq!(
+            quarantine_backup_field(r"\\fileserver\share\config.json.bak").as_deref(),
+            Some("config.json.bak")
+        );
+        assert_eq!(
+            quarantine_backup_field("config.json.bak").as_deref(),
+            Some("config.json.bak")
+        );
+        // A *relative* path survives `strip_absolute_paths` by design, so
+        // the separator check is what stops it reaching a public issue.
+        assert_eq!(quarantine_backup_field("PresenceJam/config.json.bak"), None);
+        assert_eq!(
+            quarantine_backup_field(r"PresenceJam\config.json.bak"),
+            None
+        );
+        assert_eq!(quarantine_backup_field(""), None);
+
+        // And the assembly applies it: a path handed to `build_snapshot`
+        // still leaves the payload carrying only the file name.
+        let state = crate::AppState::default();
+        let keychain = KeychainStatus {
+            spotify_client_secret_present: false,
+            tokens_encryption_key_present: false,
+        };
+        let snapshot = build_snapshot(
+            &state,
+            None,
+            keychain,
+            None,
+            ConfigQuarantine {
+                quarantined: true,
+                backup_name: Some("/tmp/pj/config.json.bak".to_string()),
+            },
+        );
+        assert_eq!(
+            snapshot.config.config_quarantine_backup.as_deref(),
+            Some("config.json.bak")
+        );
+        let json = serde_json::to_string_pretty(&snapshot).expect("serialize snapshot");
+        assert!(
+            !json.contains("/tmp/pj"),
+            "snapshot leaked a config path: {json}"
+        );
+        assert!(!json.contains("pj/config.json.bak"), "{json}");
     }
 }
