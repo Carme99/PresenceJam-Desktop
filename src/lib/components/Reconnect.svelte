@@ -268,7 +268,10 @@
       {#if authFlow.teams.phase === 'done' || !needsTeams}
         <p class="hint">{t('reconnect.teamsOk')}</p>
       {:else if authFlow.teams.phase === 'waiting'}
-        <p class="hint">{t('common.goTo')} {#if isSafeHttpUrl(authFlow.teams.verificationUrl)}<a href={authFlow.teams.verificationUrl} target="_blank" rel="noopener">{authFlow.teams.verificationUrl}</a>{:else}<span>{authFlow.teams.verificationUrl}</span>{/if} {t('common.andEnterCode')} <strong>{authFlow.teams.userCode}</strong></p>
+        <p class="hint">{t('common.openSignInPage')}</p>
+        {#if isSafeHttpUrl(authFlow.teams.verificationUrl)}<a href={authFlow.teams.verificationUrl} target="_blank" rel="noopener">{authFlow.teams.verificationUrl}</a>{:else}<span>{authFlow.teams.verificationUrl}</span>{/if}
+        <p class="hint">{t('common.enterCodeWhenAsked')}</p>
+        <strong>{authFlow.teams.userCode}</strong>
         {#if teamsCodeExpired}
           <p class="error-message" role="alert">{t('common.codeExpired')}</p>
           <button class="btn-full" onclick={reconnectTeams}>{t('common.getNewCode')}</button>

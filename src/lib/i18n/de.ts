@@ -9,11 +9,12 @@ export const de: Dict = {
   // ── common ────────────────────────────────────────────────────────
   'common.back': 'Zurück',
   'common.backToDashboard': 'Zurück zum Dashboard',
-  'common.checkNow': 'Ich habe mich angemeldet — jetzt prüfen',
+  'common.checkNow': 'Anmeldestatus prüfen',
   'common.connected': 'Verbunden',
   'common.dismiss': 'Ausblenden',
-  'common.goTo': 'Wechseln Sie zu',
-  'common.andEnterCode': 'und geben Sie diesen Code ein',
+  'common.openSignInPage': 'Öffnen Sie die Microsoft-Anmeldeseite:',
+  'common.enterCodeWhenAsked': 'Geben Sie diesen Code ein, wenn Sie dazu aufgefordert werden:',
+  'common.moreActions': 'Weitere Aktionen',
   'common.launchAtLogin': 'Bei der Anmeldung starten',
   'common.loading': 'Wird geladen...',
   'common.notConnected': 'Nicht verbunden',
@@ -51,7 +52,7 @@ export const de: Dict = {
   'dashboard.aboutAria': 'Über PresenceJam',
   'dashboard.pauseSync': 'Synchronisierung pausieren',
   'dashboard.resumeSync': 'Synchronisierung fortsetzen',
-  'dashboard.presenceGated': 'Status pausiert, während Sie beschäftigt/in einer Besprechung sind',
+  'dashboard.presenceGated': 'Status pausiert — Sie sind beschäftigt, in einem Anruf oder präsentieren',
   'dashboard.setupRequired': 'Einrichtung erforderlich',
   'dashboard.setupHint':
     'Verbinden Sie Spotify und Microsoft Teams, damit Ihre aktuell gespielten Titel Ihren Teams-Status steuern können.',
@@ -62,13 +63,13 @@ export const de: Dict = {
   'dashboard.yourTeamsStatus': 'Ihr Teams-Status',
   'dashboard.nothingPlaying': 'Keine Wiedergabe',
   'dashboard.nothingPlayingHint':
-    'Starten Sie etwas auf Spotify, und wir leiten es an Teams weiter.',
+    'Spielen Sie etwas auf Spotify ab — es erscheint in Ihrem Teams-Status.',
   'dashboard.syncCrashed':
-    'Die Synchronisierung wurde unerwartet beendet. Bitte starten Sie PresenceJam neu.',
+    'Die Synchronisierung wurde unerwartet beendet. Drücken Sie Fortsetzen (▶), um sie neu zu starten.',
   'dashboard.credentialCheckFailed':
-    'Anmeldedaten konnten nicht geprüft werden — bitte versuchen Sie es erneut.',
+    'Ihre Anmeldedaten konnten nicht geprüft werden. Prüfen Sie Ihre Verbindung und versuchen Sie es erneut.',
   'dashboard.syncToggleFailed':
-    'Synchronisierungsstatus konnte nicht geändert werden. Bitte versuchen Sie es erneut.',
+    'Die Synchronisierung konnte nicht gestartet/gestoppt werden. Versuchen Sie es erneut — bleibt das Problem, öffnen Sie die Diagnose über die Dashboard-Kopfzeile.',
   'dashboard.statusNotConfigured': 'Nicht konfiguriert',
   'dashboard.statusNoTrack': 'Kein Titel wird abgespielt',
   'dashboard.live': 'Live',
@@ -96,7 +97,7 @@ export const de: Dict = {
   'logs.openFolder': 'Ordner öffnen',
   'logs.empty': 'Noch keine Protokolleinträge',
   'logs.emptyHint':
-    'Live-Einträge erscheinen hier, während die Abfrageschleife läuft.',
+    'Live-Einträge erscheinen hier, sobald die Synchronisierung läuft und Spotify spielt.',
 
   // ── settings ──────────────────────────────────────────────────────
   'settings.title': 'Einstellungen',
@@ -107,14 +108,14 @@ export const de: Dict = {
   'settings.sectionTeams': 'Microsoft Teams',
   'settings.sectionPresence': 'Präsenz',
   'settings.sectionStatusFormat': 'Statusformat',
-  'settings.sectionPolling': 'Abrufintervall',
+  'settings.sectionPolling': 'Sync-Häufigkeit',
   'settings.sectionNotifications': 'Benachrichtigungen',
   'settings.sectionAppearance': 'Erscheinungsbild',
   'settings.clientId': 'Client-ID',
   'settings.clientIdPlaceholder': 'Spotify-Client-ID eingeben',
   'settings.clientSecret': 'Client-Secret',
   'settings.secretStoredHint':
-    'Wird sicher im Schlüsselbund Ihres Betriebssystems gespeichert. Zum Ersetzen führen Sie das Onboarding erneut aus.',
+    'Wird sicher im Schlüsselbund Ihres Betriebssystems gespeichert. Zum Ersetzen kehren Sie zum Dashboard zurück und wählen Sie „Einrichtung fortsetzen“.',
   'settings.secretNotConfigured': 'Nicht konfiguriert.',
   'settings.runOnboarding': 'Onboarding starten',
   'settings.toSetUpSpotify': 'um Spotify einzurichten.',
@@ -122,17 +123,17 @@ export const de: Dict = {
   'settings.completeAuthInBrowser':
     'Schließen Sie die Authentifizierung im Browser ab.',
   'settings.playbackScopeBanner':
-    'Die Wiedergabesteuerung erfordert eine einmalige Neuverbindung.',
+    'Spotify hat Wiedergabesteuerungen hinzugefügt. Klicken Sie neben dieser Meldung auf „Erneut verbinden“, um sie zu aktivieren.',
   'settings.spotifySecretConflict':
     'Das Client-Secret in der Konfigurationsdatei weicht vom Schlüsselbund-Eintrag ab. Spotify neu verbinden, um das Problem zu beheben.',
   'settings.teamsAuthHint':
     'Die Teams-Authentifizierung verwendet Ihr Microsoft-365-Konto. Keine zusätzliche Konfiguration erforderlich.',
   'settings.presenceScopeBanner':
-    'Die Präsenzfunktionen erfordern eine einmalige Teams-Neuverbindung.',
+    'Teams hat Besprechungs-/Anruferkennung hinzugefügt. Klicken Sie neben dieser Meldung auf „Erneut verbinden“, um sie zu aktivieren.',
   'settings.availabilitySyncLabel':
     '„Verfügbar“ beim Hören anzeigen',
   'settings.availabilitySyncHint':
-    'Standardmäßig aus. Zeigt in Teams „Verfügbar“ (statt „Beschäftigt“), während ein Titel spielt, da setPresence nur die Kombination Busy/InACall unterstützt — siehe setPresence-Einschränkung.',
+    'Standardmäßig aus. Wenn aktiviert, zeigt Teams „Verfügbar“ (statt „Beschäftigt“), während Musik spielt. Hinweis: Bei Anrufen und Besprechungen zeigt Teams weiterhin „Beschäftigt“.',
   'settings.presenceGateLabel':
     'Status bei Besprechungen/Anrufen/Nicht-stören pausieren',
   'settings.presenceGateHint':
@@ -165,8 +166,8 @@ export const de: Dict = {
     'Aktualisieren von „Bei der Anmeldung starten“ fehlgeschlagen: {error}',
   'settings.saveChanges': 'Änderungen speichern',
   'settings.saving': 'Speichern…',
-  'settings.saved': 'Einstellungen gespeichert!',
-  'settings.failedToSave': 'Speichern fehlgeschlagen',
+  'settings.saved': 'Einstellungen gespeichert.',
+  'settings.failedToSave': 'Einstellungen konnten nicht gespeichert werden — Ihre Eingaben sind erhalten. Versuchen Sie es erneut.',
   'settings.openLogsFolder': 'Protokollordner öffnen',
   'settings.previewUnavailable': '(Vorschau nicht verfügbar)',
 
@@ -229,11 +230,11 @@ export const de: Dict = {
   // ── reconnect ─────────────────────────────────────────────────────
   'reconnect.title': 'Erneut verbinden',
   'reconnect.description':
-    'Ihre Sitzung ist abgelaufen. Verbinden Sie sich unten neu, um die Synchronisierung fortzusetzen.',
+    'Die Synchronisierung braucht Ihre Aufmerksamkeit. Verbinden Sie sich unten neu, um fortzufahren.',
   'reconnect.missingCredentials': 'Fehlende Anmeldedaten',
   'reconnect.failed': 'Fehlgeschlagen',
   'reconnect.readyToReconnect': 'Bereit zur Neuverbindung',
-  'reconnect.needsReconnect': 'Neuverbindung erforderlich',
+  'reconnect.needsReconnect': 'Bereit zur Neuverbindung',
   'reconnect.spotifyOk': 'Spotify erfolgreich neu verbunden.',
   'reconnect.spotifyNotConfigured':
     'Spotify-Anmeldedaten sind auf diesem Rechner nicht konfiguriert.',
@@ -249,17 +250,16 @@ export const de: Dict = {
   'reconnect.reenterCredsHint':
     'Sie müssen Ihre Client-ID und Ihr Client-Secret erneut eingeben.',
   'reconnect.goToFullSetup': 'Zur vollständigen Einrichtung',
-  'reconnect.reconnectSpotify': 'Spotify neu verbinden',
   'reconnect.reconnectTeams': 'Teams neu verbinden',
 
   // ── about ─────────────────────────────────────────────────────────
   'about.version': 'Version {version}',
   'about.description':
-    'Leitet weiter, was Sie auf Spotify hören, automatisch in Ihren Microsoft-Teams-Status.',
+    'Zeigt, was Sie auf Spotify hören, automatisch in Ihrem Microsoft-Teams-Status.',
   'about.statusSync': 'Status-Sync',
   'about.live': 'Live',
-  'about.auth': 'Authentifizierung',
-  'about.authMethod': 'PKCE / Gerätecode',
+  'about.auth': 'Anmeldung',
+  'about.authMethod': 'Spotify + Microsoft',
   'about.storage': 'Speicher',
   'about.osKeychain': 'Betriebssystem-Schlüsselbund',
   'about.githubRepo': 'GitHub-Repository',
@@ -271,7 +271,7 @@ export const de: Dict = {
   'update.stagedQuit':
     'v{version} wird installiert, wenn Sie PresenceJam beenden',
   'update.downloadFailed': 'Download fehlgeschlagen — {error}',
-  'update.downloadAndInstall': 'Herunterladen & installieren',
+  'update.downloadAndInstall': 'Herunterladen und installieren',
   'update.downloading': 'Wird heruntergeladen…',
   'update.installOnQuit': 'Beim Beenden installieren',
   'update.preparing': 'Wird vorbereitet…',
@@ -291,12 +291,12 @@ export const de: Dict = {
   'onboarding.stepOf': 'Schritt {step} von 3',
   'onboarding.step1Title': 'Spotify verbinden',
   'onboarding.step1Intro':
-    'Fügen Sie die Client-ID und das Client-Secret Ihrer Spotify-Anwendung ein. Nach dem Klick auf die Schaltfläche starten wir den Anmeldevorgang.',
+    'Fügen Sie unten Ihre Spotify-Client-ID und Ihr Client-Secret ein und wählen Sie dann „Spotify verbinden“ — wir öffnen die Spotify-Anmeldeseite.',
   'onboarding.getCredentials': 'Ihre Spotify-Anmeldedaten abrufen',
   'onboarding.instruction1':
     'Öffnen Sie das Spotify-Entwickler-Dashboard und erstellen Sie eine App.',
   'onboarding.instruction2':
-    'Fügen Sie presencejam://callback als Redirect-URI hinzu.',
+    'Fügen Sie unter „Redirect URIs“ presencejam://callback hinzu (damit weiß Spotify, wohin Sie zurückkehren).',
   'onboarding.instruction3':
     'Kopieren Sie die Client-ID und das Client-Secret aus den App-Einstellungen.',
   'onboarding.clientIdPlaceholder': '32-stellige Spotify-Client-ID',
@@ -304,14 +304,16 @@ export const de: Dict = {
   'onboarding.connectSpotify': 'Spotify verbinden',
   'onboarding.signInWaiting': 'Spotify-Anmeldung wartet…',
   'onboarding.manualUrlHint':
-    'Schließen Sie die Autorisierung in Ihrem Browser ab, oder fügen Sie die Weiterleitungs-URL unten ein.',
+    'Schließen Sie die Anmeldung bei Spotify in Ihrem Browser ab und fügen Sie unten die vollständige Adresse aus der Adressleiste ein.',
+  'onboarding.manualUrlLabel': 'Spotify-Weiterleitungs-URL',
+  'onboarding.manualUrlPlaceholder': 'presencejam://callback?code=…',
   'onboarding.submitCode': 'Code übermitteln',
   'onboarding.connectedToSpotify': 'Mit Spotify verbunden',
   'onboarding.continue': 'Weiter →',
-  'onboarding.step2Title': 'Mit Microsoft anmelden',
+  'onboarding.step2Title': 'Microsoft Teams verbinden',
   'onboarding.step2Intro':
     'Wir verwenden den Gerätecode-Flow von Microsoft — einen einmaligen Code, den Sie auf einer Microsoft-Seite eingeben. Keine zusätzliche Einrichtung nötig.',
-  'onboarding.startMicrosoftSignIn': 'Microsoft-Anmeldung starten',
+  'onboarding.startMicrosoftSignIn': 'Microsoft Teams verbinden',
   'onboarding.connectedToTeams': 'Mit Microsoft Teams verbunden',
   'onboarding.step3Title': 'Letzte Schritte',
   'onboarding.step3Intro':
@@ -319,7 +321,7 @@ export const de: Dict = {
   'onboarding.statusTemplate': 'Statusvorlage',
   'onboarding.placeholdersHint':
     'Platzhalter: {artist}, {track}, {album}, {emoji}',
-  'onboarding.pollInterval': 'Standard-Abrufintervall: {seconds}s',
+  'onboarding.pollInterval': 'Wie oft Spotify geprüft wird: {seconds}s',
   'onboarding.settingUp': 'Einrichtung läuft…',
   'onboarding.finishSetup': 'Einrichtung abschließen',
 
@@ -330,9 +332,9 @@ export const de: Dict = {
   'validation.clientSecretRequired':
     'Das Spotify-Client-Secret ist erforderlich.',
   'validation.clientSecretTooShort':
-    'Das Spotify-Client-Secret scheint ungültig zu sein (zu kurz — mindestens 32 Zeichen).',
+    'Dieses Client-Secret sieht zu kurz aus — es sollte mindestens 32 Zeichen haben. Prüfen Sie, ob beim Kopieren etwas fehlt.',
   'validation.noCodeInUrl':
-    'Kein Code in der URL gefunden — fügen Sie die vollständige Weiterleitungs-URL mit ?code=… ein.',
+    'Diese URL enthält keinen Anmeldecode — fügen Sie die vollständige Adresse aus der Adressleiste Ihres Browsers ein, nachdem Spotify Sie weitergeleitet hat.',
   'validation.connectBothFirst':
     'Bitte verbinden Sie sowohl Spotify als auch Teams, bevor Sie die Einrichtung abschließen.',
   'validation.setupFailed': 'Einrichtung fehlgeschlagen: {error}',

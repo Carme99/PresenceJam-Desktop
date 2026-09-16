@@ -9,11 +9,12 @@ export const fr: Dict = {
   // ── common ────────────────────────────────────────────────────────
   'common.back': 'Retour',
   'common.backToDashboard': 'Retour au tableau de bord',
-  'common.checkNow': "Je me suis connecté — vérifier maintenant",
+  'common.checkNow': 'Vérifier l’état de connexion',
   'common.connected': 'Connecté',
   'common.dismiss': 'Fermer',
-  'common.goTo': 'Allez sur',
-  'common.andEnterCode': 'et saisissez ce code',
+  'common.openSignInPage': 'Ouvrez la page de connexion Microsoft :',
+  'common.enterCodeWhenAsked': 'Saisissez ce code quand on vous le demande :',
+  'common.moreActions': 'Plus d’actions',
   'common.launchAtLogin': "Lancer à l'ouverture de session",
   'common.loading': 'Chargement...',
   'common.notConnected': 'Non connecté',
@@ -56,7 +57,7 @@ export const fr: Dict = {
   'dashboard.pauseSync': 'Mettre la synchronisation en pause',
   'dashboard.resumeSync': 'Reprendre la synchronisation',
   'dashboard.presenceGated':
-    "Statut en pause pendant que vous êtes occupé/en réunion",
+    'Statut en pause — vous êtes occupé, en appel ou en présentation',
   'dashboard.setupRequired': 'Configuration requise',
   'dashboard.setupHint':
     "Connectez Spotify et Microsoft Teams pour que vos titres en cours de lecture pilotent votre statut Teams.",
@@ -67,13 +68,13 @@ export const fr: Dict = {
   'dashboard.yourTeamsStatus': 'Votre statut Teams',
   'dashboard.nothingPlaying': 'Aucune lecture',
   'dashboard.nothingPlayingHint':
-    "Lancez une lecture sur Spotify et nous la transmettrons à Teams.",
+    'Lancez une lecture sur Spotify et elle apparaîtra dans votre statut Teams.',
   'dashboard.syncCrashed':
-    "La synchronisation s'est arrêtée de manière inattendue. Veuillez redémarrer PresenceJam.",
+    'La synchronisation s’est arrêtée de façon inattendue. Appuyez sur Reprendre (▶) pour la relancer.',
   'dashboard.credentialCheckFailed':
-    "Impossible de vérifier les identifiants — veuillez réessayer.",
+    'Impossible de vérifier vos identifiants. Vérifiez votre connexion et réessayez.',
   'dashboard.syncToggleFailed':
-    "Impossible de modifier l'état de la synchronisation. Veuillez réessayer.",
+    'Impossible de démarrer/arrêter la synchronisation. Réessayez — si le problème persiste, ouvrez Diagnostics depuis l’en-tête du tableau de bord.',
   'dashboard.statusNotConfigured': 'Non configuré',
   'dashboard.statusNoTrack': 'Aucun titre en lecture',
   'dashboard.live': 'En direct',
@@ -101,7 +102,7 @@ export const fr: Dict = {
   'logs.openFolder': 'Ouvrir le dossier',
   'logs.empty': 'Aucune entrée de journal pour le moment',
   'logs.emptyHint':
-    "Les entrées en direct apparaissent ici pendant l'exécution de la boucle d'interrogation.",
+    'Les entrées en direct apparaissent ici dès que la synchronisation démarre et que Spotify joue.',
 
   // ── settings ──────────────────────────────────────────────────────
   'settings.title': 'Paramètres',
@@ -113,14 +114,14 @@ export const fr: Dict = {
   'settings.sectionTeams': 'Microsoft Teams',
   'settings.sectionPresence': 'Présence',
   'settings.sectionStatusFormat': 'Format du statut',
-  'settings.sectionPolling': 'Interrogation',
+  'settings.sectionPolling': 'Fréquence de synchro',
   'settings.sectionNotifications': 'Notifications',
   'settings.sectionAppearance': 'Apparence',
   'settings.clientId': 'ID client',
   'settings.clientIdPlaceholder': "Saisir l'ID client Spotify",
   'settings.clientSecret': 'Secret client',
   'settings.secretStoredHint':
-    "Stocké en toute sécurité dans le trousseau de votre système d'exploitation. Pour le remplacer, relancez l'onboarding.",
+    'Stocké en toute sécurité dans le trousseau de votre système. Pour le remplacer, retournez au tableau de bord et choisissez « Poursuivre la configuration ».',
   'settings.secretNotConfigured': 'Non configuré.',
   'settings.runOnboarding': "Lancer l'onboarding",
   'settings.toSetUpSpotify': 'pour configurer Spotify.',
@@ -128,17 +129,17 @@ export const fr: Dict = {
   'settings.completeAuthInBrowser':
     "Terminez l'authentification dans le navigateur.",
   'settings.playbackScopeBanner':
-    'Le contrôle de la lecture nécessite une reconnexion unique.',
+    'Spotify a ajouté des contrôles de lecture. Cliquez sur « Reconnecter » à côté de ce message pour les activer.',
   'settings.spotifySecretConflict':
     'Le secret client du fichier de configuration diffère de celui du trousseau. Reconnectez Spotify pour corriger cela.',
   'settings.teamsAuthHint':
     "L'authentification Teams utilise votre compte Microsoft 365. Aucune configuration supplémentaire requise.",
   'settings.presenceScopeBanner':
-    'Les fonctions de présence nécessitent une reconnexion Teams unique.',
+    'Teams a ajouté la détection des réunions/appels. Cliquez sur « Reconnecter » à côté de ce message pour l’activer.',
   'settings.availabilitySyncLabel':
     "Afficher « Disponible » pendant l'écoute",
   'settings.availabilitySyncHint':
-    "Désactivé par défaut. Affiche « Disponible » (et non « Occupé ») dans Teams pendant la lecture d'un titre, car setPresence ne prend en charge que la combinaison Busy/InACall — voir la limite de setPresence.",
+    'Désactivé par défaut. Quand il est activé, Teams vous affiche « Disponible » (au lieu d’« Occupé ») pendant la lecture. Remarque : Teams affiche toujours « Occupé » pendant les appels et réunions.',
   'settings.presenceGateLabel':
     'Mettre le statut en pause pendant réunions/appels/Ne pas déranger',
   'settings.presenceGateHint':
@@ -172,8 +173,8 @@ export const fr: Dict = {
     "Échec de la mise à jour du lancement à l'ouverture de session : {error}",
   'settings.saveChanges': 'Enregistrer les modifications',
   'settings.saving': 'Enregistrement…',
-  'settings.saved': 'Paramètres enregistrés !',
-  'settings.failedToSave': "Échec de l'enregistrement",
+  'settings.saved': 'Paramètres enregistrés.',
+  'settings.failedToSave': 'Impossible d’enregistrer — vos modifications sont conservées. Réessayez.',
   'settings.openLogsFolder': 'Ouvrir le dossier des journaux',
   'settings.previewUnavailable': '(aperçu indisponible)',
 
@@ -237,11 +238,11 @@ export const fr: Dict = {
   // ── reconnect ─────────────────────────────────────────────────────
   'reconnect.title': 'Reconnexion',
   'reconnect.description':
-    'Votre session a expiré. Reconnectez-vous ci-dessous pour reprendre la synchronisation.',
+    'La synchronisation a besoin de votre attention. Reconnectez-vous ci-dessous pour la reprendre.',
   'reconnect.missingCredentials': 'Identifiants manquants',
   'reconnect.failed': 'Échec',
   'reconnect.readyToReconnect': 'Prêt à se reconnecter',
-  'reconnect.needsReconnect': 'Reconnexion nécessaire',
+  'reconnect.needsReconnect': 'Prêt à se reconnecter',
   'reconnect.spotifyOk': 'Spotify reconnecté avec succès.',
   'reconnect.spotifyNotConfigured':
     "Les identifiants Spotify ne sont pas configurés sur cette machine.",
@@ -251,7 +252,6 @@ export const fr: Dict = {
   'reconnect.clickBelowSpotify':
     'Cliquez ci-dessous pour reconnecter votre compte Spotify.',
   'reconnect.teamsOk': 'Teams reconnecté avec succès.',
-  'reconnect.reconnectSpotify': 'Reconnecter Spotify',
   'reconnect.clickBelowTeams':
     'Cliquez ci-dessous pour reconnecter votre compte Microsoft Teams.',
   'reconnect.missingCredsTitle': 'Identifiants Spotify manquants ?',
@@ -263,11 +263,11 @@ export const fr: Dict = {
   // ── about ─────────────────────────────────────────────────────────
   'about.version': 'Version {version}',
   'about.description':
-    "Transmet automatiquement ce que vous écoutez sur Spotify vers votre statut Microsoft Teams.",
+    'Affiche automatiquement ce que vous écoutez sur Spotify dans votre statut Microsoft Teams.',
   'about.statusSync': 'Synchro du statut',
   'about.live': 'En direct',
-  'about.auth': 'Authentification',
-  'about.authMethod': 'PKCE / Code appareil',
+  'about.auth': 'Connexion',
+  'about.authMethod': 'Spotify + Microsoft',
   'about.storage': 'Stockage',
   'about.osKeychain': 'Trousseau du système',
   'about.githubRepo': 'Dépôt GitHub',
@@ -299,12 +299,12 @@ export const fr: Dict = {
   'onboarding.stepOf': 'Étape {step} sur 3',
   'onboarding.step1Title': 'Connecter Spotify',
   'onboarding.step1Intro':
-    "Collez l'ID client et le secret client de votre application Spotify. Nous lancerons le processus de connexion dès que vous cliquerez sur le bouton.",
+    'Collez ci-dessous votre ID client et votre secret client Spotify, puis choisissez « Connecter Spotify » — nous ouvrirons la page de connexion Spotify.',
   'onboarding.getCredentials': 'Obtenir vos identifiants Spotify',
   'onboarding.instruction1':
     "Ouvrez le tableau de bord développeur Spotify et créez une application.",
   'onboarding.instruction2':
-    'Ajoutez presencejam://callback comme URI de redirection.',
+    'Sous « URI de redirection », ajoutez presencejam://callback (cela indique à Spotify où vous renvoyer).',
   'onboarding.instruction3':
     "Copiez l'ID client et le secret client depuis les paramètres de l'application.",
   'onboarding.clientIdPlaceholder': 'ID client Spotify à 32 caractères',
@@ -312,14 +312,16 @@ export const fr: Dict = {
   'onboarding.connectSpotify': 'Connecter Spotify',
   'onboarding.signInWaiting': 'Connexion Spotify en attente…',
   'onboarding.manualUrlHint':
-    "Terminez l'autorisation dans votre navigateur, ou collez l'URL de redirection ci-dessous.",
+    'Terminez la connexion Spotify dans votre navigateur, puis collez ci-dessous l’adresse complète de la barre d’adresse.',
+  'onboarding.manualUrlLabel': 'URL de redirection Spotify',
+  'onboarding.manualUrlPlaceholder': 'presencejam://callback?code=…',
   'onboarding.submitCode': 'Envoyer le code',
   'onboarding.connectedToSpotify': 'Connecté à Spotify',
   'onboarding.continue': 'Continuer →',
-  'onboarding.step2Title': 'Se connecter avec Microsoft',
+  'onboarding.step2Title': 'Connecter Microsoft Teams',
   'onboarding.step2Intro':
     "Nous utilisons le flux par code appareil de Microsoft — un code à usage unique à saisir sur une page Microsoft. Aucune configuration supplémentaire requise.",
-  'onboarding.startMicrosoftSignIn': 'Lancer la connexion Microsoft',
+  'onboarding.startMicrosoftSignIn': 'Connecter Microsoft Teams',
   'onboarding.connectedToTeams': 'Connecté à Microsoft Teams',
   'onboarding.step3Title': 'Derniers réglages',
   'onboarding.step3Intro':
@@ -328,7 +330,7 @@ export const fr: Dict = {
   'onboarding.placeholdersHint':
     'Paramètres : {artist}, {track}, {album}, {emoji}',
   'onboarding.pollInterval':
-    "Intervalle d'interrogation par défaut : {seconds}s",
+    'Fréquence de vérification de Spotify : {seconds}s',
   'onboarding.settingUp': 'Configuration…',
   'onboarding.finishSetup': "Terminer la configuration",
 
@@ -339,9 +341,9 @@ export const fr: Dict = {
   'validation.clientSecretRequired':
     'Le secret client Spotify est requis.',
   'validation.clientSecretTooShort':
-    'Le secret client Spotify semble invalide (trop court — au moins 32 caractères requis).',
+    'Ce secret client semble trop court — il devrait comporter au moins 32 caractères. Vérifiez qu’il n’y a pas d’erreur de copier-coller.',
   'validation.noCodeInUrl':
-    "Aucun code trouvé dans l'URL — collez l'URL de redirection complète avec ?code=…",
+    'Cette URL ne contient aucun code de connexion — collez l’adresse complète de la barre d’adresse de votre navigateur après la redirection Spotify.',
   'validation.connectBothFirst':
     "Veuillez connecter Spotify et Teams avant de terminer la configuration.",
   'validation.setupFailed': 'Échec de la configuration : {error}',
