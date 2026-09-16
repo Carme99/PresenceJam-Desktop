@@ -19,6 +19,7 @@
   import PageHeader from './PageHeader.svelte';
   import { t, i18n, type Locale } from '$lib/i18n';
   import { theme } from '$lib/stores/theme';
+  import { notificationsEnabled, setNotificationsEnabled } from '$lib/stores/notifications';
   import { devLog } from '$lib/utils/dev';
 
   let localConfig = $state<AppConfig>(structuredClone($configStore));
@@ -86,8 +87,29 @@
   function resetAppearanceDefaults() {
     localConfig.autostart = defaultConfig.autostart;
   }
-  // 3.1.0 notification opt-in — localStorage gated, default off
-  let notificationsEnabled = $state(false);
+
+  // #552: a radiogroup must own `role="radio"`/`aria-checked` children with a
+  // roving tabindex and arrow-key navigation. The cards declared
+  // `aria-pressed`, which assistive tech ignores inside a radiogroup and
+  // which carries no single-selection contract at all.
+  let themeDarkButton: HTMLButtonElement | undefined = $state();
+  let themeLightButton: HTMLButtonElement | undefined = $state();
+
+  function themeRadioKeydown(e: KeyboardEvent, current: 'dark' | 'light') {
+    const isNext = e.key === 'ArrowRight' || e.key === 'ArrowDown';
+    const isPrev = e.key === 'ArrowLeft' || e.key === 'ArrowUp';
+    if (!isNext && !isPrev) return;
+    e.preventDefault();
+    const next = current === 'dark' ? 'light' : 'dark';
+    theme.set(next);
+    // Selection follows focus, and the roving tabindex moves with it.
+    (next === 'dark' ? themeDarkButton : themeLightButton)?.focus();
+  }
+
+  // 3.1.0 notification opt-in — shared store, default off. #549: this used to
+  // be a private `$state` mirrored straight into localStorage, so a toggle in
+  // a detached Settings window never reached the already-mounted Dashboard.
+  let notificationsMessage = $state('');
   let spotifyAuthWaiting = $derived(authFlow.spotify.phase === 'waiting');
   let teamsAuthWaiting = $derived(authFlow.teams.phase === 'waiting');
 
@@ -200,7 +222,6 @@
   let secretConflictDestroyed = false;
 
   onMount(async () => {
-    try { notificationsEnabled = localStorage.getItem('notificationsEnabled') === 'true'; } catch {}
     if (authListenersDestroyed) return;
     await loadConfig();
     if (authListenersDestroyed) return;
@@ -337,6 +358,16 @@
 
   async function reconnectSpotify() {
     if (spotifyAuthWaiting || !localConfig.spotify.client_id) return;
+    // #550: `reconnect_spotify` clears the tokens and emits
+    // `spotify-reconnect-required`, which the always-mounted main-window
+    // listener answers with `currentView.set('settings')`. From a popped-out
+    // pane that opens a *second* Settings view beside this one, so hand the
+    // navigation back to the main window and close this one instead — the
+    // same route goToOnboarding takes.
+    if (detached) {
+      forwardToMain('settings');
+      return;
+    }
     // #421: fresh entry clears this flow's stale phase only; never the sibling's.
     resetSpotifyAuthFlow();
     setSpotifyPhase('waiting');
@@ -350,6 +381,12 @@
 
   async function reconnectTeams() {
     if (teamsAuthWaiting) return;
+    // #550: same detached-pane guard as reconnectSpotify above — the Teams
+    // variant emits `teams-reconnect-required`, handled the same way.
+    if (detached) {
+      forwardToMain('settings');
+      return;
+    }
     // #421: fresh entry clears this flow's stale phase only; never the sibling's.
     resetTeamsAuthFlow();
     setTeamsPhase('waiting');
@@ -394,7 +431,15 @@
     }
   }
 
-  function goBack() {
+  // #548: unsaved edits must gate navigation, not merely warn. `localConfig`
+  // is the only copy of them — Settings is the sole writer of config.json —
+  // so Back and "Run onboarding" park their target here while the banner
+  // asks for a choice, instead of silently dropping queued rule edits, a
+  // changed status template and changed polling bounds.
+  type PendingNav = 'back' | 'onboarding';
+  let pendingNav = $state<PendingNav | null>(null);
+
+  function performBack() {
     if (detached) {
       // #403: same catch-and-surface guard as goToOnboarding above.
       popIn('settings').catch((e: unknown) => console.warn('[SETTINGS] popIn failed:', e));
@@ -403,11 +448,39 @@
     currentView.set('dashboard');
   }
 
+  function goBack() {
+    if (isDirty && !isSaving) {
+      pendingNav = 'back';
+      return;
+    }
+    performBack();
+  }
+
   async function toggleNotifications(e: Event) {
-    const enabled = (e.currentTarget as HTMLInputElement).checked;
-    notificationsEnabled = enabled;
-    try { localStorage.setItem('notificationsEnabled', String(enabled)); } catch {}
-    if (enabled) { try { if (!(await isPermissionGranted())) await requestPermission(); } catch {} }
+    const target = e.currentTarget as HTMLInputElement;
+    if (!target.checked) {
+      notificationsMessage = '';
+      setNotificationsEnabled(false);
+      return;
+    }
+    // #549: the OS prompt's answer decides the flag. It used to be discarded,
+    // so a denied permission left a checked toggle over a localStorage 'true'
+    // that the Dashboard honoured — notifications then silently never came.
+    let granted = false;
+    try {
+      granted = (await isPermissionGranted()) || (await requestPermission()) === 'granted';
+    } catch (err) {
+      console.warn('[SETTINGS] notification permission request failed:', err);
+    }
+    setNotificationsEnabled(granted);
+    if (granted) {
+      notificationsMessage = '';
+      return;
+    }
+    // The input is `checked={$notificationsEnabled}` and the store stays
+    // false, so reset the DOM property this click already flipped.
+    target.checked = false;
+    notificationsMessage = t('settings.notificationsDenied');
   }
 
   // #403: catch-and-surface — WebviewWindow creation/focus can reject
@@ -417,19 +490,59 @@
     popOut('settings').catch((e: unknown) => console.warn('[SETTINGS] popOut failed:', e));
   }
 
-  function goToOnboarding() {
+  /**
+   * #550: main-window navigation from a detached pane. `currentView` is
+   * main-window-only, so anything that would move it forwards the target and
+   * closes this window (C7 pattern from the onboarding link).
+   */
+  function forwardToMain(view: 'settings' | 'onboarding') {
+    void emitTo('main', 'navigate', view);
+    // #403: fire-and-forget close with the same catch-and-surface guard.
+    popIn('settings').catch((e: unknown) => console.warn('[SETTINGS] popIn failed:', e));
+  }
+
+  function performOnboarding() {
     // Used by the Spotify Client Secret hint when the keychain entry is
     // missing. Re-running Onboarding places a fresh secret in the keychain.
     // See issue #9.
     if (detached) {
-      // C7: currentView is main-window-only — forward the navigation to
-      // the main window and close this detached pane.
-      void emitTo('main', 'navigate', 'onboarding');
-      // #403: fire-and-forget close with the same catch-and-surface guard.
-      popIn('settings').catch((e: unknown) => console.warn('[SETTINGS] popIn failed:', e));
+      forwardToMain('onboarding');
       return;
     }
     currentView.set('onboarding');
+  }
+
+  function goToOnboarding() {
+    if (isDirty && !isSaving) {
+      pendingNav = 'onboarding';
+      return;
+    }
+    performOnboarding();
+  }
+
+  /** #548: run the navigation a confirmed Save / Discard asked for. */
+  function leaveSettings(target: PendingNav) {
+    if (target === 'onboarding') {
+      performOnboarding();
+      return;
+    }
+    performBack();
+  }
+
+  async function saveAndLeave() {
+    await handleSave();
+    // A failed save keeps `isDirty` set and reports the error through
+    // `saveMessage`; stay on the form rather than navigating away from it.
+    if (isDirty) return;
+    const target = pendingNav;
+    pendingNav = null;
+    if (target) leaveSettings(target);
+  }
+
+  function discardAndLeave() {
+    const target = pendingNav;
+    pendingNav = null;
+    if (target) leaveSettings(target);
   }
 </script>
 
@@ -439,7 +552,18 @@
     onAction={detached ? undefined : handlePopOut}
     actionTitle={detached ? '' : t('settings.popOutActionTitle')} />
   {#if isDirty}
-    <div class="dirty-banner" role="status">{t('settings.unsavedChanges')}</div>
+    <div class="dirty-banner" role="status">
+      <span>{t('settings.unsavedChanges')}</span>
+      {#if pendingNav}
+        <div class="dirty-actions">
+          <button type="button" class="btn-secondary" onclick={saveAndLeave} disabled={isSaving}>
+            {isSaving ? t('settings.saving') : t('settings.saveAndLeave')}
+          </button>
+          <button type="button" class="btn-link" onclick={discardAndLeave}>{t('settings.discardChanges')}</button>
+          <button type="button" class="btn-link" onclick={() => (pendingNav = null)}>{t('settings.stayHere')}</button>
+        </div>
+      {/if}
+    </div>
   {/if}
 
   <div class="sections">
@@ -789,9 +913,12 @@
       </header>
       <div class="toggle-row">
         <label for="notifications-enabled">{t('settings.notificationsToggle')}</label>
-        <input id="notifications-enabled" type="checkbox" checked={notificationsEnabled} onchange={toggleNotifications} />
+        <input id="notifications-enabled" type="checkbox" checked={$notificationsEnabled} onchange={toggleNotifications} />
       </div>
       <p class="hint">{t('settings.notificationsHint')}</p>
+      {#if notificationsMessage}
+        <p class="error-message" role="alert">{notificationsMessage}</p>
+      {/if}
     </section>
 
     <section class="card">
@@ -802,15 +929,19 @@
       <div class="form-group">
         <span class="form-label">{t('settings.themeLabel')}</span>
         <div class="theme-grid" role="radiogroup" aria-label={t('settings.themeLabel')}>
-          <button type="button" class="theme-card"
-            class:is-active={$theme === 'dark'} aria-pressed={$theme === 'dark'}
-            onclick={() => theme.set('dark')}>
+          <button type="button" class="theme-card" role="radio" bind:this={themeDarkButton}
+            aria-checked={$theme === 'dark'} tabindex={$theme === 'dark' ? 0 : -1}
+            class:is-active={$theme === 'dark'}
+            onclick={() => theme.set('dark')}
+            onkeydown={(e) => themeRadioKeydown(e, 'dark')}>
             <span class="swatch swatch-dark"></span>
             <span class="theme-name">{t('settings.themeDark')}</span>
           </button>
-          <button type="button" class="theme-card"
-            class:is-active={$theme === 'light'} aria-pressed={$theme === 'light'}
-            onclick={() => theme.set('light')}>
+          <button type="button" class="theme-card" role="radio" bind:this={themeLightButton}
+            aria-checked={$theme === 'light'} tabindex={$theme === 'light' ? 0 : -1}
+            class:is-active={$theme === 'light'}
+            onclick={() => theme.set('light')}
+            onkeydown={(e) => themeRadioKeydown(e, 'light')}>
             <span class="swatch swatch-light"></span>
             <span class="theme-name">{t('settings.themeLight')}</span>
           </button>
@@ -945,6 +1076,9 @@
   /* C9: unsaved-changes banner shown when localConfig drifts from the
      saved store; and the polling min>max clamp feedback hint. */
   .dirty-banner {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
     padding: var(--sp-2) var(--sp-4);
     background: var(--warning-soft);
     color: var(--warning);
@@ -953,6 +1087,14 @@
     font-size: var(--fs-sm);
     font-weight: 600;
     text-align: center;
+  }
+  /* #548: Save / Discard / Stay, revealed when a navigation is blocked. */
+  .dirty-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: var(--sp-3);
   }
   .clamp-hint {
     margin: 0;
