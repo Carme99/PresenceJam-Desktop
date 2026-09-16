@@ -208,6 +208,8 @@ export const de: Dict = {
   'diagnostics.loggingEnabled': 'aktiviert ({level})',
   'diagnostics.loggingDisabled': 'deaktiviert',
   'diagnostics.launchAtLogin': 'Bei der Anmeldung starten',
+  'diagnostics.statusRules': 'Statusregeln',
+  'diagnostics.statusRulesValue': '{quiet}/{quietTotal} Ruhezeiten, {rules}/{rulesTotal} Track-Regeln aktiv',
   'diagnostics.spotifyConnected': 'Spotify verbunden',
   'diagnostics.spotifyTokenExpires': 'Spotify-Token läuft ab',
   'diagnostics.teamsConnected': 'Teams verbunden',
@@ -341,5 +343,34 @@ export const de: Dict = {
 
   // ── routes / chrome ───────────────────────────────────────────────
   'routes.skipToMainContent': 'Zum Hauptinhalt springen',
-  'routes.unknownPane': 'Unbekannter Bereich: {pane}'
+  'routes.unknownPane': 'Unbekannter Bereich: {pane}',
+
+  // ── feat/45-features: status rules (#432) + support snapshot (#434) ──
+  'rules.sectionTitle': 'Statusregeln',
+  'rules.sectionHint':
+    'Ruhezeiten und Track-Regeln unterdrücken die Teams-Statusmeldung über denselben Anwesenheits-Gate-Pfad — eine abgelaufene Regel wird automatisch mitten im Track gepostet.',
+  'rules.quietHoursLabel': 'Ruhezeiten',
+  'rules.noQuietHours': 'Keine Ruhezeiten definiert — der Status wird zu allen Zeiten synchronisiert.',
+  'rules.quietStart': 'Beginn der Ruhezeit',
+  'rules.quietEnd': 'Ende der Ruhezeit',
+  'rules.quietDays': 'Aktive Tage (nichts gewählt = jeden Tag)',
+  'rules.day1': 'Mo',
+  'rules.day2': 'Di',
+  'rules.day3': 'Mi',
+  'rules.day4': 'Do',
+  'rules.day5': 'Fr',
+  'rules.day6': 'Sa',
+  'rules.day7': 'So',
+  'rules.addQuietHours': 'Ruhezeit hinzufügen',
+  'rules.trackRulesLabel': 'Track-Regeln',
+  'rules.noTrackRules': 'Keine Track-Regeln definiert — alle Tracks werden normal synchronisiert.',
+  'rules.artistPlaceholder': 'Interpret enthält…',
+  'rules.trackPlaceholder': 'Titel enthält…',
+  'rules.replacementPlaceholder': 'Stattdessen posten (leer = unterdrücken)',
+  'rules.addTrackRule': 'Track-Regel hinzufügen',
+  'rules.removeRule': 'Entfernen',
+  'rules.ruleEnabled': 'Aktiviert',
+  'logs.copySnapshot': 'Snapshot kopieren',
+  'logs.snapshotCopied': 'Geschwärzter Snapshot in die Zwischenablage kopiert.',
+  'logs.snapshotCopyFailed': 'Der Snapshot konnte nicht kopiert werden.'
 };

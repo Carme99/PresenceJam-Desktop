@@ -162,6 +162,7 @@
           <dt>{t('diagnostics.logging')}</dt>
           <dd>{snapshot.config.logging_enabled ? t('diagnostics.loggingEnabled', { level: snapshot.config.log_level }) : t('diagnostics.loggingDisabled')}</dd>
           <dt>{t('diagnostics.launchAtLogin')}</dt><dd>{boolLabel(snapshot.config.autostart)}</dd>
+          <dt>{t('diagnostics.statusRules')}</dt><dd>{t('diagnostics.statusRulesValue', { quiet: snapshot.config.quiet_hours_enabled_count, quietTotal: snapshot.config.quiet_hours_count, rules: snapshot.config.track_rules_enabled_count, rulesTotal: snapshot.config.track_rules_count })}</dd>
         </dl>
       </section>
 

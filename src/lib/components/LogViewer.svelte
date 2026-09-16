@@ -1,3 +1,8 @@
+<!-- Issue #434 scope: snapshot-copy ONLY — the Copy-snapshot button
+  emits the backend redacted tail + version/platform. Virtualization is
+  deferred (the RENDER_WINDOW tail cap below is the pre-existing #399
+  fix, untouched here); jumpToLatest pre-exists for the #400 stickiness
+  path. No new commands, no new scopes. -->
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
@@ -154,6 +159,35 @@
       console.warn('[LOGVIEWER] open_logs_folder failed:', e);
     }
   }
+  // Issue #434: one-click redacted support snapshot. Clipboard text comes
+  // SOLELY from the backend `get_diagnostics_snapshot` — its `recent_logs`
+  // already passed through `redact_sensitive` (no tokens/emails/absolute
+  // paths; #487 allowlist) — plus app version + platform for triage. The
+  // live in-memory `logs` buffer is deliberately NOT included: it never
+  // passes the redactor, so pasting it would leak exactly what #434
+  // forbids. Clipboard-only, no new commands, no new OAuth scopes.
+  let snapshotFeedback = $state('');
+  async function copySnapshot() {
+    snapshotFeedback = '';
+    try {
+      const snap = await invoke<{
+        app_version: string;
+        os: { platform: string; arch: string; family: string };
+        log_source_status: string;
+        recent_logs: string[];
+      }>('get_diagnostics_snapshot');
+      const header = [
+        `PresenceJam support snapshot v${snap.app_version}`,
+        `Platform: ${snap.os.platform}/${snap.os.arch} (${snap.os.family})`,
+        `Log source: ${snap.log_source_status} (redacted)`
+      ].join('\n');
+      await navigator.clipboard.writeText(`${header}\n\n${snap.recent_logs.join('\n')}`);
+      snapshotFeedback = t('logs.snapshotCopied');
+    } catch (e) {
+      console.warn('[LOGVIEWER] copySnapshot failed:', e);
+      snapshotFeedback = t('logs.snapshotCopyFailed');
+    }
+  }
 
   // #403: catch-and-surface — WebviewWindow creation/focus can reject;
   // never leave the promise floating from an inline onclick.
@@ -207,7 +241,11 @@
     {/if}
     <button class="btn-secondary" onclick={clearLogs}>{t('logs.clear')}</button>
     <button class="btn-secondary" onclick={openFolder}>{t('logs.openFolder')}</button>
+    <button class="btn-secondary" onclick={copySnapshot}>{t('logs.copySnapshot')}</button>
   </div>
+  {#if snapshotFeedback}
+    <p class="snapshot-feedback" role="status" aria-live="polite">{snapshotFeedback}</p>
+  {/if}
 
   <div class="log-wrap">
     <div class="log-list" bind:this={logContainer} onscroll={handleScroll}>
@@ -315,6 +353,11 @@
     border-radius: var(--r-md);
     box-shadow: var(--shadow-1);
     cursor: pointer;
+  }
+  .snapshot-feedback {
+    margin: 0;
+    font-size: var(--fs-xs);
+    color: var(--fg-subtle);
   }
   .empty-state {
     display: flex;
