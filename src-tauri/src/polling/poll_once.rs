@@ -16,6 +16,7 @@
 
 use std::sync::mpsc;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Instant;
 
 use chrono::Utc;
@@ -51,6 +52,20 @@ const DEBOUNCE_RETRY_SECONDS: u64 = 1;
 /// so the Graph expiry never lapses.
 const STATUS_KEEPALIVE_SECONDS: u64 = 5 * 60;
 const TRANSIENT_FAILURE_EXIT_THRESHOLD: u8 = 5;
+/// Finding PollCore#0 (issue #568): consecutive NETWORK failures — transport
+/// errors, 5xx, JSON parse failures and 429s — get their own counter and
+/// threshold. They must never end the session nor emit
+/// `spotify-reconnect-required`: the frontend turns that event into a real
+/// Spotify OAuth window (`+layout.svelte`), which is user-hostile when the
+/// tokens on disk are still valid and only the network is down. The counter
+/// is reset by any successful iteration.
+const NETWORK_FAILURE_THRESHOLD: u8 = 12;
+/// Base of the capped exponential backoff applied once
+/// `NETWORK_FAILURE_THRESHOLD` consecutive network failures accumulate.
+const NETWORK_BACKOFF_BASE_SECONDS: u64 = 30;
+/// Ceiling for that backoff: an offline machine slows to this cadence but
+/// KEEPS polling (never `PollIteration::Break`).
+const NETWORK_BACKOFF_CAP_SECONDS: u64 = 300;
 /// Minimum gap between setPresence re-arms while a track plays (issue
 /// #3.0-P1). An `Available` session TIMES OUT after 5 minutes when the
 /// availability is `Available` — a separate, non-configurable clock from
@@ -81,6 +96,81 @@ pub(crate) enum RunMode {
     OneShot,
 }
 
+/// Finding PollCore#4 (issue #572): the write-decision clocks.
+///
+/// These fields decide WHETHER the next Teams/Graph write happens: debounce
+/// (#364), change key (#343/#432), presence/rule gate (#3.0-P2/#380/#432),
+/// identical-write keepalive (#384) and the availability re-arm clock
+/// (#3.0-P1). Teams shows exactly ONE status per app, so the clocks describe
+/// process-wide state rather than per-thread state — a second iteration
+/// running in parallel (the manual `run_oneshot` refresh spawned by the tray
+/// and `refresh_status`) must observe the SAME clocks, otherwise it re-arms
+/// the availability session on a fresh clock and re-POSTs text Teams already
+/// shows. The polling loop loads this once per iteration and stores it back
+/// afterwards; a genuinely cold app reads `None` everywhere and arms normally.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct WriteClocks {
+    /// The change key of the track whose status is currently on Teams
+    /// (track identity + status-config fingerprint, #343/#432).
+    pub(crate) last_track_key: Option<String>,
+    /// Timestamp of the last Teams status write — times the debounce (#364)
+    /// and the #384 keepalive.
+    pub(crate) last_teams_update: Option<Instant>,
+    /// The last placeholder content posted by a clear path, so
+    /// byte-identical pause/no-track POSTs are skipped (#155).
+    pub(crate) last_posted_placeholder: Option<String>,
+    /// The track key whose status write was suppressed by the presence /
+    /// quiet-hours / track-rule gate (#3.0-P2/#432).
+    pub(crate) gated_track_key: Option<String>,
+    /// When the `Available` presence session was last armed via setPresence
+    /// (#3.0-P1). Owned here so the manual refresh cannot re-arm it early.
+    pub(crate) last_availability_arm: Option<Instant>,
+    /// The last playing-track status text posted (#384).
+    pub(crate) last_posted_status: Option<String>,
+    /// When the presence-gate re-check last ran — its own clock so re-checks
+    /// never shift the debounce + keepalive write windows (#380).
+    pub(crate) last_gate_check: Option<Instant>,
+}
+
+/// Process-wide slot for [`WriteClocks`]. See the struct docs for why these
+/// clocks are shared rather than per-thread.
+static WRITE_CLOCKS: Mutex<WriteClocks> = Mutex::new(WriteClocks {
+    last_track_key: None,
+    last_teams_update: None,
+    last_posted_placeholder: None,
+    gated_track_key: None,
+    last_availability_arm: None,
+    last_posted_status: None,
+    last_gate_check: None,
+});
+
+/// Snapshot the shared write-decision clocks. A poisoned lock is recovered
+/// rather than propagated (`into_inner`): these are dedup heuristics, and
+/// losing them costs at most one redundant Graph write.
+pub(crate) fn load_write_clocks() -> WriteClocks {
+    WRITE_CLOCKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// Publish the write-decision clocks back to the shared slot.
+pub(crate) fn store_write_clocks(clocks: &WriteClocks) {
+    *WRITE_CLOCKS.lock().unwrap_or_else(|e| e.into_inner()) = clocks.clone();
+}
+
+/// Forget the shared write-decision clocks. Called when a polling session
+/// starts and when one ends: the clocks describe the status Teams shows for
+/// the session that posted it, so a NEW session must start cold — otherwise
+/// its first iteration would read a stale `last_track_key` (no
+/// `spotify-track-changed` emit, no `current_track` update) or a stale gate.
+/// A manual refresh while no session is running therefore behaves exactly like
+/// one served by a fresh loop (it re-posts), while a manual refresh DURING a
+/// session shares that session's clocks.
+pub(crate) fn reset_write_clocks() {
+    *WRITE_CLOCKS.lock().unwrap_or_else(|e| e.into_inner()) = WriteClocks::default();
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run(
     state: &Arc<AppState>,
@@ -91,6 +181,7 @@ pub(crate) fn run(
     last_posted_placeholder: &mut Option<String>,
     consecutive_pauses: &mut u8,
     transient_failure_count: &mut u8,
+    consecutive_network_failures: &mut u8,
     gated_track_key: &mut Option<String>,
     last_availability_arm: &mut Option<Instant>,
     // Candidate C11: ETag validator from the previous conditional GET;
@@ -109,6 +200,7 @@ pub(crate) fn run(
         last_posted_placeholder,
         consecutive_pauses,
         transient_failure_count,
+        consecutive_network_failures,
         gated_track_key,
         last_availability_arm,
         last_etag,
@@ -119,54 +211,55 @@ pub(crate) fn run(
     )
 }
 
-/// One-shot entry: runs a single iteration with fresh ephemeral locals
-/// (a playing track always counts as changed, so it re-POSTs — exactly
-/// what an explicit refresh wants; an idle one-shot stays silent via
-/// `first_iteration=false`) and a throwaway stop channel
-/// that never fires. Never parks: `RunMode::OneShot` turns every parking
-/// sleep site into an immediate `Break`. Success paths (`process_track`,
-/// `handle_no_track`) contain no hidden sleeps — only natural blocking
-/// HTTP — and their returned `Sleep` is discarded. Duplicated Teams POSTs
-/// are idempotent and harmless.
+/// One-shot entry: a manual refresh (tray clear, `refresh_status`) runs one
+/// iteration against the SAME write-decision clocks the polling loop uses
+/// (see [`WriteClocks`], finding PollCore#4 / issue #572) instead of fresh
+/// per-call locals. Pre-fix, the fresh `last_availability_arm = None` made
+/// `should_rearm_availability` true on every manual refresh — an extra
+/// `setPresence` POST even seconds after the loop armed — and the fresh
+/// `last_track_key`/`last_posted_status`/`last_teams_update` made the write
+/// path force-POST a status the #384 identical-write guard would have
+/// skipped. Only the write-decision clocks are shared: `consecutive_pauses`,
+/// `last_etag` and `first_iteration` stay local, because a one-shot is not a
+/// polling thread (an idle one-shot must stay silent, issue #373) and its
+/// verdict is discarded.
+///
+/// `_tx` is a live binding (not `let _`), so the channel stays connected for
+/// the whole call: the top stop-check treats `Disconnected` as Break, and a
+/// dropped sender here would make every one-shot a silent no-op. Never
+/// collapse this to `let _`. Never parks either: `RunMode::OneShot` turns
+/// every parking sleep site into an immediate `Break`.
 pub(crate) fn run_oneshot(state: &Arc<AppState>, app: &AppHandle) {
-    // `_tx` is a live binding (not `let _`), so the channel stays
-    // connected for the whole call: the top stop-check treats
-    // `Disconnected` as Break, and a dropped sender here would make every
-    // one-shot a silent no-op. Never collapse this to `let _`.
     let (_tx, rx) = mpsc::channel::<()>();
-    let mut last_track_key: Option<String> = None;
-    let mut last_teams_update: Option<Instant> = None;
-    let mut last_posted_placeholder: Option<String> = None;
+    let mut clocks = load_write_clocks();
     let mut consecutive_pauses: u8 = 0;
     let mut transient_failure_count: u8 = 0;
-    let mut gated_track_key: Option<String> = None;
-    let mut last_availability_arm: Option<Instant> = None;
-    // `None` ⇒ unconditional GET (fresh locals, no prior validator).
+    let mut consecutive_network_failures: u8 = 0;
+    // `None` ⇒ unconditional GET (no prior validator on this path).
     let mut last_etag: Option<String> = None;
     // Issue #373 does NOT apply here: a one-shot is an explicit refresh,
     // not a fresh polling thread — an idle one-shot must stay silent
     // instead of POSTing a placeholder on every manual refresh.
     let mut first_iteration = false;
-    // Issue #384: no status posted yet this thread.
-    let mut last_posted_status: Option<String> = None;
-    let mut last_gate_check: Option<Instant> = None;
     let _ = run_inner(
         state,
         app,
         &rx,
-        &mut last_track_key,
-        &mut last_teams_update,
-        &mut last_posted_placeholder,
+        &mut clocks.last_track_key,
+        &mut clocks.last_teams_update,
+        &mut clocks.last_posted_placeholder,
         &mut consecutive_pauses,
         &mut transient_failure_count,
-        &mut gated_track_key,
-        &mut last_availability_arm,
+        &mut consecutive_network_failures,
+        &mut clocks.gated_track_key,
+        &mut clocks.last_availability_arm,
         &mut last_etag,
         &mut first_iteration,
-        &mut last_posted_status,
-        &mut last_gate_check,
+        &mut clocks.last_posted_status,
+        &mut clocks.last_gate_check,
         RunMode::OneShot,
     );
+    store_write_clocks(&clocks);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -179,6 +272,7 @@ fn run_inner(
     last_posted_placeholder: &mut Option<String>,
     consecutive_pauses: &mut u8,
     transient_failure_count: &mut u8,
+    consecutive_network_failures: &mut u8,
     gated_track_key: &mut Option<String>,
     last_availability_arm: &mut Option<Instant>,
     // Candidate C11: ETag validator from the previous conditional GET;
@@ -416,7 +510,7 @@ fn run_inner(
                 last_posted_status,
                 last_gate_check,
             );
-            *transient_failure_count = 0;
+            record_success(transient_failure_count, consecutive_network_failures);
             PollIteration::Sleep {
                 seconds: sleep_duration,
             }
@@ -434,7 +528,7 @@ fn run_inner(
                 first_iteration,
                 last_posted_status,
             );
-            *transient_failure_count = 0;
+            record_success(transient_failure_count, consecutive_network_failures);
             let mut iteration = record_no_track_outcome(consecutive_pauses, &config);
             if let PollIteration::Sleep { seconds } = &mut iteration {
                 // Issue #154: a throttled Teams clear extends the next poll
@@ -474,13 +568,14 @@ fn run_inner(
                     last_posted_status,
                     last_gate_check,
                 );
-                *transient_failure_count = 0;
+                record_success(transient_failure_count, consecutive_network_failures);
                 return PollIteration::Sleep { seconds: sleep };
             }
             not_modified_iteration(
                 last_track_key,
                 consecutive_pauses,
                 transient_failure_count,
+                consecutive_network_failures,
                 &config,
             )
         }
@@ -560,7 +655,10 @@ fn run_inner(
                                             last_posted_status,
                                             last_gate_check,
                                         );
-                                        *transient_failure_count = 0;
+                                        record_success(
+                                            transient_failure_count,
+                                            consecutive_network_failures,
+                                        );
                                         return PollIteration::Sleep { seconds: _sleep };
                                     }
                                     Ok(CurrentlyPlaying::Modified { track: None, etag }) => {
@@ -576,7 +674,10 @@ fn run_inner(
                                             first_iteration,
                                             last_posted_status,
                                         );
-                                        *transient_failure_count = 0;
+                                        record_success(
+                                            transient_failure_count,
+                                            consecutive_network_failures,
+                                        );
                                         let mut iteration =
                                             record_no_track_outcome(consecutive_pauses, &config);
                                         if let PollIteration::Sleep { seconds } = &mut iteration {
@@ -614,13 +715,17 @@ fn run_inner(
                                                 last_posted_status,
                                                 last_gate_check,
                                             );
-                                            *transient_failure_count = 0;
+                                            record_success(
+                                                transient_failure_count,
+                                                consecutive_network_failures,
+                                            );
                                             return PollIteration::Sleep { seconds: sleep };
                                         }
                                         return not_modified_iteration(
                                             last_track_key,
                                             consecutive_pauses,
                                             transient_failure_count,
+                                            consecutive_network_failures,
                                             &config,
                                         );
                                     }
@@ -666,33 +771,52 @@ fn run_inner(
                 }
             }
 
-            // Issue #159: honor the server's `Retry-After` (floored at the
-            // error retry interval so a tiny value can't create a busy loop);
-            // fall back to the fixed jittered backoff when the header is
-            // absent.
+            // Issue #159 (finding PollCore#3, issue #571): honor the server's
+            // `Retry-After` (floored at the error retry interval so a tiny
+            // value can't create a busy loop), and NEVER sleep below it — the
+            // jitter applied to a server-directed value is upward-only,
+            // because the symmetric ±20% could turn `Retry-After: 300` into a
+            // 240s sleep and immediately re-trigger the very rate limit the
+            // header exists to avoid. The header-less fallback keeps the
+            // symmetric jitter.
             if matches!(final_err, SpotifyApiError::RateLimited(_)) {
-                backoff_secs = with_jitter(spotify_backoff_base(&final_err));
+                backoff_secs = spotify_backoff_secs(&final_err);
             }
 
-            if matches!(
-                final_err,
-                SpotifyApiError::RateLimited(_)
-                    | SpotifyApiError::ExpiredToken
-                    | SpotifyApiError::Other(_)
-                    | SpotifyApiError::InvalidGrant
-            ) {
+            // Finding PollCore#0 (issue #568): only genuinely dead credentials
+            // count toward the reconnect exit. Everything else — transport
+            // errors, 5xx, JSON parse failures and 429s, all of which land in
+            // `SpotifyApiError::Other`/`RateLimited` (see spotify.rs) — is a
+            // NETWORK failure: its own counter and a capped backoff, never
+            // `spotify-reconnect-required` (the frontend turns that event into
+            // a real Spotify OAuth window) and never `PollIteration::Break`
+            // (which stops syncing outright). An offline blip must leave the
+            // valid tokens on disk untouched and keep retrying.
+            if is_auth_failure(&final_err) {
                 *transient_failure_count = transient_failure_count.saturating_add(1);
-            }
-
-            if let Some(iteration) = transient_outcome(*transient_failure_count) {
-                log::error!("[POLLING] poll_once: 5 consecutive transient failures, exiting and requiring reconnect");
-                // Issue #389: the 5-strikes exit must carry the
-                // provider-specific signal alongside the generic one —
-                // mirror the `InvalidGrant` arms above, which emit both, so
-                // the frontend can start a real Spotify OAuth flow.
-                let _ = app.emit("spotify-reconnect-required", json!(null));
-                let _ = app.emit("reconnect-required", json!(null));
-                return iteration;
+                if let Some(iteration) = transient_outcome(*transient_failure_count) {
+                    log::error!(
+                        "[POLLING] poll_once: {} consecutive auth failures, exiting and requiring reconnect",
+                        TRANSIENT_FAILURE_EXIT_THRESHOLD
+                    );
+                    // Issue #389: the exit must carry the provider-specific
+                    // signal alongside the generic one — mirror the
+                    // `InvalidGrant` arms above, which emit both, so the
+                    // frontend can start a real Spotify OAuth flow.
+                    let _ = app.emit("spotify-reconnect-required", json!(null));
+                    let _ = app.emit("reconnect-required", json!(null));
+                    return iteration;
+                }
+            } else {
+                *consecutive_network_failures = consecutive_network_failures.saturating_add(1);
+                if *consecutive_network_failures >= NETWORK_FAILURE_THRESHOLD {
+                    log::warn!(
+                        "[POLLING] poll_once: {} consecutive network failures, backing off (polling continues, no reconnect)",
+                        *consecutive_network_failures
+                    );
+                    backoff_secs =
+                        backoff_secs.max(network_failure_backoff(*consecutive_network_failures));
+                }
             }
 
             emit_error(
@@ -706,13 +830,37 @@ fn run_inner(
     }
 }
 
-/// Issue #262: the 5-strikes transient-failure decision, extracted as a
-/// pure function of the counter so the threshold semantics are testable
-/// without driving the whole `run()` error path. Returns `Some(Break)`
-/// exactly when the count has reached `TRANSIENT_FAILURE_EXIT_THRESHOLD`
-/// (the counter is only bumped for transient API errors and reset on any
-/// success), and `None` below it so the caller keeps retrying after
-/// emitting its warning.
+/// Finding PollCore#0 (issue #568): the single place that resets BOTH
+/// consecutive-failure counters. One helper so a success can never clear one
+/// counter and leave the other primed — a stale network streak would then
+/// survive healthy iterations and jump straight to the capped backoff.
+fn record_success(transient_failure_count: &mut u8, consecutive_network_failures: &mut u8) {
+    *transient_failure_count = 0;
+    *consecutive_network_failures = 0;
+}
+
+/// Finding PollCore#0 (issue #568): the auth-only classification behind the
+/// five-strikes reconnect exit. `ExpiredToken` (the 401 Spotify returns for a
+/// dead access token) and `InvalidGrant` (a dead refresh token — documented
+/// 6-month lifetime, or revoked) are the ONLY errors that mean "the stored
+/// credentials are unusable, ask the user to re-authenticate". `Other(_)` is
+/// every transport error, 5xx and JSON parse failure (see spotify.rs) and
+/// `RateLimited` is a 429: both are recoverable network states that must keep
+/// polling with the tokens already on disk.
+fn is_auth_failure(err: &SpotifyApiError) -> bool {
+    matches!(
+        err,
+        SpotifyApiError::ExpiredToken | SpotifyApiError::InvalidGrant
+    )
+}
+
+/// Issue #262 (finding PollCore#0, issue #568): the five-strikes reconnect
+/// decision, extracted as a pure function of the counter so the threshold
+/// semantics are testable without driving the whole `run()` error path.
+/// Returns `Some(Break)` exactly when the count has reached
+/// `TRANSIENT_FAILURE_EXIT_THRESHOLD`, and `None` below it so the caller
+/// keeps retrying after emitting its warning. The counter is only bumped for
+/// auth failures (see [`is_auth_failure`]) and is reset by any success.
 fn transient_outcome(count: u8) -> Option<PollIteration> {
     if count >= TRANSIENT_FAILURE_EXIT_THRESHOLD {
         Some(PollIteration::Break)
@@ -748,24 +896,31 @@ fn record_no_track_outcome(
 /// cannot provide).
 ///
 /// A 304 with a tracked track mirrors the unchanged-track path: reset the
-/// pause counter and sleep the default interval. A 304 with no tracked track
-/// means "still nothing playing" (issue #242): the no-track ETag stays valid
-/// so idle polling keeps sending conditional GETs, and the pause backoff
-/// advances exactly like an unconditional 204 no-track. A later change
-/// surfaces as a 200/204 Modified and re-establishes ground truth
+/// pause counter and sleep the default interval — bounded by the configured
+/// `[min, max]` window (finding PollCore#6, issue #573). A 304 with no
+/// tracked track means "still nothing playing" (issue #242): the no-track
+/// ETag stays valid so idle polling keeps sending conditional GETs, and the
+/// pause backoff advances exactly like an unconditional 204 no-track. A later
+/// change surfaces as a 200/204 Modified and re-establishes ground truth
 /// automatically.
 fn not_modified_iteration(
     last_track_key: &Option<String>,
     consecutive_pauses: &mut u8,
     transient_failure_count: &mut u8,
+    consecutive_network_failures: &mut u8,
     config: &Option<crate::config::AppConfig>,
 ) -> PollIteration {
     log::info!("[POLLING] poll_once: 304 Not Modified, skipping parse/format/tray work");
-    *transient_failure_count = 0;
+    record_success(transient_failure_count, consecutive_network_failures);
     if last_track_key.is_some() {
         *consecutive_pauses = 0;
+        // Finding PollCore#6 (issue #573): this arm dominates idle runtime, so
+        // it must honour the configured bounds too — pre-fix it slept the raw
+        // `default_interval_seconds`, which `clamp_polling` permits to exceed
+        // `max_interval_seconds` (e.g. default 120 / max 60), silently
+        // violating the "Max interval (s)" setting on the most common path.
         return PollIteration::Sleep {
-            seconds: config_default_interval(config),
+            seconds: clamp_poll_interval(config_default_interval(config), config),
         };
     }
     record_no_track_outcome(consecutive_pauses, config)
@@ -956,6 +1111,19 @@ fn quiet_hours_active(
     })
 }
 
+/// Finding PollCore#1 (issue #569): whether the mid-track quiet-hours ENTRY
+/// must gate the current track — quiet hours are active and this track has not
+/// been gated yet (the `!= Some(track_key)` arm is what keeps the gate
+/// idempotent: once recorded, the #380 re-check block owns the decision). Pure
+/// so the mid-track entry semantics are testable without an `AppHandle`.
+fn quiet_gate_entry_due(
+    quiet_active: bool,
+    gated_track_key: Option<&str>,
+    track_key: &str,
+) -> bool {
+    quiet_active && gated_track_key != Some(track_key)
+}
+
 /// Issue #432: local clock projection for [`quiet_hours_active`].
 /// Minute-of-day plus ISO weekday (`number_from_monday`, 1..=7).
 fn local_minutes_and_weekday() -> (u16, u8) {
@@ -963,6 +1131,65 @@ fn local_minutes_and_weekday() -> (u16, u8) {
     let now = chrono::Local::now();
     let minutes = (now.hour() as u16 * 60 + now.minute() as u16).min(1439);
     (minutes, now.weekday().number_from_monday() as u8)
+}
+
+/// Issue #432 / finding PollCore#2 (issue #570): quiet-hours evaluation on the
+/// current local clock — the read-side twin of the hoisted `quiet_active`
+/// binding in `process_track`, for the path (`handle_no_track`) that has no
+/// track to match a rule against and no hoisted decision to consult.
+fn quiet_hours_active_now(config: &Option<crate::config::AppConfig>) -> bool {
+    let (now_minutes, weekday) = local_minutes_and_weekday();
+    config
+        .as_ref()
+        .is_some_and(|c| quiet_hours_active(&c.status_rules, now_minutes, weekday))
+}
+
+/// Finding PollCore#2 (issue #570): the per-iteration rule decision, factored
+/// out of `process_track` so EVERY status write — the playing write, the
+/// paused clear and the no-track clear — consults the same policy. Pre-fix the
+/// decision was inlined in the playing path only, so the two clear paths
+/// silently bypassed quiet hours and suppression rules.
+#[derive(Debug, PartialEq, Eq)]
+enum RuleGate {
+    /// A matching rule with an empty `replacement_status`: suppress the write
+    /// exactly like a busy/meeting presence gate.
+    Suppressed,
+    /// A matching rule with a non-empty `replacement_status`: post that text
+    /// instead of the formatted status.
+    Replace(String),
+    /// No enabled rule matched.
+    NoRule,
+}
+
+/// The rule decision for an artist/title pair. The no-track clear path passes
+/// empty strings, so only quiet hours and match-all rules (both substrings
+/// empty) can suppress a clear.
+fn rule_gate(config: &Option<crate::config::AppConfig>, artist: &str, title: &str) -> RuleGate {
+    match config
+        .as_ref()
+        .and_then(|c| matching_track_rule(&c.status_rules, artist, title))
+    {
+        Some(rule) if rule.replacement_status.is_empty() => RuleGate::Suppressed,
+        Some(rule) => RuleGate::Replace(rule.replacement_status.clone()),
+        None => RuleGate::NoRule,
+    }
+}
+
+/// The single emitter for the `presence-gated` event (#3.0-P2/#432/#569/#570),
+/// so the payload shape cannot drift between the five sites that gate a write
+/// (playing gate, mid-track quiet entry, paused clear, no-track clear, tray).
+/// `availability`/`activity` are empty for the time- and rule-based reasons,
+/// which carry no Graph presence sample.
+fn emit_presence_gated(app: &AppHandle, reason: &str, availability: &str, activity: &str) {
+    let _ = app.emit(
+        "presence-gated",
+        json!({
+            "reason": reason,
+            "availability": availability,
+            "activity": activity,
+            "timestamp": Utc::now().to_rfc3339()
+        }),
+    );
 }
 
 /// Issue #432: track-rule match. Both non-empty substrings must match
@@ -1269,6 +1496,18 @@ pub(crate) fn process_track(
     let track_key = status_track_key(track, config);
     let changed = last_track_key.as_ref() != Some(&track_key);
 
+    // Issue #432 / finding PollCore#1 (issue #569) / PollCore#2 (issue #570):
+    // the per-iteration rule decision is computed ONCE, here, so EVERY write
+    // path can consult it — the playing write, the mid-track gate re-check,
+    // the paused clear and the no-track clear. Pre-fix only the playing write
+    // consulted it, and only on a track change, so a quiet-hours window that
+    // opened mid-track was never felt and the paused/no-track clears ignored
+    // rules entirely (contradicting the documented contract in en.ts
+    // 'rules.sectionHint'). Pure computation: no side effects, so it is safe
+    // to run ahead of the debounce early-return below.
+    let quiet_active = quiet_hours_active_now(config);
+    let rule = rule_gate(config, &track.artist, &track.title);
+
     // Issue #364: debounce BEFORE any side effect. A change inside the
     // window parks on the short fixed retry with every tracked field
     // untouched, so the retry re-detects the change and emits/posts
@@ -1335,19 +1574,15 @@ pub(crate) fn process_track(
             // non-empty `replacement_status` never gates: its text becomes
             // `final_status` below, still flowing through the #384
             // identical-write suppression.
-            let (now_minutes, weekday) = local_minutes_and_weekday();
-            let matched_rule = config
-                .as_ref()
-                .and_then(|c| matching_track_rule(&c.status_rules, &track.artist, &track.title));
-            let quiet_active = config
-                .as_ref()
-                .is_some_and(|c| quiet_hours_active(&c.status_rules, now_minutes, weekday));
-            // Owned clone — `matched_rule` borrows `config`; the write path
-            // below must not hold that borrow.
-            let rule_replacement: Option<String> = matched_rule
-                .filter(|m| !m.replacement_status.is_empty())
-                .map(|m| m.replacement_status.clone());
-            let rule_suppress = matched_rule.is_some_and(|m| m.replacement_status.is_empty());
+            //
+            // Both inputs come from the hoisted decision above (`quiet_active`
+            // / `rule`): one evaluation per iteration, shared with the paused
+            // and the no-track write paths.
+            let rule_replacement: Option<String> = match &rule {
+                RuleGate::Replace(text) => Some(text.clone()),
+                RuleGate::Suppressed | RuleGate::NoRule => None,
+            };
+            let rule_suppress = matches!(rule, RuleGate::Suppressed);
             let presence_gate_enabled = config
                 .as_ref()
                 .map(|c| c.teams.presence_gate)
@@ -1359,30 +1594,14 @@ pub(crate) fn process_track(
                     );
                     *gated_track_key = Some(track_key.clone());
                     *last_gate_check = Some(Instant::now());
-                    let _ = app.emit(
-                        "presence-gated",
-                        json!({
-                            "reason": "quiet-hours",
-                            "availability": "",
-                            "activity": "",
-                            "timestamp": Utc::now().to_rfc3339()
-                        }),
-                    );
+                    emit_presence_gated(app, "quiet-hours", "", "");
                 } else if rule_suppress {
                     log::info!(
                         "[POLLING] process_track: track rule matched, skipping status write"
                     );
                     *gated_track_key = Some(track_key.clone());
                     *last_gate_check = Some(Instant::now());
-                    let _ = app.emit(
-                        "presence-gated",
-                        json!({
-                            "reason": "track-rule",
-                            "availability": "",
-                            "activity": "",
-                            "timestamp": Utc::now().to_rfc3339()
-                        }),
-                    );
+                    emit_presence_gated(app, "track-rule", "", "");
                 } else if presence_gate_enabled {
                     match get_teams_presence(&teams_tok.access_token) {
                         Ok(presence) if is_presence_gated(&presence) => {
@@ -1393,14 +1612,11 @@ pub(crate) fn process_track(
                             );
                             *gated_track_key = Some(track_key.clone());
                             *last_gate_check = Some(Instant::now());
-                            let _ = app.emit(
-                                "presence-gated",
-                                json!({
-                                    "reason": reason,
-                                    "availability": presence.availability,
-                                    "activity": presence.activity,
-                                    "timestamp": Utc::now().to_rfc3339()
-                                }),
+                            emit_presence_gated(
+                                app,
+                                &reason,
+                                &presence.availability,
+                                &presence.activity,
                             );
                         }
                         Ok(_) => {
@@ -1417,6 +1633,29 @@ pub(crate) fn process_track(
                 } else {
                     *gated_track_key = None;
                 }
+            }
+            // Finding PollCore#1 (issue #569): quiet-hour ENTRY must be
+            // evaluated mid-track. Pre-fix the entry check lived inside
+            // `if changed`, and the #380 re-check block below only ever ran
+            // for an already-gated track, so a quiet window that opened while
+            // a track played stayed unfelt until the next track change — the
+            // #384 keepalive kept (re-)POSTing the status for the track's
+            // whole remaining duration. The outcome mirrors the changed-path
+            // gate exactly: record the gate (so the exit path below clears it
+            // when the window closes), emit `presence-gated`, and return
+            // before any write. Only the playing branch is handled here — a
+            // paused track's clear is the paused branch's job (finding
+            // PollCore#2, issue #570).
+            if quiet_gate_entry_due(quiet_active, gated_track_key.as_deref(), &track_key) {
+                log::info!(
+                    "[POLLING] process_track: quiet hours started mid-track, suppressing status write"
+                );
+                *gated_track_key = Some(track_key.clone());
+                *last_gate_check = Some(Instant::now());
+                emit_presence_gated(app, "quiet-hours", "", "");
+                let remaining_ms =
+                    corrected_progress_ms.map(|c| track.duration_ms.saturating_sub(c));
+                return playing_track_sleep(remaining_ms, config);
             }
             // Issue #380: a gated track stays gated only until the gate
             // re-check is due — then presence is re-read, and a cleared
@@ -1732,7 +1971,27 @@ pub(crate) fn process_track(
                 // with a "Paused" placeholder. `gated_track_key` carries the
                 // change-time decision from the playing path; re-read
                 // presence only when this track wasn't gated there.
-                let gate_blocked = if gated_track_key.as_deref() == Some(track_key.as_str()) {
+                //
+                // Finding PollCore#2 (issue #570): the clear IS a status
+                // write, so quiet hours and suppression rules apply to it too
+                // (en.ts 'rules.sectionHint'). Pre-fix only the presence gate
+                // was consulted here, so a quiet window or a matching
+                // suppression rule was bypassed on every pause.
+                let rule_suppression_reason: Option<&str> = if quiet_active {
+                    Some("quiet-hours")
+                } else if matches!(rule, RuleGate::Suppressed) {
+                    Some("track-rule")
+                } else {
+                    None
+                };
+                let gate_blocked = if let Some(reason) = rule_suppression_reason {
+                    log::info!(
+                        "[POLLING] process_track: paused-clear suppressed ({}), keeping presence untouched",
+                        reason
+                    );
+                    emit_presence_gated(app, reason, "", "");
+                    true
+                } else if gated_track_key.as_deref() == Some(track_key.as_str()) {
                     true
                 } else if config
                     .as_ref()
@@ -1743,14 +2002,11 @@ pub(crate) fn process_track(
                         Ok(presence) if is_presence_gated(&presence) => {
                             *gated_track_key = Some(track_key.clone());
                             let reason = presence_gate_reason(&presence);
-                            let _ = app.emit(
-                                "presence-gated",
-                                json!({
-                                    "reason": reason,
-                                    "availability": presence.availability,
-                                    "activity": presence.activity,
-                                    "timestamp": Utc::now().to_rfc3339()
-                                }),
+                            emit_presence_gated(
+                                app,
+                                &reason,
+                                &presence.availability,
+                                &presence.activity,
                             );
                             true
                         }
@@ -1979,6 +2235,34 @@ pub(crate) fn handle_no_track(
         return teams_backoff_secs;
     }
 
+    // Finding PollCore#2 (issue #570): the no-track clear is a status write
+    // too, so quiet hours and suppression rules govern it — the documented
+    // contract is that rules suppress the Teams status write, not just the
+    // playing branch of it (en.ts 'rules.sectionHint'). With nothing playing
+    // there is no artist/title to match a scoped rule against, so only quiet
+    // hours and match-all rules (both substrings empty) can suppress here.
+    let no_track_rule = rule_gate(config, "", "");
+    let suppression_reason: Option<&str> = if quiet_hours_active_now(config) {
+        Some("quiet-hours")
+    } else if matches!(no_track_rule, RuleGate::Suppressed) {
+        Some("track-rule")
+    } else {
+        None
+    };
+    if let Some(reason) = suppression_reason {
+        log::info!(
+            "[POLLING] handle_no_track: clear suppressed ({}), keeping Teams status untouched",
+            reason
+        );
+        // Record the placeholder as posted — exactly like the gated branch
+        // below — so the decision is made once and the suppression is not
+        // re-emitted on every idle poll. The next real track clears it (the
+        // playing branch resets `last_posted_placeholder`).
+        *last_posted_placeholder = Some(placeholder.to_string());
+        emit_presence_gated(app, reason, "", "");
+        return teams_backoff_secs;
+    }
+
     let expiry_str = placeholder_expiry_str();
     // Issue #455-residual: mirror the process_track ExpiredToken
     // refresh+single-retry (see the write path above) — a 401 here can mean
@@ -2146,6 +2430,18 @@ fn spotify_backoff_base(err: &SpotifyApiError) -> u64 {
         .max(ERROR_RETRY_INTERVAL_SECONDS)
 }
 
+/// Finding PollCore#3 (issue #571): the actual sleep for a Spotify 429. A
+/// server-directed `Retry-After` is a FLOOR — jitter may only extend it —
+/// while the header-less fallback keeps the symmetric jitter. Pre-fix the
+/// symmetric ±20% was applied to both, so `Retry-After: 300` could sleep 240s
+/// and re-trigger the rate limit the header exists to avoid.
+fn spotify_backoff_secs(err: &SpotifyApiError) -> u64 {
+    match err.retry_after() {
+        Some(_) => with_upward_jitter(spotify_backoff_base(err)),
+        None => with_jitter(spotify_backoff_base(err)),
+    }
+}
+
 /// Extra sleep contributed by a failed Teams set/clear (issue #154): a
 /// `RateLimited` error with `Retry-After` returns those seconds, without a
 /// header falls back to the jittered default backoff, anything else
@@ -2205,17 +2501,33 @@ fn playing_track_sleep(
         Some(remaining) => {
             let buffer_ms = 5000u64;
             let remaining_secs = remaining / 1000;
-            remaining_secs
-                .saturating_sub(buffer_ms / 1000)
-                .max(config_minimum_interval(config))
-                .min(config_maximum_interval(config))
+            clamp_poll_interval(remaining_secs.saturating_sub(buffer_ms / 1000), config)
         }
-        None => config_default_interval(config)
-            .max(config_minimum_interval(config))
-            .min(config_maximum_interval(config)),
+        None => clamp_poll_interval(config_default_interval(config), config),
     }
 }
 
+/// Finding PollCore#6 (issue #573): bound a computed sleep to the user's
+/// configured `[minimum_interval_seconds, maximum_interval_seconds]` window.
+/// Every sleep the poller takes must respect "Max interval (s)"; pre-fix only
+/// `playing_track_sleep` did, while the 304 and no-track paths — the ones that
+/// dominate idle runtime — slept raw values the config permits to exceed it.
+/// Non-panicking clamp order (`max` then `min`) because a hand-edited config
+/// could invert the bounds, which `u64::clamp` would panic on.
+fn clamp_poll_interval(secs: u64, config: &Option<crate::config::AppConfig>) -> u64 {
+    let minimum = config_minimum_interval(config);
+    let maximum = config_maximum_interval(config).max(minimum);
+    secs.max(minimum).min(maximum)
+}
+
+/// The documented pause ladder (issue #38: default → 2× → 4× → 300s cap, see
+/// ARCHITECTURE.md / TROUBLESHOOTING.md) is deliberately NOT bounded by
+/// `maximum_interval_seconds`: it is the idle-work reduction the docs promise,
+/// its 300s ceiling is the documented 5-minute cap, and clamping it by the
+/// default 60s max would silently multiply idle API traffic. Finding
+/// PollCore#6 (issue #573) is therefore fixed at the one path whose sleep was
+/// never a ladder rung — the tracked-track 304 (see
+/// `not_modified_iteration`).
 fn pause_backoff(consecutive_pauses: u8, default_secs: u64) -> u64 {
     match consecutive_pauses {
         0 => default_secs,
@@ -2230,6 +2542,27 @@ fn with_jitter(base_secs: u64) -> u64 {
     let jitter_range = base_secs as f64 * 0.2;
     let jitter = rng.random_range(-jitter_range..=jitter_range);
     (base_secs as f64 + jitter).max(1.0) as u64
+}
+
+/// Finding PollCore#3 (issue #571): additive-only jitter, `base + 0..=20%`.
+/// Used wherever the base is a server directive (`Retry-After`) that must
+/// never be undershot.
+fn with_upward_jitter(base_secs: u64) -> u64 {
+    let mut rng = rand::rng();
+    let jitter = rng.random_range(0.0..=(base_secs as f64 * 0.2));
+    (base_secs as f64 + jitter) as u64
+}
+
+/// Finding PollCore#0 (issue #568): capped exponential backoff for repeated
+/// network failures — `min(300, with_jitter(30) * 2^(n-1))` for `n`
+/// consecutive failures — so an offline machine slows to the 5-minute ceiling
+/// without ever stopping the poller. The doubling exponent is clamped so a
+/// saturated counter cannot overflow the shift.
+fn network_failure_backoff(count: u8) -> u64 {
+    let doublings = count.saturating_sub(1).min(4) as u32;
+    with_jitter(NETWORK_BACKOFF_BASE_SECONDS)
+        .saturating_mul(1u64 << doublings)
+        .min(NETWORK_BACKOFF_CAP_SECONDS)
 }
 
 #[cfg(test)]
@@ -2274,22 +2607,31 @@ mod tests {
         let discard_count = prod_source
             .matches("state changed during refresh, discarding result")
             .count();
-        assert!(
-            discard_count >= 1,
-            "poll_once.rs must route CAS-discards through the single helper log line. Found {}.",
+        // Finding PollCore#8 (issue #574): pin the EXACT counts. The old
+        // lower-bound assertions (`>= 1`, `>= 3`) passed even when a call site
+        // — or the helper itself — was deleted, so the #72 anti-drift
+        // guarantee this test exists to provide was vacuous. Update these
+        // numbers deliberately whenever a call site is added.
+        assert_eq!(
+            discard_count, 1,
+            "exactly one CAS-discard log line (inside the helper) is expected in \
+             production; found {}. A second one means a call site re-implemented \
+             the discard dance instead of routing through the helper.",
             discard_count
         );
         let helper_def = prod_source.matches("fn cas_refresh_or_discard").count();
-        assert!(helper_def >= 1, "helper defined {} times", helper_def);
+        assert_eq!(helper_def, 1, "helper defined {} times", helper_def);
         let helper_call_count = prod_source.matches("cas_refresh_or_discard(").count();
-        // Expect 4 calls: Spotify proactive, Spotify 401-retry, Teams
-        // proactive, Teams write-retry (issues #367/#428).
+        // 5 calls: Spotify proactive, Spotify 401-retry, Teams proactive,
+        // Teams write-retry (issues #367/#428) and the no-track clear retry
+        // (issue #455-residual).
         // The "fn cas_refresh_or_discard(" definition is NOT counted here
         // because the call-shape substring includes the open-paren.
-        assert!(
-            helper_call_count >= 3,
-            "cas_refresh_or_discard called {} times in production; need >=3 \
-             (Spotify proactive + 401-retry + Teams)",
+        assert_eq!(
+            helper_call_count, 5,
+            "cas_refresh_or_discard called {} times in production; expected 5 \
+             (Spotify proactive + 401-retry + Teams proactive + Teams write-retry \
+             + no-track clear retry)",
             helper_call_count
         );
     }
@@ -2473,20 +2815,24 @@ mod tests {
         // path: main `Ok(None)`, 401-retry `Ok(None)`, and the idle 304
         // (`not_modified_iteration`, issue #242). All three funnel the
         // increment through the same helper; a fourth site outside a
-        // shared helper is a regression. See issue #72 drift point #1.
         let call_count = prod_source.matches("record_no_track_outcome(").count();
-        assert!(
-            call_count >= 4,
-            "Expected at least 4 occurrences in production (3 call sites: main \
+        // Finding PollCore#8 (issue #574): pin the exact total (the old `>= 4`
+        // passed even if a call site — or the shared helper — was deleted).
+        assert_eq!(
+            call_count, 4,
+            "Expected exactly 4 occurrences in production (3 call sites: main \
              Ok(None), 401-retry Ok(None), idle 304 in not_modified_iteration, \
-             plus the fn definition). Found {}. If a future contributor adds \
-             a no-track handling site outside the shared helper, the \
-             increment order can drift again. See issue #72 drift point #1.",
+             plus the fn definition). Found {}. A new no-track handling site \
+             outside the shared helper lets the increment order drift again; \
+             a deleted one loses the pause backoff. See issue #72 drift point #1.",
             call_count
         );
     }
 
-    /// Regression guard for issue #72 drift point #2.
+    /// Regression guard for issue #72 drift point #2. Finding PollCore#8
+    /// (issue #574): the canonical "Failed to get currently playing" emit is
+    /// pinned at EXACTLY one site — the old `>= 1` passed even when the emit
+    /// was deleted or duplicated by a new failure path.
     #[test]
     fn test_error_event_emitted_in_exactly_one_place_per_failed_poll() {
         let source = include_str!("poll_once.rs");
@@ -2497,9 +2843,12 @@ mod tests {
         let canonical_msg_count = prod_source
             .matches("Failed to get currently playing:")
             .count();
-        assert!(
-            canonical_msg_count >= 1,
-            "expected at least 1 'Failed to get currently playing:' emit_error; found {}",
+        // Finding PollCore#8 (issue #574): exactly one emit site — the old
+        // `>= 1` passed even if the canonical error emit was deleted, or
+        // duplicated by a new failure path.
+        assert_eq!(
+            canonical_msg_count, 1,
+            "expected exactly 1 'Failed to get currently playing:' emit_error; found {}",
             canonical_msg_count
         );
     }
@@ -2865,11 +3214,13 @@ mod tests {
         let config = Some(crate::config::AppConfig::default());
         let mut consecutive_pauses: u8 = 3;
         let mut transient_failure_count: u8 = 2;
+        let mut consecutive_network_failures: u8 = 3;
 
         let iteration = not_modified_iteration(
             &Some("Artist - Track".to_string()),
             &mut consecutive_pauses,
             &mut transient_failure_count,
+            &mut consecutive_network_failures,
             &config,
         );
 
@@ -2886,6 +3237,10 @@ mod tests {
             transient_failure_count, 0,
             "a 304 counts as success for the 5-strikes counter"
         );
+        assert_eq!(
+            consecutive_network_failures, 0,
+            "a 304 counts as success for the network-failure counter too (finding PollCore#0)"
+        );
     }
 
     /// Issue #242: a 304 with no tracked track means "still nothing playing".
@@ -2897,11 +3252,13 @@ mod tests {
         let config = Some(crate::config::AppConfig::default());
         let mut consecutive_pauses: u8 = 1;
         let mut transient_failure_count: u8 = 1;
+        let mut consecutive_network_failures: u8 = 1;
 
         let iteration = not_modified_iteration(
             &None,
             &mut consecutive_pauses,
             &mut transient_failure_count,
+            &mut consecutive_network_failures,
             &config,
         );
 
@@ -2920,6 +3277,10 @@ mod tests {
         assert_eq!(
             transient_failure_count, 0,
             "a 304 counts as success for the 5-strikes counter"
+        );
+        assert_eq!(
+            consecutive_network_failures, 0,
+            "a 304 counts as success for the network-failure counter too (finding PollCore#0)"
         );
     }
 
@@ -2945,11 +3306,18 @@ mod tests {
     /// polling loop at exactly `TRANSIENT_FAILURE_EXIT_THRESHOLD` — no
     /// sooner (a transient blip must not kill the session) and no later
     /// (a permanently broken token must stop hammering the API).
+    ///
+    /// Finding PollCore#0 (issue #568): the counter that feeds this decision is
+    /// now bumped ONLY by `is_auth_failure` errors (dead access/refresh token)
+    /// — a network failure has its own counter and can never reach this exit.
     #[test]
     fn test_transient_outcome_breaks_exactly_at_threshold() {
         // The issue names five strikes explicitly; pin the constant so a
         // future retune cannot silently change the documented contract (the
         // literal assertions below would otherwise follow it).
+        // The counter is only reachable through auth failures (finding
+        // PollCore#0, issue #568); see
+        // `test_auth_failure_classification_is_dead_credentials_only`.
         assert_eq!(
             TRANSIENT_FAILURE_EXIT_THRESHOLD, 5,
             "issue #262 specifies exactly 5 consecutive transient failures"
@@ -3489,12 +3857,13 @@ mod tests {
         );
     }
 
-    /// Issue #389: the 5-strikes transient-failure exit must emit the
-    /// provider-specific `spotify-reconnect-required` alongside the generic
-    /// `reconnect-required` — mirroring the `InvalidGrant` arms — so the
-    /// frontend can start a real Spotify OAuth flow instead of seeing only
-    /// the generic banner. Brace-counted body isolation (house style —
-    /// never boundary anchors, which drift).
+    /// Issue #389 (finding PollCore#0, issue #568): the reconnect exit must
+    /// emit the provider-specific `spotify-reconnect-required` alongside the
+    /// generic `reconnect-required` — mirroring the `InvalidGrant` arms — so
+    /// the frontend can start a real Spotify OAuth flow instead of seeing only
+    /// the generic banner. And it must be reachable ONLY from an auth failure:
+    /// a network blip must not stop the session or open a browser. Structural
+    /// guard: the exit window is isolated by its log marker.
     #[test]
     fn test_five_strikes_exit_emits_spotify_reconnect() {
         let source = include_str!("poll_once.rs");
@@ -3502,22 +3871,40 @@ mod tests {
             .split("#[cfg(test)]\nmod tests")
             .next()
             .expect("poll_once.rs has no #[cfg(test)] mod tests block");
-        let marker = "5 consecutive transient failures, exiting and requiring reconnect";
+        let marker = "consecutive auth failures, exiting and requiring reconnect";
         let exit_pos = prod_source
             .find(marker)
-            .expect("the 5-strikes exit log line must exist");
+            .expect("the 5-strikes auth-exit log line must exist");
+        // The auth gate precedes the log marker, so the window under test runs
+        // from the classifier to the exit's `return iteration;`: both emits
+        // must sit INSIDE the auth-gated block.
+        let auth_pos = prod_source
+            .find("if is_auth_failure(&final_err)")
+            .expect("the error arm must classify with is_auth_failure (finding PollCore#0)");
         let window = &prod_source[exit_pos..];
         let window_end = window
             .find("return iteration;")
-            .expect("5-strikes exit must return");
-        let window = &window[..window_end];
+            .expect("the auth exit must return");
+        let window = &prod_source[auth_pos..exit_pos + window_end];
         assert!(
             window.contains(r#"emit("spotify-reconnect-required""#),
-            "the 5-strikes exit must emit spotify-reconnect-required (issue #389)"
+            "the auth-gated exit must emit spotify-reconnect-required (issue #389)"
         );
         assert!(
             window.contains(r#"emit("reconnect-required""#),
-            "the 5-strikes exit must keep the generic reconnect-required"
+            "the auth-gated exit must keep the generic reconnect-required"
+        );
+        // Finding PollCore#0: the error arm's classification must not list the
+        // network variants any more — `Other(_)` is every transport/5xx/parse
+        // failure and `RateLimited` a 429.
+        let arm_start = prod_source
+            .find("let mut final_err = e;")
+            .expect("the error arm must exist");
+        let arm = &prod_source[arm_start..exit_pos];
+        assert!(
+            !arm.contains("SpotifyApiError::Other(_)"),
+            "network/parse failures must not count toward the reconnect exit \
+             (finding PollCore#0, issue #568)"
         );
     }
 
@@ -3571,6 +3958,516 @@ mod tests {
         assert!(
             body.contains("teams-reconnect-required"),
             "a dead-credential clear must surface teams-reconnect-required"
+        );
+    }
+
+    /// Production source with the test module stripped — the shared preamble
+    /// for the structural guards below.
+    fn prod_source() -> &'static str {
+        include_str!("poll_once.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("poll_once.rs has no #[cfg(test)] mod tests block")
+    }
+
+    /// Brace-counted body isolation for a production fn (house style — never
+    /// boundary anchors, which drift).
+    fn prod_fn_body<'a>(prod: &'a str, sig: &str) -> &'a str {
+        let after_sig = prod
+            .split(sig)
+            .nth(1)
+            .unwrap_or_else(|| panic!("production source has no `{}`", sig));
+        let open = after_sig
+            .find('{')
+            .unwrap_or_else(|| panic!("`{}` has no opening brace", sig));
+        let mut depth = 0usize;
+        let mut end = None;
+        for (i, ch) in after_sig[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(open + i + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        &after_sig[..end.unwrap_or_else(|| panic!("`{}` body never closed", sig))]
+    }
+
+    /// Finding PollCore#0 (issue #568): the reconnect exit is reachable ONLY
+    /// from genuinely dead credentials. Pre-fix `Other(_)` — every transport
+    /// error, 5xx and JSON parse failure — and `RateLimited(_)` counted toward
+    /// the five-strikes exit, so five offline polls (~2.5 min) stopped syncing
+    /// and made the frontend open a real Spotify OAuth window while perfectly
+    /// valid tokens were still on disk.
+    #[test]
+    fn test_auth_failure_classification_is_dead_credentials_only() {
+        assert!(
+            is_auth_failure(&SpotifyApiError::ExpiredToken),
+            "a rejected access token (401) must count toward the reconnect exit"
+        );
+        assert!(
+            is_auth_failure(&SpotifyApiError::InvalidGrant),
+            "a dead refresh token (invalid_grant) must count toward the reconnect exit"
+        );
+        for network in [
+            SpotifyApiError::Other(
+                "Failed to send currently playing request: connection refused".to_string(),
+            ),
+            SpotifyApiError::Other("Failed to parse currently playing response".to_string()),
+            SpotifyApiError::Other("Currently playing request failed with 502".to_string()),
+            SpotifyApiError::RateLimited(Some(30)),
+            SpotifyApiError::RateLimited(None),
+        ] {
+            assert!(
+                !is_auth_failure(&network),
+                "a network/parse/429 failure must never count toward the reconnect exit: {:?}",
+                network
+            );
+        }
+    }
+
+    /// Finding PollCore#0 (issue #568): repeated network failures double the
+    /// backoff up to a hard cap — and, unlike the auth exit, they are warning
+    /// material only: no constant in that path can stop the loop.
+    #[test]
+    fn test_network_failure_backoff_is_capped_and_grows() {
+        assert_eq!(
+            NETWORK_FAILURE_THRESHOLD, 12,
+            "the network threshold must stay well above the auth threshold so an \
+             offline blip can never stop the session"
+        );
+        // Compile-time invariant (clippy: move the constant assertion into a
+        // const block) — the network threshold must stay strictly above the
+        // auth threshold so no retune can make a network blip reach the exit.
+        const { assert!(NETWORK_FAILURE_THRESHOLD > TRANSIENT_FAILURE_EXIT_THRESHOLD) };
+        assert_eq!(
+            NETWORK_BACKOFF_CAP_SECONDS, 300,
+            "the cap is the documented ceiling for a network backoff"
+        );
+        // n = 1 → with_jitter(30) ∈ [24, 36].
+        let first = network_failure_backoff(1);
+        assert!(
+            (24..=36).contains(&first),
+            "unexpected first-rung backoff: {}",
+            first
+        );
+        for count in 1..=u8::MAX {
+            let secs = network_failure_backoff(count);
+            assert!(
+                secs <= NETWORK_BACKOFF_CAP_SECONDS,
+                "count {} slept {}s, above the cap {}s",
+                count,
+                secs,
+                NETWORK_BACKOFF_CAP_SECONDS
+            );
+            assert!(secs >= 1, "a zero-second backoff would busy-loop the API");
+        }
+        assert_eq!(
+            network_failure_backoff(u8::MAX),
+            network_failure_backoff(NETWORK_FAILURE_THRESHOLD),
+            "a saturated counter must sit at the cap, not overflow the shift"
+        );
+    }
+
+    /// Finding PollCore#0 (issue #568): one success clears BOTH counters, so a
+    /// stale network streak cannot survive healthy iterations and jump
+    /// straight to the capped backoff.
+    #[test]
+    fn test_record_success_resets_both_failure_counters() {
+        let mut auth_failures = 4u8;
+        let mut network_failures = 11u8;
+        record_success(&mut auth_failures, &mut network_failures);
+        assert_eq!(
+            (auth_failures, network_failures),
+            (0, 0),
+            "a successful poll must clear both consecutive-failure counters"
+        );
+        assert!(
+            transient_outcome(auth_failures).is_none(),
+            "a cleared counter must not immediately exit the loop"
+        );
+    }
+
+    /// Finding PollCore#3 (issue #571): the 429 sleep never undercuts the
+    /// server's `Retry-After`. Pre-fix the symmetric ±20% jitter could turn
+    /// `Retry-After: 300` into a 240s sleep and re-trigger the rate limit.
+    #[test]
+    fn test_spotify_backoff_secs_never_undershoots_retry_after() {
+        for retry_after in [30u64, 45, 120, 300] {
+            for _ in 0..200 {
+                let secs = spotify_backoff_secs(&SpotifyApiError::RateLimited(Some(retry_after)));
+                assert!(
+                    secs >= retry_after,
+                    "429 sleep {}s undercut the server's Retry-After of {}s",
+                    secs,
+                    retry_after
+                );
+                assert!(
+                    secs <= retry_after + retry_after / 5,
+                    "429 sleep {}s overshot Retry-After {}s beyond the +20% jitter budget",
+                    secs,
+                    retry_after
+                );
+            }
+        }
+        // A tiny server value is still floored at the error retry interval.
+        for _ in 0..100 {
+            let secs = spotify_backoff_secs(&SpotifyApiError::RateLimited(Some(1)));
+            assert!(
+                secs >= ERROR_RETRY_INTERVAL_SECONDS,
+                "a tiny Retry-After must be floored at the error retry interval: {}",
+                secs
+            );
+        }
+        // The header-less fallback keeps the symmetric jitter (48..=72).
+        for _ in 0..100 {
+            let secs = spotify_backoff_secs(&SpotifyApiError::RateLimited(None));
+            assert!(
+                (48..=72).contains(&secs),
+                "header-less 429 backoff out of range: {}",
+                secs
+            );
+        }
+        for _ in 0..100 {
+            let secs = with_upward_jitter(100);
+            assert!(
+                (100..=120).contains(&secs),
+                "upward jitter must only ever extend the base: {}",
+                secs
+            );
+        }
+    }
+
+    /// Finding PollCore#6 (issue #573): "Max interval (s)" bounds the 304 and
+    /// no-track sleeps too. `clamp_polling` permits `default > max` (the
+    /// finding's example is default 120 / max 60), which pre-fix leaked
+    /// straight onto the two paths that dominate idle runtime.
+    #[test]
+    fn test_not_modified_sleep_honors_configured_max_interval() {
+        let mut config = crate::config::AppConfig::default();
+        config.polling.default_interval_seconds = 120;
+        config.polling.minimum_interval_seconds = 10;
+        config.polling.max_interval_seconds = 60;
+        let config = Some(config);
+        let mut auth = 0u8;
+        let mut network = 0u8;
+
+        let mut consecutive_pauses: u8 = 0;
+        match not_modified_iteration(
+            &Some("Artist - Track".to_string()),
+            &mut consecutive_pauses,
+            &mut auth,
+            &mut network,
+            &config,
+        ) {
+            PollIteration::Sleep { seconds } => assert_eq!(
+                seconds, 60,
+                "a tracked-track 304 must honor max_interval_seconds (120s pre-fix)"
+            ),
+            _ => panic!("304 must yield a Sleep iteration"),
+        }
+
+        // The no-track arm keeps the documented issue #38 ladder (default →
+        // 2× → 4× → 300s cap, an idle-work reduction promised in
+        // ARCHITECTURE.md/TROUBLESHOOTING.md), so it may exceed the interval
+        // window — deliberately, and identically to the 204 no-track path.
+        for (pauses, expected) in [(0u8, 120u64), (1, 240), (2, 300), (3, 300), (4, 300)] {
+            let mut counter = pauses;
+            match not_modified_iteration(&None, &mut counter, &mut auth, &mut network, &config) {
+                PollIteration::Sleep { seconds } => assert_eq!(
+                    seconds, expected,
+                    "the idle ladder must stay the documented ladder at pauses={}",
+                    pauses
+                ),
+                _ => panic!("304 must yield a Sleep iteration"),
+            }
+        }
+    }
+
+    /// Finding PollCore#6 (issue #573): the bounded clamp applies to the
+    /// interval-derived sleeps it was introduced for, keeps the ladder's rungs
+    /// intact (see `pause_backoff`), and a hand-edited config with inverted
+    /// bounds clamps instead of panicking like `u64::clamp` would.
+    #[test]
+    fn test_clamp_poll_interval_bounds_and_inverted_config() {
+        let mut narrow = crate::config::AppConfig::default();
+        narrow.polling.default_interval_seconds = 30;
+        narrow.polling.minimum_interval_seconds = 10;
+        narrow.polling.max_interval_seconds = 60;
+        let narrow = Some(narrow);
+        assert_eq!(clamp_poll_interval(120, &narrow), 60);
+        assert_eq!(clamp_poll_interval(5, &narrow), 10);
+        assert_eq!(clamp_poll_interval(45, &narrow), 45);
+        assert_eq!(
+            playing_track_sleep(Some(600_000), &narrow),
+            60,
+            "the playing path keeps its max-interval clamp"
+        );
+
+        let mut inverted = crate::config::AppConfig::default();
+        inverted.polling.minimum_interval_seconds = 120;
+        inverted.polling.max_interval_seconds = 5;
+        let inverted = Some(inverted);
+        assert_eq!(
+            clamp_poll_interval(30, &inverted),
+            120,
+            "inverted bounds must saturate at the minimum, never panic"
+        );
+        assert_eq!(clamp_poll_interval(1, &None), 10);
+        assert_eq!(clamp_poll_interval(9_999, &None), 60);
+    }
+
+    /// The documented pause ladder (issue #38) is intentionally NOT clamped by
+    /// `maximum_interval_seconds`: ARCHITECTURE.md and TROUBLESHOOTING.md
+    /// promise "doubles up to a 5-min cap", and clamping it at the default 60s
+    /// max would multiply idle API traffic five-fold.
+    #[test]
+    fn test_pause_ladder_is_unclamped_by_max_interval() {
+        let mut narrow = crate::config::AppConfig::default();
+        narrow.polling.default_interval_seconds = 30;
+        narrow.polling.minimum_interval_seconds = 10;
+        narrow.polling.max_interval_seconds = 60;
+        let narrow = Some(narrow);
+        assert_eq!(pause_backoff(3, config_default_interval(&narrow)), 300);
+        assert!(
+            pause_backoff(3, config_default_interval(&narrow)) > config_maximum_interval(&narrow),
+            "the ladder's documented 5-minute cap sits above the default max"
+        );
+    }
+
+    /// Finding PollCore#1 (issue #569): the mid-track quiet-hours ENTRY fires
+    /// for any un-gated track while the window is open, never re-fires for a
+    /// track it already gated (the #380 re-check owns that decision), and sits
+    /// ahead of the first Teams write in `process_track`.
+    #[test]
+    fn test_quiet_gate_entry_due_mid_track() {
+        assert!(
+            quiet_gate_entry_due(true, None, "key"),
+            "a quiet window opening mid-track must gate the playing track"
+        );
+        assert!(
+            quiet_gate_entry_due(true, Some("another-track"), "key"),
+            "a gate recorded for a previous track must not mask this one"
+        );
+        assert!(
+            !quiet_gate_entry_due(true, Some("key"), "key"),
+            "an already-gated track must not re-emit presence-gated every poll"
+        );
+        assert!(
+            !quiet_gate_entry_due(false, None, "key"),
+            "outside quiet hours nothing is gated"
+        );
+
+        // Structural: the mid-track entry check must sit ahead of the first
+        // Teams write in `process_track`, and the paused clear must consult
+        // the same rule decision (finding PollCore#2).
+        let prod = prod_source();
+        let track_body = prod_fn_body(prod, "pub(crate) fn process_track(");
+        let entry = track_body
+            .find("quiet_gate_entry_due(")
+            .expect("process_track must evaluate the mid-track quiet-hours entry (issue #569)");
+        let write = track_body
+            .find("set_teams_status_message(")
+            .expect("process_track must call set_teams_status_message");
+        assert!(
+            entry < write,
+            "the mid-track quiet-hours entry must precede the status write, otherwise the \
+             gate is evaluated after the POST it exists to suppress"
+        );
+        assert!(
+            track_body.contains("rule_gate("),
+            "the paused clear must consult the shared rule decision (issue #570)"
+        );
+        assert!(
+            track_body.contains("emit_presence_gated("),
+            "gate decisions must be surfaced through the single emitter"
+        );
+
+        let no_track_body = prod_fn_body(prod, "pub(crate) fn handle_no_track(");
+        assert!(
+            no_track_body.contains("quiet_hours_active_now("),
+            "the no-track clear must honor quiet hours (issue #570)"
+        );
+        assert!(
+            no_track_body.contains("rule_gate("),
+            "the no-track clear must consult the rule decision (issue #570)"
+        );
+        let clear_pos = no_track_body
+            .find("clear_teams_status_message(")
+            .expect("handle_no_track must call clear_teams_status_message");
+        let suppress_pos = no_track_body
+            .find("suppression_reason")
+            .expect("handle_no_track must compute a suppression reason");
+        assert!(
+            suppress_pos < clear_pos,
+            "the no-track suppression check must precede the clear POST"
+        );
+    }
+
+    /// Finding PollCore#2 (issue #570): one rule decision for every write path.
+    #[test]
+    fn test_rule_gate_suppress_replace_and_no_rule() {
+        use crate::config::{AppConfig, StatusRulesConfig, TrackRuleEntry};
+        let rule = |enabled: bool, artist: &str, track: &str, replacement: &str| TrackRuleEntry {
+            enabled,
+            artist_substring: artist.to_string(),
+            track_substring: track.to_string(),
+            replacement_status: replacement.to_string(),
+        };
+        let config_with = |rules: Vec<TrackRuleEntry>| {
+            Some(AppConfig {
+                status_rules: StatusRulesConfig {
+                    quiet_hours: Vec::new(),
+                    track_rules: rules,
+                },
+                ..AppConfig::default()
+            })
+        };
+
+        assert_eq!(
+            rule_gate(
+                &config_with(vec![rule(true, "lofi", "", "")]),
+                "LoFi Girl",
+                "Anything"
+            ),
+            RuleGate::Suppressed,
+            "an empty replacement suppresses the write"
+        );
+        assert_eq!(
+            rule_gate(
+                &config_with(vec![rule(true, "lofi", "", "Focus time")]),
+                "LoFi Girl",
+                "Anything"
+            ),
+            RuleGate::Replace("Focus time".to_string()),
+            "a non-empty replacement becomes the posted text"
+        );
+        assert_eq!(
+            rule_gate(&config_with(vec![rule(false, "", "", "")]), "Anyone", "X"),
+            RuleGate::NoRule,
+            "a disabled rule never gates"
+        );
+        assert_eq!(
+            rule_gate(&None, "Anyone", "X"),
+            RuleGate::NoRule,
+            "no config means no rule"
+        );
+        assert_eq!(
+            rule_gate(&config_with(vec![rule(true, "lofi", "", "")]), "", ""),
+            RuleGate::NoRule,
+            "a scoped rule must not suppress a no-track clear"
+        );
+        assert_eq!(
+            rule_gate(&config_with(vec![rule(true, "", "", "")]), "", ""),
+            RuleGate::Suppressed,
+            "a match-all rule suppresses a no-track clear too"
+        );
+    }
+
+    /// Finding PollCore#4 (issue #572): the manual refresh reads the session's
+    /// write clocks. Pre-fix its fresh `last_availability_arm = None` re-armed
+    /// the availability session on every refresh, and its fresh
+    /// `last_track_key`/`last_posted_status`/`last_teams_update` bypassed the
+    /// #384 identical-write guard.
+    #[test]
+    fn test_shared_write_clocks_prevent_one_shot_rearm_and_duplicate_write() {
+        let now = Instant::now();
+        let armed = WriteClocks {
+            last_availability_arm: Some(now),
+            ..WriteClocks::default()
+        };
+        store_write_clocks(&armed);
+        let loaded = load_write_clocks();
+        assert_eq!(
+            loaded.last_availability_arm,
+            Some(now),
+            "the one-shot path must observe the session's arm clock"
+        );
+        assert!(
+            !should_rearm_availability(loaded.last_availability_arm, now),
+            "a manual refresh must not re-arm a presence session armed seconds ago"
+        );
+
+        // The same shared clocks keep #384 effective: the one-shot sees the
+        // same track key (not `changed`) and the same posted text, so an
+        // unchanged track skips the POST instead of duplicating it.
+        let posted = "🎵 A - T 🎧".to_string();
+        let key = "A - T | filter=true".to_string();
+        let clocks = WriteClocks {
+            last_track_key: Some(key.clone()),
+            last_posted_status: Some(posted.clone()),
+            last_teams_update: Some(now),
+            ..WriteClocks::default()
+        };
+        let changed = clocks.last_track_key.as_ref() != Some(&key);
+        assert!(
+            !changed,
+            "sharing the track key is what makes the one-shot read 'unchanged'"
+        );
+        assert!(
+            should_skip_identical_write(
+                changed,
+                clocks.last_posted_status.as_deref(),
+                &posted,
+                clocks.last_teams_update,
+                now,
+            ),
+            "a manual refresh must honor the #384 identical-write guard"
+        );
+
+        reset_write_clocks();
+        let cold = load_write_clocks();
+        assert!(
+            cold.last_availability_arm.is_none() && cold.last_track_key.is_none(),
+            "a stopped session must leave cold clocks, so the next session treats its \
+             first track as changed (issue #373/#572)"
+        );
+        assert!(
+            should_rearm_availability(cold.last_availability_arm, now),
+            "a genuinely cold app must still arm the availability session"
+        );
+    }
+
+    /// Finding PollCore#4 (issue #572) structural guard: the one-shot entry
+    /// must run against the shared clocks rather than fresh per-call locals.
+    #[test]
+    fn test_run_oneshot_uses_shared_write_clocks() {
+        let prod = prod_source();
+        let body = prod_fn_body(prod, "pub(crate) fn run_oneshot(");
+        assert!(
+            body.contains("let mut clocks = load_write_clocks();"),
+            "run_oneshot must load the shared write clocks"
+        );
+        assert!(
+            body.contains("store_write_clocks(&clocks);"),
+            "run_oneshot must publish the clocks it advanced back to the shared slot"
+        );
+        assert!(
+            !body.contains("let mut last_availability_arm: Option<Instant> = None;"),
+            "a fresh availability clock on the one-shot path is exactly the issue #572 defect"
+        );
+    }
+
+    /// Finding PollCore#4 (issue #572): a polling session resets the shared
+    /// clocks on start and on exit, so a new session (or a refresh issued
+    /// while nothing runs) never inherits a dead session's clocks.
+    #[test]
+    fn test_polling_lifecycle_resets_shared_write_clocks() {
+        let loop_source = include_str!("loop.rs");
+        assert!(
+            loop_source.contains("reset_write_clocks()"),
+            "polling_loop must reset the shared clocks when the session ends"
+        );
+        let state_source = include_str!("state.rs");
+        assert!(
+            state_source.contains("reset_write_clocks()"),
+            "start_polling must reset the shared clocks so a panic-dead session's \
+             clocks cannot leak into the next one"
         );
     }
 }

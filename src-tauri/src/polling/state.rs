@@ -44,6 +44,11 @@ pub fn start_polling(
     // See issue #10 (Polling thread cannot be cancelled mid-request).
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
 
+    // Finding PollCore#4 (issue #572): a fresh session starts with cold
+    // write-decision clocks. `polling_loop` resets them on a clean exit; this
+    // covers the case it cannot — a previous thread that died by panic, whose
+    // `catch_unwind` below never reaches the loop's own reset.
+    super::poll_once::reset_write_clocks();
     {
         let mut tx_guard = state.polling.stop_tx_mut();
         *tx_guard = Some(stop_tx);
