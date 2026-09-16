@@ -357,7 +357,15 @@ export const en = {
   'rules.ruleEnabled': 'Enabled',
   'logs.copySnapshot': 'Copy snapshot',
   'logs.snapshotCopied': 'Redacted snapshot copied to clipboard.',
-  'logs.snapshotCopyFailed': 'Could not copy the snapshot.'
+  'logs.snapshotCopyFailed': 'Could not copy the snapshot.',
+  // 4.6 additions
+  'dashboard.availabilityListening': 'Listening (Available)',
+  'dashboard.availabilityCleared': 'Availability cleared',
+  'settings.saveAndLeave': 'Save and leave',
+  'settings.discardChanges': 'Discard changes',
+  'settings.stayHere': 'Stay here',
+  'settings.notificationsDenied':
+    'Notifications are blocked by the system. Allow them in your system settings, then switch this back on.'
 };
 
 export type Dict = { readonly [K in keyof typeof en]: string };

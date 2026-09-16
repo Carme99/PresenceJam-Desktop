@@ -381,5 +381,13 @@ export const fr: Dict = {
   'rules.ruleEnabled': 'Activé',
   'logs.copySnapshot': 'Copier le snapshot',
   'logs.snapshotCopied': 'Snapshot censuré copié dans le presse-papiers.',
-  'logs.snapshotCopyFailed': 'Impossible de copier le snapshot.'
+  'logs.snapshotCopyFailed': 'Impossible de copier le snapshot.',
+  // 4.6 additions
+  'dashboard.availabilityListening': 'Écoute en cours (disponible)',
+  'dashboard.availabilityCleared': 'Disponibilité réinitialisée',
+  'settings.saveAndLeave': 'Enregistrer et quitter',
+  'settings.discardChanges': 'Abandonner les modifications',
+  'settings.stayHere': 'Rester ici',
+  'settings.notificationsDenied':
+    'Les notifications sont bloquées par le système. Autorisez-les dans les réglages du système, puis réactivez cette option.'
 };
