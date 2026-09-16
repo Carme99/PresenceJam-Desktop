@@ -26,6 +26,11 @@ const CMD: &str = "[CMD.MISC]";
 /// optional profane sample lets the user see that fallback path with a
 /// clean-looking template.
 ///
+/// Issue #538: the caller also passes the user's lexicon
+/// (`teams.profanity_extra_words`), so the preview reflects the EXTRA words
+/// too — a hint that claims they are applied must not be previewed against a
+/// matcher that ignores them.
+///
 /// #215 decision: stays synchronous — pure string substitution, no disk,
 /// network, or keychain IO. Offloading to spawn_blocking would add
 /// overhead with no benefit.
@@ -35,6 +40,7 @@ pub fn preview_status(
     filter_enabled: Option<bool>,
     placeholder: Option<String>,
     profane_sample: Option<bool>,
+    extra_words: Option<Vec<String>>,
 ) -> String {
     log::debug!("{CMD} preview_status: ENTRY - format.len={}", format.len());
     let result = if filter_enabled.unwrap_or(false) {
@@ -55,7 +61,12 @@ pub fn preview_status(
         let effective_placeholder = placeholder
             .as_deref()
             .unwrap_or(crate::profanity::safe_placeholder_default());
-        crate::profanity::filter_status(&formatted, effective_placeholder, sample.is_playing)
+        crate::profanity::filter_status(
+            &formatted,
+            effective_placeholder,
+            sample.is_playing,
+            extra_words.as_deref().unwrap_or(&[]),
+        )
     } else {
         crate::spotify::preview_status_with_sample(&format)
     };

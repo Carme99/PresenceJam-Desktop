@@ -376,3 +376,35 @@ describe('Settings presence-rules and orphaned-field controls (#538/#634/#635/#6
     expect(hint).toContain('60');
   });
 });
+
+/**
+ * Issue #538 follow-up: the custom lexicon must reach the MATCHER, not just
+ * the store. The Settings preview is the one call site where that is
+ * observable without a playing track, so it pins the wiring: `preview_status`
+ * receives the same (clamped) list the save path persists.
+ *
+ * Fails pre-fix: the preview invoked `preview_status` without `extra_words`,
+ * so a word the user just added showed no effect in the preview.
+ */
+describe('Settings custom lexicon reaches the profanity matcher (#538)', () => {
+  it('passes the clamped extra words to preview_status', async () => {
+    const { container } = await mountSettings();
+
+    const area = container.querySelector('#profanity-extra-words') as HTMLTextAreaElement;
+    expect(area).not.toBeNull();
+    await fireEvent.input(area, { target: { value: 'flurble\nbadword' } });
+
+    await waitFor(() => {
+      const call = invokeMock.mock.calls.find(
+        ([cmd, args]) =>
+          cmd === 'preview_status' &&
+          (args as { extra_words?: unknown })?.extra_words instanceof Array
+      );
+      expect(call).toBeTruthy();
+      expect((call![1] as { extra_words: string[] }).extra_words).toEqual([
+        'flurble',
+        'badword'
+      ]);
+    });
+  });
+});

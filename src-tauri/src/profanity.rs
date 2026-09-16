@@ -364,8 +364,17 @@ fn first_token(chars: &[NormChar], mut idx: usize) -> String {
     token
 }
 
-fn contains_profanity(text: &str) -> bool {
+fn contains_profanity(text: &str, extra_words: &[String]) -> bool {
     let chars = normalize(text);
+
+    // Issue #538 / CfgDiag#3(b): the user's own lexicon is matched against the
+    // SAME normalized text with the same evasion machinery (separator skipping,
+    // leet folding, stretch collapsing, span checks) — only the stem-scoped
+    // carve-outs below are built-in-only, because they are empirically tuned for
+    // the built-in stems (`not` + `ing` must not flag `noting`).
+    if contains_extra_word(&chars, extra_words) {
+        return true;
+    }
 
     for &word in PROFANITY_LIST {
         let word_chars: Vec<char> = word.chars().collect();
@@ -474,6 +483,73 @@ fn contains_profanity(text: &str) -> bool {
     false
 }
 
+/// Issue #538 / CfgDiag#3(b): match the user's lexicon against the already
+/// normalized text.
+///
+/// A user entry is an arbitrary word or phrase, so it is matched with the
+/// BUILT-IN boundary and evasion rules — separators may be skipped or read as a
+/// single-char wildcard, leet/stretch evasions fold the same way, a
+/// separator-spanning match must sit on original-string word boundaries on both
+/// sides, and an unchanged match must have clean edges — while the stem-scoped
+/// carve-outs (`is_clean_compound` / `is_y_tail` / `is_profane_continuation` /
+/// `is_strong_stem`) stay built-in-only: they encode which CONTINUATIONS of a
+/// given stem are profane (`shitpost`, `fuckboy`) and would flag the innocent
+/// inflections of an arbitrary user word (`not` + `ing`).
+fn contains_extra_word(text: &[NormChar], extra_words: &[String]) -> bool {
+    for raw in extra_words {
+        let word_chars = extra_word_chars(raw);
+        let word_len = word_chars.len();
+        if word_len == 0 || word_len > text.len() {
+            continue;
+        }
+
+        for start in 0..=(text.len() - word_len) {
+            let Some((end, stretched, sep_skipped)) = matches_at_pos(text, &word_chars, start)
+            else {
+                continue;
+            };
+
+            let right_clean = end >= text.len() || !text[end].ch.is_alphanumeric();
+            if stretched && !right_clean {
+                continue;
+            }
+            let left_clean = start == 0 || !text[start - 1].ch.is_alphanumeric();
+
+            if sep_skipped {
+                // Same span rule as the built-in list: a separator-spanning
+                // match may substitute or skip formatting, but must not also
+                // swallow alphabetic characters (`Song (Uncut)` fabricating a
+                // word out of a parenthetical).
+                let alnum_in_span = text[start..end]
+                    .iter()
+                    .filter(|n| n.ch.is_alphanumeric())
+                    .count();
+                if alnum_in_span > word_len {
+                    continue;
+                }
+            }
+
+            if left_clean && right_clean {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Normalize one user-supplied lexicon entry the way the built-in list is
+/// stored: lower-cased and folded through the same `normalize` pass (so a
+/// pasted `Fück` or `fuuuck` behaves like its plain form), with non-alphanumeric
+/// characters dropped — an entry is a word or phrase, not a pattern.
+fn extra_word_chars(word: &str) -> Vec<char> {
+    normalize(&word.to_lowercase())
+        .into_iter()
+        .map(|n| n.ch)
+        .filter(|c| c.is_alphanumeric())
+        .collect()
+}
+
 fn apply_placeholder(template: &str, is_playing: bool) -> String {
     let emoji = if is_playing { "🎵" } else { "⏸️" };
     let bytes = template.as_bytes();
@@ -496,14 +572,25 @@ fn apply_placeholder(template: &str, is_playing: bool) -> String {
     out
 }
 
-pub fn filter_status(text: &str, placeholder: &str, is_playing: bool) -> String {
-    if contains_profanity(text) {
+/// Renders the placeholder when `text` is profane, else returns `text`.
+///
+/// `extra_words` is the user's own lexicon (`teams.profanity_extra_words`,
+/// issue #538): it is matched with the same boundary/evasion rules as the
+/// built-in list (see [`contains_extra_word`]). An empty slice reproduces the
+/// pre-#538 behaviour exactly.
+pub fn filter_status(
+    text: &str,
+    placeholder: &str,
+    is_playing: bool,
+    extra_words: &[String],
+) -> String {
+    if contains_profanity(text, extra_words) {
         let mut effective_placeholder = if placeholder.trim().is_empty() {
             SAFE_PLACEHOLDER_DEFAULT
         } else {
             placeholder
         };
-        if contains_profanity(effective_placeholder) {
+        if contains_profanity(effective_placeholder, extra_words) {
             log::debug!("[PROFANITY] placeholder flagged; falling back to default");
             effective_placeholder = SAFE_PLACEHOLDER_DEFAULT;
         }
@@ -523,40 +610,40 @@ mod tests {
 
     #[test]
     fn test_clean_text_passes() {
-        assert!(!contains_profanity("Radiohead - Karma Police"));
-        assert!(!contains_profanity("Daft Punk - One More Time"));
-        assert!(!contains_profanity("Massive Attack - Teardrop"));
-        assert!(!contains_profanity("The Beatles - Hey Jude"));
+        assert!(!contains_profanity("Radiohead - Karma Police", &[]));
+        assert!(!contains_profanity("Daft Punk - One More Time", &[]));
+        assert!(!contains_profanity("Massive Attack - Teardrop", &[]));
+        assert!(!contains_profanity("The Beatles - Hey Jude", &[]));
     }
 
     #[test]
     fn test_filter_returns_placeholder() {
-        let result = filter_status("what the fuck", "Custom Placeholder", true);
+        let result = filter_status("what the fuck", "Custom Placeholder", true, &[]);
         assert_eq!(result, "Custom Placeholder");
     }
 
     #[test]
     fn test_filter_returns_original_when_clean() {
-        let result = filter_status("Daft Punk - One More Time", "Placeholder", true);
+        let result = filter_status("Daft Punk - One More Time", "Placeholder", true, &[]);
         assert_eq!(result, "Daft Punk - One More Time");
     }
 
     #[test]
     fn test_leetspeak_substitutions() {
-        assert!(contains_profanity("sh1t"));
-        assert!(contains_profanity("$hit"));
-        assert!(contains_profanity("d@mn"));
-        assert!(contains_profanity("p1ss"));
-        assert!(contains_profanity("n1gg3r"));
+        assert!(contains_profanity("sh1t", &[]));
+        assert!(contains_profanity("$hit", &[]));
+        assert!(contains_profanity("d@mn", &[]));
+        assert!(contains_profanity("p1ss", &[]));
+        assert!(contains_profanity("n1gg3r", &[]));
     }
 
     #[test]
     fn test_extended_leet_substitutions() {
-        assert!(contains_profanity("6itch"));
-        assert!(contains_profanity("8itch"));
-        assert!(contains_profanity("ni99er"));
-        assert!(contains_profanity("shi+"));
-        assert!(contains_profanity("(ock"));
+        assert!(contains_profanity("6itch", &[]));
+        assert!(contains_profanity("8itch", &[]));
+        assert!(contains_profanity("ni99er", &[]));
+        assert!(contains_profanity("shi+", &[]));
+        assert!(contains_profanity("(ock", &[]));
         assert_eq!(norm_str("2"), "i");
         assert_eq!(norm_str("\\/"), "v");
     }
@@ -564,41 +651,41 @@ mod tests {
     #[test]
     fn test_unicode_confusables() {
         let zwsp: String = char::from_u32(0x200B).into_iter().collect();
-        assert!(contains_profanity(&format!("f{}uck", zwsp)));
-        assert!(contains_profanity("fück"));
-        assert!(contains_profanity("ｆｕｃｋ"));
-        assert!(contains_profanity("BİTCH"));
+        assert!(contains_profanity(&format!("f{}uck", zwsp), &[]));
+        assert!(contains_profanity("fück", &[]));
+        assert!(contains_profanity("ｆｕｃｋ", &[]));
+        assert!(contains_profanity("BİTCH", &[]));
     }
 
     #[test]
     fn test_separator_insertion_evasion() {
-        assert!(contains_profanity("f*ck"));
-        assert!(contains_profanity("f.u.c.k"));
-        assert!(contains_profanity("f_ck"));
-        assert!(contains_profanity("f-ck"));
-        assert!(contains_profanity("f u c k"));
-        assert!(contains_profanity("s.h.i.t"));
+        assert!(contains_profanity("f*ck", &[]));
+        assert!(contains_profanity("f.u.c.k", &[]));
+        assert!(contains_profanity("f_ck", &[]));
+        assert!(contains_profanity("f-ck", &[]));
+        assert!(contains_profanity("f u c k", &[]));
+        assert!(contains_profanity("s.h.i.t", &[]));
     }
 
     #[test]
     fn test_issue_refinements() {
-        assert!(contains_profanity("sh2t"));
-        assert!(contains_profanity("shitty"));
-        assert!(contains_profanity("bitchy"));
-        assert!(!contains_profanity("Push It"));
-        assert!(!contains_profanity("push it"));
-        assert!(!contains_profanity("cocky"));
+        assert!(contains_profanity("sh2t", &[]));
+        assert!(contains_profanity("shitty", &[]));
+        assert!(contains_profanity("bitchy", &[]));
+        assert!(!contains_profanity("Push It", &[]));
+        assert!(!contains_profanity("push it", &[]));
+        assert!(!contains_profanity("cocky", &[]));
     }
 
     #[test]
     fn test_mixed_repeat_leet() {
-        assert!(contains_profanity("fuu1uck"));
+        assert!(contains_profanity("fuu1uck", &[]));
     }
 
     #[test]
     fn test_repeated_char_collapse() {
-        assert!(contains_profanity("shiiit"));
-        assert!(contains_profanity("fuuuuck"));
+        assert!(contains_profanity("shiiit", &[]));
+        assert!(contains_profanity("fuuuuck", &[]));
     }
 
     #[test]
@@ -621,52 +708,144 @@ mod tests {
 
     #[test]
     fn test_placeholder_emoji_token_case_insensitive() {
-        let result = filter_status("fuck", "Now {Emoji} {EMOJI} {emoji}", true);
+        let result = filter_status("fuck", "Now {Emoji} {EMOJI} {emoji}", true, &[]);
         assert_eq!(result, "Now 🎵 🎵 🎵");
     }
 
     #[test]
     fn test_placeholder_empty_falls_back() {
-        let result = filter_status("fuck", "", true);
+        let result = filter_status("fuck", "", true, &[]);
         assert_eq!(result, SAFE_PLACEHOLDER_DEFAULT);
     }
 
     #[test]
     fn test_profane_placeholder_falls_back() {
-        let result = filter_status("fuck you", "my shit mix", true);
+        let result = filter_status("fuck you", "my shit mix", true, &[]);
         assert_eq!(result, SAFE_PLACEHOLDER_DEFAULT);
     }
 
     #[test]
     fn test_word_boundary_respects_clean_words() {
-        assert!(!contains_profanity("class"));
-        assert!(!contains_profanity("assassin"));
-        assert!(!contains_profanity("mass"));
-        assert!(!contains_profanity("pass"));
-        assert!(!contains_profanity("choke"));
-        assert!(!contains_profanity("cocktail"));
-        assert!(!contains_profanity("cocktail bar"));
-        assert!(!contains_profanity("cocktails"));
-        assert!(!contains_profanity("cumulative"));
-        assert!(!contains_profanity("vacuum"));
-        assert!(!contains_profanity("cockpit"));
-        assert!(!contains_profanity("Dickens"));
-        assert!(!contains_profanity("Spice Girls - Wannabe"));
-        assert!(!contains_profanity("shiitake"));
+        assert!(!contains_profanity("class", &[]));
+        assert!(!contains_profanity("assassin", &[]));
+        assert!(!contains_profanity("mass", &[]));
+        assert!(!contains_profanity("pass", &[]));
+        assert!(!contains_profanity("choke", &[]));
+        assert!(!contains_profanity("cocktail", &[]));
+        assert!(!contains_profanity("cocktail bar", &[]));
+        assert!(!contains_profanity("cocktails", &[]));
+        assert!(!contains_profanity("cumulative", &[]));
+        assert!(!contains_profanity("vacuum", &[]));
+        assert!(!contains_profanity("cockpit", &[]));
+        assert!(!contains_profanity("Dickens", &[]));
+        assert!(!contains_profanity("Spice Girls - Wannabe", &[]));
+        assert!(!contains_profanity("shiitake", &[]));
+    }
+
+    // -----------------------------------------------------------------
+    // Issue #538 / CfgDiag#3(b): the user-supplied lexicon.
+    // -----------------------------------------------------------------
+
+    /// A configured extra word flags through the same path as the built-in
+    /// list, and — the point of the feature — it flags the text the user
+    /// actually cares about while a substring of an unrelated clean word stays
+    /// clean (the boundary gates are the built-in ones, not a naive contains).
+    #[test]
+    fn test_extra_words_flag_with_built_in_boundaries() {
+        let words = vec![
+            "fuckface".to_string(),
+            "poop".to_string(),
+            "not".to_string(),
+        ];
+        // Explicit hits.
+        assert_eq!(
+            filter_status("Nothing - fuckface", "Placeholder", true, &words),
+            "Placeholder"
+        );
+        assert_eq!(
+            filter_status("Artist - Poop Song", "Placeholder", true, &words),
+            "Placeholder"
+        );
+        // Substrings of unrelated words must NOT flag: 'poop' inside
+        // 'pooping'? no — inside a different word, and 'not' inside 'noting'
+        // (the built-in stem carve-outs are deliberately not applied to a
+        // user's word, so an inflection of it is not invented for them).
+        assert_eq!(
+            filter_status("Nobody - Mississippi Queen", "Placeholder", true, &words),
+            "Nobody - Mississippi Queen"
+        );
+        assert_eq!(
+            filter_status("Artist - Noting Aloud", "Placeholder", true, &words),
+            "Artist - Noting Aloud"
+        );
+        assert_eq!(
+            filter_status("Artist - Class Act", "Placeholder", true, &[]),
+            "Artist - Class Act"
+        );
+        // The evasions the built-in list handles are handled for extra words
+        // too: separators (standalone, both sides bounded) and leet.
+        assert_eq!(
+            filter_status("Artist - p.o.o.p", "Placeholder", true, &words),
+            "Placeholder"
+        );
+        assert_eq!(
+            filter_status("Artist - fückface", "Placeholder", true, &words),
+            "Placeholder"
+        );
+        // The #578 shape stays clean for an extra word too: `Song (Uncut)`
+        // must not fabricate `cunt` by reading the parenthesis as a `c` and
+        // dropping the real `cu` — the span check is shared with the built-ins.
+        assert_eq!(
+            filter_status("Song (Uncut)", "Placeholder", true, &["cunt".to_string()]),
+            "Song (Uncut)"
+        );
+        // ... while the real standalone evasion it exists for still flags.
+        assert_eq!(
+            filter_status("(unt", "Placeholder", true, &["cunt".to_string()]),
+            "Placeholder"
+        );
+        // Multi-word and punctuation-bearing entries are normalized to a word.
+        let phrase = vec!["Bad Word!".to_string()];
+        assert_eq!(
+            filter_status("Artist - A Bad Word!", "Placeholder", true, &phrase),
+            "Placeholder"
+        );
+        // Extra words are checked on the placeholder too, so a lexicon entry
+        // cannot be smuggled in through the replacement text.
+        assert_eq!(
+            filter_status("fuckface", "my poop mix", true, &words),
+            SAFE_PLACEHOLDER_DEFAULT
+        );
+        // An empty lexicon is exactly the pre-#538 behaviour: a word that is
+        // only in the USER's list passes ("fuckface" above is flagged by the
+        // built-in list too, via the #579 continuation carve-out).
+        assert_eq!(
+            filter_status("Artist - flurble", "Placeholder", true, &[]),
+            "Artist - flurble"
+        );
+        assert_eq!(
+            filter_status(
+                "Artist - flurble",
+                "Placeholder",
+                true,
+                &["flurble".to_string()]
+            ),
+            "Placeholder"
+        );
     }
 
     #[test]
     fn test_word_list_additions() {
-        assert!(contains_profanity("asshole"));
-        assert!(contains_profanity("tits"));
-        assert!(contains_profanity("twat"));
+        assert!(contains_profanity("asshole", &[]));
+        assert!(contains_profanity("tits", &[]));
+        assert!(contains_profanity("twat", &[]));
     }
 
     #[test]
     fn test_profanity_list_exhaustive() {
         for word in PROFANITY_LIST {
             assert!(
-                contains_profanity(word),
+                contains_profanity(word, &[]),
                 "profanity list word '{}' should be detected",
                 word
             );
@@ -675,25 +854,28 @@ mod tests {
 
     #[test]
     fn test_filter_with_whitespace_placeholder() {
-        assert_eq!(filter_status("fuck", "   ", true), SAFE_PLACEHOLDER_DEFAULT);
         assert_eq!(
-            filter_status("fuck", "  \t  ", true),
+            filter_status("fuck", "   ", true, &[]),
+            SAFE_PLACEHOLDER_DEFAULT
+        );
+        assert_eq!(
+            filter_status("fuck", "  \t  ", true, &[]),
             SAFE_PLACEHOLDER_DEFAULT
         );
     }
 
     #[test]
     fn test_profane_substring_in_phrase() {
-        assert!(contains_profanity("Listening to shit song"));
-        assert!(contains_profanity("The artist is damn good"));
-        assert!(contains_profanity("This is fucking great"));
-        assert!(contains_profanity("bullshit"));
-        assert!(contains_profanity("dipshit"));
-        assert!(contains_profanity("horseshit"));
-        assert!(contains_profanity("bullshit song"));
-        assert!(contains_profanity("dickhead"));
-        assert!(contains_profanity("shithead"));
-        assert!(contains_profanity("fuckhead"));
+        assert!(contains_profanity("Listening to shit song", &[]));
+        assert!(contains_profanity("The artist is damn good", &[]));
+        assert!(contains_profanity("This is fucking great", &[]));
+        assert!(contains_profanity("bullshit", &[]));
+        assert!(contains_profanity("dipshit", &[]));
+        assert!(contains_profanity("horseshit", &[]));
+        assert!(contains_profanity("bullshit song", &[]));
+        assert!(contains_profanity("dickhead", &[]));
+        assert!(contains_profanity("shithead", &[]));
+        assert!(contains_profanity("fuckhead", &[]));
     }
 
     // issue #260: Spotify track/artist names routinely arrive Title Case or ALL
@@ -701,26 +883,29 @@ mod tests {
     // the whole module green because every other test drives lowercase input.
     #[test]
     fn test_case_insensitive_detection() {
-        assert!(contains_profanity("FUCK"));
-        assert!(contains_profanity("Shit"));
-        assert!(contains_profanity("You BITCH"));
-        assert!(contains_profanity("Fucking Great"));
-        assert_eq!(filter_status("SHIT", "Placeholder", true), "Placeholder");
+        assert!(contains_profanity("FUCK", &[]));
+        assert!(contains_profanity("Shit", &[]));
+        assert!(contains_profanity("You BITCH", &[]));
+        assert!(contains_profanity("Fucking Great", &[]));
+        assert_eq!(
+            filter_status("SHIT", "Placeholder", true, &[]),
+            "Placeholder"
+        );
     }
 
     // issue #411: `bitch` is a strong stem, so glued compounds like
     // `sonofabitch` flag; tard/cock/spic carve-outs stay exactly as-is.
     #[test]
     fn test_issue_411_sonofabitch() {
-        assert!(contains_profanity("sonofabitch"));
-        assert!(contains_profanity("SONOFABITCH"));
-        assert!(contains_profanity("bullshit"));
-        assert!(contains_profanity("bitchy"));
-        assert!(!contains_profanity("mustard"));
-        assert!(!contains_profanity("peacock"));
-        assert!(!contains_profanity("cockpit"));
-        assert!(!contains_profanity("spicy"));
-        assert!(!contains_profanity("tardy"));
+        assert!(contains_profanity("sonofabitch", &[]));
+        assert!(contains_profanity("SONOFABITCH", &[]));
+        assert!(contains_profanity("bullshit", &[]));
+        assert!(contains_profanity("bitchy", &[]));
+        assert!(!contains_profanity("mustard", &[]));
+        assert!(!contains_profanity("peacock", &[]));
+        assert!(!contains_profanity("cockpit", &[]));
+        assert!(!contains_profanity("spicy", &[]));
+        assert!(!contains_profanity("tardy", &[]));
     }
 
     // issues #377/#470: the most common real-world evasions — `ph` for `f`,
@@ -730,23 +915,23 @@ mod tests {
     // no `kill`/`skill` list entry, so it is a boundary control).
     #[test]
     fn test_issue_377_ph_fuk_x_z_evasions() {
-        assert!(contains_profanity("phuck"));
-        assert!(contains_profanity("PHUCK"));
-        assert!(contains_profanity("fuk"));
-        assert!(contains_profanity("fux"));
-        assert!(contains_profanity("niggaz"));
-        assert!(contains_profanity("bitchez"));
-        assert!(contains_profanity("niggas"));
-        assert!(contains_profanity("bitches"));
-        assert!(!contains_profanity("phone"));
-        assert!(!contains_profanity("photo"));
-        assert!(!contains_profanity("Phoenix"));
-        assert!(!contains_profanity("skillz"));
-        assert!(!contains_profanity("Fukushima"));
-        assert!(!contains_profanity("Jukebox Hero"));
-        assert!(!contains_profanity("Uptown Funk"));
-        assert!(!contains_profanity("Explicit"));
-        assert!(!contains_profanity("Zombie"));
+        assert!(contains_profanity("phuck", &[]));
+        assert!(contains_profanity("PHUCK", &[]));
+        assert!(contains_profanity("fuk", &[]));
+        assert!(contains_profanity("fux", &[]));
+        assert!(contains_profanity("niggaz", &[]));
+        assert!(contains_profanity("bitchez", &[]));
+        assert!(contains_profanity("niggas", &[]));
+        assert!(contains_profanity("bitches", &[]));
+        assert!(!contains_profanity("phone", &[]));
+        assert!(!contains_profanity("photo", &[]));
+        assert!(!contains_profanity("Phoenix", &[]));
+        assert!(!contains_profanity("skillz", &[]));
+        assert!(!contains_profanity("Fukushima", &[]));
+        assert!(!contains_profanity("Jukebox Hero", &[]));
+        assert!(!contains_profanity("Uptown Funk", &[]));
+        assert!(!contains_profanity("Explicit", &[]));
+        assert!(!contains_profanity("Zombie", &[]));
     }
 
     // issue #578: the `x`-for-`ck` and `(`-for-`c` folds were applied
@@ -756,19 +941,19 @@ mod tests {
     // exist for, while the #377 evasions they were added for still flag.
     #[test]
     fn test_issue_578_scoped_x_and_paren_expansions() {
-        assert!(!contains_profanity("Cox"));
-        assert!(!contains_profanity("Carl Cox"));
-        assert!(!contains_profanity("Coxon"));
-        assert!(!contains_profanity("Lynx"));
-        assert!(!contains_profanity("Sphinx"));
-        assert!(!contains_profanity("Song (Uncut)"));
+        assert!(!contains_profanity("Cox", &[]));
+        assert!(!contains_profanity("Carl Cox", &[]));
+        assert!(!contains_profanity("Coxon", &[]));
+        assert!(!contains_profanity("Lynx", &[]));
+        assert!(!contains_profanity("Sphinx", &[]));
+        assert!(!contains_profanity("Song (Uncut)", &[]));
         // The evasions the folds exist for are untouched.
-        assert!(contains_profanity("fux"));
-        assert!(contains_profanity("Fux"));
-        assert!(contains_profanity("phux"));
-        assert!(contains_profanity("(ock"));
-        assert!(contains_profanity("(unt"));
-        assert!(contains_profanity("(0ck"));
+        assert!(contains_profanity("fux", &[]));
+        assert!(contains_profanity("Fux", &[]));
+        assert!(contains_profanity("phux", &[]));
+        assert!(contains_profanity("(ock", &[]));
+        assert!(contains_profanity("(unt", &[]));
+        assert!(contains_profanity("(0ck", &[]));
     }
 
     // issue #579: the glued-right continuation list stopped at
@@ -777,22 +962,84 @@ mod tests {
     // (#328) — the list is extended, never turned into "flag anything".
     #[test]
     fn test_issue_579_glued_compound_continuations() {
-        assert!(contains_profanity("fuckboy"));
-        assert!(contains_profanity("Fuckface"));
-        assert!(contains_profanity("fuckwad"));
-        assert!(contains_profanity("shitpost"));
-        assert!(contains_profanity("shitposting"));
-        assert!(contains_profanity("bitchboy"));
-        assert!(contains_profanity("bullshit"));
-        assert!(contains_profanity("horseshit"));
-        assert!(contains_profanity("dipshit"));
-        assert!(contains_profanity("sonofabitch"));
+        assert!(contains_profanity("fuckboy", &[]));
+        assert!(contains_profanity("Fuckface", &[]));
+        assert!(contains_profanity("fuckwad", &[]));
+        assert!(contains_profanity("shitpost", &[]));
+        assert!(contains_profanity("shitposting", &[]));
+        assert!(contains_profanity("bitchboy", &[]));
+        assert!(contains_profanity("bullshit", &[]));
+        assert!(contains_profanity("horseshit", &[]));
+        assert!(contains_profanity("dipshit", &[]));
+        assert!(contains_profanity("sonofabitch", &[]));
         // Clean controls: a glued right token is only profane when it is a
         // known continuation.
-        assert!(!contains_profanity("shitake"));
-        assert!(!contains_profanity("shiitake"));
-        assert!(!contains_profanity("Fukushima"));
-        assert!(!contains_profanity("cocktail"));
-        assert!(!contains_profanity("Push It"));
+        assert!(!contains_profanity("shitake", &[]));
+        assert!(!contains_profanity("shiitake", &[]));
+        assert!(!contains_profanity("Fukushima", &[]));
+        assert!(!contains_profanity("cocktail", &[]));
+        assert!(!contains_profanity("Push It", &[]));
+    }
+
+    /// Issue #538 / CfgDiag#3(b): the user's own lexicon is applied with the
+    /// same evasion machinery as the built-in list, so a word they added is
+    /// caught in the forms a real track title uses — and only as a word.
+    #[test]
+    fn test_extra_words_flag_clean_titles() {
+        let extra = ["darn".to_string()];
+        assert!(!contains_profanity("Darn it", &[]));
+        assert!(contains_profanity("Darn it", &extra));
+        assert!(contains_profanity("DARN", &extra));
+        assert_eq!(
+            filter_status("Darn it", "Placeholder", true, &extra),
+            "Placeholder"
+        );
+        // A title with no extra word is untouched.
+        assert!(!contains_profanity("Daft Punk - One More Time", &extra));
+    }
+
+    /// Boundaries are respected: a user entry must not fire inside a longer
+    /// word, exactly like a built-in stem with an ambiguous edge.
+    #[test]
+    fn test_extra_words_respect_word_boundaries() {
+        let extra = ["spam".to_string()];
+        assert!(contains_profanity("spam", &extra));
+        assert!(contains_profanity("Spam sandwich", &extra));
+        assert!(!contains_profanity("spamalot", &extra));
+        assert!(!contains_profanity("mispam", &extra));
+        assert!(!contains_profanity("Spammy", &extra));
+    }
+
+    /// The separator-skipping / leet machinery applies to the user's words too,
+    /// otherwise an added word would be trivially evaded by `s.p.a.m`.
+    #[test]
+    fn test_extra_words_keep_the_evasion_rules() {
+        let extra = ["spam".to_string()];
+        assert!(contains_profanity("s.p.a.m", &extra));
+        assert!(contains_profanity("s p a m", &extra));
+        assert!(contains_profanity("5pam", &extra));
+    }
+
+    /// A placeholder that only the user's lexicon flags falls back to the
+    /// canonical safe placeholder, like the built-in case (#342).
+    #[test]
+    fn test_extra_word_placeholder_falls_back_to_default() {
+        let extra = ["darn".to_string()];
+        assert_eq!(
+            filter_status("Darn it", "darn placeholder", true, &extra),
+            SAFE_PLACEHOLDER_DEFAULT
+        );
+    }
+
+    /// Degenerate entries are inert: an empty lexicon, an empty string and a
+    /// punctuation-only entry must not panic or match everything.
+    #[test]
+    fn test_extra_word_entries_are_sanitised() {
+        let empty: [String; 0] = [];
+        assert!(!contains_profanity("", &empty));
+        let junk = ["".to_string(), "!!!".to_string()];
+        assert!(!contains_profanity("", &junk));
+        assert!(!contains_profanity("Daft Punk - One More Time", &junk));
+        assert!(!contains_profanity("hello", &junk));
     }
 }

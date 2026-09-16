@@ -279,11 +279,14 @@
     const filter_enabled = localConfig.teams.profanity_filter;
     const placeholder = localConfig.teams.profanity_placeholder;
     const profane_sample = previewProfaneSample;
+    // Issue #538: the preview must run the user's own lexicon too, otherwise a
+    // word they just added shows no effect until the next real track.
+    const extra_words = extraWordsClamp.clamped;
     if (previewDebounce) clearTimeout(previewDebounce);
     previewDebounce = setTimeout(async () => {
       const my = ++previewSeq;
       try {
-        const v = await invoke<string>('preview_status', { format, filter_enabled, placeholder, profane_sample });
+        const v = await invoke<string>('preview_status', { format, filter_enabled, placeholder, profane_sample, extra_words });
         if (my !== previewSeq) return;
         previewText = v;
       } catch (e) {
