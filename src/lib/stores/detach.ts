@@ -117,15 +117,20 @@ async function popOutInner(pane: DetachablePane): Promise<void> {
 export async function popIn(pane: DetachablePane): Promise<void> {
   const label = DETACHED_LABEL[pane];
   const win = await WebviewWindow.getByLabel(label);
-  if (win) {
-    try {
-      await win.close(); // 'tauri://destroyed' clears the store entry.
-    } catch (e) {
-      console.warn(`[DETACH] close ${label} failed:`, e);
-      markDetached(pane, false);
-    }
-  } else {
+  if (!win) {
     markDetached(pane, false);
+    return;
+  }
+  try {
+    await win.close(); // 'tauri://destroyed' clears the store entry.
+  } catch (e) {
+    // #594: a refused close must never clear the badge — the detached
+    // window is still on screen, and clearing it made the Dashboard claim
+    // the pane was back in while the user was looking straight at it.
+    // Re-derive the whole map from the live window set instead: whether a
+    // window exists decides the flag, not whether the close call resolved.
+    console.warn(`[DETACH] close ${label} failed:`, e);
+    await reconcileDetachedPanes();
   }
 }
 
@@ -145,4 +150,35 @@ export async function focusDetached(pane: DetachablePane): Promise<void> {
     // #422: no window behind the flag — clear it so the badge clears.
     markDetached(pane, false);
   }
+}
+
+/**
+ * Derive the badge map from the live window set. `WebviewWindow.getByLabel`
+ * returns a handle only while the label still has a webview, so the probe is
+ * the same call `popOut`/`focusDetached` already make.
+ *
+ * #601: called once at main-window boot because the map starts empty on
+ * every load while detached windows survive a main-window reload (HMR,
+ * manual reload, crash recovery) — without it the Dashboard offers
+ * "navigate" for a pane that is actually popped out, so the main window
+ * renders a second live copy of it. Also called when "Pop back in" is
+ * refused (#594), where the badge must keep matching what is on screen.
+ *
+ * The probe result replaces the map wholesale — it is the whole truth about
+ * which windows exist. A probe that rejects leaves that pane unclaimed, the
+ * same default the store starts from.
+ */
+export async function reconcileDetachedPanes(): Promise<void> {
+  const panes = Object.keys(DETACHED_LABEL) as DetachablePane[];
+  const probed = await Promise.all(
+    panes.map(async (pane) => {
+      try {
+        return [pane, (await WebviewWindow.getByLabel(DETACHED_LABEL[pane])) !== null] as const;
+      } catch (e) {
+        console.warn(`[DETACH] probe ${DETACHED_LABEL[pane]} failed:`, e);
+        return [pane, false] as const;
+      }
+    })
+  );
+  detachedPanes.set(Object.fromEntries(probed) as Record<DetachablePane, boolean>);
 }

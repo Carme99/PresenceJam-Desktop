@@ -1,10 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "detached",
-  "description": "C7: minimal capability for the detached Logs/Settings windows (labels logs-detached / settings-detached). Mirrors the main-window set minus tray/menu/deep-link/updater/autostart/window-management, which detached views do not exercise; app-global Tauri commands need no entry. Sensitive app commands are additionally main-window-only, enforced Rust-side (issue #241).",
+  "description": "C7: minimal capability for the detached Logs/Settings windows (labels logs-detached / settings-detached). Mirrors the main-window set minus tray/menu/deep-link/updater/autostart/window-management, which detached views do not exercise; app-global Tauri commands need no entry. Sensitive app commands are additionally main-window-only, enforced Rust-side (issue #241). `core:window:allow-close` (#594) is the one window-management permission a detached render reaches: 'Pop back in' -> popIn() -> WebviewWindow.close(), which Tauri resolves against the CALLING webview's ACL. `core:window:default` does not include it, so without the explicit entry the close rejected and the pane was marked not-detached while its window stayed on screen. `core:window:allow-set-focus` is deliberately absent: every setFocus() call site in src/lib/stores/detach.ts (popOut's re-focus, focusDetached) only ever runs in the main window.",
   "windows": ["logs-detached", "settings-detached"],
   "permissions": [
     "core:default",
+    "core:window:allow-close",
     "core:event:allow-emit",
     "core:event:allow-emit-to",
     "core:event:allow-listen",
