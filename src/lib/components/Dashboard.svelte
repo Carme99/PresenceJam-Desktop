@@ -400,13 +400,15 @@
       : 0
   );
 
-  // Helper to update tray menu state
+  // Helper to refresh the tray menu. #592: the Rust command takes no
+  // arguments — it rebuilds from authoritative backend state — so sending
+  // the frontend's isSyncing/currentTrack mirrors would be a claim the
+  // backend ignores. Keeping the catch here is load-bearing: the
+  // track-change listener calls this un-awaited, so a rejection would
+  // otherwise surface as an unhandled promise rejection.
   async function updateMenuState() {
     try {
-      await invoke('update_tray_menu_state', {
-        isSyncing: isSyncing,
-        currentTrack: currentTrack
-      });
+      await invoke('update_tray_menu_state');
     } catch (e) {
       console.error('[DASHBOARD] updateMenuState failed:', e);
     }

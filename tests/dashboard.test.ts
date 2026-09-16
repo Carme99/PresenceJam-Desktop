@@ -212,3 +212,29 @@ describe('Dashboard availability chip (#551)', () => {
     expect(container.querySelector('.availability-chip')).toBeNull();
   });
 });
+
+describe('Dashboard tray refresh is claim-free (#592)', () => {
+  it('never sends the backend a tray-state snapshot it would ignore', async () => {
+    const { container } = render(Dashboard);
+    await listenerReady('sync-started');
+    await listenerReady('spotify-track-changed');
+    await waitFor(() => expect(container.querySelector('.track-card')).not.toBeNull());
+
+    // The two hot-path triggers: a sync toggle and a track change.
+    await emit('sync-started', {});
+    await emit('spotify-track-changed', TRACK);
+
+    await waitFor(() =>
+      expect(
+        invokeMock.mock.calls.filter((c) => c[0] === 'update_tray_menu_state').length
+      ).toBeGreaterThanOrEqual(2)
+    );
+
+    // The Rust command derives is_syncing/current_track from AppState; any
+    // second argument would be a frontend claim riding a contract that no
+    // longer exists.
+    for (const call of invokeMock.mock.calls) {
+      if (call[0] === 'update_tray_menu_state') expect(call[1]).toBeUndefined();
+    }
+  });
+});
