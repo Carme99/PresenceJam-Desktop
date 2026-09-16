@@ -311,6 +311,8 @@ jobs:
 
       - name: Gitleaks detect
         uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e  # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # Dependency-vulnerability gate (issue #357): surfaces new advisories on
   # the introducing PR. Non-blocking (`continue-on-error`) until the two
