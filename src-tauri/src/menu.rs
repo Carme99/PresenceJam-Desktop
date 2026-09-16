@@ -20,6 +20,10 @@ fn show_and_focus_main_window(app: &AppHandle) {
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
+    // Issue #592: this changes window visibility, which drives the tray's
+    // Show/Hide label — repaint from backend state on a worker (the rebuild
+    // may perform blocking Spotify HTTP, issue #587).
+    crate::tray::refresh_tray_from_state(app);
 }
 
 /// Bounded grace between `app-shutdown` and the unconditional `exit(0)`

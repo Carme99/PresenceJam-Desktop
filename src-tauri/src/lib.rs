@@ -651,6 +651,34 @@ fn handle_deep_link(url: &str, app: AppHandle) {
     }
 }
 
+/// CLI flag the autostart plugin appends to the launch command.
+const MINIMIZED_FLAG: &str = "--minimized";
+
+/// True when a close request on `label` hides the window instead of
+/// destroying it (issue #585). Only the main window is close-to-tray.
+///
+/// Detached Logs/Settings panes clear their `$detachedPanes` badge on
+/// `tauri://destroyed` (and "Pop back in" awaits `win.close()`), so hiding
+/// one leaves a live-but-invisible window whose `setFocus()` can never bring
+/// it back — permanently unreachable until the process restarts. Shares the
+/// label predicate with the command guard (`commands::is_main_window_label`)
+/// so both agree on which window is *the* window.
+fn close_hides_window(label: &str) -> bool {
+    crate::commands::is_main_window_label(label)
+}
+
+/// True when this launch carries the autostart plugin's `--minimized` flag
+/// (issue #589). Generic over the argv element type so the parser is
+/// unit-testable without touching the real process argv.
+fn has_minimized_flag<I, S>(args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    args.into_iter()
+        .any(|arg| arg.as_ref() == std::ffi::OsStr::new(MINIMIZED_FLAG))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     log::info!("[APP] run: ENTRY");
@@ -671,6 +699,10 @@ pub fn run() {
                 let _ = window.unminimize();
                 let _ = window.set_focus();
             }
+            // Issue #592: raising the window changes its visibility, which
+            // drives the tray's Show/Hide label — repaint from backend state
+            // on a worker (the rebuild may perform blocking Spotify HTTP).
+            crate::tray::refresh_tray_from_state(app);
             // argv[0] is the exe path; scan for a presencejam:// URL
             // (Windows + Linux pass deep links as argv when the scheme
             // is invoked; macOS uses the deep-link plugin's on_open_url
@@ -710,7 +742,6 @@ pub fn run() {
                 tauri_plugin_log::TargetKind::Webview,
             ))
             .build())
-        .plugin(tauri_plugin_http::init())
         .setup(|app| {
             // Set panic hook to log crashes
             std::panic::set_hook(Box::new(|panic_info| {
@@ -800,8 +831,21 @@ pub fn run() {
                     // every startup is idempotent and ensures the dock
                     // icon matches the saved preference even after a
                     // crash-restart. See audit Q4.
-                    if cfg.teams.start_minimized {
-                        log::info!("[APP] setup: start_minimized enabled, hiding window");
+                    // Issue #589: the autostart plugin launches us with
+                    // `--minimized`, which used to be passed and parsed
+                    // nowhere — an autostart user got a window and a
+                    // taskbar entry thrown up at every login. The flag now
+                    // joins the config setting so the launch intent is real;
+                    // it stays exact-match only (never a prefix of some
+                    // other argument).
+                    let launched_minimized = has_minimized_flag(std::env::args_os());
+                    if cfg.teams.start_minimized || launched_minimized {
+                        log::info!(
+                            "[APP] setup: starting hidden (config start_minimized={}, {}={})",
+                            cfg.teams.start_minimized,
+                            MINIMIZED_FLAG,
+                            launched_minimized
+                        );
                         if let Some(window) = app.get_webview_window("main") {
                             let _ = window.hide();
                         }
@@ -1035,6 +1079,7 @@ pub fn run() {
             commands::misc::relaunch_app,
             updater_bg::stage_deferred_update,
             updater_bg::clear_failed_update_install,
+            updater_bg::cancel_deferred_update,
             commands::playback::playback_play,
             commands::playback::playback_pause,
             commands::playback::playback_next,
@@ -1047,6 +1092,17 @@ pub fn run() {
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // Issue #585: close-to-tray applies to the main window only.
+                // A detached Logs/Settings pane must really close — its
+                // badge clears on `tauri://destroyed` — so non-main windows
+                // fall through to the platform's normal destroy path.
+                if !close_hides_window(window.label()) {
+                    log::info!(
+                        "[APP] window_event: CloseRequested on detached window '{}', closing it",
+                        window.label()
+                    );
+                    return;
+                }
                 log::info!("[APP] window_event: CloseRequested received, hiding window");
                 let _ = window.hide();
                 api.prevent_close();
@@ -1350,6 +1406,72 @@ mod tests {
         assert!(
             body.contains("failed to build tauri application"),
             "run() build failure must log the cause"
+        );
+    }
+
+    /// Issue #585: only the main window is close-to-tray. Detached panes
+    /// clear their `$detachedPanes` badge on `tauri://destroyed`, so hiding
+    /// one strands a live-but-invisible window that no `setFocus()` can
+    /// bring back.
+    #[test]
+    fn test_close_hides_window_label_guard() {
+        assert!(
+            close_hides_window("main"),
+            "the main window must stay close-to-tray"
+        );
+        for detached in ["logs-detached", "settings-detached", "other", ""] {
+            assert!(
+                !close_hides_window(detached),
+                "window `{}` must really close, not hide",
+                detached
+            );
+        }
+        // The handler must actually consult the guard before hiding, and
+        // still prevent the close for the main window.
+        let source = include_str!("lib.rs");
+        let needle = "tauri::WindowEvent::CloseRequested";
+        let idx = source
+            .find(needle)
+            .expect("lib.rs must handle WindowEvent::CloseRequested");
+        let tail = &source[idx..idx + 1200.min(source.len() - idx)];
+        assert!(
+            tail.contains("close_hides_window(window.label())"),
+            "the CloseRequested arm must guard on the window label (issue #585)"
+        );
+        assert!(
+            tail.contains("api.prevent_close()"),
+            "the main window must still prevent the close (close-to-tray)"
+        );
+    }
+
+    /// Issue #589: the autostart plugin passes `--minimized`, which must be
+    /// parsed rather than silently ignored — and matched exactly, so a
+    /// future argument that merely starts with the flag is not mistaken
+    /// for it.
+    #[test]
+    fn test_has_minimized_flag_parses_autostart_arg() {
+        assert!(
+            has_minimized_flag(vec!["presencejam.exe", "--minimized"]),
+            "the autostart argv must be recognised"
+        );
+        assert!(
+            has_minimized_flag(vec![
+                "presencejam".to_string(),
+                MINIMIZED_FLAG.to_string()
+            ]),
+            "OsString argv elements must be recognised too"
+        );
+        assert!(
+            !has_minimized_flag(vec!["presencejam.exe"]),
+            "a plain launch must not start hidden"
+        );
+        assert!(
+            !has_minimized_flag(Vec::<String>::new()),
+            "an empty argv must not start hidden"
+        );
+        assert!(
+            !has_minimized_flag(vec!["--minimized-please"]),
+            "the flag is matched exactly, never as a prefix"
         );
     }
 }
