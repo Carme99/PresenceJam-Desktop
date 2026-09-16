@@ -56,6 +56,38 @@ pub fn require_main_window(window: &tauri::Window) -> Result<(), String> {
     }
 }
 
+/// Issue #485 caller-location matrix: which commands are guarded by
+/// `require_main_window`, which are intentionally unguarded, and why.
+/// Commands without a `tauri::Window` param cannot call the guard (it
+/// needs the caller label); their main-only status is justified by caller
+/// location instead -- every frontend call site lives in a main-window-only
+/// view (Dashboard, +page, UpdatePrompt, Diagnostics-as-main-route).
+/// Detached windows (`logs-detached` / `settings-detached`) host only
+/// Settings + LogViewer, whose invokes are the allowlist below.
+///
+/// GUARDED (take `window` and reject non-main first):
+/// start_syncing, stop_syncing, app_exit, refresh_status (sync.rs),
+/// start_spotify_auth, start_spotify_reconnect, complete_spotify_auth_manual,
+/// refresh_spotify (spotify_auth.rs), start_teams_auth_device_code,
+/// refresh_teams (teams_auth.rs), complete_onboarding (onboarding.rs),
+/// relaunch_app (misc.rs), stage_deferred_update (updater_bg.rs).
+///
+/// INTENTIONALLY UNGUARDED -- main-only by caller location (no Window param):
+/// playback_play/pause/next/previous/transfer, get_playback_devices/queue
+/// (Dashboard tray-adjacent controls + tray worker; Dashboard is main-only),
+/// show_window (+page main route), update_tray_menu_state (Dashboard),
+/// get_diagnostics_snapshot (Diagnostics-as-main-route), preview_status
+/// (Settings preview but read-only pure computation), get_sync_status
+/// (Dashboard/Settings status read), get_spotify/teams_granted_scopes
+/// (Settings scope readers, no side effect), is_spotify_client_secret_set
+/// (Settings/Reconnect presence read), clear_failed_update_install
+/// (Diagnostics dismiss; deletes only the marker file).
+///
+/// INTENTIONALLY UNGUARDED -- detached-legit (invoked from popped-out
+/// Settings/LogViewer by design): reconnect_spotify, reconnect_teams,
+/// poll_teams_auth, set_autostart_enabled, open_logs_folder,
+/// open_external_url (Teams verification-URL open during detached
+/// device-code flow).
 #[cfg(test)]
 mod tests {
     /// Regression guard for issue #76: the `commands` module must declare all
@@ -130,6 +162,39 @@ mod tests {
             assert!(
                 !super::is_main_window_label(rejected),
                 "label {:?} must not pass the main-window guard (issue #241)",
+                rejected
+            );
+        }
+    }
+
+    /// Issue #485: the guard predicate is the enforcement primitive every
+    /// guarded command funnels through -- pin its exact accept/reject
+    /// boundary behaviorally (not by grepping call sites, which pins
+    /// implementation text). The caller-location matrix above documents
+    /// which commands are guarded vs intentionally unguarded and why;
+    /// this test pins the primitive the matrix relies on.
+    #[test]
+    fn test_guard_matrix_primitive_accepts_only_main() {
+        use super::is_main_window_label;
+        // Accept: exactly "main".
+        assert!(is_main_window_label("main"));
+        // Reject: detached labels, empty, case/whitespace tampering, and
+        // near-miss prefixes/suffixes a confused deputy might present.
+        for rejected in &[
+            "logs-detached",
+            "settings-detached",
+            "",
+            "Main",
+            "MAIN",
+            "main ",
+            " main",
+            "main-window",
+            "mainwindow",
+            "detached",
+        ] {
+            assert!(
+                !is_main_window_label(rejected),
+                "label {:?} must not pass the main-window guard (issue #485)",
                 rejected
             );
         }

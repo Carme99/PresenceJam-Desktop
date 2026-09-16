@@ -33,6 +33,8 @@ export const defaultConfig: AppConfig = {
     log_level: 'Info'
   },
   autostart: false,
+  // Issue #432: mirrors Rust StatusRulesConfig::default (empty rule lists).
+  status_rules: { quiet_hours: [], track_rules: [] },
   // Mirrors Rust AppConfig::default_schema_version (issue #379). Required:
   // ts-rs emits schema_version as a required number, and unknown-key
   // `extra` is #[ts(skip)] so it is absent here by design.
@@ -47,7 +49,7 @@ export const defaultConfig: AppConfig = {
  */
 export const DEFAULT_PROFANITY_PLACEHOLDER = defaultConfig.teams.profanity_placeholder;
 
-export const configStore = writable<AppConfig>(defaultConfig);
+export const configStore = writable<AppConfig>(structuredClone(defaultConfig));
 
 let loadPromise: Promise<AppConfig> | null = null;
 let savePromise: Promise<AppConfig> | null = null;
@@ -77,6 +79,19 @@ function normalizeLoadedConfig(cfg: AppConfig): AppConfig {
       p.expiry_buffer_seconds = BigInt(p.expiry_buffer_seconds as string);
     }
   }
+  // Issue #432: pre-4.5 backends omit `status_rules` (Rust serde default
+  // covers the backend side); deep-backfill here so the Settings rules
+  // card never binds against undefined — including hand-edited configs
+  // that carry the section but lack one of the arrays.
+  const r = cfg as unknown as {
+    status_rules?: { quiet_hours?: unknown[]; track_rules?: unknown[] } | null;
+  };
+  if (r.status_rules == null) {
+    r.status_rules = { quiet_hours: [], track_rules: [] };
+  } else {
+    if (!Array.isArray(r.status_rules.quiet_hours)) r.status_rules.quiet_hours = [];
+    if (!Array.isArray(r.status_rules.track_rules)) r.status_rules.track_rules = [];
+  }
   return cfg;
 }
 
@@ -103,8 +118,9 @@ export async function loadConfig(): Promise<AppConfig> {
       return normalized;
     } catch (e) {
       console.error('[CONFIG] loadConfig failed:', e);
-      configStore.set(defaultConfig);
-      return defaultConfig;
+      const fallback = structuredClone(defaultConfig);
+      configStore.set(fallback);
+      return fallback;
     } finally {
       loadPromise = null;
     }
@@ -123,8 +139,9 @@ export async function saveConfig(cfg: AppConfig): Promise<AppConfig> {
       // adopt that value for the store. Storing `cfg` here left the UI
       // showing a value (e.g. a typed 999) that was never written to disk.
       const persisted = await invoke<AppConfig>('save_config', { config: payload });
-      configStore.set(persisted);
-      return persisted;
+      const normalized = normalizeLoadedConfig(persisted);
+      configStore.set(normalized);
+      return normalized;
     } finally {
       savePromise = null;
     }

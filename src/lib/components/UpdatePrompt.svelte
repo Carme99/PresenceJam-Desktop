@@ -171,23 +171,23 @@
 </script>
 
 {#if update && !dismissed}
-  <div class="update-banner" role="status">
-    <div class="update-info">
+  <div class="update-banner" role="region" aria-label={t('update.available', { version: update.version })}>
+    <div class="update-info" role="status">
       <span class="update-title">{t('update.available', { version: update.version })}</span>
       {#if stagedVersion}
-        <span class="update-staged" role="status">
+        <span class="update-staged">
           {currentVersion
             ? t('update.stagedVsCurrent', { staged: stagedVersion, current: currentVersion })
             : t('update.stagedQuit', { version: stagedVersion })}
         </span>
       {:else if confirming}
-        <span class="update-confirm" role="status">
+        <span class="update-confirm">
           {currentVersion
             ? t('update.confirmQuitInstall', { staged: update.version, current: currentVersion })
             : t('update.confirmQuitInstallUnknown', { staged: update.version })}
         </span>
       {:else if isStaleSkipped}
-        <span class="update-stale" role="status">
+        <span class="update-stale">
           {currentVersion
             ? t('update.staleSkipped', { staged: staleSkippedVersion, current: currentVersion })
             : t('update.staleSkippedUnknown', { staged: staleSkippedVersion })}

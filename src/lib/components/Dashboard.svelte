@@ -62,7 +62,7 @@
     try {
       devLog('[DASHBOARD] onMount: calling invoke get_sync_status');
       const status = await invoke<SyncStatus>('get_sync_status');
-      console.info('[DASHBOARD] initial sync status:', {
+      devLog('[DASHBOARD] initial sync status:', {
         is_syncing: status.is_syncing,
         spotify_connected: status.spotify_connected,
         teams_connected: status.teams_connected,
@@ -374,7 +374,7 @@
 <div class="dashboard">
   <header>
     <div class="header-left">
-      <Logo size={32} />
+      <Logo size={32} title={null} />
       <div class="title">
         <h1>PresenceJam</h1>
         <div class="badges">
@@ -425,7 +425,7 @@
     {/if}
     {#if !spotifyConnected || !teamsConnected}
       <div class="setup-card card">
-        <div class="setup-icon"><Logo size={56} /></div>
+        <div class="setup-icon"><Logo size={56} title={null} /></div>
         <h2>{t('dashboard.setupRequired')}</h2>
         <p>{t('dashboard.setupHint')}</p>
         <div class="setup-actions">
@@ -483,7 +483,7 @@
     {:else}
       <div class="not-playing card">
         <div class="not-playing-icon" aria-hidden="true">
-          <Logo size={64} />
+          <Logo size={64} title={null} />
         </div>
         <h3>{t('dashboard.nothingPlaying')}</h3>
         <p>{t('dashboard.nothingPlayingHint')}</p>

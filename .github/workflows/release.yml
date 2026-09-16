@@ -115,7 +115,7 @@ jobs:
           cache: 'npm'
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e  # stable
+        uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e  # 1.96
 
       # Cargo cache mirrors the PR-time ci.yml setup (PR #55). Cuts the
       # release build from ~50 min cold compile to ~15-20 min warm.
@@ -294,6 +294,15 @@ jobs:
           path: artifacts
           digest-mismatch: error
 
+      # Checksums-only manifest (issue #374): SHA256SUMS.txt itself is
+      # unsigned (no minisign .sig) and is generated here in the release
+      # job, so the build job's SLSA attestation (subject-path =
+      # matrix.bundle_path) does NOT cover it. Verify by cross-checking a
+      # downloaded artifact's digest against both this file AND its
+      # attested per-artifact provenance (`gh attestation verify --repo
+      # Carme99/PresenceJam-Desktop`); see SECURITY.md "Build provenance
+      # attestation". The Tauri updater independently verifies the minisign
+      # .sig files.
       - name: Generate SHA256SUMS.txt
         run: |
           set -euo pipefail
@@ -411,6 +420,11 @@ jobs:
   homebrew:
     needs: [resolve-tag, release]
     runs-on: ubuntu-latest
+    # Least privilege (issue #359): this job pushes to carme99/homebrew-tap
+    # via HOMEBREW_TAP_TOKEN, so it must not inherit the workflow-level
+    # contents:write grant (mirrors the winget job below).
+    permissions:
+      contents: read
     env:
       RELEASE_TAG: ${{ needs.resolve-tag.outputs.tag }}
     steps:

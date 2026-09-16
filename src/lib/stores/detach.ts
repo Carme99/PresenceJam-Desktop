@@ -49,22 +49,52 @@ function markDetached(pane: DetachablePane, value: boolean) {
  * (or the window survived a main-window reload and the store lost track),
  * focus the existing child window instead of creating a duplicate.
  */
+const popOutInFlight: Record<DetachablePane, boolean> = { logs: false, settings: false };
+
 export async function popOut(pane: DetachablePane): Promise<void> {
+  // #review-9: in-flight guard — two rapid popOut clicks must not
+  // double-create the child window (both would pass getByLabel null).
+  // Static pane-keyed lookup (Record, not Set — two fixed keys).
+  if (popOutInFlight[pane]) return;
+  popOutInFlight[pane] = true;
+  try {
+    await popOutInner(pane);
+  } finally {
+    popOutInFlight[pane] = false;
+  }
+}
+
+async function popOutInner(pane: DetachablePane): Promise<void> {
   const label = DETACHED_LABEL[pane];
   const existing = await WebviewWindow.getByLabel(label);
   if (existing) {
     try {
       await existing.setFocus();
+      markDetached(pane, true);
+      return;
     } catch (e) {
-      console.warn(`[DETACH] focus ${label} failed:`, e);
+      // #422: stale/zombie label — the window handle exists but focus
+      // rejects. Clear the flag and fall through to re-creation so the
+      // badge never claims a detached window that cannot be focused.
+      console.warn(`[DETACH] focus ${label} failed (stale handle, recreating):`, e);
+      markDetached(pane, false);
     }
-    markDetached(pane, true);
-    return;
   }
 
   const size = PANE_SIZE[pane];
+  // Issue #433: carry the current theme on the URL so the child's
+  // pre-paint snippet (app.html) applies it before first paint — no
+  // flash of the wrong theme even before the storage event converges.
+  // Read by literal key (no store import — this module never imports it).
+  let themeParam = '';
+  try {
+    const stored = window.localStorage.getItem('presencejam:theme');
+    if (stored === 'dark' || stored === 'light') themeParam = `?theme=${stored}`;
+  } catch {
+    // localStorage may be blocked; the child falls back to OS preference.
+  }
   const win = new WebviewWindow(label, {
-    url: `/detached/${pane}`,
+    url: `/detached/${pane}${themeParam}`,
     title: PANE_TITLE[pane],
     width: size.width,
     height: size.height,
@@ -106,7 +136,13 @@ export async function focusDetached(pane: DetachablePane): Promise<void> {
     try {
       await win.setFocus();
     } catch (e) {
-      console.warn('[DETACH] focusDetached failed:', e);
+      // #422: zombie label with no focusable window — clear the badge so
+      // the Dashboard stops offering focus-instead-of-navigate.
+      console.warn('[DETACH] focusDetached failed (clearing stale flag):', e);
+      markDetached(pane, false);
     }
+  } else {
+    // #422: no window behind the flag — clear it so the badge clears.
+    markDetached(pane, false);
   }
 }

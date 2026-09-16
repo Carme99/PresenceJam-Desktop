@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, master]
+    branches: [main]
 
 # Read-only: this workflow only checks out the PR head and runs builds.
 # No secrets required.
@@ -17,6 +17,50 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Cross-platform compile gate (issue #355): the `rust` job below checks
+  # Linux only; this leg runs `cargo check` on macOS + Windows so
+  # platform-gated code (e.g. tray.rs macOS dock-badge cfg) compiles in CI.
+  # Deliberately check-only (no fmt/clippy/test): the ubuntu legs remain the
+  # enforcing gates; a full triple-OS test matrix is future work.
+  rust-platform-check:
+    name: Rust check (macOS + Windows)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6.5.0
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e  # 1.96
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Cargo check (all targets)
+        env:
+          CARGO_INCREMENTAL: 0
+        run: cargo check --manifest-path src-tauri/Cargo.toml --all-targets
+
   # Frontend: catches Svelte/TS build errors. Mirrors the npm ci + npm run build
   # steps from release.yml. Cached via actions/setup-node cache: 'npm'.
   # Also runs `cargo test --lib` to materialise the ts-rs `#[ts(export)]`
@@ -91,6 +135,12 @@ jobs:
       # all in place.
       - name: Svelte/TS type check (npm run check)
         run: npm run check
+
+      # Frontend unit tests via vitest (issue #443). Runs after the type
+      # check; a missing `test` script must not fail this job before the
+      # harness lands, so fall back to a no-op in that case.
+      - name: Frontend unit tests (npm test)
+        run: npm test --if-present
 
   # Rust: cargo check + cargo test on all targets (lib + bins + tests + benches) catches
   # type errors, borrow errors, missing imports, and broken test code.
@@ -244,3 +294,55 @@ jobs:
             fi
           done
           exit $missing
+
+  # Secret scan (issue #356): read-only gitleaks detect over all commits.
+  # No SARIF upload (needs security-events:write); findings surface as
+  # step output. contents:read is already the workflow default.
+  secret-scan:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Gitleaks detect
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e  # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Dependency-vulnerability gate (issue #357): surfaces new advisories on
+  # the introducing PR. Non-blocking (`continue-on-error`) until the two
+  # accepted quick-xml RUSTSEC-2026-0194/-0195 advisories clear upstream
+  # (see SECURITY.md "Accepted transitive risks"); then remove the flag to
+  # enforce. The npm audit leg stays advisory-only: `npm audit` exits
+  # non-zero on any finding, so it reports without gating.
+  dep-audit:
+    name: Dependency audit (cargo + npm)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Cargo audit (advisory)
+        uses: RustSec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998  # v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          working-directory: src-tauri
+          ignore: RUSTSEC-2026-0194,RUSTSEC-2026-0195
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6.5.0
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: npm audit (advisory)
+        run: npm audit --audit-level=high || echo "::warning::npm audit found advisories (advisory-only, see #357)"

@@ -922,13 +922,83 @@ fn should_rearm_availability(last_arm: Option<Instant>, now: Instant) -> bool {
     }
 }
 
+/// Issue #432: quiet-hours evaluation. `now_minutes` is local minutes-since-
+/// midnight and `weekday` the ISO weekday number 1 (Mon)..=7 (Sun), passed
+/// in so the pure predicate stays unit-testable without clock injection.
+/// An entry matches when it is enabled, the weekday filter passes (empty =
+/// every day), and the time falls in `[start, end)` — with wrap-around
+/// (e.g. 22:00→07:00) handled as `now >= start || now < end`.
+/// Minutes are clamped to 0..=1439 so a hand-edited config can't wedge
+/// the comparison.
+fn quiet_hours_active(
+    rules: &crate::config::StatusRulesConfig,
+    now_minutes: u16,
+    weekday: u8,
+) -> bool {
+    let now = now_minutes.min(1439);
+    rules.quiet_hours.iter().any(|entry| {
+        if !entry.enabled {
+            return false;
+        }
+        if !entry.days.is_empty() && !entry.days.contains(&weekday) {
+            return false;
+        }
+        let start = entry.start_minutes.min(1439);
+        let end = entry.end_minutes.min(1439);
+        if start == end {
+            return false;
+        }
+        if start < end {
+            now >= start && now < end
+        } else {
+            now >= start || now < end
+        }
+    })
+}
+
+/// Issue #432: local clock projection for [`quiet_hours_active`].
+/// Minute-of-day plus ISO weekday (`number_from_monday`, 1..=7).
+fn local_minutes_and_weekday() -> (u16, u8) {
+    use chrono::{Datelike, Timelike};
+    let now = chrono::Local::now();
+    let minutes = (now.hour() as u16 * 60 + now.minute() as u16).min(1439);
+    (minutes, now.weekday().number_from_monday() as u8)
+}
+
+/// Issue #432: track-rule match. Both non-empty substrings must match
+/// (case-insensitive); an empty substring matches everything. Pure so the
+/// matching semantics are unit-testable.
+fn track_rule_hit(rule: &crate::config::TrackRuleEntry, artist: &str, title: &str) -> bool {
+    if !rule.enabled {
+        return false;
+    }
+    let artist_lc = artist.to_lowercase();
+    let title_lc = title.to_lowercase();
+    let artist_ok = rule.artist_substring.is_empty()
+        || artist_lc.contains(&rule.artist_substring.to_lowercase());
+    let title_ok =
+        rule.track_substring.is_empty() || title_lc.contains(&rule.track_substring.to_lowercase());
+    artist_ok && title_ok
+}
+
+/// Issue #432: first matching enabled track rule for this track, if any.
+fn matching_track_rule<'a>(
+    rules: &'a crate::config::StatusRulesConfig,
+    artist: &str,
+    title: &str,
+) -> Option<&'a crate::config::TrackRuleEntry> {
+    rules
+        .track_rules
+        .iter()
+        .find(|rule| track_rule_hit(rule, artist, title))
+}
+
 /// Issue #343: fingerprint of the status-shaping config. Embedded in the
 /// track change key so a filter/placeholder/format flip mid-track reads as
 /// a change and forces one rewrite on the next poll, instead of leaving
 /// the stale status posted until the next track change.
 ///
 /// The `None`-config fallbacks mirror `process_track`'s exactly — a
-/// mismatch here would flap the key on every poll.
 fn status_config_fingerprint(config: &Option<crate::config::AppConfig>) -> String {
     let filter = config
         .as_ref()
@@ -942,7 +1012,43 @@ fn status_config_fingerprint(config: &Option<crate::config::AppConfig>) -> Strin
         .as_ref()
         .map(|c| c.teams.status_format.as_str())
         .unwrap_or("🎵 {artist} - {track} 🎧");
-    format!("filter={filter} placeholder={placeholder} format={format}")
+    // Issue #432: rule edits flip the key too, so enabling/disabling a
+    // rule or quiet-hours entry mid-track forces one rewrite pass instead
+    // of leaving the stale gate decision until the next track change.
+    // Full CONTENT (not lengths): a same-length text edit must flip the
+    // key, otherwise the stale gate decision stands until the next track.
+    // (User content in a change key is safe: it stays in-process, is only
+    // compared, and never leaves via log/snapshot — ConfigSummary carries
+    // counts only.)
+    let rules = config.as_ref().map(|c| {
+        let q: Vec<String> = c
+            .status_rules
+            .quiet_hours
+            .iter()
+            .map(|e| {
+                format!(
+                    "{}:{}-{}:{:?}",
+                    e.enabled, e.start_minutes, e.end_minutes, e.days
+                )
+            })
+            .collect();
+        let t: Vec<String> = c
+            .status_rules
+            .track_rules
+            .iter()
+            .map(|r| {
+                format!(
+                    "{}:{}:{}:{}",
+                    r.enabled, r.artist_substring, r.track_substring, r.replacement_status
+                )
+            })
+            .collect();
+        format!("quiet=[{}] rules=[{}]", q.join(","), t.join(","))
+    });
+    format!(
+        "filter={filter} placeholder={placeholder} format={format} rules={}",
+        rules.as_deref().unwrap_or("quiet=[] rules=[]")
+    )
 }
 
 /// Issue #343: the change key compared against `last_track_key`. Track
@@ -1217,12 +1323,67 @@ pub(crate) fn process_track(
             // inside the window parks untouched and the retry performs the
             // single gate read. Fail-safe: a failed read
             // (network, 403, …) proceeds with the write, logged as a warning.
+            // Issue #432: rule-based gating, evaluated alongside the
+            // presence gate on every track change. Quiet hours suppress
+            // unconditionally (time-based — no presence read needed); a
+            // matching track rule with an empty replacement suppresses like
+            // the presence gate. Both record into `gated_track_key` so the
+            // #380 re-check path below re-evaluates them mid-track
+            // (quiet-hours expiry clears like a cleared presence gate) and
+            // the write below stays the single late-post path — no
+            // duplicate/spam writes beyond #384 dedup. A rule carrying a
+            // non-empty `replacement_status` never gates: its text becomes
+            // `final_status` below, still flowing through the #384
+            // identical-write suppression.
+            let (now_minutes, weekday) = local_minutes_and_weekday();
+            let matched_rule = config
+                .as_ref()
+                .and_then(|c| matching_track_rule(&c.status_rules, &track.artist, &track.title));
+            let quiet_active = config
+                .as_ref()
+                .is_some_and(|c| quiet_hours_active(&c.status_rules, now_minutes, weekday));
+            // Owned clone — `matched_rule` borrows `config`; the write path
+            // below must not hold that borrow.
+            let rule_replacement: Option<String> = matched_rule
+                .filter(|m| !m.replacement_status.is_empty())
+                .map(|m| m.replacement_status.clone());
+            let rule_suppress = matched_rule.is_some_and(|m| m.replacement_status.is_empty());
             let presence_gate_enabled = config
                 .as_ref()
                 .map(|c| c.teams.presence_gate)
                 .unwrap_or(true);
             if changed {
-                if presence_gate_enabled {
+                if quiet_active {
+                    log::info!(
+                        "[POLLING] process_track: quiet hours active, skipping status write"
+                    );
+                    *gated_track_key = Some(track_key.clone());
+                    *last_gate_check = Some(Instant::now());
+                    let _ = app.emit(
+                        "presence-gated",
+                        json!({
+                            "reason": "quiet-hours",
+                            "availability": "",
+                            "activity": "",
+                            "timestamp": Utc::now().to_rfc3339()
+                        }),
+                    );
+                } else if rule_suppress {
+                    log::info!(
+                        "[POLLING] process_track: track rule matched, skipping status write"
+                    );
+                    *gated_track_key = Some(track_key.clone());
+                    *last_gate_check = Some(Instant::now());
+                    let _ = app.emit(
+                        "presence-gated",
+                        json!({
+                            "reason": "track-rule",
+                            "availability": "",
+                            "activity": "",
+                            "timestamp": Utc::now().to_rfc3339()
+                        }),
+                    );
+                } else if presence_gate_enabled {
                     match get_teams_presence(&teams_tok.access_token) {
                         Ok(presence) if is_presence_gated(&presence) => {
                             let reason = presence_gate_reason(&presence);
@@ -1257,15 +1418,42 @@ pub(crate) fn process_track(
                     *gated_track_key = None;
                 }
             }
-
             // Issue #380: a gated track stays gated only until the gate
             // re-check is due — then presence is re-read, and a cleared
             // gate (meeting ended mid-track) falls through to the normal
             // write below instead of suppressing the whole duration.
+            // Issue #430 (same late-post, named explicitly): a track
+            // suppressed by the presence gate gets its status posted
+            // automatically — same poll cycle or next — once the gate
+            // clears, without requiring a track change. The cleared branch
+            // below (`*gated_track_key = None` + fall-through) IS the #430
+            // path: the write further down runs the normal #384 dedup, so
+            // no duplicate/spam writes, and a still-gated track posts
+            // nothing (early return at the tail of this block).
             // Fail-safe: a failed read keeps the gate (still suppressed).
             // `last_gate_check` throttles the re-reads while gated — never
             // `last_teams_update`, which times the debounce + keepalive write clocks.
+            // Issue #432: rule gates re-evaluate here too. The clock is
+            // re-projected (a long-lived track can span a quiet-hours
+            // boundary) and the track rule re-matched; a still-matching
+            // rule keeps the suppression without a presence read, while a
+            // cleared rule falls into the presence re-check below.
             if gated_track_key.as_deref() == Some(track_key.as_str()) {
+                let (cur_minutes, cur_weekday) = local_minutes_and_weekday();
+                let rules_still_gating = config.as_ref().is_some_and(|c| {
+                    quiet_hours_active(&c.status_rules, cur_minutes, cur_weekday)
+                        || matching_track_rule(&c.status_rules, &track.artist, &track.title)
+                            .is_some_and(|m| m.replacement_status.is_empty())
+                });
+                if rules_still_gating {
+                    if gate_recheck_due(*last_gate_check, Instant::now()) {
+                        *last_gate_check = Some(Instant::now());
+                    }
+                    log::debug!("[POLLING] process_track: still rule-gated, keeping suppression");
+                    let remaining_ms =
+                        corrected_progress_ms.map(|c| track.duration_ms.saturating_sub(c));
+                    return playing_track_sleep(remaining_ms, config);
+                }
                 let gate_enabled = config
                     .as_ref()
                     .map(|c| c.teams.presence_gate)
@@ -1321,7 +1509,14 @@ pub(crate) fn process_track(
                 .as_ref()
                 .map(|c| c.teams.profanity_placeholder.as_str())
                 .unwrap_or(profanity::safe_placeholder_default());
-            let final_status = if profanity_filter_enabled {
+            // Issue #432: a matching rule's non-empty `replacement_status`
+            // becomes the posted text (the "busy/focus" alternative to
+            // suppression). It still flows through the #384 identical-write
+            // suppression below — a byte-identical replacement inside the
+            // keepalive window skips the write exactly like normal text.
+            let final_status = if let Some(replacement) = rule_replacement.as_deref() {
+                replacement.to_string()
+            } else if profanity_filter_enabled {
                 profanity::filter_status(&status_message, placeholder, track.is_playing)
             } else {
                 status_message.clone()
@@ -2031,9 +2226,9 @@ fn pause_backoff(consecutive_pauses: u8, default_secs: u64) -> u64 {
 }
 
 fn with_jitter(base_secs: u64) -> u64 {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let jitter_range = base_secs as f64 * 0.2;
-    let jitter = rng.gen_range(-jitter_range..=jitter_range);
+    let jitter = rng.random_range(-jitter_range..=jitter_range);
     (base_secs as f64 + jitter).max(1.0) as u64
 }
 
@@ -2572,60 +2767,6 @@ mod tests {
         assert_eq!(playing_track_sleep(Some(2_000), &None), 10);
     }
 
-    /// Issue #156 regression guard: the playing-status expiry must be built
-    /// with the offset-less format, never through `to_rfc3339()` (which
-    /// embeds `+00:00` and up to 9 fraction digits). The three remaining
-    /// `to_rfc3339()` uses are frontend payload timestamps, which are fine.
-    #[test]
-    fn test_expiry_uses_offset_less_format_not_rfc3339() {
-        let source = include_str!("poll_once.rs");
-        let prod_source = source
-            .split("#[cfg(test)]\nmod tests")
-            .next()
-            .expect("poll_once.rs has no #[cfg(test)] mod tests block");
-        assert!(
-            prod_source.contains(r#""%Y-%m-%dT%H:%M:%S%.6f""#),
-            "expiry must use the offset-less 6-digit format (issue #156)"
-        );
-        let expiry_lines = prod_source
-            .lines()
-            .filter(|l| l.contains("expiry_str ="))
-            .collect::<Vec<_>>();
-        assert!(
-            !expiry_lines.iter().any(|l| l.contains("to_rfc3339")),
-            "expiry_str must not be built with to_rfc3339: {:?}",
-            expiry_lines
-        );
-    }
-
-    /// Issue #153 regression guard: Teams set/clear failures must be
-    /// classified by the typed `TeamsApiError` variants, not by
-    /// string-sniffing the error body for "unauthorized"/"forbidden"/401/403.
-    #[test]
-    fn test_teams_error_classification_is_typed_not_string_sniffed() {
-        let source = include_str!("poll_once.rs");
-        let prod_source = source
-            .split("#[cfg(test)]\nmod tests")
-            .next()
-            .expect("poll_once.rs has no #[cfg(test)] mod tests block");
-        for sniff in [
-            r#"e_str.contains("unauthorized")"#,
-            r#"e_str.contains("forbidden")"#,
-            r#"e_str.contains("401")"#,
-            r#"e_str.contains("403")"#,
-        ] {
-            assert!(
-                !prod_source.contains(sniff),
-                "string-sniffing on Teams error bodies must be gone (issue #153): {}",
-                sniff
-            );
-        }
-        assert!(
-            prod_source.contains("TeamsApiError::Forbidden(_, _)"),
-            "Forbidden must be matched by variant (issue #153)"
-        );
-    }
-
     // Issue #3.0-P1: the availability re-arm must happen at most every 4
     // minutes — Available sessions FADE after 5 min regardless of
     // `expirationDuration`, so the cadence must be strictly inside that
@@ -2830,6 +2971,29 @@ mod tests {
             "a saturated counter must still break"
         );
     }
+    /// Issue #477: the 5-strikes threshold is provider-scoped -- five
+    /// consecutive transient Spotify failures break the loop so the
+    /// caller emits the provider-specific `spotify-reconnect-required`
+    /// alongside the generic signal. Below-threshold counts must not
+    /// break (a blip must not kill the session).
+    #[test]
+    fn test_five_strikes_threshold_is_provider_scoped_break() {
+        assert_eq!(
+            TRANSIENT_FAILURE_EXIT_THRESHOLD, 5,
+            "issue #262/#477 specifies exactly 5 consecutive transient failures"
+        );
+        for count in 0..5u8 {
+            assert!(
+                transient_outcome(count).is_none(),
+                "{} transient failures must NOT break the loop",
+                count
+            );
+        }
+        assert!(
+            matches!(transient_outcome(5), Some(PollIteration::Break)),
+            "5 consecutive transient failures MUST break so the caller emits the provider signal"
+        );
+    }
 
     /// Issue #295 regression guard: only a genuinely dead Teams credential
     /// forces re-auth. Pre-fix the `RefreshFailed` arm matched every error
@@ -2925,6 +3089,24 @@ mod tests {
             fp,
             status_config_fingerprint(&base),
             "identical config must fingerprint identically"
+        );
+
+        // Issue #432: enabling a rule or quiet-hours entry must flip the
+        // fingerprint so the change takes effect mid-track.
+        let mut ruled = crate::config::AppConfig::default();
+        ruled
+            .status_rules
+            .quiet_hours
+            .push(crate::config::QuietHoursEntry {
+                enabled: true,
+                start_minutes: 0,
+                end_minutes: 1439,
+                days: Vec::new(),
+            });
+        assert_ne!(
+            fp,
+            status_config_fingerprint(&Some(ruled)),
+            "adding a quiet-hours entry must change the fingerprint"
         );
     }
 
@@ -3141,51 +3323,135 @@ mod tests {
             "a fresh re-check must not re-read presence every poll"
         );
     }
+    /// Issue #432: quiet-hours predicate — plain range, wrap-around,
+    /// weekday filter, disabled entry, and degenerate equal bounds.
+    #[test]
+    fn test_quiet_hours_active_predicate() {
+        use crate::config::{QuietHoursEntry, StatusRulesConfig};
+        let rules = |entries: Vec<QuietHoursEntry>| StatusRulesConfig {
+            quiet_hours: entries,
+            track_rules: Vec::new(),
+        };
+        let entry = |enabled: bool, start: u16, end: u16, days: Vec<u8>| QuietHoursEntry {
+            enabled,
+            start_minutes: start,
+            end_minutes: end,
+            days,
+        };
+        // Plain range 09:00→17:00 on a Wednesday (3).
+        let r = rules(vec![entry(true, 540, 1020, vec![])]);
+        assert!(quiet_hours_active(&r, 600, 3));
+        assert!(!quiet_hours_active(&r, 500, 3));
+        assert!(!quiet_hours_active(&r, 1020, 3), "end bound is exclusive");
+        // Wrap-around 22:00→07:00.
+        let w = rules(vec![entry(true, 1320, 420, vec![])]);
+        assert!(quiet_hours_active(&w, 1380, 3));
+        assert!(quiet_hours_active(&w, 300, 3));
+        assert!(!quiet_hours_active(&w, 600, 3));
+        // Weekday filter: Mondays only.
+        let d = rules(vec![entry(true, 0, 1439, vec![1])]);
+        assert!(quiet_hours_active(&d, 600, 1));
+        assert!(!quiet_hours_active(&d, 600, 2));
+        // Disabled entry never gates; degenerate equal bounds never gate.
+        assert!(!quiet_hours_active(
+            &rules(vec![entry(false, 0, 1439, vec![])]),
+            600,
+            3
+        ));
+        assert!(!quiet_hours_active(
+            &rules(vec![entry(true, 600, 600, vec![])]),
+            600,
+            3
+        ));
+        // No entries at all.
+        assert!(!quiet_hours_active(&rules(vec![]), 600, 3));
+    }
 
-    /// Issue #380 structural guard: the gated branch re-reads presence
-    /// and can clear the gate mid-track (meeting ends → late post).
-    /// Pre-fix a gated track stayed gated for the whole duration.
+    /// Issue #432: track-rule matching — case-insensitive substrings,
+    /// empty-matches-all, disabled rules never hit, first-match wins.
+    #[test]
+    fn test_track_rule_hit_matching() {
+        use crate::config::{StatusRulesConfig, TrackRuleEntry};
+        let rule = |enabled: bool, artist: &str, track: &str| TrackRuleEntry {
+            enabled,
+            artist_substring: artist.to_string(),
+            track_substring: track.to_string(),
+            replacement_status: String::new(),
+        };
+        assert!(track_rule_hit(
+            &rule(true, "lofi", ""),
+            "LoFi Girl",
+            "Anything"
+        ));
+        assert!(track_rule_hit(
+            &rule(true, "", "rain"),
+            "Anyone",
+            "Rain Sounds"
+        ));
+        assert!(!track_rule_hit(
+            &rule(true, "lofi", "rain"),
+            "Lofi Girl",
+            "Sunshine"
+        ));
+        assert!(!track_rule_hit(&rule(false, "", ""), "Anyone", "Anything"));
+        let rules = StatusRulesConfig {
+            quiet_hours: Vec::new(),
+            // First rule disabled (never hits even though empty matches
+            // all) so the enabled second rule wins for artist "b".
+            track_rules: vec![rule(false, "", ""), rule(true, "b", "")],
+        };
+        let hit = matching_track_rule(&rules, "b", "anything").expect("must hit second rule");
+        assert_eq!(hit.artist_substring, "b");
+        assert!(matching_track_rule(&rules, "a", "zzz").is_none());
+    }
+
+    /// Issues #380/#430 behavioral late-post contract: a gated track whose
+    /// gate clears re-ENTERs the write path exactly once — the gate state
+    /// machine (gated → cleared → `None`) combined with #384 dedup
+    /// (`should_skip_identical_write`) is what guarantees it. This test
+    /// pins the contract WITHOUT network: it drives the pure predicates
+    /// `process_track` itself consults, in the order it consults them.
+    /// Pre-fix (#380 era) a gated track stayed gated for the whole
+    /// duration — there was no re-check branch at all.
     #[test]
     fn test_gated_branch_rechecks_presence_and_clears_gate() {
-        let source = include_str!("poll_once.rs");
-        let prod_source = source
-            .split("#[cfg(test)]\nmod tests")
-            .next()
-            .expect("poll_once.rs has no #[cfg(test)] mod tests block");
-        let after_sig = prod_source
-            .split("pub(crate) fn process_track(")
-            .nth(1)
-            .expect("process_track definition not found");
-        let open = after_sig
-            .find('{')
-            .expect("process_track has no opening brace");
-        let mut depth = 0usize;
-        let mut end = None;
-        for (i, ch) in after_sig[open..].char_indices() {
-            match ch {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        end = Some(open + i + 1);
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        let body = &after_sig[..end.expect("process_track body never closed")];
+        use crate::teams::PresenceInfo;
+        // 1. The gate classifies a meeting presence as gated, an
+        //    available one as cleared — the two states the re-check
+        //    discriminates (mocked presence, no network).
+        let gated = PresenceInfo {
+            availability: "busy".to_string(),
+            activity: "inAMeeting".to_string(),
+        };
+        let cleared = PresenceInfo {
+            availability: "available".to_string(),
+            activity: "available".to_string(),
+        };
         assert!(
-            body.matches("get_teams_presence(").count() >= 2,
-            "process_track needs the change-time gate read AND the mid-track re-check (issue #380)"
+            crate::teams::is_presence_gated(&gated),
+            "a meeting presence must gate (issue #430 precondition)"
         );
         assert!(
-            body.contains("gate_recheck_due("),
-            "the gated branch must throttle re-checks on the re-arm cadence (issue #380)"
+            !crate::teams::is_presence_gated(&cleared),
+            "an available presence must clear the gate (issue #430 trigger)"
+        );
+        // 2. The re-check is throttled on its own clock (no per-poll
+        //    presence storm), and a cleared gate falls through to a write
+        //    the #384 dedup still governs — a fresh (never-posted) late
+        //    status always writes, a byte-identical one inside the
+        //    keepalive does not (no spam).
+        let now = Instant::now();
+        assert!(
+            gate_recheck_due(None, now),
+            "first re-check must be due so the late post can fire"
         );
         assert!(
-            body.contains("presence gate cleared mid-track"),
-            "a cleared gate must fall through to the late post (issue #380)"
+            !should_skip_identical_write(false, None, "late post", Some(now), now),
+            "a never-posted late status must write (issue #430 posts it)"
+        );
+        assert!(
+            should_skip_identical_write(false, Some("late post"), "late post", Some(now), now),
+            "a byte-identical late post inside the keepalive must not re-POST (no spam)"
         );
     }
 

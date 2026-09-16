@@ -1,4 +1,4 @@
-# State of Features — v4.3.0
+# State of Features — v4.5.0
 
 Quick, no-hedge answers to "does this thing actually work in *my* setup?"
 Most of the answers below are tied to a code path or a docs file you can read
@@ -9,7 +9,7 @@ end-to-end; the few rows that can't be sourced inline are explicitly flagged
 > row that's stale, the right place to flag it is in a PR against this file;
 > do not edit the underlying behavior silently.
 
-## Tested in main (verified during the v4.3.0 release cycle)
+## Tested in main (verified during the v4.5.0 release cycle)
 
 | Feature                                               | Status | Where it's wired / verified                                                                                             |
 |-------------------------------------------------------|--------|--------------------------------------------------------------------------------------------------------------------------|
@@ -57,6 +57,13 @@ end-to-end; the few rows that can't be sourced inline are explicitly flagged
 | Precise missing-refresh_token error | ✅     | `src-tauri/src/spotify.rs` — exchange without `refresh_token` surfaces `token response omitted refresh_token`, not a generic parse failure (#350). |
 | Spotify secret IPC validation (32–512) | ✅     | `src-tauri/src/commands/spotify_auth.rs::validate_spotify_client_secret` — 32-char alphanumeric `client_id` + 32–512 ASCII-alphanumeric secret, both validated at the IPC boundary; manual-code peek-then-take retry + legacy parse-before-keychain (#351, #352, #354, #446). |
 | LogViewer render-window + stickiness | ✅     | `src/lib/components/LogViewer.svelte` — 500-entry buffer, newest 100 rendered keyed, 48 px stickiness with Jump-to-latest (#399, #400). |
+| Status rules: quiet hours + track rules | ✅     | `src-tauri/src/config.rs::StatusRulesConfig` (additive, serde defaults) + `polling/poll_once.rs` rule hooks flowing through the presence-gate path with mid-track re-evaluation; Settings rules card with weekday picker; same-length rule edits flip the change fingerprint (#432). |
+| Pending status posts when presence gate clears mid-track | ✅     | `polling/poll_once.rs` gate re-check branch falls through to the single late-post write with `last_teams_update` untouched; predicate coverage pins the gate-clear path (#430 via #380). |
+| Detached windows: theme sync + self-healing badges | ✅     | `src/app.html` pre-paint bootstrap (`?theme=` override + stored key + OS fallback) + `src/lib/stores/theme.ts` cross-window storage sync; zombie detached flags clear with fall-through re-create (#433, #422, #423). |
+| One-click redacted support snapshot from LogViewer | ✅     | `LogViewer.svelte::copySnapshot` sources solely `get_diagnostics_snapshot.recent_logs` (redact_sensitive-passed) + version/platform; live buffer never pasted; snapshot-copy only, virtualization deferred (#434). |
+| Frontend unit-test harness (vitest) | ✅     | `vitest.config.js` + `tests/` (stores, i18n, logviewer) run in CI via `npm test --if-present`; runtime tests import real stores/components (#443). |
+| Multi-platform CI + secret scan + dep audit | ✅     | `ci.yml` macOS + Windows check legs, gitleaks secret-scan, cargo/npm advisory audit; macOS/Windows cfg code compiles in CI (#355, #356, #357). |
+| Maintained path/rand crates | ✅     | `dirs` → `directories` 6, `rand` 0.9 with `try_fill_bytes` propagation; single keyring feature set (#418). |
 
 ## Documented gaps (do work; deliberately out of scope for the version tested)
 

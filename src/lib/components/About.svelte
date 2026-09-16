@@ -12,7 +12,7 @@
 
 <div class="about">
   <div class="card about-card">
-    <div class="logo-wrap"><Logo size={72} /></div>
+    <div class="logo-wrap"><Logo size={72} title={null} /></div>
     <h1>PresenceJam</h1>
     <p class="version">{t('about.version', { version: BUILD })}</p>
     <p class="description">

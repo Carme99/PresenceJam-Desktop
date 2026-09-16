@@ -83,39 +83,45 @@ graph TD
 
 ## CI/CD Pipeline
 
-Releases are automated via GitHub Actions on every `v*.*.*` tag push. Three jobs
-fire in parallel; three downstream jobs (`release`, `homebrew`, `winget`) sequence
-off them:
+Releases are automated via GitHub Actions on every `v*` tag push (or a
+manual `workflow_dispatch` re-cut of an existing tag). A `resolve-tag` job
+resolves the tag first; a three-OS `build` matrix follows; then `release`,
+`homebrew`, and `winget` sequence off it:
 
 ```mermaid
 flowchart TD
-    Trigger["🔔 Trigger: git tag v* v3.0.0 && git push --tags"]
+    Trigger["🔔 Trigger: git tag v* && git push --tags<br/>(or workflow_dispatch re-cut)"]
+    Resolve["🏷️ resolve-tag<br/>validate existing v* tag"]
     subgraph Build["🔨 Build Matrix (parallel)"]
         direction LR
-        MacBuild["macOS Build<br/>aarch64-apple-darwin → .dmg"]
-        WinBuild["Windows Build<br/>x86_64-pc-windows-msvc → .msi"]
-        LinBuild["Linux Build<br/>ubuntu-22.04 → .deb + .AppImage"]
+        MacBuild["macOS Build<br/>macos-latest, aarch64-apple-darwin → .dmg"]
+        WinBuild["Windows Build<br/>windows-latest → .msi"]
+        LinBuild["Linux Build<br/>ubuntu-latest → .deb + .AppImage"]
     end
-    Release["🚀 release<br/>download all artifacts<br/>create GitHub Release"]
+    Release["🚀 release<br/>SHA256SUMS.txt + GitHub Release<br/>+ latest.json updater manifest"]
     Brew["🍺 homebrew<br/>update carme99/homebrew-tap"]
     Winget["📥 winget<br/>open PR to microsoft/winget-pkgs"]
-    Trigger --> Build --> Release --> Brew
+    Trigger --> Resolve --> Build --> Release --> Brew
     Release --> Winget
 ```
 
 ### Release Process
 
-1. **Tag push:** Maintainer runs `git tag vX.Y.Z && git push --tags`.
-2. **Parallel matrix:** macOS, Windows, and Linux builds run concurrently on
-   GitHub's hosted runners (Linux .deb + .AppImage added in v2.7.0 via PR #94).
-3. **Artifact upload:** Each OS build uploads its Tauri-bundled artifact via
-   `actions/upload-artifact` (v7 in v2.8.0; v4 in 2.7.x).
-4. **Release:** The `release` job downloads all artifacts and creates the
-   GitHub Release via `ncipollo/release-action`.
-5. **Updater manifest (v3.0):** the same `release` job hand-assembles
-   `latest.json` — per-platform URLs + minisign `.sig` contents + `pub_date`
-   — and uploads it to the release (`gh release upload`). The updater's
-   configured endpoint resolves it via `releases/latest/download/latest.json`.
+1. **Tag push:** Maintainer runs `git tag vX.Y.Z && git push --tags`
+   (or re-cuts an existing tag via `workflow_dispatch`).
+2. **Tag resolution:** the `resolve-tag` job validates the tag exists.
+3. **Parallel matrix:** macOS (`macos-latest`), Windows (`windows-latest`),
+   and Linux (`ubuntu-latest`; .deb + .AppImage) builds run concurrently on
+   GitHub's hosted runners. Each leg also emits a SLSA build-provenance
+   attestation (`actions/attest-build-provenance`).
+4. **Artifact upload:** Each OS build uploads its Tauri-bundled artifact via
+   `actions/upload-artifact` (v7.0.1) and the `release` job downloads them
+5. **Release + updater manifest (v3.0):** The `release` job generates
+   `SHA256SUMS.txt`, creates the GitHub Release via
+   `ncipollo/release-action`, then hand-assembles `latest.json` —
+   per-platform URLs + minisign `.sig` contents + `pub_date` — and uploads
+   it to the release (`gh release upload`). The updater's configured
+   endpoint resolves it via `releases/latest/download/latest.json`.
 6. **Distribution:** `homebrew` and `winget` jobs (each consuming the GitHub
    Release artifact) update the tap / open a winget-pkgs PR in parallel.
 
@@ -534,13 +540,15 @@ Graph. If matched, the status is replaced with `config.teams.profanity_placehold
 resolved to 🎵 or ⏸️. The replaced status is logged at info level; the
 **original profane text is never written to logs**.
 
-Detection features (curated word list, compounds like `asshole`/`bullshit`/`sonofabitch` (#411) — see `profanity.rs`):
-- **Leetspeak normalization:** `1/2→i, 3→e, $→s, @→a, 0→o, 5→s, 7→t, !→i, |→i, 6/8→b, 9→g, +→t, (→c, 4→a`, plus `/→v` folding, `ph→f` pre-fold, `x→ck` expansion, dropped-`c` `uk→uck` (scoped to `u`), terminal `z→s` (#377/#470), fullwidth→ASCII and a diacritic table; zero-width/format characters stripped.
+Detection features (v4.1.1, #328–#344; `src-tauri/src/profanity.rs` is the source of truth — curated word list plus compounds like `asshole`/`bullshit`/`sonofabitch` (#411)):
+- **Extended leetspeak normalization:** `1/2→i, 3→e, $→s, @→a, 0→o, 5→s, 7→t, !→i, |→i, 6/8→b, 9→g, +→t, (→c, 4→a`, plus `/→v` folding, `ph→f` pre-fold, `x→ck` expansion, dropped-`c` `uk→uck` (scoped to `u`), terminal `z→s` (#377/#470), fullwidth→ASCII and a diacritic table; zero-width/format characters stripped.
+- **Separator skipping gated on word boundaries** (plus glued-compound detection: `bullshit`, `dickhead`, `sonofabitch` still flag).
+- **Unicode folding** (fullwidth→ASCII, diacritic table, zero-width/format strip).
 - **Repeated-character collapse:** generic run-collapse (`shiiit → shit` regardless of excess length).
-- **Word-boundary safety:** prevents false positives on `class`, `assassin`, `cocktail bar`, `cockpit`, `Spice Girls`, `Push It`; separator skipping gated on both-side boundaries.
+- **Rescan of the placeholder** (case-insensitive `{emoji}`): a profane placeholder falls back to the default (`Currently Listening to Spotify`).
+- **Word-boundary safety:** prevents false positives on `class`, `assassin`, `cocktail bar`, `cockpit`, `Spice Girls`, `Push It`.
 - **Compound-word safe-suffixes:** `tail, head, hand, ...` allow `fishtail`, `forehead`, `handheld`.
 - **Strong stems + y-tail:** `shit/fuck/bitch` flag glued compounds; `shitty/bitchy/fucky` flag while `cocky/spicy/tardy` stay clean.
-- **Placeholder fallback:** empty/profane placeholder falls back to the default (`Currently Listening to Spotify`); `{emoji}` is case-insensitive.
 
 
 

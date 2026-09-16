@@ -28,7 +28,7 @@
   let {
     title,
     onBack,
-    backLabel = 'Back',
+    backLabel,
     showThemeToggle = true,
     showLogo = true,
     actionLabel = '⧉',
@@ -40,17 +40,17 @@
 <header class="page-header">
   <button type="button" class="back-btn btn-secondary" onclick={onBack}>
     <span aria-hidden="true">←</span>
-    <span>{backLabel}</span>
+    <span>{backLabel ?? t('common.back')}</span>
   </button>
   <div class="title-block">
     {#if showLogo}
-      <Logo size={28} />
+      <Logo size={28} title={null} />
     {/if}
     <h1>{title}</h1>
   </div>
   {#if onAction}
     <button type="button" class="icon-btn" onclick={onAction}
-      aria-label={actionTitle || actionLabel} title={actionTitle}>
+      aria-label={actionTitle || t('common.moreActions')} title={actionTitle || t('common.moreActions')}>
       {actionLabel}
     </button>
   {/if}

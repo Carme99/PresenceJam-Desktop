@@ -175,8 +175,8 @@ If PresenceJam fails to start with an error mentioning "OS keychain is unavailab
 |---|---|
 | GNOME (Ubuntu, Fedora Workstation, etc.) | `gnome-keyring` (usually pre-installed on GNOME desktops) |
 | KDE Plasma | `kwallet5` or `kwallet6` |
-| systemd-based, no GUI | `systemd-creds` |
-| Other / headless | `gnome-keyring` + `libsecret-tools` |
+| Headless / no GUI | `gnome-keyring-daemon` with headless unlock (`echo <password> \| gnome-keyring-daemon --unlock`, then verify with `secret-tool` below), or a KeePassXC Secret Service bridge |
+| Other | `gnome-keyring` + `libsecret-tools` |
 
 **Linux install command:**
 
@@ -190,6 +190,11 @@ sudo dnf install gnome-keyring libsecret
 # Arch
 sudo pacman -S gnome-keyring libsecret
 ```
+
+> **Note:** the `presencejam://` deep-link scheme registration writes
+> `~/.local/share/applications/<scheme>.desktop` plus `xdg-mime default` on
+> Linux (`lib.rs` `register_all`, issue #66) — that path needs
+> `update-desktop-database` (`desktop-file-utils`) to register launchers.
 
 After installing, **log in to a graphical session** (a headless SSH session can't reach the keyring). If you launched PresenceJam from a TTY, launch it from your desktop session instead. Then restart PresenceJam.
 

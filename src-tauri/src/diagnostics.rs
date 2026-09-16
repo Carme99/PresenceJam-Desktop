@@ -115,6 +115,13 @@ pub struct ConfigSummary {
     pub logging_enabled: bool,
     pub log_level: String,
     pub autostart: bool,
+    /// Issue #432: rule counts only (substrings/replacements are user
+    /// content — never snapshot them). Keeps the "explicit field per
+    /// config value" invariant without leaking rule text.
+    pub quiet_hours_count: usize,
+    pub quiet_hours_enabled_count: usize,
+    pub track_rules_count: usize,
+    pub track_rules_enabled_count: usize,
 }
 
 /// Token metadata ONLY. There is deliberately no field that could carry
@@ -397,6 +404,20 @@ fn config_summary(state: &crate::AppState, spotify_client_secret_present: bool) 
         logging_enabled: cfg.logging.enabled,
         log_level: cfg.logging.log_level,
         autostart: cfg.autostart,
+        quiet_hours_count: cfg.status_rules.quiet_hours.len(),
+        quiet_hours_enabled_count: cfg
+            .status_rules
+            .quiet_hours
+            .iter()
+            .filter(|e| e.enabled)
+            .count(),
+        track_rules_count: cfg.status_rules.track_rules.len(),
+        track_rules_enabled_count: cfg
+            .status_rules
+            .track_rules
+            .iter()
+            .filter(|r| r.enabled)
+            .count(),
     }
 }
 

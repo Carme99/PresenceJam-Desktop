@@ -13,6 +13,10 @@
   let needsSpotify = $state(false);
   let needsTeams = $state(false);
 
+  // #500: in-session Teams completion flag — distinguishes "reconnected
+  // just now" (success wording) from "was already connected, no action
+  // needed" (neutral wording) on fresh mount.
+  let teamsReconnectedThisSession = $state(false);
   // Device-code expiry countdown (issue #429). The 1s ticker only runs
   // while a live code is waiting; $effect cleanup clears the interval on
   // unmount, independent of the onMount/onDestroy listener guard (#392).
@@ -83,6 +87,7 @@
         if (destroyed) return;
         devLog('[RECONNECT] EVENT: teams-auth-complete received');
         setTeamsPhase('done');
+        teamsReconnectedThisSession = true;
       },
       onTeamsFailed: (payload) => {
         if (destroyed) return;
@@ -194,6 +199,7 @@
       });
       setTeamsPhase('done');
       needsTeams = false;
+      teamsReconnectedThisSession = true;
     } catch (e) {
       devLog('[RECONNECT] pollTeamsAuth failed:', e);
       setTeamsPhase('error', String(e));
@@ -258,17 +264,23 @@
           class:warning={authFlow.teams.phase === 'waiting'}
           class:error={!!authFlow.teams.error && needsTeams}>
           <span class="dot"></span>
-          {#if authFlow.teams.phase === 'done' || !needsTeams}{t('common.connected')}
+          {#if authFlow.teams.phase === 'done'}{t('common.connected')}
+          {:else if !needsTeams}{t('common.connected')}
           {:else if authFlow.teams.phase === 'waiting'}{t('common.waiting')}
           {:else if authFlow.teams.error}{t('reconnect.failed')}
           {:else}{t('reconnect.needsReconnect')}{/if}
         </span>
       </header>
 
-      {#if authFlow.teams.phase === 'done' || !needsTeams}
+      {#if authFlow.teams.phase === 'done' && teamsReconnectedThisSession}
         <p class="hint">{t('reconnect.teamsOk')}</p>
+      {:else if !needsTeams && authFlow.teams.phase !== 'done'}
+        <p class="hint">{t('common.connected')}</p>
       {:else if authFlow.teams.phase === 'waiting'}
-        <p class="hint">{t('common.goTo')} {#if isSafeHttpUrl(authFlow.teams.verificationUrl)}<a href={authFlow.teams.verificationUrl} target="_blank" rel="noopener">{authFlow.teams.verificationUrl}</a>{:else}<span>{authFlow.teams.verificationUrl}</span>{/if} {t('common.andEnterCode')} <strong>{authFlow.teams.userCode}</strong></p>
+        <p class="hint">{t('common.openSignInPage')}</p>
+        {#if isSafeHttpUrl(authFlow.teams.verificationUrl)}<a href={authFlow.teams.verificationUrl} target="_blank" rel="noopener">{authFlow.teams.verificationUrl}</a>{:else}<span>{authFlow.teams.verificationUrl}</span>{/if}
+        <p class="hint">{t('common.enterCodeWhenAsked')}</p>
+        <strong>{authFlow.teams.userCode}</strong>
         {#if teamsCodeExpired}
           <p class="error-message" role="alert">{t('common.codeExpired')}</p>
           <button class="btn-full" onclick={reconnectTeams}>{t('common.getNewCode')}</button>

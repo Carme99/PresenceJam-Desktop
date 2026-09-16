@@ -5,6 +5,39 @@
     <link rel="icon" href="%sveltekit.assets%/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>PresenceJam</title>
+    <!-- Pre-paint theme bootstrap (#423 + #433): runs before first paint in
+      every webview (main + detached) so stored-'light' users never see a
+      dark flash. Reads the `presencejam:theme` key the theme store persists
+      (plus the `?theme=` override the detached opener appends) before
+      SvelteKit paints. No dependencies, no imports — key literal duplicated
+      deliberately so this file never couples to the store.
+      CSP evidence (empirical, not spec reading): this exact CSP
+      (tauri.conf.json `security.csp`: `default-src 'self'`, NO
+      `script-src`) already ships in every release including 4.4.0, and
+      the production bundle (adapter-static SPA fallback `index.html`)
+      contains SvelteKit-generated INLINE `<script>` bootstrap code
+      (`__sveltekit_…` in `<body>`) that runs on every boot. If inline
+      scripts were banned under this CSP, the app itself could never
+      start — yet it does. This `<head>` snippet is first-party inline
+      code of the same kind and runs even earlier than that bootstrap.
+      If a future CSP adds a `script-src` directive without
+      'unsafe-inline', move this block to an external asset and
+      re-verify detached hydration. -->
+    <script>
+      try {
+        // #423/#433: `?theme=` override first (detached), then stored key,
+        // then OS preference. `let` + explicit catch param (review style).
+        let t = new URLSearchParams(location.search).get('theme');
+        if (t !== 'dark' && t !== 'light') {
+          t = localStorage.getItem('presencejam:theme');
+        }
+        if (t !== 'dark' && t !== 'light') {
+          t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
+        }
+        document.documentElement.setAttribute('data-theme', t);
+      } catch (err) { /* storage blocked — theme store applies its default */ }
+    </script>
+    </script>
     %sveltekit.head%
   </head>
   <body data-sveltekit-preload-data="hover">
