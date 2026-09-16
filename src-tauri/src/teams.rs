@@ -537,13 +537,11 @@ struct ExpiryDateTime {
     time_zone: String,
 }
 
-/// Maps a Graph response to the typed error. Shared by the set and clear
-/// paths so both get identical status-code discrimination (401 vs 403 vs
-/// 429 vs 5xx) and Retry-After parsing. See issues #153/#154.
-
 /// Pure status-code to error-variant decision (issue #493): every Graph
 /// call site funnels through this so the 401/403/429/5xx discrimination
-/// lives in one unit-testable place. Takes the already-parsed Retry-After
+/// lives in one unit-testable place. Shared by the set and clear paths so
+/// both get identical status-code discrimination and `Retry-After`
+/// parsing (see issues #153/#154). Takes the already-parsed Retry-After
 /// value and the response body text. Callers truncate bodies for log
 /// safety before display; the stored body here stays raw for diagnosis.
 fn classify_teams_status(status_code: u16, retry_after: Option<u64>, body: &str) -> TeamsApiError {

@@ -88,7 +88,6 @@ pub fn require_main_window(window: &tauri::Window) -> Result<(), String> {
 /// poll_teams_auth, set_autostart_enabled, open_logs_folder,
 /// open_external_url (Teams verification-URL open during detached
 /// device-code flow).
-
 #[cfg(test)]
 mod tests {
     /// Regression guard for issue #76: the `commands` module must declare all

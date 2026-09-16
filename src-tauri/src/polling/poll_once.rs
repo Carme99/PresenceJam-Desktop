@@ -976,8 +976,8 @@ fn track_rule_hit(rule: &crate::config::TrackRuleEntry, artist: &str, title: &st
     let title_lc = title.to_lowercase();
     let artist_ok = rule.artist_substring.is_empty()
         || artist_lc.contains(&rule.artist_substring.to_lowercase());
-    let title_ok = rule.track_substring.is_empty()
-        || title_lc.contains(&rule.track_substring.to_lowercase());
+    let title_ok =
+        rule.track_substring.is_empty() || title_lc.contains(&rule.track_substring.to_lowercase());
     artist_ok && title_ok
 }
 
@@ -1025,7 +1025,12 @@ fn status_config_fingerprint(config: &Option<crate::config::AppConfig>) -> Strin
             .status_rules
             .quiet_hours
             .iter()
-            .map(|e| format!("{}:{}-{}:{:?}", e.enabled, e.start_minutes, e.end_minutes, e.days))
+            .map(|e| {
+                format!(
+                    "{}:{}-{}:{:?}",
+                    e.enabled, e.start_minutes, e.end_minutes, e.days
+                )
+            })
             .collect();
         let t: Vec<String> = c
             .status_rules
@@ -1331,18 +1336,18 @@ pub(crate) fn process_track(
             // `final_status` below, still flowing through the #384
             // identical-write suppression.
             let (now_minutes, weekday) = local_minutes_and_weekday();
-            let matched_rule = config.as_ref().and_then(|c| {
-                matching_track_rule(&c.status_rules, &track.artist, &track.title)
-            });
-            let quiet_active = config.as_ref().map_or(false, |c| {
-                quiet_hours_active(&c.status_rules, now_minutes, weekday)
-            });
+            let matched_rule = config
+                .as_ref()
+                .and_then(|c| matching_track_rule(&c.status_rules, &track.artist, &track.title));
+            let quiet_active = config
+                .as_ref()
+                .is_some_and(|c| quiet_hours_active(&c.status_rules, now_minutes, weekday));
             // Owned clone — `matched_rule` borrows `config`; the write path
             // below must not hold that borrow.
             let rule_replacement: Option<String> = matched_rule
                 .filter(|m| !m.replacement_status.is_empty())
                 .map(|m| m.replacement_status.clone());
-            let rule_suppress = matched_rule.map_or(false, |m| m.replacement_status.is_empty());
+            let rule_suppress = matched_rule.is_some_and(|m| m.replacement_status.is_empty());
             let presence_gate_enabled = config
                 .as_ref()
                 .map(|c| c.teams.presence_gate)
@@ -1435,10 +1440,10 @@ pub(crate) fn process_track(
             // cleared rule falls into the presence re-check below.
             if gated_track_key.as_deref() == Some(track_key.as_str()) {
                 let (cur_minutes, cur_weekday) = local_minutes_and_weekday();
-                let rules_still_gating = config.as_ref().map_or(false, |c| {
+                let rules_still_gating = config.as_ref().is_some_and(|c| {
                     quiet_hours_active(&c.status_rules, cur_minutes, cur_weekday)
                         || matching_track_rule(&c.status_rules, &track.artist, &track.title)
-                            .map_or(false, |m| m.replacement_status.is_empty())
+                            .is_some_and(|m| m.replacement_status.is_empty())
                 });
                 if rules_still_gating {
                     if gate_recheck_due(*last_gate_check, Instant::now()) {
@@ -3089,12 +3094,15 @@ mod tests {
         // Issue #432: enabling a rule or quiet-hours entry must flip the
         // fingerprint so the change takes effect mid-track.
         let mut ruled = crate::config::AppConfig::default();
-        ruled.status_rules.quiet_hours.push(crate::config::QuietHoursEntry {
-            enabled: true,
-            start_minutes: 0,
-            end_minutes: 1439,
-            days: Vec::new(),
-        });
+        ruled
+            .status_rules
+            .quiet_hours
+            .push(crate::config::QuietHoursEntry {
+                enabled: true,
+                start_minutes: 0,
+                end_minutes: 1439,
+                days: Vec::new(),
+            });
         assert_ne!(
             fp,
             status_config_fingerprint(&Some(ruled)),
@@ -3370,9 +3378,21 @@ mod tests {
             track_substring: track.to_string(),
             replacement_status: String::new(),
         };
-        assert!(track_rule_hit(&rule(true, "lofi", ""), "LoFi Girl", "Anything"));
-        assert!(track_rule_hit(&rule(true, "", "rain"), "Anyone", "Rain Sounds"));
-        assert!(!track_rule_hit(&rule(true, "lofi", "rain"), "Lofi Girl", "Sunshine"));
+        assert!(track_rule_hit(
+            &rule(true, "lofi", ""),
+            "LoFi Girl",
+            "Anything"
+        ));
+        assert!(track_rule_hit(
+            &rule(true, "", "rain"),
+            "Anyone",
+            "Rain Sounds"
+        ));
+        assert!(!track_rule_hit(
+            &rule(true, "lofi", "rain"),
+            "Lofi Girl",
+            "Sunshine"
+        ));
         assert!(!track_rule_hit(&rule(false, "", ""), "Anyone", "Anything"));
         let rules = StatusRulesConfig {
             quiet_hours: Vec::new(),

@@ -1143,7 +1143,9 @@ mod tests {
         assert_eq!(cfg.status_rules.quiet_hours[0].end_minutes, 420);
         assert!(cfg.status_rules.quiet_hours[0].days.is_empty());
         assert_eq!(cfg.status_rules.track_rules.len(), 1);
-        assert!(cfg.status_rules.track_rules[0].replacement_status.is_empty());
+        assert!(cfg.status_rules.track_rules[0]
+            .replacement_status
+            .is_empty());
         let json = serde_json::to_string(&cfg).expect("must serialize");
         let back: AppConfig = serde_json::from_str(&json).expect("must re-parse");
         assert_eq!(back.status_rules.quiet_hours.len(), 1);

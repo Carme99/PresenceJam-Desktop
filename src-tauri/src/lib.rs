@@ -901,9 +901,10 @@ pub fn run() {
                         );
                         // Best-effort fallback: associate directly when the
                         // database helper is absent (minimal Linux without a
-                        // full desktop metapackage). HOME resolves via dirs
-                        // (already a dependency); unknown home skips quietly.
-                        let apps_dir = dirs::home_dir().map(|h| h.join(".local/share/applications"));
+                        // full desktop metapackage). HOME resolves via
+                        // directories (BaseDirs); unknown home skips quietly.
+                        let apps_dir = directories::BaseDirs::new()
+                            .map(|b| b.home_dir().join(".local/share/applications"));
                         let db_missing = match &apps_dir {
                             // #review-5: a non-zero exit is as missing as a
                             // spawn failure — either way the DB was not updated.
