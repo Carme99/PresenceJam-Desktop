@@ -5,6 +5,35 @@ All notable changes to PresenceJam are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [4.5.1] - 2026-09-16
+
+Sign-in persistence fix: relaunching after the app has been closed longer than
+an access token's lifetime no longer sends a returning user back through
+first-run setup.
+
+### Fixed
+- **Expired access token at launch forced full re-onboarding (#530):** the
+  launch gate validated a locally-expired access token against the live APIs,
+  took the unavoidable 401, and reported the session as dead — so every relaunch
+  more than ~1 h after the last poll (the access-token lifetime) opened the
+  Onboarding wizard and asked for the Spotify Client ID/Secret plus both OAuth
+  flows again, even though nothing had been lost. The gate now spends the
+  refresh token under the shared CAS guard and persists the result:
+  `invalid_grant` (or unavailable credentials) is the only re-auth signal,
+  transient failures keep the pre-existing "a flaky network is not a dead
+  session" policy, and a locally-fresh token still short-circuits with no
+  network call. The now-dead `validate_spotify_token` / `validate_teams_token`
+  stale-bearer probes are removed.
+- **A dead session was routed to the first-run wizard (#530):** an incomplete
+  verdict with the Spotify Client ID + keychain secret still stored now lands on
+  the Reconnect view (`src/lib/utils/boot.ts::bootView`), which re-runs the
+  OAuth flow with the credentials already on disk instead of re-asking for
+  them.
+
+### Known issues
+- The wizard's `finish()` still overwrites the stored config with defaults when
+  it is completed by an existing user — tracked as #531.
+
 ## [4.5.0] - 2026-09-16
 
 Feature-packed release: quiet-hours + track-based status rules, pending
@@ -923,7 +952,8 @@ Closes #60 #61 #62 #63
 ### Removed
 
 - PowerShell script version — this is a full rewrite
-[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.5.0...HEAD
+[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.5.1...HEAD
+[4.5.1]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.5.0...v4.5.1
 [4.5.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.4.0...v4.5.0
 [4.4.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.3.0...v4.4.0
 [4.3.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.2.1...v4.3.0

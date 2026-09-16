@@ -402,6 +402,15 @@ This means:
   never re-enter `tauri-plugin-store` (issue #65 closed that path).
 - **After a Spotify mid-OAuth crash:** pending auth *state* is no longer persisted to disk at all — the user restarts the OAuth flow. Crash-safe: PKCE verifier (a 10-min bearer credential) is in AppState only.
 - **Reconnect** clears tokens from both memory and the tokens.json file on disk, forcing re-auth.
+- **Boot gate (issue #530):** `commands::onboarding::is_onboarding_complete` is
+  the routing decision behind `dashboard` vs `onboarding`. A locally-expired
+  access token is **not** a dead session: the gate spends the refresh token
+  under the shared CAS guard, persists the result, and only reports re-auth for
+  `invalid_grant` (or unavailable Spotify credentials). An incomplete verdict
+  with the Spotify Client ID + keychain secret still stored routes to the
+  **Reconnect** view rather than the setup wizard
+  (`src/lib/utils/boot.ts::bootView`) — a returning user is never asked to
+  re-enter credentials the app already holds.
 
 ## Reconnect Flow
 
@@ -783,7 +792,8 @@ without rewriting every call site.
   the pre-refresh snapshot, otherwise discard. Prevents the lost-update race.
 - **`onboarding_cache.lock()` (PR #47):** `parking_lot::Mutex<(Instant, bool)>`
   with a 30 s TTL — `is_onboarding_complete` calls upstream APIs only on cache
-  miss. Plus `invalidate()` from every token-mutating command (issue #70).
+  miss. Plus `invalidate()` from every token-mutating command (issue #70). Its
+  boot-time refresh shares the CAS guard above (issue #530).
 
 ### Frontend state
 
