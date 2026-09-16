@@ -68,6 +68,42 @@
     return logContainer.scrollHeight - logContainer.scrollTop - logContainer.clientHeight < SCROLL_THRESHOLD;
   }
 
+  // #600: while the list is unpinned, hold the reader's place. The DOM
+  // renders only the tail window (#399), so every appended entry evicts a
+  // row from the top and the text would otherwise slide upward one row per
+  // event — continuous at Trace level. Anchor on a row that survives the
+  // eviction, then re-apply its content-space delta once the DOM updated.
+  // The pinned path below is untouched.
+  let anchorSeq = -1;
+  let anchorOffset = 0;
+
+  function captureScrollAnchor() {
+    anchorSeq = -1;
+    if (!logContainer || atBottom) return;
+    const rows = logContainer.querySelectorAll<HTMLElement>('.log-entry');
+    if (rows.length === 0) return;
+    // Row 0 is exactly what an append evicts; anchor one behind it so the
+    // anchor outlives the update in the common single-entry case.
+    const row = rows[rows.length > 1 ? 1 : 0];
+    const seq = Number(row.dataset.seq);
+    if (!Number.isFinite(seq)) return;
+    anchorSeq = seq;
+    anchorOffset = row.offsetTop;
+  }
+
+  function restoreScrollAnchor() {
+    if (anchorSeq < 0 || !logContainer) return;
+    const seq = anchorSeq;
+    anchorSeq = -1;
+    // The reader re-pinned between capture and this frame (Jump to latest,
+    // or a scroll back to the bottom): the pinned path owns the scroll now.
+    if (atBottom) return;
+    const row = logContainer.querySelector<HTMLElement>(`.log-entry[data-seq="${seq}"]`);
+    // Evicted by a burst — nothing to hold on to; leave the browser alone.
+    if (!row) return;
+    logContainer.scrollTop += row.offsetTop - anchorOffset;
+  }
+
   // Recompute stickiness and snap when pinned. Pinned state survives
   // content swaps (e.g. filter tabs); an unpinned view only auto-pins
   // when the new content fits entirely in view, hiding the Jump button.
@@ -78,7 +114,15 @@
     }
     if (!atBottom) {
       atBottom = isAtBottom();
-      if (!atBottom) return;
+      if (!atBottom) {
+        // #600: unpinned — hold the reader's place instead of snapping.
+        // Same rAF the pinned path uses, so both land in one frame.
+        requestAnimationFrame(() => {
+          restoreScrollAnchor();
+          atBottom = isAtBottom();
+        });
+        return;
+      }
     }
     // Snap inside rAF only, after re-reading: a mid-frame scroll-up
     // must not get yanked back to the bottom.
@@ -114,6 +158,8 @@
     unlisten.push(await listen<LogPayload>('log://log', (event) => {
       // #400: capture stickiness BEFORE the push changes the scroll height.
       atBottom = isAtBottom();
+      // #600: anchor before the push shifts the rendered window.
+      captureScrollAnchor();
       // Map numeric level (1=Trace, 2=Debug, 3=Info, 4=Warning, 5=Error) to string
       const levelMap: Record<number, string> = { 1: 'Trace', 2: 'Debug', 3: 'Info', 4: 'Warning', 5: 'Error' };
       const numericLevel = event.payload?.level;
@@ -256,7 +302,7 @@
         </div>
       {:else}
         {#each visibleLogs as log (log.seq)}
-          <div class="log-entry">
+          <div class="log-entry" data-seq={log.seq}>
             <span class="timestamp">{log.timestamp}</span>
             <span class="level-badge {getLevelClass(log.level)}">{LEVEL_KEYS[log.level] ? t(LEVEL_KEYS[log.level]) : log.level}</span>
             <span class="message">{log.message}</span>
@@ -334,6 +380,12 @@
   .log-list {
     flex: 1;
     overflow-y: auto;
+    /* #600: the anchoring below is the single source of truth. Chromium's
+     * own scroll anchoring (WebView2 on Windows) already compensates for
+     * rows evicted above the viewport, so leaving it on would apply the
+     * correction twice and shove the reader the other way. WebKit has no
+     * anchoring and ignores this. */
+    overflow-anchor: none;
     background: var(--bg-surface);
     border: 1px solid var(--border);
     border-radius: var(--r-md);
