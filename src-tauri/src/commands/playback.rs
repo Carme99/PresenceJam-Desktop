@@ -103,16 +103,21 @@ fn concurrent_refresh_won(current_access_token: &str, attempted_token: &str) -> 
 
 /// Runs a Spotify player call with never-re-auth semantics (issues #375,
 /// #428): proactive `refreshed_access_token`, then on `ExpiredToken` one
-/// refresh + single retry before surfacing the reconnect message. All six
-/// player commands route through here so the refresh policy lives in one
-/// place.
-fn player_with_refresh<T>(
+/// refresh + single retry before surfacing the *typed* failure. All player
+/// commands — and the tray's click path — route through here, so the
+/// refresh policy lives in one place.
+///
+/// Typed counterpart of [`player_with_refresh`]: the tray dispatches player
+/// actions directly from Rust and matches on the `SpotifyApiError` to keep
+/// its distinct no-active-device wording (issue #586), so the
+/// classification has to survive the policy.
+pub(crate) fn player_with_refresh_typed<T>(
     state: &Arc<crate::AppState>,
     app: &AppHandle,
     label: &str,
     call: impl Fn(&str) -> Result<T, SpotifyApiError>,
-) -> Result<T, String> {
-    let token = refreshed_access_token(state, app)?;
+) -> Result<T, SpotifyApiError> {
+    let token = refreshed_access_token(state, app).map_err(SpotifyApiError::Other)?;
     match call(&token) {
         Err(SpotifyApiError::ExpiredToken) => {
             log::info!("{CMD} {label}: ExpiredToken, attempting one refresh + retry");
@@ -122,22 +127,30 @@ fn player_with_refresh<T>(
                     if concurrent_refresh_won(&current_tokens.access_token, &token) =>
                 {
                     // A concurrent refresh already won; retry once with it.
-                    call(&current_tokens.access_token).map_err(friendly_playback_error)
+                    call(&current_tokens.access_token)
                 }
                 Some(current_tokens) => {
-                    match try_refresh_spotify_token(state, app, &current_tokens) {
-                        Ok(retry_token) => call(&retry_token).map_err(friendly_playback_error),
-                        Err(SpotifyApiError::InvalidGrant) => {
-                            Err("Spotify session invalid - reconnect from Settings".to_string())
-                        }
-                        Err(e) => Err(e.to_string()),
-                    }
+                    try_refresh_spotify_token(state, app, &current_tokens)
+                        .and_then(|retry_token| call(&retry_token))
                 }
-                None => Err("Spotify is not connected".to_string()),
+                None => Err(SpotifyApiError::Other(
+                    "Spotify is not connected".to_string(),
+                )),
             }
         }
-        result => result.map_err(friendly_playback_error),
+        result => result,
     }
+}
+
+/// [`player_with_refresh_typed`] with the user-facing wording applied — the
+/// shape every command handler returns (issues #375, #428, #464).
+fn player_with_refresh<T>(
+    state: &Arc<crate::AppState>,
+    app: &AppHandle,
+    label: &str,
+    call: impl Fn(&str) -> Result<T, SpotifyApiError>,
+) -> Result<T, String> {
+    player_with_refresh_typed(state, app, label, call).map_err(friendly_playback_error)
 }
 
 /// Maps a `SpotifyApiError` from a player call to a user-facing message,
@@ -377,6 +390,8 @@ mod tests {
     /// Issue #464: the shared policy itself must proactively refresh via
     /// `refreshed_access_token` and reactively retry via
     /// `try_refresh_spotify_token`, so the policy lives in one place.
+    /// Issue #586: the policy is the typed core the tray also calls —
+    /// `player_with_refresh` is only its friendly-message wrapper.
     #[test]
     fn test_player_with_refresh_owns_both_refresh_paths() {
         let source = include_str!("playback.rs");
@@ -384,7 +399,7 @@ mod tests {
             .split("#[cfg(test)]\nmod tests")
             .next()
             .expect("playback.rs has no #[cfg(test)] mod tests block");
-        let body = fn_body(prod_source, "fn player_with_refresh<T>(");
+        let body = fn_body(prod_source, "fn player_with_refresh_typed<T>(");
         assert!(
             body.contains("refreshed_access_token("),
             "player_with_refresh must proactively refresh via refreshed_access_token"
