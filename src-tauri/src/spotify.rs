@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
 use std::time::Duration;
 
 /// Parse the `Retry-After` header from a 429 response, supporting both
@@ -205,12 +206,25 @@ impl std::fmt::Display for SpotifyApiError {
 ///
 /// User-Agent uses `env!("CARGO_PKG_VERSION")` so it tracks `Cargo.toml`
 /// automatically on every release — never hardcode the version.
+///
+/// The client is built once per process and cached (#576):
+/// `reqwest::blocking::Client` is `Arc`-backed, so every later call returns a
+/// refcount bump over the same connection pool instead of a fresh pool per
+/// poll iteration (a new TCP+TLS handshake every 30–60 s, ~2880 discarded
+/// pools per day at the default cadence). The cache also memoizes a failed
+/// build: `ClientBuilder::build` fails only on environmental TLS/runtime
+/// init, where a retry would fail identically. The signature stays
+/// `Result<Client, String>` so the existing call sites and their error
+/// mapping are untouched.
 fn build_spotify_client() -> Result<Client, String> {
-    Client::builder()
-        .user_agent(format!("PresenceJam/{}", env!("CARGO_PKG_VERSION")))
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))
+    static CLIENT: LazyLock<Result<Client, String>> = LazyLock::new(|| {
+        Client::builder()
+            .user_agent(format!("PresenceJam/{}", env!("CARGO_PKG_VERSION")))
+            .timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|e| format!("Failed to create HTTP client: {}", e))
+    });
+    CLIENT.as_ref().map(|c| c.clone()).map_err(|e| e.clone())
 }
 
 pub fn complete_spotify_auth(
@@ -392,8 +406,23 @@ pub enum CurrentlyPlaying {
         etag: Option<String>,
     },
     /// 304 Not Modified — body absent; the caller keeps its prior state
-    /// and skips JSON parse / status-format work.
+    /// (including the stored `ETag` validator, which a 304 leaves
+    /// authoritative per RFC 9110 §13.1.2) and skips JSON parse /
+    /// status-format work.
     NotModified,
+}
+
+/// Reads the `ETag` response header as an owned validator. Only the arms
+/// that carry a representation (200/204) call this: a 304 refreshes
+/// nothing, because the stored validator stays authoritative
+/// (RFC 9110 §13.1.2), so the steady state of the conditional-GET feature
+/// allocates no String it would immediately drop (#577).
+fn read_etag(response: &reqwest::blocking::Response) -> Option<String> {
+    response
+        .headers()
+        .get("ETag")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
 }
 
 pub fn get_currently_playing(
@@ -419,18 +448,18 @@ pub fn get_currently_playing(
             SpotifyApiError::Other(format!("Failed to send currently playing request: {}", e))
         })?;
 
-    // Read before the response is consumed by `.json()`/`.text()` below.
-    // Captured on both 200 and 304 so a refreshed validator replaces the
-    // stored one.
-    let response_etag = response
-        .headers()
-        .get("ETag")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned);
+    // No `ETag` read here. A 304 means the representation is unchanged, so
+    // the validator already stored by the caller stays authoritative
+    // (RFC 9110 §13.1.2) — and this is the steady state of the whole
+    // conditional-GET feature, so allocating a String here only to drop it
+    // was pure per-poll waste (#577). The 200/204 arms read it instead.
 
     match response.status().as_u16() {
         304 => Ok(CurrentlyPlaying::NotModified),
         200 => {
+            // Read before `.json()` consumes the response.
+            let response_etag = read_etag(&response);
+
             #[derive(Deserialize)]
             struct CurrentlyPlayingResponse {
                 item: Option<CurrentlyPlayingItem>,
@@ -520,7 +549,7 @@ pub fn get_currently_playing(
         }
         204 => Ok(CurrentlyPlaying::Modified {
             track: None,
-            etag: response_etag,
+            etag: read_etag(&response),
         }),
         401 => Err(SpotifyApiError::ExpiredToken),
         429 => {
@@ -1142,6 +1171,38 @@ mod tests {
         assert!(
             body.contains("CARGO_PKG_VERSION"),
             "builder User-Agent version must track Cargo.toml via env! (issue #450)"
+        );
+    }
+
+    // Issue #576: one Spotify client — and therefore one connection pool —
+    // per process. `reqwest::blocking::Client` exposes no handle identity and
+    // pooling lives behind a background runtime, so a behavioural assertion
+    // would need a live keep-alive server; the invariant is pinned the way
+    // this module already pins builder *configuration* (see
+    // `token_requests_go_through_shared_client_builder`): against the
+    // production source. Regression this defends: a fresh `Client::builder()
+    // .build()` per call — the pre-#576 shape, which paid a new TCP+TLS
+    // handshake on every poll.
+    #[test]
+    fn build_spotify_client_is_memoized_per_process() {
+        let src = include_str!("spotify.rs");
+        let body = crate::token_io::test_scan::fn_body(src, "fn build_spotify_client(");
+        assert!(
+            body.contains("static CLIENT"),
+            "build_spotify_client must memoize its client in a process-wide static (issue #576)"
+        );
+        assert!(
+            body.contains("LazyLock") || body.contains("OnceLock"),
+            "the cached client must live in a std sync cell (issue #576)"
+        );
+        assert_eq!(
+            body.matches("Client::builder()").count(),
+            1,
+            "the client must be built exactly once (inside the cache initializer), not per call (issue #576)"
+        );
+        assert!(
+            body.contains(".map(|c| c.clone())"),
+            "callers must receive a refcount-bumped clone of the one cached client (issue #576)"
         );
     }
 }
