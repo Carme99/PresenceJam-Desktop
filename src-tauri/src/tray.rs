@@ -12,6 +12,10 @@ const ID_SHOW_HIDE: &str = "show_hide_window";
 const ID_PAUSE_SYNC: &str = "pause_sync";
 const ID_RESUME_SYNC: &str = "resume_sync";
 const ID_CURRENT_TRACK: &str = "current_track";
+/// Disabled head-of-menu item that states what the app is actually doing
+/// (issue #591) — the Pause/Resume verb alone left sync state unstated, and
+/// the presence-gate badge is macOS-only.
+const ID_SYNC_STATUS: &str = "sync_status";
 const ID_OPEN_SETTINGS: &str = "settings";
 const ID_OPEN_LOGS: &str = "open_logs";
 const ID_QUIT: &str = "quit";
@@ -66,14 +70,33 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
                         let _ = window.set_focus();
                     }
                 }
-                // Refresh tray menu label (Show ↔ Hide) and sync state
-                let state = app.state::<std::sync::Arc<crate::AppState>>();
-                let is_syncing = state.polling.is_syncing(Ordering::Acquire);
-                let current_track = state.polling.current_track().clone();
-                let _ = update_tray_menu(app, is_syncing, current_track);
+                // Issue #587: the repaint performs blocking Spotify HTTP
+                // (devices/queue fetches, 10 s timeout each) whenever the
+                // 60 s throttle has lapsed, so it must never run on the
+                // menu-event thread — offload it like the #386 player arms.
+                refresh_tray_from_state(app);
             }
             ID_PAUSE_SYNC | ID_RESUME_SYNC => {
+                // Issue #588: this arm only *asks* the frontend to toggle
+                // (the frontend owns the start/stop call), so the running
+                // flag settles asynchronously. Watch it from a worker and
+                // repaint from backend truth, instead of relying on the
+                // Dashboard route being mounted to mirror the change back.
+                let before = app
+                    .state::<std::sync::Arc<crate::AppState>>()
+                    .polling
+                    .is_syncing(Ordering::Acquire);
                 let _ = app.emit("toggle-pause", ());
+                let app_handle = app.clone();
+                std::thread::spawn(move || {
+                    if !await_sync_toggle(&app_handle, before) {
+                        log::debug!(
+                            "[TRAY] pause/resume: sync flag unchanged after {:?}; repainting anyway",
+                            TOGGLE_SETTLE_TIMEOUT
+                        );
+                    }
+                    repaint_tray_from_state(&app_handle, "pause/resume");
+                });
             }
             ID_QUIT => {
                 // Issue #383: Quit must terminate the process even with no
@@ -92,6 +115,9 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
                     let _ = window.unminimize();
                     let _ = window.set_focus();
                 }
+                // Issue #592: showing the window here changes the Show/Hide
+                // label, so the tray must be repainted from backend state.
+                refresh_tray_from_state(app);
             }
             ID_OPEN_LOGS => {
                 let _ = app.emit("open-logs-folder", ());
@@ -101,17 +127,13 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
             ID_PLAY_PAUSE => {
                 // Issue #386: the click-path blocking Spotify HTTP must not
                 // run on the menu-event thread — a slow network would wedge
-                // the tray menu. Snapshot the token and offload everything
-                // (the currently-playing GET plus the play/pause action)
-                // to a worker thread.
-                let state = app.state::<std::sync::Arc<crate::AppState>>();
-                let token = match state.tokens.spotify().as_ref() {
-                    Some(t) => t.access_token.clone(),
-                    None => {
-                        log::warn!("[TRAY] play/pause: no Spotify token stored");
-                        return;
-                    }
-                };
+                // the tray menu. Offload everything (the currently-playing
+                // GET plus the play/pause action) to a worker thread.
+                //
+                // Issue #586: the worker resolves its token through the
+                // shared refresh-aware policy rather than snapshotting
+                // `state.tokens.spotify()`, so an expired access token is
+                // refreshed (and retried once) exactly like the command layer.
                 let app_handle = app.clone();
                 std::thread::spawn(move || {
                     // Resolve the ACTUAL playing state from the API rather
@@ -122,12 +144,23 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
                     // fine — this is user-initiated. Unknown → resume.
                     // Unconditional GET (`None`): user-initiated one-off
                     // click with no stored validator. C11 signature.
-                    let should_pause = match crate::spotify::get_currently_playing(&token, None) {
+                    let state = app_handle.state::<std::sync::Arc<crate::AppState>>();
+                    let should_pause = match crate::commands::playback::player_with_refresh_typed(
+                        state.inner(),
+                        &app_handle,
+                        "play/pause state",
+                        |token| crate::spotify::get_currently_playing(token, None),
+                    ) {
                         Ok(crate::spotify::CurrentlyPlaying::Modified {
                             track: Some(track),
                             ..
                         }) => track.is_playing,
-                        _ => false,
+                        Ok(_) => false,
+                        Err(e) => {
+                            log::warn!("[TRAY] play/pause: playback state read failed: {}", e);
+                            let _ = app_handle.emit("playback-error", e.to_string());
+                            return;
+                        }
                     };
                     if should_pause {
                         run_player_action(&app_handle, "pause", Some(false), |t| {
@@ -467,10 +500,11 @@ fn selected_for_log(selected: &DeviceMenuSelection) -> String {
 /// Cache first (no IO), then a live `get_devices` re-fetch when the cached
 /// list went stale (issue #388: the old `devices.get(i)` raced the
 /// 60 s-throttled cache against the live device list). MUST run off the
-/// menu-event thread — the fallback performs blocking HTTP (issue #386).
+/// menu-event thread — the fallback performs blocking HTTP (issue #386) —
+/// and resolves its token through the shared refresh-aware policy, so an
+/// expired access token does not strand a transfer on "unknown device"
+/// (issue #586).
 fn resolve_device_id(app: &AppHandle, selected: &DeviceMenuSelection) -> Option<String> {
-    let state = app.state::<std::sync::Arc<crate::AppState>>();
-    let token = state.tokens.spotify().as_ref()?.access_token.clone();
     match selected {
         DeviceMenuSelection::DeviceId(id) => {
             // Fast path: still in the cached list and transferable.
@@ -485,7 +519,13 @@ fn resolve_device_id(app: &AppHandle, selected: &DeviceMenuSelection) -> Option<
             }
             // Slow path: live re-fetch; the device may have appeared after
             // the submenu was built, or the cache may be stale.
-            match crate::spotify::get_devices(&token) {
+            let state = app.state::<std::sync::Arc<crate::AppState>>();
+            match crate::commands::playback::player_with_refresh_typed(
+                state.inner(),
+                app,
+                "transfer device list",
+                crate::spotify::get_devices,
+            ) {
                 Ok(devices) => {
                     *DEVICES_CACHE.lock() = Some((Instant::now(), devices.clone()));
                     devices
@@ -618,17 +658,15 @@ fn run_player_action(
     app: &AppHandle,
     label: &str,
     resulting_playing: Option<bool>,
-    action: impl FnOnce(&str) -> Result<(), crate::spotify::SpotifyApiError>,
+    action: impl Fn(&str) -> Result<(), crate::spotify::SpotifyApiError>,
 ) {
+    // Issue #586: route the tray's player actions through the shared
+    // refresh-aware policy instead of a raw `state.tokens.spotify()`
+    // snapshot — a stale access token is refreshed proactively, and an
+    // `ExpiredToken` response gets one refresh + retry, exactly as the
+    // command layer does.
     let state = app.state::<std::sync::Arc<crate::AppState>>();
-    let token = match state.tokens.spotify().as_ref() {
-        Some(t) => t.access_token.clone(),
-        None => {
-            log::warn!("[TRAY] {}: no Spotify token stored", label);
-            return;
-        }
-    };
-    match action(&token) {
+    match crate::commands::playback::player_with_refresh_typed(state.inner(), app, label, action) {
         Ok(()) => {
             log::info!("[TRAY] {}: success", label);
             if let Some(playing) = resulting_playing {
@@ -697,6 +735,63 @@ fn run_player_action(
     }
 }
 
+/// Upper bound on the wait for the frontend's Pause/Resume toggle to land
+/// (issue #588). The frontend owns the actual `start_syncing` /
+/// `stop_syncing` call, so the flag settles only after that round-trip.
+const TOGGLE_SETTLE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Poll cadence while waiting for the toggle to land.
+const TOGGLE_SETTLE_POLL: Duration = Duration::from_millis(150);
+
+/// Repaints the tray from authoritative backend state on the CURRENT
+/// thread. Callers must already be off the menu/app-event thread — the
+/// rebuild performs blocking Spotify HTTP whenever the fetch throttle has
+/// lapsed. `context` only labels the failure log.
+fn repaint_tray_from_state(app: &AppHandle, context: &str) {
+    let Some(state) = app.try_state::<std::sync::Arc<crate::AppState>>() else {
+        log::debug!(
+            "[TRAY] {}: AppState not registered yet, skipping repaint",
+            context
+        );
+        return;
+    };
+    let is_syncing = state.polling.is_syncing(Ordering::Acquire);
+    let current_track = state.polling.current_track().clone();
+    if let Err(e) = update_tray_menu(app, is_syncing, current_track) {
+        log::warn!("[TRAY] {}: tray repaint failed: {}", context, e);
+    }
+}
+
+/// Repaints the tray from backend state on a worker thread.
+///
+/// Issues #587/#592: every caller runs on a menu/app-event thread (tray
+/// click arms, app-menu items, the single-instance raise), and
+/// `update_tray_menu` fetches Spotify devices/queue with a 10 s timeout
+/// whenever the 60 s throttle has lapsed — doing that inline wedges the
+/// native menu (the freeze issue #386 removed from the player arms).
+pub(crate) fn refresh_tray_from_state(app: &AppHandle) {
+    let app_handle = app.clone();
+    std::thread::spawn(move || repaint_tray_from_state(&app_handle, "refresh_tray_from_state"));
+}
+
+/// Waits — bounded by [`TOGGLE_SETTLE_TIMEOUT`] — for the frontend's
+/// Pause/Resume toggle to move the running flag away from `before`.
+/// Returns `true` when it moved, `false` when the window elapsed or state
+/// was unavailable; the caller repaints either way.
+fn await_sync_toggle(app: &AppHandle, before: bool) -> bool {
+    let deadline = Instant::now() + TOGGLE_SETTLE_TIMEOUT;
+    while Instant::now() < deadline {
+        std::thread::sleep(TOGGLE_SETTLE_POLL);
+        let Some(state) = app.try_state::<std::sync::Arc<crate::AppState>>() else {
+            return false;
+        };
+        if state.polling.is_syncing(Ordering::Acquire) != before {
+            return true;
+        }
+    }
+    false
+}
+
 /// Forces the next `update_tray_menu` call to rebuild: clears both throttled
 /// caches (so devices/queue are re-fetched), nudges the dedup snapshot so
 /// the rebuild can't early-return, then rebuilds immediately. User-initiated
@@ -722,6 +817,26 @@ fn force_tray_refresh(app: &AppHandle) {
     // committed by the rebuild below, so this can never match the dedup key.
     *last_tray_state().lock() = Some((!is_syncing, false, track_key));
     let _ = update_tray_menu(app, is_syncing, current_track);
+}
+
+/// One-line sync/status summary for the tray's status item and tooltip
+/// (issue #591). The Pause/Resume verb on its own left the sync state
+/// unstated, and the presence-gated dock badge is macOS-only. `is_playing`
+/// is `LAST_PLAYING_STATE` — the same source as the Play/Pause checkmark —
+/// not the polling loop's copy, which goes stale on a same-track pause.
+fn sync_status_line(
+    is_syncing: bool,
+    is_playing: bool,
+    track: Option<&crate::spotify::TrackInfo>,
+) -> String {
+    if !is_syncing {
+        return "Not syncing".to_string();
+    }
+    match track {
+        None => "Syncing — no track".to_string(),
+        Some(t) if is_playing => format!("Syncing — {} — {}", t.artist, t.title),
+        Some(t) => format!("Paused — {} — {}", t.artist, t.title),
+    }
 }
 
 /// Rebuilds the tray menu with current state.
@@ -893,6 +1008,21 @@ pub fn update_tray_menu(
     // so a same-track pause flips without waiting for the next poll. See
     // issues #229 and #217.
     let is_playing = LAST_PLAYING_STATE.load(Ordering::Acquire);
+    // Issue #591: a disabled head-of-menu status line stating what the app
+    // is actually doing (syncing / paused / not syncing). Everything below
+    // is derived from state already in scope for this rebuild, so the line
+    // cannot drift from the Show/Hide and Pause/Resume items beside it.
+    let status_line = sync_status_line(is_syncing, is_playing, current_track.as_ref());
+    let sync_status = MenuItemBuilder::with_id(ID_SYNC_STATUS, status_line.clone())
+        .enabled(false)
+        .build(app)
+        .map_err(|e| {
+            log::warn!(
+                "[TRAY] update_tray_menu: failed to build sync_status item: {}",
+                e
+            );
+            e.to_string()
+        })?;
     let play_pause = CheckMenuItemBuilder::with_id(ID_PLAY_PAUSE, PLAY_PAUSE_LABEL)
         .checked(is_playing)
         .build(app)
@@ -943,7 +1073,7 @@ pub fn update_tray_menu(
 
     // Build menu with optional track info
     let mut menu_builder = MenuBuilder::new(app)
-        .items(&[&show_hide, &pause_resume, &separator1])
+        .items(&[&sync_status, &show_hide, &pause_resume, &separator1])
         .items(&[&play_pause, &previous, &next, &playback_separator])
         .items(&[&devices_submenu, &queue_submenu]);
 
@@ -993,7 +1123,7 @@ pub fn update_tray_menu(
     // rebuild, i.e. exactly whenever track info changes (the dedup key
     // already covers artist/title/is_playing), and performs no IO and no
     // extra locking beyond the tray handle itself.
-    let tooltip = match &current_track {
+    let track_tooltip = match &current_track {
         Some(t) => format!(
             "{} — {} ({})",
             t.artist,
@@ -1002,6 +1132,10 @@ pub fn update_tray_menu(
         ),
         None => "PresenceJam".to_string(),
     };
+    // Issue #591: the status line leads the tooltip, so a hover states
+    // whether PresenceJam is syncing even when no track row is present
+    // (and off macOS, where the presence-gated dock badge is a no-op).
+    let tooltip = format!("{} · {}", status_line, track_tooltip);
     if let Err(e) = tray.set_tooltip(Some(tooltip)) {
         log::warn!("[TRAY] update_tray_menu: failed to set tooltip: {}", e);
     }
@@ -1107,40 +1241,24 @@ mod tests {
     }
 
     /// Issue #388: the click handler must resolve by id with a live
-    /// re-fetch fallback instead of `devices.get(i)`. Brace-counted body
-    /// isolation (order-independent): do not anchor on the next fn.
+    /// re-fetch fallback instead of `devices.get(i)`. Issue #586: that
+    /// re-fetch must resolve its token through the shared refresh-aware
+    /// policy, so an expired token does not strand a transfer.
     #[test]
     fn device_click_resolves_by_id_with_live_fallback() {
         let src = include_str!("tray.rs");
-        let sig_idx = src
-            .find("fn resolve_device_id(")
-            .expect("resolve_device_id must exist");
-        let brace_open_rel = src[sig_idx..]
-            .find('{')
-            .expect("function body must have an opening brace");
-        let body_start = sig_idx + brace_open_rel;
-        let mut depth: u32 = 0;
-        let mut i = body_start;
-        let body_end = loop {
-            match src.as_bytes()[i] {
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        break i;
-                    }
-                }
-                _ => {}
-            }
-            i += 1;
-            if i >= src.len() {
-                panic!("unbalanced braces in resolve_device_id");
-            }
-        };
-        let body = &src[body_start + 1..body_end];
+        let body = body_of(prod_source(src), "fn resolve_device_id(");
         assert!(
-            body.contains("get_devices(&token)"),
+            body.contains("crate::spotify::get_devices"),
             "resolve_device_id must live re-fetch when the cache misses"
+        );
+        assert!(
+            body.contains("player_with_refresh_typed("),
+            "the live re-fetch must use the refresh-aware token policy (issue #586)"
+        );
+        assert!(
+            !body.contains("tokens.spotify()"),
+            "resolve_device_id must not snapshot the raw access token (issue #586)"
         );
         assert!(
             !body.contains("devices.get(*i).cloned()") || body.contains("LegacyIndex"),
@@ -1150,37 +1268,13 @@ mod tests {
 
     /// Issues #383/#386: the tray Quit arm must terminate via the shared
     /// graceful shutdown, and the playback/device click arms must offload
-    /// blocking Spotify HTTP onto worker threads. Brace-counted body
-    /// isolation (order-independent): do not anchor on the next fn.
+    /// blocking Spotify HTTP onto worker threads. Issue #587: the Show/Hide
+    /// repaint rebuilds a menu that can fetch Spotify over the network, so
+    /// it must be offloaded too.
     #[test]
     fn tray_click_arms_quit_and_offload() {
         let src = include_str!("tray.rs");
-        let sig_idx = src
-            .find("pub fn setup_tray(")
-            .expect("setup_tray must exist");
-        let brace_open_rel = src[sig_idx..]
-            .find('{')
-            .expect("function body must have an opening brace");
-        let body_start = sig_idx + brace_open_rel;
-        let mut depth: u32 = 0;
-        let mut i = body_start;
-        let body_end = loop {
-            match src.as_bytes()[i] {
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        break i;
-                    }
-                }
-                _ => {}
-            }
-            i += 1;
-            if i >= src.len() {
-                panic!("unbalanced braces in setup_tray");
-            }
-        };
-        let body = &src[body_start + 1..body_end];
+        let body = body_of(prod_source(src), "pub fn setup_tray(");
         // #383: Quit terminates even with no frontend listener.
         let quit_pos = body
             .find("ID_QUIT =>")
@@ -1196,7 +1290,7 @@ mod tests {
         );
         // #386: no blocking Spotify HTTP directly on the menu-event thread.
         for marker in [
-            "get_currently_playing(&token, None)",
+            "get_currently_playing(token, None)",
             "player_pause(t, None)",
             "player_play(t, None)",
             "player_previous(token, None)",
@@ -1213,5 +1307,182 @@ mod tests {
                 marker
             );
         }
+        // #587: the Show/Hide repaint must be offloaded. `update_tray_menu`
+        // fetches Spotify devices/queue with a 10 s timeout once the fetch
+        // throttle lapses, so rebuilding inline would wedge the menu the
+        // same way the #386 player arms used to.
+        let show_pos = body
+            .find("ID_SHOW_HIDE =>")
+            .expect("setup_tray must handle ID_SHOW_HIDE");
+        let show_end = body[show_pos..]
+            .find("ID_PAUSE_SYNC")
+            .map(|i| show_pos + i)
+            .unwrap_or(body.len());
+        let show_arm = &body[show_pos..show_end];
+        assert!(
+            !show_arm.contains("update_tray_menu("),
+            "the Show/Hide arm must not rebuild the tray menu inline (issue #587)"
+        );
+        assert!(
+            show_arm.contains("refresh_tray_from_state("),
+            "the Show/Hide arm must repaint through the offloading refresh helper"
+        );
+        // #588: the Pause/Resume label is repainted from backend truth after
+        // the frontend's asynchronous toggle, not left to the Dashboard.
+        let pause_pos = body
+            .find("ID_PAUSE_SYNC | ID_RESUME_SYNC =>")
+            .expect("setup_tray must handle ID_PAUSE_SYNC | ID_RESUME_SYNC");
+        let pause_end = body[pause_pos..]
+            .find("ID_QUIT =>")
+            .map(|i| pause_pos + i)
+            .unwrap_or(body.len());
+        let pause_arm = &body[pause_pos..pause_end];
+        assert!(
+            pause_arm.contains("std::thread::spawn"),
+            "the Pause/Resume arm must repaint from a worker (issue #588)"
+        );
+        assert!(
+            pause_arm.contains("await_sync_toggle("),
+            "the Pause/Resume arm must wait for the toggle to settle before repainting"
+        );
+        // #586: no raw token snapshot on the click path — the refresh-aware
+        // policy resolves the token (and retries once on ExpiredToken).
+        assert!(
+            !show_arm.contains("tokens.spotify()"),
+            "the click path must not read the raw Spotify token snapshot"
+        );
+    }
+
+    /// Production half of `src` — everything before the inline test module,
+    /// so a scan can never match the assertions themselves.
+    fn prod_source(src: &str) -> &str {
+        src.split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("tray.rs has no #[cfg(test)] mod tests block")
+    }
+
+    /// Drops `//` line comments so a source-scan assertion is not fooled by
+    /// prose that quotes the very construct it forbids: a comment saying
+    /// "never snapshot `state.tokens.spotify()`" must not read as a
+    /// snapshot. String literals are not parsed, so a `//` inside a literal
+    /// truncates the rest of that line — that can only lose trailing text,
+    /// never invent it. Stripping also removes any brace a comment mentions,
+    /// which keeps the brace counting below from being unbalanced by prose.
+    fn strip_line_comments(src: &str) -> String {
+        src.lines()
+            .map(|line| match line.find("//") {
+                Some(i) => &line[..i],
+                None => line,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Comment-stripped, brace-counted body isolation for `sig`'s fn.
+    /// Order-independent: never anchor on the next fn.
+    fn body_of(prod: &str, sig: &str) -> String {
+        let stripped = strip_line_comments(prod);
+        let after_sig = stripped
+            .split(sig)
+            .nth(1)
+            .unwrap_or_else(|| panic!("tray.rs has no `{}`", sig));
+        let open = after_sig
+            .find('{')
+            .unwrap_or_else(|| panic!("{} has no opening brace", sig));
+        let mut depth = 0usize;
+        let mut end = None;
+        for (i, ch) in after_sig[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(open + i + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        after_sig[..end.unwrap_or_else(|| panic!("{} body never closed", sig))].to_string()
+    }
+
+    /// Issue #586: tray player actions used to snapshot
+    /// `state.tokens.spotify()` — an expired access token meant a failed
+    /// click with no refresh and no retry, while the refresh-aware policy in
+    /// `commands/playback.rs` had no callers. Both tray paths must now route
+    /// through that shared policy.
+    #[test]
+    fn tray_player_actions_use_refresh_aware_token() {
+        let src = include_str!("tray.rs");
+        let prod = src
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("tray.rs has no #[cfg(test)] mod tests block");
+        let action_body = body_of(prod, "fn run_player_action(");
+        assert!(
+            action_body.contains("player_with_refresh_typed("),
+            "run_player_action must route through the shared refresh-aware policy (issue #586)"
+        );
+        assert!(
+            !action_body.contains("tokens.spotify()"),
+            "run_player_action must not snapshot the raw access token (issue #586)"
+        );
+        let setup_body = body_of(prod, "pub fn setup_tray(");
+        let play_pos = setup_body
+            .find("ID_PLAY_PAUSE =>")
+            .expect("setup_tray must handle ID_PLAY_PAUSE");
+        let play_end = setup_body[play_pos..]
+            .find("ID_PREVIOUS =>")
+            .map(|i| play_pos + i)
+            .unwrap_or(setup_body.len());
+        let play_arm = &setup_body[play_pos..play_end];
+        assert!(
+            play_arm.contains("player_with_refresh_typed("),
+            "the Play/Pause arm must read playback state through the refresh-aware policy (issue #586)"
+        );
+        assert!(
+            !play_arm.contains("tokens.spotify()"),
+            "the Play/Pause arm must not snapshot the raw access token (issue #586)"
+        );
+    }
+
+    /// Issue #591: the tray must state whether the app is syncing instead of
+    /// leaving it to be inferred from the Pause/Resume verb. Pure helper.
+    #[test]
+    fn sync_status_line_reports_backend_state() {
+        let track = crate::spotify::TrackInfo {
+            title: "Track".to_string(),
+            artist: "Artist".to_string(),
+            album: "Album".to_string(),
+            album_art_url: String::new(),
+            is_playing: true,
+            progress_ms: None,
+            duration_ms: 0,
+        };
+        assert_eq!(
+            sync_status_line(false, true, Some(&track)),
+            "Not syncing",
+            "a stopped poller outranks any remembered track"
+        );
+        assert_eq!(
+            sync_status_line(false, false, None),
+            "Not syncing",
+            "no track and no sync is still Not syncing"
+        );
+        assert_eq!(
+            sync_status_line(true, false, None),
+            "Syncing — no track",
+            "syncing with nothing playing must say so rather than claim a track"
+        );
+        assert_eq!(
+            sync_status_line(true, true, Some(&track)),
+            "Syncing — Artist — Track"
+        );
+        assert_eq!(
+            sync_status_line(true, false, Some(&track)),
+            "Paused — Artist — Track",
+            "a same-track pause is reported from the live playing state"
+        );
     }
 }

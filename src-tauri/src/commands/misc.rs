@@ -7,7 +7,8 @@
 
 use crate::spotify::TrackInfo;
 use crate::tray;
-use tauri::AppHandle;
+use std::sync::Arc;
+use tauri::{AppHandle, Manager};
 
 /// Log tag prefix for this submodule (issue #79 item 3).
 const CMD: &str = "[CMD.MISC]";
@@ -62,22 +63,32 @@ pub fn preview_status(
     result
 }
 
+/// Rebuilds the tray menu from authoritative backend state (issue #592).
+///
+/// The frontend used to pass its own `is_syncing` / `current_track` mirrors
+/// here. Those mirrors are event-driven (and absent entirely on a view that
+/// never mounted), so committing them made the tray's dedup baseline a tuple
+/// the backend never produced: a stale mirror could erase the track row or
+/// show "Pause Sync" while `polling.is_syncing` was false, and the truthful
+/// rebuild stayed suppressed until the dedup key changed. The command is now
+/// a push-only refresh trigger — it takes no state, and any payload the
+/// caller still sends is ignored.
 #[tauri::command]
-pub async fn update_tray_menu_state(
-    app: AppHandle,
-    is_syncing: bool,
-    current_track: Option<TrackInfo>,
-) -> Result<(), String> {
-    log::info!(
-        "{CMD} update_tray_menu_state: ENTRY - is_syncing={}",
-        is_syncing
-    );
+pub async fn update_tray_menu_state(app: AppHandle) -> Result<(), String> {
+    log::info!("{CMD} update_tray_menu_state: ENTRY");
     // #215: tray::update_tray_menu builds the native menu and may fetch
     // Spotify devices/queue via blocking HTTP (cached_devices / cached_queue
     // in tray.rs call spotify::get_devices with 10 s timeout). Offload to
     // the blocking pool so the UI thread is not frozen.
     let app_clone = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let Some(state) = app_clone.try_state::<Arc<crate::AppState>>() else {
+            return Err("AppState not registered".to_string());
+        };
+        let is_syncing = state
+            .polling
+            .is_syncing(std::sync::atomic::Ordering::Acquire);
+        let current_track = state.polling.current_track().clone();
         tray::update_tray_menu(&app_clone, is_syncing, current_track)
     })
     .await
