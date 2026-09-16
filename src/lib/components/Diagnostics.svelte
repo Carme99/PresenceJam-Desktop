@@ -5,6 +5,7 @@
   import { currentView } from '$lib/stores/app';
   import { t } from '$lib/i18n';
   import type { DiagnosticsSnapshot } from '$lib/types';
+  import { devLog } from '$lib/utils/dev';
 
   /**
    * Telemetry-free local diagnostics page (scope-3.3 candidate C5).
@@ -13,14 +14,17 @@
    * command — app/OS versions, sanitized config summary, token metadata
    * only (expiry timestamps, presence flags; never token values),
    * keychain presence flags, and the redacted tail of the on-disk log.
-   * "Copy diagnostics" puts the JSON on the clipboard and "Save to
-   * file" downloads it, so the user can paste it into a GitHub issue.
+   * "Copy diagnostics" puts the JSON on the clipboard and "Save to file"
+   * asks the backend to write it into the downloads folder, so the user
+   * can attach it to a GitHub issue.
    * No network calls anywhere — matches SECURITY.md "No Telemetry".
    */
 
   let snapshot = $state<DiagnosticsSnapshot | null>(null);
   let loadError = $state('');
   let feedback = $state('');
+  /** Guard so a double click cannot start two saves (issue #598). */
+  let saving = $state(false);
   let loading = $derived(snapshot === null && loadError === '');
 
   function goBack() {
@@ -42,22 +46,29 @@
     }
   }
 
-  function saveToFile() {
-    if (!snapshot) return;
+  /**
+   * Issue #598: the old implementation clicked a synthetic anchor on a
+   * `blob:` URL and then reported success unconditionally. No download
+   * handler is registered anywhere in the app, so on engines that ignore
+   * an unhandled download (WebKitGTK) nothing was written while the user
+   * was told the file had been saved. The backend now performs the write
+   * and returns the path it created (dev-logged below), so success is
+   * reported only for a file that actually exists.
+   */
+  async function saveToFile() {
+    if (!snapshot || saving) return;
+    saving = true;
     try {
-      const blob = new Blob([formatText(snapshot)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `presencejam-diagnostics-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
+      const path = await invoke<string>('save_diagnostics_snapshot', {
+        json: formatText(snapshot)
+      });
+      devLog('[DIAGNOSTICS] snapshot saved to', path);
       feedback = t('diagnostics.savedToDownloads');
     } catch (e) {
       console.warn('[DIAGNOSTICS] save failed:', e);
       feedback = t('diagnostics.saveFailed');
+    } finally {
+      saving = false;
     }
   }
 
@@ -105,7 +116,7 @@
   <div class="toolbar">
     <span class="hint">{t('diagnostics.localOnlyHint')}</span>
     <button class="btn-secondary" onclick={copyDiagnostics} disabled={!snapshot}>{t('diagnostics.copy')}</button>
-    <button class="btn-secondary" onclick={saveToFile} disabled={!snapshot}>{t('diagnostics.saveToFile')}</button>
+    <button class="btn-secondary" onclick={saveToFile} disabled={!snapshot || saving}>{t('diagnostics.saveToFile')}</button>
   </div>
 
   <p class="feedback" role="status">{feedback}</p>
@@ -159,6 +170,7 @@
           <dt>{t('diagnostics.presenceGate')}</dt><dd>{boolLabel(snapshot.config.presence_gate)}</dd>
           <dt>{t('diagnostics.pollInterval')}</dt>
           <dd>{snapshot.config.default_interval_seconds}s / {snapshot.config.minimum_interval_seconds}s / {snapshot.config.maximum_interval_seconds}s</dd>
+          <dt>{t('diagnostics.expiryBuffer')}</dt><dd>{snapshot.config.expiry_buffer_seconds}s</dd>
           <dt>{t('diagnostics.logging')}</dt>
           <dd>{snapshot.config.logging_enabled ? t('diagnostics.loggingEnabled', { level: snapshot.config.log_level }) : t('diagnostics.loggingDisabled')}</dd>
           <dt>{t('diagnostics.launchAtLogin')}</dt><dd>{boolLabel(snapshot.config.autostart)}</dd>
@@ -173,6 +185,7 @@
           <dt>{t('diagnostics.spotifyTokenExpires')}</dt><dd>{snapshot.tokens.spotify_expires_at ?? '—'}{snapshot.tokens.spotify_expired ? t('diagnostics.expired') : ''}</dd>
           <dt>{t('diagnostics.teamsConnected')}</dt><dd>{boolLabel(snapshot.tokens.teams_connected)}</dd>
           <dt>{t('diagnostics.teamsTokenExpires')}</dt><dd>{snapshot.tokens.teams_expires_at ?? '—'}{snapshot.tokens.teams_expired ? t('diagnostics.expired') : ''}</dd>
+          <dt>{t('diagnostics.teamsRefreshTokenPresent')}</dt><dd>{boolLabel(snapshot.tokens.teams_refresh_token_present)}</dd>
           <dt>{t('diagnostics.keychainSpotifySecret')}</dt><dd>{boolLabel(snapshot.keychain.spotify_client_secret_present)}</dd>
           <dt>{t('diagnostics.keychainEncryptionKey')}</dt><dd>{boolLabel(snapshot.keychain.tokens_encryption_key_present)}</dd>
         </dl>
