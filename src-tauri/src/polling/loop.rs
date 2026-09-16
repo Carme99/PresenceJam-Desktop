@@ -107,6 +107,7 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
             &mut clocks.last_track_key,
             &mut clocks.last_teams_update,
             &mut clocks.last_posted_placeholder,
+            &mut clocks.suppressed_placeholder,
             &mut consecutive_pauses,
             &mut transient_failure_count,
             &mut consecutive_network_failures,
@@ -154,6 +155,14 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
     // `spotify-track-changed` emit and the `current_track` update for a track
     // that is already playing.
     super::poll_once::reset_write_clocks();
+    // Finding D1 (issue #684): the clocks die here, but what this session left
+    // on TEAMS does not — the exit snapshot in `polling/state.rs` is
+    // deliberately NOT reset on this path. `RunEvent::Exit` runs
+    // `clear_presence_on_exit` AFTER this tail, so resetting the snapshot here
+    // (or deciding the cleanup from these now-cold clocks) is precisely the
+    // defect: a quit mid-song would leave the music status and the armed
+    // `Available` session live. Only a NEW session (and a completed cleanup)
+    // clears it.
     tray::set_presence_gated_badge(&app, false);
 
     log::info!("[POLLING] polling_loop: ENDED");

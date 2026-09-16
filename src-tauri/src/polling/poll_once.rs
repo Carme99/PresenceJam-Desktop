@@ -118,6 +118,17 @@ pub(crate) enum RunMode {
 /// the availability session on a fresh clock and re-POSTs text Teams already
 /// shows. The polling loop loads this once per iteration and stores it back
 /// afterwards; a genuinely cold app reads `None` everywhere and arms normally.
+///
+/// Finding D11 (issue #694): that load/store pair is NOT atomic, and the
+/// consequence of a stale write-back is worse than the "one redundant write"
+/// this comment used to claim. `run_oneshot` (a tray/refresh-status "Refresh")
+/// loads the slot once around its WHOLE iteration while the loop loads per
+/// iteration, so a refresh that stores after the loop recorded a gate
+/// (`gated_track_key`) published a PRE-gate snapshot back — silently dropping
+/// the gate and letting the next write through mid-meeting. The snapshot
+/// therefore carries a [`WriteClocks::generation`]: a store lands only when the
+/// slot still holds the generation the snapshot was loaded at, so a superseded
+/// writer is discarded (and logged) instead of resurrecting an old decision.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct WriteClocks {
     /// The change key of the track whose status is currently on Teams
@@ -146,6 +157,17 @@ pub(crate) struct WriteClocks {
     /// switch the bubble on the NEXT iteration instead of waiting out the
     /// 4-minute cadence; the pair is also what the exit path clears.
     pub(crate) armed_presence: Option<PresencePair>,
+    /// The placeholder text whose write was SUPPRESSED by the presence / rule
+    /// gate (findings D3/D4, issues #686/#687). Deliberately distinct from
+    /// `last_posted_placeholder`, which only ever holds text Teams actually
+    /// shows: a suppressed placeholder must be RETRIED once the gate clears
+    /// (re-check due, quiet window over, rule stopped matching), while a posted
+    /// one stays deduped. Recording it also keeps the `presence-gated` event to
+    /// one per suppression episode instead of one per poll.
+    pub(crate) suppressed_placeholder: Option<String>,
+    /// Generation of the slot this snapshot was loaded at (finding D11, issue
+    /// #694). See the struct docs and [`store_write_clocks`].
+    pub(crate) generation: u64,
 }
 
 /// Process-wide slot for [`WriteClocks`]. See the struct docs for why these
@@ -159,11 +181,17 @@ static WRITE_CLOCKS: Mutex<WriteClocks> = Mutex::new(WriteClocks {
     last_posted_status: None,
     last_gate_check: None,
     armed_presence: None,
+    suppressed_placeholder: None,
+    generation: 0,
 });
 
 /// Snapshot the shared write-decision clocks. A poisoned lock is recovered
 /// rather than propagated (`into_inner`): these are dedup heuristics, and
 /// losing them costs at most one redundant Graph write.
+///
+/// The snapshot carries the generation it read, so the matching
+/// [`store_write_clocks`] can tell whether it is still the slot's latest view
+/// (finding D11, issue #694).
 pub(crate) fn load_write_clocks() -> WriteClocks {
     WRITE_CLOCKS
         .lock()
@@ -172,8 +200,28 @@ pub(crate) fn load_write_clocks() -> WriteClocks {
 }
 
 /// Publish the write-decision clocks back to the shared slot.
+///
+/// Finding D11 (issue #694): the store is generation-checked. `clocks` came
+/// from [`load_write_clocks`] and carries the generation it read; if the slot
+/// has moved on, another iteration already published a snapshot derived from a
+/// later view of the world and THIS one is stale — applying it would resurrect
+/// a pre-gate `gated_track_key` (and its `last_gate_check`) and let a write
+/// through mid-meeting, which is exactly the defect the guard exists for.
+/// Discard it and log: the lost fields are dedup hints the next iteration
+/// re-derives, while a resurrected gate decision is not recoverable.
 pub(crate) fn store_write_clocks(clocks: &WriteClocks) {
-    *WRITE_CLOCKS.lock().unwrap_or_else(|e| e.into_inner()) = clocks.clone();
+    let mut slot = WRITE_CLOCKS.lock().unwrap_or_else(|e| e.into_inner());
+    if slot.generation != clocks.generation {
+        log::debug!(
+            "[POLLING] store_write_clocks: discarding a superseded snapshot (loaded generation {}, slot generation {}); a concurrent iteration already published a newer one",
+            clocks.generation,
+            slot.generation
+        );
+        return;
+    }
+    let next_generation = slot.generation.wrapping_add(1);
+    *slot = clocks.clone();
+    slot.generation = next_generation;
 }
 
 /// Forget the shared write-decision clocks. Called when a polling session
@@ -184,8 +232,15 @@ pub(crate) fn store_write_clocks(clocks: &WriteClocks) {
 /// A manual refresh while no session is running therefore behaves exactly like
 /// one served by a fresh loop (it re-posts), while a manual refresh DURING a
 /// session shares that session's clocks.
+///
+/// Finding D11 (issue #694): the reset bumps the generation too, so a snapshot
+/// loaded before it (by a dead session, or by an in-flight one-shot) can never
+/// land on the fresh slot.
 pub(crate) fn reset_write_clocks() {
-    *WRITE_CLOCKS.lock().unwrap_or_else(|e| e.into_inner()) = WriteClocks::default();
+    let mut slot = WRITE_CLOCKS.lock().unwrap_or_else(|e| e.into_inner());
+    let next_generation = slot.generation.wrapping_add(1);
+    *slot = WriteClocks::default();
+    slot.generation = next_generation;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -196,6 +251,7 @@ pub(crate) fn run(
     last_track_key: &mut Option<String>,
     last_teams_update: &mut Option<Instant>,
     last_posted_placeholder: &mut Option<String>,
+    suppressed_placeholder: &mut Option<String>,
     consecutive_pauses: &mut u8,
     transient_failure_count: &mut u8,
     consecutive_network_failures: &mut u8,
@@ -216,6 +272,7 @@ pub(crate) fn run(
         last_track_key,
         last_teams_update,
         last_posted_placeholder,
+        suppressed_placeholder,
         consecutive_pauses,
         transient_failure_count,
         consecutive_network_failures,
@@ -267,6 +324,7 @@ pub(crate) fn run_oneshot(state: &Arc<AppState>, app: &AppHandle) {
         &mut clocks.last_track_key,
         &mut clocks.last_teams_update,
         &mut clocks.last_posted_placeholder,
+        &mut clocks.suppressed_placeholder,
         &mut consecutive_pauses,
         &mut transient_failure_count,
         &mut consecutive_network_failures,
@@ -290,6 +348,7 @@ fn run_inner(
     last_track_key: &mut Option<String>,
     last_teams_update: &mut Option<Instant>,
     last_posted_placeholder: &mut Option<String>,
+    suppressed_placeholder: &mut Option<String>,
     consecutive_pauses: &mut u8,
     transient_failure_count: &mut u8,
     consecutive_network_failures: &mut u8,
@@ -528,6 +587,7 @@ fn run_inner(
                 last_poll_instant,
                 last_teams_update,
                 last_posted_placeholder,
+                suppressed_placeholder,
                 consecutive_pauses,
                 gated_track_key,
                 last_availability_arm,
@@ -549,6 +609,7 @@ fn run_inner(
                 last_track_key,
                 &config,
                 last_posted_placeholder,
+                suppressed_placeholder,
                 last_availability_arm,
                 armed_presence,
                 first_iteration,
@@ -588,6 +649,7 @@ fn run_inner(
                     last_poll_instant,
                     last_teams_update,
                     last_posted_placeholder,
+                    suppressed_placeholder,
                     consecutive_pauses,
                     gated_track_key,
                     last_availability_arm,
@@ -682,6 +744,7 @@ fn run_inner(
                                             last_poll_instant_retry,
                                             last_teams_update,
                                             last_posted_placeholder,
+                                            suppressed_placeholder,
                                             consecutive_pauses,
                                             gated_track_key,
                                             last_availability_arm,
@@ -704,6 +767,7 @@ fn run_inner(
                                             last_track_key,
                                             &config,
                                             last_posted_placeholder,
+                                            suppressed_placeholder,
                                             last_availability_arm,
                                             armed_presence,
                                             first_iteration,
@@ -742,6 +806,7 @@ fn run_inner(
                                                 last_poll_instant_retry,
                                                 last_teams_update,
                                                 last_posted_placeholder,
+                                                suppressed_placeholder,
                                                 consecutive_pauses,
                                                 gated_track_key,
                                                 last_availability_arm,
@@ -1473,6 +1538,10 @@ fn arm_presence_session(
         Ok(_) => {
             *armed = Some(pair.clone());
             *last_availability_arm = Some(now);
+            // Finding D1 (issue #684): this session now has a live presence
+            // session on Teams — record it in the exit snapshot, which
+            // survives the loop's exit-tail clock reset.
+            super::state::record_armed_presence(Some((&pair.availability, &pair.activity, label)));
             let _ = app.emit(
                 "presence-availability-updated",
                 json!({
@@ -1513,6 +1582,8 @@ fn clear_presence_session(
         Ok(_) => {
             *armed = None;
             *last_availability_arm = None;
+            // Finding D1 (issue #684): no session of ours is armed any more.
+            super::state::record_armed_presence(None);
             let _ = app.emit(
                 "presence-availability-updated",
                 json!({
@@ -1891,6 +1962,68 @@ fn should_skip_identical_write(
     }
 }
 
+/// Findings D3/D4 (issues #686/#687): what to do with one placeholder write —
+/// the paused-track clear and the no-track clear share it, so the two paths
+/// cannot drift again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlaceholderWrite {
+    /// POST the placeholder (and only then record it as posted).
+    Post,
+    /// A byte-identical placeholder is already on Teams: stay silent.
+    SkipDuplicate,
+    /// The presence/rule/manual gate suppressed this write. NOT recorded as
+    /// posted, so a later iteration retries it once the gate clears; `announce`
+    /// is false when this suppression episode was already surfaced, so the
+    /// `presence-gated` event fires once per episode instead of once per poll.
+    Suppress { announce: bool },
+}
+
+/// Findings D3/D4 (issues #686/#687): the single record/emit decision for a
+/// placeholder write.
+///
+/// The pre-fix code compared `last_posted_placeholder` BEFORE asking the gate
+/// whether the write was allowed, and the gated branch then recorded the
+/// placeholder as POSTED although nothing was sent. A gated pause-clear or
+/// no-track clear was therefore deduped away forever — the meeting could end
+/// mid-track and the clear would still never be retried. Splitting "applied"
+/// from "suppressed" is what makes the retry possible:
+///
+/// * `blocked`      ⇒ `Suppress`, regardless of what is currently on Teams (a
+///   suppressed write must never look like a posted one);
+/// * `already_posted` ⇒ `SkipDuplicate` (#155);
+/// * otherwise      ⇒ `Post`.
+pub(crate) fn placeholder_write_decision(
+    blocked: bool,
+    already_posted: bool,
+    already_suppressed: bool,
+) -> PlaceholderWrite {
+    if blocked {
+        PlaceholderWrite::Suppress {
+            announce: !already_suppressed,
+        }
+    } else if already_posted {
+        PlaceholderWrite::SkipDuplicate
+    } else {
+        PlaceholderWrite::Post
+    }
+}
+
+/// Finding D6 (issue #689): whether the observed item represents a playback
+/// STATE change for an otherwise-unchanged track.
+///
+/// `status_track_key` deliberately excludes `is_playing` (it keys track
+/// identity + status-shaping config), and the stored `TrackInfo` was only ever
+/// written inside `if changed` — so pausing the same track in the Spotify
+/// client left the process-wide store claiming it was still playing, and the
+/// sync status / tray / Dashboard all reported the wrong playback state. An
+/// absent stored track counts as a change (re-store rather than assume).
+pub(crate) fn playback_state_changed(
+    stored_is_playing: Option<bool>,
+    observed_is_playing: bool,
+) -> bool {
+    stored_is_playing != Some(observed_is_playing)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn process_track(
     app: &AppHandle,
@@ -1904,6 +2037,7 @@ pub(crate) fn process_track(
     last_poll_instant: Instant,
     last_teams_update: &mut Option<Instant>,
     last_posted_placeholder: &mut Option<String>,
+    suppressed_placeholder: &mut Option<String>,
     consecutive_pauses: &mut u8,
     gated_track_key: &mut Option<String>,
     last_availability_arm: &mut Option<Instant>,
@@ -1928,6 +2062,13 @@ pub(crate) fn process_track(
     // instead of leaving the stale status until the next track.
     let track_key = status_track_key(now, config);
     let changed = last_track_key.as_ref() != Some(&track_key);
+    // Finding D6 (issue #689): `status_track_key` excludes `is_playing`, so a
+    // pause/resume of the SAME track is not a `changed` iteration — and the
+    // stored `TrackInfo` was only written inside `if changed`, leaving every
+    // consumer (tray, sync status, Dashboard) reporting the stale playback
+    // state. Detect it separately and re-store below.
+    let stored_is_playing = state.polling.current_track().as_ref().map(|t| t.is_playing);
+    let playing_changed = !changed && playback_state_changed(stored_is_playing, track.is_playing);
 
     // Issue #432 / finding PollCore#1 (issue #569) / PollCore#2 (issue #570) /
     // finding #634 (issue #634): the per-iteration rule decision is computed
@@ -2015,6 +2156,25 @@ pub(crate) fn process_track(
                 "duration_ms": track.duration_ms
             }),
         );
+    } else if playing_changed {
+        // Finding D6 (issue #689): a pause is a state change. Re-store the
+        // observed item (so `current_track` — and therefore the returned sync
+        // status — reports the paused track) and tell the shell about it. The
+        // full item is re-stored, not just the flag, because `LAST_NOW_PLAYING`
+        // and `current_track` are documented as lockstep (issues #580/#581).
+        log::info!(
+            "[POLLING] process_track: playback state changed for the same track (is_playing={}), re-storing",
+            track.is_playing
+        );
+        *state.polling.current_track_mut() = Some(track.clone());
+        *LAST_NOW_PLAYING.lock() = Some(now.clone());
+        let _ = app.emit(
+            "playback-state-changed",
+            json!({
+                "is_playing": track.is_playing,
+                "track_key": track_key,
+            }),
+        );
     }
 
     // Issues #370/#388: one shared refresh path — see `teams_token_for_write`.
@@ -2031,6 +2191,9 @@ pub(crate) fn process_track(
             // Issue #155: a real track replaces any placeholder, so the next
             // pause/no-track must post a fresh placeholder again.
             *last_posted_placeholder = None;
+            // Findings D3/D4: a real track also retires any SUPPRESSED
+            // placeholder record — a fresh pause decides from scratch.
+            *suppressed_placeholder = None;
 
             // P2 (issue #3.0-P2): presence-aware gating. On a track change,
             // read the user's Teams presence; when busy/DND/in a
@@ -2336,6 +2499,10 @@ pub(crate) fn process_track(
                 Ok(_) => {
                     *last_teams_update = Some(Instant::now());
                     *last_posted_status = Some(final_status.clone());
+                    // Finding D1 (issue #684): the playing status is now on
+                    // Teams — mirror it in the exit snapshot, which survives the
+                    // loop's exit-tail clock reset (the D1 defect).
+                    super::state::record_posted_status(Some(&final_status));
                     let _ = app.emit(
                         "presence-updated",
                         json!({
@@ -2449,6 +2616,8 @@ pub(crate) fn process_track(
                         Ok(refreshed) => {
                             *last_teams_update = Some(Instant::now());
                             *last_posted_status = Some(final_status.clone());
+                            // Finding D1 (issue #684): see the main write arm.
+                            super::state::record_posted_status(Some(&final_status));
                             let _ = app.emit(
                                 "presence-updated",
                                 json!({
@@ -2505,80 +2674,107 @@ pub(crate) fn process_track(
             // (Graph has no "clear status message" action) and skips
             // byte-identical repeat posts.
             let placeholder = "\u{1F3B5} Paused";
-            if last_posted_placeholder.as_deref() == Some(placeholder) {
-                log::debug!(
-                    "[POLLING] process_track: paused placeholder unchanged, skipping clear POST"
+            // P2 (issue #3.0-P2): gate the paused-clear the same way as
+            // the playing write — don't replace a busy/meeting presence
+            // with a "Paused" placeholder. `gated_track_key` carries the
+            // change-time decision from the playing path; re-read
+            // presence only when this track wasn't gated there.
+            //
+            // Finding PollCore#2 (issue #570): the clear IS a status
+            // write, so quiet hours and suppression rules apply to it too
+            // (en.ts 'rules.sectionHint'). Pre-fix only the presence gate
+            // was consulted here, so a quiet window or a matching
+            // suppression rule was bypassed on every pause.
+            // Finding #635: the gate covers the manual-status verdict too —
+            // never replace a message the user typed with "Paused".
+            let rule_suppression_reason: Option<&str> =
+                if rule.suppresses() { rule.reason } else { None };
+            // Findings D3 (issue #686): ask the GATE first and compare against
+            // what Teams shows SECOND. Pre-fix the byte-identity check ran
+            // before the verdict, and the gated branch recorded the placeholder
+            // as POSTED although nothing was sent — so once `gate_recheck_due`
+            // let the gate clear, the dedup skipped the clear forever and the
+            // meeting-ending mid-pause never reached Teams.
+            //
+            // A gate recorded by the playing path is therefore re-decided as
+            // soon as its re-check is due (the #380 clock, exactly like the
+            // playing branch), instead of suppressing the pause indefinitely.
+            let mut gate_blocked = false;
+            let mut gate_reason: Option<String> = None;
+            let mut gate_sample: Option<(String, String)> = None;
+            if let Some(reason) = rule_suppression_reason {
+                log::info!(
+                    "[POLLING] process_track: paused-clear suppressed ({}), keeping presence untouched",
+                    reason
                 );
-            } else {
-                // P2 (issue #3.0-P2): gate the paused-clear the same way as
-                // the playing write — don't replace a busy/meeting presence
-                // with a "Paused" placeholder. `gated_track_key` carries the
-                // change-time decision from the playing path; re-read
-                // presence only when this track wasn't gated there.
-                //
-                // Finding PollCore#2 (issue #570): the clear IS a status
-                // write, so quiet hours and suppression rules apply to it too
-                // (en.ts 'rules.sectionHint'). Pre-fix only the presence gate
-                // was consulted here, so a quiet window or a matching
-                // suppression rule was bypassed on every pause.
-                // Finding #635: `gate_blocked` covers the manual-status
-                // verdict too — never replace a message the user typed with
-                // "Paused".
-                let rule_suppression_reason: Option<&str> =
-                    if rule.suppresses() { rule.reason } else { None };
-                // `presence_blocked` is the hoisted flag (declared above the
-                // playing branch) — the availability block consults it.
-                let gate_blocked = if let Some(reason) = rule_suppression_reason {
+                gate_blocked = true;
+                gate_reason = Some(reason.to_string());
+            } else if gated_track_key.as_deref() == Some(track_key.as_str())
+                && !gate_recheck_due(*last_gate_check, Instant::now())
+            {
+                // Inside the re-check window: keep the recorded verdict (it was
+                // surfaced when it was taken, so nothing to emit).
+                gate_blocked = true;
+            } else if presence_read_needed {
+                match get_teams_presence(&teams_tok.access_token) {
+                    Ok(presence) => match gate_verdict(
+                        &presence,
+                        last_posted_status.as_deref(),
+                        last_posted_placeholder.as_deref(),
+                    ) {
+                        Some(reason) => {
+                            *gated_track_key = Some(track_key.clone());
+                            *last_gate_check = Some(Instant::now());
+                            presence_blocked = true;
+                            gate_blocked = true;
+                            gate_reason = Some(reason);
+                            gate_sample =
+                                Some((presence.availability.clone(), presence.activity.clone()));
+                        }
+                        None => {
+                            // The gate cleared: fall through to the write
+                            // decision below, which posts the placeholder the
+                            // suppressed iteration never sent (finding D3).
+                            *gated_track_key = None;
+                            *last_gate_check = Some(Instant::now());
+                        }
+                    },
+                    Err(e) => {
+                        // Fail-safe: proceed with the clear.
+                        log::warn!(
+                            "[POLLING] process_track: presence gate read failed, proceeding with paused clear: {}",
+                            e
+                        );
+                    }
+                }
+            }
+
+            let already_posted = last_posted_placeholder.as_deref() == Some(placeholder);
+            let already_suppressed = suppressed_placeholder.as_deref() == Some(placeholder);
+            match placeholder_write_decision(gate_blocked, already_posted, already_suppressed) {
+                PlaceholderWrite::Suppress { announce } => {
                     log::info!(
-                        "[POLLING] process_track: paused-clear suppressed ({}), keeping presence untouched",
-                        reason
+                        "[POLLING] process_track: paused-clear gated, keeping presence untouched (retried when the gate clears)"
                     );
-                    emit_presence_gated(app, reason, "", "");
-                    true
-                } else if gated_track_key.as_deref() == Some(track_key.as_str()) {
-                    true
-                } else if presence_read_needed {
-                    match get_teams_presence(&teams_tok.access_token) {
-                        Ok(presence) => match gate_verdict(
-                            &presence,
-                            last_posted_status.as_deref(),
-                            last_posted_placeholder.as_deref(),
-                        ) {
-                            Some(reason) => {
-                                *gated_track_key = Some(track_key.clone());
-                                presence_blocked = true;
-                                emit_presence_gated(
-                                    app,
-                                    &reason,
-                                    &presence.availability,
-                                    &presence.activity,
-                                );
-                                true
-                            }
-                            None => false,
-                        },
-                        Err(e) => {
-                            // Fail-safe: proceed with the clear.
-                            log::warn!(
-                                "[POLLING] process_track: presence gate read failed, proceeding with paused clear: {}",
-                                e
-                            );
-                            false
+                    // Findings D3/D4: record the suppression, never a post. The
+                    // marker is what lets a later iteration (re-check due, quiet
+                    // window over, rule stopped matching) POST the placeholder
+                    // instead of deduping it away.
+                    *suppressed_placeholder = Some(placeholder.to_string());
+                    if announce {
+                        if let Some(reason) = gate_reason.as_deref() {
+                            let (availability, activity) = gate_sample.unwrap_or_default();
+                            emit_presence_gated(app, reason, &availability, &activity);
                         }
                     }
-                } else {
-                    false
-                };
-
-                if gate_blocked {
-                    log::info!(
-                        "[POLLING] process_track: paused-clear gated, keeping presence untouched"
+                }
+                PlaceholderWrite::SkipDuplicate => {
+                    log::debug!(
+                        "[POLLING] process_track: paused placeholder unchanged, skipping clear POST"
                     );
-                    // Mark the placeholder as posted so the decision is made
-                    // once per pause; the next track change resets it (the
-                    // playing branch clears `last_posted_placeholder`).
-                    *last_posted_placeholder = Some(placeholder.to_string());
-                } else {
+                }
+                PlaceholderWrite::Post => {
+                    *suppressed_placeholder = None;
                     let expiry_str = placeholder_expiry_str();
                     match clear_teams_status_message(
                         &teams_tok.access_token,
@@ -2591,10 +2787,16 @@ pub(crate) fn process_track(
                             // Issue #384: Teams now shows a placeholder, so
                             // the recorded playing status is stale.
                             *last_posted_status = None;
-                            let _ = app.emit(
-                                "presence-cleared",
-                                json!({ "timestamp": Utc::now().to_rfc3339() }),
-                            );
+                            // Finding D1 (issue #684): mirror it in the exit
+                            // snapshot, which the loop's exit-tail clock reset
+                            // cannot erase.
+                            super::state::record_posted_status(None);
+                            // Finding D7 (issue #690): a PAUSE is not a stop.
+                            // The dedicated event lets the Dashboard keep the
+                            // track card and show the paused state;
+                            // `presence-cleared` stays reserved for the genuine
+                            // no-track path.
+                            let _ = app.emit("presence-paused", json!({ "status": placeholder }));
                         }
                         Err(e) => {
                             log::error!(
@@ -2690,6 +2892,7 @@ pub(crate) fn handle_no_track(
     last_track_key: &mut Option<String>,
     config: &Option<crate::config::AppConfig>,
     last_posted_placeholder: &mut Option<String>,
+    suppressed_placeholder: &mut Option<String>,
     last_availability_arm: &mut Option<Instant>,
     armed_presence: &mut Option<PresencePair>,
     first_iteration: &mut bool,
@@ -2763,31 +2966,54 @@ pub(crate) fn handle_no_track(
         .replacement
         .clone()
         .unwrap_or_else(|| "\u{1F3B5} Nothing playing on Spotify".to_string());
-    // Issue #155: skip byte-identical placeholder posts (the rule's own text
-    // included, so a quiet-hours replacement is not re-POSTed every idle poll).
-    if last_posted_placeholder.as_deref() == Some(placeholder.as_str()) {
-        log::debug!(
-            "[POLLING] handle_no_track: no-track placeholder unchanged, skipping clear POST"
-        );
-        return teams_backoff_secs;
-    }
     let suppression_reason: Option<&str> = if no_track_rule.suppresses() {
         no_track_rule.reason
     } else {
         None
     };
-    if let Some(reason) = suppression_reason {
-        log::info!(
-            "[POLLING] handle_no_track: clear suppressed ({}), keeping Teams status untouched",
-            reason
-        );
-        // Record the placeholder as posted — exactly like the gated branch
-        // below — so the decision is made once and the suppression is not
-        // re-emitted on every idle poll. The next real track clears it (the
-        // playing branch resets `last_posted_placeholder`).
-        *last_posted_placeholder = Some(placeholder.clone());
-        emit_presence_gated(app, reason, "", "");
-        return teams_backoff_secs;
+    // Finding D4 (issue #687): the same class of defect as the paused clear.
+    // Pre-fix the byte-identity check above ran BEFORE the suppression verdict,
+    // and the suppressed branch recorded the placeholder as POSTED although
+    // nothing was sent — so when the quiet window closed (or a match-all rule
+    // stopped matching) the dedup skipped the clear and Teams kept showing the
+    // stale playing status until the next track. Ask the verdict first, then
+    // compare, and record a SUPPRESSION (not a post) when it blocks.
+    let already_posted = last_posted_placeholder.as_deref() == Some(placeholder.as_str());
+    let already_suppressed = suppressed_placeholder.as_deref() == Some(placeholder.as_str());
+    match placeholder_write_decision(
+        suppression_reason.is_some(),
+        already_posted,
+        already_suppressed,
+    ) {
+        PlaceholderWrite::Suppress { announce } => {
+            log::info!(
+                "[POLLING] handle_no_track: clear suppressed ({}), keeping Teams status untouched (retried once the decision changes)",
+                suppression_reason.unwrap_or(GATE_REASON_QUIET_HOURS)
+            );
+            // Findings D4: recorded as SUPPRESSED so the decision can flip back
+            // — the next iteration where the rule no longer suppresses falls
+            // into the POST arm below instead of being deduped. The marker also
+            // keeps the event to one per suppression episode.
+            *suppressed_placeholder = Some(placeholder.clone());
+            if announce {
+                emit_presence_gated(
+                    app,
+                    suppression_reason.unwrap_or(GATE_REASON_QUIET_HOURS),
+                    "",
+                    "",
+                );
+            }
+            return teams_backoff_secs;
+        }
+        PlaceholderWrite::SkipDuplicate => {
+            log::debug!(
+                "[POLLING] handle_no_track: no-track placeholder unchanged, skipping clear POST"
+            );
+            return teams_backoff_secs;
+        }
+        PlaceholderWrite::Post => {
+            *suppressed_placeholder = None;
+        }
     }
 
     let expiry_str = placeholder_expiry_str();
@@ -2889,6 +3115,9 @@ pub(crate) fn handle_no_track(
             // Issue #384: Teams now shows a placeholder, so the recorded
             // playing status is stale.
             *last_posted_status = None;
+            // Finding D1 (issue #684): Teams now shows a placeholder, not a
+            // playing status — mirror it in the exit snapshot.
+            super::state::record_posted_status(None);
             let _ = app.emit(
                 "presence-cleared",
                 json!({ "timestamp": Utc::now().to_rfc3339() }),
@@ -2945,20 +3174,38 @@ pub(crate) fn handle_no_track(
 /// Never blocks meaningfully: both calls run through a 3-second client
 /// ([`crate::teams::EXIT_CLEANUP_TIMEOUT`]) and a failed first call skips the
 /// second. Log-only; nothing here can fail the exit.
+///
+/// Finding D1 (issue #684): the decision is read from the process-wide
+/// [`ExitSnapshot`] — NOT from the live write clocks. `polling_loop`'s exit
+/// tail calls `reset_write_clocks()` on its way out (finding PollCore#4 / #572)
+/// and `RunEvent::Exit` runs after it, so the clocks are already cold exactly
+/// when a mid-song quit needs them: `clear_presence_on_exit` found two `None`s,
+/// early-returned, and left the music status plus the armed `Available` session
+/// live — the very outcome #636 exists to prevent. The snapshot is written by
+/// every successful Teams write / presence arm and is deliberately not reset by
+/// that exit tail (see [`super::state::ExitSnapshot`]).
 pub(crate) fn clear_presence_on_exit(app: &AppHandle) {
     use tauri::Manager;
 
     let Some(state) = app.try_state::<Arc<AppState>>() else {
         return;
     };
-    let clocks = load_write_clocks();
-    // Nothing of ours is armed or posted: don't touch the user's Teams.
-    if clocks.last_availability_arm.is_none() && clocks.last_posted_status.is_none() {
-        return;
-    }
     // Clone out of the read guard before any blocking call: the guard must not
     // be held across a Graph round-trip on the exit path.
     let config = state.config.get().clone();
+    let snapshot = super::state::load_exit_snapshot();
+    let plan = exit_cleanup_plan(
+        &snapshot,
+        availability_sync_enabled(&config),
+        config
+            .as_ref()
+            .map(|c| c.teams.clear_on_pause)
+            .unwrap_or(true),
+    );
+    // Nothing of ours is armed or posted: don't touch the user's Teams.
+    if !plan.clear_presence && !plan.post_placeholder {
+        return;
+    }
     let Some(tokens) = state.tokens.teams().clone() else {
         return;
     };
@@ -2970,7 +3217,15 @@ pub(crate) fn clear_presence_on_exit(app: &AppHandle) {
     }
 
     let mut cleared = true;
-    if availability_sync_enabled(&config) && clocks.last_availability_arm.is_some() {
+    if plan.clear_presence {
+        if let Some((availability, activity, label)) = snapshot.armed_presence.as_ref() {
+            log::info!(
+                "[POLLING] clear_presence_on_exit: clearing the presence session this app armed as {} / {} ({})",
+                availability,
+                activity,
+                label
+            );
+        }
         match clear_teams_presence_quick(&tokens.access_token) {
             Ok(_) => log::info!("[POLLING] clear_presence_on_exit: presence session cleared"),
             Err(e) => {
@@ -2982,11 +3237,7 @@ pub(crate) fn clear_presence_on_exit(app: &AppHandle) {
             }
         }
     }
-    let clear_on_pause = config
-        .as_ref()
-        .map(|c| c.teams.clear_on_pause)
-        .unwrap_or(true);
-    if cleared && clear_on_pause && clocks.last_posted_status.is_some() {
+    if cleared && plan.post_placeholder {
         match clear_teams_status_message_quick(
             &tokens.access_token,
             "\u{1F3B5} Paused",
@@ -3000,6 +3251,33 @@ pub(crate) fn clear_presence_on_exit(app: &AppHandle) {
                 e
             ),
         }
+    }
+    if cleared {
+        // Nothing of ours is left on Teams, so a repeated `RunEvent::Exit` (or
+        // a later session that has not written yet) must not repeat this.
+        super::state::reset_exit_snapshot();
+    }
+}
+
+/// Finding D1 (issue #684): what the exit cleanup should attempt, derived from
+/// the [`super::state::ExitSnapshot`] and the two config flags. Pure so the
+/// "the reset clocks must not cancel the cleanup" guarantee is unit-testable —
+/// the pre-fix code decided this inline from `clocks.last_availability_arm` /
+/// `clocks.last_posted_status`, which the loop's exit tail has already emptied.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ExitCleanupPlan {
+    pub(crate) clear_presence: bool,
+    pub(crate) post_placeholder: bool,
+}
+
+fn exit_cleanup_plan(
+    snapshot: &super::state::ExitSnapshot,
+    availability_sync: bool,
+    clear_on_pause: bool,
+) -> ExitCleanupPlan {
+    ExitCleanupPlan {
+        clear_presence: availability_sync && snapshot.armed_presence.is_some(),
+        post_placeholder: clear_on_pause && snapshot.last_posted_status.is_some(),
     }
 }
 
@@ -5159,11 +5437,14 @@ mod tests {
     /// #384 identical-write guard.
     #[test]
     fn test_shared_write_clocks_prevent_one_shot_rearm_and_duplicate_write() {
+        let _guard = global_state_lock();
         let now = Instant::now();
-        let armed = WriteClocks {
-            last_availability_arm: Some(now),
-            ..WriteClocks::default()
-        };
+        // Finding D11 (issue #694): the shared slot is generation-checked, so a
+        // test snapshot must be the one `load_write_clocks` just handed out —
+        // building a `WriteClocks::default()` (generation 0) and storing it
+        // would now be discarded as superseded.
+        let mut armed = load_write_clocks();
+        armed.last_availability_arm = Some(now);
         store_write_clocks(&armed);
         let loaded = load_write_clocks();
         assert_eq!(
@@ -5615,5 +5896,396 @@ mod tests {
         // Unchanged pair past the cadence re-arms (the Available fade window).
         let stale = Some(now - std::time::Duration::from_secs(AVAILABILITY_REARM_SECONDS));
         assert!(should_arm_presence(Some(&away), &away, stale, now));
+    }
+
+    // ---------------------------------------------------------------
+    // Findings D1/D3/D4/D6/D7/D11 (issues #684/#686/#687/#689/#690/#694):
+    // the exit-time cleanup, the gate/dedup ordering on both placeholder
+    // clears, the pause-as-state-change store and the clock generation guard.
+    // ---------------------------------------------------------------
+
+    /// Serialises the tests that mutate the process-wide clock / exit-snapshot
+    /// statics. `cargo test` runs a module's tests in parallel threads and
+    /// these slots are shared, so an interleaved reset would make the
+    /// generation assertions flaky (they would be asserting about another
+    /// test's slot).
+    fn global_state_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Finding D1 (issue #684): `polling_loop`'s exit tail empties the
+    /// write-decision clocks BEFORE `RunEvent::Exit` runs the cleanup, so the
+    /// cleanup must decide from the exit snapshot. Pre-fix this test's
+    /// assertions about the snapshot did not exist and the cleanup read the
+    /// (already cold) clocks — a quit mid-song left the music status and the
+    /// armed `Available` session live.
+    #[test]
+    fn test_exit_cleanup_survives_the_loop_exit_tail() {
+        let _guard = global_state_lock();
+        crate::polling::state::reset_exit_snapshot();
+        // A session that posted a playing status AND armed a listening session.
+        crate::polling::state::record_posted_status(Some("\u{1F3B5} A - T \u{1F3A7}"));
+        crate::polling::state::record_armed_presence(Some((
+            "Available",
+            "Available",
+            "Listening (Available)",
+        )));
+
+        // The loop's exit tail (what runs before `RunEvent::Exit`).
+        reset_write_clocks();
+
+        let snapshot = crate::polling::state::load_exit_snapshot();
+        assert_eq!(
+            snapshot.last_posted_status.as_deref(),
+            Some("\u{1F3B5} A - T \u{1F3A7}"),
+            "the posted playing status must survive the clock reset (finding D1)"
+        );
+        assert_eq!(
+            snapshot.armed_presence.as_ref().map(|(a, _, _)| a.as_str()),
+            Some("Available"),
+            "the armed presence session must survive the clock reset (finding D1)"
+        );
+        assert_eq!(
+            exit_cleanup_plan(&snapshot, true, true),
+            ExitCleanupPlan {
+                clear_presence: true,
+                post_placeholder: true,
+            },
+            "a quit mid-song must still clear the presence session and replace the \
+             playing status (finding D1)"
+        );
+
+        // The pre-fix source of truth is provably empty at this point — which
+        // is exactly why the cleanup used to skip both calls.
+        let cold = load_write_clocks();
+        let from_cold_clocks = ExitCleanupPlan {
+            clear_presence: cold.last_availability_arm.is_some(),
+            post_placeholder: cold.last_posted_status.is_some(),
+        };
+        assert_eq!(
+            from_cold_clocks,
+            ExitCleanupPlan::default(),
+            "the exit tail empties the clocks, so deciding the cleanup from them \
+             (the pre-fix code) does nothing"
+        );
+
+        // A new session starts cold, so its quit cannot clear OUR residue.
+        crate::polling::state::reset_exit_snapshot();
+        assert_eq!(
+            exit_cleanup_plan(&crate::polling::state::load_exit_snapshot(), true, true),
+            ExitCleanupPlan::default()
+        );
+    }
+
+    /// Finding D1 (issue #684) structural guard: the cleanup reads the
+    /// snapshot, and the loop's exit tail never resets it.
+    #[test]
+    fn test_clear_presence_on_exit_reads_the_snapshot_not_the_clocks() {
+        let prod = prod_source();
+        let body = prod_fn_body(prod, "pub(crate) fn clear_presence_on_exit(");
+        assert!(
+            body.contains("load_exit_snapshot()"),
+            "the exit cleanup must read the exit snapshot (finding D1)"
+        );
+        assert!(
+            !body.contains("load_write_clocks()"),
+            "the exit cleanup must NOT read the clocks: polling_loop's exit tail \
+             resets them before RunEvent::Exit runs this cleanup (finding D1)"
+        );
+        assert!(
+            !body.contains("clocks.last_availability_arm"),
+            "the pre-fix early-return on default clocks is the D1 defect"
+        );
+        let loop_source = include_str!("loop.rs");
+        assert!(
+            loop_source.contains("reset_write_clocks()"),
+            "polling_loop must still reset the shared clocks when the session ends"
+        );
+        assert!(
+            !loop_source.contains("reset_exit_snapshot()"),
+            "the loop's exit tail must not reset the exit snapshot — that would \
+             resurrect finding D1"
+        );
+        let state_source = include_str!("state.rs");
+        assert!(
+            // The CALL, not merely the definition in this module.
+            state_source.contains("reset_exit_snapshot();"),
+            "start_polling must cold-start the exit snapshot for the new session"
+        );
+    }
+
+    /// Finding D5 (issue #688): a poller that stops itself must announce it.
+    /// Structural because the emitter lives in the spawned thread's
+    /// ownership-checked exit block, which needs a live `AppHandle`.
+    #[test]
+    fn test_self_terminating_poller_emits_sync_stopped() {
+        let state_source = include_str!("state.rs");
+        let body = prod_fn_body(state_source, "pub fn start_polling(");
+        assert!(
+            body.contains("app.emit(\"sync-stopped\", ())"),
+            "the poller's own thread-exit point must emit sync-stopped \
+             (finding D5) — otherwise the Dashboard mirror stays on \"Syncing\" \
+             and the tray on \"Pause Sync\""
+        );
+        assert!(
+            body.contains("exit_reason"),
+            "the self-termination log line must name the exit reason (finding D5)"
+        );
+        let owner = body
+            .find("if is_owner {")
+            .expect("start_polling must keep the ownership check");
+        let emit = body
+            .find("app.emit(\"sync-stopped\", ())")
+            .expect("sync-stopped emit");
+        assert!(
+            emit > owner,
+            "the emit must sit inside the ownership-checked block (finding D5), so a \
+             superseded thread's exit cannot report a stop for the live one"
+        );
+        // The payload shape is the existing emitter's, verbatim.
+        let sync_source = include_str!("../commands/sync.rs");
+        assert!(
+            sync_source.contains("app.emit(\"sync-stopped\", ())"),
+            "the payload shape is copied from commands::sync::stop_syncing"
+        );
+    }
+
+    /// Findings D3/D4 (issues #686/#687): a SUPPRESSED placeholder write is
+    /// never recorded as posted, so the clear is retried once the gate clears;
+    /// a genuinely posted one still dedups (#155).
+    #[test]
+    fn test_placeholder_write_decision_retries_a_suppressed_write() {
+        assert_eq!(
+            placeholder_write_decision(false, false, false),
+            PlaceholderWrite::Post
+        );
+        assert_eq!(
+            placeholder_write_decision(false, true, false),
+            PlaceholderWrite::SkipDuplicate,
+            "the issue #155 dedup still holds for a placeholder Teams shows"
+        );
+        assert_eq!(
+            placeholder_write_decision(true, false, false),
+            PlaceholderWrite::Suppress { announce: true },
+            "a gated write is suppressed, never posted (findings D3/D4)"
+        );
+        assert_eq!(
+            placeholder_write_decision(true, true, false),
+            PlaceholderWrite::Suppress { announce: true },
+            "even when a stale post marker is present, a gated write is not a post"
+        );
+        assert_eq!(
+            placeholder_write_decision(true, false, true),
+            PlaceholderWrite::Suppress { announce: false },
+            "one presence-gated event per suppression episode, not one per poll"
+        );
+        assert_eq!(
+            placeholder_write_decision(false, false, true),
+            PlaceholderWrite::Post,
+            "the gate clearing must RETRY the suppressed clear (findings D3/D4) — \
+             pre-fix the helper did not exist and the gated branch marked the \
+             placeholder as posted, so `gate_recheck_due` could never re-post it"
+        );
+    }
+
+    /// Finding D3 (issue #686) structural guard: in the paused-clear branch the
+    /// gate verdict is computed BEFORE the byte-identity comparison, and the
+    /// suppressing arm records a suppression instead of a post.
+    #[test]
+    fn test_paused_clear_asks_the_gate_before_the_dedup() {
+        let prod = prod_source();
+        let track_body = prod_fn_body(prod, "pub(crate) fn process_track(");
+        let paused_start = track_body
+            .find("let placeholder = \"\\u{1F3B5} Paused\";")
+            .expect("process_track must keep the paused placeholder literal");
+        let paused = &track_body[paused_start..];
+        let verdict = paused
+            .find("let mut gate_blocked = false;")
+            .expect("the paused branch must compute a gate verdict (finding D3)");
+        let dedup = paused
+            .find("let already_posted =")
+            .expect("the paused branch must compare against what Teams shows");
+        assert!(
+            verdict < dedup,
+            "the gate verdict must precede the byte-identity comparison: pre-fix the \
+             dedup ran first and a suppressed write claimed it had been posted \
+             (finding D3)"
+        );
+        let suppress_arm_start = paused
+            .find("PlaceholderWrite::Suppress")
+            .expect("the paused branch must use the shared decision (findings D3/D4)");
+        let post_arm_start = paused
+            .find("PlaceholderWrite::Post")
+            .expect("the paused branch must keep the POST arm");
+        let suppress_arm = &paused[suppress_arm_start..post_arm_start];
+        assert!(
+            !suppress_arm.contains("last_posted_placeholder = Some"),
+            "a suppressed paused-clear must not claim the placeholder was posted \
+             (finding D3)"
+        );
+        assert!(
+            suppress_arm.contains("suppressed_placeholder = Some"),
+            "a suppressed paused-clear must record the suppression (finding D3)"
+        );
+        assert!(
+            paused.contains("*suppressed_placeholder = None;"),
+            "an allowed clear retires the suppression marker"
+        );
+        // The pause is re-decided once its re-check is due, like the playing
+        // branch — otherwise the gate could never clear on the pause path.
+        assert!(
+            paused.contains("gate_recheck_due(*last_gate_check, Instant::now())"),
+            "the paused-clear gate must be re-evaluated once the re-check is due \
+             (finding D3)"
+        );
+    }
+
+    /// Finding D4 (issue #687) structural guard: the same ordering on the
+    /// no-track clear.
+    #[test]
+    fn test_no_track_clear_asks_the_rule_before_the_dedup() {
+        let prod = prod_source();
+        let body = prod_fn_body(prod, "pub(crate) fn handle_no_track(");
+        let verdict = body
+            .find("if no_track_rule.suppresses()")
+            .expect("handle_no_track must ask the rule decision");
+        let dedup = body
+            .find("let already_posted =")
+            .expect("handle_no_track must compare against what Teams shows");
+        let clear = body
+            .find("clear_teams_status_message(")
+            .expect("handle_no_track must keep the clear POST");
+        assert!(
+            verdict < dedup && dedup < clear,
+            "the no-track rule verdict must precede the byte-identity comparison, and \
+             the comparison must precede the POST (finding D4)"
+        );
+        let suppress_arm_start = body
+            .find("PlaceholderWrite::Suppress")
+            .expect("the no-track clear must use the shared decision (finding D4)");
+        let post_arm_start = body
+            .find("PlaceholderWrite::Post")
+            .expect("the no-track clear must keep the POST arm");
+        let suppress_arm = &body[suppress_arm_start..post_arm_start];
+        assert!(
+            !suppress_arm.contains("last_posted_placeholder = Some"),
+            "a suppressed no-track clear must not claim the placeholder was posted \
+             (finding D4)"
+        );
+        assert!(
+            suppress_arm.contains("suppressed_placeholder = Some"),
+            "a suppressed no-track clear must record the suppression (finding D4)"
+        );
+    }
+
+    /// Finding D6 (issue #689): pausing the SAME track is a state change.
+    #[test]
+    fn test_playback_state_change_is_detected_for_the_same_track() {
+        assert!(
+            playback_state_changed(Some(true), false),
+            "pausing the same track must be a change (finding D6) — the status key \
+             excludes `is_playing`, so nothing else notices"
+        );
+        assert!(
+            playback_state_changed(Some(false), true),
+            "resuming must be a change too (finding D6)"
+        );
+        assert!(!playback_state_changed(Some(true), true));
+        assert!(!playback_state_changed(Some(false), false));
+        assert!(
+            playback_state_changed(None, false),
+            "an absent stored track counts as a change (re-store, never assume)"
+        );
+
+        let prod = prod_source();
+        let track_body = prod_fn_body(prod, "pub(crate) fn process_track(");
+        assert!(
+            track_body.contains("let playing_changed ="),
+            "process_track must derive the playback-state change (finding D6)"
+        );
+        let arm = track_body
+            .find("} else if playing_changed {")
+            .expect("the playback-state change needs its own arm (finding D6)");
+        let arm_body = &track_body[arm..];
+        assert!(
+            arm_body.contains("current_track_mut()")
+                && arm_body.contains("\"playback-state-changed\""),
+            "the arm must re-store the observed track — so the sync status reports \
+             the paused track — and emit playback-state-changed (finding D6)"
+        );
+    }
+
+    /// Finding D7 (issue #690): a pause is not a stop.
+    #[test]
+    fn test_presence_paused_is_distinct_from_presence_cleared() {
+        let prod = prod_source();
+        let track_body = prod_fn_body(prod, "pub(crate) fn process_track(");
+        assert!(
+            track_body.contains("\"presence-paused\""),
+            "the paused-clear POST must announce presence-paused (finding D7)"
+        );
+        assert!(
+            !track_body.contains("\"presence-cleared\""),
+            "a pause must never be reported as a stop (finding D7)"
+        );
+        let no_track_body = prod_fn_body(prod, "pub(crate) fn handle_no_track(");
+        assert!(
+            no_track_body.contains("\"presence-cleared\""),
+            "the genuine no-track path keeps presence-cleared"
+        );
+    }
+
+    /// Finding D11 (issue #694): a snapshot whose generation was superseded
+    /// must not land — that is the write-back that silently dropped
+    /// `gated_track_key` and let a write through mid-meeting.
+    #[test]
+    fn test_superseded_clock_snapshot_is_discarded() {
+        let _guard = global_state_lock();
+        reset_write_clocks();
+
+        // The loop's iteration: loads, records the gate it observed, stores.
+        let mut iteration = load_write_clocks();
+        iteration.gated_track_key = Some("A - T | filter=true".to_string());
+        store_write_clocks(&iteration);
+        assert_eq!(
+            load_write_clocks().gated_track_key.as_deref(),
+            Some("A - T | filter=true"),
+            "a snapshot loaded from the current slot must land"
+        );
+
+        // A concurrent one-shot that loaded BEFORE that gate decision finishes
+        // afterwards and writes its pre-gate view back.
+        let mut stale = WriteClocks {
+            last_track_key: Some("A - T | filter=true".to_string()),
+            last_posted_status: Some("\u{1F3B5} stale \u{1F3A7}".to_string()),
+            ..WriteClocks::default()
+        };
+        stale.generation = iteration.generation;
+        store_write_clocks(&stale);
+
+        let landed = load_write_clocks();
+        assert!(
+            landed.gated_track_key.is_some(),
+            "a superseded snapshot must never drop the recorded gate (finding D11)"
+        );
+        assert_eq!(
+            landed.last_posted_status, None,
+            "the superseded snapshot must not land at all (finding D11)"
+        );
+
+        // A reset also moves the generation on, so a dead session's snapshot
+        // cannot resurrect itself afterwards.
+        let dead = WriteClocks {
+            generation: landed.generation,
+            ..WriteClocks::default()
+        };
+        reset_write_clocks();
+        store_write_clocks(&dead);
+        assert_eq!(
+            load_write_clocks().generation,
+            dead.generation.wrapping_add(1),
+            "the reset's generation must not be overwritten by a pre-reset snapshot"
+        );
     }
 }
