@@ -5,6 +5,85 @@ All notable changes to PresenceJam are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [4.5.0] - 2026-09-16
+
+Feature-packed release: quiet-hours + track-based status rules, pending
+status posts when the presence gate clears mid-track, detached windows
+with theme sync and self-healing badges, one-click redacted support
+snapshot from LogViewer, a 24-issue UX copy + accessibility sweep, a
+frontend behavior wave with a real vitest harness, 19 Rust test holes
+closed with behavioral tests, and CI/docs/deps modernization
+(multi-platform legs, secret scan, dep audit, maintained crates).
+
+### Added
+- **Status rules: quiet hours + track rules (#432):** `StatusRulesConfig`
+  on `AppConfig` (fully additive, serde defaults — pre-4.5 configs load
+  unchanged). Quiet-hours entries support wrap-around ranges and ISO
+  weekday selection; track rules match artist/title substrings
+  (case-insensitive) with optional replacement status flowing through
+  the #384 dedup. Rules flow through the presence-gate path with
+  mid-track re-evaluation; Settings gains a rules card with weekday
+  picker. New track rules default to disabled (no suppress-the-world
+  footgun); frontend deep-backfills nested arrays.
+- **Pending status posts on gate-clear (#430):** the #380 re-check branch
+  falls through to the single late-post write when the presence gate
+  clears mid-track, with debounce/keepalive clocks undisturbed.
+- **Detached windows: theme sync + self-healing badges (#433, #422,
+  #423):** pre-paint theme bootstrap in `app.html` (`?theme=` override +
+  stored key + OS fallback, no hydration flash) plus cross-window
+  storage sync; zombie detached flags clear with fall-through
+  re-create and concurrent-popOut guard.
+- **One-click redacted support snapshot from LogViewer (#434):**
+  copy-snapshot button sources solely the backend-redacted
+  `recent_logs` + version/platform — the live buffer is never pasted.
+- **Frontend unit-test harness (#443):** vitest + jsdom +
+  @testing-library/svelte with runtime tests (stores, i18n, LogViewer
+  mount) running in CI via `npm test`.
+- **Multi-platform CI + supply-chain gates (#355, #356, #357):**
+  macOS + Windows check legs, gitleaks secret-scan, cargo/npm
+  advisory audit.
+
+### Fixed
+- **UX copy sweep (16 issues: #451, #452, #454, #456, #457, #458, #459,
+  #460, #461, #462, #463, #465, #467, #469, #471, #473):** tone, jargon,
+  first-person, casing, dead-end errors, scope banners, and
+  gated-presence wording brought in line across en/de/fr.
+- **Accessibility + i18n structure (#381, #382, #385, #387, #390, #412,
+  #413, #414):** Back-button i18n, labeled manual-URL input, focus
+  management with live announcements, devLog discipline, decorative
+  Logo silence, PageHeader action names, UpdatePrompt live-region
+  roles.
+- **Frontend behavior wave (#420, #422, #423, #424, #425, #426, #488,
+  #492, #497, #498, #499, #500):** saveConfig BigInt normalization,
+  configStore alias removal, t() runtime-miss degradation with dev
+  warning, dead-key removal, neutral Reconnect Teams state, blank-page
+  notice outside Tauri, xdg-mime fallback diagnostics, real version
+  in logs, LogViewer/i18n behavior tests.
+- **Rust behavioral tests (19 issues: #468, #474, #477–#485, #489–#491,
+  #493–#496):** pure Teams error classifier funnelling all four Graph
+  call sites, break-at-exactly-5 provider-scoped test, device-menu
+  id edges + log redaction, unminimize on all Show arms, staged-update
+  freshness guard, caller-location guard matrix, device-code expiry
+  across IPC; three brittle source-text guards deleted and replaced
+  with stronger behavioral tests. Deferred with justification: #393 +
+  #478 (need a config.rs prod fix not in 4.5), Svelte halves of #489
+  + #491 (covered by the frontend harness).
+- **Deep-link fallback port:** the minimal-Linux association fallback
+  now resolves HOME via `directories::BaseDirs` following the
+  dirs → directories 6 migration (#418, #497).
+- **Docs + deps (#358–#363, #365, #368, #369, #371, #372, #374, #418,
+  #427):** trigger branch, toolchain/MSRV honesty, SECURITY/ARCHITECTURE/
+  TROUBLESHOOTING/SETUP/scope-3.3/STATE/CONTRIBUTING accuracy,
+  SHA256SUMS honesty note, tightened npm/Tauri pins, rand 0.9.
+
+### Known limitations carried forward
+- #393 (config.rs `[MODULE]` log tags) + #478 (its guard test) need a
+  config.rs prod fix — open, low priority.
+- LogViewer virtualization (second half of #434) deferred; jumpToLatest
+  pre-exists.
+- Playlist-id matching (second half of #432) out of scope — needs
+  Spotify playlist context + extra API budget.
+
 ## [4.4.0] - 2026-09-14
 
 Hardening wave: diagnostics redaction closes 10 secret shapes, profanity
@@ -844,7 +923,8 @@ Closes #60 #61 #62 #63
 ### Removed
 
 - PowerShell script version — this is a full rewrite
-[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.4.0...HEAD
+[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.5.0...HEAD
+[4.5.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.4.0...v4.5.0
 [4.4.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.3.0...v4.4.0
 [4.3.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.2.1...v4.3.0
 [4.2.1]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.2.0...v4.2.1
