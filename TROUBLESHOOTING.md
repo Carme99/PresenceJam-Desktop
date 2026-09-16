@@ -61,6 +61,17 @@ Before diving in, check these basics:
 
 **Fix:** Check your Spotify plan. If you have Premium but the controls still fail, reconnect Spotify once (see the next entry) so the token carries the new scope.
 
+### Tray Shuffle / Repeat does nothing, or asks for Premium
+
+**Cause:** Both are real Spotify player commands, so they carry exactly the same requirements as Play/Pause: a **Spotify Premium** account, the `user-modify-playback-state` scope (a one-time reconnect for tokens that predate it), and an **active device**.
+
+**Fix:**
+1. If an in-app toast reads **"Playback control requires Spotify Premium"**, check your Spotify plan — playback control is a Premium-only Web API surface.
+2. If it reads **"No active playback device - pick one from the tray Devices menu"**, open tray → **Devices** and pick one, or start playback on a device first.
+3. If nothing happens and no toast appears, the stored token predates the playback scope — click **Reconnect** once (see *"Playback control needs a one-time reconnect" banner* above).
+
+The **Repeat** item spells its mode out — `Repeat: Off` → `Repeat: Context` → `Repeat: Track` → back to off — because a check mark alone cannot distinguish *context* from *track*. A command Spotify rejects leaves the label and check mark where they were, so the menu never claims a state that was refused.
+
 ### "Playback control needs a one-time reconnect" banner
 
 **Cause:** Tray playback control needs the `user-modify-playback-state` scope, which older stored tokens don't carry — a token granted before that scope was added can't control playback until you re-auth.
@@ -72,6 +83,17 @@ Before diving in, check these basics:
 **Cause:** A legacy plaintext `spotify.client_secret` left in `config.json` disagrees with the value stored in the OS keychain (#376). The app keeps the plaintext (nothing is deleted) and asks you to resolve it.
 
 **Fix:** Click **Reconnect** in the banner (or Settings → reconnect Spotify) once — the fresh sign-in reconciles the stored secret and the banner dismisses on reconnect.
+
+### Reconnect shows "Keychain unavailable"
+
+**Cause:** The OS keychain could not be read — typically a locked Secret Service keyring on Linux, or a denied credential store. This is **not** the same as "no stored credential": your Spotify Client Secret is still in the keychain, the app just cannot reach it right now. Treating the two alike is what used to push a fully set-up user back through the Spotify wizard.
+
+**Fix:**
+1. On Linux, unlock your keyring and make sure a Secret Service daemon is running — see [SETUP.md — Linux: System Keyring Required](./SETUP.md#linux-keyring). On Windows/macOS an unavailable store usually means the credential manager is locked by policy.
+2. Re-enter the Reconnect view: it re-probes the keychain on every entry.
+3. There is deliberately **no Reconnect button** while this state is showing — the sign-in flow reads the secret from the same keychain that cannot answer, so it would only open a browser window that fails. You do **not** need to re-enter your Client ID/Secret.
+
+Settings shows the same state on the credential row ("System keychain unavailable — it may be locked or missing…"). A genuine *absent* credential is the only case that offers **Run Onboarding**.
 
 ## Microsoft Teams
 
@@ -138,6 +160,26 @@ Before diving in, check these basics:
 
 **Fix:** Quit again (or relaunch) and check `PresenceJam.log` for `[UPDATER]` lines. If the staged update keeps failing, use **Download & Install** from the update banner instead — that path reports errors in-app. Note: since v4.2.0, a staged update that is stale (same version or older than your current install) is *deliberately* skipped with an `[UPDATER]` log line, not installed — the banner shows a skipped state with an **Install anyway** override (#431). Downgrades are off by default (`allowDowngrades: false`).
 
+### The app came up with default settings
+
+**Cause:** `config.json` no longer parsed as JSON, so PresenceJam refused to load it. Instead of overwriting a file it cannot read, it **renames the broken file next to itself as `config.json.bak`**, logs a `[CFG] corrupt config '…' quarantined to '…'` warning, and starts on the shipped defaults.
+
+**Fix:**
+1. Look for that `[CFG]` line in the log viewer — it names both the original and the backup.
+   The **Diagnostics** page (🩺 in the Dashboard header) shows an amber *Settings were reset* banner for this too — and it keeps showing it on later launches, naming the backup file, because the per-process log line is gone by then.
+2. Your old settings are all still in the `.bak`. Repair the JSON by hand and put it back as `config.json`, or simply re-apply the settings in the app.
+3. Where to look (the backup sits beside the config file):
+
+   | OS | Path |
+   |----|------|
+   | Windows | `%APPDATA%\PresenceJam\config.json.bak` |
+   | macOS | `~/Library/Application Support/PresenceJam/config.json.bak` |
+   | Linux | `$XDG_CONFIG_HOME/PresenceJam/config.json.bak` (usually `~/.config/PresenceJam/`) |
+
+The backup name is fixed — `config.json.bak`, never timestamped — and the rename is best-effort: if it fails, the app logs that too and still boots on defaults, leaving your original file untouched. `tokens.json` is unaffected and lives in a different folder entirely (see [SETUP.md — What Gets Installed](./SETUP.md#what-gets-installed)).
+
+The banner names the `.bak` when one is still on disk. When the banner appears **without** a backup name, the rename could not move your file — so the unreadable original is still there as `config.json`, and the banner says exactly that.
+
 
 ### No status appears on Teams
 
@@ -146,7 +188,17 @@ Before diving in, check these basics:
 3. Wait for the next poll: with a track playing, the status updates within a few seconds; when nothing is playing, the app backs off between polls (30 s → 60 s → 120 s → 300 s), so an idle app can take up to five minutes to react. Failed polls retry after ~30 s (±20%)
 4. If still nothing, check the log viewer for API errors
 
-**Suppressed by status rules?** PresenceJam also suppresses the write on purpose: a quiet-hours entry covering the current time and weekday, or an enabled track rule whose *Post this instead* field is left empty. The Dashboard shows its *suppressed* chip for these as well, and the log records which one fired — `[POLLING] process_track: quiet hours active, skipping status write` or `[POLLING] process_track: track rule matched, skipping status write`. Open **Settings → Status rules** and look for an enabled quiet-hours range covering now, and for a rule matching what's playing (see [USAGE.md — Status rules](./USAGE.md#status-rules)).
+**Suppressed by status rules or a presence policy?** PresenceJam also skips the write on purpose, and the Dashboard chip now names the cause:
+
+| Chip | Cause |
+|------|-------|
+| *quiet hours are active* | a quiet-hours entry covers the current time and weekday |
+| *a track rule matched* | an enabled quiet-hours row or track rule whose **Post this instead** field is left empty |
+| *you set a status message by hand* | **Never overwrite a status I set by hand** is on and your Teams status is not one the app posted (or it has expired) |
+| *you are out of office* | **Pause while I am out of office** is on and Teams reports you out of office |
+| *busy, in a call, or presenting* | the meeting/call/DND gate — busy, Do Not Disturb, focusing, in a meeting, in a call, or presenting |
+
+The log records the same verdicts — `[POLLING] process_track: quiet hours active, skipping status write`, `… track rule matched, …`, and `… presence-gated, skipping status write` for the policies. Nothing is paused: the app keeps polling on its normal cadence and the write resumes by itself once the cause clears (a quiet window ending, your presence going available, or the hand-set message expiring). Open **Settings → Status rules** for the first two, **Settings → Presence** for the policies (see [USAGE.md — Status rules](./USAGE.md#status-rules)).
 
 ### Status doesn't clear when Spotify is paused
 
@@ -184,6 +236,11 @@ The list is in `src-tauri/src/profanity.rs` and covers common English profanity.
 - Leetspeak variants: `sh1t`, `$hit`, `d@mn`, `p1ss`, `n1gg3r`
 - Repeated-character variants: `shiiit`, `fuuuuck`
 - "fucking", "fucked", "fucker" variants
+- Any words you add under Settings → Profanity filter → *Custom words to filter*
+  (one per line, up to 64 entries of 32 characters). Your words go through the
+  same boundary and evasion rules as the list above — adding `spam` does not flag
+  `spamalot`, and `s.p.a.m` / `5pam` are still caught — and the status preview
+  updates as soon as you type them.
 
 False positives are prevented via word-boundary checks — words like `class`, `cocktail`, `assassin`, `vacuum`, `cumulative` are not flagged.
 
@@ -191,7 +248,7 @@ False positives are prevented via word-boundary checks — words like `class`, `
 
 ### Where to find logs
 
-**In-app:** the **Log Viewer** view (it can be popped out into its own window) lets you scroll through the entries without touching the filesystem.
+**In-app:** the **Log Viewer** view (it can be popped out into its own window) lets you scroll through the entries without touching the filesystem. When it opens it is already backfilled with the last 500 lines of the on-disk file, so the history is there before the first new entry is logged; while you are scrolled up it holds your position as new lines arrive.
 
 **Direct filesystem** — a single `PresenceJam.log` file managed by the logging plugin:
 ```

@@ -84,18 +84,25 @@ After connecting both services, you'll land on the **Dashboard**. Before startin
 
 ### Status Format
 
-Customize the text using placeholders:
+Customize the text using placeholders — the full table lives in [USAGE.md — Status Format](./USAGE.md#status-format):
 
 | Placeholder | Output |
 |-------------|--------|
-| `{artist}` | Artist name |
-| `{track}` | Track name |
-| `{album}` | Album name |
-| `{emoji}` | 🎵 (playing) or ⏸️ (paused) |
+| `{artist}` | Artist name — on an episode, the show name |
+| `{track}` | Track name — on an episode, the episode name |
+| `{album}` | Album name — on an episode, the publisher |
+| `{emoji}` | 🎵 (playing track), 🎙️ (playing episode) or ⏸️ (paused) |
+| `{device}` | Name of the device Spotify is playing on |
+| `{playlist}` / `{context}` | Where playback started from (exact aliases of each other) |
+| `{progress}` | Playback position (`3:07`); empty when Spotify reports none |
+| `{shuffle}` / `{repeat}` | 🔀 / 🔁 while on, nothing while off |
+| `{show}` / `{episode}` / `{publisher}` | Episode-only fields; empty on a music track |
 
 **Default:** `🎵 {artist} - {track} 🎧`
 
 **Example:** `🎵 Daft Punk - One More Time 🎧`
+
+Podcast and audiobook episodes are formatted with their own built-in `🎙️ {show} - {episode}` template — your music template above is not applied to them, and there is no setting for it yet.
 
 ### Profanity Filter
 
@@ -139,7 +146,7 @@ Your `tokens.json` migrates automatically: on first read, v3.0 detects a ≤2.x 
 ~/Library/Logs/com.presencejam.app/         (macOS — bundle-id folder)
 └── PresenceJam.log   # Single log file — no rotation, no retention pruning
 ```
-(Linux uses `$XDG_CONFIG_HOME` instead of `%APPDATA%` / `~/Library/Application Support` for `config.json` and `tokens.json`, and `~/.local/share` in place of `%LOCALAPPDATA%` for the logs; the layout is otherwise the same.) **`config.json`, `tokens.json` and the logs live in three different folders** — Tauri's config/token path and `app_log_dir()` both append the bundle identifier `com.presencejam.app` (issue #300), so back up or delete all three.
+(Linux uses `$XDG_CONFIG_HOME` instead of `%APPDATA%` / `~/Library/Application Support` for `config.json` and `tokens.json`, and `~/.local/share` in place of `%LOCALAPPDATA%` for the logs; the layout is otherwise the same.) **`config.json`, `tokens.json` and the logs live in three different folders** — Tauri's config/token path and `app_log_dir()` both append the bundle identifier `com.presencejam.app` (issue #300), so back up or delete all three. A `config.json` that no longer parses as JSON is renamed out of the way as `config.json.bak` in that same folder and the app boots on defaults, so a broken file is never silently overwritten — see [TROUBLESHOOTING.md — The app came up with default settings](./TROUBLESHOOTING.md#the-app-came-up-with-default-settings).
 
 No data is sent to any third-party server — all tokens stay on your machine.
 
@@ -199,6 +206,8 @@ sudo pacman -S gnome-keyring libsecret
 > `update-desktop-database` (`desktop-file-utils`) to register launchers.
 
 After installing, **log in to a graphical session** (a headless SSH session can't reach the keyring). If you launched PresenceJam from a TTY, launch it from your desktop session instead. Then restart PresenceJam.
+
+> **If the keyring is locked rather than missing**, the app no longer mistakes it for "Spotify was never set up": Reconnect shows a **Keychain unavailable** badge (and Settings the matching wording on the credential row) telling you to unlock the keyring and retry, and it does **not** push you back through the Spotify setup wizard. Your `client_secret` is still stored — nothing needs re-entering once the keyring answers.
 
 Verify the keyring is reachable from your shell:
 
