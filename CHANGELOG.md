@@ -5,32 +5,176 @@ All notable changes to PresenceJam are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [4.6.0] - 2026-09-16
+
+The largest PresenceJam release since 4.0: a full repository audit produced 90
+tracked findings, and the wave that fixed them reworked the config write path,
+the reconnect flow, the token store, the polling loop, the tray remote, the
+detached windows, the diagnostics snapshot, the release pipeline and the docs —
+then added the features those same paths were missing.
+
+### Added
+
+- **Richer status placeholders (#580):** the status template now also substitutes
+  `{device}`, `{playlist}` (alias `{context}`), `{progress}` and `{shuffle}` /
+  `{repeat}` — every one of them fed by data the polling loop already receives on
+  each 200 response, so no extra request, scope or failure mode. Substitution is
+  a single pass over a token table, which fixes the old chained-replace
+  re-expansion for templates that themselves contain a token.
+- **Podcast and audiobook support (#581, #583):** episodes are no longer treated
+  as "nothing playing". An episode renders through its own template
+  (`🎙️ {show} - {episode}`, plus `{show}`, `{episode}`, `{publisher}`), the tray
+  Up Next peek lists them, and the poll request now sends
+  `additional_types=episode`. Adverts and unknown item types still map to
+  "nothing playing", as before.
+- **Tray Shuffle and Repeat toggles (#582):** both are real check-menu items
+  driven by the `shuffle_state`/`repeat_state` already present in the poll
+  response; Repeat cycles off → context → track and its label names the current
+  mode. A non-Premium account or an inactive device leaves the menu showing the
+  truth.
+- **Rule-driven Teams availability (#633):** quiet hours and track rules can now
+  *set* availability/activity instead of only suppressing the status (quiet hours
+  take precedence, and a suppression-only rule still moves the presence bubble);
+  a status the user set by hand is respected — the loop skips the Teams write
+  while it is in force and the Dashboard chip says why; the Available session is
+  bounded to real listening and cleared on quit; and the presence gate
+  understands an out-of-office/away state, with the chip naming the reason
+  instead of showing one generic string.
+- **Settings controls for the rule and polling fields (#538):** quiet hours now
+  carry a replacement status, the profanity filter takes extra words, and the
+  paused-polling ceiling is configurable — each with clamp feedback that mirrors
+  the Rust clamp.
+- **Log viewer backfill (#595):** the Logs pane seeds itself from the on-disk
+  log tail on mount instead of staying empty until the next live event. The read
+  is bounded (500 lines / 256 KiB, read from the end of the file) and runs off
+  the UI thread; a backfill that lands after the reader has scrolled away does
+  not move the viewport.
+- **Live update-staging progress and cancel (#590):** install-on-quit now
+  streams throttled `update-stage-progress` events and can be cancelled, which
+  releases the verified payload instead of pinning it in memory until the next
+  quit.
+- **Keychain state surface (#560):** a system keychain that is locked or missing
+  is now reported as exactly that — "unlock it or install a Secret Service
+  provider, your secret is still stored" — instead of being collapsed into "not
+  configured", which used to send a fully-configured user back through first-run
+  setup.
+- **Config quarantine is visible (#537):** when a corrupt `config.json` is
+  quarantined, the diagnostics snapshot and the UI now say so and name the
+  backup, rather than silently reverting every setting to its default.
+- **macOS deep-link re-claim (#628, #66):** the `presencejam://` scheme is
+  re-registered as the default handler on every launch through CoreServices
+  `LSSetDefaultHandlerForURLScheme` (the plugin returns `UnsupportedPlatform` on
+  macOS), closing the scheme-hijack gap that PKCE alone had to cover.
+- **i18n formatting and locale convergence (#616, #620):** plural and number
+  formatting goes through `Intl.PluralRules`/`Intl.NumberFormat`, the language
+  picker converges across webviews the way the theme already did, and
+  `<html lang>` tracks the active locale.
 
 ### Changed
-- **Documentation truth pass (#622, #623, #624, #625, #626):** the log file is
-  now documented at its real location on all three platforms
-  (`%LOCALAPPDATA%\com.presencejam.app\logs\`,
-  `~/Library/Logs/com.presencejam.app/` and
-  `~/.local/share/com.presencejam.app/logs/` — Tauri's `app_log_dir()` appends
-  the bundle identifier, and it is the folder tray → *Open Logs Folder* opens);
-  the v4.5.0 status rules (quiet hours + track rules) and the opt-in desktop
-  notifications are documented in README/USAGE/ARCHITECTURE/TROUBLESHOOTING;
-  the main-window-guarded command count is corrected to 13; the dependency
-  attribution tables in ACKNOWLEDGEMENTS.md are re-derived from `Cargo.toml` /
-  `package.json`; CONTRIBUTING.md no longer claims the vitest harness is
-  unlanded; the stale `~line` anchors are gone from docs/STATE-OF-FEATURES.md,
-  which also gained the release-smoke recipe for its two ⚠ Partial rows
-  (#630, #631).
 
+- **Config writes merge instead of replace (#535, #536, #542):** `update_config`
+  applies a field-level patch, `save_config` is documented as the whole-document
+  write, and `schema_version` is server-authoritative. The onboarding wizard now
+  prefills from the stored config and patches only the fields it owns — a
+  returning user routed back through setup no longer loses their quiet hours,
+  track rules, profanity settings, poll bounds or logging level (#531).
+- **Reconnect re-authorizes without destroying credentials (#554):** Settings'
+  "Reconnect Spotify" used to run the disconnect command, deleting the keychain
+  client secret and forcing full setup. The destructive path is now a separate
+  `disconnect_spotify`, and the reconnect path clears only the session.
+- **PKCE bindings are consumed only after a successful exchange (#555):** a
+  transient exchange failure no longer burns the single-use launch binding, so
+  the retry works.
+- **Polling treats only dead credentials as dead (#568):** transient network and
+  parse failures no longer count toward the exit that stops polling and opens a
+  browser OAuth window; they back off (`min(300 s, 30 s · 2ⁿ)` with jitter) and
+  warn. Quiet hours and track rules are now evaluated mid-track and on the
+  paused-clear and no-track clear paths (#569, #570), the 429 backoff can never
+  sleep below the server's `Retry-After` (#571), and a manual refresh shares the
+  driver's write-decision clocks instead of bypassing them (#572).
+- **Token store hardening (#561–#566):** one locked AES-key create, serialised
+  token persists with a joint snapshot, a keychain tri-state that keeps a live
+  session when the keychain merely cannot answer, persist failures that no
+  longer discard a successful sign-in, a recoverable corrupt-key path, and the
+  shared CAS refresh on both providers.
+- **Detached windows behave (#594, #585):** the child capability grants
+  `core:window:allow-close` so "Pop back in" works, and close-to-tray is now
+  main-window only — a detached Logs/Settings pane is no longer hidden into an
+  unreachable zombie.
+- **Tray remote correctness (#586–#589, #591, #592):** playback and device
+  actions use the refresh-aware token path (with one refresh + retry), the
+  Show/Hide arm no longer performs blocking HTTP on the menu-event thread, the
+  Pause/Resume label repaints from backend state, `--minimized` is honoured, and
+  the tray derives its state from `AppState` rather than a frontend claim.
+- **Dashboard and Settings state (#547–#551):** presence preview and the gate
+  chip survive a view remount, the notification opt-in reaches a mounted
+  Dashboard and a denied permission no longer renders the toggle as on, leaving
+  Settings with unsaved edits prompts instead of discarding them, and the
+  availability chip is localized and clears.
+- **Diagnostics (#598, #602, #603):** `Authorization: Bearer <token>` is masked
+  without a length threshold, absolute POSIX/Windows/UNC paths are stripped from
+  the failed-update record, the support snapshot is written by the backend and
+  reports its real outcome, and two collected fields are rendered.
+- **Profanity filter (#578, #579):** scoped leet folds stop `Cox` and
+  `Song (Uncut)` from flagging, and the strong-stem continuation list now
+  catches `fuckboy`, `fuckface`, `fuckwad` and `shitpost` while `Fukushima`,
+  `shitake`, `cocktail` and `Push It` stay clean.
+- **Spotify client cost (#576, #577):** one HTTP client per process instead of
+  one per request, and the steady-state 304 path no longer allocates a `String`
+  it drops immediately.
+- **Frontend listener lifecycle (#615):** `useAuthListeners` returns a
+  synchronous disposer and tracks disposal itself, deleting five hand-rolled
+  destroyed-flag dances (and giving Dashboard and `+page.svelte` one teardown
+  helper for their raw `listen()` sites).
+
+### Fixed (build, CI and release)
+
+- **Tag/version consistency (#605):** the release workflow now fails when the
+  pushed tag disagrees with `tauri.conf.json`/`package.json`/`Cargo.toml`, and
+  the same three-way agreement runs on every PR — the mismatch that would make
+  the updater re-offer one version forever can no longer ship.
+- **Tagged commits are verified (#606):** the release pipeline runs
+  `cargo fmt --check`, clippy `-D warnings`, `cargo test --all-targets`,
+  `npm run check` and `npm test` before it builds, so a tag can no longer publish
+  an unverified commit.
+- **Frontend tests are a real gate (#607):** `npm test --if-present` is gone.
+- **Node 24 (#608):** CI and release moved off the EOL Node 20, with `engines`
+  aligned and `@types/node` tracked.
+- **Job timeouts and packaging (#609, #610, #611, #612, #613):** the `rust` job's
+  timeout is no longer below its own cold build, the Homebrew formula refuses
+  Intel Macs (it installs an aarch64-only DMG), `withGlobalTauri` is off now that
+  nothing consumes `window.__TAURI__`, dead plugin dependencies and duplicate
+  capability grants are pruned, and the MSRV is declared.
+- **Dependency advisories (#642):** `vitest`/`@vitest/mocker` bumped to the
+  patched 4.1.11. The `glib` advisory is *not* clearable by a lockfile bump —
+  `tauri 2.11.5` requires `gtk ^0.18` while glib's fix is 0.20.0 — and remains
+  tracked.
+
+### Documentation
+
+- **Truth pass (#622–#626, #630–#632):** the log file is documented at its real
+  per-platform location (Tauri's `app_log_dir()` appends the bundle id, and
+  Windows uses `%LOCALAPPDATA%`), the v4.5.0 status rules and the opt-in desktop
+  notifications are documented, the guarded-command count is corrected, the
+  dependency attribution tables are re-derived from the manifests, the stale
+  line anchors are gone, and `docs/STATE-OF-FEATURES.md` carries a release-smoke
+  recipe for its ⚠ Partial rows.
 ### Known issues
-- LogViewer virtualization (second half of #434) is still deferred;
-  `jumpToLatest` pre-exists.
-- Playlist-id matching (second half of #432) is out of scope — it needs
-  Spotify playlist context plus extra API budget.
-- The three ⚠ Partial rows in `docs/STATE-OF-FEATURES.md` (sign-in persistence,
-  install-on-quit updates, macOS deep-link defence) await the post-tag release
-  smoke; the recipe is in that file.
+
+- The `glib` advisory (GHSA-wrw7-89jp-8q8g) is not clearable by a dependency bump:
+  `tauri 2.11.5` requires `gtk ^0.18` while glib's first patched release is
+  `0.20.0`, so it needs a tauri/gtk-rs 0.20 migration. Tracked in #642.
+- LogViewer virtualization (second half of #434) remains deferred.
+- Playlist-id matching for track rules (second half of #432) is out of scope —
+  it needs playlist context the status response does not carry.
+- The two ⚠ Partial rows in `docs/STATE-OF-FEATURES.md` (sign-in persistence
+  across a long idle, install-on-quit updates) are implemented and unit-tested
+  but still need one live release cycle to be observed end to end; the smoke
+  recipe is in that file.
+- The dashboard's presence preview survives a remount via a frontend store
+  (#547) rather than by promoting the poller's status/gate state into
+  `AppState`; the user-visible defect is fixed, the backend-truth variant is
+  still open.
 
 ## [4.5.2] - 2026-09-16
 
@@ -1004,6 +1148,7 @@ Closes #60 #61 #62 #63
 
 - PowerShell script version — this is a full rewrite
 [Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.5.2...HEAD
+[4.6.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.5.2...v4.6.0
 [4.5.2]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.5.1...v4.5.2
 [4.5.1]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.5.0...v4.5.1
 [4.5.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.4.0...v4.5.0
