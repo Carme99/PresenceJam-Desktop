@@ -148,7 +148,7 @@ export const fr: Dict = {
   'settings.formatTemplatePlaceholder': '🎵 {artist} - {track} 🎧',
   'settings.livePreview': 'Aperçu en direct',
   'settings.placeholdersHint':
-    'Paramètres disponibles : {artist}, {track}, {album}, {emoji}',
+    'Paramètres disponibles : {artist}, {track}, {album}, {emoji}, {device}, {playlist} (ou {context}), {progress}, {shuffle}, {repeat}. Lecture aléatoire et Répétition n’affichent 🔀/🔁 que lorsqu’ils sont activés.',
   'settings.profanityFilterLabel':
     'Filtrer les grossièretés dans le statut',
   'settings.placeholderTextLabel': 'Texte de substitution',
@@ -330,7 +330,7 @@ export const fr: Dict = {
     "Choisissez l'apparence de votre message de statut et si PresenceJam doit se lancer à l'ouverture de session.",
   'onboarding.statusTemplate': 'Modèle de statut',
   'onboarding.placeholdersHint':
-    'Paramètres : {artist}, {track}, {album}, {emoji}',
+    'Paramètres : {artist}, {track}, {album}, {emoji}, {device}, {playlist} (ou {context}), {progress}, {shuffle}, {repeat}',
   'onboarding.pollInterval':
     'Fréquence de vérification de Spotify : {seconds}s',
   'onboarding.settingUp': 'Configuration…',
@@ -395,5 +395,7 @@ export const fr: Dict = {
   'reconnect.restartSignIn': 'Redémarrer la connexion',
   'update.stagingProgress': 'Préparation de la mise à jour — {percent} %',
   'update.cancelStage': 'Annuler',
-  'onboarding.submitting': 'Envoi…'
+  'onboarding.submitting': 'Envoi…',
+  'settings.episodeFormatHint':
+    'Les podcasts et livres audio utilisent leur propre modèle — 🎙️ {show} - {episode} — votre modèle musical ci-dessus ne leur est pas appliqué.',
 };

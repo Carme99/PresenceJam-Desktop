@@ -832,6 +832,9 @@
       <p class="hint">
         {t('settings.placeholdersHint')}
       </p>
+      <!-- Issue #581: episodes use their own template, so a user editing the
+           music template must know it does not apply to podcasts. -->
+      <p class="hint">{t('settings.episodeFormatHint')}</p>
       <div class="toggle-row">
         <label for="profanity-filter">{t('settings.profanityFilterLabel')}</label>
         <input

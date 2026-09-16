@@ -143,7 +143,7 @@ export const en = {
   'settings.formatTemplatePlaceholder': '🎵 {artist} - {track} 🎧',
   'settings.livePreview': 'Live preview',
   'settings.placeholdersHint':
-    'Available placeholders: {artist}, {track}, {album}, {emoji}',
+    'Available placeholders: {artist}, {track}, {album}, {emoji}, {device}, {playlist} (or {context}), {progress}, {shuffle}, {repeat}. Shuffle and Repeat show 🔀/🔁 only while they are on.',
   'settings.profanityFilterLabel': 'Filter profanity in status',
   'settings.placeholderTextLabel': 'Placeholder text',
   'settings.placeholderTextHint':
@@ -308,7 +308,8 @@ export const en = {
   'onboarding.step3Intro':
     'Choose how your status message should look and whether PresenceJam should launch when you sign in.',
   'onboarding.statusTemplate': 'Status template',
-  'onboarding.placeholdersHint': 'Placeholders: {artist}, {track}, {album}, {emoji}',
+  'onboarding.placeholdersHint':
+    'Placeholders: {artist}, {track}, {album}, {emoji}, {device}, {playlist} (or {context}), {progress}, {shuffle}, {repeat}',
   'onboarding.pollInterval': 'How often to check Spotify: {seconds}s',
   'onboarding.settingUp': 'Setting up…',
   'onboarding.finishSetup': 'Finish setup',
@@ -371,7 +372,9 @@ export const en = {
   'reconnect.restartSignIn': 'Restart sign-in',
   'update.stagingProgress': 'Preparing update — {percent}%',
   'update.cancelStage': 'Cancel',
-  'onboarding.submitting': 'Submitting…'
+  'onboarding.submitting': 'Submitting…',
+  'settings.episodeFormatHint':
+    'Podcasts and audiobooks use their own template — 🎙️ {show} - {episode} — so your music template above is not applied to them.',
 };
 
 export type Dict = { readonly [K in keyof typeof en]: string };

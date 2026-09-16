@@ -88,7 +88,7 @@ pub struct SpotifyTokens {
     pub refresh_token: String,
     pub expires_at: DateTime<Utc>,
 }
-#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct TrackInfo {
     pub title: String,
@@ -125,16 +125,137 @@ pub struct DeviceInfo {
     pub supports_volume: bool,
 }
 
-/// The user's playback queue (GET /v1/me/player/queue), mapped down to
-/// the track-shaped subset the app understands — episodes and ads are
-/// gated out (same item-type gate as `get_currently_playing`, issue
-/// #161). See issue #3.0-P3.
+/// The user's playback queue (GET /v1/me/player/queue), mapped down to the
+/// app's track-shaped `TrackInfo`. Tracks AND podcast/audiobook episodes are
+/// mapped (their `type` field decides — issue #581); only ads and item types
+/// the client does not know are dropped. See issues #161 and #3.0-P3.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct QueueInfo {
     pub currently_playing: Option<TrackInfo>,
     pub up_next: Vec<TrackInfo>,
 }
+
+/// Repeat mode — the three values `repeat_state` may carry (issue #582).
+///
+/// Grounding:
+/// https://developer.spotify.com/documentation/web-api/reference/get-the-users-currently-playing-track
+/// documents `repeat_state` as `off`, `track` or `context`; the same three
+/// values are what `PUT /me/player/repeat` accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RepeatState {
+    #[default]
+    Off,
+    Context,
+    Track,
+}
+
+impl RepeatState {
+    /// Normalises a wire `repeat_state`. Anything else — a value Spotify adds
+    /// later, or a body that omitted the field — degrades to
+    /// [`RepeatState::Off`], so neither the status text nor the tray toggle
+    /// ever claims a mode the API did not report.
+    pub fn from_api(state: &str) -> Self {
+        match state.to_ascii_lowercase().as_str() {
+            "track" => Self::Track,
+            "context" => Self::Context,
+            _ => Self::Off,
+        }
+    }
+
+    /// The wire value for `PUT /me/player/repeat`.
+    pub fn as_api(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Context => "context",
+            Self::Track => "track",
+        }
+    }
+
+    /// True while any repeat mode is active — drives the tray check mark and
+    /// the `{repeat}` token.
+    pub fn is_on(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    /// The next mode in the cycle Spotify's own player uses:
+    /// `off` → `context` → `track` → `off` (issue #582).
+    pub fn next(self) -> Self {
+        match self {
+            Self::Off => Self::Context,
+            Self::Context => Self::Track,
+            Self::Track => Self::Off,
+        }
+    }
+}
+
+/// Episode-only metadata for a podcast/audiobook item. Every field is empty
+/// when the body omitted it (`show` is absent on some items and
+/// `publisher` is not guaranteed), so the episode mapping degrades cleanly
+/// instead of failing the poll (issue #581).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EpisodeInfo {
+    /// `show.name` — the podcast/audiobook the episode belongs to.
+    pub show_name: String,
+    /// `show.publisher`.
+    pub publisher: String,
+}
+
+/// The playback context a currently-playing poll body carries next to the
+/// item itself: which device is playing, which context the item was started
+/// from, and the shuffle/repeat modes (issue #580). Every field comes from
+/// the SAME poll response — no extra request, no new scope.
+#[derive(Debug, Clone, Default)]
+pub struct PlaybackContext {
+    /// `device.name`, `""` when the body carried no device.
+    pub device: String,
+    /// `context.display_name` — the playlist/album/artist/show the item plays
+    /// from. `""` for ad-hoc playback (a search result or a queue has no
+    /// context object).
+    pub playlist: String,
+    /// `shuffle_state`, `false` when the body omitted it.
+    pub shuffle: bool,
+    /// `repeat_state`, normalised through [`RepeatState::from_api`].
+    pub repeat: RepeatState,
+}
+
+impl PlaybackContext {
+    /// The sample context the Svelte Settings preview renders against, so a
+    /// user editing `{device}`/`{playlist}` sees a value instead of a hole.
+    /// The runtime path always supplies the context parsed from the poll body.
+    pub fn sample() -> Self {
+        Self {
+            device: "Kitchen speaker".to_string(),
+            playlist: "Workout Mix".to_string(),
+            shuffle: true,
+            repeat: RepeatState::Context,
+        }
+    }
+}
+
+/// One observed playing item: the media in the app's frozen `TrackInfo` shape
+/// plus the episode metadata and playback context the same poll body carries
+/// (issues #580/#581).
+///
+/// `TrackInfo` itself stays exactly as it is: it is the ts-rs-exported IPC
+/// shape consumed by `SyncStatus`, the Dashboard and the tray, and it is
+/// built with exhaustive struct literals outside this module — widening it
+/// would be a breaking wire change with no consumer that needs it.
+#[derive(Debug, Clone, Default)]
+pub struct NowPlaying {
+    pub media: TrackInfo,
+    /// `Some` for a podcast/audiobook episode (`item.type == "episode"`),
+    /// `None` for a music track.
+    pub episode: Option<EpisodeInfo>,
+    pub context: PlaybackContext,
+}
+
+/// Default status template for episodes (issue #581): a user's music template
+/// must not be applied verbatim to a 90-minute episode. This value is the
+/// documented default of the `teams.episode_status_format` config key the
+/// episode slice needs from `config.rs` (see the report note in the commit
+/// body) — until that key exists, the built-in default IS what episodes use.
+pub const DEFAULT_EPISODE_STATUS_FORMAT: &str = "🎙️ {show} - {episode}";
 
 #[derive(Debug)]
 pub enum SpotifyApiError {
@@ -360,11 +481,11 @@ pub fn refresh_spotify_token(
     })
 }
 
-/// The `currently_playing_type` field of the currently-playing response.
-/// Typed so the `track` gate can't be broken by a typo; `Unknown` is the
-/// explicit catch-all for Spotify's documented "unknown" value and any
-/// future item types. Defaults to `Unknown` so an absent field can't
-/// hard-fail the parse. See issue #161.
+/// The `type` field of an item, or of the envelope's
+/// `currently_playing_type`. Typed so the item gate can't be broken by a
+/// typo; `Unknown` is the explicit catch-all for Spotify's documented
+/// "unknown" value and any future item types. Defaults to `Unknown` so an
+/// absent field can't hard-fail the parse. See issues #161 and #581.
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 enum CurrentlyPlayingType {
@@ -374,6 +495,265 @@ enum CurrentlyPlayingType {
     #[default]
     #[serde(other)]
     Unknown,
+}
+
+impl CurrentlyPlayingType {
+    /// Classifies a raw `type` string. An item's own `type` is read as a
+    /// plain string because the docs direct clients to check it themselves —
+    /// "make sure that your client properly handles cases of new types in
+    /// the future by checking against the `type` field of each object" — and
+    /// an unrecognised value must degrade, not fail the whole parse.
+    fn from_wire(raw: &str) -> Self {
+        match raw {
+            "track" => Self::Track,
+            "episode" => Self::Episode,
+            "ad" => Self::Ad,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// The documented `oneOf(TrackObject, EpisodeObject)` item shared by the
+/// currently-playing and queue bodies. Every field is `#[serde(default)]` so
+/// a body that omits one degrades instead of failing the whole parse.
+#[derive(Debug, Deserialize, Default)]
+struct MediaItem {
+    #[serde(rename = "type", default)]
+    type_: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    images: Vec<ItemImage>,
+    #[serde(default)]
+    artists: Vec<ItemName>,
+    #[serde(default)]
+    album: ItemAlbum,
+    #[serde(default)]
+    show: ItemShow,
+    #[serde(default)]
+    duration_ms: u64,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct ItemName {
+    #[serde(default)]
+    name: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct ItemAlbum {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    images: Vec<ItemImage>,
+}
+
+/// `item.show` — the podcast/audiobook an episode belongs to. Absent on
+/// tracks and on bodies that omit it, hence the `Default`.
+#[derive(Debug, Deserialize, Default)]
+struct ItemShow {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    publisher: String,
+    #[serde(default)]
+    images: Vec<ItemImage>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct ItemImage {
+    #[serde(default)]
+    url: String,
+}
+
+fn first_image_url(images: &[ItemImage]) -> String {
+    images
+        .first()
+        .map(|img| img.url.clone())
+        .unwrap_or_default()
+}
+
+/// Maps one wire item onto the app's frozen `TrackInfo`, plus the episode
+/// metadata when the item is a podcast/audiobook episode (issues #580/#581).
+///
+/// The item's own `type` decides which branch of the documented
+/// `oneOf(track, episode)` union to read: a track reads `artists`/`album`, an
+/// episode reads `show`. An episode's show name takes the `artist` slot so
+/// the Dashboard, the desktop notification and the tray keep rendering one
+/// shape, and its publisher takes the `album` slot — a second copy of the
+/// show name on the Dashboard's album line would read as a duplicate, and an
+/// empty line reads as a bug. `ad` and every unknown type return `None`,
+/// i.e. "nothing playing", exactly as the pre-#581 gate did.
+fn map_media_item(
+    item: MediaItem,
+    is_playing: bool,
+    progress_ms: Option<u64>,
+) -> Option<(TrackInfo, Option<EpisodeInfo>)> {
+    let (artist, album, album_art_url, episode) = match CurrentlyPlayingType::from_wire(&item.type_)
+    {
+        CurrentlyPlayingType::Track => (
+            item.artists
+                .iter()
+                .map(|a| a.name.clone())
+                .collect::<Vec<_>>()
+                .join(", "),
+            item.album.name.clone(),
+            first_image_url(&item.album.images),
+            None,
+        ),
+        CurrentlyPlayingType::Episode => (
+            item.show.name.clone(),
+            item.show.publisher.clone(),
+            // The episode's own cover art is what the Dashboard and the
+            // notifications show; the show's cover is the fallback for
+            // items that carry no images of their own.
+            if item.images.is_empty() {
+                first_image_url(&item.show.images)
+            } else {
+                first_image_url(&item.images)
+            },
+            Some(EpisodeInfo {
+                show_name: item.show.name.clone(),
+                publisher: item.show.publisher.clone(),
+            }),
+        ),
+        CurrentlyPlayingType::Ad | CurrentlyPlayingType::Unknown => return None,
+    };
+    Some((
+        TrackInfo {
+            title: item.name,
+            artist,
+            album,
+            album_art_url,
+            is_playing,
+            progress_ms,
+            duration_ms: item.duration_ms,
+        },
+        episode,
+    ))
+}
+
+/// Resolves the human-readable name of the playback context (`{playlist}`).
+///
+/// `context.display_name` is read first — Spotify's newer responses carry it
+/// — but the reference documents only `type`/`uri` on the context object, so
+/// when it is missing the name is derived from the item for the context
+/// types whose name the item already contains (an `album` context's name is
+/// the item's album, an `artist` context's name is its artist, a `show`
+/// context's name is the episode's show). A *playlist* context has no
+/// derivable name — that needs `GET /playlists/{id}`, i.e. a scope this app
+/// does not request — so `{playlist}` renders empty there instead of
+/// inventing one.
+fn context_display_name(context: Option<&ContextObject>, item: Option<&MediaItem>) -> String {
+    if let Some(name) = context.and_then(|c| c.display_name.as_deref()) {
+        if !name.is_empty() {
+            return name.to_string();
+        }
+    }
+    let Some(item) = item else {
+        return String::new();
+    };
+    match context.map(|c| c.type_.as_str()).unwrap_or_default() {
+        "album" => item.album.name.clone(),
+        "artist" => item
+            .artists
+            .first()
+            .map(|a| a.name.clone())
+            .unwrap_or_default(),
+        "show" => item.show.name.clone(),
+        _ => String::new(),
+    }
+}
+
+/// `context` of the currently-playing body: `type` plus the undocumented-but-
+/// present `display_name`.
+#[derive(Debug, Deserialize, Default)]
+struct ContextObject {
+    #[serde(rename = "type", default)]
+    type_: String,
+    #[serde(default)]
+    display_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct DeviceName {
+    #[serde(default)]
+    name: String,
+}
+
+/// Parses a 200 body of `GET /me/player/currently-playing`.
+///
+/// Split out of `get_currently_playing` so the whole mapping — track vs
+/// episode, ad gating, playback context, missing fields — is unit-testable
+/// without a live response. `Err` carries the message for
+/// `SpotifyApiError::Other`; `Ok(None)` means "nothing to report" (204-style
+/// empty body, an ad, an unknown item type, or no item at all).
+fn parse_currently_playing_body(body: &str) -> Result<Option<NowPlaying>, String> {
+    #[derive(Debug, Deserialize, Default)]
+    struct CurrentlyPlayingResponse {
+        #[serde(default)]
+        item: Option<MediaItem>,
+        #[serde(default)]
+        is_playing: bool,
+        #[serde(default)]
+        progress_ms: Option<u64>,
+        /// `track`, `episode`, `ad` or anything else — the docs say to check
+        /// this and to handle new types gracefully. Defaults to `Unknown` so
+        /// an absent field can't hard-fail the parse.
+        #[serde(default)]
+        currently_playing_type: CurrentlyPlayingType,
+        #[serde(default)]
+        device: Option<DeviceName>,
+        #[serde(default)]
+        context: Option<ContextObject>,
+        #[serde(default)]
+        shuffle_state: bool,
+        #[serde(default)]
+        repeat_state: String,
+    }
+
+    let playing: CurrentlyPlayingResponse = serde_json::from_str(body)
+        .map_err(|e| format!("Failed to parse currently playing response: {}", e))?;
+
+    // An ad is never "listening": the envelope's type says so even when the
+    // item looks like a track, and the pre-#581 gate dropped it the same way.
+    if matches!(playing.currently_playing_type, CurrentlyPlayingType::Ad) {
+        return Ok(None);
+    }
+
+    // Resolved before `item` is moved into the mapper (needs both halves).
+    let playlist = context_display_name(playing.context.as_ref(), playing.item.as_ref());
+
+    let Some((media, episode)) = playing
+        .item
+        .and_then(|item| map_media_item(item, playing.is_playing, playing.progress_ms))
+    else {
+        return Ok(None);
+    };
+
+    Ok(Some(NowPlaying {
+        media,
+        episode,
+        context: PlaybackContext {
+            device: playing.device.map(|d| d.name).unwrap_or_default(),
+            playlist,
+            shuffle: playing.shuffle_state,
+            repeat: RepeatState::from_api(&playing.repeat_state),
+        },
+    }))
+}
+
+/// Reads the `ETag` response header as an owned validator. Only the arms
+/// that carry a representation (200/204) call this: a 304 refreshes
+/// nothing, because the stored validator stays authoritative
+/// (RFC 9110 §13.1.2), so the steady state of the conditional-GET feature
+/// allocates no String it would immediately drop (#577).
+fn read_etag(response: &reqwest::blocking::Response) -> Option<String> {
+    response
+        .headers()
+        .get("ETag")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
 }
 
 /// Conditional GET of the currently-playing track (candidate C11(1),
@@ -394,12 +774,18 @@ enum CurrentlyPlayingType {
 /// poll is unconditional; any other status keeps the pre-existing error
 /// paths. If Spotify never sends an ETag this whole feature is a
 /// behavioral no-op.
+// The `Modified` payload is the whole observed item (issues #580/#581) and is
+// deliberately held by value: it is built once per poll and moved a couple of
+// times, so a `Box` would buy nothing and cost one heap allocation on every
+// poll — the same per-poll waste #577 removed from this call path.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum CurrentlyPlaying {
-    /// 200/204 — the full response was parsed. `track` is `None` for a
-    /// 204, a non-track item type (issue #161) or a missing `item`.
+    /// 200/204 — the full response was parsed. `now` is `None` for a 204, a
+    /// missing `item`, an ad, or an item type the client does not know
+    /// (issues #161/#581).
     Modified {
-        track: Option<TrackInfo>,
+        now: Option<NowPlaying>,
         /// The `ETag` response header when present; echo it back as
         /// `If-None-Match` on the next poll. `None` ⇒ the next poll is
         /// unconditional (RFC 9110 §13.1.2).
@@ -411,28 +797,18 @@ pub enum CurrentlyPlaying {
     /// status-format work.
     NotModified,
 }
-
-/// Reads the `ETag` response header as an owned validator. Only the arms
-/// that carry a representation (200/204) call this: a 304 refreshes
-/// nothing, because the stored validator stays authoritative
-/// (RFC 9110 §13.1.2), so the steady state of the conditional-GET feature
-/// allocates no String it would immediately drop (#577).
-fn read_etag(response: &reqwest::blocking::Response) -> Option<String> {
-    response
-        .headers()
-        .get("ETag")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned)
-}
-
 pub fn get_currently_playing(
     access_token: &str,
     if_none_match: Option<&str>,
 ) -> Result<CurrentlyPlaying, SpotifyApiError> {
     let client = build_spotify_client().map_err(SpotifyApiError::Other)?;
 
+    // Issue #581: `additional_types=episode` makes the endpoint return the
+    // podcast/audiobook item instead of ignoring it — the reference: "A
+    // comma-separated list of item types that your client supports besides
+    // the default `track` type. Valid types are: `track` and `episode`."
     let mut request = client
-        .get("https://api.spotify.com/v1/me/player/currently-playing")
+        .get("https://api.spotify.com/v1/me/player/currently-playing?additional_types=episode")
         .header("Authorization", format!("Bearer {}", access_token));
     // Conditional GET (candidate C11): a stored ETag goes out as
     // If-None-Match so an unchanged resource can answer 304 without a
@@ -457,98 +833,19 @@ pub fn get_currently_playing(
     match response.status().as_u16() {
         304 => Ok(CurrentlyPlaying::NotModified),
         200 => {
-            // Read before `.json()` consumes the response.
+            // Read before `.text()` consumes the response.
             let response_etag = read_etag(&response);
-
-            #[derive(Deserialize)]
-            struct CurrentlyPlayingResponse {
-                item: Option<CurrentlyPlayingItem>,
-                is_playing: bool,
-                progress_ms: Option<u64>,
-                /// `track`, `episode`, `ad` or anything else — the docs say
-                /// to check this and to handle new types gracefully. Default
-                /// to `Unknown` so an absent field can't hard-fail the parse.
-                #[serde(default)]
-                currently_playing_type: CurrentlyPlayingType,
-            }
-
-            #[derive(Deserialize)]
-            struct CurrentlyPlayingItem {
-                name: String,
-                #[serde(default)]
-                artists: Vec<Artist>,
-                #[serde(default)]
-                album: Album,
-                duration_ms: u64,
-            }
-
-            #[derive(Deserialize)]
-            struct Artist {
-                name: String,
-            }
-
-            #[derive(Deserialize, Default)]
-            struct Album {
-                name: String,
-                images: Vec<AlbumImage>,
-            }
-
-            #[derive(Deserialize)]
-            struct AlbumImage {
-                url: String,
-            }
-
-            let playing: CurrentlyPlayingResponse = response.json().map_err(|e| {
-                SpotifyApiError::Other(format!("Failed to parse currently playing response: {}", e))
+            let body = response.text().map_err(|e| {
+                SpotifyApiError::Other(format!("Failed to read currently playing body: {}", e))
             })?;
-
-            // Only `track` items are track-shaped (name/artists/album).
-            // Episodes, ads and future item types must not be forced through
-            // TrackInfo — treat them as "nothing playing" instead of erroring.
-            // See issue #161.
-            if !matches!(playing.currently_playing_type, CurrentlyPlayingType::Track) {
-                return Ok(CurrentlyPlaying::Modified {
-                    track: None,
-                    etag: response_etag,
-                });
-            }
-
-            if let Some(item) = playing.item {
-                let artist = item
-                    .artists
-                    .iter()
-                    .map(|a| a.name.clone())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-
-                let album_art_url = item
-                    .album
-                    .images
-                    .first()
-                    .map(|img| img.url.clone())
-                    .unwrap_or_default();
-
-                Ok(CurrentlyPlaying::Modified {
-                    track: Some(TrackInfo {
-                        title: item.name,
-                        artist,
-                        album: item.album.name,
-                        album_art_url,
-                        is_playing: playing.is_playing,
-                        progress_ms: playing.progress_ms,
-                        duration_ms: item.duration_ms,
-                    }),
-                    etag: response_etag,
-                })
-            } else {
-                Ok(CurrentlyPlaying::Modified {
-                    track: None,
-                    etag: response_etag,
-                })
-            }
+            let now = parse_currently_playing_body(&body).map_err(SpotifyApiError::Other)?;
+            Ok(CurrentlyPlaying::Modified {
+                now,
+                etag: response_etag,
+            })
         }
         204 => Ok(CurrentlyPlaying::Modified {
-            track: None,
+            now: None,
             etag: read_etag(&response),
         }),
         401 => Err(SpotifyApiError::ExpiredToken),
@@ -684,6 +981,45 @@ pub fn player_transfer(
     )
 }
 
+/// Turns shuffle on or off. `device_id` targets a specific device; `None`
+/// acts on the active device. PUT /v1/me/player/shuffle with the documented
+/// `{"state": <bool>}` body — the reference documents `state` as
+/// "**true** : Shuffle user's playback." and the response as 204/401/403/429.
+/// Scope `user-modify-playback-state`, already requested. See issue #582.
+pub fn player_set_shuffle(
+    access_token: &str,
+    state: bool,
+    device_id: Option<&str>,
+) -> Result<(), SpotifyApiError> {
+    send_player_command(
+        reqwest::Method::PUT,
+        "/me/player/shuffle",
+        access_token,
+        device_id,
+        Some(serde_json::json!({ "state": state })),
+        "shuffle",
+    )
+}
+
+/// Sets the repeat mode. `device_id` targets a specific device; `None` acts
+/// on the active device. PUT /v1/me/player/repeat with the documented
+/// `{"state": "off" | "track" | "context"}` body. Scope
+/// `user-modify-playback-state`, already requested. See issue #582.
+pub fn player_set_repeat(
+    access_token: &str,
+    state: RepeatState,
+    device_id: Option<&str>,
+) -> Result<(), SpotifyApiError> {
+    send_player_command(
+        reqwest::Method::PUT,
+        "/me/player/repeat",
+        access_token,
+        device_id,
+        Some(serde_json::json!({ "state": state.as_api() })),
+        "repeat",
+    )
+}
+
 /// Lists the user's available playback devices.
 /// GET /v1/me/player/devices. See issue #3.0-P3.
 pub fn get_devices(access_token: &str) -> Result<Vec<DeviceInfo>, SpotifyApiError> {
@@ -711,10 +1047,11 @@ pub fn get_devices(access_token: &str) -> Result<Vec<DeviceInfo>, SpotifyApiErro
     Ok(devices.devices)
 }
 
-/// Fetches the user's playback queue. Only `track` items are mapped to
-/// `TrackInfo` — episodes and ads are gated out with the same item-type
-/// gate as `get_currently_playing` (issue #161). GET /v1/me/player/queue.
-/// See issue #3.0-P3.
+/// Fetches the user's playback queue. Items are mapped through the same
+/// `oneOf(track, episode)` mapper as `get_currently_playing`, so podcast and
+/// audiobook episodes reach the tray's Up Next submenu instead of being
+/// dropped (issue #583); ads and unknown item types are still gated out
+/// (issue #161). GET /v1/me/player/queue. See issue #3.0-P3.
 pub fn get_queue(access_token: &str) -> Result<QueueInfo, SpotifyApiError> {
     let client = build_spotify_client().map_err(SpotifyApiError::Other)?;
     let response = client
@@ -736,73 +1073,35 @@ pub fn get_queue(access_token: &str) -> Result<QueueInfo, SpotifyApiError> {
         return Err(map_player_error(response, "queue"));
     }
 
-    #[derive(Deserialize)]
+    let queue_body = response
+        .text()
+        .map_err(|e| SpotifyApiError::Other(format!("Failed to read queue response: {}", e)))?;
+    parse_queue_body(&queue_body).map_err(SpotifyApiError::Other)
+}
+
+/// Parses a 200 body of `GET /me/player/queue`.
+///
+/// Split out of `get_queue` for the same reason as
+/// [`parse_currently_playing_body`]: the item gate and the track/episode
+/// mapping are what the tray's Up Next submenu renders, and both are worth
+/// pinning without a live response.
+fn parse_queue_body(body: &str) -> Result<QueueInfo, String> {
+    #[derive(Debug, Deserialize, Default)]
     struct QueueResponse {
-        currently_playing: Option<QueueItem>,
-        queue: Vec<QueueItem>,
-    }
-
-    #[derive(Deserialize)]
-    struct QueueItem {
-        #[serde(rename = "type")]
-        type_: String,
-        name: String,
         #[serde(default)]
-        artists: Vec<Artist>,
+        currently_playing: Option<MediaItem>,
         #[serde(default)]
-        album: Album,
-        duration_ms: u64,
+        queue: Vec<MediaItem>,
     }
 
-    #[derive(Deserialize)]
-    struct Artist {
-        name: String,
+    fn map_item(item: MediaItem) -> Option<TrackInfo> {
+        // Queue items are by definition not the currently playing one, so
+        // there is no playing state or position to report.
+        map_media_item(item, false, None).map(|(media, _episode)| media)
     }
 
-    #[derive(Deserialize, Default)]
-    struct Album {
-        name: String,
-        images: Vec<AlbumImage>,
-    }
-
-    #[derive(Deserialize)]
-    struct AlbumImage {
-        url: String,
-    }
-
-    fn map_item(item: QueueItem) -> Option<TrackInfo> {
-        // Only `track` items are track-shaped (name/artists/album).
-        // Episodes, ads and future item types must not be forced through
-        // TrackInfo — same gate as get_currently_playing (issue #161).
-        if item.type_ != "track" {
-            return None;
-        }
-        Some(TrackInfo {
-            title: item.name,
-            artist: item
-                .artists
-                .iter()
-                .map(|a| a.name.clone())
-                .collect::<Vec<_>>()
-                .join(", "),
-            album: item.album.name,
-            album_art_url: item
-                .album
-                .images
-                .first()
-                .map(|img| img.url.clone())
-                .unwrap_or_default(),
-            // Queue items are by definition not the currently playing one.
-            is_playing: false,
-            progress_ms: None,
-            duration_ms: item.duration_ms,
-        })
-    }
-
-    let queue: QueueResponse = response
-        .json()
-        .map_err(|e| SpotifyApiError::Other(format!("Failed to parse queue response: {}", e)))?;
-
+    let queue: QueueResponse =
+        serde_json::from_str(body).map_err(|e| format!("Failed to parse queue response: {}", e))?;
     Ok(QueueInfo {
         currently_playing: queue.currently_playing.and_then(map_item),
         up_next: queue.queue.into_iter().filter_map(map_item).collect(),
@@ -832,45 +1131,156 @@ pub fn decode_spotify_granted_scopes(access_token: &str) -> Vec<String> {
     }
 }
 
-/// Single source of truth for status-format placeholder substitution.
-///
-/// Substitutes `{artist}`, `{track}`, `{album}`, and `{emoji}` in the
-/// given `format` string. The `{emoji}` placeholder resolves to `🎵` when
-/// the track is playing and `⏸️` when paused.
-///
-/// Both the runtime polling loop (`polling::poll_once`) and the Svelte
-/// live preview (Settings.svelte via the `preview_status` Tauri command)
-/// must call this — see issue #74.
-pub fn format_status(track: &TrackInfo, format: &str) -> String {
-    let emoji = if track.is_playing { "🎵" } else { "⏸️" };
-
-    // Issue #341: `{emoji}` substitutes FIRST. Track metadata may
-    // literally contain "{emoji}" (or "{artist}"/"{track}"/"{album}");
-    // substituting data fields first would let this final pass re-expand
-    // data-inserted tokens ("{emoji}" artist → "🎵"), while the other
-    // tokens survive verbatim — asymmetric data injection. Emoji-first
-    // means data-inserted tokens are never re-scanned.
-    format
-        .replace("{emoji}", emoji)
-        .replace("{artist}", &track.artist)
-        .replace("{track}", &track.title)
-        .replace("{album}", &track.album)
+/// Substitutes one `{token}` per pass and never re-scans what it inserted
+/// (issue #341): a value that arrives from Spotify containing a literal
+/// expanded by a later token. The previous chained-`replace` implementation
+/// documented that rule but only honoured it for `{emoji}` — a track titled
+/// `{album}` was re-expanded by the later `{album}` pass. Substituting
+/// against a fixed token table in one pass makes the rule true for every
+/// token and drops the intermediate strings.
+fn substitute_placeholders(format: &str, tokens: &[(&str, &str)]) -> String {
+    let mut out = String::with_capacity(format.len());
+    let mut rest = format;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let candidate = &rest[open..];
+        let Some(close) = candidate.find('}') else {
+            // Unterminated brace: copy the tail verbatim.
+            out.push_str(candidate);
+            return out;
+        };
+        let name = &candidate[1..close];
+        match tokens.iter().find(|(token, _)| *token == name) {
+            Some((_, value)) => out.push_str(value),
+            // Unknown placeholder: keep it exactly as written.
+            None => out.push_str(&candidate[..=close]),
+        }
+        rest = &candidate[close + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
-/// Renders `format` against a sample TrackInfo so the Svelte Settings page
-/// can show a live preview without holding a real playing track. Picked up
-/// by the `preview_status` Tauri command. See issue #74.
-pub fn preview_status_with_sample(format: &str) -> String {
-    let sample = TrackInfo {
+/// `mm:ss` for a progress position, `""` when Spotify reported none (a
+/// live/unknown-position stream — issue #165).
+fn format_progress(progress_ms: Option<u64>) -> String {
+    match progress_ms {
+        Some(ms) => {
+            let total_secs = ms / 1000;
+            format!("{}:{:02}", total_secs / 60, total_secs % 60)
+        }
+        None => String::new(),
+    }
+}
+
+/// The placeholder vocabulary shared by every render path. Values are the
+/// *rendered* text for one item, so the table is built here once per render
+/// and reused for whichever template is being filled in.
+fn placeholder_values<'a>(
+    media: &'a TrackInfo,
+    episode: Option<&'a EpisodeInfo>,
+    context: &'a PlaybackContext,
+    progress: &'a str,
+    emoji: &'a str,
+) -> Vec<(&'static str, &'a str)> {
+    vec![
+        ("emoji", emoji),
+        ("artist", media.artist.as_str()),
+        ("track", media.title.as_str()),
+        ("album", media.album.as_str()),
+        ("device", context.device.as_str()),
+        // `{context}` is an alias: the token names differ in how much the
+        // user knows about where the item was started from.
+        ("playlist", context.playlist.as_str()),
+        ("context", context.playlist.as_str()),
+        ("progress", progress),
+        // Icon-only tokens for the two playback modes (issue #580): an
+        // "on"/"off" word would wreck a status that reads as a sentence, and
+        // a template author can put them behind a literal space.
+        ("shuffle", if context.shuffle { "🔀" } else { "" }),
+        ("repeat", if context.repeat.is_on() { "🔁" } else { "" }),
+        ("show", episode.map(|e| e.show_name.as_str()).unwrap_or("")),
+        // `{episode}` is the episode's own name, and renders only for an
+        // episode — the whole episode token family stays empty on a music
+        // track, so a template that mentions one never prints the track
+        // title by accident.
+        (
+            "episode",
+            if episode.is_some() {
+                media.title.as_str()
+            } else {
+                ""
+            },
+        ),
+        (
+            "publisher",
+            episode.map(|e| e.publisher.as_str()).unwrap_or(""),
+        ),
+    ]
+}
+
+/// Single source of truth for status-format placeholder substitution.
+///
+/// Renders `format` against one observed item: its media (`{artist}`,
+/// `{track}`, `{album}`), its episode metadata (`{show}`, `{episode}`,
+/// `{publisher}`) and the playback context the same poll body carried
+/// (`{device}`, `{playlist}`/`{context}`, `{progress}`, `{shuffle}`,
+/// `{repeat}`). `{emoji}` is `🎵` for a playing track, `🎙️` for a playing
+/// episode and `⏸️` when paused. The runtime polling loop
+/// (`polling::poll_once`) calls this with the parsed body — issues
+/// #580/#581.
+pub fn format_status_with_context(
+    media: &TrackInfo,
+    episode: Option<&EpisodeInfo>,
+    context: &PlaybackContext,
+    format: &str,
+) -> String {
+    let emoji = match (media.is_playing, episode.is_some()) {
+        (false, _) => "⏸️",
+        (true, true) => "🎙️",
+        (true, false) => "🎵",
+    };
+    let progress = format_progress(media.progress_ms);
+    let tokens = placeholder_values(media, episode, context, &progress, emoji);
+    substitute_placeholders(format, &tokens)
+}
+
+/// The Settings-preview entry point: renders `format` against the sample
+/// media and the sample playback context ([`PlaybackContext::sample`]).
+///
+/// Kept as a 2-argument surface because `commands::misc::preview_status`'s
+/// profanity branch builds its own sample media and has no playback context
+/// to offer; sharing one sample context here is what makes that branch and
+/// `preview_status_with_sample` render the new tokens identically. The
+/// runtime polling loop must NOT use this — it calls
+/// [`format_status_with_context`] with the context parsed from the poll
+/// body. See issues #74 and #580.
+pub fn format_status(track: &TrackInfo, format: &str) -> String {
+    format_status_with_context(track, None, &PlaybackContext::sample(), format)
+}
+
+/// The sample item the Settings preview renders. Shared with
+/// `format_status`'s fallback context so both preview branches agree.
+fn sample_track() -> TrackInfo {
+    TrackInfo {
         title: "Sample Track".to_string(),
         artist: "Sample Artist".to_string(),
         album: "Sample Album".to_string(),
         album_art_url: String::new(),
         is_playing: true,
+        // `Some(0)` mirrors the sample `commands::misc::preview_status`
+        // builds on the profanity path, so `{progress}` renders "0:00" on
+        // both sides of that toggle instead of disagreeing.
         progress_ms: Some(0),
         duration_ms: 0,
-    };
-    format_status(&sample, format)
+    }
+}
+
+/// Renders `format` against a sample item so the Svelte Settings page can
+/// show a live preview without holding a real playing track. Picked up by
+/// the `preview_status` Tauri command. See issue #74.
+pub fn preview_status_with_sample(format: &str) -> String {
+    format_status_with_context(&sample_track(), None, &PlaybackContext::sample(), format)
 }
 
 pub fn is_token_expired(tokens: &SpotifyTokens) -> bool {
@@ -941,6 +1351,448 @@ mod tests {
     fn preview_status_with_sample_uses_sample_values_and_playing_emoji() {
         let result = preview_status_with_sample("{emoji} {artist} - {track} ({album}) {emoji}");
         assert_eq!(result, "🎵 Sample Artist - Sample Track (Sample Album) 🎵");
+    }
+
+    // Issue #580: the Settings preview has two Rust branches. With the
+    // profanity filter on, `commands::misc::preview_status` builds its own
+    // sample media and calls `format_status`; with it off, the same command
+    // calls `preview_status_with_sample`. Both must render the new context
+    // tokens identically, or toggling that filter would silently change
+    // which placeholders the preview appears to support.
+    #[test]
+    fn preview_branches_render_the_same_placeholders() {
+        let format = "{emoji} {artist} - {track} ({album}) {device} {playlist} {progress} {shuffle} {repeat}";
+        let filter_branch_sample = TrackInfo {
+            title: "Sample Track".to_string(),
+            artist: "Sample Artist".to_string(),
+            album: "Sample Album".to_string(),
+            album_art_url: String::new(),
+            is_playing: true,
+            progress_ms: Some(0),
+            duration_ms: 0,
+        };
+        assert_eq!(
+            format_status(&filter_branch_sample, format),
+            preview_status_with_sample(format)
+        );
+    }
+
+    fn make_context() -> PlaybackContext {
+        PlaybackContext {
+            device: "Kitchen speaker".to_string(),
+            playlist: "Workout Mix".to_string(),
+            shuffle: true,
+            repeat: RepeatState::Context,
+        }
+    }
+
+    fn make_episode(show: &str) -> EpisodeInfo {
+        EpisodeInfo {
+            show_name: show.to_string(),
+            publisher: "Acme Audio".to_string(),
+        }
+    }
+
+    // Issue #580: the tokens the poll body already carries render from the
+    // parsed context. Fails pre-fix — `{device}`/`{playlist}`/`{progress}`/
+    // `{shuffle}`/`{repeat}` stayed in the output as literal placeholders.
+    #[test]
+    fn format_status_renders_playback_context_tokens() {
+        let mut track = make_track("Karma Police", "Radiohead", "OK Computer", true);
+        track.progress_ms = Some(83_000);
+        let context = make_context();
+        let result = format_status_with_context(
+            &track,
+            None,
+            &context,
+            "{device}|{playlist}|{context}|{progress}|{shuffle}|{repeat}",
+        );
+        assert_eq!(result, "Kitchen speaker|Workout Mix|Workout Mix|1:23|🔀|🔁");
+    }
+
+    // The mode tokens are icon-only: off must leave nothing behind, so a
+    // template like "🎵 {artist} - {track}{repeat}" stays a clean sentence.
+    #[test]
+    fn format_status_omits_mode_tokens_when_off() {
+        let track = make_track("Karma Police", "Radiohead", "OK Computer", true);
+        let context = PlaybackContext {
+            device: "Kitchen speaker".to_string(),
+            playlist: String::new(),
+            shuffle: false,
+            repeat: RepeatState::Off,
+        };
+        let result = format_status_with_context(&track, None, &context, "a{shuffle}b{repeat}c");
+        assert_eq!(result, "abc");
+    }
+
+    // Issue #165: no known position ⇒ `{progress}` renders empty rather than
+    // "0:00", so a live stream's status does not claim to be at the start.
+    #[test]
+    fn format_progress_matches_spotify_position_semantics() {
+        assert_eq!(format_progress(None), "");
+        assert_eq!(format_progress(Some(0)), "0:00");
+        assert_eq!(format_progress(Some(59_999)), "0:59");
+        assert_eq!(format_progress(Some(60_000)), "1:00");
+        assert_eq!(format_progress(Some(3_599_000)), "59:59");
+        // A 90-minute podcast is 90 minutes, not an hour-and-a-half rollover.
+        assert_eq!(format_progress(Some(5_400_000)), "90:00");
+    }
+
+    // Issue #581: episodes render through the same formatter, with their own
+    // tokens and their own play glyph.
+    #[test]
+    fn format_status_renders_episode_tokens_and_episode_emoji() {
+        let media = make_track(
+            "Episode 12: Focus",
+            "The Deep Work Show",
+            "Acme Audio",
+            true,
+        );
+        let episode = make_episode("The Deep Work Show");
+        let result = format_status_with_context(
+            &media,
+            Some(&episode),
+            &PlaybackContext::default(),
+            "{emoji} {show} - {episode} ({publisher})",
+        );
+        assert_eq!(
+            result,
+            "🎙️ The Deep Work Show - Episode 12: Focus (Acme Audio)"
+        );
+    }
+
+    // An episode template's `{show}`/`{episode}`/`{publisher}` must render
+    // empty for a music track instead of leaking the previous episode.
+    #[test]
+    fn format_status_episode_tokens_empty_for_track() {
+        let track = make_track("Karma Police", "Radiohead", "OK Computer", true);
+        let result = format_status_with_context(
+            &track,
+            None,
+            &PlaybackContext::default(),
+            "[{show}|{episode}|{publisher}]",
+        );
+        assert_eq!(result, "[||]");
+    }
+
+    #[test]
+    fn format_status_paused_episode_uses_pause_emoji() {
+        let media = make_track("Episode 12", "Show", "Publisher", false);
+        let episode = make_episode("Show");
+        let result = format_status_with_context(
+            &media,
+            Some(&episode),
+            &PlaybackContext::default(),
+            "{emoji}",
+        );
+        assert_eq!(result, "⏸️");
+    }
+
+    // Issue #341, extended from `{emoji}` to every token: a value that came
+    // from Spotify is never re-scanned, so metadata containing a token is
+    // copied verbatim. Fails pre-fix for the data tokens — the chained
+    // `replace` calls re-expanded a title of "{album}" into the album name.
+    #[test]
+    fn format_status_does_not_expand_data_inserted_tokens() {
+        let track = make_track("{album} - {device}", "{artist}", "OK Computer", true);
+        let context = make_context();
+        let result = format_status_with_context(&track, None, &context, "{artist} - {track}");
+        assert_eq!(result, "{artist} - {album} - {device}");
+    }
+
+    #[test]
+    fn format_status_keeps_unterminated_brace_verbatim() {
+        let track = make_track("x", "y", "z", true);
+        let result = format_status_with_context(
+            &track,
+            None,
+            &PlaybackContext::default(),
+            "y {artist} {unclosed",
+        );
+        assert_eq!(result, "y y {unclosed");
+    }
+
+    #[test]
+    fn repeat_state_normalises_the_documented_wire_values() {
+        assert_eq!(RepeatState::from_api("off"), RepeatState::Off);
+        assert_eq!(RepeatState::from_api("track"), RepeatState::Track);
+        assert_eq!(RepeatState::from_api("context"), RepeatState::Context);
+        assert_eq!(RepeatState::from_api("CONTEXT"), RepeatState::Context);
+        // Anything Spotify adds later degrades to Off rather than guessing.
+        assert_eq!(RepeatState::from_api("party"), RepeatState::Off);
+        assert_eq!(RepeatState::from_api(""), RepeatState::Off);
+    }
+
+    #[test]
+    fn repeat_state_cycles_off_context_track_and_round_trips_to_the_api() {
+        assert_eq!(RepeatState::Off.next(), RepeatState::Context);
+        assert_eq!(RepeatState::Context.next(), RepeatState::Track);
+        assert_eq!(RepeatState::Track.next(), RepeatState::Off);
+        assert_eq!(RepeatState::Off.as_api(), "off");
+        assert_eq!(RepeatState::Context.as_api(), "context");
+        assert_eq!(RepeatState::Track.as_api(), "track");
+        assert!(!RepeatState::Off.is_on());
+        assert!(RepeatState::Context.is_on());
+        assert!(RepeatState::Track.is_on());
+    }
+
+    /// A realistic `currently-playing` body for a podcast episode, verbatim
+    /// from the shapes the reference documents: `item.type = "episode"`,
+    /// `show` with `name`/`publisher`/`images`, `resume_point`,
+    /// `is_externally_hosted`, plus the playback context fields.
+    const EPISODE_BODY: &str = r#"{
+        "device": {"id": "dev1", "is_active": true, "name": "Kitchen speaker", "type": "computer", "volume_percent": 59},
+        "repeat_state": "context",
+        "shuffle_state": true,
+        "context": {"type": "show", "href": "https://api.spotify.com/v1/shows/s1", "uri": "spotify:show:s1"},
+        "timestamp": 1758000000000,
+        "progress_ms": 90000,
+        "is_playing": true,
+        "item": {
+            "type": "episode",
+            "id": "e1",
+            "name": "Episode 12: Focus",
+            "duration_ms": 5400000,
+            "is_externally_hosted": true,
+            "images": [{"url": "https://i.scdn.co/image/ep1"}],
+            "resume_point": {"fully_played": false, "resume_position_ms": 90000},
+            "show": {
+                "name": "The Deep Work Show",
+                "publisher": "Acme Audio",
+                "images": [{"url": "https://i.scdn.co/image/show1"}]
+            }
+        },
+        "currently_playing_type": "episode"
+    }"#;
+
+    // Issue #581: an episode must produce a real item — pre-fix the whole
+    // body mapped to `None` ("Nothing playing on Spotify") and a podcast
+    // morning looked like a broken app.
+    #[test]
+    fn parse_episode_body_maps_title_show_and_publisher() {
+        let now = parse_currently_playing_body(EPISODE_BODY)
+            .expect("episode body must parse")
+            .expect("episode body must yield an item");
+        assert_eq!(now.media.title, "Episode 12: Focus");
+        // The show takes the artist slot so the Dashboard/notification/tray
+        // keep rendering one shape; the publisher fills the subtitle slot.
+        assert_eq!(now.media.artist, "The Deep Work Show");
+        assert_eq!(now.media.album, "Acme Audio");
+        assert_eq!(now.media.album_art_url, "https://i.scdn.co/image/ep1");
+        assert_eq!(now.media.duration_ms, 5_400_000);
+        assert_eq!(now.media.progress_ms, Some(90_000));
+        assert!(now.media.is_playing);
+        let episode = now.episode.expect("episode metadata must be present");
+        assert_eq!(episode.show_name, "The Deep Work Show");
+        assert_eq!(episode.publisher, "Acme Audio");
+    }
+
+    #[test]
+    fn parse_episode_body_maps_the_playback_context() {
+        let now = parse_currently_playing_body(EPISODE_BODY)
+            .expect("episode body must parse")
+            .expect("episode body must yield an item");
+        assert_eq!(now.context.device, "Kitchen speaker");
+        // A `show` context carries no display_name in the documented shape,
+        // so the name is derived from the episode's own show.
+        assert_eq!(now.context.playlist, "The Deep Work Show");
+        assert!(now.context.shuffle);
+        assert_eq!(now.context.repeat, RepeatState::Context);
+    }
+
+    // The episode mapping must degrade, not drop: `show` absent leaves the
+    // show/publisher fields empty while the episode still reports playing.
+    #[test]
+    fn parse_episode_without_show_degrades_cleanly() {
+        let body = r#"{
+            "is_playing": true,
+            "progress_ms": null,
+            "currently_playing_type": "episode",
+            "item": {"type": "episode", "name": "Some Episode", "duration_ms": 120000}
+        }"#;
+        let now = parse_currently_playing_body(body)
+            .expect("episode body must parse")
+            .expect("episode must still be an item");
+        assert_eq!(now.media.title, "Some Episode");
+        assert_eq!(now.media.artist, "");
+        assert_eq!(now.media.album, "");
+        assert_eq!(now.media.progress_ms, None);
+        let episode = now.episode.expect("episode metadata is present-but-empty");
+        assert_eq!(episode.show_name, "");
+        assert_eq!(episode.publisher, "");
+    }
+
+    /// A `currently-playing` body for a music track started from a playlist,
+    /// with the documented `context` shape (no `display_name`).
+    const TRACK_BODY: &str = r#"{
+        "device": {"id": "dev2", "is_active": true, "name": "Office PC", "type": "computer"},
+        "repeat_state": "off",
+        "shuffle_state": false,
+        "context": {"type": "playlist", "href": "https://api.spotify.com/v1/playlists/p1", "uri": "spotify:playlist:p1"},
+        "progress_ms": 12345,
+        "is_playing": true,
+        "item": {
+            "type": "track",
+            "name": "Karma Police",
+            "duration_ms": 261000,
+            "artists": [{"name": "Radiohead"}],
+            "album": {"name": "OK Computer", "images": [{"url": "https://i.scdn.co/image/okc"}]}
+        },
+        "currently_playing_type": "track"
+    }"#;
+
+    #[test]
+    fn parse_track_body_maps_artists_album_and_modes() {
+        let now = parse_currently_playing_body(TRACK_BODY)
+            .expect("track body must parse")
+            .expect("track body must yield an item");
+        assert!(now.episode.is_none());
+        assert_eq!(now.media.title, "Karma Police");
+        assert_eq!(now.media.artist, "Radiohead");
+        assert_eq!(now.media.album, "OK Computer");
+        assert_eq!(now.media.album_art_url, "https://i.scdn.co/image/okc");
+        assert_eq!(now.media.progress_ms, Some(12_345));
+        assert_eq!(now.context.device, "Office PC");
+        assert!(!now.context.shuffle);
+        assert_eq!(now.context.repeat, RepeatState::Off);
+        // A playlist context has no derivable name (that needs
+        // GET /playlists/{id}, i.e. a scope this app does not request), so
+        // `{playlist}` renders empty rather than a URI fragment.
+        assert_eq!(now.context.playlist, "");
+    }
+
+    // `display_name` is honoured when a response does carry it.
+    #[test]
+    fn context_display_name_prefers_the_response_value() {
+        let body = r#"{
+            "is_playing": true,
+            "currently_playing_type": "track",
+            "context": {"type": "playlist", "display_name": "Workout Mix"},
+            "item": {"type": "track", "name": "X", "duration_ms": 1000, "artists": [{"name": "A"}]}
+        }"#;
+        let now = parse_currently_playing_body(body)
+            .expect("body must parse")
+            .expect("item expected");
+        assert_eq!(now.context.playlist, "Workout Mix");
+    }
+
+    // Contexts whose name the item already contains are derived from it, so
+    // `{playlist}` still renders something useful without an extra request.
+    #[test]
+    fn context_display_name_derives_from_the_item_when_the_response_omits_it() {
+        let album = r#"{
+            "is_playing": true,
+            "currently_playing_type": "track",
+            "context": {"type": "album", "uri": "spotify:album:a1"},
+            "item": {"type": "track", "name": "X", "duration_ms": 1000, "artists": [{"name": "Radiohead"}], "album": {"name": "OK Computer"}}
+        }"#;
+        let now = parse_currently_playing_body(album)
+            .expect("body must parse")
+            .expect("item expected");
+        assert_eq!(now.context.playlist, "OK Computer");
+
+        let artist = r#"{
+            "is_playing": true,
+            "currently_playing_type": "track",
+            "context": {"type": "artist", "uri": "spotify:artist:a-r"},
+            "item": {"type": "track", "name": "X", "duration_ms": 1000, "artists": [{"name": "Radiohead"}], "album": {"name": "OK Computer"}}
+        }"#;
+        let now = parse_currently_playing_body(artist)
+            .expect("body must parse")
+            .expect("item expected");
+        assert_eq!(now.context.playlist, "Radiohead");
+    }
+
+    // An ad is never "listening" (issue #161): the envelope type drops it
+    // even though the item looks playable.
+    #[test]
+    fn parse_ad_body_is_nothing_playing() {
+        let body = r#"{
+            "is_playing": true,
+            "progress_ms": 1000,
+            "currently_playing_type": "ad",
+            "item": {"type": "track", "name": "Sponsor", "duration_ms": 30000, "artists": [{"name": "Ad"}]}
+        }"#;
+        assert!(parse_currently_playing_body(body)
+            .expect("ad body must parse")
+            .is_none());
+    }
+
+    // Doc guidance for future item types: check the item's own `type` and
+    // degrade to "nothing playing" instead of guessing a shape.
+    #[test]
+    fn parse_unknown_item_type_is_nothing_playing() {
+        let body = r#"{
+            "is_playing": true,
+            "currently_playing_type": "unknown",
+            "item": {"type": "hologram", "name": "Future", "duration_ms": 1000}
+        }"#;
+        assert!(parse_currently_playing_body(body)
+            .expect("unknown item body must parse")
+            .is_none());
+    }
+
+    #[test]
+    fn parse_body_without_item_is_nothing_playing() {
+        let body = r#"{"is_playing": false, "currently_playing_type": "track"}"#;
+        assert!(parse_currently_playing_body(body)
+            .expect("empty body parses")
+            .is_none());
+    }
+
+    #[test]
+    fn parse_malformed_body_reports_a_parse_error() {
+        let err = parse_currently_playing_body("not json").expect_err("malformed body must fail");
+        assert!(
+            err.contains("Failed to parse currently playing response"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // Issue #583: the Up Next pane must tell the same story as the status, so
+    // queue items go through the same track/episode mapper. Pre-fix every
+    // episode in the queue was dropped and the pane read "(queue empty)".
+    #[test]
+    fn parse_queue_body_maps_episodes_and_drops_ads() {
+        let body = r#"{
+            "currently_playing": {"type": "track", "name": "Now", "duration_ms": 1000, "artists": [{"name": "A"}]},
+            "queue": [
+                {"type": "track", "name": "Next Track", "duration_ms": 2000, "artists": [{"name": "B"}], "album": {"name": "Album B", "images": [{"url": "https://i.scdn.co/image/b"}]}},
+                {"type": "episode", "name": "Next Episode", "duration_ms": 600000, "images": [{"url": "https://i.scdn.co/image/e"}], "show": {"name": "The Show", "publisher": "Acme Audio"}},
+                {"type": "ad", "name": "Sponsor", "duration_ms": 30000}
+            ]
+        }"#;
+        let queue = parse_queue_body(body).expect("queue body must parse");
+        assert_eq!(queue.currently_playing.expect("now playing").title, "Now");
+        let titles: Vec<&str> = queue.up_next.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(titles, vec!["Next Track", "Next Episode"]);
+        // Episodes arrive in the same frozen shape, with the show in the
+        // artist slot so the submenu label reads "Show - Episode".
+        assert_eq!(queue.up_next[1].artist, "The Show");
+        assert_eq!(queue.up_next[1].album_art_url, "https://i.scdn.co/image/e");
+    }
+
+    #[test]
+    fn parse_queue_body_tolerates_missing_fields() {
+        let queue = parse_queue_body("{}").expect("empty body must parse");
+        assert!(queue.currently_playing.is_none());
+        assert!(queue.up_next.is_empty());
+    }
+
+    // Issue #581: the episode template a user's music template must not
+    // replace. Pinned as a rendered string, not as the raw constant, so a
+    // formatter regression (a token that stopped resolving) fails here.
+    #[test]
+    fn default_episode_status_format_renders_the_episode() {
+        let media = make_track("Episode 12", "The Deep Work Show", "Acme Audio", true);
+        let episode = make_episode("The Deep Work Show");
+        let result = format_status_with_context(
+            &media,
+            Some(&episode),
+            &PlaybackContext::default(),
+            DEFAULT_EPISODE_STATUS_FORMAT,
+        );
+        assert_eq!(result, "🎙️ The Deep Work Show - Episode 12");
     }
 
     // Regression guard for issue #78: ensure the SpotifyTokens struct
