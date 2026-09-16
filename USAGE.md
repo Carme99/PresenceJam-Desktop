@@ -80,11 +80,41 @@ Edit the template that formats your Teams status message. Supports `{artist}`, `
 
 > Both toggles need a one-time Teams reconnect if your tokens predate the `Presence.Read` and `profile` scopes — those are only granted on a fresh sign-in (see [SETUP.md — Upgrading from 2.x](./SETUP.md#upgrading-from-2x)).
 
+### Status rules
+
+Quiet hours and track rules suppress the Teams status write. They reuse the same presence-gate path as the meeting/call gate, so a rule that stops matching mid-track posts the status without waiting for the next track.
+
+**Quiet hours** — each entry has an on/off checkbox, a start and an end time, and a weekday picker. Times wrap around midnight (a new entry starts at 22:00 → 07:00). **No weekday ticked means every day.**
+
+**Track rules** — each entry matches case-insensitively on artist and/or track-title substrings, plus an optional replacement status:
+
+| Field | Behaviour |
+|-------|-----------|
+| Artist contains | Matched against the track's artist. Empty = any artist. |
+| Track title contains | Matched against the track title. Empty = any title. |
+| Post this instead | Non-empty — this text is posted instead of the formatted status. **Empty — the status write is suppressed entirely** for the matching track. |
+
+New track rules are added **disabled**, so a half-filled rule can't suppress your status by accident. A suppressed track is re-checked every 240 s (the same clock as the presence gate), so clearing the rule or leaving the quiet-hours window posts the status mid-track.
+
+Both lists live in `config.json` under `status_rules` (`quiet_hours[]`, `track_rules[]`); the section is fully additive, so pre-4.5 config files load unchanged (#432).
+
 ### Polling
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| Interval | 30s | How often to check Spotify when a track is playing (minimum 5s) |
+| Default interval | 30s | The baseline poll gap when a track is playing but Spotify reports no playback position (live streams, #165) — slider range 10–60 s. It is also the base for the pause backoff: each consecutive non-playing response doubles it (30 → 60 → 120 s) up to a 300 s cap, resetting on the next playing track. |
+| Min interval | 10s | Floor for the track-end smart sleep — while a track plays, PresenceJam never polls sooner than this (5–30 s in Settings). |
+| Max interval | 60s | Ceiling for the track-end smart sleep — while a track plays, PresenceJam never sleeps longer than this (up to 300 s in Settings). |
+
+All three are clamped by the backend (`config.rs::clamp_polling`): default 5–300 s, min 5–30 s, and max between min and 300 s. The Settings form previews the clamped values before saving ("Min interval exceeds max interval — max will be saved as {max}s.").
+
+### Notifications
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Desktop notification on track change | Off | Shows a system notification when the track changes. Turn it on here; the first enable asks the OS for notification permission. The flag is stored in `localStorage.notificationsEnabled`, **not** in `config.json`. |
+
+Notifications are throttled to at most one per 5 s, and the same track is never notified twice. Where the platform supports it the newest notification replaces the previous one in place instead of stacking. The listener lives in `Dashboard.svelte`, so notifications are driven by the main window.
 
 ### General
 

@@ -513,7 +513,8 @@ Two complementary rate-limits:
 
 ### Presence gating + availability sync (v3.0)
 
-Two `TeamsConfig` flags shape what the polling loop writes:
+Two `TeamsConfig` flags shape what the polling loop writes, and
+`AppConfig::status_rules` adds a third, track- and time-based gate:
 
 - **`presence_gate` (default ON, issue #3.0-P2):** on a *track change*
   the loop calls `get_teams_presence` *before* the status write.
@@ -535,6 +536,20 @@ Two `TeamsConfig` flags shape what the polling loop writes:
   the fade window. On pause/stop, `clear_teams_presence` drops the
   session (404 = already gone = success). Emits
   `presence-availability-updated` on each arm/clear.
+- **`status_rules` (v4.5.0, issue #432)** — `AppConfig::status_rules`
+  holds quiet-hours entries and track rules, evaluated on the same
+  track-change path immediately after `presence_gate`. A quiet-hours
+  entry covering the current local time + weekday suppresses
+  unconditionally (no presence read); a matching track rule with an
+  **empty** `replacement_status` suppresses the same way, and one with a
+  non-empty replacement supplies the status text instead of gating. Both
+  suppression causes record into the same `gated_track_key` slot and emit
+  `presence-gated` with `reason: "quiet-hours"` / `"track-rule"`, so the
+  #380 mid-track re-check re-projects the local clock and re-matches the
+  rule on the same 240 s cadence — a rule that stops matching (or a quiet
+  window that ends) posts the status late instead of pinning suppression
+  for the whole track. A rule with a non-empty replacement never gates;
+  its text flows into the normal #384 identical-write dedup.
 
 `is_syncing` ownership: `commands/sync::start_syncing` is the **sole claimer**
 (v2.6.3, fixes issue #60 — `compare_exchange(false, true, …)` is here).
@@ -593,7 +608,7 @@ sequenceDiagram
 | `polling-thread-panicked` | `null` | Polling thread panicked and was caught by `catch_unwind` |
 | `tray-click` | — | User clicks tray icon |
 | `toggle-pause` | — | User clicks Pause in tray menu |
-| `presence-gated` | `{reason, availability, activity, timestamp}` | Status write suppressed by busy/DND/**focusing** availability or in-meeting/in-call/presenting activity (v3.0; `focusing` added in #254) |
+| `presence-gated` | `{reason, availability, activity, timestamp}` | Status write suppressed — `reason` is either a presence verdict (busy / doNotDisturb / **focusing** availability, or in-meeting / in-call / presenting activity; v3.0, `focusing` added in #254) or a status rule (`quiet-hours` / `track-rule`; v4.5.0, #432) |
 | `presence-availability-updated` | `{available, label, timestamp}` | Availability session armed (`Available`) or cleared (v3.0) |
 | `playback-error` | `string` (error message) | Tray playback command failed — no active device, non-Premium 403, etc. (v3.0) |
 | `spotify-auth-complete` | `null` | Spotify sign-in finished and tokens were persisted (no token value in the payload — #299) |
@@ -607,6 +622,20 @@ sequenceDiagram
 | `app-shutdown` | `null` | User picks Quit in the tray or app menu |
 | `spotify-secret-conflict` | `{action: "reconnect-spotify", ...}` (once per process) | Legacy plaintext secret in `config.json` conflicts with a *different* keychain secret — plaintext left untouched, Settings prompts Reconnect Spotify (#376) |
 | `show-about` | `null` | User picks About in the app menu |
+
+### Frontend notification throttle (C8)
+
+`Dashboard.svelte` owns the opt-in desktop-notification path — the only
+consumer of `spotify-track-changed` that raises a toast. The flag lives in
+`localStorage.notificationsEnabled` (default off — **not** in `config.json`);
+the Settings toggle requests OS permission on first enable. Two guards run
+before `sendNotification`: the track key (`"<title>::<artist>"`,
+`lastNotifiedId`) suppresses a repeat of the same track, and a 5 s
+timestamp throttle (`NOTIFICATION_THROTTLE_MS`) caps the rate. A throttled
+track does **not** claim `lastNotifiedId`, so once the window elapses the
+genuinely current track can still notify. Toasts carry a stable `id` +
+`group`, which lets platforms that support it replace the previous
+notification in place instead of stacking.
 
 ## Deep Link Routing
 

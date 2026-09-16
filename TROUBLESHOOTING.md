@@ -146,6 +146,8 @@ Before diving in, check these basics:
 3. Wait for the next poll: with a track playing, the status updates within a few seconds; when nothing is playing, the app backs off between polls (30 s → 60 s → 120 s → 300 s), so an idle app can take up to five minutes to react. Failed polls retry after ~30 s (±20%)
 4. If still nothing, check the log viewer for API errors
 
+**Suppressed by status rules?** PresenceJam also suppresses the write on purpose: a quiet-hours entry covering the current time and weekday, or an enabled track rule whose *Post this instead* field is left empty. The Dashboard shows its *suppressed* chip for these as well, and the log records which one fired — `[POLLING] process_track: quiet hours active, skipping status write` or `[POLLING] process_track: track rule matched, skipping status write`. Open **Settings → Status rules** and look for an enabled quiet-hours range covering now, and for a rule matching what's playing (see [USAGE.md — Status rules](./USAGE.md#status-rules)).
+
 ### Status doesn't clear when Spotify is paused
 
 **Cause:** The `clear_on_pause` config option may be disabled, or you're using Spotify Web Player instead of the desktop app.

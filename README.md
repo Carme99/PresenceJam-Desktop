@@ -32,6 +32,8 @@ The app lives in your system tray, syncs while you work, and stays out of the wa
 - **Interface languages** — English, German (Deutsch), and French (Français) via an in-app language picker.
 - **Availability sync (opt-in)** — optionally show yourself as **Available** in Teams while you listen.
 - **Meeting/call-aware gating** — pauses status updates while you're busy, in a meeting, on a call, or presenting.
+- **Status rules (quiet hours & track rules)** — suppress the Teams status write during chosen hours/days or for matching tracks, with an optional replacement status.
+- **Desktop notifications (opt-in)** — a toast on track change, throttled to one per 5 s and replaced in place where the OS supports it.
 - **Auto-update** — silent update checks at startup and every ~24h; install immediately in-app or defer with *Install on quit*, which applies the verified update as the app exits.
 - **Launch at login** — optional auto-start on boot.
 - **Secure auth** — Authorization Code + PKCE OAuth for Spotify (confidential client), Device Code flow for Teams.
