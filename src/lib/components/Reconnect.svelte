@@ -45,11 +45,12 @@
     return () => clearInterval(id);
   });
 
-  // #419: combined teardown is async — call sites must await it.
+  // #615: the teardown is returned synchronously and covers the
+  // unmount-while-registering race internally, so this is just a handle.
   let unlisten: (() => Promise<void>) | null = null;
-  // #392: onMount awaits config/keychain/sync IPC before registering auth
-  // listeners, so an unmount while suspended must drop the late
-  // subscription (Dashboard.svelte:31-33 pattern).
+  // #392: onMount awaits config/keychain/sync IPC before it writes state,
+  // so an unmount while suspended must abandon the rest of the sequence.
+  // (Registration itself is guarded by the helper above.)
   let destroyed = false;
 
   onMount(async () => {
@@ -89,34 +90,28 @@
 
     devLog('[RECONNECT] needsSpotify=', needsSpotify, 'needsTeams=', needsTeams);
 
-    const unlistenFn = await useAuthListeners({
+    // #615: every suspension point above re-checks `destroyed`, and the
+    // helper's own `listen()` calls are the next thing this function does —
+    // so no unmount can slip between that check and this registration.
+    unlisten = useAuthListeners({
       onSpotifyComplete: () => {
-        if (destroyed) return;
         devLog('[RECONNECT] EVENT: spotify-auth-complete received');
         setSpotifyPhase('done');
       },
       onSpotifyFailed: (payload) => {
-        if (destroyed) return;
         devLog('[RECONNECT] EVENT: spotify-auth-failed:', payload);
         setSpotifyPhase('error', String(payload));
       },
       onTeamsComplete: () => {
-        if (destroyed) return;
         devLog('[RECONNECT] EVENT: teams-auth-complete received');
         setTeamsPhase('done');
         teamsReconnectedThisSession = true;
       },
       onTeamsFailed: (payload) => {
-        if (destroyed) return;
         devLog('[RECONNECT] EVENT: teams-auth-failed:', payload);
         setTeamsPhase('error', String(payload));
       }
     });
-    if (destroyed) {
-      await unlistenFn();
-      return;
-    }
-    unlisten = unlistenFn;
 
     // Auto-start only when Spotify is the provider that needs the sign-in: an
     // unsolicited OAuth window for a healthy session is user-hostile (#530).
@@ -366,7 +361,7 @@
           {:else if !needsTeams}{t('common.connected')}
           {:else if authFlow.teams.phase === 'waiting'}{t('common.waiting')}
           {:else if authFlow.teams.error}{t('reconnect.failed')}
-          {:else}{t('reconnect.needsReconnect')}{/if}
+          {:else}{t('reconnect.readyToReconnect')}{/if}
         </span>
       </header>
 

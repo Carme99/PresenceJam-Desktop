@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
   import { currentView, type View } from '$lib/stores/app';
@@ -9,6 +9,7 @@
   import LogViewer from '$lib/components/LogViewer.svelte';
   import Diagnostics from '$lib/components/Diagnostics.svelte';
   import { devLog } from '$lib/utils/dev';
+  import { useListenerTeardown } from '$lib/utils/useAuthListeners';
   import About from '$lib/components/About.svelte';
   import Reconnect from '$lib/components/Reconnect.svelte';
   import { bootView } from '$lib/utils/boot';
@@ -24,7 +25,10 @@
 
   let ready = $state(false);
   let bootError = $state('');
-  let unlisten: (() => void)[] = [];
+  // #615: one teardown for every `listen()` below — it releases a
+  // registration that settles after this component is destroyed, so the
+  // per-listener `destroyed` flag is gone.
+  const teardown = useListenerTeardown();
 
   // #405: bounded boot — the invoke below must never hang the loading
   // screen forever (e.g. an IPC stall). The race rejects after
@@ -112,12 +116,8 @@
   onMount(() => {
     devLog('[PAGE] onMount: ENTRY');
     void boot();
-    let unlistenTray: (() => void) | undefined;
-    let unlistenShutdown: (() => void) | undefined;
-
     devLog('[PAGE] onMount: setting up tray-click listener');
-    let destroyed = false;
-    listen('tray-click', async () => {
+    teardown.add(listen('tray-click', async () => {
       devLog('[PAGE] EVENT: tray-click received');
       devLog('[PAGE] EVENT: calling invoke show_window');
       try {
@@ -125,13 +125,9 @@
       } catch (e) {
         console.warn('[PAGE] show_window failed:', e);
       }
-    }).then(fn => {
-      if (destroyed) fn();
-      else unlistenTray = fn;
-      devLog('[PAGE] onMount: tray-click listener registered');
-    });
+    }));
     devLog('[PAGE] onMount: setting up app-shutdown listener');
-    listen('app-shutdown', async () => {
+    teardown.add(listen('app-shutdown', async () => {
       devLog('[PAGE] EVENT: app-shutdown received');
       try {
         await invoke('app_exit');
@@ -139,14 +135,10 @@
       } catch (e) {
         console.error('[PAGE] EVENT: app_exit FAILED:', e);
       }
-    }).then(fn => {
-      if (destroyed) fn();
-      else unlistenShutdown = fn;
-      devLog('[PAGE] onMount: app-shutdown listener registered');
-    });
+    }));
 
     devLog('[PAGE] onMount: setting up navigate listener');
-    listen<string>('navigate', (event) => {
+    teardown.add(listen<string>('navigate', (event) => {
       devLog('[PAGE] EVENT: navigate received:', event.payload);
       // C2: deep-link auth completions also emit 'navigate'. While the
       // Onboarding view is up it owns its own phase transitions — jumping
@@ -154,26 +146,26 @@
       // navigation is ignored until onboarding yields the view.
       if (!ready || $currentView === 'onboarding') return;
       currentView.set(event.payload as View);
-    }).then(fn => { if (destroyed) fn(); else unlisten.push(fn); });
+    }));
 
     devLog('[PAGE] onMount: setting up open-logs-folder listener');
-    listen('open-logs-folder', async () => {
+    teardown.add(listen('open-logs-folder', async () => {
       devLog('[PAGE] EVENT: open-logs-folder received');
       try {
         await invoke('open_logs_folder');
       } catch (e) {
         console.error('[PAGE] EVENT: open_logs_folder FAILED:', e);
       }
-    }).then(fn => { if (destroyed) fn(); else unlisten.push(fn); });
+    }));
 
     devLog('[PAGE] onMount: setting up show-about listener');
-    listen('show-about', () => {
+    teardown.add(listen('show-about', () => {
       devLog('[PAGE] EVENT: show-about received');
       currentView.set('about');
-    }).then(fn => { if (destroyed) fn(); else unlisten.push(fn); });
+    }));
 
     devLog('[PAGE] onMount: setting up toggle-pause listener');
-    listen('toggle-pause', async () => {
+    teardown.add(listen('toggle-pause', async () => {
       devLog('[PAGE] EVENT: toggle-pause received');
       try {
         const status = await invoke<{ is_syncing: boolean }>('get_sync_status');
@@ -187,21 +179,11 @@
       } catch (e) {
         console.warn('[PAGE] toggle-pause failed:', e);
       }
-    }).then(fn => { if (destroyed) fn(); else unlisten.push(fn); });
+    }));
 
     return () => {
-      destroyed = true;
       devLog('[PAGE] onDestroy: ENTRY');
-      if (unlistenTray) {
-        unlistenTray();
-        devLog('[PAGE] onDestroy: tray-click listener removed');
-      }
-      if (unlistenShutdown) {
-        unlistenShutdown();
-        devLog('[PAGE] onDestroy: app-shutdown listener removed');
-      }
-      unlisten.forEach(fn => fn());
-      unlisten = [];
+      void teardown.dispose();
       devLog('[PAGE] onDestroy: all listeners cleaned up');
       devLog('[PAGE] onDestroy: EXIT');
     };
