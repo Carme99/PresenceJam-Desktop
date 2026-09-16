@@ -102,19 +102,25 @@
     // their stored settings rather than its own defaults — and `finish()`
     // merges into that same stored config instead of replacing it. The
     // store load also warms `configStore` for the views that follow.
-    try {
-      const loaded = await loadConfig();
-      statusFormat = loaded.teams.status_format;
-      launchAtLogin = loaded.autostart;
-      pollingInterval = Number(loaded.polling.default_interval_seconds);
-      spotifyClientId = loaded.spotify.client_id;
-      devLog('[ONBOARDING] onMount: prefilled from stored config');
-    } catch (e) {
-      // `loadConfig` already falls back to `defaultConfig` and never
-      // rejects; this guard only keeps a future change from breaking the
-      // wizard silently. Prefill is display-only — `finish()` re-reads.
-      console.warn('[ONBOARDING] onMount: config prefill failed:', e);
-    }
+    // The prefill is awaited inside an IIFE rather than by making the
+    // `onMount` callback `async`: Svelte treats an async callback's returned
+    // promise as a teardown function (#392), and the listener registration
+    // above must stay synchronous.
+    void (async () => {
+      try {
+        const loaded = await loadConfig();
+        statusFormat = loaded.teams.status_format;
+        launchAtLogin = loaded.autostart;
+        pollingInterval = Number(loaded.polling.default_interval_seconds);
+        spotifyClientId = loaded.spotify.client_id;
+        devLog('[ONBOARDING] onMount: prefilled from stored config');
+      } catch (e) {
+        // `loadConfig` already falls back to `defaultConfig` and never
+        // rejects; this guard only keeps a future change from breaking the
+        // wizard silently. Prefill is display-only — `finish()` re-reads.
+        console.warn('[ONBOARDING] onMount: config prefill failed:', e);
+      }
+    })();
   });
 
   onDestroy(() => {
