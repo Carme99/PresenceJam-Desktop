@@ -6,7 +6,7 @@ Thank you for your interest in contributing!
 
 ### Prerequisites
 
-- **Rust** 1.96+ ([rustup](https://rustup.rs/)) — minimum supported version; CI pins the 1.96 toolchain (`dtolnay/rust-toolchain` in `ci.yml`)
+- **Rust** 1.96+ ([rustup](https://rustup.rs/)) — minimum supported Rust version; CI installs the toolchain via `dtolnay/rust-toolchain` (no version pin; actions SHA-pinned, see `ci.yml`)
 - **Node.js** 20+ ([nodejs.org](https://nodejs.org/))
 - **npm** 9+
 - **Tauri CLI** v2 — provided by repo-pinned local `@tauri-apps/cli`; use `npm run tauri ...`. A global install is unnecessary.
