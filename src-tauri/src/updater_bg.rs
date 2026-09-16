@@ -30,9 +30,21 @@
 //! failed_update_install`), which `build_snapshot` populates.
 //! A marker is cleared whenever an install succeeds, and a corrupt or
 //! unreadable marker reads as `None` rather than surfacing an error.
+//!
+//! Staging UX (issue #590): the download used to be a black box — a
+//! multi-minute payload with no progress and no way to abort, and once
+//! staged the only exit was applying it at the next quit. The stage now
+//! streams throttled `update-stage-progress` events (see
+//! [`StageProgressThrottle`]) and [`cancel_deferred_update`] discards the
+//! staged update on demand, which also releases the verified payload bytes
+//! instead of holding them for the rest of the session. The bytes are still
+//! held in memory rather than re-read from disk at exit on purpose: the
+//! plugin verifies the signature inside `download()`, so a file-backed
+//! payload would be installable after an unverified post-stage swap.
 
 use parking_lot::Mutex;
-use tauri::AppHandle;
+use std::time::{Duration, Instant};
+use tauri::{AppHandle, Emitter};
 use tauri_plugin_updater::Update;
 
 /// Log tag prefix for this submodule (mirrors the `[CMD.MISC]` pattern).
@@ -80,6 +92,86 @@ impl PendingUpdate {
 impl Default for PendingUpdate {
     fn default() -> Self {
         Self::new()
+    }
+}
+// ---------------------------------------------------------------------
+// Staging progress (issue #590)
+// ---------------------------------------------------------------------
+
+/// Emitted on `update-stage-progress` while a deferred update downloads, so
+/// the banner can drive its progress bar instead of sitting on "Preparing…"
+/// for the whole payload. No `ts_rs` export: the shape is mirrored by a
+/// local interface in `UpdatePrompt.svelte` (same convention as
+/// [`StageDeferredOutcome`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct StageProgress {
+    /// Bytes downloaded so far. The plugin's callback reports the running
+    /// total, not the size of the chunk just read.
+    pub downloaded: u64,
+    /// Total payload size, when the server sent a `Content-Length`.
+    pub total: Option<u64>,
+}
+
+/// Minimum wall-clock gap between two progress emissions.
+const STAGE_PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Whole-percent advance that forces an emission even inside the interval:
+/// a fast link still shows movement, and a slow one cannot flood the webview
+/// with one event per chunk.
+const STAGE_PROGRESS_PCT_STEP: u64 = 5;
+
+/// Emission throttle for `update-stage-progress`. The first chunk always
+/// emits, so the UI leaves "Preparing…" immediately; afterwards an event
+/// goes out once [`STAGE_PROGRESS_MIN_INTERVAL`] has elapsed or the
+/// whole-percent position advanced by [`STAGE_PROGRESS_PCT_STEP`].
+///
+/// Pure state machine over `Instant`s, so it is unit-tested with synthetic
+/// clocks and no webview or network.
+#[derive(Debug)]
+struct StageProgressThrottle {
+    last_emit: Option<Instant>,
+    last_pct: u64,
+}
+
+impl StageProgressThrottle {
+    fn new() -> Self {
+        Self {
+            last_emit: None,
+            last_pct: 0,
+        }
+    }
+
+    /// Returns the event to emit for this chunk, or `None` when throttled.
+    fn observe(
+        &mut self,
+        now: Instant,
+        downloaded: u64,
+        total: Option<u64>,
+    ) -> Option<StageProgress> {
+        let pct = percent_of(downloaded, total);
+        let due = match self.last_emit {
+            None => true,
+            Some(last) => {
+                now.duration_since(last) >= STAGE_PROGRESS_MIN_INTERVAL
+                    || pct >= self.last_pct.saturating_add(STAGE_PROGRESS_PCT_STEP)
+            }
+        };
+        if !due {
+            return None;
+        }
+        self.last_emit = Some(now);
+        self.last_pct = pct;
+        Some(StageProgress { downloaded, total })
+    }
+}
+
+/// Whole-percent position of `downloaded` within `total` (clamped to 100).
+/// `0` when the server sent no length (or a zero one), which leaves the
+/// interval as the only throttle.
+fn percent_of(downloaded: u64, total: Option<u64>) -> u64 {
+    match total {
+        Some(total) if total > 0 => (downloaded.saturating_mul(100) / total).min(100),
+        _ => 0,
     }
 }
 
@@ -233,6 +325,24 @@ pub fn clear_failed_update_install() -> Result<(), String> {
         format!("cannot remove failed-install marker: {e}")
     })?;
     log::info!("{TAG} clear_failed_update_install: SUCCESS");
+    Ok(())
+}
+/// Tauri command: discards a staged deferred update (issue #590). Before
+/// this existed, staging was one-way — the only exit was applying the
+/// payload at the next quit, so an accidental click could not be undone and
+/// the verified bytes stayed resident for the rest of the session. Dropping
+/// the [`StagedUpdate`] releases that payload immediately.
+#[cfg(desktop)]
+#[tauri::command]
+pub fn cancel_deferred_update(app: AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+
+    let state = app.state::<PendingUpdate>();
+    if state.0.lock().take().is_some() {
+        log::info!("{TAG} cancel_deferred_update: staged update discarded");
+    } else {
+        log::debug!("{TAG} cancel_deferred_update: nothing staged");
+    }
     Ok(())
 }
 
@@ -457,8 +567,9 @@ fn clear_stale_skipped_marker() {
 /// (`Updater::check` / `Update::download` are async and non-blocking), but
 /// per the #215 convention that heavy IO stays off the async runtime's
 /// worker threads, the whole staging flow runs on a blocking-pool thread
-/// via `block_on`. Progress callbacks are unused: the UI only needs
-/// completion of the deferred stage.
+/// via `block_on`. Progress is streamed on `update-stage-progress` through
+/// [`StageProgressThrottle`] (issue #590); the payload itself is only
+/// reported once, at completion.
 #[cfg(desktop)]
 #[tauri::command]
 pub async fn stage_deferred_update(
@@ -528,10 +639,34 @@ pub async fn stage_deferred_update(
                     });
                 }
             }
+            // Issue #590: stream throttled progress while the payload
+            // downloads, so a multi-minute stage is not a black box.
+            let progress_app = app.clone();
+            let mut progress = StageProgressThrottle::new();
             let bytes = update
-                .download(|_chunk_len, _content_length| {}, || {})
+                .download(
+                    move |chunk_len, content_length| {
+                        if let Some(event) =
+                            progress.observe(Instant::now(), chunk_len as u64, content_length)
+                        {
+                            let _ = progress_app.emit("update-stage-progress", event);
+                        }
+                    },
+                    || {},
+                )
                 .await
                 .map_err(|e| format!("update download failed: {e}"))?;
+            // Terminal event: the last throttled chunk can land short of the
+            // end (and a `total` the server never sent leaves the bar
+            // indeterminate), so the completion is announced explicitly.
+            let staged_len = bytes.len() as u64;
+            let _ = app.emit(
+                "update-stage-progress",
+                StageProgress {
+                    downloaded: staged_len,
+                    total: Some(staged_len),
+                },
+            );
             log::info!(
                 "{TAG} stage_deferred_update: staged v{} ({} bytes){}",
                 version,
@@ -873,5 +1008,107 @@ mod tests {
         assert!(read_stale_skipped_marker_at(&path).is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------
+    // Staging progress throttle (issue #590)
+    // -----------------------------------------------------------------
+
+    /// The first chunk must always emit: until it does, the banner has no
+    /// idea the download started and sits on "Preparing…".
+    #[test]
+    fn test_stage_progress_emits_first_chunk() {
+        let mut throttle = StageProgressThrottle::new();
+        let now = Instant::now();
+        assert_eq!(
+            throttle.observe(now, 4096, Some(1_048_576)),
+            Some(StageProgress {
+                downloaded: 4096,
+                total: Some(1_048_576),
+            }),
+            "the first chunk must emit so the UI leaves the preparing state"
+        );
+    }
+
+    /// A burst of chunks inside the interval, with no percentage movement,
+    /// must be coalesced — one event per chunk would flood the webview.
+    #[test]
+    fn test_stage_progress_throttles_within_interval() {
+        let mut throttle = StageProgressThrottle::new();
+        let start = Instant::now();
+        let total = 1_000_000u64;
+        assert!(throttle.observe(start, 1_000, Some(total)).is_some());
+        assert_eq!(
+            throttle.observe(start + Duration::from_millis(10), 1_200, Some(total)),
+            None,
+            "a chunk inside the interval with <5% movement must be coalesced"
+        );
+        assert_eq!(
+            throttle.observe(start + Duration::from_millis(249), 1_300, Some(total)),
+            None,
+            "still inside the interval"
+        );
+    }
+
+    /// Progress must be visible on a fast link too: a whole-percent jump of
+    /// at least the step emits immediately, without waiting out the interval.
+    #[test]
+    fn test_stage_progress_emits_on_percent_step() {
+        let mut throttle = StageProgressThrottle::new();
+        let start = Instant::now();
+        let total = 100_000u64;
+        assert!(throttle.observe(start, 1_000, Some(total)).is_some());
+        assert_eq!(
+            throttle.observe(start + Duration::from_millis(5), 6_000, Some(total)),
+            Some(StageProgress {
+                downloaded: 6_000,
+                total: Some(total),
+            }),
+            "a 5-point jump must emit even inside the interval"
+        );
+        assert_eq!(
+            throttle.observe(start + Duration::from_millis(10), 9_000, Some(total)),
+            None,
+            "a 3-point jump inside the interval is still coalesced"
+        );
+    }
+
+    /// The interval alone must eventually let an event through, and a
+    /// missing `Content-Length` must fall back to it (no percentage basis).
+    #[test]
+    fn test_stage_progress_emits_after_interval_without_total() {
+        let mut throttle = StageProgressThrottle::new();
+        let start = Instant::now();
+        assert!(
+            throttle.observe(start, 1_000, None).is_some(),
+            "the first chunk emits even with no Content-Length"
+        );
+        assert_eq!(
+            throttle.observe(start + Duration::from_millis(100), 2_000, None),
+            None,
+            "no total means no percentage step to trip the throttle"
+        );
+        assert_eq!(
+            throttle.observe(start + STAGE_PROGRESS_MIN_INTERVAL, 3_000, None),
+            Some(StageProgress {
+                downloaded: 3_000,
+                total: None,
+            }),
+            "the interval must release the next event"
+        );
+    }
+
+    /// Percentage arithmetic guards the divide-by-zero (and the overflow a
+    /// large payload could cause) rather than panicking mid-download.
+    #[test]
+    fn test_percent_of_guards_zero_total_and_overflow() {
+        assert_eq!(percent_of(0, Some(0)), 0, "a zero total has no percentage");
+        assert_eq!(percent_of(5, Some(10)), 50);
+        assert_eq!(percent_of(u64::MAX, Some(1)), 100, "overshoot clamps to 100");
+        assert_eq!(
+            percent_of(u64::MAX, Some(u64::MAX)),
+            1,
+            "a saturating multiply keeps huge payloads from overflowing"
+        );
     }
 }
