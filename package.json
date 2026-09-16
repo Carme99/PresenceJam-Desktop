@@ -24,6 +24,7 @@
     "@tauri-apps/plugin-updater": "^2.11.0"
   },
   "devDependencies": {
+    "@testing-library/svelte": "^5.4.2",
     "jsdom": "^26.1.0",
     "vitest": "^3.2.7",
     "@sveltejs/adapter-static": "^3.0.6",

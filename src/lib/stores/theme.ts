@@ -1,4 +1,4 @@
-import { writable } from 'svelte/store';
+import { get, writable } from 'svelte/store';
 
 export type Theme = 'dark' | 'light';
 
@@ -36,7 +36,11 @@ if (typeof document !== 'undefined') {
 if (typeof window !== 'undefined') {
   window.addEventListener('storage', (e) => {
     if (e.key !== STORAGE_KEY) return;
-    if (e.newValue === 'light' || e.newValue === 'dark') theme.set(e.newValue);
+    if (e.newValue !== 'light' && e.newValue !== 'dark') return;
+    // #review-6: same-value guard — set() notifies subscribers even when
+    // unchanged; skip the write churn + data-theme DOM flip when already there.
+    if (get(theme) === e.newValue) return;
+    theme.set(e.newValue);
   });
 }
 

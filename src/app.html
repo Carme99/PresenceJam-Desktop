@@ -11,12 +11,13 @@
       // the static/SSR path bakes the 'dark' fallback; this inline script
       // runs before first paint in every webview (main + detached).
       try {
-        var t = localStorage.getItem('presencejam:theme');
+        // #review-12: let (block scope) + explicit catch param.
+        let t = localStorage.getItem('presencejam:theme');
         if (t !== 'light' && t !== 'dark') {
           t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
         }
         document.documentElement.setAttribute('data-theme', t);
-      } catch (e) { /* storage blocked — theme store default applies */ }
+      } catch (err) { /* storage blocked — theme store default applies */ }
     </script>
     %sveltekit.head%
   </head>

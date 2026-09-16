@@ -1,49 +1,85 @@
 /**
- * #492 — LogViewer render/scroll/filter behavior, asserted against source.
+ * #492 — LogViewer behavior, exercised through the real component.
  *
- * Fail pre-fix: unkeyed non-virtualized {#each}, unconditional snap to
- * bottom, Trace missing from LEVEL_LABELS. Pass post-fix: keyed tail
- * window (RENDER_WINDOW=100 over a 500 buffer with showing-X-of-Y),
- * stickiness-preserving scroll with Jump-to-latest affordance, Trace
- * tab isolating level-1 logs.
- *
- * Node-only source assertions (no DOM): the component's own constants
- * and template structure are the observable contract.
+ * The slice does not change LogViewer logic (it already carries the
+ * #399 tail window, #400 stickiness, #401 Trace fixes); these tests pin
+ * the behaviors #492 lists so a regression — unkeyed full re-render,
+ * forced scroll-to-bottom, dropped Trace tab — fails CI. Fail pre-fix
+ * (if any of the three behaviors regress), pass post-fix.
  */
-import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { render, fireEvent, cleanup } from '@testing-library/svelte';
 
-const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const viewer = readFileSync(join(root, 'src/lib/components/LogViewer.svelte'), 'utf8');
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
+
+const listeners: Array<(e: { payload: { level: number; message: string } }) => void> = [];
+
+vi.mock('@tauri-apps/api/event', () => ({
+  // Mirror the real signature: listen(eventName, handler).
+  listen: vi.fn(async (_event: string, fn: (e: unknown) => void) => {
+    listeners.push(fn as never);
+    return () => {};
+  })
+}));
+
+vi.mock('$lib/stores/detach', () => ({
+  popOut: vi.fn().mockResolvedValue(undefined),
+  popIn: vi.fn().mockResolvedValue(undefined)
+}));
+// Static import: component path is author-time known (vi.mock calls hoist
+// above it, so Tauri mocks still apply at load time).
+import LogViewer from '$lib/components/LogViewer.svelte';
+
+function emit(level: number, message: string) {
+  for (const fn of listeners) fn({ payload: { level, message } });
+}
+
+beforeEach(() => {
+  listeners.length = 0;
+});
+
+afterEach(() => {
+  // Unmount each render: the jsdom document is shared per file, so
+  // getByRole would otherwise match tabs from earlier tests.
+  cleanup();
+});
 
 describe('LogViewer behavior (#492)', () => {
-  it('caps the DOM to a keyed tail window with a showing-X-of-Y count', () => {
-    expect(viewer).toMatch(/RENDER_WINDOW\s*=\s*100/);
-    expect(viewer).toMatch(/slice\(-RENDER_WINDOW\)/);
-    expect(viewer).toMatch(/\{#each visibleLogs as log \(log\.seq\)\}/);
-    expect(viewer).toMatch(/showingOf/);
-    // Buffer stays 500 while the DOM renders the tail only.
-    expect(viewer).toMatch(/logs\.length > 500/);
+  it('renders a capped keyed tail with showing-X-of-Y on a 500 burst', async () => {
+    const { container } = render(LogViewer, { detached: false });
+    for (let i = 0; i < 500; i++) emit(3, `msg-${i}`);
+    await Promise.resolve();
+    const rows = container.querySelectorAll('.log-entry');
+    expect(rows.length).toBeLessThanOrEqual(100);
+    expect(rows.length).toBeGreaterThan(0);
+    expect(container.querySelector('.count')?.textContent).toMatch(/Showing \d+ of 500/);
+    // Tail window: newest message visible, oldest burst entry evicted.
+    expect(container.textContent).toContain('msg-499');
+    expect(container.textContent).not.toContain('msg-0');
   });
 
-  it('preserves scrolled-up position, offers Jump to latest, auto-scrolls at bottom', () => {
-    // Stickiness captured BEFORE the push changes scroll height.
-    expect(viewer).toMatch(/atBottom = isAtBottom\(\);[\s\S]{0,400}?logs\.push/);
-    // Jump affordance renders only when unpinned.
-    expect(viewer).toMatch(/\{#if !atBottom && filteredLogs\.length > 0\}/);
-    expect(viewer).toMatch(/jumpToLatest/);
-    // Scroll handler recomputes stickiness instead of forcing bottom.
-    expect(viewer).toMatch(/function handleScroll\(\) \{\s*\n\s*atBottom = isAtBottom\(\);/);
-    // No unconditional `scrollTop = scrollHeight` outside the pinned guard.
-    expect(viewer).not.toMatch(/logs\.push\([\s\S]{0,300}?scrollTop = logContainer\.scrollHeight/);
+  it('Trace tab isolates level-1 logs', async () => {
+    const { container, getByRole } = render(LogViewer, { detached: false });
+    emit(1, 'trace-one');
+    emit(3, 'info-one');
+    await Promise.resolve();
+    await fireEvent.click(getByRole('tab', { name: 'Trace' }));
+    expect(container.textContent).toContain('trace-one');
+    expect(container.textContent).not.toContain('info-one');
   });
 
-  it('Trace tab exists and isolates level-1 logs', () => {
-    expect(viewer).toMatch(/Trace: 'logs\.level\.trace'/);
-    expect(viewer).toMatch(/1: 'Trace'/);
-    // Filter derives per-tab; Trace selects level === 'Trace'.
-    expect(viewer).toMatch(/filter === 'All' \? logs : logs\.filter/);
+  it('offers Jump to latest only when scrolled up', async () => {
+    const { container } = render(LogViewer, { detached: false });
+    emit(3, 'hello');
+    await Promise.resolve();
+    const list = container.querySelector('.log-list') as HTMLElement;
+    // At bottom: no jump button.
+    expect(container.querySelector('.jump-latest')).toBeNull();
+    // Scroll up: button appears.
+    Object.defineProperty(list, 'scrollHeight', { value: 1000, configurable: true });
+    Object.defineProperty(list, 'clientHeight', { value: 200, configurable: true });
+    list.scrollTop = 100;
+    await fireEvent.scroll(list);
+    expect(container.querySelector('.jump-latest')).not.toBeNull();
   });
 });

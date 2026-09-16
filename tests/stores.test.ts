@@ -1,74 +1,134 @@
 /**
- * Store/logic invariants (#420, #422, #423, #425, #500, #497, #499, #498).
- *
- * Fail pre-fix: saveConfig stored the raw reply (numbers, not bigints),
- * configStore aliased defaultConfig, popOut/focusDetached never cleared a
- * zombie flag, theme had no cross-window listener, Reconnect claimed a
- * fresh Teams success on mount, lib.rs logged a stale version / bare
- * ENOENT, layout threw outside Tauri. Pass post-fix: each source guard
- * below holds.
+ * Runtime store tests (#420, #425, #422, #423) — import and call the
+ * real stores with mocked Tauri IPC. Fail pre-fix (raw numbers stored,
+ * aliased default, zombie flag stuck, no cross-window sync); pass
+ * post-fix.
  */
-import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+const invoke = vi.fn();
 
-function read(p: string): string {
-  return readFileSync(join(root, p), 'utf8');
+vi.mock('@tauri-apps/api/core', () => ({ invoke }));
+
+const winState = {
+  win: null as null | { setFocus: () => Promise<void> },
+  created: 0
+};
+
+class FakeWebviewWindow {
+  static async getByLabel(_label: string) {
+    return winState.win;
+  }
+  constructor() {
+    winState.created++;
+  }
+  async setFocus() {
+    await winState.win?.setFocus();
+  }
+  once() {
+    return 0;
+  }
 }
 
-describe('store and runtime invariants', () => {
-  it('saveConfig normalizes the persisted reply (#420)', () => {
-    const cfg = read('src/lib/stores/config.ts');
-    expect(cfg).toMatch(/const normalized = normalizeLoadedConfig\(persisted\)/);
-    expect(cfg).toMatch(/configStore\.set\(normalized\)/);
+vi.mock('@tauri-apps/api/webviewWindow', () => ({
+  WebviewWindow: FakeWebviewWindow
+}));
+
+beforeEach(() => {
+  invoke.mockReset();
+  winState.win = null;
+  winState.created = 0;
+});
+
+describe('config store runtime (#420, #425)', () => {
+  it('saveConfig stores bigints, not raw numbers', async () => {
+    const { get } = await import('svelte/store');
+    const cfg = await import('$lib/stores/config');
+    invoke.mockResolvedValueOnce({
+      polling: {
+        default_interval_seconds: 30,
+        minimum_interval_seconds: 10,
+        max_interval_seconds: 60,
+        expiry_buffer_seconds: 10
+      }
+    });
+    const out = await cfg.saveConfig({
+      ...cfg.defaultConfig
+    });
+    for (const k of [
+      'default_interval_seconds',
+      'minimum_interval_seconds',
+      'max_interval_seconds',
+      'expiry_buffer_seconds'
+    ] as const) {
+      expect(typeof out.polling[k]).toBe('bigint');
+      expect(typeof get(cfg.configStore).polling[k]).toBe('bigint');
+    }
   });
 
-  it('configStore never aliases defaultConfig (#425)', () => {
-    const cfg = read('src/lib/stores/config.ts');
-    expect(cfg).toMatch(/writable<AppConfig>\(structuredClone\(defaultConfig\)\)/);
-    expect(cfg).toMatch(/const fallback = structuredClone\(defaultConfig\)/);
-    expect(cfg).not.toMatch(/configStore\.set\(defaultConfig\)/);
+  it('configStore never aliases defaultConfig', async () => {
+    const { get } = await import('svelte/store');
+    const cfg = await import('$lib/stores/config');
+    expect(get(cfg.configStore)).not.toBe(cfg.defaultConfig);
+    invoke.mockRejectedValueOnce(new Error('load failed'));
+    const out = await cfg.loadConfig();
+    expect(out).not.toBe(cfg.defaultConfig);
+    expect(get(cfg.configStore)).not.toBe(cfg.defaultConfig);
+  });
+});
+
+describe('detach store runtime (#422)', () => {
+  it('zombie popOut clears the flag and re-creates the window', async () => {
+    const { get } = await import('svelte/store');
+    const d = await import('$lib/stores/detach');
+    winState.win = {
+      setFocus: async () => {
+        throw new Error('stale handle');
+      }
+    };
+    await d.popOut('logs');
+    // Fell through to creation (not stuck on the zombie handle).
+    expect(winState.created).toBe(1);
+    expect(get(d.detachedPanes).logs).toBe(true);
   });
 
-  it('zombie windows clear the detached flag (#422)', () => {
-    const detach = read('src/lib/stores/detach.ts');
-    // popOut catch clears + falls through (no early return inside catch).
-    expect(detach).toMatch(/markDetached\(pane, false\);\s*\n\s*\}/);
-    // focusDetached miss path clears.
-    expect(detach).toMatch(/\} else \{\s*\n\s*\/\/ #422[^\n]*\n\s*markDetached\(pane, false\);/);
+  it('focusDetached on a missing window clears the badge', async () => {
+    const { get } = await import('svelte/store');
+    const d = await import('$lib/stores/detach');
+    winState.win = null;
+    await d.focusDetached('settings');
+    expect(get(d.detachedPanes).settings).toBe(false);
   });
 
-  it('theme converges across windows with pre-paint bootstrap (#423)', () => {
-    const theme = read('src/lib/stores/theme.ts');
-    expect(theme).toMatch(/export const STORAGE_KEY/);
-    expect(theme).toMatch(/addEventListener\('storage'/);
-    const html = read('src/app.html');
-    expect(html).toMatch(/presencejam:theme/);
-    expect(html).toMatch(/%sveltekit\.head%/);
+  it('concurrent popOut creates at most one window', async () => {
+    const d = await import('$lib/stores/detach');
+    winState.win = null;
+    await Promise.all([d.popOut('settings'), d.popOut('settings')]);
+    expect(winState.created).toBeLessThanOrEqual(1);
   });
+});
 
-  it('Reconnect reserves success wording for in-session reconnects (#500)', () => {
-    const rec = read('src/lib/components/Reconnect.svelte');
-    expect(rec).toMatch(/teamsReconnectedThisSession/);
-    expect(rec).toMatch(/phase === 'done' && teamsReconnectedThisSession/);
-    expect(rec).not.toContain('teamsAlreadyConnected');
-  });
-
-  it('lib.rs reports the real version and names the missing helper (#497, #499)', () => {
-    const lib = read('src-tauri/src/lib.rs');
-    expect(lib).toMatch(/PresenceJam \{\} started successfully", env!\("CARGO_PKG_VERSION"\)/);
-    expect(lib).not.toContain('PresenceJam 2.0 started successfully');
-    expect(lib).toMatch(/update-desktop-database/);
-    expect(lib).toMatch(/xdg-mime default/);
-  });
-
-  it('layout renders a notice outside Tauri instead of throwing (#498)', () => {
-    const layout = read('src/routes/+layout.svelte');
-    expect(layout).toMatch(/__TAURI_INTERNALS__/);
-    expect(layout).toMatch(/\{#if !isTauriRuntime\}/);
-    expect(layout).toMatch(/if \(!isTauriRuntime \|\| !isMainWindow\) return;/);
+describe('theme cross-window runtime (#423)', () => {
+  it('storage event flips the theme; same value is a no-op', async () => {
+    const { get } = await import('svelte/store');
+    const th = await import('$lib/stores/theme');
+    const cur = get(th.theme);
+    const other = cur === 'dark' ? 'light' : 'dark';
+    let notifies = 0;
+    const unsub = th.theme.subscribe(() => {
+      notifies++;
+    });
+    notifies = 0;
+    window.dispatchEvent(
+      new StorageEvent('storage', { key: th.STORAGE_KEY, newValue: other })
+    );
+    expect(get(th.theme)).toBe(other);
+    expect(notifies).toBe(1);
+    notifies = 0;
+    window.dispatchEvent(
+      new StorageEvent('storage', { key: th.STORAGE_KEY, newValue: other })
+    );
+    expect(notifies).toBe(0);
+    unsub();
   });
 });

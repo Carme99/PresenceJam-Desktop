@@ -905,10 +905,12 @@ pub fn run() {
                         // (already a dependency); unknown home skips quietly.
                         let apps_dir = dirs::home_dir().map(|h| h.join(".local/share/applications"));
                         let db_missing = match &apps_dir {
-                            Some(dir) => std::process::Command::new("update-desktop-database")
+                            // #review-5: a non-zero exit is as missing as a
+                            // spawn failure — either way the DB was not updated.
+                            Some(dir) => !std::process::Command::new("update-desktop-database")
                                 .arg(dir)
                                 .status()
-                                .is_err(),
+                                .is_ok_and(|s| s.success()),
                             None => {
                                 log::warn!(
                                     "[APP] setup: home dir unknown; skipping deep-link fallback association"

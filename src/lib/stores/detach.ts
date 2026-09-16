@@ -50,6 +50,21 @@ function markDetached(pane: DetachablePane, value: boolean) {
  * focus the existing child window instead of creating a duplicate.
  */
 export async function popOut(pane: DetachablePane): Promise<void> {
+  // #review-9: in-flight guard — two rapid popOut clicks must not
+  // double-create the child window (both would pass getByLabel null).
+  // Static pane-keyed lookup (Record, not Set — two fixed keys).
+  if (popOutInFlight[pane]) return;
+  popOutInFlight[pane] = true;
+  try {
+    await popOutInner(pane);
+  } finally {
+    popOutInFlight[pane] = false;
+  }
+}
+
+const popOutInFlight: Record<DetachablePane, boolean> = { logs: false, settings: false };
+
+async function popOutInner(pane: DetachablePane): Promise<void> {
   const label = DETACHED_LABEL[pane];
   const existing = await WebviewWindow.getByLabel(label);
   if (existing) {
