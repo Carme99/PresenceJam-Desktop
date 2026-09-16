@@ -6,6 +6,13 @@ class PresenceJam < Formula
   version "__VERSION__"
   license "MIT"
 
+  # The release matrix builds only aarch64-apple-darwin and latest.json
+  # advertises only darwin-aarch64 (see .github/workflows/release.yml), so
+  # an Intel Mac can neither launch the DMG's arm64 .app nor ever self-heal
+  # through the updater. Refuse the install instead of copying a bundle
+  # that cannot run. See issue #610.
+  depends_on arch: :arm64
+
   # Tauri-built macOS DMG. brew mounts the DMG, extracts the .app
   # bundle to a temp dir, and chdirs INTO the .app — so the
   # formula's `buildpath` IS the .app bundle itself, with the

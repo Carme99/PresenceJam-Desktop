@@ -4,6 +4,7 @@ version = "4.5.2"
 description = "Syncs Spotify playback to Microsoft Teams status"
 authors = ["Jack Lee"]
 edition = "2021"
+rust-version = "1.96"
 
 [lib]
 name = "presence_jam_lib"
@@ -22,7 +23,6 @@ tauri-plugin-opener = "~2.5"
 tauri-plugin-notification = "~2.4"
 tauri-plugin-autostart = "~2.5"
 tauri-plugin-log = "~2.9"
-tauri-plugin-http = "~2.6"
 tauri-plugin-updater = "~2.11"
 
 serde = { version = "1", features = ["derive"] }
