@@ -372,5 +372,13 @@ export const de: Dict = {
   'rules.ruleEnabled': 'Aktiviert',
   'logs.copySnapshot': 'Snapshot kopieren',
   'logs.snapshotCopied': 'Geschwärzter Snapshot in die Zwischenablage kopiert.',
-  'logs.snapshotCopyFailed': 'Der Snapshot konnte nicht kopiert werden.'
+  'logs.snapshotCopyFailed': 'Der Snapshot konnte nicht kopiert werden.',
+  // 4.6 additions
+  'dashboard.availabilityListening': 'Wird gehört (verfügbar)',
+  'dashboard.availabilityCleared': 'Verfügbarkeit zurückgesetzt',
+  'settings.saveAndLeave': 'Speichern und verlassen',
+  'settings.discardChanges': 'Änderungen verwerfen',
+  'settings.stayHere': 'Hier bleiben',
+  'settings.notificationsDenied':
+    'Benachrichtigungen sind im System blockiert. Erlauben Sie sie in den Systemeinstellungen und aktivieren Sie die Option erneut.'
 };

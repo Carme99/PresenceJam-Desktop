@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { get } from 'svelte/store';
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
   import { onMount, onDestroy } from 'svelte';
@@ -9,6 +10,14 @@
   import type { ErrorEventPayload, SyncStatus, TrackInfo } from '$lib/types';
   import { devLog } from '$lib/utils/dev';
   import { theme, toggleTheme } from '$lib/stores/theme';
+  import {
+    presence,
+    markStatusPosted,
+    markPresenceGated,
+    markPresenceCleared,
+    setAvailabilityListening
+  } from '$lib/stores/presence';
+  import { notificationsEnabled } from '$lib/stores/notifications';
   import Logo from './Logo.svelte';
   import { t } from '$lib/i18n';
 
@@ -18,14 +27,24 @@
   let spotifyConnected = $state(false);
   let teamsConnected = $state(false);
   let currentTrack = $state<TrackInfo | null>(null);
-  let statusPreview = $state(t('dashboard.statusNotConfigured'));
+  // #547: statusPreview / presenceGated live in the module-level presence
+  // store (see $lib/stores/presence.ts) — a remount hydrates from whatever
+  // the poll events last reported instead of resetting to "Not configured".
+  // The availability announcement is transient state on top of that: the
+  // store remembers *whether* the user is listening, the chip remembers
+  // which announcement is on screen.
+  let availabilityAnnouncement = $state<'listening' | 'cleared' | null>(
+    get(presence).availabilityListening ? 'listening' : null
+  );
+  let availabilityTimeout: ReturnType<typeof setTimeout> | null = null;
+  const AVAILABILITY_CLEARED_DISMISS_MS = 5000;
   let displayError = $state('');
-  // P2 (issue #3.0-P2): true while the status write is suppressed by a
-  // busy/meeting presence; cleared on the next `presence-updated`.
-  let presenceGated = $state(false);
-  // P1 (issue #3.0-P1): label from `presence-availability-updated`
-  // ('Listening (Available)' / 'Availability cleared').
-  let availabilityLabel = $state('');
+  // #547: the preview is the last status the poll loop confirmed it posted,
+  // so it survives a remount; the fallback copy only applies when nothing
+  // has been posted yet this session.
+  let statusPreview = $derived(
+    $presence.postedStatus ?? (currentTrack ? t('dashboard.statusNotConfigured') : t('dashboard.statusNoTrack'))
+  );
   let displayErrorTimeout: ReturnType<typeof setTimeout> | null = null;
   // #408: goToSetup re-enable timer must be cleared on destroy so a
   // late callback cannot touch state after unmount.
@@ -36,8 +55,6 @@
   // would leave `unlisten` empty and leak every registration. Mirrors
   // the guard already used in +page.svelte and +layout.svelte.
   let destroyed = false;
-  // 3.1.0 notifications — opt-in via localStorage, default off
-  let notificationsEnabled = $state(false);
   let lastNotifiedId = '';
   // C8: throttle — at most one track-change notification every 5 s.
   const NOTIFICATION_THROTTLE_MS = 5000;
@@ -54,6 +71,7 @@
     unlisten.forEach(fn => fn());
     if (displayErrorTimeout) clearTimeout(displayErrorTimeout);
     if (goToSetupTimeout) clearTimeout(goToSetupTimeout);
+    if (availabilityTimeout) clearTimeout(availabilityTimeout);
   });
 
   onMount(async () => {
@@ -78,9 +96,6 @@
       console.error('[DASHBOARD] onMount: get_sync_status FAILED:', e);
     }
 
-    // 3.1.0: notification opt-in gate — default off, enabled via localStorage flag
-    try { notificationsEnabled = localStorage.getItem('notificationsEnabled') === 'true'; } catch {}
-
     devLog('[DASHBOARD] onMount: setting up spotify-track-changed listener');
     listen('spotify-track-changed', async (event: any) => {
       devLog('[DASHBOARD] EVENT: spotify-track-changed received');
@@ -88,7 +103,7 @@
       devLog('[DASHBOARD] EVENT: track.artist=', event.payload.artist);
       currentTrack = event.payload;
       await updateMenuState();
-      if (notificationsEnabled && event.payload?.title) {
+      if ($notificationsEnabled && event.payload?.title) {
         const id = `${event.payload.title}::${event.payload.artist}`;
         if (id === lastNotifiedId) return;
         // C8: timestamp throttle — max one notification per 5 s. A
@@ -119,18 +134,17 @@
     listen('presence-updated', (event: any) => {
       devLog('[DASHBOARD] EVENT: presence-updated received');
       devLog('[DASHBOARD] EVENT: status=', event.payload.status);
-      statusPreview = event.payload.status;
       // A real status write means the gate is no longer suppressing —
-      // clear the chip (issue #3.0-P2).
-      presenceGated = false;
+      // markStatusPosted clears it (issue #3.0-P2).
+      markStatusPosted(event.payload.status);
     }).then(fn => { if (destroyed) fn(); else unlisten.push(fn); });
 
     devLog('[DASHBOARD] onMount: setting up presence-cleared listener');
     listen('presence-cleared', async () => {
       devLog('[DASHBOARD] EVENT: presence-cleared received');
       currentTrack = null;
-      statusPreview = t('dashboard.statusNoTrack');
-      devLog('[DASHBOARD] EVENT: currentTrack=null, statusPreview="No track playing"');
+      markPresenceCleared();
+      devLog('[DASHBOARD] EVENT: currentTrack=null, presence cleared');
       await updateMenuState();
     }).then(fn => { if (destroyed) fn(); else unlisten.push(fn); });
 
@@ -138,13 +152,19 @@
     listen('presence-gated', (event: any) => {
       devLog('[DASHBOARD] EVENT: presence-gated received');
       devLog('[DASHBOARD] EVENT: reason=', event.payload?.reason);
-      presenceGated = true;
+      markPresenceGated();
     }).then(fn => { if (destroyed) fn(); else unlisten.push(fn); });
 
     devLog('[DASHBOARD] onMount: setting up presence-availability-updated listener');
     listen('presence-availability-updated', (event: any) => {
       devLog('[DASHBOARD] EVENT: presence-availability-updated received');
-      availabilityLabel = event.payload?.label ?? '';
+      // #551: derive the chip copy from the structured flag instead of
+      // rendering the backend's English `label`, and make the "cleared"
+      // announcement transient — it used to stay on screen for the rest of
+      // the session because nothing ever reset it.
+      const available = event.payload?.available === true;
+      setAvailabilityListening(available);
+      showAvailability(available);
     }).then(fn => { if (destroyed) fn(); else unlisten.push(fn); });
 
     devLog('[DASHBOARD] onMount: setting up error listener');
@@ -214,6 +234,28 @@
       updateMenuState();
     }).then(fn => { if (destroyed) fn(); else unlisten.push(fn); });
   });
+
+  /**
+   * #551: render the availability announcement for the structured state the
+   * poll loop just reported. "Listening" is a condition and holds until the
+   * next event; "cleared" is a one-shot transition, so it is dismissed on a
+   * timer rather than branding the Dashboard for the rest of the session.
+   */
+  function showAvailability(listening: boolean) {
+    if (availabilityTimeout) {
+      clearTimeout(availabilityTimeout);
+      availabilityTimeout = null;
+    }
+    if (listening) {
+      availabilityAnnouncement = 'listening';
+      return;
+    }
+    availabilityAnnouncement = 'cleared';
+    availabilityTimeout = setTimeout(() => {
+      availabilityAnnouncement = null;
+      availabilityTimeout = null;
+    }, AVAILABILITY_CLEARED_DISMISS_MS);
+  }
 
   async function toggleSync() {
     if (isToggling) return;
@@ -417,11 +459,15 @@
   {/if}
 
   <main>
-    {#if presenceGated}
+    {#if $presence.gated}
       <div class="presence-chip" role="status">{t('dashboard.presenceGated')}</div>
     {/if}
-    {#if availabilityLabel}
-      <div class="availability-chip" role="status">{availabilityLabel}</div>
+    {#if availabilityAnnouncement}
+      <div class="availability-chip" role="status">
+        {availabilityAnnouncement === 'listening'
+          ? t('dashboard.availabilityListening')
+          : t('dashboard.availabilityCleared')}
+      </div>
     {/if}
     {#if !spotifyConnected || !teamsConnected}
       <div class="setup-card card">
