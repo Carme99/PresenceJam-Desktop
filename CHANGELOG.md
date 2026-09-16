@@ -73,6 +73,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   dropping `gated_track_key` and letting the next write through mid-meeting. The
   shared slot is now generation-checked: a snapshot whose generation was
   superseded is discarded and logged instead of resurrecting an old decision.
+- **Presence state no longer dies with the Dashboard (#670, #547):** the
+  `presence-updated` / `presence-cleared` / `presence-gated` /
+  `presence-availability-updated` listeners (plus `presence-paused`,
+  `playback-state-changed`, `sync-started` / `sync-stopped`) now live in the
+  always-mounted `+layout.svelte` and write the shared store, so a status, gate
+  or pause that lands while Settings/Logs/Diagnostics is on screen is no longer
+  dropped with the destroyed Dashboard. A mounting Dashboard seeds the status
+  preview, the gate chip and the track card from `get_sync_status`
+  (`last_posted_status` / `presence_gated` / `presence_paused`, read from the
+  poller's session clocks — never re-derived from a fresh API call), and a
+  pause now keeps the track card in its paused state instead of reporting
+  "Nothing playing".
 
 ### Security
 

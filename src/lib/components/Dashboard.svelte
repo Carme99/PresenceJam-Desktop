@@ -10,25 +10,19 @@
   import type { ErrorEventPayload, SyncStatus, TrackInfo } from '$lib/types';
   import { devLog } from '$lib/utils/dev';
   import { theme, toggleTheme } from '$lib/stores/theme';
-  import {
-    presence,
-    markStatusPosted,
-    markPresenceGated,
-    markPresenceCleared,
-    setAvailabilityListening
-  } from '$lib/stores/presence';
+  import { presence, hydrate, setSyncing } from '$lib/stores/presence';
   import { notificationsEnabled } from '$lib/stores/notifications';
   import Logo from './Logo.svelte';
   import { t } from '$lib/i18n';
   import { useListenerTeardown } from '$lib/utils/useAuthListeners';
 
   /**
-   * The `presence-gated` payload's `reason`, used only for the chip's copy.
-   * Not in the presence store: it is display state owned by this view, and the
-   * store's contract (`markPresenceGated()`) is deliberately shape-free.
+   * The gate chip's copy, derived from the reason the always-mounted
+   * `+layout.svelte` listener recorded in the presence store (#670): the
+   * reason is part of the shared state now, so a remount keeps the specific
+   * copy instead of falling back to the generic one.
    */
-  let gatedReason = $state('');
-  let gatedLabel = $derived(gatedReasonLabel(gatedReason));
+  let gatedLabel = $derived(gatedReasonLabel($presence.gatedReason));
 
   /**
    * Map a gate reason to its chip label. Mirrors the Rust `teams.rs`
@@ -51,30 +45,37 @@
     }
   }
 
-  let isSyncing = $state(false);
+  // #670: the sync mirror lives in the shared presence store — the
+  // always-mounted layout owns the `sync-started` / `sync-stopped` listeners,
+  // so a state change that lands while another view is mounted is not lost
+  // with this component.
   let isToggling = $state(false);
   let isRefreshing = $state(false);
   let spotifyConnected = $state(false);
   let teamsConnected = $state(false);
   let currentTrack = $state<TrackInfo | null>(null);
-  // #547: statusPreview / presenceGated live in the module-level presence
-  // store (see $lib/stores/presence.ts) — a remount hydrates from whatever
-  // the poll events last reported instead of resetting to "Not configured".
-  // The availability announcement is transient state on top of that: the
-  // store remembers *whether* the user is listening, the chip remembers
-  // which announcement is on screen.
-  let availabilityAnnouncement = $state<'listening' | 'cleared' | null>(
-    get(presence).availabilityListening ? 'listening' : null
-  );
+  // #547/#670: statusPreview / presenceGated live in the module-level presence
+  // store (see $lib/stores/presence.ts), written by the always-mounted layout
+  // listeners, so a remount shows what the poll loop last reported instead of
+  // resetting to "Not configured".
+  let availabilityAnnouncement = $state<'listening' | 'cleared' | null>(null);
+  let availabilityObserved: boolean | null = null;
   let availabilityTimeout: ReturnType<typeof setTimeout> | null = null;
   const AVAILABILITY_CLEARED_DISMISS_MS = 5000;
   let displayError = $state('');
-  // #547: the preview is the last status the poll loop confirmed it posted,
-  // so it survives a remount; the fallback copy only applies when nothing
-  // has been posted yet this session.
+  // #547/#670: the preview is the last status the poll loop confirmed it
+  // posted (or the paused placeholder while a track is paused), so it
+  // survives a remount; the fallback copy only applies when nothing has been
+  // posted yet this session.
   let statusPreview = $derived(
-    $presence.postedStatus ?? (currentTrack ? t('dashboard.statusNotConfigured') : t('dashboard.statusNoTrack'))
+    $presence.paused
+      ? ($presence.pausedStatus ?? t('dashboard.paused'))
+      : ($presence.postedStatus ?? (currentTrack ? t('dashboard.statusNotConfigured') : t('dashboard.statusNoTrack')))
   );
+  // #670: a pause is not a stop — the card stays up and shows the paused
+  // state, either from the poller's pause signal or from the hydrated track's
+  // own playback flag.
+  let isPaused = $derived($presence.paused || currentTrack?.is_playing === false);
   let displayErrorTimeout: ReturnType<typeof setTimeout> | null = null;
   // #408: goToSetup re-enable timer must be cleared on destroy so a
   // late callback cannot touch state after unmount.
@@ -102,6 +103,38 @@
     if (availabilityTimeout) clearTimeout(availabilityTimeout);
   });
 
+  // #670: a genuine stop — and only a stop — drops the track card. The flag is
+  // written by the always-mounted listener, so a stop that landed while
+  // another view was mounted still clears the card here on the next mount.
+  let stoppedObserved = false;
+  $effect(() => {
+    const stopped = $presence.stopped;
+    if (stopped === stoppedObserved) return;
+    stoppedObserved = stopped;
+    if (stopped) currentTrack = null;
+  });
+
+  // #551: `availabilityListening` is the shared condition and is applied as
+  // "listening"; the "cleared" chip is a one-shot transition, so it only shows
+  // when this mount observes the flip — a mount that starts out cleared has
+  // nothing to announce.
+  $effect(() => {
+    const listening = $presence.availabilityListening;
+    if (listening === availabilityObserved) return;
+    const hadPrevious = availabilityObserved !== null;
+    availabilityObserved = listening;
+    if (listening || hadPrevious) showAvailability(listening);
+  });
+
+  // #670: the tray mirror follows the shared sync state, so every transition —
+  // the hydrated mount, a `sync-started`/`sync-stopped` handled by the layout,
+  // a sync toggle, a panic or a reconnect — refreshes it exactly once.
+  $effect(() => {
+    const isSyncing = $presence.syncing;
+    devLog(`[DASHBOARD] sync state changed: isSyncing=${isSyncing}`);
+    void updateMenuState();
+  });
+
   onMount(async () => {
     devLog('[DASHBOARD] onMount: ENTRY');
 
@@ -115,11 +148,10 @@
         current_track: status.current_track?.title ?? null
       });
 
-      isSyncing = status.is_syncing;
       spotifyConnected = status.spotify_connected;
       teamsConnected = status.teams_connected;
       currentTrack = status.current_track;
-      await updateMenuState();
+      hydrate(status);
     } catch (e) {
       console.error('[DASHBOARD] onMount: get_sync_status FAILED:', e);
     }
@@ -159,47 +191,10 @@
         }
       }
     }));
-    teardown.add(listen('presence-updated', (event: any) => {
-      devLog('[DASHBOARD] EVENT: presence-updated received');
-      devLog('[DASHBOARD] EVENT: status=', event.payload.status);
-      // A real status write means the gate is no longer suppressing —
-      // markStatusPosted clears it (issue #3.0-P2).
-      markStatusPosted(event.payload.status);
-    }));
-
-    devLog('[DASHBOARD] onMount: setting up presence-cleared listener');
-    teardown.add(listen('presence-cleared', async () => {
-      devLog('[DASHBOARD] EVENT: presence-cleared received');
-      currentTrack = null;
-      markPresenceCleared();
-      devLog('[DASHBOARD] EVENT: currentTrack=null, presence cleared');
-      await updateMenuState();
-    }));
-
-    devLog('[DASHBOARD] onMount: setting up presence-gated listener');
-    teardown.add(listen('presence-gated', (event: any) => {
-      devLog('[DASHBOARD] EVENT: presence-gated received');
-      devLog('[DASHBOARD] EVENT: reason=', event.payload?.reason);
-      // Findings #634/#635/#637: the payload's `reason` distinguishes the
-      // time- and rule-based gates from a presence sample, so the chip can say
-      // WHY the status is paused. Reason strings are the Rust constants in
-      // `teams.rs` (`GATE_REASON_*`); anything unrecognised keeps the generic
-      // copy.
-      gatedReason = String(event.payload?.reason ?? '');
-      markPresenceGated();
-    }));
-
-    devLog('[DASHBOARD] onMount: setting up presence-availability-updated listener');
-    teardown.add(listen('presence-availability-updated', (event: any) => {
-      devLog('[DASHBOARD] EVENT: presence-availability-updated received');
-      // #551: derive the chip copy from the structured flag instead of
-      // rendering the backend's English `label`, and make the "cleared"
-      // announcement transient — it used to stay on screen for the rest of
-      // the session because nothing ever reset it.
-      const available = event.payload?.available === true;
-      setAvailabilityListening(available);
-      showAvailability(available);
-    }));
+    // #670: presence state is written by +layout.svelte now (always mounted);
+    // this component only consumes the shared store — and hydrates it from
+    // `get_sync_status` on mount — so a status, gate or pause that lands while
+    // another view is on screen is no longer dropped with this component.
 
     devLog('[DASHBOARD] onMount: setting up error listener');
     teardown.add(listen<ErrorEventPayload>('error', (event) => {
@@ -223,34 +218,21 @@
     }));
 
     // toggle-pause is now handled in +page.svelte (always-mounted) — Dashboard no longer owns it (#230).
-    devLog('[DASHBOARD] onMount: setting up sync-started listener');
-    teardown.add(listen('sync-started', () => {
-      devLog('[DASHBOARD] EVENT: sync-started received');
-      isSyncing = true;
-      devLog('[DASHBOARD] EVENT: isSyncing=true');
-      updateMenuState();
-    }));
-
-    devLog('[DASHBOARD] onMount: setting up sync-stopped listener');
-    teardown.add(listen('sync-stopped', () => {
-      devLog('[DASHBOARD] EVENT: sync-stopped received');
-      isSyncing = false;
-      devLog('[DASHBOARD] EVENT: isSyncing=false');
-      updateMenuState();
-    }));
+    // #670: `sync-started` / `sync-stopped` are owned by +layout.svelte for the
+    // same reason and mirror into `$presence.syncing`, so this component no
+    // longer registers them.
 
     devLog('[DASHBOARD] onMount: setting up polling-thread-panicked listener');
     teardown.add(listen('polling-thread-panicked', () => {
       // Rust side resets is_syncing in polling.rs:321, but the JS-side
-      // mirror (this rune) was not being flipped — UI would stay
-      // "Syncing" forever after a thread panic. See issue #33.
+      // mirror was not being flipped — UI would stay "Syncing" forever
+      // after a thread panic. See issue #33.
       devLog('[DASHBOARD] EVENT: polling-thread-panicked received');
-      isSyncing = false;
+      setSyncing(false);
       devLog('[DASHBOARD] EVENT: isSyncing=false (panic recovery)');
       if (displayErrorTimeout) clearTimeout(displayErrorTimeout);
       displayError = t('dashboard.syncCrashed');
       displayErrorTimeout = setTimeout(() => { displayError = ''; displayErrorTimeout = null; }, 5000);
-      updateMenuState();
     }));
 
     devLog('[DASHBOARD] onMount: setting up reconnect-required listener');
@@ -262,10 +244,9 @@
       // teams-reconnect-required in +layout.svelte (issue #157);
       // this is the catch-all that takes the user to the reconnect view.
       devLog('[DASHBOARD] EVENT: reconnect-required received');
-      isSyncing = false;
+      setSyncing(false);
       devLog('[DASHBOARD] EVENT: isSyncing=false (reconnect)');
       currentView.set('reconnect');
-      updateMenuState();
     }));
   });
 
@@ -294,22 +275,21 @@
   async function toggleSync() {
     if (isToggling) return;
     devLog('[DASHBOARD] toggleSync: ENTRY');
-    devLog('[DASHBOARD] toggleSync: isSyncing=', isSyncing);
+    devLog('[DASHBOARD] toggleSync: isSyncing=', $presence.syncing);
 
     isToggling = true;
     try {
-      if (isSyncing) {
+      if ($presence.syncing) {
         devLog('[DASHBOARD] toggleSync: calling invoke stop_syncing');
         await invoke('stop_syncing');
-        isSyncing = false;
+        setSyncing(false);
         devLog('[DASHBOARD] toggleSync: isSyncing=false');
       } else {
         devLog('[DASHBOARD] toggleSync: calling invoke start_syncing');
         await invoke('start_syncing');
-        isSyncing = true;
+        setSyncing(true);
         devLog('[DASHBOARD] toggleSync: isSyncing=true');
       }
-      await updateMenuState();
     } catch (e) {
       console.error('[DASHBOARD] toggleSync failed:', e);
       if (displayErrorTimeout) clearTimeout(displayErrorTimeout);
@@ -323,9 +303,9 @@
   }
 
   async function refreshStatus() {
-    if (isRefreshing || !isSyncing) return;
+    if (isRefreshing || !$presence.syncing) return;
     devLog('[DASHBOARD] refreshStatus: ENTRY');
-    devLog('[DASHBOARD] refreshStatus: isSyncing=', isSyncing);
+    devLog('[DASHBOARD] refreshStatus: isSyncing=', $presence.syncing);
 
     isRefreshing = true;
     try {
@@ -333,11 +313,10 @@
       await invoke('refresh_status');
       devLog('[DASHBOARD] refreshStatus: calling invoke get_sync_status');
       const status = await invoke<SyncStatus>('get_sync_status');
-      isSyncing = status.is_syncing;
       spotifyConnected = status.spotify_connected;
       teamsConnected = status.teams_connected;
       currentTrack = status.current_track;
-      devLog('[DASHBOARD] refreshStatus: status re-read complete');
+      hydrate(status);
       await updateMenuState();
     } catch (e) {
       console.error('[DASHBOARD] refreshStatus failed:', e);
@@ -469,7 +448,7 @@
           <span class="badge" class:success={teamsConnected} class:error={!teamsConnected}>
             <span class="dot"></span>{teamsConnected ? 'Teams' : t('dashboard.teamsOff')}
           </span>
-          {#if isSyncing}
+          {#if $presence.syncing}
             <span class="badge accent"><span class="dot pulse"></span>{t('dashboard.syncing')}</span>
           {/if}
         </div>
@@ -489,10 +468,10 @@
         title={$detachedPanes.settings ? t('dashboard.settingsDetachedTitle') : t('dashboard.settings')}
         aria-label={$detachedPanes.settings ? t('dashboard.settingsDetachedAria') : t('dashboard.openSettingsAria')}>⚙</button>
       <button class="icon-btn" onclick={openAbout} title={t('dashboard.about')} aria-label={t('dashboard.aboutAria')}>ⓘ</button>
-      <button class="icon-btn primary" class:is-on={isSyncing} onclick={toggleSync}
-        disabled={isToggling} aria-label={isSyncing ? t('dashboard.pauseSync') : t('dashboard.resumeSync')}
-        title={isSyncing ? t('dashboard.pauseSync') : t('dashboard.resumeSync')}>
-        {isSyncing ? '⏸' : '▶'}
+      <button class="icon-btn primary" class:is-on={$presence.syncing} onclick={toggleSync}
+        disabled={isToggling} aria-label={$presence.syncing ? t('dashboard.pauseSync') : t('dashboard.resumeSync')}
+        title={$presence.syncing ? t('dashboard.pauseSync') : t('dashboard.resumeSync')}>
+        {$presence.syncing ? '⏸' : '▶'}
       </button>
     </div>
   </header>
@@ -536,7 +515,7 @@
           <div class="track-artist">{currentTrack.artist}</div>
           <div class="track-album">{currentTrack.album}</div>
 
-          {#if currentTrack.is_playing}
+          {#if !isPaused}
             <div class="playing-indicator">
               <span class="pulse-dot" aria-hidden="true"></span>
               <span>{t('dashboard.playing')}</span>
@@ -558,7 +537,7 @@
           <button
             class="btn-refresh"
             onclick={refreshStatus}
-            disabled={!isSyncing || isRefreshing}
+            disabled={!$presence.syncing || isRefreshing}
             aria-label={t('dashboard.refreshAria')}
             aria-busy={isRefreshing}
           >⟳ {isRefreshing ? t('dashboard.refreshing') : t('dashboard.refreshStatus')}</button>
