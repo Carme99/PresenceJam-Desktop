@@ -217,10 +217,14 @@ export function mergeWizardConfig(
 ): AppConfig {
   const cfg = structuredClone(stored);
   cfg.spotify.client_id = fields.spotify_client_id;
-  // The secret went to the OS keychain during the OAuth flow; the flag is
-  // derived, not persisted, but keeping it truthful matters for the
-  // immediate post-save store update.
+  // The secret went to the OS keychain during the OAuth flow; both derived
+  // keychain fields are kept truthful for the immediate post-save store
+  // update (#560). They must move together: `clientSecretStateOf` prioritises
+  // the state, so writing only the bool would leave the pair disagreeing and
+  // Settings' credential row reading "Not configured" until the next
+  // `load_config`.
   cfg.spotify.client_secret_set = true;
+  cfg.spotify.client_secret_state = 'present';
   cfg.teams.status_format = fields.status_format;
   // The wizard's "Launch at login" toggle drives both the OS autostart
   // entry and the tray-only start behaviour, as it did before this change.
