@@ -577,33 +577,68 @@ pub fn refresh_spotify(
     };
     log::info!("{CMD} refresh_spotify: current tokens found");
 
-    // `refresh_spotify_token` now returns a typed `SpotifyApiError`
-    // (issue #160); stringify it for the IPC boundary, preserving this
-    // command's public `Result<(), String>` contract.
-    let new_tokens =
-        crate::spotify::refresh_spotify_token(&current_tokens, &client_id, &client_secret)
-            .map_err(|e| e.to_string())?;
-    log::info!("{CMD} refresh_spotify: new tokens received");
-
-    // CAS: only commit if state still holds the access token we refreshed
-    // from. If state changed during the refresh (e.g. user clicked
-    // Reconnect from another command), discard the result.
+    // Issue #564: route the CAS through the shared `cas_refresh_or_discard`
+    // helper (the same one the poll loop and the boot gate use) instead of a
+    // hand-rolled copy. The helper hands back the provider's typed error, so
+    // the one outcome that means the refresh token is dead (`invalid_grant`)
+    // is classified here instead of being stringified into an
+    // indistinguishable IPC error and re-attempted forever.
+    //
+    // Issue #180: the helper must never persist itself — the write guard below
+    // is a temporary that dies at the end of the statement, so persisting in a
+    // later statement cannot re-lock the slot it held (parking_lot is not
+    // reentrant).
     let pre_refresh_access_token = current_tokens.access_token.clone();
-    let committed = {
-        let mut guard = state.tokens.spotify_mut();
-        if guard.as_ref().map(|t| &t.access_token) == Some(&pre_refresh_access_token) {
-            *guard = Some(new_tokens.clone());
-            true
-        } else {
-            log::warn!("{CMD} refresh_spotify: state changed during refresh, discarding result");
-            false
+    let outcome = crate::polling::cas_refresh_or_discard(
+        "spotify-refresh-cmd",
+        &mut *state.tokens.spotify_mut(),
+        &pre_refresh_access_token,
+        || crate::spotify::refresh_spotify_token(&current_tokens, &client_id, &client_secret),
+        |t| &t.access_token,
+    );
+    match outcome {
+        crate::polling::CasOutcome::Committed(_) => {
+            token_io::persist_tokens(state.inner(), &app)?;
+            log::info!("{CMD} refresh_spotify: SUCCESS (state updated and persisted)");
         }
-    };
-    if committed {
-        token_io::persist_tokens(state.inner(), &app)?;
-        log::info!("{CMD} refresh_spotify: SUCCESS (state updated and persisted)");
-    } else {
-        log::info!("{CMD} refresh_spotify: NOOP (concurrent state change; not persisted)");
+        // Somebody else replaced the token we refreshed from: whatever is in
+        // the slot now is newer, so the session is alive.
+        crate::polling::CasOutcome::Discarded { current: Some(_) } => {
+            log::info!("{CMD} refresh_spotify: NOOP (concurrent state change; not persisted)");
+        }
+        crate::polling::CasOutcome::Discarded { current: None } => {
+            log::warn!(
+                "{CMD} refresh_spotify: the session was cleared while the refresh was in flight"
+            );
+            return Err("Spotify session was reset - sign in again to continue.".to_string());
+        }
+        // #160/#564: `invalid_grant` means the refresh token is dead (the
+        // documented lifetime elapsed, or the user revoked access). Retrying
+        // cannot succeed, so drop the session, persist the cleared file and
+        // raise the same re-auth signal the polling loop raises for this
+        // outcome — mirroring `poll_once`'s Spotify policy so the UI reacts
+        // identically whichever path noticed the dead session.
+        crate::polling::CasOutcome::RefreshFailed(
+            crate::spotify::SpotifyApiError::InvalidGrant,
+        ) => {
+            *state.tokens.spotify_mut() = None;
+            if let Err(e) = token_io::persist_tokens(state.inner(), &app) {
+                log::warn!(
+                    "{CMD} refresh_spotify: failed to persist cleared tokens - {}",
+                    e
+                );
+            }
+            state.onboarding_cache.invalidate();
+            log::error!(
+                "{CMD} refresh_spotify: refresh token is dead (invalid_grant); re-auth required"
+            );
+            let _ = app.emit("spotify-reconnect-required", ());
+            return Err("Spotify sign-in expired - reconnect Spotify to continue.".to_string());
+        }
+        crate::polling::CasOutcome::RefreshFailed(e) => {
+            log::warn!("{CMD} refresh_spotify: transient refresh failure - {}", e);
+            return Err(e.to_string());
+        }
     }
 
     Ok(())
