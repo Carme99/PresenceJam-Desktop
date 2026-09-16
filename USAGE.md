@@ -54,6 +54,8 @@ The main screen showing your current sync status.
 - Updates in real-time as tracks change
 - Shows ⏸️ when nothing is playing, including during adverts, which are never treated as "listening"
 
+**Suppressed chip:** when a write is being held back, the card shows a chip saying why. The wording is reason-specific for the four rules/policies — *quiet hours are active*, *a track rule matched*, *you set a status message by hand*, *you are out of office* — and falls back to a generic *busy, in a call, or presenting* line for a presence-based verdict (busy / Do Not Disturb / focusing / in a meeting / in a call / presenting). The chip reappears after a view switch, but it renders the generic line until the next `presence-gated` event arrives, since only the reason is carried live.
+
 ---
 
 ## Settings
@@ -93,22 +95,28 @@ The **live preview** below the field renders against a fixed sample item — dev
 | Clear on pause | On | Clears your Teams status when Spotify pauses or stops. There is no Settings toggle for this — edit `teams.clear_on_pause` in `config.json` directly (consumed at `src-tauri/src/polling/poll_once.rs`). |
 | Profanity filter | On | Replaces profane track/artist names with a safe placeholder |
 | Profanity placeholder | `Currently Listening to Spotify` | Shown when a track name is filtered. Supports `{emoji}`. |
+| Custom words to filter | empty | Extra words/phrases, one per line, bounded to the first **64 entries of 32 characters** and shown with the same clamp feedback as the polling fields. **Documented gap:** the list is stored and validated but the filter does not yet use it — only the built-in list is applied (see [TROUBLESHOOTING.md — A profane track isn't being filtered](./TROUBLESHOOTING.md#a-profane-track-isnt-being-filtered)). |
 
 ### Presence
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| Show Available while listening | Off | Sets your Teams presence to **Available** while a track plays (re-armed every few minutes, cleared on pause). It shows *Available*, not *Busy* — Microsoft's `setPresence` API only supports the Busy/**InACall** combination, so "busy" would display an in-call bubble to your colleagues. |
-| Pause status during meetings/calls/DND | On | Reads your Teams presence before writing a status update and skips the write while you're busy, in a meeting, in a call, or presenting. The status resumes on the next track change once your presence clears. |
+| Show Available while listening | Off | Sets your Teams presence to **Available** while a track plays (re-armed every few minutes). The requested session length is the **remaining listening time plus one re-arm period**, clamped to Microsoft's documented `PT5M`–`PT4H` window — so a crash or a force-quit no longer leaves you green for four hours when the music stopped. A live/unknown-position stream has no remaining time to bound with, so it still asks for `PT4H`. |
+| Pause status during meetings/calls/DND | On | Reads your Teams presence before writing a status update and skips the write while you're busy, in a meeting, in a call, or presenting. The status resumes once your presence clears — the app keeps polling, it is the Teams *write* that is skipped. |
+| Never overwrite a status I set by hand | On | If your Teams status message is not one PresenceJam posted (and has not expired), the app leaves it alone rather than replacing it with the track. It reuses the presence read the gate already performs, so it costs no extra request; a message you set that then expires stops blocking, and the next track posts normally. If the presence read itself fails, the write proceeds (nothing is held back on a failed read). |
+| Pause while I am out of office | Off | Skips the status update while Teams reports you out of office (either the out-of-office setting or an `outOfOffice` activity). A quiet-hours row or track rule that carries its own presence action overrides it for that track. |
 
 > Both toggles need a one-time Teams reconnect if your tokens predate the `Presence.Read` and `profile` scopes — those are only granted on a fresh sign-in (see [SETUP.md — Upgrading from 2.x](./SETUP.md#upgrading-from-2x)).
 
+> The two policy rows are the newest of the four; they need the same one-time Teams reconnect if your tokens predate the `Presence.Read` scope.
+
 ### Status rules
 
-Quiet hours and track rules suppress the Teams status write. They reuse the same presence-gate path as the meeting/call gate, so a rule that stops matching mid-track posts the status without waiting for the next track.
+Quiet hours and track rules either **suppress** the Teams status write or **replace** it, and each can also move your Teams presence while it applies. They reuse the same presence-gate path as the meeting/call gate, so a rule that stops matching mid-track posts the status without waiting for the next track.
 
 **Quiet hours** — each entry has an on/off checkbox, a start and an end time, and a weekday picker. Times wrap around midnight (a new entry starts at 22:00 → 07:00). **No weekday ticked means every day.**
 
+Each quiet-hours row also has a **Presence while this rule applies** picker. It offers *Don't change my presence* plus the five `(availability, activity)` pairs Microsoft's `setPresence` accepts — **Available/Available**, **Busy/InACall**, **Busy/InAConferenceCall**, **Away/Away** and **DoNotDisturb/Presenting**. Anything else is rejected at the config boundary and cleared rather than guessed at. The action is **inert while "Show Available while listening" (availability sync) is off**, and it never overrides a call, a meeting, or a status you set by hand.
 **Track rules** — each entry matches case-insensitively on artist and/or track-title substrings, plus an optional replacement status:
 
 | Field | Behaviour |
@@ -116,8 +124,15 @@ Quiet hours and track rules suppress the Teams status write. They reuse the same
 | Artist contains | Matched against the track's artist. Empty = any artist. |
 | Track title contains | Matched against the track title. Empty = any title. |
 | Post this instead | Non-empty — this text is posted instead of the formatted status. **Empty — the status write is suppressed entirely** for the matching track. |
+| Presence while this rule applies | *Don't change my presence* (default), or one of the five supported availability/activity pairs — armed while the rule matches. |
 
 New track rules are added **disabled**, so a half-filled rule can't suppress your status by accident. A suppressed track is re-checked every 240 s (the same clock as the presence gate), so clearing the rule or leaving the quiet-hours window posts the status mid-track.
+
+**A rule with "Post this instead" left empty suppresses the write — but it still moves your presence**: that is the point of pairing them ("while my Focus playlist plays, show me Do Not Disturb" needs no status text at all). A rule with replacement text posts that text instead of the formatted status; it still flows through the identical-write skip, so an unchanged replacement is not re-posted every cycle.
+
+**Quiet hours win over track rules.** If a quiet-hours row covers the current time and day, it decides the iteration — the matching track rule is not consulted at all, so its replacement text and its presence pair do not apply.
+
+**Replacement text is capped at 160 characters** and your quiet-hours replacement is posted from both the playing path *and* the stop/pause clear, so a rule you set is what ends up in Teams either way.
 
 Both lists live in `config.json` under `status_rules` (`quiet_hours[]`, `track_rules[]`); the section is fully additive, so pre-4.5 config files load unchanged (#432).
 
@@ -128,8 +143,9 @@ Both lists live in `config.json` under `status_rules` (`quiet_hours[]`, `track_r
 | Default interval | 30s | The baseline poll gap when a track is playing but Spotify reports no playback position (live streams, #165) — slider range 10–60 s. It is also the base for the pause backoff: each consecutive non-playing response doubles it (30 → 60 → 120 s) up to a 300 s cap, resetting on the next playing track. |
 | Min interval | 10s | Floor for the track-end smart sleep — while a track plays, PresenceJam never polls sooner than this (5–30 s in Settings). |
 | Max interval | 60s | Ceiling for the track-end smart sleep — while a track plays, PresenceJam never sleeps longer than this (up to 300 s in Settings). |
+| Paused backoff ceiling | 300s | The upper bound for the pause backoff ladder (30 → 60 → 120 s → this value), accepted in the range 60–3600 s with inline clamp feedback. **Documented gap:** the setting is stored and validated but the polling loop still caps the ladder at the documented 300 s, so raising it has no effect yet — the code comments call that cap the promise the docs make about idle-work reduction. |
 
-All three are clamped by the backend (`config.rs::clamp_polling`): default 5–300 s, min 5–30 s, and max between min and 300 s. The Settings form previews the clamped values before saving ("Min interval exceeds max interval — max will be saved as {max}s.").
+All four are clamped by the backend (`config.rs::clamp_polling`): default 5–300 s, min 5–30 s, max between min and 300 s, and the pause ceiling 60–3600 s. The Settings form previews the clamped values before saving ("Min interval exceeds max interval — max will be saved as {max}s.").
 
 ### Notifications
 

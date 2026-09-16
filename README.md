@@ -31,9 +31,9 @@ The app lives in your system tray, syncs while you work, and stays out of the wa
 - **Diagnostics page** — one-click local support snapshot (versions, sanitized config, token expiry metadata, redacted log tail). Never leaves your machine.
 - **Detachable Logs & Settings** — pop Logs or Settings out into their own window and back in again.
 - **Interface languages** — English, German (Deutsch), and French (Français) via an in-app language picker.
-- **Availability sync (opt-in)** — optionally show yourself as **Available** in Teams while you listen.
-- **Meeting/call-aware gating** — pauses status updates while you're busy, in a meeting, on a call, or presenting.
-- **Status rules (quiet hours & track rules)** — suppress the Teams status write during chosen hours/days or for matching tracks, with an optional replacement status.
+- **Availability sync (opt-in)** — optionally show yourself as **Available** in Teams while you listen, with the requested session bounded to the remaining listening time (Microsoft's `PT5M`–`PT4H` window) and cleared when you quit.
+- **Meeting/call-aware gating** — skips status writes while you're busy, in a meeting, on a call, or presenting, with optionals for **out-of-office** and for never overwriting a status you set by hand. The Dashboard chip names which one fired.
+- **Status rules (quiet hours & track rules)** — suppress the Teams status write during chosen hours/days or for matching tracks, post an optional replacement status, and set your Teams availability/activity while the rule applies.
 - **Desktop notifications (opt-in)** — a toast on track change, throttled to one per 5 s and replaced in place where the OS supports it.
 - **Auto-update** — silent update checks at startup and every ~24h; install immediately in-app, or defer with *Install on quit*, which stages the verified payload with live progress and a Cancel action and applies it as the app exits.
 - **Launch at login** — optional auto-start on boot.

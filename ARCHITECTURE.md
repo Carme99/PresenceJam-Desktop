@@ -708,14 +708,52 @@ Two `TeamsConfig` flags shape what the polling loop writes, and
   presence is clear (`Available`, `Away`, …); a transient gate-read
   failure at change time degrades to a logged warning and the write
   proceeds.
+- **`gate_when_out_of_office` (default OFF, #637):** the **lowest-precedence**
+  reason, so a user who is busy or in a call still gets that more specific
+  explanation. Fires on either documented signal —
+  `outOfOfficeSettings.isOutOfOffice` or `activity == "outOfOffice"` (both
+  case-insensitive; a body that omits the object parses as "not out of
+  office"). Reason string `out of office` (spaces). A rule carrying its own
+  presence pair overrides it for that iteration (`ooo_gate_enabled(config,
+  rule.presence.is_some())`).
+- **`respect_manual_status` (default ON, #635):** the gate also protects a
+  status message the *user* typed. `manual_status_blocks_write` requires all
+  five of: the flag on, a presence sample present, non-empty
+  `statusMessage.message.content`, an expiry that has not lapsed, and content
+  that is not byte-identical (after trim) to what this process last posted
+  (`last_posted_status` / `last_posted_placeholder`). Authorship is decided by
+  **content identity** — `publishedDateTime` is deliberately not modelled. No
+  sample (a failed read) fails **open**: the write proceeds.
+  `presence_gate_decision` applies presence reasons first, then this one, and
+  returns a single reason string.
+
+  What a gated verdict does on the playing path: record `gated_track_key`, emit
+  `presence-gated`, and `return playing_track_sleep(remaining_ms, config)` —
+  i.e. the **Teams write** is skipped while the loop keeps polling on its normal
+  cadence and re-evaluates the gate on the re-arm clock. The paused-clear path
+  honours the same verdict, so a hand-typed message is never replaced with
+  "Paused".
 - **`availability_sync` (default OFF, issue #3.0-P1):** while a track
-  plays, re-arm the Graph `Available`/`Available` presence session via
-  `set_teams_presence` at most every 4 minutes — Available sessions
-  **fade after 5 min** regardless of `expirationDuration`, so the re-arm
-  cadence (`AVAILABILITY_REARM_SECONDS` = 240 s) stays strictly inside
-  the fade window. On pause/stop, `clear_teams_presence` drops the
-  session (404 = already gone = success). Emits
-  `presence-availability-updated` on each arm/clear.
+  plays, re-arm the presence session via `set_teams_presence` at most every
+  4 minutes — Available sessions **fade after 5 min** regardless of
+  `expirationDuration`, so the re-arm cadence (`AVAILABILITY_REARM_SECONDS`
+  = 240 s) stays strictly inside the fade window. Since 4.6 (#636) the
+  requested `expirationDuration` is **derived**, not fixed:
+  `presence_expiration_duration` takes the remaining listening time plus one
+  re-arm period and clamps it into Microsoft's documented
+  `PT5M`–`PT4H` window, so a crash or force-quit no longer leaves the user
+  green for four hours — a live/unknown-position stream (issue #165) has no
+  remaining time to bound with and keeps `PT4H`. On pause/stop,
+  `clear_presence_session` drops it (404 = already gone = success).
+  `RunEvent::Exit` calls `updater_bg::install_pending_on_exit` **first** and
+  `polling::clear_presence_on_exit` second (the order is load-bearing: a Graph
+  round-trip must never delay an install, and on Windows an update-driven quit
+  exits the process without returning, so that path never reaches the
+  cleanup). The clear is best-effort and log-only, bounded by
+  `teams::EXIT_CLEANUP_TIMEOUT` (3 s): it no-ops when nothing of ours was armed
+  or posted, skips an expired stored token, and does not emit
+  `presence-availability-updated`. Emits that event on each in-session
+  arm/clear.
 - **`status_rules` (v4.5.0, issue #432; 4.6 semantics, #569/#570)** —
   `AppConfig::status_rules` holds quiet-hours entries and track rules. Since 4.6
   the per-iteration decision is computed **once** per poll
@@ -739,10 +777,56 @@ Two `TeamsConfig` flags shape what the polling loop writes, and
   a non-empty replacement never gates; its text flows into the normal #384
   identical-write dedup.
 
+  **Rule-driven presence (4.6, #634).** `rule_gate_at` returns a `RuleDecision`
+  — `{ reason, replacement, presence }` — built by `decision_from`, where an
+  empty replacement means *suppress* and an empty/unsupported presence pair means
+  *don't touch presence* (the same normalization, repeated so an in-memory config
+  that skipped the clamp cannot send Graph an unsupported pair).
+  `RuleDecision::suppresses()` is `reason.is_some() && replacement.is_none()`.
+  Two behaviours fall out of that shape:
+
+  - **Precedence is quiet hours first, track rules second.** A matching
+    quiet-hours row returns early; the track rule is never evaluated, so its
+    replacement text and its presence pair do not apply. The two decisions are
+    never merged.
+  - **A suppression-only rule still moves the bubble.** `rule_presence_backoff`
+    runs on the paths that return *before* the shared availability block
+    (a playing write suppressed by quiet hours or a track rule) and arms the
+    rule's pair — otherwise "while my Focus playlist plays, show me Do Not
+    Disturb" would move nothing, since its whole point is that no status write
+    happens. It is **inert unless `availability_sync` is on** (the hint text in
+    the UI says the same thing).
+
+  `should_arm_presence` arms immediately when the desired pair *differs* from the
+  armed one (a rule starting or stopping must move the bubble on the next
+  iteration) and otherwise keeps the 240 s cadence;
+  `arm_presence_session` is the single `setPresence` call site for both the rule
+  pair and the default "listening" pair, so the pair, the expiration bound and
+  the cadence cannot drift apart.
+
 `is_syncing` ownership: `commands/sync::start_syncing` is the **sole claimer**
 (v2.6.3, fixes issue #60 — `compare_exchange(false, true, …)` is here).
 `polling::start_polling` is a pure thread-spawner; the panic guard + spawn-error
 map-err in `polling/state.rs` resets the flag so future claims don't wedge.
+
+### User-editable config surface (4.6, #538)
+
+Three fields that existed in `config.json` but had no UI (and, for two of them,
+no reader at all) are now editable in Settings, each with inline clamp feedback
+mirroring the backend bound:
+
+| Field | Bound (backend, `config.rs`) | Settings | Consumed by |
+|-------|------------------------------|----------|-------------|
+| `status_rules.quiet_hours[].replacement_status` | `MAX_RULE_STATUS_CHARS` = 160 | "Post this instead (empty = suppress)" per quiet-hours row | ✅ the playing path *and* the no-track clear — a quiet-hours replacement is posted from both |
+| `teams.profanity_extra_words` | `clamp_teams`: at most 64 entries, each truncated to 32 chars | "Custom words to filter", one per line | ❌ **nothing** — `profanity::filter_status(text, placeholder, is_playing)` takes no extra lexicon, and no other module reads the field |
+| `polling.pause_backoff_max_seconds` | `clamp_polling`: 60–3600 s | "Paused backoff ceiling (seconds)" | ❌ **nothing** — `poll_once::pause_backoff` hardcodes the documented `.min(300)` ladder ceiling |
+
+> **Documented gap (must not be papered over):** all three are persisted,
+> clamped and validated, and the two `❌` rows are presented in the UI as if
+> they worked — `settings.extraWordsHint` promises the words are "applied with
+> the same boundaries as the built-in list" and `pauseBackoffClampHint` implies
+> the ceiling is honoured. Neither is true on `main`; the doc lines here and in
+> `USAGE.md` say so explicitly rather than describing intended behaviour.
 
 ### Profanity filter
 
@@ -881,8 +965,8 @@ sequenceDiagram
 | `polling-thread-panicked` | `null` | Polling thread panicked and was caught by `catch_unwind` |
 | `tray-click` | — | User clicks tray icon |
 | `toggle-pause` | — | User clicks Pause in tray menu |
-| `presence-gated` | `{reason, availability, activity, timestamp}` | Status write suppressed — `reason` is either a presence verdict (busy / doNotDisturb / **focusing** availability, or in-meeting / in-call / presenting activity; v3.0, `focusing` added in #254) or a status rule (`quiet-hours` / `track-rule`; v4.5.0, #432) |
-| `presence-availability-updated` | `{available, label, timestamp}` | Availability session armed (`Available`) or cleared (v3.0) |
+| `presence-gated` | `{reason, availability, activity, timestamp}` | Status write suppressed. `reason` is one of the four rule/policy strings — `quiet-hours`, `track-rule` (v4.5.0, #432), `manual-status` (#635), `out of office` (#637, spaces) — or a presence verdict: `busy` / `Do Not Disturb` / `focusing` availability, or `in a meeting` / `in a call` / `presenting` activity (v3.0; `focusing` added in #254). The Dashboard maps the four rule/policy strings to reason-specific chip copy and falls back to the generic busy/meeting line for every presence verdict, an unknown reason and the empty reason. Six emit sites funnel through the single `emit_presence_gated` |
+| `presence-availability-updated` | `{available, label, timestamp}` | Availability session armed (`Available`, or a matched rule's pair — v4.6, #634) or cleared in-session (v3.0). **Not** emitted by the exit-time cleanup |
 | `playback-error` | `string` (error message) | Tray playback command failed — no active device, non-Premium 403, etc. (v3.0) |
 | `spotify-auth-complete` | `null` | Spotify sign-in finished and tokens were persisted (no token value in the payload — #299) |
 | `teams-auth-complete` | `null` | Teams device-code sign-in finished and tokens were persisted (no token value — #299) |

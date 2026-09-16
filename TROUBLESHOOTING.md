@@ -93,7 +93,7 @@ The **Repeat** item spells its mode out — `Repeat: Off` → `Repeat: Context` 
 2. Re-enter the Reconnect view: it re-probes the keychain on every entry.
 3. There is deliberately **no Reconnect button** while this state is showing — the sign-in flow reads the secret from the same keychain that cannot answer, so it would only open a browser window that fails. You do **not** need to re-enter your Client ID/Secret.
 
-Settings shows the same state on the credential row ("System keychain unavailable — it may be locked or missing…"). A genuine *absent* credential is the only case that offers **Run onboarding**.
+Settings shows the same state on the credential row ("System keychain unavailable — it may be locked or missing…"). A genuine *absent* credential is the only case that offers **Run Onboarding**.
 
 ## Microsoft Teams
 
@@ -188,7 +188,17 @@ The banner names the `.bak` when one is still on disk. When the banner appears *
 3. Wait for the next poll: with a track playing, the status updates within a few seconds; when nothing is playing, the app backs off between polls (30 s → 60 s → 120 s → 300 s), so an idle app can take up to five minutes to react. Failed polls retry after ~30 s (±20%)
 4. If still nothing, check the log viewer for API errors
 
-**Suppressed by status rules?** PresenceJam also suppresses the write on purpose: a quiet-hours entry covering the current time and weekday, or an enabled track rule whose *Post this instead* field is left empty. The Dashboard shows its *suppressed* chip for these as well, and the log records which one fired — `[POLLING] process_track: quiet hours active, skipping status write` or `[POLLING] process_track: track rule matched, skipping status write`. Open **Settings → Status rules** and look for an enabled quiet-hours range covering now, and for a rule matching what's playing (see [USAGE.md — Status rules](./USAGE.md#status-rules)).
+**Suppressed by status rules or a presence policy?** PresenceJam also skips the write on purpose, and the Dashboard chip now names the cause:
+
+| Chip | Cause |
+|------|-------|
+| *quiet hours are active* | a quiet-hours entry covers the current time and weekday |
+| *a track rule matched* | an enabled quiet-hours row or track rule whose **Post this instead** field is left empty |
+| *you set a status message by hand* | **Never overwrite a status I set by hand** is on and your Teams status is not one the app posted (or it has expired) |
+| *you are out of office* | **Pause while I am out of office** is on and Teams reports you out of office |
+| *busy, in a call, or presenting* | the meeting/call/DND gate — busy, Do Not Disturb, focusing, in a meeting, in a call, or presenting |
+
+The log records the same verdicts — `[POLLING] process_track: quiet hours active, skipping status write`, `… track rule matched, …`, and `… presence-gated, skipping status write` for the policies. Nothing is paused: the app keeps polling on its normal cadence and the write resumes by itself once the cause clears (a quiet window ending, your presence going available, or the hand-set message expiring). Open **Settings → Status rules** for the first two, **Settings → Presence** for the policies (see [USAGE.md — Status rules](./USAGE.md#status-rules)).
 
 ### Status doesn't clear when Spotify is paused
 
