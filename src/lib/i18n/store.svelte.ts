@@ -7,6 +7,8 @@
  *
  * The locale persists to localStorage under `locale` and defaults to
  * the browser language (de/fr prefixes), falling back to English.
+ * Switching it also retags `<html lang>`; a `storage` write from another
+ * webview converges on the new locale (#620).
  */
 
 export type Locale = 'en' | 'de' | 'fr';
@@ -35,17 +37,29 @@ function detectInitialLocale(): Locale {
   return 'en';
 }
 
-let current = $state<Locale>(detectInitialLocale());
+const initialLocale = detectInitialLocale();
+let current = $state<Locale>(initialLocale);
+
+// #620: `<html lang>` drives screen-reader pronunciation and `:lang()`
+// styling. `app.html` ships the pre-hydration `lang="en"`; from the first
+// paint on, the active locale owns it.
+function applyDocumentLang(locale: Locale): void {
+  if (typeof document === 'undefined') return;
+  document.documentElement.lang = locale;
+}
+
+applyDocumentLang(initialLocale);
 
 export const i18n = {
   /** Reactive current locale — read it inside templates/effects. */
   get locale(): Locale {
     return current;
   },
-  /** Switch locale and persist the choice. */
+  /** Switch locale, persist the choice and retag the document. */
   set(next: Locale): void {
     if (!(KNOWN as readonly string[]).includes(next)) return;
     current = next;
+    applyDocumentLang(next);
     try {
       localStorage.setItem(STORAGE_KEY, next);
     } catch {
@@ -53,3 +67,19 @@ export const i18n = {
     }
   }
 };
+
+// #620: cross-window convergence — every webview (main + detached Logs /
+// Settings) owns an independent locale instance, so a detached window kept
+// rendering the language it loaded with after the user switched language in
+// the main window. `storage` fires in every OTHER same-origin webview on
+// write; this mirrors the #423 theme listener (stores/theme.ts).
+if (typeof window !== 'undefined') {
+  window.addEventListener('storage', (e) => {
+    if (e.key !== STORAGE_KEY) return;
+    const next = e.newValue;
+    if (next === null || !(KNOWN as readonly string[]).includes(next)) return;
+    // Same-value guard: `set()` would re-persist and re-tag the document.
+    if (next === current) return;
+    i18n.set(next as Locale);
+  });
+}
