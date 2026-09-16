@@ -61,8 +61,125 @@ jobs:
           echo "Resolved release tag: ${TAG}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
-  build:
+      # Gate (issue #605): the tag decides the version written into
+      # latest.json, but the shipped binary self-reports the version baked
+      # in at build time (tauri.conf.json). If the two disagree, the
+      # updater keeps offering an update the app never becomes — a
+      # permanent re-offer loop — and install_pending_on_exit sees
+      # staged > current on every quit. The tag must exist before it can be
+      # checked out, so this runs after the ls-remote existence check above
+      # and still ahead of `build`.
+      - name: Checkout repository at the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ steps.resolve.outputs.tag }}
+
+      - name: Verify version consistency
+        env:
+          RELEASE_TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          EXPECTED="${RELEASE_TAG#v}"
+          CONFIG_VERSION=$(jq -r .version src-tauri/tauri.conf.json)
+          PKG_VERSION=$(jq -r .version package.json)
+          CARGO_VERSION=$(sed -nE 's/^version = "(.*)"/\1/p' src-tauri/Cargo.toml | head -1)
+          echo "Tag ${RELEASE_TAG} implies version ${EXPECTED}"
+          echo "src-tauri/tauri.conf.json : ${CONFIG_VERSION}"
+          echo "package.json              : ${PKG_VERSION}"
+          echo "src-tauri/Cargo.toml      : ${CARGO_VERSION}"
+          drift=0
+          for entry in "src-tauri/tauri.conf.json:${CONFIG_VERSION}" "package.json:${PKG_VERSION}" "src-tauri/Cargo.toml:${CARGO_VERSION}"; do
+            file="${entry%:*}"
+            version="${entry##*:}"
+            if [ "$version" != "$EXPECTED" ]; then
+              echo "::error::tag/version drift: ${file} says '${version}' but tag ${RELEASE_TAG} implies '${EXPECTED}'"
+              drift=1
+            fi
+          done
+          exit "$drift"
+
+  # Verification gate (issue #606): ci.yml enforces fmt, clippy, the test
+  # suites and the Svelte/TS type check on pull_request / push-to-main
+  # only. A tag push jumps straight from resolve-tag into the three-OS
+  # build matrix, so without this job the exact commit that produces
+  # user-facing binaries is never verified — worst of all on a
+  # workflow_dispatch re-cut of a commit that never ran CI. Mirrors the
+  # ci.yml gate set (including its Linux system dependencies) against the
+  # resolved tag. A separate job so a failure blocks the matrix without
+  # burning runner minutes on three OSes.
+  verify:
     needs: resolve-tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.resolve-tag.outputs.tag }}
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6.5.0
+        with:
+          node-version: 24
+          cache: 'npm'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e  # 1.96
+        with:
+          toolchain: "1.96"
+          components: rustfmt, clippy
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            pkg-config \
+            build-essential
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Cargo fmt (check)
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all --check
+
+      - name: Cargo clippy (deny warnings)
+        env:
+          CARGO_INCREMENTAL: 0
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      # Runs before the type check on purpose: the ts-rs `#[ts(export)]`
+      # tests materialise src/lib/types-generated/, which src/lib/types.ts
+      # re-exports and svelte-check must resolve.
+      - name: Cargo test (all targets)
+        env:
+          CARGO_INCREMENTAL: 0
+        run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets
+
+      - name: Svelte/TS type check (npm run check)
+        run: npm run check
+
+      - name: Frontend unit tests (npm test)
+        run: npm test
+
+  build:
+    needs: [resolve-tag, verify]
     runs-on: ${{ matrix.os }}
     # Least privilege for the build matrix: read-only repo access plus
     # the OIDC (id-token) and attestations scopes consumed by
@@ -111,11 +228,13 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6.5.0
         with:
-          node-version: 20
+          node-version: 24
           cache: 'npm'
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e  # 1.96
+        with:
+          toolchain: "1.96"
 
       # Cargo cache mirrors the PR-time ci.yml setup (PR #55). Cuts the
       # release build from ~50 min cold compile to ~15-20 min warm.

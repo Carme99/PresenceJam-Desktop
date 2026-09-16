@@ -39,11 +39,13 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6.5.0
         with:
-          node-version: 20
+          node-version: 24
           cache: 'npm'
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e  # 1.96
+        with:
+          toolchain: "1.96"
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
@@ -80,7 +82,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6.5.0
         with:
-          node-version: 20
+          node-version: 24
           cache: 'npm'
 
       - name: Install frontend dependencies
@@ -88,6 +90,8 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e  # 1.96
+        with:
+          toolchain: "1.96"
 
       - name: Install Linux system dependencies
         run: |
@@ -137,10 +141,11 @@ jobs:
         run: npm run check
 
       # Frontend unit tests via vitest (issue #443). Runs after the type
-      # check; a missing `test` script must not fail this job before the
-      # harness lands, so fall back to a no-op in that case.
+      # check. Deliberately not `--if-present` (issue #607): a missing or
+      # renamed `test` script must fail this leg, not let it report green
+      # with zero tests executed.
       - name: Frontend unit tests (npm test)
-        run: npm test --if-present
+        run: npm test
 
   # Rust: cargo check + cargo test on all targets (lib + bins + tests + benches) catches
   # type errors, borrow errors, missing imports, and broken test code.
@@ -155,7 +160,7 @@ jobs:
   rust:
     name: Rust (cargo check)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 25
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -165,12 +170,13 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6.5.0
         with:
-          node-version: 20
+          node-version: 24
           cache: 'npm'
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e  # 1.96
         with:
+          toolchain: "1.96"
           components: rustfmt
 
       - name: Install Linux system dependencies
@@ -208,8 +214,12 @@ jobs:
           CARGO_INCREMENTAL: 0
         run: cargo check --manifest-path src-tauri/Cargo.toml --all-targets
 
-      # Runs the Rust unit-test suite. Reuses the cached build from the Cargo
-      # check step above so this is incremental rather than a cold rebuild.
+      # Runs the Rust unit-test suite. `cargo check` above only emits
+      # metadata (.rmeta); `cargo test` needs codegen'd rlib/bin artifacts,
+      # so this is a second full compile of the dependency tree, not an
+      # incremental reuse — a Cargo.lock change (every backend Dependabot
+      # merge, weekly) makes both passes cold. That is why this job gets
+      # 25 minutes while the check-only platform leg gets 20.
       - name: Cargo test (all targets)
         env:
           CARGO_INCREMENTAL: 0
@@ -225,7 +235,7 @@ jobs:
   rust-clippy:
     name: Rust clippy
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -235,12 +245,13 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6.5.0
         with:
-          node-version: 20
+          node-version: 24
           cache: 'npm'
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e  # 1.96
         with:
+          toolchain: "1.96"
           components: clippy
 
       - name: Install Linux system dependencies
@@ -295,6 +306,44 @@ jobs:
           done
           exit $missing
 
+  # Version consistency (issue #605): the release tag decides the version
+  # written into latest.json, while the shipped binary self-reports
+  # whatever tauri.conf.json says (Cargo.toml and package.json are two more
+  # copies). A partial bump ships a binary whose self-reported version never
+  # matches latest.json, so tauri-plugin-updater re-offers the same update
+  # on every check and the prompt never goes away. release.yml gates the
+  # tag against all three sources; this leg catches the drift at PR time,
+  # before a tag exists to disagree with.
+  version-consistency:
+    name: Version consistency
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the three version sources agree
+        run: |
+          set -euo pipefail
+          CONFIG_VERSION=$(jq -r .version src-tauri/tauri.conf.json)
+          PKG_VERSION=$(jq -r .version package.json)
+          CARGO_VERSION=$(sed -nE 's/^version = "(.*)"/\1/p' src-tauri/Cargo.toml | head -1)
+          echo "src-tauri/tauri.conf.json : ${CONFIG_VERSION}"
+          echo "package.json              : ${PKG_VERSION}"
+          echo "src-tauri/Cargo.toml      : ${CARGO_VERSION}"
+          drift=0
+          for entry in "package.json:${PKG_VERSION}" "src-tauri/Cargo.toml:${CARGO_VERSION}"; do
+            file="${entry%:*}"
+            version="${entry##*:}"
+            if [ "$version" != "$CONFIG_VERSION" ]; then
+              echo "::error::version drift: ${file} says '${version}' but src-tauri/tauri.conf.json says '${CONFIG_VERSION}'"
+              drift=1
+            fi
+          done
+          exit "$drift"
+
   # Secret scan (issue #356): read-only gitleaks detect over all commits.
   # No SARIF upload (needs security-events:write); findings surface as
   # step output. contents:read is already the workflow default.
@@ -341,7 +390,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6.5.0
         with:
-          node-version: 20
+          node-version: 24
           cache: 'npm'
 
       - name: npm audit (advisory)
