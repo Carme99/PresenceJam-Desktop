@@ -23,7 +23,7 @@ use sha2::{Digest, Sha256};
 /// contract used by Spotify and Microsoft.
 pub fn generate_verifier() -> String {
     let mut bytes = [0u8; 64];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
@@ -49,7 +49,7 @@ pub fn generate_challenge(verifier: &str) -> String {
 /// stays in our AppState). See issue #66.
 pub fn generate_launch_secret() -> String {
     let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     URL_SAFE_NO_PAD.encode(bytes)
 }
 

@@ -231,9 +231,16 @@ impl Default for AppConfig {
 }
 
 pub fn config_dir() -> Result<PathBuf, String> {
-    let base_dir = dirs::config_dir().ok_or_else(|| {
-        "Failed to get config directory: dirs::config_dir() returned None".to_string()
-    })?;
+    // Maintained replacement for the unmaintained `dirs` crate (issue #418):
+    // `directories::BaseDirs::new()` resolves the same platform config
+    // roots (XDG_CONFIG_HOME/~/.config on Linux, ~/Library/Application
+    // Support on macOS, %APPDATA% on Windows) and preserves the
+    // `<config>/PresenceJam` layout and 0o700 creation below.
+    let base_dir = directories::BaseDirs::new()
+        .map(|b| b.config_dir().to_path_buf())
+        .ok_or_else(|| {
+            "Failed to get config directory: BaseDirs::new() returned None".to_string()
+        })?;
 
     let app_dir = base_dir.join("PresenceJam");
 

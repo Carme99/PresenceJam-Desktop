@@ -36,7 +36,7 @@ use crate::spotify::SpotifyTokens;
 use crate::teams::TeamsTokens;
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
-use rand::RngCore;
+use rand::TryRngCore;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
@@ -81,7 +81,9 @@ const TOKENS_HEADER_LEN: usize = TOKENS_MAGIC.len() + 1 + TOKENS_NONCE_LEN;
 /// ciphertext-pattern leakage) and the nonce never repeats.
 fn encrypt_tokens(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, String> {
     let mut nonce_bytes = [0u8; TOKENS_NONCE_LEN];
-    rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
+    rand::rngs::OsRng
+        .try_fill_bytes(&mut nonce_bytes)
+        .map_err(|e| format!("OS CSPRNG nonce generation failed: {}", e))?;
     let cipher =
         Aes256Gcm::new_from_slice(key).map_err(|_| "AES-256 key must be 32 bytes".to_string())?;
     let ciphertext = cipher

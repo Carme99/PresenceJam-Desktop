@@ -15,7 +15,7 @@
 //! OS keychain on the happy path. Issue #69.
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use rand::RngCore;
+use rand::TryRngCore;
 use std::sync::OnceLock;
 
 const KEYRING_SERVICE: &str = "presencejam";
@@ -62,8 +62,8 @@ fn keychain_error_help(err: &keyring::Error) -> Option<String> {
     match err {
         keyring::Error::NoEntry => None,
         keyring::Error::PlatformFailure(_) | keyring::Error::NoStorageAccess(_) => Some(format!(
-            "OS keychain is unavailable: {}. On Linux install/enable a system \
-                 keyring (gnome-keyring, kwallet, or systemd-creds) and log in to a \
+            "OS keychain is unavailable: {}. On Linux install/enable a Secret Service provider \
+                 (gnome-keyring with headless unlock, kwallet, or a KeePassXC bridge) and log in to a \
                  graphical session; see {}.",
             err, LINUX_KEYRING_DOC
         )),
@@ -304,7 +304,9 @@ pub fn get_or_create_tokens_aes_key() -> Result<[u8; 32], String> {
         Ok(b64) => decode_tokens_aes_key(&b64),
         Err(keyring::Error::NoEntry) => {
             let mut key = [0u8; 32];
-            rand::rngs::OsRng.fill_bytes(&mut key);
+            rand::rngs::OsRng
+                .try_fill_bytes(&mut key)
+                .map_err(|e| format!("Failed to generate tokens AES key from OS CSPRNG: {}", e))?;
             let b64 = STANDARD.encode(key);
             map_keychain_err(entry.set_password(&b64))?;
             log::info!("[KEYCHAIN] Generated + stored tokens.json AES key in OS keychain");

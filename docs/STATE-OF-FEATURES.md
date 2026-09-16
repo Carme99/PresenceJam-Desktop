@@ -1,4 +1,4 @@
-# State of Features — v4.3.0
+# State of Features — v4.4.0
 
 Quick, no-hedge answers to "does this thing actually work in *my* setup?"
 Most of the answers below are tied to a code path or a docs file you can read
@@ -9,7 +9,7 @@ end-to-end; the few rows that can't be sourced inline are explicitly flagged
 > row that's stale, the right place to flag it is in a PR against this file;
 > do not edit the underlying behavior silently.
 
-## Tested in main (verified during the v4.3.0 release cycle)
+## Tested in main (verified during the v4.4.0 release cycle)
 
 | Feature                                               | Status | Where it's wired / verified                                                                                             |
 |-------------------------------------------------------|--------|--------------------------------------------------------------------------------------------------------------------------|

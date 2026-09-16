@@ -6,8 +6,8 @@ Thank you for your interest in contributing!
 
 ### Prerequisites
 
-- **Rust** 1.75+ ([rustup](https://rustup.rs/))
-- **Node.js** 18+ ([nodejs.org](https://nodejs.org/))
+- **Rust** 1.96 ([rustup](https://rustup.rs/)) — version CI installs; MSRV not declared (no `rust-version` in `Cargo.toml`, no `toolchain:` pin on the `dtolnay/rust-toolchain` steps — actions SHA-pinned only, see `ci.yml`)
+- **Node.js** 20+ ([nodejs.org](https://nodejs.org/))
 - **npm** 9+
 - **Tauri CLI** v2 — provided by repo-pinned local `@tauri-apps/cli`; use `npm run tauri ...`. A global install is unnecessary.
 
@@ -35,6 +35,7 @@ npm run tauri dev
 | `cargo test` | Run Rust unit tests |
 | `cargo fmt` | Format Rust code |
 | `npm run check` | Type-check Svelte/TypeScript |
+| `npm test` | Run frontend unit tests (vitest; lands with issue #443 — no `test` script on main yet) |
 
 ## Coding Standards
 
@@ -54,7 +55,7 @@ Types: `feat`, `fix`, `docs`, `test`, `refactor`, `chore`
 ### Rust
 
 - Run `cargo check` before committing
-- Use `cargo fmt` to format code before committing
+- Run `cargo fmt --check` (CI `rust` job gates on it) and `cargo clippy --all-targets -- -D warnings` (CI `rust-clippy` job) before committing
 - Error handling with `Result` types — no `unwrap()` on fallible I/O or parse paths in production code; the sole exception is the `tray.rs` `cached_devices` cache-hit fast path, which unwraps a snapshot it just proved is `Some`
 - Use `log::info!` / `log::debug!` over `println!`
 - Prefix module-level log tags in square brackets: `[MODULE]`
@@ -96,7 +97,7 @@ To see verbose output in dev mode, check the terminal where `npm run tauri dev` 
 2. Create a branch: `fix/short-description`
 3. Make your changes
 4. Ensure it compiles: `cargo check && npm run check`
-5. Run tests: `cargo test`
+5. Run tests: `cargo test` (+ `npm test` for frontend changes)
 6. Commit with a clear message
 7. Open a Pull Request
 
@@ -107,7 +108,7 @@ To see verbose output in dev mode, check the terminal where `npm run tauri dev` 
 3. Write your implementation
 4. Test in dev mode: `npm run tauri dev`
 5. Ensure it compiles: `cargo check && npm run check`
-6. Run tests: `cargo test`
+6. Run tests: `cargo test` (+ `npm test` for frontend changes)
 7. Commit with a clear message
 8. Open a Pull Request
 

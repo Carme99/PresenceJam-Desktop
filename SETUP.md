@@ -175,8 +175,8 @@ If PresenceJam fails to start with an error mentioning "OS keychain is unavailab
 |---|---|
 | GNOME (Ubuntu, Fedora Workstation, etc.) | `gnome-keyring` (usually pre-installed on GNOME desktops) |
 | KDE Plasma | `kwallet5` or `kwallet6` |
-| systemd-based, no GUI | `systemd-creds` |
-| Other / headless | `gnome-keyring` + `libsecret-tools` |
+| Headless / no GUI | `gnome-keyring-daemon` with headless unlock (`echo <password> \| gnome-keyring-daemon --unlock`, then verify with `secret-tool` below), or a KeePassXC Secret Service bridge |
+| Other | `gnome-keyring` + `libsecret-tools` |
 
 **Linux install command:**
 

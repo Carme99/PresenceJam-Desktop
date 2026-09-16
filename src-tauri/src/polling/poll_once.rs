@@ -2031,9 +2031,9 @@ fn pause_backoff(consecutive_pauses: u8, default_secs: u64) -> u64 {
 }
 
 fn with_jitter(base_secs: u64) -> u64 {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let jitter_range = base_secs as f64 * 0.2;
-    let jitter = rng.gen_range(-jitter_range..=jitter_range);
+    let jitter = rng.random_range(-jitter_range..=jitter_range);
     (base_secs as f64 + jitter).max(1.0) as u64
 }
 

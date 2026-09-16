@@ -174,7 +174,7 @@ This is the app's own expiry/clear mechanism, not a Teams limitation. To keep th
 **Cause:** The filter currently operates on the formatted status string after the template is applied. If your template uses custom placeholders, the raw track metadata (artist/track/album) may not be fully covered.
 
 **Fix / Workaround:**
-This is a known architectural limitation. See the TODO note in [ARCHITECTURE.md](./ARCHITECTURE.md#profanity-filter). A future release will filter raw Spotify fields before formatting.
+This is a known architectural limitation: the filter screens the formatted status string (see [ARCHITECTURE.md](./ARCHITECTURE.md#profanity-filter)), verified against `poll_once.rs` (filter applied at the single status-write path) and `profanity.rs`. A future release will filter raw Spotify fields before formatting.
 
 ### What's in the profanity word list?
 
