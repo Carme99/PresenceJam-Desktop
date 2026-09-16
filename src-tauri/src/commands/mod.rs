@@ -13,8 +13,10 @@
 //!   - `window` — show_window, set_autostart_enabled, open_logs_folder, open_external_url
 //!   - `onboarding` — is_onboarding_complete, complete_onboarding, reconnect_spotify, reconnect_teams
 //!   - `misc` — preview_status, update_tray_menu_state
+//!   - `logs` — get_recent_logs (LogViewer history backfill, issue #595)
 
 pub mod config;
+pub mod logs;
 pub mod misc;
 pub mod onboarding;
 pub mod playback;
@@ -89,17 +91,23 @@ pub fn require_main_window(window: &tauri::Window) -> Result<(), String> {
 /// open_external_url (Teams verification-URL open during detached
 /// device-code flow), save_config (whole-document config write) and
 /// update_config (field-level config write, issue #535) — both are reached
-/// from Settings, which is one of the two detached-hosting views.
+/// from Settings, which is one of the two detached-hosting views;
+/// get_recent_logs (LogViewer history backfill, issue #595) — the Logs pane
+/// is hosted in either window, and the file it tails is the same local file
+/// `open_logs_folder` already exposes to both, unredacted there and here
+/// alike (only the paste-able snapshot is redacted, #434).
 #[cfg(test)]
 mod tests {
-    /// Regression guard for issue #76: the `commands` module must declare all
-    /// 8 per-workflow submodules. If a contributor deletes one (or renames the
-    /// module without updating this list), `cargo test` fails fast.
+    /// Regression guard for issue #76: the `commands` module must declare
+    /// every per-workflow submodule. If a contributor deletes one (or renames
+    /// the module without updating this list), `cargo test` fails fast.
+    /// `logs` joined the list with the #595 LogViewer backfill.
     #[test]
     fn test_commands_split_groups_present() {
         let source = include_str!("mod.rs");
         for group in &[
             "config",
+            "logs",
             "spotify_auth",
             "playback",
             "teams_auth",

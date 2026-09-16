@@ -2,7 +2,11 @@
   emits the backend redacted tail + version/platform. Virtualization is
   deferred (the RENDER_WINDOW tail cap below is the pre-existing #399
   fix, untouched here); jumpToLatest pre-exists for the #400 stickiness
-  path. No new commands, no new scopes. -->
+  path.
+  Issue #595 added one more command: the pane also reads the on-disk log
+  tail through `get_recent_logs` to seed its buffer on mount. That read is
+  raw and local-only (the redacted, paste-able artifact is still the
+  snapshot above); no new OAuth scopes are involved. -->
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
@@ -28,6 +32,9 @@
 
   // #399: render-window cap (buffer stays 500, DOM renders the tail only).
   const RENDER_WINDOW = 100;
+  // Buffer ceiling — one source for the live push path (#399) and for the
+  // #595 backfill seed, and the number the backend clamps its own tail to.
+  const MAX_BUFFER = 500;
   // #400: stickiness threshold in px (scrollHeight - scrollTop - clientHeight).
   const SCROLL_THRESHOLD = 48;
 
@@ -151,10 +158,85 @@
     if (total === 1) return t('logs.countOne', { count: total });
     return t('logs.countOther', { count: total });
   }
-  onMount(async () => {
-    // Note: get_recent_logs is a placeholder in v2 — tauri_plugin_log streams live via Webview
-    // The listener below handles all log entries in real-time.
 
+  // #595: seed the buffer from the on-disk tail. The pane used to open empty
+  // and stay that way until the next live event, while PresenceJam.log already
+  // held the session's history — and "Copy snapshot" pasted that same history,
+  // so the two surfaces contradicted each other.
+  //
+  // The backend read is raw (no redaction): it feeds the local viewer showing
+  // the very file the user can open from the toolbar, not the paste-able
+  // support artifact (#434/#487) — that one still comes solely from
+  // `get_diagnostics_snapshot`.
+  //
+  // On-disk line format (tauri-plugin-log desktop default, written in UTC):
+  //   [YYYY-MM-DD][HH:MM:SS][target][LEVEL] message
+  const LOG_LINE_RE =
+    /^\[(\d{4}-\d{2}-\d{2})\]\[(\d{2}:\d{2}:\d{2})\]\[([^\]]*)\]\[(\w+)\]\s?(.*)$/;
+  // The backend clamps `limit` to this same ceiling.
+  const BACKFILL_LINES = MAX_BUFFER;
+
+  /** Backend level word (`WARN`) -> the canonical name the filter tabs use. */
+  function canonicalLevel(raw: string): string {
+    const l = raw.toUpperCase();
+    if (l === 'TRACE') return 'Trace';
+    if (l === 'DEBUG') return 'Debug';
+    if (l === 'WARN' || l === 'WARNING') return 'Warning';
+    if (l === 'ERROR') return 'Error';
+    return 'Info';
+  }
+
+  /** One on-disk log line -> the shape the list renders. */
+  function parseLogLine(line: string): Omit<LogEntry, 'seq'> {
+    const m = LOG_LINE_RE.exec(line);
+    if (!m) {
+      // Not a plugin-formatted record (verbatim write, rotated fragment):
+      // keep the text rather than dropping the line.
+      return { timestamp: '', level: 'Info', message: line };
+    }
+    // The file is UTC; the live rows below are local, so convert — otherwise
+    // one instant would print as two different times in the same column.
+    const at = new Date(`${m[1]}T${m[2]}Z`);
+    return {
+      timestamp: Number.isNaN(at.getTime()) ? m[2] : at.toLocaleTimeString(),
+      level: canonicalLevel(m[4]),
+      message: `[${m[3]}] ${m[5]}`
+    };
+  }
+
+  // #595: Clear is an instruction to empty the pane — a tail that lands after
+  // it must not resurrect what the user just wiped.
+  let seedCancelled = false;
+
+  /**
+   * Prepend the on-disk history to whatever the live stream has already
+   * delivered. A pane the user has scrolled away from keeps its exact scroll
+   * position: only a pane still pinned to the bottom follows the content.
+   */
+  async function seedHistory() {
+    let lines: unknown;
+    try {
+      lines = await invoke<unknown>('get_recent_logs', { limit: BACKFILL_LINES });
+    } catch (e) {
+      // Backfill is an enhancement — the live stream keeps working without it.
+      console.warn('[LOGVIEWER] get_recent_logs failed:', e);
+      return;
+    }
+    if (!Array.isArray(lines) || lines.length === 0 || seedCancelled) return;
+    const seeded: LogEntry[] = (lines as string[]).map(line => ({
+      seq: seqCounter++,
+      ...parseLogLine(line)
+    }));
+    logs = [...seeded, ...logs].slice(-MAX_BUFFER);
+    if (!atBottom) return;
+    await tick();
+    updateStickinessAndSnap();
+  }
+
+  onMount(async () => {
+    // Register the live stream FIRST: the disk read below is slower than the
+    // first events, and `log://log` stays authoritative for everything from
+    // here on — the seed only prepends what already happened.
     unlisten.push(await listen<LogPayload>('log://log', (event) => {
       // #400: capture stickiness BEFORE the push changes the scroll height.
       atBottom = isAtBottom();
@@ -170,9 +252,11 @@
         level: levelStr,
         message: event.payload?.message || ''
       });
-      if (logs.length > 500) logs.shift();
+      if (logs.length > MAX_BUFFER) logs.shift();
       updateStickinessAndSnap();
     }));
+
+    await seedHistory();
   });
 
   onDestroy(() => unlisten.forEach(fn => fn()));
@@ -242,6 +326,9 @@
   }
 
   function clearLogs() {
+    // #595: drop a tail still in flight — Clear must empty the pane, not
+    // have history reappear in it a moment later.
+    seedCancelled = true;
     logs = [];
   }
 
