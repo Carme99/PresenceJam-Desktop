@@ -19,6 +19,7 @@ import { de } from './i18n/de';
 import { fr } from './i18n/fr';
 import { i18n } from './i18n/store.svelte';
 import type { Locale } from './i18n/store.svelte';
+import { devLog } from './utils/dev';
 
 export { i18n };
 export type { Locale } from './i18n/store.svelte';
@@ -31,11 +32,19 @@ export function t(
   key: TKey,
   params?: Record<string, string | number>
 ): string {
-  let text: string = DICTS[i18n.locale][key] ?? en[key];
+  // #424: runtime degradation — Dict parity makes a miss impossible at
+  // compile time, but a stale chunk / hand-cast TKey can still miss at
+  // runtime. Fall back to the key itself instead of throwing in split.
+  // Warn in dev so the fallback never masks a real dict bug (#review-4).
+  const hit = DICTS[i18n.locale][key] ?? en[key];
+  if (hit === undefined) devLog(`[I18N] missing key '${key as string}' for locale '${i18n.locale}' — falling back to key`);
+  const text: string = hit ?? (key as string);
   if (params) {
+    let out = text;
     for (const [name, value] of Object.entries(params)) {
-      text = text.split(`{${name}}`).join(String(value));
+      out = out.split(`{${name}}`).join(String(value));
     }
+    return out;
   }
   return text;
 }

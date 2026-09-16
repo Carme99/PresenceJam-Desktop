@@ -19,10 +19,16 @@
   // registering them per-window would run device-code/OAuth flows twice
   // when both windows mount. Detached windows only inherit the theme
   // side-effect import above.
-  const isMainWindow = getCurrentWindow().label === 'main';
+  // #498: outside the Tauri runtime (plain browser) `getCurrentWindow()`
+  // throws synchronously at component init, blanking the page before the
+  // +page boot-failure path can mount. Detect the runtime first and
+  // render a static notice instead of Tauri-dependent listeners.
+  const isTauriRuntime =
+    typeof window !== 'undefined' &&
+    typeof (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !== 'undefined';
+  const isMainWindow = isTauriRuntime ? getCurrentWindow().label === 'main' : false;
   import { authFlow, setTeamsPhase, setTeamsDeviceCode, setSpotifyPhase, expiresAtFromResponse, resetTeamsAuthFlow, tryAcquireTeamsPoll, releaseTeamsPoll } from '$lib/stores/authFlow.svelte';
   import type { DeviceCodeResponse, AppConfig } from '$lib/types';
-
   devLog(`[LAYOUT] PresenceJam build: ${import.meta.env.VITE_APP_BUILD ?? 'dev build'}`);
 
   let playbackError = $state('');
@@ -41,7 +47,8 @@
   // Settings no longer owns spotify-reconnect-required (issue #220) to
   // avoid missed events when the user is on Dashboard.
   onMount(() => {
-    if (!isMainWindow) return;
+    // #498: never touch Tauri IPC outside the runtime (plain browser).
+    if (!isTauriRuntime || !isMainWindow) return;
     let unlistenTeams: (() => void) | null = null;
     let unlistenSpotify: (() => void) | null = null;
     let unlistenPlayback: (() => void) | null = null;
@@ -170,7 +177,17 @@
 </svelte:head>
 
 <a class="skip-link" href="#main-content">{t('routes.skipToMainContent')}</a>
+{#if !isTauriRuntime}
+  <!-- #498: static notice outside the Tauri runtime — plain-browser
+       visitors get an explanation instead of a blank page + uncaught
+       metadata exception. Reuses existing keys, no new copy. -->
+  <main id="main-content">
+    <p>{t('common.bootFailed')}</p>
+    <p>{t('dashboard.setupHint')}</p>
+  </main>
+{:else}
 <slot />
+{/if}
 {#if playbackError}
   <div class="playback-toast" role="alert">
     <span class="toast-msg">{playbackError}</span>

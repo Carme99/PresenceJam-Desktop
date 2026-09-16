@@ -5,6 +5,20 @@
     <link rel="icon" href="%sveltekit.assets%/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>PresenceJam</title>
+    <script>
+      // #423: pre-hydration theme bootstrap — kills the dark-flash for
+      // stored-'light' users. readInitial() already prefers OS light, but
+      // the static/SSR path bakes the 'dark' fallback; this inline script
+      // runs before first paint in every webview (main + detached).
+      try {
+        // #review-12: let (block scope) + explicit catch param.
+        let t = localStorage.getItem('presencejam:theme');
+        if (t !== 'light' && t !== 'dark') {
+          t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
+        }
+        document.documentElement.setAttribute('data-theme', t);
+      } catch (err) { /* storage blocked — theme store default applies */ }
+    </script>
     %sveltekit.head%
   </head>
   <body data-sveltekit-preload-data="hover">
