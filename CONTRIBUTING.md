@@ -6,7 +6,7 @@ Thank you for your interest in contributing!
 
 ### Prerequisites
 
-- **Rust** 1.96+ ([rustup](https://rustup.rs/)) — matches `ci.yml` toolchain pin
+- **Rust** 1.96+ ([rustup](https://rustup.rs/)) — minimum supported version; CI pins the 1.96 toolchain (`dtolnay/rust-toolchain` in `ci.yml`)
 - **Node.js** 20+ ([nodejs.org](https://nodejs.org/))
 - **npm** 9+
 - **Tauri CLI** v2 — provided by repo-pinned local `@tauri-apps/cli`; use `npm run tauri ...`. A global install is unnecessary.
@@ -35,7 +35,7 @@ npm run tauri dev
 | `cargo test` | Run Rust unit tests |
 | `cargo fmt` | Format Rust code |
 | `npm run check` | Type-check Svelte/TypeScript |
-| `npm test` | Run frontend unit tests (vitest, issue #443) |
+| `npm test` | Run frontend unit tests (vitest; lands with issue #443 — no `test` script on main yet) |
 
 ## Coding Standards
 

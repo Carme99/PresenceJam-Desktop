@@ -40,9 +40,9 @@ url = "2"
 urlencoding = "2"
 # Cross-platform OS keychain access for secure storage of OAuth secrets
 # (e.g. Spotify client_secret). See issue #9.
-# Kept features (issue #418): apple-native + windows-native plus the Linux
-# combo linux-native + sync-secret-service — the combo selects the
-# persistent Secret Service store as the Linux default (see keyring
+# Kept features (issue #418): apple-native + windows-native, plus enabling
+# both linux-native and sync-secret-service on Linux — with both enabled the
+# persistent Secret Service store becomes the Linux default (see keyring
 # src/lib.rs "Credential store features"; Secret Service persists via
 # gnome-keyring/kwallet, configured in SETUP.md#linux-keyring). The
 # keyutils-only store is in-memory and expires after logout/reboot, so it
