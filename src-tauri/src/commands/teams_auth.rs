@@ -183,7 +183,9 @@ pub fn refresh_teams(
             Ok(())
         }
         CasOutcome::Discarded { .. } => {
-            log::error!("{CMD} refresh_teams: state was cleared during the refresh; re-auth required");
+            log::error!(
+                "{CMD} refresh_teams: state was cleared during the refresh; re-auth required"
+            );
             Err(TEAMS_REAUTH_MSG.to_string())
         }
         CasOutcome::RefreshFailed(TeamsApiError::InvalidGrant) => {
@@ -194,7 +196,10 @@ pub fn refresh_teams(
             // Issue #180: the clearing statement above drops its guard at the
             // end of that statement, so this persist cannot self-deadlock.
             if let Err(e) = token_io::persist_tokens(state.inner(), &app) {
-                log::warn!("{CMD} refresh_teams: failed to persist cleared teams tokens: {}", e);
+                log::warn!(
+                    "{CMD} refresh_teams: failed to persist cleared teams tokens: {}",
+                    e
+                );
             }
             Err(TEAMS_REAUTH_MSG.to_string())
         }
@@ -208,8 +213,8 @@ pub fn refresh_teams(
 /// IPC error text for a session the user has to re-authorize. The frontend
 /// renders the error string verbatim, so it has to name the action rather
 /// than a provider error code (issue #564).
-const TEAMS_REAUTH_MSG: &str = "Your Microsoft Teams session has expired. Sign in again from Settings.";
-
+const TEAMS_REAUTH_MSG: &str =
+    "Your Microsoft Teams session has expired. Sign in again from Settings.";
 
 /// Decodes the `scp` claim from the stored Teams access token's JWT payload
 /// (empty when undecodable or no token). Powers the Settings one-time

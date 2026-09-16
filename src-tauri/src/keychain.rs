@@ -232,14 +232,14 @@ fn classify_keychain_lookup(result: Result<String, keyring::Error>) -> KeychainP
     match result {
         Ok(_) => KeychainPresence::Present,
         Err(keyring::Error::NoEntry) => KeychainPresence::Absent,
-        Err(other) => KeychainPresence::Unavailable(
-            keychain_error_help(&other).unwrap_or_else(|| {
+        Err(other) => {
+            KeychainPresence::Unavailable(keychain_error_help(&other).unwrap_or_else(|| {
                 format!(
                     "OS keychain error: {}. On Linux see {} for setup help.",
                     other, LINUX_KEYRING_DOC
                 )
-            }),
-        ),
+            }))
+        }
     }
 }
 
@@ -272,9 +272,12 @@ fn combine_presence(probes: impl IntoIterator<Item = KeychainPresence>) -> Keych
 /// generations of installs (audit M2).
 pub fn spotify_client_secret_presence() -> KeychainPresence {
     combine_presence(
-        [SPOTIFY_CLIENT_SECRET_USER, SPOTIFY_CLIENT_SECRET_USER_LEGACY]
-            .into_iter()
-            .map(|user| classify_keychain_lookup(probe_keychain_entry(user))),
+        [
+            SPOTIFY_CLIENT_SECRET_USER,
+            SPOTIFY_CLIENT_SECRET_USER_LEGACY,
+        ]
+        .into_iter()
+        .map(|user| classify_keychain_lookup(probe_keychain_entry(user))),
     )
 }
 
@@ -493,8 +496,8 @@ fn create_or_adopt_tokens_key(
             // under a key the keychain does not hold.
             match read() {
                 Ok(stored) => {
-                    let stored_key = decode_tokens_aes_key(&stored)
-                        .map_err(corrupt_tokens_aes_key_help)?;
+                    let stored_key =
+                        decode_tokens_aes_key(&stored).map_err(corrupt_tokens_aes_key_help)?;
                     if stored_key != key {
                         log::warn!(
                             "[KEYCHAIN] tokens AES key store raced with another writer; adopting the stored key"

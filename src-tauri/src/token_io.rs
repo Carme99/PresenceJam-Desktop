@@ -352,8 +352,7 @@ fn tokens_from_bytes_with_key(
 /// rename would win with whichever snapshot it happened to capture — which
 /// is how a stale access token can end up paired with a fresh refresh token
 /// on disk. Serialising every writer makes the last write the newest state.
-static WRITE_LOCK: LazyLock<parking_lot::Mutex<()>> =
-    LazyLock::new(|| parking_lot::Mutex::new(()));
+static WRITE_LOCK: LazyLock<parking_lot::Mutex<()>> = LazyLock::new(|| parking_lot::Mutex::new(()));
 
 /// Run `f` holding the process-wide tokens.json write lock. Every persist
 /// funnels through here, and the snapshot it writes must be taken inside the
@@ -369,20 +368,12 @@ fn temp_tokens_path(path: &Path) -> PathBuf {
     path.with_extension(format!("json.tmp.{}", std::process::id()))
 }
 
-/// Remove stale temp sidecars for `path` before a write: crash leftovers from
-/// this process (the `.json.tmp.<pid>` name is reused across runs), from other
-/// processes, and the fixed-name `.json.tmp` used by ≤ 4.5 — including the
-/// stale *plaintext* sidecar a ≤ v2.10.0 crash could have left next to the live
-/// file.
-///
-/// This write's own sidecar is swept too: it is either gone or a leftover, and
-/// leaving it would make the `create_new(true)` below fail with `AlreadyExists`
-/// — the one-off crash turned into a permanent save failure that issue #135
-/// exists to prevent. No live writer can be using it: in-process writers are
-/// serialised by [`with_tokens_write_lock`], and the name is per-process.
-///
-/// A missing directory is not an error: callers create it before writing.
-fn remove_stale_tokens_sidecars(path: &Path) -> Result<(), String> {
+/// Remove stale temp sidecars for `path` — crash leftovers from this or a
+/// previous process, plus the fixed-name `.json.tmp` used by ≤ 4.5 and the
+/// stale *plaintext* sidecar a ≤ v2.10.0 crash could have left next to the
+/// live file. `keep` (this write's own sidecar) is left alone. A missing
+/// directory is not an error: callers create it before writing.
+fn remove_stale_tokens_sidecars(path: &Path, keep: &Path) -> Result<(), String> {
     let Some(dir) = path.parent() else {
         return Ok(());
     };
@@ -403,6 +394,9 @@ fn remove_stale_tokens_sidecars(path: &Path) -> Result<(), String> {
     };
     for entry in entries.flatten() {
         let candidate = entry.path();
+        if candidate == keep {
+            continue;
+        }
         let matches = candidate
             .file_name()
             .and_then(|n| n.to_str())
@@ -475,7 +469,7 @@ fn write_tokens_atomic_with_key(
     // the fixed-name `.json.tmp` used by ≤ 4.5, so no plaintext lingers next
     // to the live file. Missing files are fine — everything here is
     // best-effort except an unexpected removal failure.
-    remove_stale_tokens_sidecars(path)?;
+    remove_stale_tokens_sidecars(path, &temp_path)?;
     // OpenOptions::create_new(true) prevents racing with a leftover sidecar;
     // .mode(0o600) sets the mode at file-creation time (no chmod-after-create
     // window where tokens would be world-readable). The subsequent
@@ -769,6 +763,30 @@ mod tests {
         let mut p = env::temp_dir();
         p.push(format!("presencejam-test-{}-{}", std::process::id(), name));
         p
+    }
+
+    /// A fresh directory for one test, removed by that test on its normal exit
+    /// path. The shared temp dir is not a sandbox: sidecar names are keyed on
+    /// the pid, so a leftover from an earlier run at a recycled pid — or from a
+    /// test running in parallel — would otherwise decide a test's outcome. The
+    /// unique name means a panic (which skips the cleanup) cannot poison a
+    /// later run.
+    fn unique_tmp_dir(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = env::temp_dir().join(format!(
+            "presencejam-test-{}-{}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed),
+            nanos,
+            tag
+        ));
+        fs::create_dir_all(&dir).expect("a unique test dir must be creatable");
+        dir
     }
 
     fn read_tokens_inner(path: &std::path::Path) -> Result<TokensFile, String> {
@@ -1135,24 +1153,36 @@ mod tests {
         let _ = fs::remove_file(&path);
     }
 
-    // Issue #135/#565 (behavioral): the write path pre-clears stale sidecars
-    // of every generation — the fixed-name `.json.tmp` (≤ 4.5), another
-    // process's per-pid leftover, and a leftover at this process's own
-    // `.json.tmp.<pid>` path (pids are reused, so that name is not
-    // guaranteed free). Any survivor makes `create_new(true)` fail with
-    // AlreadyExists — the permanent save failure #135 exists to prevent.
+    // Issue #565 (behavioral): the write path sweeps stale sidecars of every
+    // generation — the fixed-name `.json.tmp` (≤ 4.5) and any per-pid leftover
+    // from a crashed process — but never its own in-flight sidecar.
+    //
+    // The fixture works in a directory of its own and names the foreign sidecar
+    // with a pid no live process can hold. `temp_tokens_path` keys a sidecar on
+    // *this* process's pid, so a fabricated file at that name is not a foreign
+    // leftover at all: it is the very path the write below opens with
+    // `create_new(true)`, the `keep` contract preserves it, and a recycled pid
+    // re-arms it from a previous run — a permanent AlreadyExists.
     #[test]
     fn stale_sidecars_of_every_generation_are_swept() {
-        let path = tmp_path("sweep.json");
+        // Above every platform's pid_max ceiling, so it can never be — nor
+        // later be reused as — this process's pid.
+        const FOREIGN_PID: u32 = u32::MAX;
+        assert_ne!(
+            FOREIGN_PID,
+            std::process::id(),
+            "the foreign pid must not be this process's"
+        );
+        let dir = unique_tmp_dir("sweep");
+        let path = dir.join("tokens.json");
         let legacy_sidecar = path.with_extension("json.tmp");
-        let foreign_sidecar = path.with_extension("json.tmp.999999");
+        let foreign_sidecar = path.with_extension(format!("json.tmp.{}", FOREIGN_PID));
         let own_sidecar = temp_tokens_path(&path);
-        let _ = fs::remove_file(&path);
         for sidecar in [&legacy_sidecar, &foreign_sidecar, &own_sidecar] {
             fs::write(sidecar, b"{\"leaked\":\"PLAINTEXT\"}").unwrap();
         }
 
-        remove_stale_tokens_sidecars(&path).unwrap();
+        remove_stale_tokens_sidecars(&path, &own_sidecar).unwrap();
 
         assert!(
             !legacy_sidecar.exists(),
@@ -1163,16 +1193,27 @@ mod tests {
             "another process's crashed sidecar must be swept"
         );
         assert!(
-            !own_sidecar.exists(),
-            "a leftover at this process's own sidecar path must be swept"
+            own_sidecar.exists(),
+            "this write's own sidecar must be left alone"
         );
+
+        // Write phase: the sweep above consumed the foreign sidecar, so plant a
+        // fresh one — and drop the fixture's stand-in at this process's own
+        // sidecar path, which the `keep` contract preserves and which would
+        // therefore make the write's `create_new(true)` fail with AlreadyExists.
+        fs::write(&foreign_sidecar, b"{\"leaked\":\"PLAINTEXT\"}").unwrap();
+        fs::remove_file(&own_sidecar).unwrap();
 
         write_tokens_atomic_with_key(&path, &sample_file(), &test_key())
             .expect("write must succeed with a foreign-pid sidecar present");
         assert!(path.exists());
         assert!(!own_sidecar.exists(), "rename must consume the sidecar");
-        assert!(!foreign_sidecar.exists());
-        let _ = fs::remove_file(&path);
+        assert!(
+            !foreign_sidecar.exists(),
+            "the write's own pre-clear must consume the foreign sidecar"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     // Issue #565: two processes must never share a sidecar path.
