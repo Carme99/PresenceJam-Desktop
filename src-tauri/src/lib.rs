@@ -1126,6 +1126,7 @@ pub fn run() {
             commands::misc::preview_status,
             commands::misc::update_tray_menu_state,
             commands::misc::relaunch_app,
+            commands::logs::get_recent_logs,
             updater_bg::stage_deferred_update,
             updater_bg::clear_failed_update_install,
             updater_bg::cancel_deferred_update,
