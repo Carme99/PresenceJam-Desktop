@@ -35,7 +35,7 @@ npm run tauri dev
 | `cargo test` | Run Rust unit tests |
 | `cargo fmt` | Format Rust code |
 | `npm run check` | Type-check Svelte/TypeScript |
-| `npm test` | Run frontend unit tests (vitest; lands with issue #443 — no `test` script on main yet) |
+| `npm test` | Run frontend unit tests (vitest, `tests/*.test.ts`); run it for any change under `src/` — CI runs `npm test --if-present` in the `frontend` job |
 
 ## Coding Standards
 

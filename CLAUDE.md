@@ -55,11 +55,11 @@ Types: `feat`, `fix`, `docs`, `test`, `refactor`, `chore`
 |------|---------|
 | `src-tauri/src/lib.rs` | Tauri entry, command registration, AppState setup |
 | `src-tauri/src/commands/` | All invoke() command handlers (config, auth, sync, window, playback, misc) |
-| `src-tauri/src/polling/` | Polling loop, token refresh, crash recovery |
+| `src-tauri/src/polling/` | Polling loop, token refresh, crash recovery, presence-gate + status-rule evaluation (`gated_track_key`, 240 s mid-track re-check) |
 | `src-tauri/src/spotify.rs` | Spotify Web API client (PKCE auth) |
 | `src-tauri/src/teams.rs` | Microsoft Graph API client (device code flow) |
 | `src-tauri/src/profanity.rs` | Profanity filter |
-| `src-tauri/src/config.rs` | AppConfig struct, JSON load/save |
+| `src-tauri/src/config.rs` | AppConfig struct (incl. `status_rules` — quiet hours + track rules), JSON load/save, `clamp_polling` |
 | `src-tauri/src/tray.rs` | System tray + playback menu |
 | `src-tauri/src/diagnostics.rs` | Local, redacted support snapshot (`get_diagnostics_snapshot`) |
 | `src-tauri/src/updater_bg.rs` | Silent background update checks + stage-deferred ("Install on quit") updates |

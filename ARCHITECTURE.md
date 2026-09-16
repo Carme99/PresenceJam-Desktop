@@ -50,7 +50,8 @@ PresenceJam is a Tauri 2 desktop application:
 graph TD
     subgraph Frontend ["Frontend (Svelte 5 SPA)"]
         UI["+page.svelte + lib/components/<br/>Dashboard / Onboarding / Settings / Reconnect / LogViewer"]
-        Stores["lib/stores/<br/>app.ts (view + error)<br/>config.ts (configStore)<br/>authFlow.svelte.ts<br/>useAuthListeners.ts"]
+        Stores["lib/stores/<br/>app.ts (view + error)<br/>config.ts (configStore)<br/>authFlow.svelte.ts<br/>detach.ts / theme.ts"]
+        Utils["lib/utils/<br/>boot.ts (boot gate)<br/>reconnect.ts<br/>useAuthListeners.ts<br/>dev.ts (devLog)"]
         Types["lib/types.ts<br/>(re-exports ts-rs codegen)"]
     end
 
@@ -223,7 +224,7 @@ back in), VS Code detached-panel style:
   they call `save_config` / `load_config`, `reconnect_spotify` /
   `reconnect_teams`, `poll_teams_auth` and `open_logs_folder` directly, none
   of which take a `window` argument — so config/polling state is shared by
-  construction. The 12 commands that assume the main window (auth *starts*,
+  construction. The 13 commands that assume the main window (auth *starts*,
   the token refreshes, `relaunch_app`, `app_exit`, `stage_deferred_update`,
   `start_syncing` / `stop_syncing`, …) are rejected by
   `require_main_window` (issue #241). That does not strand a detached user:
@@ -724,9 +725,13 @@ PresenceJam-Desktop/
 │   │   │   ├── fr.ts                       # French dictionary (typed against Dict)
 │   │   │   └── store.svelte.ts             # locale $state store, localStorage persistence
 │   │   └── utils/
+│   │       ├── boot.ts                     # Launch gate → dashboard/onboarding/reconnect (bootView)
 │   │       ├── dev.ts                      # devLog() no-op in prod builds
-│   │       └── useAuthListeners.ts          # Shared 4-event listener setup
+│   │       ├── reconnect.ts                # shouldAutoStartSpotifyReconnect (v4.5.2, #530)
+│   │       └── useAuthListeners.ts         # Shared 4-event listener setup
 │   └── routes/
+│       ├── +layout.js                      # SvelteKit layout config (ssr = false)
+│       ├── +layout.svelte                  # Main-window-guarded reconnect/update listeners
 │       ├── +page.svelte                    # SPA entry, routes to views
 │       └── detached/[pane]/+page.svelte    # Renders LogViewer/Settings in detached mode (v4.0)
 ├── src-tauri/
