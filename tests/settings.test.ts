@@ -188,7 +188,24 @@ describe('Settings detached reconnect guard (#550)', () => {
 
     await waitFor(() => expect(emitToMock).toHaveBeenCalledWith('main', 'navigate', 'settings'));
     expect(popInMock).toHaveBeenCalledWith('settings');
+    expect(invokeMock.mock.calls.some(([cmd]) => cmd.startsWith('reconnect_spotify'))).toBe(false);
+  });
+
+  it('re-authorizes from the main window without clearing stored credentials (#554)', async () => {
+    const { getByRole } = await mountSettings(false);
+
+    await fireEvent.click(getByRole('button', { name: t('settings.reconnectSpotify') }));
+
+    await waitFor(() =>
+      expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'reconnect_spotify_session')).toBe(true)
+    );
+    // `reconnect_spotify` wipes the tokens *and* the keychain client_secret.
     expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'reconnect_spotify')).toBe(false);
+    const call = invokeMock.mock.calls.find(([cmd]) => cmd === 'reconnect_spotify_session');
+    expect(call?.[1]).toEqual({
+      clientId: 'test-client-id',
+      redirectUri: 'presencejam://callback'
+    });
   });
 
   it('still drives the reconnect command from the main window', async () => {
