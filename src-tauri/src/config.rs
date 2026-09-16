@@ -168,8 +168,9 @@ pub struct PollingConfig {
     #[serde(default = "default_expiry_buffer_seconds")]
     pub expiry_buffer_seconds: u64,
     /// Ceiling for the "paused playback" exponential backoff (CfgDiag#3(c),
-    /// issue #538). `pause_backoff` hardcoded 300 s in three places; the
-    /// value is now clamped into 60..=3600 by `clamp_polling`.
+    /// issue #538). `pause_backoff` used to hardcode a 300 s cap; it is now
+    /// the ladder's ceiling (default 300, so an untouched config is unchanged)
+    /// and the value is clamped into 60..=3600 by `clamp_polling`.
     #[serde(default = "default_pause_backoff_max")]
     pub pause_backoff_max_seconds: u64,
 }
