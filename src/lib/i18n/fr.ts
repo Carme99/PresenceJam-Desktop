@@ -393,4 +393,6 @@ export const fr: Dict = {
   'diagnostics.expiryBuffer': "Marge avant expiration du jeton",
   'diagnostics.teamsRefreshTokenPresent': 'Jeton de rafraîchissement Teams enregistré',
   'reconnect.restartSignIn': 'Redémarrer la connexion',
+  'update.stagingProgress': 'Préparation de la mise à jour — {percent} %',
+  'update.cancelStage': 'Annuler'
 };

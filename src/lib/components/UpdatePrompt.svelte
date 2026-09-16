@@ -3,6 +3,7 @@
   import { check, type Update } from '@tauri-apps/plugin-updater';
   import { invoke } from '@tauri-apps/api/core';
   import { getVersion } from '@tauri-apps/api/app';
+  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { t } from '$lib/i18n';
 
   // Always-mounted update banner (3.0-P5). On mount it asks the updater
@@ -30,6 +31,16 @@
   // applied on process exit by `updater_bg::install_pending_on_exit`.
   let stagedVersion = $state('');
   let staging = $state(false);
+  // #590: live position of the deferred stage, streamed on
+  // `update-stage-progress` while `stage_deferred_update` downloads.
+  // `staging` alone only drives the "Preparing…" label; `stageAborted`
+  // marks a stage the user walked away from mid-download (the Rust side
+  // owns the transfer and cannot be interrupted, so the outcome is
+  // discarded when it lands — see stageForQuit).
+  let stageDownloaded = $state(0);
+  let stageTotal = $state<number | null>(null);
+  let stageAborted = $state(false);
+  let cancelling = $state(false);
   // #431: `confirming` shows the install/skip choice surface;
   // `currentVersion` is the running build (best-effort — the banner
   // falls back to version-agnostic strings when it stays empty);
@@ -45,6 +56,14 @@
   interface StageOutcome {
     staged: string | null;
     current: string;
+  }
+
+  // Mirrors the backend `StageProgress` shape emitted on
+  // `update-stage-progress` (kept local, same convention as StageOutcome).
+  // `total` is `null` when the server sent no `Content-Length`.
+  interface StageProgress {
+    downloaded: number;
+    total: number | null;
   }
 
   let isStaleSkipped = $derived(
@@ -80,11 +99,36 @@
   onMount(() => {
     checkForUpdate();
     const interval = setInterval(checkForUpdate, CHECK_INTERVAL_MS);
-    return () => clearInterval(interval);
+    // #590: staging progress. `listen()` resolves asynchronously, so an
+    // unmount before it does must release the subscription immediately —
+    // the `destroyed` guard the other listener sites in this app use.
+    let destroyed = false;
+    let unlistenStage: UnlistenFn | null = null;
+    listen<StageProgress>('update-stage-progress', (event) => {
+      stageDownloaded = event.payload.downloaded;
+      stageTotal = event.payload.total;
+    }).then((fn) => {
+      if (destroyed) fn();
+      else unlistenStage = fn;
+    });
+    return () => {
+      destroyed = true;
+      clearInterval(interval);
+      if (unlistenStage) unlistenStage();
+    };
   });
 
   const progress = $derived(
     totalBytes > 0 ? Math.min(downloadedBytes / totalBytes, 1) : 0
+  );
+
+  // #590: whole-percent position of the deferred stage, or `null` when the
+  // payload size is unknown — the row then renders its indeterminate copy
+  // instead of a percentage that would be a guess.
+  const stagePercent = $derived(
+    stageTotal !== null && stageTotal > 0
+      ? Math.min(Math.round((stageDownloaded / stageTotal) * 100), 100)
+      : null
   );
 
   async function downloadAndInstall() {
@@ -140,12 +184,28 @@
   async function stageForQuit(force: boolean) {
     if (!update || staging || downloading) return;
     staging = true;
+    stageAborted = false;
+    stageDownloaded = 0;
+    stageTotal = null;
     error = '';
     try {
       const outcome = await invoke<StageOutcome>('stage_deferred_update', { force });
       // Backend truth for the running version — always populated, so
       // the staged state can show both versions unconditionally.
       currentVersion = outcome.current;
+      if (stageAborted) {
+        // #590: the user cancelled while the payload was downloading. The
+        // Rust side owns the transfer and cannot be interrupted, so the
+        // bytes landed anyway — discard them instead of advertising a
+        // stage the user already walked away from.
+        stageAborted = false;
+        if (outcome.staged) {
+          await invoke('cancel_deferred_update').catch((e) => {
+            console.error('[UPDATER] cancel_deferred_update (after cancel) failed:', e);
+          });
+        }
+        return;
+      }
       if (outcome.staged) {
         stagedVersion = outcome.staged;
         confirming = false;
@@ -161,6 +221,7 @@
     } catch (e) {
       console.error('[UPDATER] stage_deferred_update failed:', e);
       error = String(e);
+      stageAborted = false;
     } finally {
       staging = false;
     }
@@ -173,13 +234,47 @@
   async function installStaleAnyway() {
     await stageForQuit(true);
   }
+
+  // #590: abandons the deferred stage and returns the banner to its plain
+  // update offer. A download already in flight cannot be stopped
+  // Rust-side, so that case marks the stage abandoned and `stageForQuit`
+  // discards the payload when it lands; an already-staged payload is
+  // dropped immediately by `cancel_deferred_update`, which also releases
+  // the verified bytes instead of holding them for the rest of the session.
+  async function cancelStage() {
+    if (cancelling) return;
+    cancelling = true;
+    error = '';
+    if (staging) stageAborted = true;
+    try {
+      await invoke('cancel_deferred_update');
+      stagedVersion = '';
+      stageDownloaded = 0;
+      stageTotal = null;
+      confirming = false;
+    } catch (e) {
+      // The payload is still held Rust-side, so the banner must keep
+      // saying so rather than claiming the stage is gone.
+      if (staging) stageAborted = false;
+      console.error('[UPDATER] cancel_deferred_update failed:', e);
+      error = String(e);
+    } finally {
+      cancelling = false;
+    }
+  }
 </script>
 
 {#if update && !dismissed}
   <div class="update-banner" role="region" aria-label={t('update.available', { version: update.version })}>
     <div class="update-info" role="status">
       <span class="update-title">{t('update.available', { version: update.version })}</span>
-      {#if stagedVersion}
+      {#if staging && !stageAborted}
+        <span class="update-progress">
+          {stagePercent === null
+            ? t('update.preparing')
+            : t('update.stagingProgress', { percent: stagePercent })}
+        </span>
+      {:else if stagedVersion}
         <span class="update-staged">
           {currentVersion
             ? t('update.stagedVsCurrent', { staged: stagedVersion, current: currentVersion })
@@ -216,43 +311,50 @@
       >
         {downloading ? t('update.downloading') : t('update.downloadAndInstall')}
       </button>
-      {#if !stagedVersion}
-        {#if confirming}
-          <button
-            type="button"
-            class="quit-btn"
-            onclick={confirmQuitInstall}
-            disabled={downloading || staging}
-          >
-            {staging ? t('update.preparing') : t('update.installOnQuit')}
-          </button>
-          <button
-            type="button"
-            class="quit-btn"
-            onclick={cancelQuitConfirm}
-            disabled={downloading || staging}
-          >
-            {t('common.dismiss')}
-          </button>
-        {:else if isStaleSkipped}
-          <button
-            type="button"
-            class="quit-btn"
-            onclick={installStaleAnyway}
-            disabled={downloading || staging}
-          >
-            {staging ? t('update.preparing') : t('update.installAnyway')}
-          </button>
-        {:else}
-          <button
-            type="button"
-            class="quit-btn"
-            onclick={openQuitConfirm}
-            disabled={downloading || staging}
-          >
-            {t('update.installOnQuit')}
-          </button>
-        {/if}
+      {#if staging || stagedVersion}
+        <button
+          type="button"
+          class="quit-btn"
+          onclick={cancelStage}
+          disabled={cancelling || stageAborted}
+        >
+          {t('update.cancelStage')}
+        </button>
+      {:else if confirming}
+        <button
+          type="button"
+          class="quit-btn"
+          onclick={confirmQuitInstall}
+          disabled={downloading}
+        >
+          {t('update.installOnQuit')}
+        </button>
+        <button
+          type="button"
+          class="quit-btn"
+          onclick={cancelQuitConfirm}
+          disabled={downloading}
+        >
+          {t('common.dismiss')}
+        </button>
+      {:else if isStaleSkipped}
+        <button
+          type="button"
+          class="quit-btn"
+          onclick={installStaleAnyway}
+          disabled={downloading}
+        >
+          {t('update.installAnyway')}
+        </button>
+      {:else}
+        <button
+          type="button"
+          class="quit-btn"
+          onclick={openQuitConfirm}
+          disabled={downloading}
+        >
+          {t('update.installOnQuit')}
+        </button>
       {/if}
       <button
         type="button"
