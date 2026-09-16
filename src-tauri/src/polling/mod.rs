@@ -23,7 +23,9 @@ mod loop_;
 mod poll_once;
 mod state;
 
-pub(crate) use poll_once::{cas_refresh_or_discard, run_oneshot, CasOutcome};
+pub(crate) use poll_once::{
+    cas_refresh_or_discard, clear_presence_on_exit, run_oneshot, CasOutcome,
+};
 pub use state::{start_polling, stop_polling};
 
 use tauri::{AppHandle, Emitter};

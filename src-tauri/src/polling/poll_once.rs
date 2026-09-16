@@ -24,15 +24,18 @@ use rand::Rng;
 use serde_json::json;
 use tauri::{AppHandle, Emitter};
 
+use crate::config::{AppConfig, PresencePair};
 use crate::profanity;
 use crate::spotify::{
     format_status_with_context, get_currently_playing, is_token_expired, refresh_spotify_token,
     CurrentlyPlaying, SpotifyApiError,
 };
 use crate::teams::{
-    clear_teams_presence, clear_teams_status_message, get_teams_presence, is_presence_gated,
+    clear_teams_presence, clear_teams_presence_quick, clear_teams_status_message,
+    clear_teams_status_message_quick, get_teams_presence,
     is_token_expired as is_teams_token_expired, presence_gate_reason, refresh_teams_token,
     set_teams_presence, set_teams_status_message, TeamsApiError, TeamsTokens,
+    GATE_REASON_MANUAL_STATUS, GATE_REASON_QUIET_HOURS, GATE_REASON_TRACK_RULE,
 };
 use crate::token_io;
 use crate::AppState;
@@ -77,6 +80,13 @@ const NETWORK_BACKOFF_CAP_SECONDS: u64 = 300;
 /// `PT4H` the app sends) does NOT extend the green bubble.
 /// (Microsoft Learn: cloud-communications-manage-presence-state)
 const AVAILABILITY_REARM_SECONDS: u64 = 4 * 60;
+
+/// Documented bounds of a `setPresence` `expirationDuration` (finding #636,
+/// issue #636): "The valid duration range is from 5 to 240 minutes (PT5M to
+/// PT4H)", after which the session becomes `Offline`.
+/// (Microsoft Learn: graph/api/presence-setpresence, manage-presence-state)
+const PRESENCE_EXPIRATION_MIN_SECONDS: u64 = 5 * 60;
+const PRESENCE_EXPIRATION_MAX_SECONDS: u64 = 4 * 60 * 60;
 
 /// What the driver should do after this iteration.
 pub(crate) enum PollIteration {
@@ -130,6 +140,12 @@ pub(crate) struct WriteClocks {
     /// When the presence-gate re-check last ran — its own clock so re-checks
     /// never shift the debounce + keepalive write windows (#380).
     pub(crate) last_gate_check: Option<Instant>,
+    /// The `setPresence` pair the app currently has armed (finding #634, issue
+    /// #634). `None` = no session of ours is live. Kept next to
+    /// `last_availability_arm` so a rule that starts or stops matching can
+    /// switch the bubble on the NEXT iteration instead of waiting out the
+    /// 4-minute cadence; the pair is also what the exit path clears.
+    pub(crate) armed_presence: Option<PresencePair>,
 }
 
 /// Process-wide slot for [`WriteClocks`]. See the struct docs for why these
@@ -142,6 +158,7 @@ static WRITE_CLOCKS: Mutex<WriteClocks> = Mutex::new(WriteClocks {
     last_availability_arm: None,
     last_posted_status: None,
     last_gate_check: None,
+    armed_presence: None,
 });
 
 /// Snapshot the shared write-decision clocks. A poisoned lock is recovered
@@ -184,6 +201,7 @@ pub(crate) fn run(
     consecutive_network_failures: &mut u8,
     gated_track_key: &mut Option<String>,
     last_availability_arm: &mut Option<Instant>,
+    armed_presence: &mut Option<PresencePair>,
     // Candidate C11: ETag validator from the previous conditional GET;
     // stored from each 200/204, echoed as If-None-Match on the next poll.
     last_etag: &mut Option<String>,
@@ -203,6 +221,7 @@ pub(crate) fn run(
         consecutive_network_failures,
         gated_track_key,
         last_availability_arm,
+        armed_presence,
         last_etag,
         first_iteration,
         last_posted_status,
@@ -253,6 +272,7 @@ pub(crate) fn run_oneshot(state: &Arc<AppState>, app: &AppHandle) {
         &mut consecutive_network_failures,
         &mut clocks.gated_track_key,
         &mut clocks.last_availability_arm,
+        &mut clocks.armed_presence,
         &mut last_etag,
         &mut first_iteration,
         &mut clocks.last_posted_status,
@@ -275,6 +295,7 @@ fn run_inner(
     consecutive_network_failures: &mut u8,
     gated_track_key: &mut Option<String>,
     last_availability_arm: &mut Option<Instant>,
+    armed_presence: &mut Option<PresencePair>,
     // Candidate C11: ETag validator from the previous conditional GET;
     // stored from each 200/204, echoed as If-None-Match on the next poll.
     last_etag: &mut Option<String>,
@@ -510,6 +531,7 @@ fn run_inner(
                 consecutive_pauses,
                 gated_track_key,
                 last_availability_arm,
+                armed_presence,
                 last_posted_status,
                 last_gate_check,
             );
@@ -528,6 +550,7 @@ fn run_inner(
                 &config,
                 last_posted_placeholder,
                 last_availability_arm,
+                armed_presence,
                 first_iteration,
                 last_posted_status,
             );
@@ -568,6 +591,7 @@ fn run_inner(
                     consecutive_pauses,
                     gated_track_key,
                     last_availability_arm,
+                    armed_presence,
                     last_posted_status,
                     last_gate_check,
                 );
@@ -661,6 +685,7 @@ fn run_inner(
                                             consecutive_pauses,
                                             gated_track_key,
                                             last_availability_arm,
+                                            armed_presence,
                                             last_posted_status,
                                             last_gate_check,
                                         );
@@ -680,6 +705,7 @@ fn run_inner(
                                             &config,
                                             last_posted_placeholder,
                                             last_availability_arm,
+                                            armed_presence,
                                             first_iteration,
                                             last_posted_status,
                                         );
@@ -719,6 +745,7 @@ fn run_inner(
                                                 consecutive_pauses,
                                                 gated_track_key,
                                                 last_availability_arm,
+                                                armed_presence,
                                                 last_posted_status,
                                                 last_gate_check,
                                             );
@@ -1084,6 +1111,139 @@ fn should_rearm_availability(last_arm: Option<Instant>, now: Instant) -> bool {
     }
 }
 
+/// Finding #634 (issue #634): whether the presence session must be (re-)armed
+/// now. A DIFFERENT desired pair arms immediately — a rule that starts or stops
+/// matching must move the bubble on the next iteration, not after the cadence
+/// tick — while an unchanged pair keeps the [`should_rearm_availability`]
+/// cadence.
+fn should_arm_presence(
+    armed: Option<&PresencePair>,
+    desired: &PresencePair,
+    last_arm: Option<Instant>,
+    now: Instant,
+) -> bool {
+    armed != Some(desired) || should_rearm_availability(last_arm, now)
+}
+
+/// Finding #636 (issue #636): the `expirationDuration` to request for a session
+/// armed now — the remaining listening time plus one re-arm period of slack,
+/// clamped into the documented `PT5M..PT4H` window.
+///
+/// Pre-fix the app always asked for `PT4H`, so a crash, a force-quit or a
+/// machine sleep left the user green for four hours after the music stopped.
+/// A live/unknown-position stream has no remaining time to bound the session
+/// with (issue #165), so it keeps `PT4H`.
+fn presence_expiration_duration(remaining_ms: Option<u64>) -> String {
+    match remaining_ms {
+        None => "PT4H".to_string(),
+        Some(remaining) => {
+            let seconds = (remaining / 1000)
+                .saturating_add(AVAILABILITY_REARM_SECONDS)
+                .clamp(
+                    PRESENCE_EXPIRATION_MIN_SECONDS,
+                    PRESENCE_EXPIRATION_MAX_SECONDS,
+                );
+            format!("PT{}S", seconds)
+        }
+    }
+}
+
+/// Finding #635 (issue #635): the read-before-write decision — does the status
+/// message currently on Teams belong to the USER rather than to us?
+///
+/// POLICY. A live status message blocks our write when every one of these holds:
+///
+/// 1. `teams.respect_manual_status` is on (default), and
+/// 2. we actually read the presence this iteration — with no sample the check
+///    fails OPEN and the write proceeds exactly as in 4.5, and
+/// 3. the live content is non-empty, and
+/// 4. the message is not already expiring — a message whose `expiryDateTime`
+///    has lapsed is stale (our placeholders always carry a near-term expiry,
+///    so this is also what stops a leftover from a previous run from blocking
+///    forever), and
+/// 5. the content is not byte-identical (trimmed) to a message this process
+///    last posted — `last_posted_status` for playing/replacement text,
+///    `last_posted_placeholder` for the "Paused"/"Nothing playing" clears.
+///
+/// COST. Zero extra Graph calls under the default configuration: the sample is
+/// the one the presence gate already fetches per track change (and every
+/// `AVAILABILITY_REARM_SECONDS` mid-track). Only a user who turned the presence
+/// gate OFF while leaving this check on pays one extra `getPresence` per gate
+/// point, because the read is what makes the decision possible.
+fn manual_status_blocks_write(
+    respect_manual_status: bool,
+    presence: Option<&crate::teams::PresenceInfo>,
+    last_posted_status: Option<&str>,
+    last_posted_placeholder: Option<&str>,
+    now: chrono::DateTime<Utc>,
+) -> bool {
+    if !respect_manual_status {
+        return false;
+    }
+    let Some(message) = presence.and_then(|p| p.status_message.as_ref()) else {
+        return false;
+    };
+    let content = message.content.trim();
+    if content.is_empty() {
+        return false;
+    }
+    if message.expires_at.is_some_and(|expiry| expiry <= now) {
+        return false;
+    }
+    let ours = |candidate: Option<&str>| candidate.is_some_and(|text| text.trim() == content);
+    !(ours(last_posted_status) || ours(last_posted_placeholder))
+}
+
+/// The single presence-gate decision for one `getPresence` sample (issues
+/// #3.0-P2/#635/#637): the reason the write must be suppressed, or `None` when
+/// it may proceed.
+///
+/// ORDER is the precedence the user sees on the Dashboard chip: a
+/// busy/meeting/out-of-office presence first (the more specific real-world
+/// state), then a status message the user wrote by hand.
+#[allow(clippy::too_many_arguments)]
+fn presence_gate_decision(
+    presence: &crate::teams::PresenceInfo,
+    presence_gate_enabled: bool,
+    gate_when_out_of_office: bool,
+    respect_manual_status: bool,
+    last_posted_status: Option<&str>,
+    last_posted_placeholder: Option<&str>,
+    now: chrono::DateTime<Utc>,
+) -> Option<String> {
+    if presence_gate_enabled {
+        let reason = presence_gate_reason(presence, gate_when_out_of_office);
+        if !reason.is_empty() {
+            return Some(reason);
+        }
+    }
+    if manual_status_blocks_write(
+        respect_manual_status,
+        Some(presence),
+        last_posted_status,
+        last_posted_placeholder,
+        now,
+    ) {
+        return Some(GATE_REASON_MANUAL_STATUS.to_string());
+    }
+    None
+}
+
+/// Finding #637 (issue #637): whether the out-of-office reason participates in
+/// the gate this iteration.
+///
+/// Opt-in through `teams.gate_when_out_of_office`, and overridable per rule: a
+/// rule that carries its own presence action is an explicit instruction for
+/// this track/window, so it wins over the OOO default (finding #634). Busy /
+/// Do-Not-Disturb / in-a-call always gate regardless.
+fn ooo_gate_enabled(config: &Option<AppConfig>, rule_has_presence_action: bool) -> bool {
+    !rule_has_presence_action
+        && config
+            .as_ref()
+            .map(|c| c.teams.gate_when_out_of_office)
+            .unwrap_or(false)
+}
+
 /// Issue #432: quiet-hours evaluation. `now_minutes` is local minutes-since-
 /// midnight and `weekday` the ISO weekday number 1 (Mon)..=7 (Sun), passed
 /// in so the pure predicate stays unit-testable without clock injection.
@@ -1097,8 +1257,28 @@ fn quiet_hours_active(
     now_minutes: u16,
     weekday: u8,
 ) -> bool {
+    matching_quiet_hours(rules, now_minutes, weekday).is_some()
+}
+
+/// Issue #432: the first enabled quiet-hours entry whose window contains the
+/// given local time, if any. Extracted from [`quiet_hours_active`] (finding
+/// #634, issue #634) because the ACTIVE ENTRY — not just the boolean — carries
+/// the rule's replacement text and presence action.
+///
+/// `now_minutes` is local minutes-since-midnight and `weekday` the ISO weekday
+/// number 1 (Mon)..=7 (Sun), passed in so the predicate stays unit-testable
+/// without clock injection. An entry matches when it is enabled, the weekday
+/// filter passes (empty = every day), and the time falls in `[start, end)` —
+/// with wrap-around (e.g. 22:00→07:00) handled as `now >= start || now < end`.
+/// Minutes are clamped to 0..=1439 so a hand-edited config can't wedge the
+/// comparison.
+fn matching_quiet_hours(
+    rules: &crate::config::StatusRulesConfig,
+    now_minutes: u16,
+    weekday: u8,
+) -> Option<&crate::config::QuietHoursEntry> {
     let now = now_minutes.min(1439);
-    rules.quiet_hours.iter().any(|entry| {
+    rules.quiet_hours.iter().find(|entry| {
         if !entry.enabled {
             return false;
         }
@@ -1151,34 +1331,94 @@ fn quiet_hours_active_now(config: &Option<crate::config::AppConfig>) -> bool {
         .is_some_and(|c| quiet_hours_active(&c.status_rules, now_minutes, weekday))
 }
 
-/// Finding PollCore#2 (issue #570): the per-iteration rule decision, factored
-/// out of `process_track` so EVERY status write — the playing write, the
-/// paused clear and the no-track clear — consults the same policy. Pre-fix the
-/// decision was inlined in the playing path only, so the two clear paths
-/// silently bypassed quiet hours and suppression rules.
-#[derive(Debug, PartialEq, Eq)]
-enum RuleGate {
-    /// A matching rule with an empty `replacement_status`: suppress the write
-    /// exactly like a busy/meeting presence gate.
-    Suppressed,
-    /// A matching rule with a non-empty `replacement_status`: post that text
-    /// instead of the formatted status.
-    Replace(String),
-    /// No enabled rule matched.
-    NoRule,
+/// The per-iteration rule decision, factored out of `process_track` so EVERY
+/// status write — the playing write, the paused clear and the no-track clear —
+/// consults the same policy (finding PollCore#2, issue #570; findings #634).
+///
+/// 4.5 could only SUPPRESS: a matched rule with an empty `replacement_status`
+/// gated the write exactly like a busy/meeting presence gate. Finding #634
+/// widens the same decision into an ACTION: a non-empty replacement posts that
+/// text instead, and a validated presence pair moves the user's Teams bubble.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RuleDecision {
+    /// The `presence-gated` reason of the matched rule
+    /// ([`GATE_REASON_QUIET_HOURS`] / [`GATE_REASON_TRACK_RULE`]); `None` when
+    /// no enabled rule matched.
+    reason: Option<&'static str>,
+    /// Non-empty replacement text to post instead of the formatted status.
+    replacement: Option<String>,
+    /// The `setPresence` pair the matched rule wants armed (finding #634).
+    /// `None` = the rule does not touch presence.
+    presence: Option<PresencePair>,
 }
 
-/// The rule decision for an artist/title pair. The no-track clear path passes
-/// empty strings, so only quiet hours and match-all rules (both substrings
-/// empty) can suppress a clear.
-fn rule_gate(config: &Option<crate::config::AppConfig>, artist: &str, title: &str) -> RuleGate {
-    match config
-        .as_ref()
-        .and_then(|c| matching_track_rule(&c.status_rules, artist, title))
-    {
-        Some(rule) if rule.replacement_status.is_empty() => RuleGate::Suppressed,
-        Some(rule) => RuleGate::Replace(rule.replacement_status.clone()),
-        None => RuleGate::NoRule,
+impl RuleDecision {
+    /// Whether the matched rule suppresses the write: a matched rule with no
+    /// replacement text. Suppression is the 4.5 semantics, now shared by quiet
+    /// hours and track rules.
+    fn suppresses(&self) -> bool {
+        self.reason.is_some() && self.replacement.is_none()
+    }
+}
+
+/// The rule decision for an artist/title pair on the CURRENT local clock. The
+/// no-track clear path passes empty strings, so only quiet hours and match-all
+/// rules (both substrings empty) can suppress a clear.
+fn rule_gate(config: &Option<AppConfig>, artist: &str, title: &str) -> RuleDecision {
+    let (now_minutes, weekday) = local_minutes_and_weekday();
+    rule_gate_at(config, now_minutes, weekday, artist, title)
+}
+
+/// [`rule_gate`] with an explicit clock, so the mid-track re-check can
+/// re-project it (a long-lived track spans quiet-hours boundaries) without a
+/// second live-clock read.
+///
+/// Precedence is quiet hours first, then track rules — the same order the
+/// suppression decision has always used.
+fn rule_gate_at(
+    config: &Option<AppConfig>,
+    now_minutes: u16,
+    weekday: u8,
+    artist: &str,
+    title: &str,
+) -> RuleDecision {
+    let Some(cfg) = config.as_ref() else {
+        return RuleDecision::default();
+    };
+    if let Some(entry) = matching_quiet_hours(&cfg.status_rules, now_minutes, weekday) {
+        return decision_from(
+            GATE_REASON_QUIET_HOURS,
+            &entry.replacement_status,
+            &entry.presence_availability,
+            &entry.presence_activity,
+        );
+    }
+    match matching_track_rule(&cfg.status_rules, artist, title) {
+        Some(rule) => decision_from(
+            GATE_REASON_TRACK_RULE,
+            &rule.replacement_status,
+            &rule.presence_availability,
+            &rule.presence_activity,
+        ),
+        None => RuleDecision::default(),
+    }
+}
+
+/// Assemble one rule's action. An empty replacement means "suppress"; an empty
+/// or unsupported presence pair means "don't touch presence" (the same
+/// normalization `config::clamp_rules` applies at the IPC boundary, repeated
+/// here so an in-memory config that skipped the clamp can never send an
+/// unsupported pair to Graph).
+fn decision_from(
+    reason: &'static str,
+    replacement_status: &str,
+    presence_availability: &str,
+    presence_activity: &str,
+) -> RuleDecision {
+    RuleDecision {
+        reason: Some(reason),
+        replacement: (!replacement_status.is_empty()).then(|| replacement_status.to_string()),
+        presence: crate::config::normalize_presence_pair(presence_availability, presence_activity),
     }
 }
 
@@ -1197,6 +1437,137 @@ fn emit_presence_gated(app: &AppHandle, reason: &str, availability: &str, activi
             "timestamp": Utc::now().to_rfc3339()
         }),
     );
+}
+
+/// Arm (or re-arm) a Teams presence session (findings #634/#636, issues #634/
+/// #636) through the shared cadence clocks, emitting
+/// `presence-availability-updated` on success. Returns extra backoff seconds to
+/// fold into the next poll (0 unless Graph throttled the call).
+///
+/// The single setPresence call site for the polling loop — rules and the
+/// default "listening" session both funnel through here, so the pair, the
+/// expiration bound and the re-arm cadence cannot drift apart.
+fn arm_presence_session(
+    app: &AppHandle,
+    access_token: &str,
+    pair: &PresencePair,
+    expiration_duration: &str,
+    label: &str,
+    armed: &mut Option<PresencePair>,
+    last_availability_arm: &mut Option<Instant>,
+) -> u64 {
+    let now = Instant::now();
+    if !should_arm_presence(armed.as_ref(), pair, *last_availability_arm, now) {
+        return 0;
+    }
+    match set_teams_presence(
+        access_token,
+        &pair.availability,
+        &pair.activity,
+        expiration_duration,
+    ) {
+        Ok(_) => {
+            *armed = Some(pair.clone());
+            *last_availability_arm = Some(now);
+            let _ = app.emit(
+                "presence-availability-updated",
+                json!({
+                    "available": true,
+                    "label": label,
+                    "timestamp": Utc::now().to_rfc3339()
+                }),
+            );
+            0
+        }
+        Err(e) => {
+            log::error!(
+                "[POLLING] failed to set Teams availability ({}): {}",
+                label,
+                e
+            );
+            // Issue #154: a throttled set extends the next poll to the
+            // server-directed delay.
+            rate_limit_sleep_secs(&e)
+        }
+    }
+}
+
+/// Clear the app's presence session (issues #3.0-P1/#636): `clearPresence`
+/// 404 = the session is already gone = success. Returns extra backoff seconds
+/// (0 unless Graph throttled the call). No-op when nothing of ours is armed.
+fn clear_presence_session(
+    app: &AppHandle,
+    access_token: &str,
+    label: &str,
+    armed: &mut Option<PresencePair>,
+    last_availability_arm: &mut Option<Instant>,
+) -> u64 {
+    if last_availability_arm.is_none() {
+        return 0;
+    }
+    match clear_teams_presence(access_token) {
+        Ok(_) => {
+            *armed = None;
+            *last_availability_arm = None;
+            let _ = app.emit(
+                "presence-availability-updated",
+                json!({
+                    "available": false,
+                    "label": label,
+                    "timestamp": Utc::now().to_rfc3339()
+                }),
+            );
+            0
+        }
+        Err(e) => {
+            log::error!("[POLLING] failed to clear Teams availability: {}", e);
+            rate_limit_sleep_secs(&e)
+        }
+    }
+}
+
+/// Finding #634 (issue #634): apply a matched rule's presence action on the
+/// paths that return BEFORE the shared availability block (a playing write
+/// suppressed by quiet hours or a track rule). Without this a suppression-only
+/// rule — "while my Focus playlist plays, show me Do Not Disturb" — would move
+/// nothing, because its whole point is that no status write happens.
+///
+/// `Some(0)` when the rule carries no presence action or `availability_sync` is
+/// off (the rule action is inert then, mirroring the documented hint text).
+#[allow(clippy::too_many_arguments)]
+fn rule_presence_backoff(
+    app: &AppHandle,
+    access_token: &str,
+    config: &Option<AppConfig>,
+    decision: &RuleDecision,
+    remaining_ms: Option<u64>,
+    armed: &mut Option<PresencePair>,
+    last_availability_arm: &mut Option<Instant>,
+) -> u64 {
+    let Some(pair) = decision.presence.as_ref() else {
+        return 0;
+    };
+    if !availability_sync_enabled(config) {
+        return 0;
+    }
+    arm_presence_session(
+        app,
+        access_token,
+        pair,
+        &presence_expiration_duration(remaining_ms),
+        &format!("Rule presence ({}/{})", pair.availability, pair.activity),
+        armed,
+        last_availability_arm,
+    )
+}
+
+/// `teams.availability_sync`, defaulted the same way `process_track` defaults
+/// it (off).
+fn availability_sync_enabled(config: &Option<AppConfig>) -> bool {
+    config
+        .as_ref()
+        .map(|c| c.teams.availability_sync)
+        .unwrap_or(false)
 }
 
 /// Issue #432: track-rule match. Both non-empty substrings must match
@@ -1260,9 +1631,19 @@ fn status_config_fingerprint(config: &Option<crate::config::AppConfig>) -> Strin
             .quiet_hours
             .iter()
             .map(|e| {
+                // Finding #634: the quiet-hours replacement text and presence
+                // pair are part of the decision, so editing either mid-track
+                // must flip the key and force one rewrite (issue #432's
+                // contract, widened to the new fields).
                 format!(
-                    "{}:{}-{}:{:?}",
-                    e.enabled, e.start_minutes, e.end_minutes, e.days
+                    "{}:{}-{}:{:?}:{}:{}:{}",
+                    e.enabled,
+                    e.start_minutes,
+                    e.end_minutes,
+                    e.days,
+                    e.replacement_status,
+                    e.presence_availability,
+                    e.presence_activity
                 )
             })
             .collect();
@@ -1272,8 +1653,13 @@ fn status_config_fingerprint(config: &Option<crate::config::AppConfig>) -> Strin
             .iter()
             .map(|r| {
                 format!(
-                    "{}:{}:{}:{}",
-                    r.enabled, r.artist_substring, r.track_substring, r.replacement_status
+                    "{}:{}:{}:{}:{}:{}",
+                    r.enabled,
+                    r.artist_substring,
+                    r.track_substring,
+                    r.replacement_status,
+                    r.presence_availability,
+                    r.presence_activity
                 )
             })
             .collect();
@@ -1517,6 +1903,7 @@ pub(crate) fn process_track(
     consecutive_pauses: &mut u8,
     gated_track_key: &mut Option<String>,
     last_availability_arm: &mut Option<Instant>,
+    armed_presence: &mut Option<PresencePair>,
     last_posted_status: &mut Option<String>,
     last_gate_check: &mut Option<Instant>,
 ) -> u64 {
@@ -1538,17 +1925,51 @@ pub(crate) fn process_track(
     let track_key = status_track_key(now, config);
     let changed = last_track_key.as_ref() != Some(&track_key);
 
-    // Issue #432 / finding PollCore#1 (issue #569) / PollCore#2 (issue #570):
-    // the per-iteration rule decision is computed ONCE, here, so EVERY write
-    // path can consult it — the playing write, the mid-track gate re-check,
-    // the paused clear and the no-track clear. Pre-fix only the playing write
-    // consulted it, and only on a track change, so a quiet-hours window that
-    // opened mid-track was never felt and the paused/no-track clears ignored
-    // rules entirely (contradicting the documented contract in en.ts
-    // 'rules.sectionHint'). Pure computation: no side effects, so it is safe
-    // to run ahead of the debounce early-return below.
+    // Issue #432 / finding PollCore#1 (issue #569) / PollCore#2 (issue #570) /
+    // finding #634 (issue #634): the per-iteration rule decision is computed
+    // ONCE, here, so EVERY write path can consult it — the playing write, the
+    // mid-track gate re-check, the paused clear and the no-track clear. It
+    // carries the rule's suppression, its replacement text AND its presence
+    // action. Pure computation: no side effects, so it is safe to run ahead of
+    // the debounce early-return below.
     let quiet_active = quiet_hours_active_now(config);
     let rule = rule_gate(config, &track.artist, &track.title);
+    // Finding #637: a rule with its own presence action overrides the
+    // out-of-office default (a track rule cannot override it for the
+    // no-track path, where `rule_gate` is fed empty strings).
+    let gate_out_of_office = ooo_gate_enabled(config, rule.presence.is_some());
+    // Findings #3.0-P2/#635/#637: the presence gate and the manual-status check
+    // read the SAME sample. `presence_gate` owns the Graph read, so the manual
+    // check only ever forces an extra read when the user turned the gate off.
+    let presence_gate_enabled = config
+        .as_ref()
+        .map(|c| c.teams.presence_gate)
+        .unwrap_or(true);
+    let respect_manual_status = config
+        .as_ref()
+        .map(|c| c.teams.respect_manual_status)
+        .unwrap_or(true);
+    let presence_read_needed = presence_gate_enabled || respect_manual_status;
+
+    // The gate verdict for one sample — a local closure so the read sites
+    // below (track change, mid-track re-check, pause) cannot drift. The two
+    // "what we posted" texts are PARAMETERS rather than captures: the write
+    // path below mutates them, and a capturing closure would hold a borrow of
+    // them for the whole function.
+    let gate_verdict = |presence: &crate::teams::PresenceInfo,
+                        posted: Option<&str>,
+                        placeholder: Option<&str>|
+     -> Option<String> {
+        presence_gate_decision(
+            presence,
+            presence_gate_enabled,
+            gate_out_of_office,
+            respect_manual_status,
+            posted,
+            placeholder,
+            Utc::now(),
+        )
+    };
 
     // Issue #364: debounce BEFORE any side effect. A change inside the
     // window parks on the short fixed retry with every tracked field
@@ -1596,6 +2017,11 @@ pub(crate) fn process_track(
     let teams_tokens = teams_token_for_write(app, state);
 
     if let Some(mut teams_tok) = teams_tokens {
+        // Findings #634/#635/#637: whether the presence read suppressed this
+        // iteration's status work. The presence gate is the OUTER AUTHORITY for
+        // the rule engine too, so a rule's `setPresence` action is skipped when
+        // the gate — or a status message the user owns — already said no.
+        let mut presence_blocked = false;
         if track.is_playing {
             *consecutive_pauses = 0;
             // Issue #155: a real track replaces any placeholder, so the next
@@ -1623,53 +2049,45 @@ pub(crate) fn process_track(
             // `final_status` below, still flowing through the #384
             // identical-write suppression.
             //
-            // Both inputs come from the hoisted decision above (`quiet_active`
-            // / `rule`): one evaluation per iteration, shared with the paused
-            // and the no-track write paths.
-            let rule_replacement: Option<String> = match &rule {
-                RuleGate::Replace(text) => Some(text.clone()),
-                RuleGate::Suppressed | RuleGate::NoRule => None,
-            };
-            let rule_suppress = matches!(rule, RuleGate::Suppressed);
-            let presence_gate_enabled = config
-                .as_ref()
-                .map(|c| c.teams.presence_gate)
-                .unwrap_or(true);
+            // Everything comes from the hoisted decision above (`rule`, which
+            // now covers quiet hours too): one evaluation per iteration, shared
+            // with the paused and the no-track write paths.
+            let rule_replacement: Option<String> = rule.replacement.clone();
             if changed {
-                if quiet_active {
+                if rule.suppresses() {
+                    let reason = rule.reason.unwrap_or(GATE_REASON_QUIET_HOURS);
                     log::info!(
-                        "[POLLING] process_track: quiet hours active, skipping status write"
+                        "[POLLING] process_track: {} active, skipping status write",
+                        reason
                     );
                     *gated_track_key = Some(track_key.clone());
                     *last_gate_check = Some(Instant::now());
-                    emit_presence_gated(app, "quiet-hours", "", "");
-                } else if rule_suppress {
-                    log::info!(
-                        "[POLLING] process_track: track rule matched, skipping status write"
-                    );
-                    *gated_track_key = Some(track_key.clone());
-                    *last_gate_check = Some(Instant::now());
-                    emit_presence_gated(app, "track-rule", "", "");
-                } else if presence_gate_enabled {
+                    emit_presence_gated(app, reason, "", "");
+                } else if presence_read_needed {
                     match get_teams_presence(&teams_tok.access_token) {
-                        Ok(presence) if is_presence_gated(&presence) => {
-                            let reason = presence_gate_reason(&presence);
-                            log::info!(
-                                "[POLLING] process_track: presence gated ({}), skipping status write",
-                                reason
-                            );
-                            *gated_track_key = Some(track_key.clone());
-                            *last_gate_check = Some(Instant::now());
-                            emit_presence_gated(
-                                app,
-                                &reason,
-                                &presence.availability,
-                                &presence.activity,
-                            );
-                        }
-                        Ok(_) => {
-                            *gated_track_key = None;
-                        }
+                        Ok(presence) => match gate_verdict(
+                            &presence,
+                            last_posted_status.as_deref(),
+                            last_posted_placeholder.as_deref(),
+                        ) {
+                            Some(reason) => {
+                                log::info!(
+                                    "[POLLING] process_track: gated ({}), skipping status write",
+                                    reason
+                                );
+                                *gated_track_key = Some(track_key.clone());
+                                *last_gate_check = Some(Instant::now());
+                                emit_presence_gated(
+                                    app,
+                                    &reason,
+                                    &presence.availability,
+                                    &presence.activity,
+                                );
+                            }
+                            None => {
+                                *gated_track_key = None;
+                            }
+                        },
                         Err(e) => {
                             log::warn!(
                                 "[POLLING] process_track: presence gate read failed, proceeding with status write: {}",
@@ -1695,15 +2113,39 @@ pub(crate) fn process_track(
             // paused track's clear is the paused branch's job (finding
             // PollCore#2, issue #570).
             if quiet_gate_entry_due(quiet_active, gated_track_key.as_deref(), &track_key) {
-                log::info!(
-                    "[POLLING] process_track: quiet hours started mid-track, suppressing status write"
-                );
                 *gated_track_key = Some(track_key.clone());
                 *last_gate_check = Some(Instant::now());
-                emit_presence_gated(app, "quiet-hours", "", "");
                 let remaining_ms =
                     corrected_progress_ms.map(|c| track.duration_ms.saturating_sub(c));
-                return playing_track_sleep(remaining_ms, config);
+                if rule.suppresses() {
+                    log::info!(
+                        "[POLLING] process_track: quiet hours started mid-track, suppressing status write"
+                    );
+                    emit_presence_gated(
+                        app,
+                        rule.reason.unwrap_or(GATE_REASON_QUIET_HOURS),
+                        "",
+                        "",
+                    );
+                    // Finding #634: the suppression skips the write, but the
+                    // rule's presence action still applies.
+                    teams_backoff_secs = teams_backoff_secs.max(rule_presence_backoff(
+                        app,
+                        &teams_tok.access_token,
+                        config,
+                        &rule,
+                        remaining_ms,
+                        armed_presence,
+                        last_availability_arm,
+                    ));
+                    return playing_track_sleep(remaining_ms, config).max(teams_backoff_secs);
+                }
+                // Finding #634: a quiet-hours window with a replacement text is
+                // NOT a suppression — fall through to the write below, which
+                // posts the rule's text.
+                log::info!(
+                    "[POLLING] process_track: quiet hours started mid-track, posting the rule status"
+                );
             }
             // Issue #380: a gated track stays gated only until the gate
             // re-check is due — then presence is re-read, and a cleared
@@ -1720,49 +2162,71 @@ pub(crate) fn process_track(
             // Fail-safe: a failed read keeps the gate (still suppressed).
             // `last_gate_check` throttles the re-reads while gated — never
             // `last_teams_update`, which times the debounce + keepalive write clocks.
-            // Issue #432: rule gates re-evaluate here too. The clock is
-            // re-projected (a long-lived track can span a quiet-hours
-            // boundary) and the track rule re-matched; a still-matching
-            // rule keeps the suppression without a presence read, while a
-            // cleared rule falls into the presence re-check below.
+            // Issue #432 / finding #634: rule gates re-evaluate here too. The
+            // clock is re-projected (a long-lived track can span a quiet-hours
+            // boundary) and the rule re-matched — including its replacement
+            // text and presence action — so a rule that stopped suppressing
+            // falls into the presence re-check below.
             if gated_track_key.as_deref() == Some(track_key.as_str()) {
                 let (cur_minutes, cur_weekday) = local_minutes_and_weekday();
-                let rules_still_gating = config.as_ref().is_some_and(|c| {
-                    quiet_hours_active(&c.status_rules, cur_minutes, cur_weekday)
-                        || matching_track_rule(&c.status_rules, &track.artist, &track.title)
-                            .is_some_and(|m| m.replacement_status.is_empty())
-                });
-                if rules_still_gating {
+                let current_rule = rule_gate_at(
+                    config,
+                    cur_minutes,
+                    cur_weekday,
+                    &track.artist,
+                    &track.title,
+                );
+                let remaining_ms =
+                    corrected_progress_ms.map(|c| track.duration_ms.saturating_sub(c));
+                if current_rule.suppresses() {
                     if gate_recheck_due(*last_gate_check, Instant::now()) {
                         *last_gate_check = Some(Instant::now());
                     }
                     log::debug!("[POLLING] process_track: still rule-gated, keeping suppression");
-                    let remaining_ms =
-                        corrected_progress_ms.map(|c| track.duration_ms.saturating_sub(c));
-                    return playing_track_sleep(remaining_ms, config);
+                    teams_backoff_secs = teams_backoff_secs.max(rule_presence_backoff(
+                        app,
+                        &teams_tok.access_token,
+                        config,
+                        &current_rule,
+                        remaining_ms,
+                        armed_presence,
+                        last_availability_arm,
+                    ));
+                    return playing_track_sleep(remaining_ms, config).max(teams_backoff_secs);
                 }
-                let gate_enabled = config
-                    .as_ref()
-                    .map(|c| c.teams.presence_gate)
-                    .unwrap_or(true);
-                if !gate_enabled {
+                if !presence_read_needed {
                     *gated_track_key = None;
                 } else if gate_recheck_due(*last_gate_check, Instant::now()) {
                     match get_teams_presence(&teams_tok.access_token) {
-                        Ok(presence) if is_presence_gated(&presence) => {
-                            log::debug!("[POLLING] process_track: still presence-gated, keeping suppression");
-                            *last_gate_check = Some(Instant::now());
-                        }
-                        Ok(_) => {
-                            log::info!(
-                                "[POLLING] process_track: presence gate cleared mid-track, posting late"
-                            );
-                            *gated_track_key = None;
-                            // Issue #380: record the re-check on the gate
-                            // clock only — `last_teams_update` (debounce +
-                            // keepalive) stays untouched so the late post
-                            // below is never mistaken for a fresh write.
-                            *last_gate_check = Some(Instant::now());
+                        Ok(presence) => {
+                            // The same verdict as the change-time gate, so a
+                            // manual status that lapses mid-track clears the
+                            // gate and late-posts exactly like a meeting ending.
+                            match presence_gate_decision(
+                                &presence,
+                                presence_gate_enabled,
+                                gate_out_of_office,
+                                respect_manual_status,
+                                last_posted_status.as_deref(),
+                                last_posted_placeholder.as_deref(),
+                                Utc::now(),
+                            ) {
+                                Some(_) => {
+                                    log::debug!("[POLLING] process_track: still presence-gated, keeping suppression");
+                                    *last_gate_check = Some(Instant::now());
+                                }
+                                None => {
+                                    log::info!(
+                                        "[POLLING] process_track: presence gate cleared mid-track, posting late"
+                                    );
+                                    *gated_track_key = None;
+                                    // Issue #380: record the re-check on the gate
+                                    // clock only — `last_teams_update` (debounce +
+                                    // keepalive) stays untouched so the late post
+                                    // below is never mistaken for a fresh write.
+                                    *last_gate_check = Some(Instant::now());
+                                }
+                            }
                         }
                         Err(e) => {
                             log::warn!(
@@ -1777,8 +2241,6 @@ pub(crate) fn process_track(
                     log::debug!(
                         "[POLLING] process_track: track presence-gated, skipping status write"
                     );
-                    let remaining_ms =
-                        corrected_progress_ms.map(|c| track.duration_ms.saturating_sub(c));
                     return playing_track_sleep(remaining_ms, config);
                 }
             }
@@ -2045,13 +2507,13 @@ pub(crate) fn process_track(
                 // (en.ts 'rules.sectionHint'). Pre-fix only the presence gate
                 // was consulted here, so a quiet window or a matching
                 // suppression rule was bypassed on every pause.
-                let rule_suppression_reason: Option<&str> = if quiet_active {
-                    Some("quiet-hours")
-                } else if matches!(rule, RuleGate::Suppressed) {
-                    Some("track-rule")
-                } else {
-                    None
-                };
+                // Finding #635: `gate_blocked` covers the manual-status
+                // verdict too — never replace a message the user typed with
+                // "Paused".
+                let rule_suppression_reason: Option<&str> =
+                    if rule.suppresses() { rule.reason } else { None };
+                // `presence_blocked` is the hoisted flag (declared above the
+                // playing branch) — the availability block consults it.
                 let gate_blocked = if let Some(reason) = rule_suppression_reason {
                     log::info!(
                         "[POLLING] process_track: paused-clear suppressed ({}), keeping presence untouched",
@@ -2061,24 +2523,26 @@ pub(crate) fn process_track(
                     true
                 } else if gated_track_key.as_deref() == Some(track_key.as_str()) {
                     true
-                } else if config
-                    .as_ref()
-                    .map(|c| c.teams.presence_gate)
-                    .unwrap_or(true)
-                {
+                } else if presence_read_needed {
                     match get_teams_presence(&teams_tok.access_token) {
-                        Ok(presence) if is_presence_gated(&presence) => {
-                            *gated_track_key = Some(track_key.clone());
-                            let reason = presence_gate_reason(&presence);
-                            emit_presence_gated(
-                                app,
-                                &reason,
-                                &presence.availability,
-                                &presence.activity,
-                            );
-                            true
-                        }
-                        Ok(_) => false,
+                        Ok(presence) => match gate_verdict(
+                            &presence,
+                            last_posted_status.as_deref(),
+                            last_posted_placeholder.as_deref(),
+                        ) {
+                            Some(reason) => {
+                                *gated_track_key = Some(track_key.clone());
+                                presence_blocked = true;
+                                emit_presence_gated(
+                                    app,
+                                    &reason,
+                                    &presence.availability,
+                                    &presence.activity,
+                                );
+                                true
+                            }
+                            None => false,
+                        },
                         Err(e) => {
                             // Fail-safe: proceed with the clear.
                             log::warn!(
@@ -2132,72 +2596,56 @@ pub(crate) fn process_track(
             }
         }
 
-        // P1 (issue #3.0-P1): availability sync — OFF by default. While a
-        // track plays, re-arm the Graph "Available" presence session at
-        // most every 4 minutes (Available sessions FADE after 5 min
-        // regardless of `expirationDuration`; re-arm strictly inside that
-        // window); on pause, clear the session (`clearPresence` 404 =
-        // session already gone = success). Emits
-        // `presence-availability-updated` on each arm/clear.
-        if config
-            .as_ref()
-            .map(|c| c.teams.availability_sync)
-            .unwrap_or(false)
-        {
-            let now = Instant::now();
-            if track.is_playing {
-                if should_rearm_availability(*last_availability_arm, now) {
-                    match set_teams_presence(
-                        &teams_tok.access_token,
-                        "Available",
-                        "Available",
-                        "PT4H",
-                    ) {
-                        Ok(_) => {
-                            *last_availability_arm = Some(now);
-                            let _ = app.emit(
-                                "presence-availability-updated",
-                                json!({
-                                    "available": true,
-                                    "label": "Listening (Available)",
-                                    "timestamp": Utc::now().to_rfc3339()
-                                }),
-                            );
-                        }
-                        Err(e) => {
-                            log::error!(
-                                "[POLLING] process_track: failed to set Teams availability: {}",
-                                e
-                            );
-                            // Issue #154: a throttled set extends the next
-                            // poll to the server-directed delay.
-                            teams_backoff_secs = teams_backoff_secs.max(rate_limit_sleep_secs(&e));
-                        }
-                    }
-                }
-            } else if last_availability_arm.is_some() {
-                match clear_teams_presence(&teams_tok.access_token) {
-                    Ok(_) => {
-                        *last_availability_arm = None;
-                        let _ = app.emit(
-                            "presence-availability-updated",
-                            json!({
-                                "available": false,
-                                "label": "Availability cleared",
-                                "timestamp": Utc::now().to_rfc3339()
-                            }),
-                        );
-                    }
-                    Err(e) => {
-                        log::error!(
-                            "[POLLING] process_track: failed to clear Teams availability: {}",
-                            e
-                        );
-                        // Issue #154: honor the server's Retry-After on a
-                        // throttled clear.
-                        teams_backoff_secs = teams_backoff_secs.max(rate_limit_sleep_secs(&e));
-                    }
-                }
+        // P1 (issue #3.0-P1) + finding #634 (issue #634): presence sessions —
+        // OFF by default. `teams.availability_sync` arms a session while a
+        // track plays (re-armed at most every 4 minutes: an `Available` session
+        // FADES after 5 min regardless of `expirationDuration`, so the re-arm
+        // stays strictly inside that window) and clears it on pause
+        // (`clearPresence` 404 = session already gone = success).
+        //
+        // A matching rule's own pair takes precedence: it IS the user's
+        // instruction for this track/window, and it applies whether the track is
+        // playing or paused — leaving a quiet-hours rule clears it again so the
+        // user's real state returns. Emits `presence-availability-updated` on
+        // each arm/clear.
+        //
+        // Skipped entirely while `presence_blocked`: the presence gate is the
+        // outer authority, so a busy/DND/meeting user (or one who typed their
+        // own status) is never answered with a setPresence of ours.
+        if availability_sync_enabled(config) && !presence_blocked {
+            let remaining_ms = corrected_progress_ms.map(|c| track.duration_ms.saturating_sub(c));
+            if let Some(pair) = rule.presence.as_ref() {
+                teams_backoff_secs = teams_backoff_secs.max(arm_presence_session(
+                    app,
+                    &teams_tok.access_token,
+                    pair,
+                    &presence_expiration_duration(remaining_ms),
+                    &format!("Rule presence ({}/{})", pair.availability, pair.activity),
+                    armed_presence,
+                    last_availability_arm,
+                ));
+            } else if track.is_playing {
+                let listening = PresencePair {
+                    availability: "Available".to_string(),
+                    activity: "Available".to_string(),
+                };
+                teams_backoff_secs = teams_backoff_secs.max(arm_presence_session(
+                    app,
+                    &teams_tok.access_token,
+                    &listening,
+                    &presence_expiration_duration(remaining_ms),
+                    "Listening (Available)",
+                    armed_presence,
+                    last_availability_arm,
+                ));
+            } else {
+                teams_backoff_secs = teams_backoff_secs.max(clear_presence_session(
+                    app,
+                    &teams_tok.access_token,
+                    "Availability cleared",
+                    armed_presence,
+                    last_availability_arm,
+                ));
             }
         }
     }
@@ -2225,6 +2673,7 @@ pub(crate) fn handle_no_track(
     config: &Option<crate::config::AppConfig>,
     last_posted_placeholder: &mut Option<String>,
     last_availability_arm: &mut Option<Instant>,
+    armed_presence: &mut Option<PresencePair>,
     first_iteration: &mut bool,
     last_posted_status: &mut Option<String>,
 ) -> u64 {
@@ -2252,40 +2701,24 @@ pub(crate) fn handle_no_track(
         None => return 0,
     };
 
-    // P1 (issue #3.0-P1): availability sync — clear the Graph presence
-    // session when nothing is playing (`clearPresence` 404 = session
-    // already gone = success). Runs independently of `clear_on_pause`:
-    // that toggle governs the placeholder status message only, while
-    // availability sync owns the presence bubble.
+    // P1 (issue #3.0-P1): availability sync — clear the Graph presence session
+    // when nothing is playing (`clearPresence` 404 = session already gone =
+    // success). Runs independently of `clear_on_pause`: that toggle governs the
+    // placeholder status message only, while availability sync owns the
+    // presence bubble. Finding #634: a rule's own presence session is cleared
+    // here too — nothing is playing, so the rule's window/track no longer
+    // applies and the user's real state must return. `armed_presence` is
+    // cleared with it, so the next track re-arms instead of believing a session
+    // is live.
     let mut teams_backoff_secs: u64 = 0;
-    if config
-        .as_ref()
-        .map(|c| c.teams.availability_sync)
-        .unwrap_or(false)
-        && last_availability_arm.is_some()
-    {
-        match clear_teams_presence(&teams_tok.access_token) {
-            Ok(_) => {
-                *last_availability_arm = None;
-                let _ = app.emit(
-                    "presence-availability-updated",
-                    json!({
-                        "available": false,
-                        "label": "Availability cleared",
-                        "timestamp": Utc::now().to_rfc3339()
-                    }),
-                );
-            }
-            Err(e) => {
-                log::error!(
-                    "[POLLING] handle_no_track: failed to clear Teams availability: {}",
-                    e
-                );
-                // Issue #154: honor the server's Retry-After on a throttled
-                // clear.
-                teams_backoff_secs = teams_backoff_secs.max(rate_limit_sleep_secs(&e));
-            }
-        }
+    if availability_sync_enabled(config) {
+        teams_backoff_secs = teams_backoff_secs.max(clear_presence_session(
+            app,
+            &teams_tok.access_token,
+            "Availability cleared",
+            armed_presence,
+            last_availability_arm,
+        ));
     }
 
     // Issue #155: honor `clear_on_pause` like the paused-track branch.
@@ -2297,26 +2730,31 @@ pub(crate) fn handle_no_track(
         return teams_backoff_secs;
     }
 
-    let placeholder = "\u{1F3B5} Nothing playing on Spotify";
-    // Issue #155: skip byte-identical placeholder posts.
-    if last_posted_placeholder.as_deref() == Some(placeholder) {
-        log::debug!(
-            "[POLLING] handle_no_track: no-track placeholder unchanged, skipping clear POST"
-        );
-        return teams_backoff_secs;
-    }
-
     // Finding PollCore#2 (issue #570): the no-track clear is a status write
     // too, so quiet hours and suppression rules govern it — the documented
     // contract is that rules suppress the Teams status write, not just the
     // playing branch of it (en.ts 'rules.sectionHint'). With nothing playing
     // there is no artist/title to match a scoped rule against, so only quiet
     // hours and match-all rules (both substrings empty) can suppress here.
+    //
+    // Finding #634 (issue #634): the decision now also carries the rule's
+    // replacement text, so a quiet-hours entry saying "🌙 Back at 09:00" posts
+    // that instead of going silent.
     let no_track_rule = rule_gate(config, "", "");
-    let suppression_reason: Option<&str> = if quiet_hours_active_now(config) {
-        Some("quiet-hours")
-    } else if matches!(no_track_rule, RuleGate::Suppressed) {
-        Some("track-rule")
+    let placeholder = no_track_rule
+        .replacement
+        .clone()
+        .unwrap_or_else(|| "\u{1F3B5} Nothing playing on Spotify".to_string());
+    // Issue #155: skip byte-identical placeholder posts (the rule's own text
+    // included, so a quiet-hours replacement is not re-POSTed every idle poll).
+    if last_posted_placeholder.as_deref() == Some(placeholder.as_str()) {
+        log::debug!(
+            "[POLLING] handle_no_track: no-track placeholder unchanged, skipping clear POST"
+        );
+        return teams_backoff_secs;
+    }
+    let suppression_reason: Option<&str> = if no_track_rule.suppresses() {
+        no_track_rule.reason
     } else {
         None
     };
@@ -2329,7 +2767,7 @@ pub(crate) fn handle_no_track(
         // below — so the decision is made once and the suppression is not
         // re-emitted on every idle poll. The next real track clears it (the
         // playing branch resets `last_posted_placeholder`).
-        *last_posted_placeholder = Some(placeholder.to_string());
+        *last_posted_placeholder = Some(placeholder.clone());
         emit_presence_gated(app, reason, "", "");
         return teams_backoff_secs;
     }
@@ -2342,7 +2780,7 @@ pub(crate) fn handle_no_track(
     // `teams-reconnect-required`.
     let clear_outcome: Result<(), TeamsApiError> = match clear_teams_status_message(
         &teams_tok.access_token,
-        placeholder,
+        &placeholder,
         Some(&expiry_str),
     ) {
         Ok(_) => Ok(()),
@@ -2378,7 +2816,7 @@ pub(crate) fn handle_no_track(
                         }
                         match clear_teams_status_message(
                             &new_tokens.access_token,
-                            placeholder,
+                            &placeholder,
                             Some(&expiry_str),
                         ) {
                             Ok(()) => Ok(()),
@@ -2466,6 +2904,83 @@ pub(crate) fn handle_no_track(
                 }
             }
             backoff
+        }
+    }
+}
+
+/// Finding #636 (issue #636): best-effort presence cleanup on shutdown.
+///
+/// Called from the `RunEvent::Exit` arm in `lib.rs`, AFTER
+/// `updater_bg::install_pending_on_exit` — so a staged update is never delayed
+/// by a Graph round-trip, and on Windows (where the installer exits the process
+/// without returning) an update-driven quit never reaches this code at all.
+///
+/// Without it, a crash/force-quit/machine-sleep leaves the app's presence
+/// session armed until its `expirationDuration` lapses, and a leftover
+/// "🎵 …" status message keeps advertising music the app is no longer
+/// tracking. Two bounded calls, each behind its own config flag:
+///
+/// * `availability_sync` + something actually armed → `clearPresence`;
+/// * `clear_on_pause` + a playing status currently posted → the short-lived
+///   "Paused" placeholder (it self-removes after 60 s).
+///
+/// Never blocks meaningfully: both calls run through a 3-second client
+/// ([`crate::teams::EXIT_CLEANUP_TIMEOUT`]) and a failed first call skips the
+/// second. Log-only; nothing here can fail the exit.
+pub(crate) fn clear_presence_on_exit(app: &AppHandle) {
+    use tauri::Manager;
+
+    let Some(state) = app.try_state::<Arc<AppState>>() else {
+        return;
+    };
+    let clocks = load_write_clocks();
+    // Nothing of ours is armed or posted: don't touch the user's Teams.
+    if clocks.last_availability_arm.is_none() && clocks.last_posted_status.is_none() {
+        return;
+    }
+    // Clone out of the read guard before any blocking call: the guard must not
+    // be held across a Graph round-trip on the exit path.
+    let config = state.config.get().clone();
+    let Some(tokens) = state.tokens.teams().clone() else {
+        return;
+    };
+    if is_teams_token_expired(&tokens) {
+        log::info!(
+            "[POLLING] clear_presence_on_exit: stored Teams token is expired, skipping presence cleanup"
+        );
+        return;
+    }
+
+    let mut cleared = true;
+    if availability_sync_enabled(&config) && clocks.last_availability_arm.is_some() {
+        match clear_teams_presence_quick(&tokens.access_token) {
+            Ok(_) => log::info!("[POLLING] clear_presence_on_exit: presence session cleared"),
+            Err(e) => {
+                cleared = false;
+                log::warn!(
+                    "[POLLING] clear_presence_on_exit: failed to clear presence session: {}",
+                    e
+                );
+            }
+        }
+    }
+    let clear_on_pause = config
+        .as_ref()
+        .map(|c| c.teams.clear_on_pause)
+        .unwrap_or(true);
+    if cleared && clear_on_pause && clocks.last_posted_status.is_some() {
+        match clear_teams_status_message_quick(
+            &tokens.access_token,
+            "\u{1F3B5} Paused",
+            Some(&placeholder_expiry_str()),
+        ) {
+            Ok(_) => log::info!(
+                "[POLLING] clear_presence_on_exit: paused placeholder posted; available status replaced"
+            ),
+            Err(e) => log::warn!(
+                "[POLLING] clear_presence_on_exit: failed to post the paused placeholder: {}",
+                e
+            ),
         }
     }
 }
@@ -3264,14 +3779,31 @@ mod tests {
             "the presence-gate read must precede the status write in process_track \
              so a busy/meeting presence can suppress it (issue #3.0-P2)"
         );
+        // Finding #634: the setPresence/clearPresence calls moved into the two
+        // session helpers (one call site per direction for rules AND the
+        // default listening session), so the source-level contract is now
+        // "process_track arms through arm_presence_session and clears through
+        // clear_presence_session" — the Graph calls themselves are pinned in
+        // the helper bodies below.
         assert!(
-            body.contains("set_teams_presence("),
-            "process_track must re-arm set_teams_presence(Available, ...) while playing \
-             (issue #3.0-P1)"
+            body.contains("arm_presence_session("),
+            "process_track must re-arm a presence session while playing \
+             (issues #3.0-P1/#634)"
         );
         assert!(
-            body.contains("clear_teams_presence("),
-            "process_track must clear_teams_presence on pause (issue #3.0-P1)"
+            body.contains("clear_presence_session("),
+            "process_track must clear the presence session on pause \
+             (issues #3.0-P1/#634)"
+        );
+        let helper = prod_fn_body(prod_source, "fn arm_presence_session(");
+        assert!(
+            helper.contains("set_teams_presence("),
+            "the arm helper must be the setPresence call site (issue #3.0-P1)"
+        );
+        let clear_helper = prod_fn_body(prod_source, "fn clear_presence_session(");
+        assert!(
+            clear_helper.contains("clear_teams_presence("),
+            "the clear helper must be the clearPresence call site (issue #3.0-P1)"
         );
     }
 
@@ -3542,6 +4074,7 @@ mod tests {
                 start_minutes: 0,
                 end_minutes: 1439,
                 days: Vec::new(),
+                ..Default::default()
             });
         assert_ne!(
             fp,
@@ -3858,6 +4391,7 @@ mod tests {
             start_minutes: start,
             end_minutes: end,
             days,
+            ..QuietHoursEntry::default()
         };
         // Plain range 09:00→17:00 on a Wednesday (3).
         let r = rules(vec![entry(true, 540, 1020, vec![])]);
@@ -3898,6 +4432,7 @@ mod tests {
             artist_substring: artist.to_string(),
             track_substring: track.to_string(),
             replacement_status: String::new(),
+            ..TrackRuleEntry::default()
         };
         assert!(track_rule_hit(
             &rule(true, "lofi", ""),
@@ -3943,17 +4478,19 @@ mod tests {
         let gated = PresenceInfo {
             availability: "busy".to_string(),
             activity: "inAMeeting".to_string(),
+            ..Default::default()
         };
         let cleared = PresenceInfo {
             availability: "available".to_string(),
             activity: "available".to_string(),
+            ..Default::default()
         };
         assert!(
-            crate::teams::is_presence_gated(&gated),
+            crate::teams::is_presence_gated(&gated, false),
             "a meeting presence must gate (issue #430 precondition)"
         );
         assert!(
-            !crate::teams::is_presence_gated(&cleared),
+            !crate::teams::is_presence_gated(&cleared, false),
             "an available presence must clear the gate (issue #430 trigger)"
         );
         // 2. The re-check is throttled on its own clock (no per-poll
@@ -4442,13 +4979,18 @@ mod tests {
         );
 
         let no_track_body = prod_fn_body(prod, "pub(crate) fn handle_no_track(");
-        assert!(
-            no_track_body.contains("quiet_hours_active_now("),
-            "the no-track clear must honor quiet hours (issue #570)"
-        );
+        // Finding #634: `rule_gate` now carries quiet hours too (the matched
+        // entry's replacement text and presence pair), so the no-track clear
+        // consults ONE decision instead of a separate quiet-hours probe plus a
+        // track-rule probe that could disagree.
         assert!(
             no_track_body.contains("rule_gate("),
-            "the no-track clear must consult the rule decision (issue #570)"
+            "the no-track clear must consult the rule decision (issues #570/#634)"
+        );
+        assert!(
+            no_track_body.contains("suppresses()"),
+            "the no-track clear must honor quiet hours AND suppression rules \
+             through the shared decision (issues #570/#634)"
         );
         let clear_pos = no_track_body
             .find("clear_teams_status_message(")
@@ -4471,6 +5013,7 @@ mod tests {
             artist_substring: artist.to_string(),
             track_substring: track.to_string(),
             replacement_status: replacement.to_string(),
+            ..TrackRuleEntry::default()
         };
         let config_with = |rules: Vec<TrackRuleEntry>| {
             Some(AppConfig {
@@ -4488,7 +5031,10 @@ mod tests {
                 "LoFi Girl",
                 "Anything"
             ),
-            RuleGate::Suppressed,
+            RuleDecision {
+                reason: Some(GATE_REASON_TRACK_RULE),
+                ..Default::default()
+            },
             "an empty replacement suppresses the write"
         );
         assert_eq!(
@@ -4497,27 +5043,34 @@ mod tests {
                 "LoFi Girl",
                 "Anything"
             ),
-            RuleGate::Replace("Focus time".to_string()),
+            RuleDecision {
+                reason: Some(GATE_REASON_TRACK_RULE),
+                replacement: Some("Focus time".to_string()),
+                ..Default::default()
+            },
             "a non-empty replacement becomes the posted text"
         );
         assert_eq!(
             rule_gate(&config_with(vec![rule(false, "", "", "")]), "Anyone", "X"),
-            RuleGate::NoRule,
+            RuleDecision::default(),
             "a disabled rule never gates"
         );
         assert_eq!(
             rule_gate(&None, "Anyone", "X"),
-            RuleGate::NoRule,
+            RuleDecision::default(),
             "no config means no rule"
         );
         assert_eq!(
             rule_gate(&config_with(vec![rule(true, "lofi", "", "")]), "", ""),
-            RuleGate::NoRule,
+            RuleDecision::default(),
             "a scoped rule must not suppress a no-track clear"
         );
         assert_eq!(
             rule_gate(&config_with(vec![rule(true, "", "", "")]), "", ""),
-            RuleGate::Suppressed,
+            RuleDecision {
+                reason: Some(GATE_REASON_TRACK_RULE),
+                ..Default::default()
+            },
             "a match-all rule suppresses a no-track clear too"
         );
     }
@@ -4622,5 +5175,368 @@ mod tests {
             "start_polling must reset the shared clocks so a panic-dead session's \
              clocks cannot leak into the next one"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // Findings #634/#635/#636/#637 (issues #634/#635/#636/#637): the rule
+    // presence action, the manual-status policy, the bounded presence session
+    // and the out-of-office gate.
+    // ---------------------------------------------------------------
+
+    /// Finding #634: a rule's action travels with the decision — suppression,
+    /// replacement text and presence pair — for track rules AND quiet hours.
+    #[test]
+    fn test_rule_actions_suppress_replace_and_set_presence() {
+        use crate::config::{AppConfig, QuietHoursEntry, TrackRuleEntry};
+        let cfg = |quiet: Vec<QuietHoursEntry>, rules: Vec<TrackRuleEntry>| {
+            let mut c = AppConfig::default();
+            c.status_rules.quiet_hours = quiet;
+            c.status_rules.track_rules = rules;
+            Some(c)
+        };
+        let wy = |avail: &str, act: &str| (avail.to_string(), act.to_string());
+
+        // (a) A track rule with no replacement suppresses and carries its pair.
+        let (avail, act) = wy("DoNotDisturb", "Presenting");
+        let decision = rule_gate_at(
+            &cfg(
+                vec![],
+                vec![TrackRuleEntry {
+                    enabled: true,
+                    artist_substring: "lofi".to_string(),
+                    presence_availability: avail,
+                    presence_activity: act,
+                    ..TrackRuleEntry::default()
+                }],
+            ),
+            600,
+            3,
+            "LoFi Girl",
+            "Anything",
+        );
+        assert!(decision.suppresses(), "empty replacement = suppress");
+        assert_eq!(decision.reason, Some(GATE_REASON_TRACK_RULE));
+        assert_eq!(
+            decision
+                .presence
+                .expect("the rule must carry its pair")
+                .activity,
+            "Presenting"
+        );
+
+        // (b) A non-empty replacement is NOT a suppression: the text is posted.
+        let decision = rule_gate_at(
+            &cfg(
+                vec![],
+                vec![TrackRuleEntry {
+                    enabled: true,
+                    replacement_status: "Focus time".to_string(),
+                    ..TrackRuleEntry::default()
+                }],
+            ),
+            600,
+            3,
+            "Anyone",
+            "Anything",
+        );
+        assert!(!decision.suppresses());
+        assert_eq!(decision.replacement.as_deref(), Some("Focus time"));
+        assert!(
+            decision.presence.is_none(),
+            "no pair = don't touch presence"
+        );
+
+        // (c) Quiet hours carry the same three actions, and win over a track
+        //     rule (the documented precedence).
+        let decision = rule_gate_at(
+            &cfg(
+                vec![QuietHoursEntry {
+                    enabled: true,
+                    start_minutes: 540,
+                    end_minutes: 1020,
+                    replacement_status: "🌙 Back at 09:00".to_string(),
+                    presence_availability: "Away".to_string(),
+                    presence_activity: "Away".to_string(),
+                    ..QuietHoursEntry::default()
+                }],
+                vec![TrackRuleEntry {
+                    enabled: true,
+                    replacement_status: "from the track rule".to_string(),
+                    ..TrackRuleEntry::default()
+                }],
+            ),
+            600,
+            3,
+            "Anyone",
+            "Anything",
+        );
+        assert_eq!(decision.reason, Some(GATE_REASON_QUIET_HOURS));
+        assert_eq!(decision.replacement.as_deref(), Some("🌙 Back at 09:00"));
+        assert_eq!(
+            decision.presence.expect("quiet hours pair").availability,
+            "Away"
+        );
+
+        // (d) An unsupported pair in an unclamped in-memory config is dropped
+        //     rather than sent to Graph.
+        let decision = rule_gate_at(
+            &cfg(
+                vec![],
+                vec![TrackRuleEntry {
+                    enabled: true,
+                    presence_availability: "DoNotDisturb".to_string(),
+                    presence_activity: "DoNotDisturb".to_string(),
+                    ..TrackRuleEntry::default()
+                }],
+            ),
+            600,
+            3,
+            "",
+            "",
+        );
+        assert!(decision.suppresses());
+        assert!(decision.presence.is_none());
+
+        // (e) Outside the quiet window nothing matches.
+        let outside = cfg(
+            vec![QuietHoursEntry {
+                enabled: true,
+                start_minutes: 540,
+                end_minutes: 1020,
+                presence_availability: "Away".to_string(),
+                presence_activity: "Away".to_string(),
+                ..QuietHoursEntry::default()
+            }],
+            vec![],
+        );
+        let decision = rule_gate_at(&outside, 1200, 3, "", "");
+        assert!(!decision.suppresses());
+        assert!(decision.presence.is_none());
+    }
+
+    /// Finding #635: the read-before-write policy, as a truth table.
+    #[test]
+    fn test_manual_status_blocks_write_policy() {
+        use crate::teams::{PresenceInfo, PresenceStatusMessage};
+        let now = Utc::now();
+        let sample = |content: &str, expires: Option<chrono::DateTime<Utc>>| PresenceInfo {
+            availability: "available".to_string(),
+            activity: "available".to_string(),
+            status_message: Some(PresenceStatusMessage {
+                content: content.to_string(),
+                expires_at: expires,
+            }),
+            ..PresenceInfo::default()
+        };
+
+        // A message the user typed blocks the write (this is the fix).
+        assert!(manual_status_blocks_write(
+            true,
+            Some(&sample("In a workshop until 3", None)),
+            None,
+            None,
+            now,
+        ));
+        // Our own last playing status / placeholder does not.
+        assert!(!manual_status_blocks_write(
+            true,
+            Some(&sample("🎵 A - B 🎧", None)),
+            Some("🎵 A - B 🎧"),
+            None,
+            now,
+        ));
+        assert!(!manual_status_blocks_write(
+            true,
+            Some(&sample("🎵 Paused", None)),
+            None,
+            Some("🎵 Paused"),
+            now,
+        ));
+        // An expired message is stale by definition (our placeholders and
+        // status writes both carry a near-term expiryDateTime).
+        assert!(!manual_status_blocks_write(
+            true,
+            Some(&sample(
+                "In a workshop until 3",
+                Some(now - chrono::Duration::seconds(30))
+            )),
+            None,
+            None,
+            now,
+        ));
+        // Still-live expiry + a different text = authored.
+        assert!(manual_status_blocks_write(
+            true,
+            Some(&sample(
+                "In a workshop until 3",
+                Some(now + chrono::Duration::hours(1))
+            )),
+            None,
+            None,
+            now,
+        ));
+        // Fail-open paths: the flag is off, there is no sample, or the live
+        // message is empty/whitespace.
+        assert!(!manual_status_blocks_write(
+            false,
+            Some(&sample("In a workshop until 3", None)),
+            None,
+            None,
+            now,
+        ));
+        assert!(!manual_status_blocks_write(true, None, None, None, now));
+        assert!(!manual_status_blocks_write(
+            true,
+            Some(&sample("   ", None)),
+            None,
+            None,
+            now,
+        ));
+        // Whitespace-only difference is still "ours".
+        assert!(!manual_status_blocks_write(
+            true,
+            Some(&sample(" 🎵 A - B 🎧 ", None)),
+            Some("🎵 A - B 🎧"),
+            None,
+            now,
+        ));
+    }
+
+    /// Finding #635/#637: the ONE gate decision the read sites share — the
+    /// presence reasons outrank the manual-status reason, and each opt-in flag
+    /// gates only its own reason.
+    #[test]
+    fn test_presence_gate_decision_precedence_and_opt_ins() {
+        use crate::teams::{PresenceInfo, PresenceStatusMessage};
+        let now = Utc::now();
+        let busy_manual = PresenceInfo {
+            availability: "busy".to_string(),
+            activity: "available".to_string(),
+            status_message: Some(PresenceStatusMessage {
+                content: "In a workshop".to_string(),
+                expires_at: None,
+            }),
+            ..PresenceInfo::default()
+        };
+        let manual = PresenceInfo {
+            availability: "available".to_string(),
+            activity: "available".to_string(),
+            status_message: Some(PresenceStatusMessage {
+                content: "In a workshop".to_string(),
+                expires_at: None,
+            }),
+            ..PresenceInfo::default()
+        };
+        let ooo = PresenceInfo {
+            availability: "available".to_string(),
+            activity: "available".to_string(),
+            out_of_office: true,
+            ..PresenceInfo::default()
+        };
+
+        // Busy wins over the manual message (the more specific state).
+        assert_eq!(
+            presence_gate_decision(&busy_manual, true, false, true, None, None, now).as_deref(),
+            Some("busy")
+        );
+        // Manual status is reported under its own reason.
+        assert_eq!(
+            presence_gate_decision(&manual, true, false, true, None, None, now).as_deref(),
+            Some(GATE_REASON_MANUAL_STATUS)
+        );
+        // Turning the manual check off leaves only the presence gate.
+        assert_eq!(
+            presence_gate_decision(&manual, true, false, false, None, None, now),
+            None
+        );
+        // OOO participates only when opted in.
+        assert_eq!(
+            presence_gate_decision(&ooo, true, false, true, None, None, now),
+            None
+        );
+        assert_eq!(
+            presence_gate_decision(&ooo, true, true, true, None, None, now).as_deref(),
+            Some(crate::teams::GATE_REASON_OUT_OF_OFFICE)
+        );
+        // The manual check survives the presence gate being switched off —
+        // that is the one case where it costs an extra Graph read.
+        assert_eq!(
+            presence_gate_decision(&manual, false, false, true, None, None, now).as_deref(),
+            Some(GATE_REASON_MANUAL_STATUS)
+        );
+
+        // Finding #637: a rule with its own presence action overrides the OOO
+        // default; a user who is busy is still gated regardless.
+        let cfg = Some(crate::config::AppConfig::default());
+        assert!(!ooo_gate_enabled(&cfg, true));
+        let mut on = crate::config::AppConfig::default();
+        on.teams.gate_when_out_of_office = true;
+        assert!(ooo_gate_enabled(&Some(on.clone()), false));
+        assert!(!ooo_gate_enabled(&Some(on), true));
+    }
+
+    /// Finding #636: the requested `expirationDuration` is bounded by the real
+    /// listening time and clamped into the documented PT5M..PT4H window.
+    #[test]
+    fn test_presence_expiration_duration_is_bounded_by_listening_time() {
+        // Unknown position (live stream, issue #165) keeps the ceiling.
+        assert_eq!(presence_expiration_duration(None), "PT4H");
+        // A track with 3:30 left: 210s + one re-arm period of slack.
+        assert_eq!(
+            presence_expiration_duration(Some(210_000)),
+            format!("PT{}S", 210 + AVAILABILITY_REARM_SECONDS)
+        );
+        // A track about to end floors at the documented PT5M — the shortest
+        // session Graph accepts (and still inside the 5-minute Available fade).
+        assert_eq!(
+            presence_expiration_duration(Some(1_000)),
+            format!("PT{}S", PRESENCE_EXPIRATION_MIN_SECONDS)
+        );
+        // A four-hour DJ set ceilings at PT4H.
+        assert_eq!(
+            presence_expiration_duration(Some(6 * 60 * 60 * 1000)),
+            format!("PT{}S", PRESENCE_EXPIRATION_MAX_SECONDS)
+        );
+        // Every arm therefore stays inside Graph's documented window.
+        for remaining in [0_u64, 1_000, 60_000, 900_000, 6 * 60 * 60 * 1000] {
+            let value = presence_expiration_duration(Some(remaining));
+            let secs: u64 = value
+                .trim_start_matches("PT")
+                .trim_end_matches('S')
+                .parse()
+                .expect("the duration is a PT<n>S string");
+            assert!(
+                (PRESENCE_EXPIRATION_MIN_SECONDS..=PRESENCE_EXPIRATION_MAX_SECONDS).contains(&secs),
+                "{} out of the documented PT5M..PT4H window",
+                value
+            );
+        }
+    }
+
+    /// Finding #634: a rule that starts or stops matching switches the bubble
+    /// on the next iteration; an unchanged pair keeps the 4-minute cadence.
+    #[test]
+    fn test_should_arm_presence_switches_immediately_and_keeps_cadence() {
+        let away = PresencePair {
+            availability: "Away".to_string(),
+            activity: "Away".to_string(),
+        };
+        let listening = PresencePair {
+            availability: "Available".to_string(),
+            activity: "Available".to_string(),
+        };
+        let now = Instant::now();
+        let fresh = Some(now - std::time::Duration::from_secs(30));
+
+        // Cold start: arm.
+        assert!(should_arm_presence(None, &away, None, now));
+        // Same pair inside the cadence: do not re-POST.
+        assert!(!should_arm_presence(Some(&away), &away, fresh, now));
+        // A DIFFERENT pair arms immediately, even seconds after the last arm —
+        // leaving a quiet-hours rule must not wait out the cadence.
+        assert!(should_arm_presence(Some(&away), &listening, fresh, now));
+        // Unchanged pair past the cadence re-arms (the Available fade window).
+        let stale = Some(now - std::time::Duration::from_secs(AVAILABILITY_REARM_SECONDS));
+        assert!(should_arm_presence(Some(&away), &away, stale, now));
     }
 }

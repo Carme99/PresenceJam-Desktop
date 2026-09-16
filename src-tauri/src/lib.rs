@@ -1215,7 +1215,16 @@ pub fn run() {
         // the app to be quitting on Windows).
         #[cfg(desktop)]
         if matches!(event, tauri::RunEvent::Exit) {
+            // Order is load-bearing (finding #636, issue #636): the staged
+            // update is applied FIRST so a Graph round-trip can never delay an
+            // install — and on Windows, where the installer exits the process
+            // without returning, an update-driven quit never reaches the
+            // presence cleanup at all. On every other exit the cleanup then
+            // clears an armed presence session (bounded by its own 3-second
+            // client) and replaces a leftover playing status with the
+            // short-lived "Paused" placeholder.
             updater_bg::install_pending_on_exit(app);
+            polling::clear_presence_on_exit(app);
         }
     });
 }
