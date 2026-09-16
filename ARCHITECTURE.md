@@ -50,13 +50,13 @@ PresenceJam is a Tauri 2 desktop application:
 graph TD
     subgraph Frontend ["Frontend (Svelte 5 SPA)"]
         UI["+page.svelte + lib/components/<br/>Dashboard / Onboarding / Settings / Reconnect / LogViewer"]
-        Stores["lib/stores/<br/>app.ts (view + error)<br/>config.ts (configStore)<br/>authFlow.svelte.ts<br/>detach.ts / theme.ts"]
+        Stores["lib/stores/<br/>app.ts (view + error)<br/>config.ts (configStore)<br/>authFlow.svelte.ts<br/>detach.ts / theme.ts<br/>presence.ts / notifications.ts"]
         Utils["lib/utils/<br/>boot.ts (boot gate)<br/>reconnect.ts<br/>useAuthListeners.ts<br/>dev.ts (devLog)"]
         Types["lib/types.ts<br/>(re-exports ts-rs codegen)"]
     end
 
     subgraph Backend ["Backend (Rust / Tauri 2)"]
-        Commands["commands/ submodule<br/>config / spotify_auth / teams_auth<br/>sync / window / onboarding / playback / misc"]
+        Commands["commands/ submodule<br/>config / spotify_auth / teams_auth<br/>sync / window / onboarding / playback<br/>misc / logs"]
         Polling["polling/ submodule<br/>loop (driver) + state (lifecycle)<br/>poll_once (single-source-of-truth iteration)<br/>+ mod.rs (ErrorSeverity, emit_error)"]
         SpotifyAPI["spotify.rs<br/>Spotify Web API (Authorization Code + PKCE)"]
         TeamsAPI["teams.rs<br/>Microsoft Graph (device code)"]
@@ -126,6 +126,25 @@ flowchart TD
 6. **Distribution:** `homebrew` and `winget` jobs (each consuming the GitHub
    Release artifact) update the tap / open a winget-pkgs PR in parallel.
 
+Two gates guard the tag before a single artifact is built (both added in 4.6):
+
+- **Tag/version agreement** — the `resolve-tag` job's *Verify version consistency*
+  step compares the pushed tag against all three version sources
+  (`src-tauri/tauri.conf.json`, `package.json`, `src-tauri/Cargo.toml`) and fails
+  the run on drift. The tag decides the version written into `latest.json`, while
+  the binary self-reports the version baked in at build time, so a mismatch is a
+  permanent re-offer loop: the updater keeps advertising a version the app never
+  becomes, and `install_pending_on_exit` sees `staged > current` on every quit.
+  `ci.yml` has the PR-time twin (`version-consistency` job) so the drift is caught
+  before a tag exists to disagree with (#605).
+- **Tagged-commit verification** — the `verify` job (`needs: resolve-tag`) checks
+  out the resolved tag and reruns the `ci.yml` gate set (fmt, clippy, Rust tests,
+  `npm run check`, frontend tests, Linux system deps). `ci.yml` only triggers on
+  pull requests and pushes to `main`, so without this job the exact commit that
+  produces user-facing binaries would never be tested — worst of all on a
+  `workflow_dispatch` re-cut. `build:` declares `needs: [resolve-tag, verify]`, so
+  a failure blocks all three OS legs without burning runner minutes (#606).
+
 The full workflow: [`.github/workflows/release.yml`](.github/workflows/release.yml).
 The PR-time CI that gates merges is [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
@@ -175,6 +194,22 @@ never blocks the UI.
   Windows installer relaunches automatically; macOS/Linux pick up the replaced
   bundle/AppImage on next launch.
 
+- *Progress + cancel (4.6):* staging is no longer a black box. The download
+  streams throttled `update-stage-progress` events carrying
+  `StageProgress { downloaded, total }` — the first chunk always emits, then at
+  most one event per 250 ms **or** per 5 whole-percent advance
+  (`updater_bg::StageProgressThrottle`), so a fast link still shows movement and a
+  slow one cannot flood the webview. `cancel_deferred_update` drops the staged
+  update on demand (`PendingUpdate` → `None`), which releases the verified
+  `Vec<u8>` instead of holding it for the rest of the session. The payload is
+  deliberately memory-resident rather than file-backed: the plugin verifies the
+  signature inside `Update::download`, so a file could be swapped after the
+  verification and before the exit-time install. A cancel issued while the
+  download is still in flight **cannot** interrupt the Rust transfer — the banner
+  marks the stage abandoned and discards the payload the moment it lands
+  (`UpdatePrompt.svelte::cancelStage` → `stageAbort` → `stageForQuit`), and after a
+  successful cancel the banner simply returns to its plain offer.
+
 Payload signing is independent of OS code signing: the updater works on
 unsigned builds, and the macOS unsigned/Gatekeeper story (README
 "macOS first-run note") applies to updated `.app` builds too. The release
@@ -197,9 +232,27 @@ matching SECURITY.md's No Telemetry promise. The snapshot contains:
 - The most recent exit-time update install that failed, if any (issue #244) —
   read from the marker `updater_bg::install_pending_on_exit` writes, so a failed
   install is visible on the next launch instead of silently lost.
+- The config-quarantine state (#537, completing #379): `config_quarantined`
+  (true when *this* process renamed an unreadable `config.json` aside) and
+  `config_quarantine_backup`, the **bare file name** of the `.bak` when one is
+  still next to the config. Without the flag, every value in the summary below
+  reads as the user's own when it is really a factory default.
 - The last 50 lines of the on-disk `PresenceJam.log` tail, passed through a
   defensive second-pass redaction helper (`redact_sensitive`) that reuses the `[REDACTED len N]`
   pattern from v3.2 (#228) — a keyed allowlist (`token`, `password`/`passwd`, `id_token`, `code_verifier`/`code_challenge`, `api_key`, …) with single-quote + whitespace-gap separators, plus any ≥32-char JWT/base64 opaque run, is scrubbed.
+
+Two 4.6 hardening passes sit on top of that redaction. **Auth-scheme awareness:**
+`Authorization: Bearer <token>` used to have the scheme word masked and the
+credential left to the ≥32-char opaque-run heuristic, so a *short* credential was
+printed in full; `is_auth_scheme_key` (`authorization`, `bearer`) plus
+`skip_auth_scheme` (skips `bearer`/`basic`/`dpop`) now start the redaction at the
+credential itself. **Path hygiene:** the failed-install marker's `error` string is
+also run through `strip_absolute_paths`, which reduces every absolute filesystem
+path — POSIX, Windows and UNC — to its bare trailing component (#409 applied to
+#603). Documented gap: that path pass covers the updater marker and the
+log-source *status* strings only; `recent_logs` lines get `redact_sensitive`
+alone, and its opaque-character class excludes `\`, so a short Windows path
+inside a log line is not scrubbed.
 
 The command is async with `spawn_blocking` per the v3.2 main-thread-stall
 convention (file IO + keychain reads). Regression tests cover the redaction
@@ -207,6 +260,34 @@ edge cases and assert injected fake token values never survive serialization of
 the snapshot. The frontend (`Diagnostics.svelte`) offers Copy diagnostics /
 Save to file with `role="status"` feedback, reachable from a dashboard icon
 button.
+
+## Log Viewer (v4.6)
+
+The Logs pane is seeded from disk before the live stream takes over (#595):
+
+- `commands/logs.rs::get_recent_logs(limit)` reads the tail inside
+  `tauri::async_runtime::spawn_blocking` (the #215 convention — the UI thread
+  never waits on the file). It is bounded twice: `limit` is clamped into
+  `1..=MAX_LOG_LINES` (500, matching the pane's buffer) and the read itself never
+  touches more than the trailing `LOG_TAIL_MAX_BYTES` (256 KiB). Seeking
+  mid-file lands inside a line, so the partial first line is dropped.
+- **The seed is raw, not redacted** — deliberately. The redacted tail belongs to
+  the Copy-snapshot path (`diagnostics::tail_log_file`), whose artifact is pasted
+  into public bug reports; this one shows the same file the user can already open
+  with `open_logs_folder`, and redacting it would make the viewer disagree with
+  the file it claims to display.
+- A missing file is `Ok(vec![])`, not an error (first run has no log yet), and the
+  pane falls back to its empty state.
+- `LogViewer.svelte` registers the `log://log` listener **first**, then awaits the
+  seed, so nothing logged during the read is lost; the seed is prepended and the
+  array re-clamped to `MAX_BUFFER` (500), while the DOM renders only the last
+  `RENDER_WINDOW` (100) entries. **Clear** sets `seedCancelled` so history cannot
+  reappear a moment later.
+- **Scroll anchoring (#600):** while the pane is unpinned, every push captures a
+  surviving row's `offsetTop` and re-applies the delta after the DOM update, so
+  the text no longer slides upward one row per event. The container sets
+  `overflow-anchor: none` because Chromium's own scroll anchoring would apply the
+  correction twice; WebKit has none and ignores the property.
 
 ## Multi-Window Detach (v4.0)
 
@@ -236,10 +317,17 @@ back in), VS Code detached-panel style:
   (backend truth). `src/lib/stores/detach.ts` tracks pane→popped-out state in
   the main window only; dashboard nav shows a dot badge and focuses the child
   instead of navigating while detached.
-- **Capabilities:** new `src-tauri/capabilities/detached.json` scopes the two
-  child labels to a minimal mirrored set (`core/event/log/opener/notification`);
-  `default.json` gains `core:window:allow-create` +
-  `core:webview:allow-create-webview-window` for runtime creation.
+- **Capabilities:** `src-tauri/capabilities/detached.json` scopes the two
+  child labels to a minimal mirrored set (`core/event/log/opener/notification`),
+  plus `core:window:allow-close` (#594) — the one window-management permission a
+  detached render reaches, because **Pop back in** is `popIn()` →
+  `WebviewWindow.close()`, which Tauri resolves against the *calling* webview's
+  ACL, and `core:window:default` does not include it. Without that explicit entry
+  the close rejected and the pane was marked not-detached while its window stayed
+  on screen; a refused close now leaves the badge alone instead of lying
+  (`detach.ts::popIn`, with `reconcileDetachedPanes()` on boot). `default.json`
+  gains `core:window:allow-create` + `core:webview:allow-create-webview-window`
+  for runtime creation.
 - **Listener hygiene:** `+layout.svelte` guards its always-mounted
   reconnect/auth/update listeners (and `UpdatePrompt`) behind a window-label
   check so detached windows never double-register handlers.
@@ -265,8 +353,21 @@ The UI is localized to **English, German, and French** via the i18n barrel
 - The locale persists to `localStorage` under `locale`; first run defaults
   to the browser language (`de`/`fr` prefixes), falling back to English.
   The picker lives in Settings → General.
+- **Intl formatting (4.6):** the locale's `Intl.NumberFormat` and
+  `Intl.PluralRules` are built once per locale and reused (constructing a
+  formatter per render would dominate `t()`). Numeric params go through the
+  number formatter, and `tCount(key, count)` selects the `${key}_one` /
+  `${key}_other` entry from the CLDR category — not from `count === 1`, because
+  French puts `0` in `one` ("0 entrée") (#616).
+- **`<html lang>` + convergence (4.6):** `app.html` ships the pre-hydration
+  `lang="en"` and `applyDocumentLang` retags `<html lang>` on boot and on every
+  switch, so screen-reader pronunciation and `:lang()` styling follow the picker.
+  Detached Logs/Settings windows own independent locale instances, so a `storage`
+  listener converges them on the main window's write (the same pattern as the
+  `#423` theme listener, with a same-value guard that stops a write loop) (#620).
 - Known limitation: Rust-side error strings surfaced through `invoke()`
-  rejections and event payloads remain English.
+  rejections and event payloads remain English. Tray menu labels are English
+  literals too — they are built in Rust (`tray.rs`) and never route through `t()`.
 
 ## Authentication Flows
 
@@ -371,6 +472,64 @@ Rate limits: getPresence 1,500 req/30 s/app/tenant; presence writes
 10,000 req/30 s/app/tenant — the polling loop's cadences sit far inside
 both. The entire presence surface is unsupported in the China (21Vianet)
 national cloud (see `docs/STATE-OF-FEATURES.md`).
+
+## Config integrity (v4.6)
+
+Three layers keep a damaged or partial `config.json` from destroying working
+settings:
+
+- **Field-level patch merge (#535):** `config::apply_patch` overwrites only the
+  fields a `ConfigPatch` explicitly names; everything else — including `extra` and
+  the binary-owned `schema_version` — is left exactly as it was. Named lists are
+  replaced wholesale, not merged. `update_config` uses this; `save_config` is
+  still a whole-document replace, which is why the patch API exists.
+- **Wizard merge (#531/#542):** the onboarding wizard is reachable by returning
+  users (Dashboard's setup link, Settings' *Run onboarding*, Reconnect), so
+  `mergeWizardConfig` clones the **stored** config and writes only the four fields
+  the wizard owns — `spotify.client_id`, `teams.status_format`,
+  `polling.default_interval_seconds` and `autostart` — then sends the result over
+  `save_config`. `status_rules`, `logging`, `profanity_*`, `presence_gate`,
+  `availability_sync` and `extra` survive verbatim. The read is a deliberate
+  `invoke('load_config')` rather than the store helper, because the helper
+  swallows a failure into `defaultConfig` and would reintroduce exactly that
+  clobber; a failed read aborts the save instead of inventing a base.
+- **Corrupt-file quarantine (#379):** a `config.json` that fails
+  `serde_json::from_str` is renamed beside itself to `config.json.bak` (fixed
+  name, never timestamped), a `[CFG] corrupt config … quarantined to …` warning is
+  logged, `CONFIG_QUARANTINED` is raised, and the app boots on
+  `AppConfig::default()`. The rename is best-effort: a failure is logged and
+  swallowed, and the flag is raised either way, so the original file is never
+  truncated. A *schema-version* mismatch is **not** a quarantine — it goes through
+  `migrate_config` in place.
+
+  > **Surfaced on the Diagnostics page (#537, completing #379):**
+  > `ConfigSummary` carries `config_quarantined` and
+  > `config_quarantine_backup`, injected at the command boundary from
+  > `ConfigQuarantine::observe` so `build_snapshot` stays drivable from a test
+  > with a planted quarantine (the same shape as the #603 failed-install
+  > marker). `Diagnostics.svelte` renders a dismissible amber **Settings were
+  > reset** banner from *either* fact: the per-process flag alone would vanish
+  > on the first restart — exactly when the user notices their settings are
+  > gone — while the `.bak` on disk outlives the launch that produced it. The
+  > backup never travels as a path (`quarantine_backup_field` reduces any
+  > incoming value to its last component and drops a relative path, holding the
+  > #409 rule at the snapshot boundary), and the banner's location copy names
+  > the PresenceJam folder rather than an absolute path. Dismiss is
+  > session-local and invokes nothing: unlike the disposable failed-install
+  > record, the backup is the only copy of the settings the user lost, so no UI
+  > action may delete it.
+
+The **keychain tri-state** is the other half of 4.6's honesty pass (#560/#561):
+`keychain::KeychainPresence` splits `Present` / `Absent` / `Unavailable(help)`,
+where `NoEntry` is the *only* error that means "never configured" and every other
+`keyring::Error` (Linux `PlatformFailure`/`NoStorageAccess`: no Secret Service
+daemon, locked keyring, denied access) is a recoverable platform problem. It is
+carried over IPC as `ClientSecretState` (`present`/`absent`/`unavailable`,
+lowercase on the wire) stamped onto the config by `with_keychain_flags`, and the
+boot gate mirrors its own probe back into the in-memory config so a later save
+cannot return a stale state. An *unavailable* keychain maps to
+`RefreshFailure::Transient` — the session is kept and retried, exactly like a
+flaky network — while only `Absent` justifies sending the user to setup.
 
 ## Startup Loading
 
@@ -512,6 +671,26 @@ Two complementary rate-limits:
   never lapses. 304 Not Modified resets backoff via
   `not_modified_iteration`.
 
+### Failure classification (4.6)
+
+The loop separates **dead credentials** from **network trouble**, because only the
+first may ever stop the session or pop an OAuth window (#568, finding PollCore#0):
+
+- `transient_failure_count` is bumped only for `ExpiredToken` / `InvalidGrant`
+  (`poll_once::is_auth_failure`) and exits the loop at
+  `TRANSIENT_FAILURE_EXIT_THRESHOLD` (5), emitting
+  `spotify-reconnect-required` alongside `reconnect-required`.
+- Everything else — transport errors, 5xx, JSON parse failures, 429s — lands in
+  `SpotifyApiError::Other`/`RateLimited` and feeds a **separate**
+  `consecutive_network_failures` counter with its own higher threshold
+  (`NETWORK_FAILURE_THRESHOLD` = 12) and a capped backoff
+  (`NETWORK_BACKOFF_CAP_SECONDS` = 300). It escalates the backoff and logs a
+  warning; it never breaks the loop.
+- `record_success` is the single place that resets both counters.
+
+The Teams write path applies the same rule: only token-endpoint `invalid_grant` or
+a 401 `ExpiredToken` asks for re-auth.
+
 ### Presence gating + availability sync (v3.0)
 
 Two `TeamsConfig` flags shape what the polling loop writes, and
@@ -537,20 +716,28 @@ Two `TeamsConfig` flags shape what the polling loop writes, and
   the fade window. On pause/stop, `clear_teams_presence` drops the
   session (404 = already gone = success). Emits
   `presence-availability-updated` on each arm/clear.
-- **`status_rules` (v4.5.0, issue #432)** — `AppConfig::status_rules`
-  holds quiet-hours entries and track rules, evaluated on the same
-  track-change path immediately after `presence_gate`. A quiet-hours
-  entry covering the current local time + weekday suppresses
-  unconditionally (no presence read); a matching track rule with an
-  **empty** `replacement_status` suppresses the same way, and one with a
-  non-empty replacement supplies the status text instead of gating. Both
-  suppression causes record into the same `gated_track_key` slot and emit
-  `presence-gated` with `reason: "quiet-hours"` / `"track-rule"`, so the
-  #380 mid-track re-check re-projects the local clock and re-matches the
-  rule on the same 240 s cadence — a rule that stops matching (or a quiet
-  window that ends) posts the status late instead of pinning suppression
-  for the whole track. A rule with a non-empty replacement never gates;
-  its text flows into the normal #384 identical-write dedup.
+- **`status_rules` (v4.5.0, issue #432; 4.6 semantics, #569/#570)** —
+  `AppConfig::status_rules` holds quiet-hours entries and track rules. Since 4.6
+  the per-iteration decision is computed **once** per poll
+  (`quiet_hours_active_now` + `rule_gate`) and consulted by *every* write path,
+  not just the playing one:
+
+  | Path | Before 4.6 | 4.6 |
+  |------|-----------|-----|
+  | Playing track, quiet window opens mid-track | unfelt until the next track change | `quiet_gate_entry_due` evaluates the entry mid-track (#569) |
+  | Already-gated track | re-checked on the #380 240 s clock | unchanged, now re-projects the local clock and re-matches the rule |
+  | Paused clear | only the presence gate consulted | quiet hours and suppression rules apply to the clear too (#570) |
+  | No-track clear | no rules consulted | quiet hours, plus **match-all** rules only — with no artist/title there is nothing for a scoped rule to match (#570) |
+
+  A quiet-hours entry covering the current local time + weekday suppresses
+  unconditionally (no presence read); a matching track rule with an **empty**
+  `replacement_status` suppresses the same way, and one with a non-empty
+  replacement supplies the status text instead of gating. Both suppression causes
+  record into the same `gated_track_key` slot and emit `presence-gated` with
+  `reason: "quiet-hours"` / `"track-rule"`, so the #380 mid-track re-check posts
+  the status late instead of pinning suppression for the whole track. A rule with
+  a non-empty replacement never gates; its text flows into the normal #384
+  identical-write dedup.
 
 `is_syncing` ownership: `commands/sync::start_syncing` is the **sole claimer**
 (v2.6.3, fixes issue #60 — `compare_exchange(false, true, …)` is here).
@@ -574,6 +761,91 @@ Detection features (v4.1.1, #328–#344; `src-tauri/src/profanity.rs` is the sou
 - **Word-boundary safety:** prevents false positives on `class`, `assassin`, `cocktail bar`, `cockpit`, `Spice Girls`, `Push It`.
 - **Compound-word safe-suffixes:** `tail, head, hand, ...` allow `fishtail`, `forehead`, `handheld`.
 - **Strong stems + y-tail:** `shit/fuck/bitch` flag glued compounds; `shitty/bitchy/fucky` flag while `cocky/spicy/tardy` stay clean.
+
+### Status formatting (4.6)
+
+One pure function renders every status string:
+`spotify::format_status_with_context(media, episode, context, format)`. The
+runtime caller is `polling::poll_once::process_track`; the Settings/Onboarding
+preview goes through the two-argument `format_status` /
+`preview_status_with_sample`, which always passes `episode = None` and
+`PlaybackContext::sample()` (device *Kitchen speaker*, playlist *Workout Mix*,
+shuffle on, repeat *context*) so the mode tokens preview as something other than
+holes (#74, #580).
+
+- **Token table:** `placeholder_values` builds one 13-entry `(&str, &str)` table
+  per render — `emoji`, `artist`, `track`, `album`, `device`, `playlist`,
+  `context` (a literal alias of `playlist`), `progress`, `shuffle`, `repeat`,
+  `show`, `episode`, `publisher`. There is no `{title}`, `{name}`, `{duration}`
+  or `{type}` token.
+- **Single pass:** `substitute_placeholders` walks the *format string* once,
+  emitting matched values into an output buffer it never re-scans. That makes the
+  "#341" rule true for every token instead of just `{emoji}` — a track literally
+  titled `{album}` is no longer re-expanded by the later `{album}` pass. Unknown
+  placeholders and an unterminated `{` are copied verbatim.
+- **Emoji precedence:** `(false, _) => "⏸️"` comes first, then
+  `(true, true) => "🎙️"`, then `(true, false) => "🎵"` — so a *paused* episode
+  shows the pause glyph, not the mic.
+- **`{progress}`:** `format_progress` renders `format!("{}:{:02}", secs/60, secs%60)`
+  — minutes unpadded, **no hour rollover** (a 90-minute episode reads `90:00`),
+  and an empty string when Spotify reported no position (live/unknown streams,
+  #165). The value is the raw poll `progress_ms`; the elapsed-corrected value the
+  sleep math uses is not what gets rendered.
+- **Mode tokens are icon-only:** `{shuffle}` → 🔀 / `""`, `{repeat}` → 🔁 / `""`.
+  The status does **not** distinguish repeat *context* from repeat *track* — both
+  render 🔁; the three-valued mode matters only to the tray.
+- **Episodes (#581):** `map_media_item` reads the item's own `type` against the
+  documented `oneOf(track, episode)` union. An episode's `show.name` takes the
+  `artist` slot and `show.publisher` the `album` slot, so the Dashboard, the
+  desktop notification and the tray keep rendering one shape; `EpisodeInfo`
+  carries `show_name` + `publisher`, and the `Option` itself is the episode
+  marker (there is no `is_episode` field). `{show}`/`{episode}`/`{publisher}`
+  render empty on a music track, so a template mentioning one never prints the
+  track title by accident.
+- **Adverts are still nothing playing:** the envelope's `currently_playing_type`
+  is gated before the item is even mapped, and `Ad | Unknown` returns `None` from
+  `map_media_item` — "nothing playing", exactly as the pre-#581 gate did. The
+  queue mapper (`filter_map`) drops ads from Up Next the same way.
+- **Episode template:** `poll_once::process_track` selects
+  `spotify::DEFAULT_EPISODE_STATUS_FORMAT` (`🎙️ {show} - {episode}`) whenever
+  `now.episode.is_some()`, and the user's `teams.status_format` otherwise, so a
+  music template is never applied verbatim to a 90-minute podcast. **There is no
+  `teams.episode_status_format` config key** — the constant *is* the template, and
+  the Settings page renders a fixed hint saying so. Adding the key is the
+  documented follow-up in the source comments.
+
+## System Tray (v4.6)
+
+`tray.rs` builds the menu natively, from in-process state:
+
+- **Shuffle / Repeat are real toggles (#582).** Both are
+  `CheckMenuItemBuilder` items; Shuffle's mark reads `LAST_SHUFFLE_STATE` and
+  Repeat's reads `LAST_REPEAT_STATE` plus a mode-spelling label
+  (`Repeat: Off` / `Repeat: Context` / `Repeat: Track` — a check mark alone cannot
+  tell the last two apart). Those atoms are written by `note_playback_modes` from
+  the poll body itself (no extra request, no new scope) and optimistically by a
+  successful tray toggle, applied *before* `force_tray_refresh` so the rebuild
+  paints the state the API just accepted.
+- **Clicks are the inverse / the next mode.** Shuffle targets
+  `!last_known`; Repeat targets `RepeatState::next()`, which cycles
+  `off → context → track → off` to match Spotify's own button. Both run off the
+  menu-event thread (blocking HTTP must not stall the tray).
+- **Failure never lies.** A rejected command records nothing, so the mark keeps
+  showing the last known truth, and the error is emitted on `playback-error`
+  (rendered as an in-app toast — there is no OS/tray notification on this path).
+  `NoActiveDevice` has its own log line and message pointing at the Devices
+  submenu; 403 surfaces "Playback control requires Spotify Premium".
+- **The tray never snapshots a raw token for playback (#586).** Every player
+  action — including the Play/Pause state read and the device-list re-fetch — goes
+  through `commands::playback::player_with_refresh_typed`, so a stale access token
+  is refreshed proactively and an `ExpiredToken` response gets one refresh +
+  retry. The tray menu *build* still snapshots `state.tokens.spotify()` for the
+  Devices/Queue listings; those are display fetches, not playback commands.
+- **Refresh cadence:** the polling loop calls `update_tray_menu` after every
+  iteration, behind a dedup key of `(is_syncing, window_visible,
+  "artist|title|is_playing")`. The key is deliberately track-scoped, so a mode
+  changed from another Spotify client is picked up at the next rebuild rather
+  than forcing one.
 
 
 
@@ -623,6 +895,7 @@ sequenceDiagram
 | `app-shutdown` | `null` | User picks Quit in the tray or app menu |
 | `spotify-secret-conflict` | `{action: "reconnect-spotify", ...}` (once per process) | Legacy plaintext secret in `config.json` conflicts with a *different* keychain secret — plaintext left untouched, Settings prompts Reconnect Spotify (#376) |
 | `show-about` | `null` | User picks About in the app menu |
+| `update-stage-progress` | `{downloaded, total}` (`total` null without `Content-Length`; not ts-rs-exported — mirrored in `UpdatePrompt.svelte`) | A deferred install-on-quit payload is downloading; throttled to 250 ms / 5 % with the first chunk always emitting (v4.6, #590) |
 
 ### Frontend notification throttle (C8)
 
@@ -681,17 +954,32 @@ We piggyback two things on it:
 - **Linux:** writes `~/.local/share/applications/presencejam.desktop` with
   `MimeType=x-scheme-handler/presencejam;` and runs `xdg-mime default`.
   Same last-writer semantics.
-- **macOS:** the plugin's `register` returns `Err(UnsupportedPlatform)`.
-  App logs a warning at startup and continues. macOS coverage relies on
-  PKCE + `state`-only protection (no LaunchServices call). The full
-  `LSSetDefaultHandlerForURLScheme` native-FFI work for macOS is tracked
-  separately.
+- **macOS:** the plugin's `register` returns `Err(UnsupportedPlatform)`, and the
+  error arm of that call is now the load-bearing path (4.6, #66/#628). macOS
+  claims a URL scheme through the app bundle's `CFBundleURLTypes`, and
+  LaunchServices gives the **first** claimant priority, so the plugin call cannot
+  take `presencejam://` back from an app that registered it first. The setup hook
+  therefore calls `macos_deeplink::claim`, which issues
+  `LSSetDefaultHandlerForURLScheme` (CoreServices, via `objc2-core-services`) —
+  that writes the user's *preferred* handler and does override first-come-first-
+  served registration. The scheme list is read from the same
+  `tauri.conf.json` the plugin reads, so a scheme added there is re-claimed
+  automatically; the call is latched to at most once per process
+  (`macos_deeplink::CLAIMED`, consumed on the *attempt*). Apple marks the symbol
+  deprecated as of macOS 12 — the module documents accepting it deliberately,
+  because the supported replacement
+  (`-[NSWorkspace setDefaultApplicationAtURL:toOpenURLsWithScheme:completionHandler:]`)
+  is asynchronous and would have to be re-entered from an Objective-C block
+  during startup. Failure is only logged: under `tauri dev` the process is a bare
+  binary rather than a bundle, so `kLSNotAnApplicationErr` is expected, and the
+  #65 PKCE launch-binding defence covers the gap either way.
 
 On a `name` mismatch (an attacker pre-registers before launch), the
-local-machine registry / desktop file reflects our (last-write) entry.
-A foreign app already installed before PresenceJam at the **same OS
-user** can still win the race on platforms without per-launch
-reregistration — that's the macOS gap. Windows + Linux are now covered.
+local-machine registry / desktop file reflects our (last-write) entry. All three
+platforms now re-claim on every launch: Windows and Linux through the plugin's
+`register_all()`, macOS through the CoreServices call above. The residual risk is
+an attacker that registers **between** our launch and the callback — accepted,
+and mitigated by the PKCE verifier never leaving `AppState` (#65).
 
 ## Directory Structure
 
@@ -709,13 +997,15 @@ PresenceJam-Desktop/
 │   │   │   ├── About.svelte                # Version + license
 │   │   │   ├── Logo.svelte                 # Brand mark
 │   │   │   ├── PageHeader.svelte           # Shared view header (title, back/pop-out actions)
-│   │   │   └── LogViewer.svelte            # In-app log viewer (detachable to its own window, v4.0)
+│   │   │   └── LogViewer.svelte            # In-app log viewer (detachable to its own window, v4.0; disk backfill + scroll anchoring, v4.6)
 │   │   ├── stores/
 │   │   │   ├── app.ts                      # currentView, appError (classic writable stores)
 │   │   │   ├── config.ts                   # configStore + saveConfig
 │   │   │   ├── authFlow.svelte.ts          # 4-event auth-listener state
 │   │   │   ├── detach.ts                   # logs/settings popped-out state (main-window only, v4.0)
-│   │   │   └── theme.ts                    # light/dark theme store
+│   │   │   ├── theme.ts                    # light/dark theme store
+│   │   │   ├── presence.ts                 # Process-lifetime presence store — survives a Dashboard remount (v4.6, #547)
+│   │   │   └── notifications.ts            # localStorage-backed notification opt-in + cross-window sync (v4.6, #549)
 │   │   ├── types.ts                        # Re-exports ts-rs codegen
 │   │   ├── types-generated/                # ts-rs output (gitignored, regenerated by cargo test)
 │   │   ├── i18n.ts                         # i18n barrel — t(key, params) / reactive locale (en/de/fr, v4.0)
@@ -746,7 +1036,8 @@ PresenceJam-Desktop/
 │   │   │   ├── window.rs                    #   show_window / autostart / logs folder
 │   │   │   ├── onboarding.rs                #   is_onboarding_complete / complete / reconnect
 │   │   │   ├── playback.rs                 #   playback_play / pause / next / previous / transfer + devices / queue (v3.0)
-│   │   │   └── misc.rs                     #   preview_status / update_tray_menu_state / relaunch_app
+│   │   │   ├── misc.rs                     #   preview_status / update_tray_menu_state / relaunch_app
+│   │   │   └── logs.rs                     #   get_recent_logs — bounded on-disk tail for the Logs pane (v4.6, #595)
 │   │   ├── polling/                        # Split from polling.rs (PR #72)
 │   │   │   ├── mod.rs                      #   re-exports + ErrorSeverity + emit_error
 │   │   │   ├── loop.rs                     #   driver (mpsc channel, ~50 lines)
@@ -762,7 +1053,8 @@ PresenceJam-Desktop/
 │   │   ├── tray.rs                        # System tray + dedup snapshot (native CheckMenuItem Play/Pause + live tooltip, v4.0)
 │   │   ├── updater_bg.rs                  # Background update checks + stage_deferred_update / PendingUpdate (v4.0)
 │   │   ├── diagnostics.rs                 # Telemetry-free get_diagnostics_snapshot (v4.0)
-│   │   └── menu.rs                        # macOS / Windows app menu bar
+│   │   ├── menu.rs                        # macOS / Windows app menu bar
+│   │   └── macos_deeplink.rs              # CoreServices re-claim of presencejam:// on macOS (v4.6, #66/#628)
 │   ├── Cargo.toml                         # Rust deps + `ts-rs = { version = "12", features = ["chrono-impl"] }`
 │   ├── Cargo.lock                         # Commit-locked for reproducible builds
 │   ├── tauri.conf.json                    # Window + deep-link + bundle config
