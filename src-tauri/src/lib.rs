@@ -1044,6 +1044,7 @@ pub fn run() {
             commands::playback::get_playback_queue,
             commands::playback::get_spotify_granted_scopes,
             diagnostics::get_diagnostics_snapshot,
+            diagnostics::save_diagnostics_snapshot,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

@@ -389,5 +389,9 @@ export const fr: Dict = {
   'settings.discardChanges': 'Abandonner les modifications',
   'settings.stayHere': 'Rester ici',
   'settings.notificationsDenied':
-    'Les notifications sont bloquées par le système. Autorisez-les dans les réglages du système, puis réactivez cette option.'
+    'Les notifications sont bloquées par le système. Autorisez-les dans les réglages du système, puis réactivez cette option.',
+
+
+  'diagnostics.expiryBuffer': "Marge avant expiration du jeton",
+  'diagnostics.teamsRefreshTokenPresent': 'Jeton de rafraîchissement Teams enregistré'
 };

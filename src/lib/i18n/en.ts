@@ -365,7 +365,11 @@ export const en = {
   'settings.discardChanges': 'Discard changes',
   'settings.stayHere': 'Stay here',
   'settings.notificationsDenied':
-    'Notifications are blocked by the system. Allow them in your system settings, then switch this back on.'
+    'Notifications are blocked by the system. Allow them in your system settings, then switch this back on.',
+
+
+  'diagnostics.expiryBuffer': 'Token refresh buffer',
+  'diagnostics.teamsRefreshTokenPresent': 'Teams refresh token stored'
 };
 
 export type Dict = { readonly [K in keyof typeof en]: string };
