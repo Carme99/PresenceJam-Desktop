@@ -358,12 +358,12 @@
 
   async function reconnectSpotify() {
     if (spotifyAuthWaiting || !localConfig.spotify.client_id) return;
-    // #550: `reconnect_spotify` clears the tokens and emits
-    // `spotify-reconnect-required`, which the always-mounted main-window
-    // listener answers with `currentView.set('settings')`. From a popped-out
-    // pane that opens a *second* Settings view beside this one, so hand the
-    // navigation back to the main window and close this one instead — the
-    // same route goToOnboarding takes.
+    // #550: `reconnect_spotify_session` emits `spotify-reconnect-required`,
+    // which the always-mounted main-window listener answers with
+    // `currentView.set('settings')`. From a popped-out pane that opens a
+    // *second* Settings view beside this one, so hand the navigation back to
+    // the main window and close this one instead — the same route
+    // goToOnboarding takes.
     if (detached) {
       forwardToMain('settings');
       return;
@@ -372,9 +372,15 @@
     resetSpotifyAuthFlow();
     setSpotifyPhase('waiting');
     try {
-      await invoke('reconnect_spotify');
+      // #554: re-authorize only. `reconnect_spotify` also cleared the stored
+      // tokens and the keychain client_secret, pushing a returning user back
+      // through the onboarding wizard to re-enter their Client ID/Secret.
+      await invoke('reconnect_spotify_session', {
+        clientId: localConfig.spotify.client_id,
+        redirectUri: 'presencejam://callback'
+      });
     } catch (e) {
-      console.error('[SETTINGS] reconnect_spotify failed:', e);
+      console.error('[SETTINGS] reconnect_spotify_session failed:', e);
       setSpotifyPhase('error', String(e));
     }
   }
