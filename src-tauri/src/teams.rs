@@ -71,20 +71,34 @@ impl std::fmt::Display for TeamsApiError {
     }
 }
 
-/// Creates a reqwest blocking client with standard config (user agent + 10s timeout).
-/// Ensures consistent HTTP client settings across all Teams API calls.
+/// Creates a reqwest blocking client with standard config (user agent +
+/// `timeout`). Ensures consistent HTTP client settings across all Teams API
+/// calls.
 ///
 /// User-Agent uses `env!("CARGO_PKG_VERSION")` so it tracks `Cargo.toml`
 /// (which mirrors `tauri.conf.json` → `version`) automatically on every
 /// release. Never hardcode the version — see CONTRIBUTING.md. See audit
 /// Q8.
-fn build_teams_client() -> Result<reqwest::blocking::Client, String> {
+fn build_teams_client_with_timeout(
+    timeout: std::time::Duration,
+) -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .user_agent(format!("PresenceJam/{}", env!("CARGO_PKG_VERSION")))
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(timeout)
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))
 }
+
+fn build_teams_client() -> Result<reqwest::blocking::Client, String> {
+    build_teams_client_with_timeout(std::time::Duration::from_secs(10))
+}
+
+/// Binding budget for the exit-path cleanup (finding #636, issue #636).
+///
+/// The two best-effort calls run inside `RunEvent::Exit`, so they must never
+/// hold the quit open: a dead network costs seconds, not the default 10 s per
+/// call.
+pub const EXIT_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
@@ -554,13 +568,32 @@ fn classify_teams_status(status_code: u16, retry_after: Option<u64>, body: &str)
     }
 }
 
-fn post_status_message(
+/// Builds the `setStatusMessage` body. `expiry_datetime` is the offset-less
+/// UTC `dateTime` the app sends (issue #156).
+fn status_message_request(message: &str, expiry_datetime: Option<&str>) -> StatusMessageRequest {
+    let expiry = expiry_datetime.map(|dt| ExpiryDateTime {
+        date_time: dt.to_string(),
+        time_zone: "UTC".to_string(),
+    });
+    StatusMessageRequest {
+        status_message: StatusMessageContent {
+            message: MessageContent {
+                content: message.to_string(),
+                content_type: "text".to_string(),
+            },
+            expiry_date_time: expiry,
+        },
+    }
+}
+
+/// POSTs a `setStatusMessage` body through a caller-supplied client, so the
+/// exit path (finding #636) can bound the call with its own timeout.
+fn post_status_message_with(
+    client: &reqwest::blocking::Client,
     access_token: &str,
     body: &StatusMessageRequest,
     action: &str,
 ) -> Result<(), TeamsApiError> {
-    let client = build_teams_client().map_err(TeamsApiError::Transient)?;
-
     let response = client
         .post("https://graph.microsoft.com/v1.0/me/presence/setStatusMessage")
         .header("Authorization", format!("Bearer {}", access_token))
@@ -596,22 +629,13 @@ pub fn set_teams_status_message(
     message: &str,
     expiry_datetime: Option<&str>,
 ) -> Result<(), TeamsApiError> {
-    let expiry = expiry_datetime.map(|dt| ExpiryDateTime {
-        date_time: dt.to_string(),
-        time_zone: "UTC".to_string(),
-    });
-
-    let body = StatusMessageRequest {
-        status_message: StatusMessageContent {
-            message: MessageContent {
-                content: message.to_string(),
-                content_type: "text".to_string(),
-            },
-            expiry_date_time: expiry,
-        },
-    };
-
-    post_status_message(access_token, &body, "set")?;
+    let client = build_teams_client().map_err(TeamsApiError::Transient)?;
+    post_status_message_with(
+        &client,
+        access_token,
+        &status_message_request(message, expiry_datetime),
+        "set",
+    )?;
 
     log::info!("Successfully set Teams status message: {}", message);
     Ok(())
@@ -626,22 +650,35 @@ pub fn clear_teams_status_message(
     // short-lived placeholder whose expiryDateTime removes it. Without an
     // expiry the placeholder never expires (presenceStatusMessage docs).
     // See issue #155.
-    let expiry = expiry_datetime.map(|dt| ExpiryDateTime {
-        date_time: dt.to_string(),
-        time_zone: "UTC".to_string(),
-    });
+    let client = build_teams_client().map_err(TeamsApiError::Transient)?;
+    clear_teams_status_message_with(&client, access_token, placeholder, expiry_datetime)
+}
 
-    let body = StatusMessageRequest {
-        status_message: StatusMessageContent {
-            message: MessageContent {
-                content: placeholder.to_string(),
-                content_type: "text".to_string(),
-            },
-            expiry_date_time: expiry,
-        },
-    };
+/// Exit-path variant of [`clear_teams_status_message`] (finding #636, issue
+/// #636): identical POST, bounded by [`EXIT_CLEANUP_TIMEOUT`] so a dead network
+/// can never hold the quit open.
+pub fn clear_teams_status_message_quick(
+    access_token: &str,
+    placeholder: &str,
+    expiry_datetime: Option<&str>,
+) -> Result<(), TeamsApiError> {
+    let client =
+        build_teams_client_with_timeout(EXIT_CLEANUP_TIMEOUT).map_err(TeamsApiError::Transient)?;
+    clear_teams_status_message_with(&client, access_token, placeholder, expiry_datetime)
+}
 
-    post_status_message(access_token, &body, "clear")?;
+fn clear_teams_status_message_with(
+    client: &reqwest::blocking::Client,
+    access_token: &str,
+    placeholder: &str,
+    expiry_datetime: Option<&str>,
+) -> Result<(), TeamsApiError> {
+    post_status_message_with(
+        client,
+        access_token,
+        &status_message_request(placeholder, expiry_datetime),
+        "clear",
+    )?;
 
     log::info!("Successfully cleared Teams status message");
     Ok(())
@@ -696,14 +733,47 @@ pub fn graph_oid_from_access_token(access_token: &str) -> Result<String, String>
         .ok_or_else(|| "JWT payload has no `oid` claim".to_string())
 }
 
+/// `presence-gated` reasons that carry no presence sample — the time- and
+/// rule-based gates (issue #432 / findings #634/#635) plus the status-message
+/// gate. Shared constants so the polling loop and the Dashboard chip's label
+/// mapping (`src/lib/components/Dashboard.svelte`) cannot drift.
+pub const GATE_REASON_QUIET_HOURS: &str = "quiet-hours";
+pub const GATE_REASON_TRACK_RULE: &str = "track-rule";
+pub const GATE_REASON_MANUAL_STATUS: &str = "manual-status";
+/// The out-of-office reason (finding #637) — the only gate reason that is
+pub const GATE_REASON_OUT_OF_OFFICE: &str = "out of office";
+
+/// The `statusMessage` half of a Graph presence (finding #635, issue #635).
+///
+/// `content` is the live status message Teams shows; `expires_at` is the
+/// parsed `expiryDateTime` (`None` when Graph omitted it or it did not parse —
+/// an unparseable expiry is treated as "no expiry", never as "expired").
+/// `publishedDateTime` is deliberately not modelled: authorship is decided by
+/// content identity against the text this process last posted (see
+/// `poll_once::manual_status_blocks_write`), which subsumes every case a
+/// publication-time comparison could distinguish.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PresenceStatusMessage {
+    pub content: String,
+    pub expires_at: Option<chrono::DateTime<Utc>>,
+}
+
 /// Presence returned by the Graph getPresence endpoint (v1.0). The docs
 /// enumerate lowercase enum values (`available`, `busy`, …) but real
 /// examples return PascalCase (`Available`, `Busy`, `InACall`, …) — parse
 /// case-insensitively (issue #3.0-P1/P2).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PresenceInfo {
     pub availability: String,
     pub activity: String,
+    /// The live status message (finding #635). `None` when Graph sent no
+    /// `statusMessage`/`message`/`content`.
+    #[serde(default)]
+    pub status_message: Option<PresenceStatusMessage>,
+    /// `outOfOfficeSettings.isOutOfOffice` (finding #637, issue #637); false
+    /// whenever Graph omitted the object.
+    #[serde(default)]
+    pub out_of_office: bool,
 }
 
 /// Parses a Graph getPresence response body into a `PresenceInfo`,
@@ -724,21 +794,87 @@ pub fn parse_presence_body(body: &str) -> Result<PresenceInfo, String> {
     Ok(PresenceInfo {
         availability,
         activity,
+        status_message: parse_status_message(&value),
+        // Finding #637: `outOfOfficeSettings.isOutOfOffice` is a plain
+        // boolean on the same response; a missing object means "not out of
+        // office" (fail-open: a gate must never fire on absent data).
+        out_of_office: value
+            .get("outOfOfficeSettings")
+            .and_then(|v| v.get("isOutOfOffice"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
     })
+}
+
+/// The `statusMessage` half of a getPresence body (finding #635).
+///
+/// Graph nests the text under `statusMessage.message.content`
+/// (presenceStatusMessage → itemBody), and reports the self-destruct time as a
+/// `dateTimeTimeZone` on `statusMessage.expiryDateTime`. `None` when there is
+/// no message text at all — an empty live message means "nothing to respect".
+fn parse_status_message(value: &serde_json::Value) -> Option<PresenceStatusMessage> {
+    let message = value.get("statusMessage")?;
+    let content = message
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let expires_at = message
+        .get("expiryDateTime")
+        .and_then(parse_datetime_time_zone);
+    if content.trim().is_empty() && expires_at.is_none() {
+        return None;
+    }
+    Some(PresenceStatusMessage {
+        content,
+        expires_at,
+    })
+}
+
+/// Parse a Graph `dateTimeTimeZone` to UTC, or `None` when it is absent or not
+/// trustworthy (fail-open: an unparseable expiry must never be read as
+/// "expired", which would let the app clobber a live manual status).
+///
+/// An offset-bearing `dateTime` is parsed as-is; an offset-less one is only
+/// accepted when `timeZone` is `UTC` (or absent), because assuming UTC for a
+/// named zone such as "Pacific Standard Time" would silently shift the
+/// boundary.
+fn parse_datetime_time_zone(value: &serde_json::Value) -> Option<chrono::DateTime<Utc>> {
+    let raw = value.get("dateTime")?.as_str()?.trim();
+    if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(raw) {
+        return Some(parsed.with_timezone(&Utc));
+    }
+    let zone = value
+        .get("timeZone")
+        .and_then(|z| z.as_str())
+        .unwrap_or("UTC");
+    if !zone.is_empty() && !zone.eq_ignore_ascii_case("utc") {
+        return None;
+    }
+    chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S%.f")
+        .ok()
+        .map(|naive| naive.and_utc())
 }
 
 /// Human-readable reason a presence gates a status-message write, or an
 /// empty string when it doesn't. Single source of truth for the gating
 /// rule — `is_presence_gated` is defined through it so the two cannot
 /// drift apart (issue #3.0-P2).
-pub fn presence_gate_reason(presence: &PresenceInfo) -> String {
+///
+/// `gate_when_out_of_office` (finding #637, issue #637) adds the
+/// out-of-office reason; it is a parameter rather than a field read because
+/// the OPT-IN lives in `teams.gate_when_out_of_office` and a rule that carries
+/// its own presence action overrides it for the iteration (see
+/// `poll_once::ooo_gate_enabled`).
+pub fn presence_gate_reason(presence: &PresenceInfo, gate_when_out_of_office: bool) -> String {
     match presence.activity.to_lowercase().as_str() {
         "inameeting" => return "in a meeting".to_string(),
         "inacall" => return "in a call".to_string(),
         "presenting" => return "presenting".to_string(),
         _ => {}
     }
-    match presence.availability.to_lowercase().as_str() {
+    let availability_reason = match presence.availability.to_lowercase().as_str() {
         "busy" => "busy".to_string(),
         "donotdisturb" => "Do Not Disturb".to_string(),
         // Issue #254: `focusing` is a documented v1.0 availability value
@@ -746,15 +882,28 @@ pub fn presence_gate_reason(presence: &PresenceInfo) -> String {
         // time), so it must gate exactly like Do Not Disturb.
         "focusing" => "focusing".to_string(),
         _ => String::new(),
+    };
+    if !availability_reason.is_empty() {
+        return availability_reason;
     }
+    // Finding #637: out-of-office is the LOWEST-precedence gate reason, so a
+    // user who is busy or in a call gets that (more specific) explanation.
+    // `activity = outOfOffice` and `outOfOfficeSettings.isOutOfOffice` are
+    // the two documented signals; either one fires.
+    if gate_when_out_of_office
+        && (presence.out_of_office || presence.activity.eq_ignore_ascii_case("outofoffice"))
+    {
+        return GATE_REASON_OUT_OF_OFFICE.to_string();
+    }
+    String::new()
 }
 
 /// True iff a presence should suppress a status-message write: the user is
 /// busy or Do-Not-Disturb, or their activity is in a meeting/call or
-/// presenting. Case-insensitive — both fields are normalized internally
-/// (issue #3.0-P2).
-pub fn is_presence_gated(presence: &PresenceInfo) -> bool {
-    !presence_gate_reason(presence).is_empty()
+/// presenting — plus, when opted in, out of office. Case-insensitive — both
+/// fields are normalized internally (issue #3.0-P2).
+pub fn is_presence_gated(presence: &PresenceInfo, gate_when_out_of_office: bool) -> bool {
+    !presence_gate_reason(presence, gate_when_out_of_office).is_empty()
 }
 
 #[derive(Debug, Serialize)]
@@ -779,13 +928,12 @@ struct ClearPresenceRequest {
 /// path (the setPresence/clearPresence docs list only `/users/{id}`; `/me`
 /// works in practice but is undocumented).
 fn post_presence<T: Serialize>(
+    client: &reqwest::blocking::Client,
     access_token: &str,
     url: &str,
     body: &T,
     action: &str,
 ) -> Result<(), TeamsApiError> {
-    let client = build_teams_client().map_err(TeamsApiError::Transient)?;
-
     let response = client
         .post(url)
         .header("Authorization", format!("Bearer {}", access_token))
@@ -839,7 +987,9 @@ pub fn set_teams_presence(
         activity: activity.to_string(),
         expiration_duration: expiration_duration.to_string(),
     };
+    let client = build_teams_client().map_err(TeamsApiError::Transient)?;
     match post_presence(
+        &client,
         access_token,
         "https://graph.microsoft.com/v1.0/me/presence/setPresence",
         &body,
@@ -854,6 +1004,7 @@ pub fn set_teams_presence(
                 )
             })?;
             post_presence(
+                &client,
                 access_token,
                 &format!(
                     "https://graph.microsoft.com/v1.0/users/{}/presence/setPresence",
@@ -871,10 +1022,28 @@ pub fn set_teams_presence(
 /// endpoint (issue #3.0-P1). A 404 on either path is documented success —
 /// the session is already gone (clearPresence docs).
 pub fn clear_teams_presence(access_token: &str) -> Result<(), TeamsApiError> {
+    let client = build_teams_client().map_err(TeamsApiError::Transient)?;
+    clear_teams_presence_with(&client, access_token)
+}
+
+/// Exit-path variant of [`clear_teams_presence`] (finding #636, issue #636):
+/// identical request, bounded by [`EXIT_CLEANUP_TIMEOUT`] so a dead network can
+/// never hold the quit open.
+pub fn clear_teams_presence_quick(access_token: &str) -> Result<(), TeamsApiError> {
+    let client =
+        build_teams_client_with_timeout(EXIT_CLEANUP_TIMEOUT).map_err(TeamsApiError::Transient)?;
+    clear_teams_presence_with(&client, access_token)
+}
+
+fn clear_teams_presence_with(
+    client: &reqwest::blocking::Client,
+    access_token: &str,
+) -> Result<(), TeamsApiError> {
     let body = ClearPresenceRequest {
         session_id: MICROSOFT_GRAPH_CLIENT_ID.to_string(),
     };
     match post_presence(
+        client,
         access_token,
         "https://graph.microsoft.com/v1.0/me/presence/clearPresence",
         &body,
@@ -889,6 +1058,7 @@ pub fn clear_teams_presence(access_token: &str) -> Result<(), TeamsApiError> {
                 )
             })?;
             match post_presence(
+                client,
                 access_token,
                 &format!(
                     "https://graph.microsoft.com/v1.0/users/{}/presence/clearPresence",
@@ -1212,6 +1382,57 @@ mod tests {
         assert!(super::parse_presence_body(r#"{"availability":42,"activity":"x"}"#).is_err());
     }
 
+    /// Finding #635: the live status message and the out-of-office flag come
+    /// from the SAME getPresence response the gate already parses — no extra
+    /// request, no extra scope.
+    #[test]
+    fn parse_presence_body_carries_status_message_and_ooo() {
+        let info = super::parse_presence_body(
+            r#"{
+                "availability": "Available",
+                "activity": "Available",
+                "statusMessage": {
+                    "message": {"contentType": "text", "content": "In a workshop until 3"},
+                    "publishedDateTime": "2026-09-16T10:00:00Z",
+                    "expiryDateTime": {"dateTime": "2026-09-16T18:00:00.0000000", "timeZone": "UTC"}
+                },
+                "outOfOfficeSettings": {"message": "OOO", "isOutOfOffice": true}
+            }"#,
+        )
+        .expect("a full presence body must parse");
+        assert!(info.out_of_office);
+        let message = info.status_message.expect("statusMessage must be parsed");
+        assert_eq!(message.content, "In a workshop until 3");
+        assert_eq!(
+            message.expires_at.expect("expiry must parse").to_rfc3339(),
+            "2026-09-16T18:00:00+00:00"
+        );
+
+        // No message / no OOO object: both stay absent rather than erroring.
+        let bare = super::parse_presence_body(r#"{"availability":"Away","activity":"Away"}"#)
+            .expect("a bare presence body must parse");
+        assert!(bare.status_message.is_none());
+        assert!(!bare.out_of_office);
+
+        // An offset-bearing expiry parses too, and a named non-UTC zone is
+        // refused (fail-open: never read as "expired").
+        let offset = super::parse_presence_body(
+            r#"{"availability":"Available","activity":"Available",
+                "statusMessage":{"message":{"content":"x"},
+                "expiryDateTime":{"dateTime":"2026-09-16T18:00:00+00:00","timeZone":"UTC"}}}"#,
+        )
+        .expect("must parse");
+        assert!(offset.status_message.unwrap().expires_at.is_some());
+        let named_zone = super::parse_presence_body(
+            r#"{"availability":"Available","activity":"Available",
+                "statusMessage":{"message":{"content":"x"},
+                "expiryDateTime":{"dateTime":"2026-09-16T18:00:00.0000000",
+                                  "timeZone":"Pacific Standard Time"}}}"#,
+        )
+        .expect("must parse");
+        assert!(named_zone.status_message.unwrap().expires_at.is_none());
+    }
+
     // Issue #3.0-P2: gating rule — busy/DND availability OR
     // in-meeting/in-call/presenting activity, case-insensitive.
     #[test]
@@ -1220,27 +1441,76 @@ mod tests {
         let info = |availability: &str, activity: &str| PresenceInfo {
             availability: availability.to_string(),
             activity: activity.to_string(),
+            ..PresenceInfo::default()
         };
-        assert!(is_presence_gated(&info("busy", "available")));
-        assert!(is_presence_gated(&info("donotdisturb", "available")));
-        assert!(is_presence_gated(&info("available", "inameeting")));
-        assert!(is_presence_gated(&info("available", "inacall")));
-        assert!(is_presence_gated(&info("available", "presenting")));
+        // Out-of-office gating is opted in via the second argument (finding
+        // #637): it changes none of the 4.5 verdicts while it is off.
+        let gated = |p: &PresenceInfo| is_presence_gated(p, false);
+        assert!(gated(&info("busy", "available")));
+        assert!(gated(&info("donotdisturb", "available")));
+        assert!(gated(&info("available", "inameeting")));
+        assert!(gated(&info("available", "inacall")));
+        assert!(gated(&info("available", "presenting")));
         // Issue #254: `focusing` is a documented v1.0 availability value
         // that Teams renders with the same red DND icon (scheduled focus
         // time), so it must gate like Do Not Disturb.
-        assert!(is_presence_gated(&info("focusing", "focusing")));
+        assert!(gated(&info("focusing", "focusing")));
         // Activity wins even when availability is Available (in-meeting).
-        assert!(is_presence_gated(&info("available", "InAMeeting")));
-        assert!(!is_presence_gated(&info("available", "available")));
-        assert!(!is_presence_gated(&info("away", "away")));
-        assert!(!is_presence_gated(&info("available", "offline")));
+        assert!(gated(&info("available", "InAMeeting")));
+        assert!(!gated(&info("available", "available")));
+        assert!(!gated(&info("away", "away")));
+        assert!(!gated(&info("available", "offline")));
         // `presenceUnknown` deliberately stays ungated — the gate already
         // fails safe on a read error, so it is not a "do not disturb".
-        assert!(!is_presence_gated(&info(
-            "presenceunknown",
-            "presenceunknown"
-        )));
+        assert!(!gated(&info("presenceunknown", "presenceunknown")));
+    }
+
+    /// Finding #637: out-of-office gates only when opted in, through either
+    /// documented signal, and never outranks a more specific reason.
+    #[test]
+    fn out_of_office_gates_only_when_opted_in() {
+        use super::{
+            is_presence_gated, presence_gate_reason, PresenceInfo, GATE_REASON_OUT_OF_OFFICE,
+        };
+        let ooo_flag = PresenceInfo {
+            availability: "available".to_string(),
+            activity: "available".to_string(),
+            out_of_office: true,
+            ..PresenceInfo::default()
+        };
+        let ooo_activity = PresenceInfo {
+            availability: "available".to_string(),
+            activity: "outOfOffice".to_string(),
+            ..PresenceInfo::default()
+        };
+        let plain = PresenceInfo {
+            availability: "away".to_string(),
+            activity: "away".to_string(),
+            ..PresenceInfo::default()
+        };
+
+        // Opt-in is the whole point: with the flag off nothing changes.
+        assert!(!is_presence_gated(&ooo_flag, false));
+        assert!(!is_presence_gated(&ooo_activity, false));
+        assert!(presence_gate_reason(&ooo_flag, false).is_empty());
+
+        assert!(is_presence_gated(&ooo_flag, true));
+        assert!(is_presence_gated(&ooo_activity, true));
+        assert_eq!(
+            presence_gate_reason(&ooo_flag, true),
+            GATE_REASON_OUT_OF_OFFICE
+        );
+        // Being plain Away is still not "out of office".
+        assert!(!is_presence_gated(&plain, true));
+        // A busy/in-a-call user gets the more specific reason, not "out of
+        // office" — the flag adds a reason, it never masks one.
+        let busy_ooo = PresenceInfo {
+            availability: "busy".to_string(),
+            activity: "available".to_string(),
+            out_of_office: true,
+            ..PresenceInfo::default()
+        };
+        assert_eq!(presence_gate_reason(&busy_ooo, true), "busy");
     }
 
     // Issue #3.0-P2: the human-readable reason must mirror the gating rule
@@ -1251,29 +1521,36 @@ mod tests {
         let info = |availability: &str, activity: &str| PresenceInfo {
             availability: availability.to_string(),
             activity: activity.to_string(),
+            ..PresenceInfo::default()
         };
-        assert_eq!(presence_gate_reason(&info("busy", "available")), "busy");
+        // The reason strings carry the 4.5 gating rule verbatim; the
+        // out-of-office argument is exercised in
+        // `out_of_office_gates_only_when_opted_in`.
         assert_eq!(
-            presence_gate_reason(&info("donotdisturb", "available")),
+            presence_gate_reason(&info("busy", "available"), false),
+            "busy"
+        );
+        assert_eq!(
+            presence_gate_reason(&info("donotdisturb", "available"), false),
             "Do Not Disturb"
         );
         assert_eq!(
-            presence_gate_reason(&info("available", "inameeting")),
+            presence_gate_reason(&info("available", "inameeting"), false),
             "in a meeting"
         );
         assert_eq!(
-            presence_gate_reason(&info("available", "inacall")),
+            presence_gate_reason(&info("available", "inacall"), false),
             "in a call"
         );
         assert_eq!(
-            presence_gate_reason(&info("available", "presenting")),
+            presence_gate_reason(&info("available", "presenting"), false),
             "presenting"
         );
         assert_eq!(
-            presence_gate_reason(&info("focusing", "focusing")),
+            presence_gate_reason(&info("focusing", "focusing"), false),
             "focusing"
         );
-        assert!(presence_gate_reason(&info("available", "available")).is_empty());
+        assert!(presence_gate_reason(&info("available", "available"), false).is_empty());
     }
 
     // Issue #3.0-P1: the oid claim (needed for the /users/{oid} fallback)

@@ -112,6 +112,7 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
             &mut consecutive_network_failures,
             &mut clocks.gated_track_key,
             &mut clocks.last_availability_arm,
+            &mut clocks.armed_presence,
             &mut last_etag,
             &mut first_iteration,
             &mut clocks.last_posted_status,

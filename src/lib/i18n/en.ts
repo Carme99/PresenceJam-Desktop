@@ -391,6 +391,34 @@ export const en = {
     'The unreadable original is still next to your settings file as config.json.',
   'diagnostics.quarantineWhere':
     'Both files live in the PresenceJam folder inside your user configuration folder — the backup sits next to config.json.',
+  // 4.6 additions (presence rules #634/#635/#636/#637 + #538 consumption sites)
+  'rules.replacementClampHint':
+    'Replacement status is capped at {max} characters — {kept} will be posted.',
+  'rules.quietReplacementPlaceholder': 'Post this instead (empty = suppress)',
+  'rules.presenceLabel': 'Presence while this rule applies',
+  'rules.presenceNone': "Don't change my presence",
+  'rules.presenceHint':
+    'A rule can set Teams availability/activity, but only while “Availability sync” is on; it never overrides a call, a meeting or a status you set by hand.',
+  'settings.respectManualStatusLabel': 'Never overwrite a status I set by hand',
+  'settings.respectManualStatusHint':
+    'Reuses the presence read the gate already performs, so it costs no extra request — its text is respected until you change it or it expires.',
+  'settings.gateOutOfOfficeLabel': 'Pause while I am out of office',
+  'settings.gateOutOfOfficeHint':
+    'Skips the status update while your Teams out-of-office setting is on. A track rule with its own presence action overrides this.',
+  'settings.extraWordsLabel': 'Custom words to filter',
+  'settings.extraWordsHint':
+    'One word or phrase per line. Applied with the same boundaries as the built-in list.',
+  'settings.extraWordsPlaceholder': 'word or phrase',
+  'settings.extraWordsClampHint':
+    'Only the first {max} entries of {chars} characters are kept — {kept} will be filtered.',
+  'settings.pauseBackoffMaxLabel': 'Paused backoff ceiling (seconds)',
+  'settings.pauseBackoffClampHint':
+    'Allowed range is {min}–{max} seconds; {effective} will be used.',
+  'dashboard.presenceGatedQuietHours': 'Status paused — quiet hours are active',
+  'dashboard.presenceGatedTrackRule': 'Status paused — a track rule matched',
+  'dashboard.presenceGatedManualStatus':
+    'Status paused — you set a status message by hand',
+  'dashboard.presenceGatedOutOfOffice': 'Status paused — you are out of office',
 };
 
 export type Dict = { readonly [K in keyof typeof en]: string };

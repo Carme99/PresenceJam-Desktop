@@ -269,3 +269,110 @@ describe('Settings theme picker semantics (#552)', () => {
     expect(document.activeElement).toBe(light);
   });
 });
+
+/**
+ * Findings #634/#635/#637 + issue #538: the 4.6 Settings controls.
+ *
+ * Every one of these fields existed in `config.json` (or in Rust) with no
+ * editor at all, so a user could only reach them by hand-editing the file:
+ * the quiet-hours replacement status, the custom profanity lexicon, the
+ * paused-backoff ceiling, the manual-status policy, the out-of-office gate and
+ * the per-rule presence action. They are exercised through the real component,
+ * with the same clamps the backend applies (`clamp_teams` /
+ * `clamp_polling` / `clamp_rules`).
+ *
+ * Fails pre-fix: none of these controls renders, so every `querySelector`
+ * below returns null.
+ */
+describe('Settings presence-rules and orphaned-field controls (#538/#634/#635/#637)', () => {
+  it('renders the manual-status and out-of-office policies, off/on by default', async () => {
+    const { container } = await mountSettings();
+
+    const manual = container.querySelector('#respect-manual-status') as HTMLInputElement;
+    const ooo = container.querySelector('#gate-out-of-office') as HTMLInputElement;
+    expect(manual).not.toBeNull();
+    expect(ooo).not.toBeNull();
+    // Mirrors the Rust serde defaults: manual status respected, OOO opt-in.
+    expect(manual.checked).toBe(true);
+    expect(ooo.checked).toBe(false);
+
+    await fireEvent.click(ooo);
+    await fireEvent.click(container.querySelector('.actions .btn-full') as HTMLElement);
+    await waitFor(() => expect(get(configStore).teams.gate_when_out_of_office).toBe(true));
+  });
+
+  it('posts the quiet-hours replacement text and its presence action', async () => {
+    const { container } = await mountSettings();
+
+    const addQuiet = [...container.querySelectorAll('.btn-secondary')].find(
+      (b) => b.textContent?.trim() === t('rules.addQuietHours')
+    ) as HTMLButtonElement;
+    await fireEvent.click(addQuiet);
+    await tick();
+
+    const replacement = container.querySelector(
+      'input[aria-label="' + t('rules.quietReplacementPlaceholder') + '"]'
+    ) as HTMLInputElement;
+    expect(replacement).not.toBeNull();
+    await fireEvent.input(replacement, { target: { value: '🌙 Back at 09:00' } });
+
+    const presence = container.querySelector(
+      'select[aria-label="' + t('rules.presenceLabel') + '"]'
+    ) as HTMLSelectElement;
+    expect(presence).not.toBeNull();
+    // Only the five documented setPresence combinations are offered — the
+    // "don't change my presence" option plus the closed set.
+    expect(presence.querySelectorAll('option').length).toBe(6);
+    await fireEvent.change(presence, { target: { value: 'Away|Away' } });
+
+    await fireEvent.click(container.querySelector('.actions .btn-full') as HTMLElement);
+    await waitFor(() => {
+      const entry = get(configStore).status_rules.quiet_hours[0];
+      expect(entry.replacement_status).toBe('🌙 Back at 09:00');
+      expect(entry.presence_availability).toBe('Away');
+      expect(entry.presence_activity).toBe('Away');
+    });
+  });
+
+  it('bounds the custom lexicon to the same 64x32 the backend enforces', async () => {
+    const { container } = await mountSettings();
+
+    const area = container.querySelector('#profanity-extra-words') as HTMLTextAreaElement;
+    expect(area).not.toBeNull();
+    const longWord = 'x'.repeat(40);
+    const many = [...Array(70).keys()].map((i) => `word${i}`);
+    await fireEvent.input(area, { target: { value: [longWord, ...many].join('\n') } });
+    await tick();
+
+    // The clamp hint tells the user what will actually be matched.
+    expect(container.querySelector('.clamp-hint')?.textContent).toContain('64');
+
+    await fireEvent.click(container.querySelector('.actions .btn-full') as HTMLElement);
+    await waitFor(() => {
+      const words = get(configStore).teams.profanity_extra_words;
+      expect(words.length).toBe(64);
+      expect(words[0].length).toBe(32);
+    });
+  });
+
+  it('bounds the paused-backoff ceiling to the backend clamp range', async () => {
+    const { container } = await mountSettings();
+
+    const input = container.querySelector('#pause-backoff-max') as HTMLInputElement;
+    expect(input).not.toBeNull();
+    // The native bounds mirror clamp_polling's 60..=3600.
+    expect(input.min).toBe('60');
+    expect(input.max).toBe('3600');
+
+    await fireEvent.input(input, { target: { value: '99999' } });
+    await tick();
+    // Out-of-range input surfaces the effective value instead of silently
+    // storing something the backend will rewrite.
+    // The hint names the effective range/value the backend will store (the
+    // test harness's `save_config` echo is an identity, so the clamp itself is
+    // pinned by the Rust test `test_clamp_polling_...`).
+    const hint = container.querySelector('.clamp-hint')?.textContent ?? '';
+    expect(hint).toContain('3');
+    expect(hint).toContain('60');
+  });
+});

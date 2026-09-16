@@ -105,6 +105,19 @@ pub struct TeamsConfig {
     /// bounded to 64 entries of 32 chars by `clamp_teams`.
     #[serde(default)]
     pub profanity_extra_words: Vec<String>,
+    /// Finding #635 (issue #635): never overwrite a Teams status message the
+    /// user set by hand. ON by default — clobbering a message the user typed
+    /// ("In a workshop until 3") is the app taking over something the user
+    /// owns, and the read-before-write check reuses the presence sample the
+    /// gate already fetches (see `poll_once::manual_status_blocks_write`).
+    #[serde(default = "default_respect_manual_status")]
+    pub respect_manual_status: bool,
+    /// Finding #637 (issue #637): also gate the status write while the user
+    /// is marked out of office. OFF by default, matching how
+    /// `availability_sync` shipped — 4.5 behaviour is unchanged until the
+    /// user opts in.
+    #[serde(default = "default_gate_when_out_of_office")]
+    pub gate_when_out_of_office: bool,
 }
 
 fn default_status_format() -> String {
@@ -133,6 +146,14 @@ fn default_availability_sync() -> bool {
 
 fn default_presence_gate() -> bool {
     true
+}
+
+fn default_respect_manual_status() -> bool {
+    true
+}
+
+fn default_gate_when_out_of_office() -> bool {
+    false
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
@@ -201,6 +222,105 @@ fn clamp_teams(cfg: &mut TeamsConfig) {
         if word.chars().count() > 32 {
             *word = word.chars().take(32).collect();
         }
+    }
+}
+
+/// The closed set of `availability`/`activity` pairs the Graph
+/// `presence: setPresence` action accepts (finding #634, issue #634).
+///
+/// Quoted from https://learn.microsoft.com/graph/api/presence-setpresence:
+/// "Supported combinations of availability and activity are:
+/// Available/Available, Busy/InACall, Busy/InAConferenceCall, Away/Away,
+/// DoNotDisturb/Presenting". `DoNotDisturb/DoNotDisturb` appears in the
+/// manage-presence-state permutation table but is NOT settable through
+/// setPresence, and OutOfOffice/InAMeeting "has no effect" — neither is
+/// offered here, so a rule can never contain a pair Graph silently drops.
+pub const PRESENCE_COMBINATIONS: [(&str, &str); 5] = [
+    ("Available", "Available"),
+    ("Busy", "InACall"),
+    ("Busy", "InAConferenceCall"),
+    ("Away", "Away"),
+    ("DoNotDisturb", "Presenting"),
+];
+
+/// A validated `setPresence` pair — constructible only through
+/// [`normalize_presence_pair`], so an invalid combination cannot exist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresencePair {
+    pub availability: String,
+    pub activity: String,
+}
+
+/// Canonicalize a rule's presence pair (finding #634, issue #634).
+///
+/// Case-insensitive and whitespace-trimmed (a hand-edited `config.json` may
+/// say `"doNotDisturb"`), and the ONLY constructor of [`PresencePair`]. Any
+/// pair outside [`PRESENCE_COMBINATIONS`] — including a half-filled pair —
+/// yields `None`, and [`clamp_rules`] then clears both fields, so an
+/// unsupported value is normalized away at the IPC boundary exactly like
+/// `clamp_polling` normalizes an out-of-range interval.
+pub fn normalize_presence_pair(availability: &str, activity: &str) -> Option<PresencePair> {
+    let availability = availability.trim();
+    let activity = activity.trim();
+    if availability.is_empty() || activity.is_empty() {
+        return None;
+    }
+    PRESENCE_COMBINATIONS
+        .iter()
+        .find(|(avail, act)| {
+            avail.eq_ignore_ascii_case(availability) && act.eq_ignore_ascii_case(activity)
+        })
+        .map(|(avail, act)| PresencePair {
+            availability: (*avail).to_string(),
+            activity: (*act).to_string(),
+        })
+}
+
+/// Upper bound on a rule's status replacement text (finding #634). The text
+/// is POSTed verbatim as the Teams status message AND embedded in the #343
+/// change key, so it stays a status line rather than an essay; the Settings
+/// editor mirrors this with a `maxlength` + counter so the truncation is
+/// never silent.
+pub const MAX_RULE_STATUS_CHARS: usize = 128;
+
+/// Normalize the rule model (finding #634, issue #634): canonicalize every
+/// presence pair and bound every replacement text. Mirrors `clamp_polling` /
+/// `clamp_teams`, so it runs on load and on every save through
+/// [`clamped_config`].
+fn clamp_rules(cfg: &mut StatusRulesConfig) {
+    for entry in &mut cfg.quiet_hours {
+        clamp_presence_pair(
+            &mut entry.presence_availability,
+            &mut entry.presence_activity,
+        );
+        clamp_rule_text(&mut entry.replacement_status);
+    }
+    for rule in &mut cfg.track_rules {
+        clamp_presence_pair(&mut rule.presence_availability, &mut rule.presence_activity);
+        clamp_rule_text(&mut rule.replacement_status);
+    }
+}
+
+/// Rewrite a rule's pair in place to its canonical form, or clear BOTH fields
+/// when the pair is not one of [`PRESENCE_COMBINATIONS`] (an empty pair is the
+/// documented "don't touch presence" value).
+fn clamp_presence_pair(availability: &mut String, activity: &mut String) {
+    match normalize_presence_pair(availability, activity) {
+        Some(pair) => {
+            *availability = pair.availability;
+            *activity = pair.activity;
+        }
+        None => {
+            availability.clear();
+            activity.clear();
+        }
+    }
+}
+
+/// Truncate a rule's replacement text to [`MAX_RULE_STATUS_CHARS`].
+fn clamp_rule_text(text: &mut String) {
+    if text.chars().count() > MAX_RULE_STATUS_CHARS {
+        *text = text.chars().take(MAX_RULE_STATUS_CHARS).collect();
     }
 }
 
@@ -319,6 +439,32 @@ pub struct QuietHoursEntry {
     /// [`TrackRuleEntry::replacement_status`].
     #[serde(default)]
     pub replacement_status: String,
+    /// setPresence pair applied while this window is active (finding #634,
+    /// issue #634) — e.g. Away/Away outside working hours, so the user is
+    /// visibly away instead of merely unheard. Both fields empty (the
+    /// default) = don't touch presence; `clamp_rules` normalizes them against
+    /// [`PRESENCE_COMBINATIONS`].
+    #[serde(default)]
+    pub presence_availability: String,
+    #[serde(default)]
+    pub presence_activity: String,
+}
+
+/// Mirrors the serde defaults field-by-field (note `end_minutes` defaults to
+/// [`default_quiet_end`], not `u16::default()`), so a test fixture built with
+/// `..Default::default()` and a config file missing the same field agree.
+impl Default for QuietHoursEntry {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            start_minutes: 0,
+            end_minutes: default_quiet_end(),
+            days: Vec::new(),
+            replacement_status: String::new(),
+            presence_availability: String::new(),
+            presence_activity: String::new(),
+        }
+    }
 }
 
 fn default_quiet_end() -> u16 {
@@ -344,6 +490,28 @@ pub struct TrackRuleEntry {
     /// "busy/focus" alternative). Empty = suppress silently.
     #[serde(default)]
     pub replacement_status: String,
+    /// setPresence pair applied while this rule matches (finding #634, issue
+    /// #634) — e.g. DoNotDisturb/Presenting for a focus playlist. Both fields
+    /// empty (the default) = don't touch presence; `clamp_rules` normalizes
+    /// them against [`PRESENCE_COMBINATIONS`].
+    #[serde(default)]
+    pub presence_availability: String,
+    #[serde(default)]
+    pub presence_activity: String,
+}
+
+/// Mirrors the serde defaults field-by-field — see [`QuietHoursEntry`].
+impl Default for TrackRuleEntry {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            artist_substring: String::new(),
+            track_substring: String::new(),
+            replacement_status: String::new(),
+            presence_availability: String::new(),
+            presence_activity: String::new(),
+        }
+    }
 }
 
 /// User-defined status rules for issue #432 (quiet hours + track
@@ -411,6 +579,8 @@ impl Default for TeamsConfig {
             availability_sync: default_availability_sync(),
             presence_gate: default_presence_gate(),
             profanity_extra_words: Vec::new(),
+            respect_manual_status: default_respect_manual_status(),
+            gate_when_out_of_office: default_gate_when_out_of_office(),
         }
     }
 }
@@ -803,6 +973,7 @@ pub fn load_config() -> Result<AppConfig, String> {
     migrate_config(&mut config, from_version);
     clamp_polling(&mut config.polling);
     clamp_teams(&mut config.teams);
+    clamp_rules(&mut config.status_rules);
 
     log::info!("[CFG] Loaded configuration from '{}'", path.display());
     Ok(with_keychain_flags(config))
@@ -1128,6 +1299,7 @@ pub fn clamped_config(config: &AppConfig) -> AppConfig {
     let mut cfg = config.clone();
     clamp_polling(&mut cfg.polling);
     clamp_teams(&mut cfg.teams);
+    clamp_rules(&mut cfg.status_rules);
     cfg
 }
 
@@ -1692,12 +1864,15 @@ mod tests {
             end_minutes: 420,
             days: vec![1, 2, 3, 4, 5],
             replacement_status: "Busy".to_string(),
+            ..QuietHoursEntry::default()
         });
         cfg.status_rules.track_rules.push(TrackRuleEntry {
             enabled: true,
             artist_substring: "lofi".to_string(),
             track_substring: String::new(),
             replacement_status: "Focus".to_string(),
+            presence_availability: "DoNotDisturb".to_string(),
+            presence_activity: "Presenting".to_string(),
         });
         cfg.extra
             .insert("future_key".to_string(), serde_json::json!({"a": 1}));
@@ -2154,6 +2329,168 @@ mod tests {
         let json = serde_json::to_string_pretty(&clamped_config(&cfg)).expect("must serialize");
         let back: AppConfig = serde_json::from_str(&json).expect("must re-parse");
         assert_eq!(back.teams.profanity_extra_words[0].chars().count(), 32);
+    }
+
+    // ---------------------------------------------------------------
+    // Presence findings #634 / #635 / #637: the rule presence model, the
+    // manual-status policy flag and the out-of-office gate flag.
+    // ---------------------------------------------------------------
+
+    /// Every new field is additive: a 4.5 file loads with the documented
+    /// defaults (presence-untouched rules, manual status respected, OOO gating
+    /// off).
+    #[test]
+    fn test_presence_additions_default_on_old_files() {
+        let cfg: AppConfig = serde_json::from_str(
+            r#"{"teams": {}, "status_rules": {"quiet_hours": [{"enabled": true}], "track_rules": [{"enabled": true}]}}"#,
+        )
+        .expect("a 4.5 document must still parse");
+        assert!(cfg.teams.respect_manual_status);
+        assert!(!cfg.teams.gate_when_out_of_office);
+        assert!(cfg.status_rules.quiet_hours[0]
+            .presence_availability
+            .is_empty());
+        assert!(cfg.status_rules.quiet_hours[0].presence_activity.is_empty());
+        assert!(cfg.status_rules.track_rules[0]
+            .presence_availability
+            .is_empty());
+        assert!(cfg.status_rules.track_rules[0].presence_activity.is_empty());
+    }
+
+    /// The canonical pair set is exactly the five documented combinations:
+    /// case-insensitive on input, canonical on output, and nothing else.
+    #[test]
+    fn test_normalize_presence_pair_accepts_only_documented_combinations() {
+        assert_eq!(
+            normalize_presence_pair("Available", "Available"),
+            Some(PresencePair {
+                availability: "Available".to_string(),
+                activity: "Available".to_string(),
+            })
+        );
+        // Case + whitespace from a hand-edited config normalize to canonical.
+        assert_eq!(
+            normalize_presence_pair(" doNotDisturb ", "presenting")
+                .expect("case-insensitive match")
+                .activity,
+            "Presenting"
+        );
+        assert_eq!(
+            normalize_presence_pair("Busy", "InAConferenceCall")
+                .expect("documented combination")
+                .availability,
+            "Busy"
+        );
+        // Unsupported / half-filled pairs are rejected outright — including
+        // the two the docs say setPresence does not honour.
+        assert_eq!(
+            normalize_presence_pair("DoNotDisturb", "DoNotDisturb"),
+            None
+        );
+        assert_eq!(normalize_presence_pair("OutOfOffice", "InAMeeting"), None);
+        assert_eq!(normalize_presence_pair("Available", ""), None);
+        assert_eq!(normalize_presence_pair("", ""), None);
+        assert_eq!(normalize_presence_pair("totally-made-up", "x"), None);
+    }
+
+    /// `clamp_rules` is the IPC-boundary normalizer: an unsupported pair is
+    /// cleared (not rejected), and an over-long replacement text is truncated
+    /// on a char boundary.
+    #[test]
+    fn test_clamp_rules_normalizes_pairs_and_bounds_text() {
+        let mut rules = StatusRulesConfig {
+            quiet_hours: vec![QuietHoursEntry {
+                enabled: true,
+                presence_availability: "donotdisturb".to_string(),
+                presence_activity: "presenting".to_string(),
+                replacement_status: "ü".repeat(200),
+                ..QuietHoursEntry::default()
+            }],
+            track_rules: vec![TrackRuleEntry {
+                enabled: true,
+                presence_availability: "DoNotDisturb".to_string(),
+                presence_activity: "DoNotDisturb".to_string(),
+                replacement_status: "Focus".to_string(),
+                ..TrackRuleEntry::default()
+            }],
+        };
+        clamp_rules(&mut rules);
+        assert_eq!(rules.quiet_hours[0].presence_availability, "DoNotDisturb");
+        assert_eq!(rules.quiet_hours[0].presence_activity, "Presenting");
+        assert_eq!(
+            rules.quiet_hours[0].replacement_status.chars().count(),
+            MAX_RULE_STATUS_CHARS
+        );
+        // The unsupported pair is cleared on both sides, so the rule means
+        // "don't touch presence" instead of sending a pair Graph drops.
+        assert!(rules.track_rules[0].presence_availability.is_empty());
+        assert!(rules.track_rules[0].presence_activity.is_empty());
+        // A supported, already-canonical pair and a short text are untouched.
+        assert_eq!(rules.track_rules[0].replacement_status, "Focus");
+    }
+
+    /// The rule model is normalized on the SAVE path too (`clamped_config` is
+    /// what `save_config` persists and what `AppState` stores).
+    #[test]
+    fn test_clamped_config_normalizes_rules_on_save() {
+        let mut cfg = AppConfig::default();
+        cfg.status_rules.track_rules.push(TrackRuleEntry {
+            enabled: true,
+            presence_availability: "Busy".to_string(),
+            presence_activity: "InACall".to_string(),
+            ..TrackRuleEntry::default()
+        });
+        cfg.status_rules.quiet_hours.push(QuietHoursEntry {
+            enabled: true,
+            presence_availability: "Away".to_string(),
+            presence_activity: "Away".to_string(),
+            replacement_status: "z".repeat(500),
+            ..QuietHoursEntry::default()
+        });
+
+        let json = serde_json::to_string_pretty(&clamped_config(&cfg)).expect("must serialize");
+        let back: AppConfig = serde_json::from_str(&json).expect("must re-parse");
+        assert_eq!(
+            back.status_rules.track_rules[0].presence_activity,
+            "InACall"
+        );
+        assert_eq!(back.status_rules.quiet_hours[0].presence_activity, "Away");
+        assert_eq!(
+            back.status_rules.quiet_hours[0]
+                .replacement_status
+                .chars()
+                .count(),
+            MAX_RULE_STATUS_CHARS
+        );
+    }
+
+    /// Round trip for the new Teams + rule fields (finding #634/#635/#637).
+    #[test]
+    fn test_presence_additions_round_trip() {
+        let cfg: AppConfig = serde_json::from_str(
+            r#"{
+                "teams": {"respect_manual_status": false, "gate_when_out_of_office": true},
+                "status_rules": {"track_rules": [{
+                    "enabled": true,
+                    "presence_availability": "Away",
+                    "presence_activity": "Away"
+                }]}
+            }"#,
+        )
+        .expect("must parse");
+        assert!(!cfg.teams.respect_manual_status);
+        assert!(cfg.teams.gate_when_out_of_office);
+        assert_eq!(
+            cfg.status_rules.track_rules[0].presence_availability,
+            "Away"
+        );
+
+        let back: AppConfig =
+            serde_json::from_str(&serde_json::to_string(&cfg).expect("must serialize"))
+                .expect("must re-parse");
+        assert!(!back.teams.respect_manual_status);
+        assert!(back.teams.gate_when_out_of_office);
+        assert_eq!(back.status_rules.track_rules[0].presence_activity, "Away");
     }
 
     // ---------------------------------------------------------------
