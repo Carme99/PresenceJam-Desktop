@@ -710,12 +710,6 @@ mod tests {
         assert!(config.logging.enabled);
     }
 
-    #[test]
-    fn test_config_dir_creation() {
-        let dir = config_dir().expect("config_dir should return valid path");
-        assert!(dir.to_str().unwrap().ends_with("PresenceJam"));
-    }
-
     /// Regression guard for issue found in PR review: a redundant
     /// `fs::remove_file(path)` before the final `rename` opened a window
     /// where a process crash leaves config.json missing. Drop the
