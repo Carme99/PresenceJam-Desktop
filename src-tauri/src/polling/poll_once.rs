@@ -148,7 +148,10 @@ static WRITE_CLOCKS: Mutex<WriteClocks> = Mutex::new(WriteClocks {
 /// rather than propagated (`into_inner`): these are dedup heuristics, and
 /// losing them costs at most one redundant Graph write.
 pub(crate) fn load_write_clocks() -> WriteClocks {
-    WRITE_CLOCKS.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    WRITE_CLOCKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
 }
 
 /// Publish the write-decision clocks back to the shared slot.
@@ -652,7 +655,10 @@ fn run_inner(
                                             last_posted_status,
                                             last_gate_check,
                                         );
-                                        record_success(transient_failure_count, consecutive_network_failures);
+                                        record_success(
+                                            transient_failure_count,
+                                            consecutive_network_failures,
+                                        );
                                         return PollIteration::Sleep { seconds: _sleep };
                                     }
                                     Ok(CurrentlyPlaying::Modified { track: None, etag }) => {
@@ -668,7 +674,10 @@ fn run_inner(
                                             first_iteration,
                                             last_posted_status,
                                         );
-                                        record_success(transient_failure_count, consecutive_network_failures);
+                                        record_success(
+                                            transient_failure_count,
+                                            consecutive_network_failures,
+                                        );
                                         let mut iteration =
                                             record_no_track_outcome(consecutive_pauses, &config);
                                         if let PollIteration::Sleep { seconds } = &mut iteration {
@@ -706,7 +715,10 @@ fn run_inner(
                                                 last_posted_status,
                                                 last_gate_check,
                                             );
-                                            record_success(transient_failure_count, consecutive_network_failures);
+                                            record_success(
+                                                transient_failure_count,
+                                                consecutive_network_failures,
+                                            );
                                             return PollIteration::Sleep { seconds: sleep };
                                         }
                                         return not_modified_iteration(
@@ -863,7 +875,7 @@ fn record_no_track_outcome(
     consecutive_pauses: &mut u8,
     config: &Option<crate::config::AppConfig>,
 ) -> PollIteration {
-    let no_track_sleep = pause_backoff_for_config(*consecutive_pauses, config);
+    let no_track_sleep = pause_backoff(*consecutive_pauses, config_default_interval(config));
     *consecutive_pauses = consecutive_pauses.saturating_add(1).min(4);
     log::info!(
         "[POLLING] poll_once: sleeping for {} seconds (no track)",
@@ -2126,7 +2138,7 @@ pub(crate) fn process_track(
         let remaining_ms = corrected_progress_ms.map(|c| track.duration_ms.saturating_sub(c));
         playing_track_sleep(remaining_ms, config)
     } else {
-        let sleep = pause_backoff_for_config(*consecutive_pauses, config);
+        let sleep = pause_backoff(*consecutive_pauses, config_default_interval(config));
         *consecutive_pauses = consecutive_pauses.saturating_add(1).min(4);
         sleep
     }
@@ -2508,21 +2520,14 @@ fn clamp_poll_interval(secs: u64, config: &Option<crate::config::AppConfig>) -> 
     secs.max(minimum).min(maximum)
 }
 
-/// The documented pause ladder (issue #38: default → 2× → 4× → 300s cap),
-/// bounded by the configured interval window (finding PollCore#6, issue
-/// #573). The ladder's shape is unchanged; only its output is capped, so the
-/// 204 no-track, idle-304 and paused-track paths all agree and none of them
-/// exceeds the user's "Max interval (s)".
-fn pause_backoff_for_config(
-    consecutive_pauses: u8,
-    config: &Option<crate::config::AppConfig>,
-) -> u64 {
-    clamp_poll_interval(
-        pause_backoff(consecutive_pauses, config_default_interval(config)),
-        config,
-    )
-}
-
+/// The documented pause ladder (issue #38: default → 2× → 4× → 300s cap, see
+/// ARCHITECTURE.md / TROUBLESHOOTING.md) is deliberately NOT bounded by
+/// `maximum_interval_seconds`: it is the idle-work reduction the docs promise,
+/// its 300s ceiling is the documented 5-minute cap, and clamping it by the
+/// default 60s max would silently multiply idle API traffic. Finding
+/// PollCore#6 (issue #573) is therefore fixed at the one path whose sleep was
+/// never a ladder rung — the tracked-track 304 (see
+/// `not_modified_iteration`).
 fn pause_backoff(consecutive_pauses: u8, default_secs: u64) -> u64 {
     match consecutive_pauses {
         0 => default_secs,
@@ -4036,10 +4041,10 @@ mod tests {
             "the network threshold must stay well above the auth threshold so an \
              offline blip can never stop the session"
         );
-        assert!(
-            NETWORK_FAILURE_THRESHOLD > TRANSIENT_FAILURE_EXIT_THRESHOLD,
-            "network failures must be strictly more tolerated than auth failures"
-        );
+        // Compile-time invariant (clippy: move the constant assertion into a
+        // const block) — the network threshold must stay strictly above the
+        // auth threshold so no retune can make a network blip reach the exit.
+        const { assert!(NETWORK_FAILURE_THRESHOLD > TRANSIENT_FAILURE_EXIT_THRESHOLD) };
         assert_eq!(
             NETWORK_BACKOFF_CAP_SECONDS, 300,
             "the cap is the documented ceiling for a network backoff"
@@ -4167,45 +4172,42 @@ mod tests {
             _ => panic!("304 must yield a Sleep iteration"),
         }
 
-        for pauses in 0..=4u8 {
+        // The no-track arm keeps the documented issue #38 ladder (default →
+        // 2× → 4× → 300s cap, an idle-work reduction promised in
+        // ARCHITECTURE.md/TROUBLESHOOTING.md), so it may exceed the interval
+        // window — deliberately, and identically to the 204 no-track path.
+        for (pauses, expected) in [(0u8, 120u64), (1, 240), (2, 300), (3, 300), (4, 300)] {
             let mut counter = pauses;
             match not_modified_iteration(&None, &mut counter, &mut auth, &mut network, &config) {
-                PollIteration::Sleep { seconds } => assert!(
-                    (10..=60).contains(&seconds),
-                    "no-track 304 sleep {}s escaped the configured [min, max] window",
-                    seconds
+                PollIteration::Sleep { seconds } => assert_eq!(
+                    seconds, expected,
+                    "the idle ladder must stay the documented ladder at pauses={}",
+                    pauses
                 ),
                 _ => panic!("304 must yield a Sleep iteration"),
             }
         }
     }
 
-    /// Finding PollCore#6 (issue #573): the pause ladder keeps its documented
-    /// shape (issue #38) but is bounded by the configured window, and a
-    /// hand-edited config with inverted bounds clamps instead of panicking.
+    /// Finding PollCore#6 (issue #573): the bounded clamp applies to the
+    /// interval-derived sleeps it was introduced for, keeps the ladder's rungs
+    /// intact (see `pause_backoff`), and a hand-edited config with inverted
+    /// bounds clamps instead of panicking like `u64::clamp` would.
     #[test]
-    fn test_pause_backoff_for_config_honors_bounds_and_ladder_shape() {
-        let mut wide = crate::config::AppConfig::default();
-        wide.polling.default_interval_seconds = 30;
-        wide.polling.minimum_interval_seconds = 10;
-        wide.polling.max_interval_seconds = 300;
-        let wide = Some(wide);
-        assert_eq!(pause_backoff_for_config(0, &wide), 30);
-        assert_eq!(pause_backoff_for_config(1, &wide), 60);
-        assert_eq!(pause_backoff_for_config(2, &wide), 120);
-        assert_eq!(pause_backoff_for_config(3, &wide), 300);
-        assert_eq!(pause_backoff_for_config(255, &wide), 300);
-
+    fn test_clamp_poll_interval_bounds_and_inverted_config() {
         let mut narrow = crate::config::AppConfig::default();
+        narrow.polling.default_interval_seconds = 30;
+        narrow.polling.minimum_interval_seconds = 10;
         narrow.polling.max_interval_seconds = 60;
         let narrow = Some(narrow);
-        for pauses in 0..=4u8 {
-            assert!(
-                pause_backoff_for_config(pauses, &narrow) <= 60,
-                "the ladder must not exceed max_interval_seconds at pauses={}",
-                pauses
-            );
-        }
+        assert_eq!(clamp_poll_interval(120, &narrow), 60);
+        assert_eq!(clamp_poll_interval(5, &narrow), 10);
+        assert_eq!(clamp_poll_interval(45, &narrow), 45);
+        assert_eq!(
+            playing_track_sleep(Some(600_000), &narrow),
+            60,
+            "the playing path keeps its max-interval clamp"
+        );
 
         let mut inverted = crate::config::AppConfig::default();
         inverted.polling.minimum_interval_seconds = 120;
@@ -4214,10 +4216,28 @@ mod tests {
         assert_eq!(
             clamp_poll_interval(30, &inverted),
             120,
-            "inverted bounds must saturate at the minimum, never panic like u64::clamp"
+            "inverted bounds must saturate at the minimum, never panic"
         );
         assert_eq!(clamp_poll_interval(1, &None), 10);
         assert_eq!(clamp_poll_interval(9_999, &None), 60);
+    }
+
+    /// The documented pause ladder (issue #38) is intentionally NOT clamped by
+    /// `maximum_interval_seconds`: ARCHITECTURE.md and TROUBLESHOOTING.md
+    /// promise "doubles up to a 5-min cap", and clamping it at the default 60s
+    /// max would multiply idle API traffic five-fold.
+    #[test]
+    fn test_pause_ladder_is_unclamped_by_max_interval() {
+        let mut narrow = crate::config::AppConfig::default();
+        narrow.polling.default_interval_seconds = 30;
+        narrow.polling.minimum_interval_seconds = 10;
+        narrow.polling.max_interval_seconds = 60;
+        let narrow = Some(narrow);
+        assert_eq!(pause_backoff(3, config_default_interval(&narrow)), 300);
+        assert!(
+            pause_backoff(3, config_default_interval(&narrow)) > config_maximum_interval(&narrow),
+            "the ladder's documented 5-minute cap sits above the default max"
+        );
     }
 
     /// Finding PollCore#1 (issue #569): the mid-track quiet-hours ENTRY fires
@@ -4300,12 +4320,13 @@ mod tests {
             replacement_status: replacement.to_string(),
         };
         let config_with = |rules: Vec<TrackRuleEntry>| {
-            let mut config = AppConfig::default();
-            config.status_rules = StatusRulesConfig {
-                quiet_hours: Vec::new(),
-                track_rules: rules,
-            };
-            Some(config)
+            Some(AppConfig {
+                status_rules: StatusRulesConfig {
+                    quiet_hours: Vec::new(),
+                    track_rules: rules,
+                },
+                ..AppConfig::default()
+            })
         };
 
         assert_eq!(

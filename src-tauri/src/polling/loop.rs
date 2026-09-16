@@ -30,13 +30,13 @@ use crate::AppState;
 pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()>) {
     log::info!("[POLLING] polling_loop: STARTED");
     // Tracks consecutive empty/paused responses so we can widen the poll
-    // interval (30→60→120→300s, bounded by the configured max interval) instead
-    // of hammering the API on a paused user. See issue #38. Owned by the driver
-    // because the counter's lifetime spans iterations; `poll_once::run` mutates
-    // it as a side effect of computing the per-iteration sleep. There is exactly
-    // ONE increment site per no-track outcome — inside poll_once::run — so the
-    // 401-retry no-track branch and the main no-track branch cannot drift apart.
-    // (Issue #72 drift point #1.)
+    // interval (30→60→120→300s) instead of hammering the API on a paused user.
+    // See issue #38. Owned by the driver because the counter's lifetime spans
+    // iterations; `poll_once::run` mutates it as a side effect of computing
+    // the per-iteration sleep. There is exactly ONE increment site per
+    // no-track outcome — inside poll_once::run — so the 401-retry no-track
+    // branch and the main no-track branch cannot drift apart. (Issue #72
+    // drift point #1.)
     let mut consecutive_pauses: u8 = 0;
     // Counts consecutive AUTH failures toward the 5-strikes exit that emits
     // `reconnect-required`. Owned by the driver because the counter's lifetime
