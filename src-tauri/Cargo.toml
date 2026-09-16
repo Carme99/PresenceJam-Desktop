@@ -16,6 +16,20 @@ tauri-build = { version = "~2.6", features = [] }
 [target."cfg(any(target_os = \"macos\", windows, target_os = \"linux\"))".dependencies]
 tauri-plugin-single-instance = { version = "~2.4", features = ["deep-link"] }
 
+# macOS-only CoreServices bindings used by `macos_deeplink.rs` to re-claim the
+# `presencejam://` URL scheme at every launch (issue #66): on macOS
+# `tauri-plugin-deep-link`'s `register_all()` returns `Err(UnsupportedPlatform)`
+# because schemes are claimed through the app bundle's `CFBundleURLTypes`, and
+# LaunchServices honours the first claimant. `LSSetDefaultHandlerForURLScheme`
+# is the override. Both crates are already in the tree via tauri's own macOS
+# dependencies, so this adds no new transitive weight.
+[target."cfg(target_os = \"macos\")".dependencies]
+# CFString, used to pass the scheme and bundle id to LaunchServices.
+objc2-core-foundation = { version = "~0.3", default-features = false, features = ["std", "CFString"] }
+# `LSInfo` carries `LSSetDefaultHandlerForURLScheme`; `LaunchServices` is the
+# umbrella feature that re-exports the LaunchServices module.
+objc2-core-services = { version = "~0.3", default-features = false, features = ["std", "LSInfo", "LaunchServices"] }
+
 [dependencies]
 tauri = { version = "~2.11", features = ["tray-icon"] }
 tauri-plugin-deep-link = "~2.4"
