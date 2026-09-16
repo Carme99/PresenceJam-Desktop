@@ -60,6 +60,11 @@
           if (!update || update.version !== u.version) {
             staleSkippedVersion = '';
             confirming = false;
+            // #597: a dismissal is scoped to the version it dismissed.
+            // `dismissed` gates rendering, so leaving it set would make the
+            // 24h re-check unable to ever surface a newer release in a
+            // long-running session. The same version stays dismissed.
+            dismissed = false;
           }
           update = u;
         }
