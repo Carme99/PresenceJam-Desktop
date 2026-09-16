@@ -401,10 +401,14 @@ async fn handle_spotify_callback(
     let app_state = app.state::<Arc<AppState>>();
     log::info!("[CALLBACK] handle_spotify_callback: got app state");
 
+    // Issue #555: peek, do not take. A callback that fails validation (expired
+    // pending, replayed state, transient exchange failure) must leave the
+    // pending in place so the same flow stays retryable instead of destroying
+    // it on the way to an error the user cannot act on. The pending is claimed
+    // below, once the code has actually been redeemed.
     let pending = {
-        let mut guard = app_state.pending.spotify_mut();
-        log::info!("[CALLBACK] handle_spotify_callback: taking pending Spotify auth from state");
-        guard.take().ok_or_else(|| {
+        let guard = app_state.pending.spotify();
+        guard.as_ref().cloned().ok_or_else(|| {
             log::error!("[CALLBACK] handle_spotify_callback: No pending Spotify auth found");
             "No pending Spotify auth".to_string()
         })?
@@ -455,7 +459,7 @@ async fn handle_spotify_callback(
     let client_id = pending.client_id.clone();
     let client_secret = client_secret.clone();
     let redirect_uri = pending.redirect_uri.clone();
-    let tokens = tauri::async_runtime::spawn_blocking(move || {
+    let exchange = tauri::async_runtime::spawn_blocking(move || {
         crate::spotify::complete_spotify_auth(
             &code,
             &verifier,
@@ -464,12 +468,67 @@ async fn handle_spotify_callback(
             &redirect_uri,
         )
     })
-    .await
-    .map_err(|e| format!("Spotify OAuth callback task failed: {}", e))??;
+    .await;
+    // #555: a failed exchange must not burn the flow — the authorization code
+    // was never redeemed, so put the pending back and let the user retry the
+    // same callback instead of starting over from a fresh consent screen.
+    let tokens = match exchange {
+        Ok(Ok(tokens)) => tokens,
+        Ok(Err(e)) => {
+            crate::commands::spotify_auth::restore_pending_after_failed_exchange(
+                &app_state, pending,
+            );
+            log::error!(
+                "[CALLBACK] handle_spotify_callback: token exchange failed - {}",
+                e
+            );
+            return Err(e);
+        }
+        Err(e) => {
+            crate::commands::spotify_auth::restore_pending_after_failed_exchange(
+                &app_state, pending,
+            );
+            let msg = format!("Spotify OAuth callback task failed: {}", e);
+            log::error!("[CALLBACK] handle_spotify_callback: {}", msg);
+            return Err(msg);
+        }
+    };
     log::info!(
         "[CALLBACK] handle_spotify_callback: token exchange successful - access_token.len={}",
         tokens.access_token.len()
     );
+
+    // The code is redeemed, so claim the pending for this flow and consume the
+    // single-use launch binding — and only now (#555). A mismatch means a
+    // concurrent flow replaced the pending while the exchange was in flight:
+    // restore what we took and fail closed rather than claiming another flow's
+    // pending (#351).
+    {
+        let mut guard = app_state.pending.spotify_mut();
+        match guard.take() {
+            Some(taken) if crate::pkce::ct_eq(&taken.state, &pending.state) => {}
+            Some(taken) => {
+                *guard = Some(taken);
+                log::error!(
+                    "[CALLBACK] handle_spotify_callback: pending changed during the exchange"
+                );
+                return Err("No pending Spotify auth".to_string());
+            }
+            None => {
+                log::error!("[CALLBACK] handle_spotify_callback: pending consumed concurrently");
+                return Err("No pending Spotify auth".to_string());
+            }
+        }
+    }
+    if let Some(binding) = app_state.launch_binding.get() {
+        let secret_component = pending.state.rsplit('.').next().unwrap_or("");
+        if let Err(reason) = binding.validate_and_consume(secret_component, &pending.verifier) {
+            log::warn!(
+                "[CALLBACK] handle_spotify_callback: launch binding not consumed after a successful exchange ({}) [REDACTED]",
+                reason
+            );
+        }
+    }
 
     {
         let mut guard = app_state.tokens.spotify_mut();
@@ -537,10 +596,14 @@ fn handle_deep_link(url: &str, app: AppHandle) {
                 //      verifier.
                 //   4. Single-use consumption (RFC 6749 §10.12
                 //      https://datatracker.ietf.org/doc/html/rfc6749#section-10.12):
-                //      `validate_and_consume` takes the verifier-hash slot on
-                //      success, so a replayed callback is rejected. The full
-                //      state compare + `take()` of the pending auth stay in
-                //      `handle_spotify_callback`.
+                //      the check here is the NON-consuming
+                //      `LaunchBinding::validate` — it must reject a foreign or
+                //      replayed callback before any exchange, yet leave the
+                //      slot intact so a *transient* exchange failure stays
+                //      retryable (#555). The consumption happens in
+                //      `handle_spotify_callback`, after the code was redeemed,
+                //      and only there. The full state compare + `take()` of the
+                //      pending auth also stay in `handle_spotify_callback`.
                 // Scheme stays `presencejam://`
                 // because macOS bundle scheme registration is config-time only (Info.plist) —
                 // runtime re-registration is not supported, so hijack remains possible on macOS
@@ -559,9 +622,7 @@ fn handle_deep_link(url: &str, app: AppHandle) {
                                     let pending_peek = app_state.pending.spotify_mut();
                                     match pending_peek.as_ref() {
                                         Some(pending) if crate::pkce::ct_eq(st, &pending.state) => {
-                                            match binding
-                                                .validate_and_consume(parts[1], &pending.verifier)
-                                            {
+                                            match binding.validate(parts[1], &pending.verifier) {
                                                 Ok(()) => true,
                                                 Err(reason) => {
                                                     let prefix: String =

@@ -117,6 +117,28 @@ fn decide_manual_paste_peek(
     ManualPasteOutcome::Accept
 }
 
+/// Put a peeked/taken pending back after a failed token exchange (#555), so the
+/// same callback or paste can be retried without a fresh consent screen.
+/// Restores only when the slot is still empty: a concurrent `start_spotify_auth`
+/// / `start_spotify_reconnect` may have published a newer flow in the meantime,
+/// and that flow's pending must never be clobbered (#351).
+///
+/// `pub(crate)` because the deep-link callback in `lib.rs` applies the same
+/// policy to the same failure mode.
+pub(crate) fn restore_pending_after_failed_exchange(state: &AppState, pending: PendingSpotifyAuth) {
+    let mut guard = state.pending.spotify_mut();
+    if guard.is_none() {
+        *guard = Some(pending);
+        log::info!(
+            "{CMD} restore_pending_after_failed_exchange: pending restored - the paste can be retried"
+        );
+    } else {
+        log::warn!(
+            "{CMD} restore_pending_after_failed_exchange: a newer flow claimed the pending slot; not restoring"
+        );
+    }
+}
+
 /// Common PKCE OAuth flow for Spotify authorization. Builds the auth
 /// URL, generates verifier/challenge/state, stores the pending auth
 /// in AppState (in-memory only — never persisted), and opens the
@@ -335,14 +357,17 @@ pub async fn complete_spotify_auth_manual(
         oauth_state.len()
     );
 
-    // Issue #351: peek-then-validate-then-take, mirroring the deep-link peek
-    // at lib.rs:559-563. Phase 1 peeks under a READ guard (expiry + state
-    // only — never the single-use binding, which must not burn on a
-    // wrong-state paste). Phase 2 runs `validate_and_consume` on a clone
-    // after the guard is dropped. Phase 3 takes the pending and verifies
-    // `taken.state == peeked.state`, restoring on mismatch so a concurrent
-    // flow's pending is never stolen. A wrong-state paste therefore leaves
-    // both the pending and the binding slot intact for the correct retry.
+    // Issue #351 + #555: peek → validate → take → exchange → consume,
+    // mirroring the deep-link pre-check in lib.rs. Phase 1 peeks under a READ
+    // guard (expiry + `state` only — never the single-use binding, which must
+    // not burn on a wrong-state paste). Phase 2 runs the NON-consuming
+    // `LaunchBinding::validate` on a clone, so the binding survives the
+    // exchange attempt. Phase 3 takes the pending and verifies it is still the
+    // flow we validated, restoring it on mismatch so a concurrent flow's
+    // pending is never stolen (#351). Phase 4 exchanges the code and consumes
+    // the binding only after that succeeded: a transient exchange failure
+    // (offline, 5xx, locked keychain, code already redeemed) restores the
+    // pending and leaves the flow retryable instead of burning it (#555).
     // Phase 1 — peek under the read guard.
     let peeked = {
         let guard = state.pending.spotify();
@@ -385,18 +410,17 @@ pub async fn complete_spotify_auth_manual(
     };
     // Phase 2 — launch binding on the clone, guard already dropped.
     // scope-3.3 §C1: same binding as the deep-link path (constant-time
-    // secret-component compare, PKCE verifier-hash linkage, single-use
-    // consumption so a replayed state/code pair fails closed, RFC 6749
-    // §10.12). Runs only after the state check passed, so a wrong-state
-    // paste never reaches — and never burns — the single-use slot.
+    // secret-component compare, PKCE verifier-hash linkage). Validation here
+    // is deliberately NON-consuming — the slot is taken only once the token
+    // exchange succeeded (phase 5, #555), so a transient exchange failure
+    // cannot burn the flow. Runs only after the state check passed, so a
+    // wrong-state paste never reaches the slot at all.
     {
         let app_state = state.inner();
         match app_state.launch_binding.get() {
             Some(binding) => {
                 let secret_component = oauth_state.rsplit('.').next().unwrap_or("");
-                if let Err(reason) =
-                    binding.validate_and_consume(secret_component, &peeked.verifier)
-                {
+                if let Err(reason) = binding.validate(secret_component, &peeked.verifier) {
                     log::error!(
                         "{CMD} complete_spotify_auth_manual: launch binding rejected ({}) [REDACTED]",
                         reason
@@ -420,7 +444,7 @@ pub async fn complete_spotify_auth_manual(
     let pending = {
         let mut guard = state.pending.spotify_mut();
         match guard.take() {
-            Some(taken) if taken.state == peeked.state => taken,
+            Some(taken) if crate::pkce::ct_eq(&taken.state, &peeked.state) => taken,
             Some(taken) => {
                 *guard = Some(taken);
                 log::error!(
@@ -442,7 +466,7 @@ pub async fn complete_spotify_auth_manual(
     // on the async thread after the join.
     let pending_clone = pending.clone();
     let code_clone = code.clone();
-    let tokens = tauri::async_runtime::spawn_blocking(move || {
+    let exchange = tauri::async_runtime::spawn_blocking(move || {
         let client_secret = crate::keychain::get_spotify_client_secret()?;
         crate::spotify::complete_spotify_auth(
             &code_clone,
@@ -452,9 +476,43 @@ pub async fn complete_spotify_auth_manual(
             &pending_clone.redirect_uri,
         )
     })
-    .await
-    .map_err(|e| format!("complete_spotify_auth_manual task failed: {}", e))??;
+    .await;
+    // Phase 4 — exchange outcome (#555). A failure here must NOT burn the
+    // flow: the authorization code was never redeemed, so put the pending
+    // back and leave the launch binding unconsumed — retrying the same paste
+    // then works instead of forcing a fresh consent screen.
+    let tokens = match exchange {
+        Ok(Ok(tokens)) => tokens,
+        Ok(Err(e)) => {
+            restore_pending_after_failed_exchange(state.inner(), pending);
+            log::error!(
+                "{CMD} complete_spotify_auth_manual: token exchange failed - {}",
+                e
+            );
+            return Err(e);
+        }
+        Err(e) => {
+            restore_pending_after_failed_exchange(state.inner(), pending);
+            let msg = format!("complete_spotify_auth_manual task failed: {}", e);
+            log::error!("{CMD} complete_spotify_auth_manual: {}", msg);
+            return Err(msg);
+        }
+    };
     log::info!("{CMD} complete_spotify_auth_manual: token exchange successful");
+
+    // Phase 5 — the code is spent, so consume the single-use launch binding
+    // now and only now (#555). A failure to consume is logged, not fatal: the
+    // session is live and the pending is already gone, so a replay is rejected
+    // by the phase-1 peek regardless.
+    if let Some(binding) = state.inner().launch_binding.get() {
+        let secret_component = oauth_state.rsplit('.').next().unwrap_or("");
+        if let Err(reason) = binding.validate_and_consume(secret_component, &pending.verifier) {
+            log::warn!(
+                "{CMD} complete_spotify_auth_manual: launch binding not consumed after a successful exchange ({}) [REDACTED]",
+                reason
+            );
+        }
+    }
 
     {
         let mut tokens_guard = state.tokens.spotify_mut();
@@ -688,53 +746,80 @@ mod tests {
         );
     }
 
-    // Structural source guard: the handler must peek under a READ guard,
-    // run the single-use binding only after the peek, and take() only last
-    // with a state re-verify — so no future refactor can reintroduce
-    // take-first or burn the binding slot on a wrong-state paste. The body
-    // is isolated with the shared literal-aware scanner
-    // (`crate::token_io::test_scan`), not a next-function boundary anchor:
-    // a naive `{`/`}` byte counter breaks on braces inside string literals
-    // (`"{CMD} … {} …"`), so strings, char literals and comments are
+    // Structural source guard: the handler must peek under a READ guard, run
+    // the NON-consuming binding check only after the peek, take() only after
+    // that, and consume the single-use slot only once the token exchange
+    // returned Ok — so no future refactor can reintroduce take-first, burn the
+    // binding on a wrong-state paste, or burn a flow whose exchange merely
+    // failed (#555). The body is isolated with the shared literal-aware
+    // scanner (`crate::token_io::test_scan`), not a next-function boundary
+    // anchor: a naive `{`/`}` byte counter breaks on braces inside string
+    // literals (`"{CMD} … {} …"`), so strings, char literals and comments are
     // skipped. This scan is a deliberate, load-bearing proxy for handler
     // ordering that cannot be driven in a unit test without Tauri state —
     // but the guarded behavior itself is covered behaviorally by
     // `peek_wrong_state_then_correct_state_succeeds` (peek-then-bind order
-    // through the real helper and binding).
+    // through the real helper and binding) and by pkce's
+    // `binding_validate_does_not_consume_the_slot`.
     #[test]
-    fn manual_path_takes_pending_only_after_validation() {
+    fn manual_path_consumes_the_binding_only_after_a_successful_exchange() {
         let src = include_str!("spotify_auth.rs");
         let body = crate::token_io::test_scan::fn_body(src, "fn complete_spotify_auth_manual(");
+        // NOTE: anchors must be code-specific call shapes, not bare
+        // identifiers — the handler's own comments name `LaunchBinding::validate`,
+        // `validate_and_consume` and `restore_pending_after_failed_exchange` in
+        // backticks, which a bare `find` would hit before the real code.
         let peek_pos = body
             .find("state.pending.spotify()")
             .expect("body must peek under the read guard");
         let mismatch_pos = body
             .find("State mismatch - possible CSRF attack")
             .expect("body must keep the state-mismatch rejection");
-        // NOTE: anchors must be code-specific call shapes, not bare
-        // identifiers — the handler's own header comment names
-        // `validate_and_consume` and `taken.state == peeked.state` in
-        // backticks, which a bare `find` would hit before the real code.
-        let bind_pos = body
-            .find("validate_and_consume(secret_component")
-            .expect("body must run the launch binding");
+        let validate_pos = body
+            .find("binding.validate(secret_component")
+            .expect("body must run the non-consuming launch-binding check");
         let take_pos = body
             .find("guard.take()")
             .expect("body must take the pending");
         let verify_pos = body
-            .find("Some(taken) if taken.state == peeked.state")
-            .expect("body must re-verify the taken pending against the peek");
+            .find("Some(taken) if crate::pkce::ct_eq(&taken.state, &peeked.state)")
+            .expect("body must re-verify the taken pending against the peek, in constant time");
+        let exchange_pos = body
+            .find("crate::spotify::complete_spotify_auth(")
+            .expect("body must exchange the authorization code");
+        let restore_pos = body
+            .find("restore_pending_after_failed_exchange(")
+            .expect("body must put the pending back when the exchange fails");
+        let consume_pos = body
+            .find("validate_and_consume(secret_component")
+            .expect("body must consume the single-use binding");
         assert!(
             peek_pos < mismatch_pos,
             "read-guard peek must come before the state-mismatch rejection"
         );
         assert!(
-            mismatch_pos < bind_pos,
-            "binding consume must come after the state check so a wrong-state paste never burns the slot"
+            mismatch_pos < validate_pos,
+            "the binding check must come after the state check so a wrong-state paste never reaches the slot"
         );
         assert!(
-            bind_pos < take_pos && take_pos < verify_pos,
+            validate_pos < take_pos && take_pos < verify_pos,
             "take() must come after the binding check and the taken pending must be verified against the peek"
+        );
+        assert!(
+            take_pos < exchange_pos,
+            "the code must be exchanged after the pending is claimed for this flow"
+        );
+        assert!(
+            exchange_pos < restore_pos && exchange_pos < consume_pos,
+            "both the restore and the single-use consumption must sit on the post-exchange paths"
+        );
+        assert!(
+            restore_pos < consume_pos,
+            "a failed exchange restores the pending and must never reach the consumption step"
+        );
+        assert!(
+            !body[..consume_pos].contains("validate_and_consume("),
+            "the single-use binding must not be consumed anywhere before the exchange"
         );
         assert!(
             body.find("decide_manual_paste_peek").is_some(),
