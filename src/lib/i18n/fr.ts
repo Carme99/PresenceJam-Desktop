@@ -397,4 +397,10 @@ export const fr: Dict = {
   'onboarding.submitting': 'Envoi…',
   'settings.episodeFormatHint':
     'Les podcasts et livres audio utilisent leur propre modèle — 🎙️ {show} - {episode} — votre modèle musical ci-dessus ne leur est pas appliqué.',
+  'reconnect.keychainUnavailableBadge':
+    'Trousseau indisponible',
+  'reconnect.keychainUnavailableHint':
+    'PresenceJam n’a pas pu lire votre secret client Spotify enregistré : le trousseau du système est verrouillé ou absent. Déverrouillez-le (ou installez un fournisseur Secret Service comme gnome-keyring), puis réessayez — le secret est toujours stocké, vous n’avez donc pas à reconfigurer Spotify.',
+  'settings.secretKeychainUnavailable':
+    'Trousseau du système indisponible — il est peut-être verrouillé ou absent. Déverrouillez-le (ou installez un fournisseur Secret Service) pour utiliser votre secret enregistré ; il est toujours stocké.',
 };

@@ -11,7 +11,7 @@
   // the pane back into the main window (closes this one); the onboarding
   // redirect forwards the navigation to the main window first.
   let { detached = false }: { detached?: boolean } = $props();
-  import { configStore, saveConfig, loadConfig, defaultConfig } from '$lib/stores/config';
+  import { configStore, saveConfig, loadConfig, defaultConfig, clientSecretStateOf } from '$lib/stores/config';
   import type { AppConfig, SyncStatus } from '$lib/types';
   import { authFlow, setSpotifyPhase, setTeamsPhase, formatCountdownMs, resetSpotifyAuthFlow, resetTeamsAuthFlow, teamsPollMutex, tryAcquireTeamsPoll, releaseTeamsPoll, isSafeHttpUrl } from '$lib/stores/authFlow.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
@@ -141,6 +141,12 @@
   // differs from the keychain entry). The banner below prompts a
   // Spotify reconnect; the plaintext is left untouched until then.
   let spotifySecretConflict = $state(false);
+
+  // #560: the OS keychain's answer about the stored client_secret —
+  // `present` / `absent` / `unavailable`. The credential row must branch on
+  // this rather than on `client_secret_set`, which cannot tell "the user never
+  // configured a secret" from "the keychain would not answer".
+  let spotifySecretState = $derived(clientSecretStateOf(localConfig));
 
   async function refreshGrantedScopes() {
     try {
@@ -576,8 +582,15 @@
       <div class="form-group">
         <span class="form-label">{t('settings.clientSecret')}</span>
         <p class="hint">
-          {#if localConfig.spotify.client_secret_set}
+          <!-- #560: three states, not two. `client_secret_set` is the
+               `Present`-only projection, so branching on it alone told a user
+               whose keyring was locked that nothing was configured and
+               pointed them at onboarding to re-enter a secret that is still
+               stored. -->
+          {#if spotifySecretState === 'present'}
             {t('settings.secretStoredHint')}
+          {:else if spotifySecretState === 'unavailable'}
+            {t('settings.secretKeychainUnavailable')}
           {:else}
             {t('settings.secretNotConfigured')} <button type="button" class="btn-link" onclick={goToOnboarding}>{t('settings.runOnboarding')}</button> {t('settings.toSetUpSpotify')}
           {/if}
