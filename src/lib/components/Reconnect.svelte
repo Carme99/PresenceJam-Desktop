@@ -23,6 +23,13 @@
   // just now" (success wording) from "was already connected, no action
   // needed" (neutral wording) on fresh mount.
   let teamsReconnectedThisSession = $state(false);
+
+  // #558: manual-paste fallback for the Spotify card. A flow stuck in
+  // `waiting` (browser tab abandoned) had no way out at all — these track the
+  // paste input, its validation error, and the in-flight state of the submit.
+  let spotifyManualUrl = $state('');
+  let manualUrlError = $state('');
+  let manualSubmitBusy = $state(false);
   // Device-code expiry countdown (issue #429). The 1s ticker only runs
   // while a live code is waiting; $effect cleanup clears the interval on
   // unmount, independent of the onMount/onDestroy listener guard (#392).
@@ -168,6 +175,63 @@
     }
   }
 
+  // #558: restart a flow that is stuck in `waiting`. `reconnectSpotify` refuses
+  // to restart a waiting flow (and `shouldAutoStartSpotifyReconnect` never does
+  // either), so clearing the phase first is what makes the retry reachable.
+  async function restartSpotifySignIn() {
+    devLog('[RECONNECT] restartSpotifySignIn: ENTRY');
+    resetSpotifyAuthFlow();
+    await reconnectSpotify();
+  }
+
+  // #558: complete the flow from a pasted redirect URL — the same fallback
+  // Onboarding offers (#385), for the case where the `presencejam://` deep link
+  // never reached the app, or the sign-in finished after the browser tab was
+  // reopened. Reuses the onboarding.* dictionary keys: it is the same
+  // affordance, so it must not carry a second translation of the same copy.
+  async function submitManualUrl() {
+    if (manualSubmitBusy) return;
+    const extracted = extractCodeFromUrl(spotifyManualUrl);
+    if (!extracted) {
+      manualUrlError = t('validation.noCodeInUrl');
+      return;
+    }
+    manualSubmitBusy = true;
+    manualUrlError = '';
+    devLog('[RECONNECT] submitManualUrl: calling invoke complete_spotify_auth_manual');
+    try {
+      await invoke('complete_spotify_auth_manual', {
+        code: extracted.code,
+        oauthState: extracted.state
+      });
+      setSpotifyPhase('done');
+    } catch (e) {
+      devLog('[RECONNECT] submitManualUrl failed:', e);
+      manualUrlError = String(e);
+      setSpotifyPhase('error', String(e));
+    } finally {
+      manualSubmitBusy = false;
+    }
+  }
+
+  /** Extract `code`/`state` from a pasted Spotify redirect URL. */
+  function extractCodeFromUrl(url: string): { code: string; state: string } | null {
+    try {
+      const parsed = new URL(url);
+      const code = parsed.searchParams.get('code');
+      if (!code) {
+        devLog('[RECONNECT] extractCodeFromUrl: no code in URL params');
+        return null;
+      }
+      // A missing `state` still passes (empty string) — the backend rejects it,
+      // mirroring the deep-link CSRF check. See issue #162.
+      return { code, state: parsed.searchParams.get('state') ?? '' };
+    } catch (e) {
+      devLog('[RECONNECT] extractCodeFromUrl: URL parse failed:', e);
+      return null;
+    }
+  }
+
   async function reconnectTeams() {
     if (authFlow.teams.phase === 'waiting') return;
     devLog('[RECONNECT] reconnectTeams: ENTRY');
@@ -264,6 +328,23 @@
         <p class="hint">{t('reconnect.spotifyNotConfigured')}</p>
       {:else if authFlow.spotify.phase === 'waiting'}
         <p class="hint">{t('reconnect.completeAuthInOpenedBrowser')}</p>
+        <button class="btn-full" onclick={restartSpotifySignIn}>{t('reconnect.restartSignIn')}</button>
+        <p class="hint" id="spotify-manual-url-hint">{t('onboarding.manualUrlHint')}</p>
+        <label class="sr-only" for="spotify-manual-url">{t('onboarding.manualUrlLabel')}</label>
+        <input
+          id="spotify-manual-url"
+          type="text"
+          bind:value={spotifyManualUrl}
+          placeholder={t('onboarding.manualUrlPlaceholder')}
+          aria-describedby="spotify-manual-url-hint"
+          onkeydown={(e) => e.key === 'Enter' && submitManualUrl()}
+        />
+        <button class="btn-secondary" onclick={submitManualUrl} disabled={manualSubmitBusy}>
+          {t('onboarding.submitCode')}
+        </button>
+        {#if manualUrlError}
+          <p class="error-message" role="alert">{manualUrlError}</p>
+        {/if}
       {:else if authFlow.spotify.error}
         <p class="error-message" role="alert">{authFlow.spotify.error}</p>
         <button class="btn-full" onclick={reconnectSpotify}>{t('reconnect.tryAgain')}</button>
@@ -291,7 +372,7 @@
 
       {#if authFlow.teams.phase === 'done' && teamsReconnectedThisSession}
         <p class="hint">{t('reconnect.teamsOk')}</p>
-      {:else if !needsTeams && authFlow.teams.phase !== 'done'}
+      {:else if !needsTeams}
         <p class="hint">{t('common.connected')}</p>
       {:else if authFlow.teams.phase === 'waiting'}
         <p class="hint">{t('common.openSignInPage')}</p>
@@ -416,5 +497,19 @@
     width: 100%;
     padding: var(--sp-3) var(--sp-5);
     font-size: var(--fs-md);
+  }
+
+  /* Visually hidden label for the manual-paste input (same utility the
+     Onboarding wizard defines locally — it is not a global class). */
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
   }
 </style>

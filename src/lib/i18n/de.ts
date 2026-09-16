@@ -381,8 +381,7 @@ export const de: Dict = {
   'settings.stayHere': 'Hier bleiben',
   'settings.notificationsDenied':
     'Benachrichtigungen sind im System blockiert. Erlauben Sie sie in den Systemeinstellungen und aktivieren Sie die Option erneut.',
-
-
   'diagnostics.expiryBuffer': 'Puffer vor Token-Ablauf',
-  'diagnostics.teamsRefreshTokenPresent': 'Teams-Aktualisierungstoken gespeichert'
+  'diagnostics.teamsRefreshTokenPresent': 'Teams-Aktualisierungstoken gespeichert',
+  'reconnect.restartSignIn': 'Anmeldung neu starten',
 };

@@ -86,12 +86,13 @@ pub fn ct_eq(a: &str, b: &str) -> bool {
 ///   launch.
 /// - **`verifier_hash`** is the SHA-256 of the PKCE verifier for the flow
 ///   currently in flight (RFC 7636). It is bound at authorize time
-///   (`bind_verifier`) and validated at callback time
-///   (`validate_and_consume`), tying the echoed state to the exact
-///   `code_verifier` that will be presented at token exchange. The slot is
-///   **single-use**: it is taken after successful validation so a replayed
-///   callback fails closed, mirroring client-side what RFC 6749 §10.12
-///   requires server-side for authorization codes
+///   (`bind_verifier`) and validated at callback time (`validate` for the
+///   fail-closed pre-check, `validate_and_consume` once the token exchange
+///   succeeded), tying the echoed state to the exact `code_verifier` that will
+///   be presented at token exchange. The slot is **single-use**: it is taken
+///   only after a successful exchange so a replayed callback fails closed
+///   while a transient exchange failure stays retryable, mirroring client-side
+///   what RFC 6749 §10.12 requires server-side for authorization codes
 ///   (<https://datatracker.ietf.org/doc/html/rfc6749#section-10.12>).
 ///
 /// On macOS the `presencejam://` scheme is registered at build time
@@ -119,6 +120,21 @@ impl LaunchBinding {
     }
 
     /// Validate the `state` secret component and the pending PKCE verifier
+    /// against this binding using constant-time comparisons, **without**
+    /// consuming the single-use verifier hash.
+    ///
+    /// The split from [`Self::validate_and_consume`] exists so a caller can
+    /// prove a callback belongs to this app launch *before* it spends the
+    /// authorization code, and consume the slot only after the token exchange
+    /// actually succeeded — a transient exchange failure (offline, 5xx, locked
+    /// keychain, code already redeemed) must leave the flow retryable instead
+    /// of burning it (issue #555).
+    pub fn validate(&self, state_secret: &str, verifier: &str) -> Result<(), &'static str> {
+        let slot = self.verifier_hash.lock();
+        self.check(state_secret, slot.as_deref(), verifier)
+    }
+
+    /// Validate the `state` secret component and the pending PKCE verifier
     /// against this binding using constant-time comparisons, consuming the
     /// single-use verifier hash on success. A replayed callback finds the
     /// slot empty and is rejected (fail closed).
@@ -127,20 +143,33 @@ impl LaunchBinding {
         state_secret: &str,
         verifier: &str,
     ) -> Result<(), &'static str> {
+        let mut slot = self.verifier_hash.lock();
+        self.check(state_secret, slot.as_deref(), verifier)?;
+        // Single-use consumption: any subsequent callback with the same
+        // state/secret now finds `None` in `check` and fails closed.
+        *slot = None;
+        Ok(())
+    }
+
+    /// Shared comparison core: constant-time `state` secret compare, then the
+    /// PKCE verifier-hash linkage. Identical error taxonomy for both the
+    /// consuming and non-consuming entry points.
+    fn check(
+        &self,
+        state_secret: &str,
+        bound: Option<&str>,
+        verifier: &str,
+    ) -> Result<(), &'static str> {
         if !ct_eq(state_secret, &self.launch_secret) {
             return Err("launch secret mismatch");
         }
-        let mut slot = self.verifier_hash.lock();
-        let bound = match slot.as_ref() {
+        let bound = match bound {
             Some(h) => h,
             None => return Err("no in-flight verifier binding (replayed or stale callback)"),
         };
         if !ct_eq(bound, &generate_challenge(verifier)) {
             return Err("PKCE verifier does not match the bound challenge");
         }
-        // Single-use consumption: any subsequent callback with the same
-        // state/secret now finds `None` above and fails closed.
-        *slot = None;
         Ok(())
     }
 }
@@ -254,6 +283,37 @@ mod tests {
         assert!(binding
             .validate_and_consume(&binding.launch_secret.clone(), &verifier)
             .is_err());
+    }
+
+    // Issue #555: `validate` must be non-consuming, so a caller can run it as
+    // a fail-closed pre-check before the token exchange and consume only after
+    // the exchange succeeded. A transient failure therefore leaves the flow
+    // retryable, while a genuine replay (consume already happened) still fails.
+    #[test]
+    fn binding_validate_does_not_consume_the_slot() {
+        let verifier = generate_verifier();
+        let binding = LaunchBinding::new(generate_launch_secret());
+        binding.bind_verifier(&verifier);
+        let secret = binding.launch_secret.clone();
+
+        // Repeated non-consuming validation stays green…
+        assert!(binding.validate(&secret, &verifier).is_ok());
+        assert!(binding.validate(&secret, &verifier).is_ok());
+        // …and reports the same taxonomy as the consuming entry point.
+        assert_eq!(
+            binding.validate(&secret, &generate_verifier()),
+            Err("PKCE verifier does not match the bound challenge")
+        );
+        assert_eq!(
+            binding.validate("wrong-secret", &verifier),
+            Err("launch secret mismatch")
+        );
+        // The slot is still live: the success path consumes it exactly once.
+        assert!(binding.validate_and_consume(&secret, &verifier).is_ok());
+        assert_eq!(
+            binding.validate(&secret, &verifier),
+            Err("no in-flight verifier binding (replayed or stale callback)")
+        );
     }
 
     #[test]
