@@ -25,7 +25,41 @@
   let feedback = $state('');
   /** Guard so a double click cannot start two saves (issue #598). */
   let saving = $state(false);
+  /**
+   * #537: Dismiss only hides the banner for this session. Unlike the
+   * #244 failed-install record — which `dismissFailedInstall` deletes,
+   * because the payload it describes is disposable — the quarantine is the
+   * user's only pointer to the settings they lost, so nothing on disk is
+   * touched and the snapshot fields stay truthful in "Copy diagnostics".
+   */
+  let quarantineDismissed = $state(false);
   let loading = $derived(snapshot === null && loadError === '');
+
+  // #537: the config file was unreadable, so every value in the summary
+  // below is a factory default rather than the user's. Two independent
+  // facts drive this: `config_quarantined` (this process did the
+  // quarantine) and `config_quarantine_backup` (the `.bak` is still there,
+  // possibly from an earlier launch — the flag is per-process, so without
+  // the second the banner would vanish on the first restart, which is
+  // exactly when the user notices their settings are gone).
+  const quarantineBackup = $derived(
+    snapshot?.config.config_quarantine_backup ?? null
+  );
+  const quarantineNotice = $derived(
+    snapshot !== null &&
+      !quarantineDismissed &&
+      (snapshot.config.config_quarantined || quarantineBackup !== null)
+  );
+  const quarantineBody = $derived(
+    snapshot?.config.config_quarantined
+      ? t('diagnostics.quarantineBodyNow')
+      : t('diagnostics.quarantineBodyEarlier')
+  );
+  const quarantineBackupBody = $derived(
+    quarantineBackup
+      ? t('diagnostics.quarantineBackupPresent', { name: quarantineBackup })
+      : t('diagnostics.quarantineBackupMissing')
+  );
 
   function goBack() {
     currentView.set('dashboard');
@@ -133,6 +167,18 @@
         <button class="btn-secondary" onclick={loadSnapshot}>{t('common.retry')}</button>
       </div>
     {:else if snapshot}
+      {#if quarantineNotice}
+        <section class="quarantine" role="alert" aria-label={t('diagnostics.quarantineTitle')}>
+          <h2>{t('diagnostics.quarantineTitle')}</h2>
+          <p>{quarantineBody}</p>
+          <p>{quarantineBackupBody}</p>
+          <p class="hint">{t('diagnostics.quarantineWhere')}</p>
+          <div class="quarantine-actions">
+            <button class="btn-secondary" onclick={() => (quarantineDismissed = true)}>{t('common.dismiss')}</button>
+          </div>
+        </section>
+      {/if}
+
       <section aria-label={t('diagnostics.versions')}>
         <h2>{t('diagnostics.versions')}</h2>
         <dl>
@@ -284,6 +330,34 @@
   }
   dd.mono {
     font-family: var(--font-mono);
+  }
+
+  /* #537: a settings-loss warning, not an error — the app is fine, the
+     user's configured values are not. Amber reads as "needs attention"
+     without competing with the red failed-install card (#244). */
+  .quarantine {
+    border-color: var(--warning);
+  }
+  .quarantine h2 {
+    color: var(--warning);
+  }
+  .quarantine p {
+    margin: 0 0 var(--sp-1);
+    font-size: var(--fs-sm);
+    color: var(--fg);
+  }
+  .quarantine .hint {
+    margin-right: 0;
+  }
+  .quarantine-actions {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: var(--sp-2);
+  }
+  .quarantine-actions .btn-secondary {
+    width: auto;
+    padding: var(--sp-2) var(--sp-4);
+    font-size: var(--fs-sm);
   }
 
   .failed-install {
