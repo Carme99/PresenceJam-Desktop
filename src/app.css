@@ -102,9 +102,6 @@
   /* Selection */
   --selection-bg: rgba(29, 185, 84, 0.35);
   --selection-fg: #FFFFFF;
-
-  /* Focus ring */
-  --focus-ring: 0 0 0 3px rgba(29, 185, 84, 0.75); /* WCAG: alpha raised so the blended ring clears 3:1 on every surface */
 }
 
 /* ---------- Theme: light ---------- */
@@ -144,8 +141,6 @@
   --selection-bg: rgba(22, 156, 70, 0.22);
   --selection-fg: #0F1226;
 
-  --focus-ring: 0 0 0 3px rgba(17, 130, 56, 0.90); /* WCAG: old 0.35-alpha ring measured ~1.4:1 against surfaces */
-
   --shadow-1: 0 1px 2px rgba(15, 18, 38, 0.06);
   --shadow-2: 0 4px 16px rgba(15, 18, 38, 0.10);
 }
@@ -178,11 +173,15 @@ body {
   color: var(--selection-fg);
 }
 
-/* Global focus ring — visible only for keyboard nav via :focus-visible */
+/* Global focus ring — visible only for keyboard nav via :focus-visible.
+ * Expressed as an outline, not a box-shadow: a component rule that sets its
+ * own box-shadow (e.g. `.seg-btn.is-active`, `.jump-latest`) outranks this
+ * 0,1,0 selector and silently erased the ring (#596). An outline cannot be
+ * clobbered that way. */
 :focus { outline: none; }
 :focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
+  outline: 2px solid var(--accent-text);
+  outline-offset: 2px;
   border-radius: var(--r-sm);
 }
 
@@ -409,6 +408,18 @@ input[type='radio'] {
 @media (prefers-reduced-motion: reduce) {
   .badge .dot.pulse {
     animation: none;
+  }
+  /* #596: the motion tokens drive every colour/background/border/shadow
+   * transition (body, button, input, the LogViewer segmented control), so
+   * zeroing them here makes the whole system instant without touching each
+   * component. Same specificity as the token block; later source order wins. */
+  :root {
+    --dur-fast: 0ms;
+    --dur: 0ms;
+    --dur-slow: 0ms;
+  }
+  button:active:not(:disabled) {
+    transform: none;
   }
 }
 
