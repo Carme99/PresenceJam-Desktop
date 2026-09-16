@@ -191,6 +191,11 @@ sudo dnf install gnome-keyring libsecret
 sudo pacman -S gnome-keyring libsecret
 ```
 
+> **Note:** the `presencejam://` deep-link scheme registration writes
+> `~/.local/share/applications/<scheme>.desktop` plus `xdg-mime default` on
+> Linux (`lib.rs` `register_all`, issue #66) — that path needs
+> `update-desktop-database` (`desktop-file-utils`) to register launchers.
+
 After installing, **log in to a graphical session** (a headless SSH session can't reach the keyring). If you launched PresenceJam from a TTY, launch it from your desktop session instead. Then restart PresenceJam.
 
 Verify the keyring is reachable from your shell:

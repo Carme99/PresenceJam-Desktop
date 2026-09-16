@@ -49,6 +49,8 @@ function markDetached(pane: DetachablePane, value: boolean) {
  * (or the window survived a main-window reload and the store lost track),
  * focus the existing child window instead of creating a duplicate.
  */
+const popOutInFlight: Record<DetachablePane, boolean> = { logs: false, settings: false };
+
 export async function popOut(pane: DetachablePane): Promise<void> {
   // #review-9: in-flight guard — two rapid popOut clicks must not
   // double-create the child window (both would pass getByLabel null).
@@ -61,8 +63,6 @@ export async function popOut(pane: DetachablePane): Promise<void> {
     popOutInFlight[pane] = false;
   }
 }
-
-const popOutInFlight: Record<DetachablePane, boolean> = { logs: false, settings: false };
 
 async function popOutInner(pane: DetachablePane): Promise<void> {
   const label = DETACHED_LABEL[pane];

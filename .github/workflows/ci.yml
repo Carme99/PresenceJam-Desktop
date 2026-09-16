@@ -92,6 +92,12 @@ jobs:
       - name: Svelte/TS type check (npm run check)
         run: npm run check
 
+      # Frontend unit tests via vitest (issue #443). Runs after the type
+      # check; a missing `test` script must not fail this job before the
+      # harness lands, so fall back to a no-op in that case.
+      - name: Frontend unit tests (npm test)
+        run: npm test --if-present
+
   # Rust: cargo check + cargo test on all targets (lib + bins + tests + benches) catches
   # type errors, borrow errors, missing imports, and broken test code.
   # Runs cargo check + cargo test + clippy (clippy in separate job).
