@@ -130,7 +130,6 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e  # 1.96
         with:
-          toolchain: "1.96"
           components: rustfmt, clippy
 
       - name: Install Linux system dependencies
@@ -233,8 +232,6 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e  # 1.96
-        with:
-          toolchain: "1.96"
 
       # Cargo cache mirrors the PR-time ci.yml setup (PR #55). Cuts the
       # release build from ~50 min cold compile to ~15-20 min warm.
