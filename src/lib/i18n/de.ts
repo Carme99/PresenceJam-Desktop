@@ -405,4 +405,32 @@ export const de: Dict = {
     'Das unlesbare Original liegt weiterhin neben Ihrer Einstellungsdatei als config.json.',
   'diagnostics.quarantineWhere':
     'Beide Dateien liegen im Ordner PresenceJam in Ihrem Benutzer-Konfigurationsordner – die Sicherung neben config.json.',
+  // 4.6 additions (presence rules #634/#635/#636/#637 + #538 consumption sites)
+  'rules.replacementClampHint':
+    'Der Ersatzstatus ist auf {max} Zeichen begrenzt — {kept} werden gepostet.',
+  'rules.quietReplacementPlaceholder': 'Stattdessen posten (leer = unterdrücken)',
+  'rules.presenceLabel': 'Präsenz, solange diese Regel gilt',
+  'rules.presenceNone': 'Präsenz nicht ändern',
+  'rules.presenceHint':
+    'Eine Regel kann die Teams-Verfügbarkeit/-Aktivität setzen, aber nur wenn „Verfügbarkeits-Sync“ aktiv ist; sie überschreibt nie einen Anruf, ein Meeting oder einen selbst gesetzten Status.',
+  'settings.respectManualStatusLabel': 'Einen selbst gesetzten Status nie überschreiben',
+  'settings.respectManualStatusHint':
+    'Nutzt die Präsenzabfrage, die das Gate ohnehin durchführt — kein zusätzlicher Aufruf. Der Text bleibt erhalten, bis Sie ihn ändern oder er abläuft.',
+  'settings.gateOutOfOfficeLabel': 'Pausieren, wenn ich abwesend bin',
+  'settings.gateOutOfOfficeHint':
+    'Überspringt die Statusaktualisierung, solange Ihre Teams-Abwesenheit aktiv ist. Eine Titelregel mit eigener Präsenzaktion hat Vorrang.',
+  'settings.extraWordsLabel': 'Eigene Wörter für den Filter',
+  'settings.extraWordsHint':
+    'Ein Wort oder Ausdruck pro Zeile. Es gelten dieselben Wortgrenzen wie für die eingebaute Liste.',
+  'settings.extraWordsPlaceholder': 'Wort oder Ausdruck',
+  'settings.extraWordsClampHint':
+    'Nur die ersten {max} Einträge mit {chars} Zeichen bleiben erhalten — {kept} werden gefiltert.',
+  'settings.pauseBackoffMaxLabel': 'Obergrenze für Pausen-Backoff (Sekunden)',
+  'settings.pauseBackoffClampHint':
+    'Erlaubt sind {min}–{max} Sekunden; verwendet werden {effective}.',
+  'dashboard.presenceGatedQuietHours': 'Status pausiert — Ruhezeiten sind aktiv',
+  'dashboard.presenceGatedTrackRule': 'Status pausiert — eine Titelregel greift',
+  'dashboard.presenceGatedManualStatus':
+    'Status pausiert — Sie haben eine Statusmeldung selbst gesetzt',
+  'dashboard.presenceGatedOutOfOffice': 'Status pausiert — Sie sind abwesend',
 };

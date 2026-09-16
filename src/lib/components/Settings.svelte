@@ -56,11 +56,17 @@
   function resetPresenceDefaults() {
     localConfig.teams.availability_sync = defaultConfig.teams.availability_sync;
     localConfig.teams.presence_gate = defaultConfig.teams.presence_gate;
+    // Findings #635/#637: both new presence policies reset with the card.
+    localConfig.teams.respect_manual_status = defaultConfig.teams.respect_manual_status;
+    localConfig.teams.gate_when_out_of_office = defaultConfig.teams.gate_when_out_of_office;
   }
   function resetStatusFormatDefaults() {
     localConfig.teams.status_format = defaultConfig.teams.status_format;
     localConfig.teams.profanity_filter = defaultConfig.teams.profanity_filter;
     localConfig.teams.profanity_placeholder = defaultConfig.teams.profanity_placeholder;
+    // Issue #538: the custom lexicon belongs to this card too.
+    localConfig.teams.profanity_extra_words = [...defaultConfig.teams.profanity_extra_words];
+    extraWordsText = '';
   }
   // Issue #432: reset the rules section to its (empty) default. Rules are
   // additive with serde defaults, so a default section is always valid.
@@ -83,6 +89,81 @@
   function resetPollingDefaults() {
     localConfig.polling = structuredClone(defaultConfig.polling);
   }
+
+  // ── 4.6 findings #634/#635/#637 + issue #538 consumption sites ──────────
+  //
+  // Frontend mirrors of the Rust clamps, so a typed/pasted value shows the
+  // value the backend will actually store (`config.rs::clamp_rules`,
+  // `::clamp_teams`, `::clamp_polling`) instead of silently differing.
+  const MAX_RULE_STATUS_CHARS = 128;
+  const EXTRA_WORDS_MAX_ENTRIES = 64;
+  const EXTRA_WORDS_MAX_CHARS = 32;
+  const PAUSE_BACKOFF_MIN_SECONDS = 60;
+  const PAUSE_BACKOFF_MAX_SECONDS = 3600;
+
+  /**
+   * The five availability/activity pairs Graph `presence: setPresence`
+   * accepts. Mirrors `config.rs::PRESENCE_COMBINATIONS` — the closed set the
+   * backend normalizes against — and deliberately omits the two the docs say
+   * have no effect.
+   */
+  const PRESENCE_OPTIONS = [
+    { availability: 'Available', activity: 'Available', label: 'Available' },
+    { availability: 'Busy', activity: 'InACall', label: 'Busy — In a call' },
+    {
+      availability: 'Busy',
+      activity: 'InAConferenceCall',
+      label: 'Busy — In a conference call'
+    },
+    { availability: 'Away', activity: 'Away', label: 'Away' },
+    { availability: 'DoNotDisturb', activity: 'Presenting', label: 'Do not disturb — Presenting' }
+  ] as const;
+
+  type PresenceFields = { presence_availability: string; presence_activity: string };
+
+  /** `"Availability|Activity"` for the row's `<select>`, `''` when unset. */
+  function presenceValue(availability: string, activity: string): string {
+    return availability && activity ? `${availability}|${activity}` : '';
+  }
+
+  /** Write a selected pair back, or clear BOTH fields for "don't change". */
+  function applyPresenceValue(target: PresenceFields, value: string) {
+    const [availability, activity] = value.split('|');
+    target.presence_availability = availability ?? '';
+    target.presence_activity = activity ?? '';
+  }
+
+  /**
+   * Rust bounds the lexicon to 64 entries of 32 chars at the IPC boundary
+   * (issue #538). Counted here so the hint can say what will actually be
+   * matched, and applied on save so the store shows what the backend stores.
+   */
+  let extraWordsText = $state('');
+  let extraWordsClamp = $derived.by(() => {
+    const raw = extraWordsText
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    const kept = raw.map((word) => [...word].slice(0, EXTRA_WORDS_MAX_CHARS).join(''));
+    const truncated = kept.slice(0, EXTRA_WORDS_MAX_ENTRIES);
+    return {
+      active: raw.length > EXTRA_WORDS_MAX_ENTRIES || kept.some((word, i) => word !== raw[i]),
+      kept: truncated.length,
+      maxEntries: EXTRA_WORDS_MAX_ENTRIES,
+      maxChars: EXTRA_WORDS_MAX_CHARS,
+      clamped: truncated
+    };
+  });
+
+  /** The pause-backoff ceiling a typed value lands on after `clamp_polling`. */
+  let pauseBackoffClamp = $derived.by(() => {
+    const raw = Number(localConfig.polling.pause_backoff_max_seconds);
+    const effective = Math.min(
+      PAUSE_BACKOFF_MAX_SECONDS,
+      Math.max(PAUSE_BACKOFF_MIN_SECONDS, Number.isFinite(raw) ? raw : 300)
+    );
+    return { active: effective !== raw, effective };
+  });
   function resetAppearanceDefaults() {
     localConfig.autostart = defaultConfig.autostart;
   }
@@ -272,6 +353,10 @@
 
     await loadConfig();
     localConfig = structuredClone($configStore);
+    // Issue #538: the lexicon editor is a textarea (one entry per line), so the
+    // stored list is projected into it here — after every load, including the
+    // post-save adoption below.
+    extraWordsText = localConfig.teams.profanity_extra_words.join('\n');
 
     try {
       const syncStatus = await invoke<SyncStatus>('get_sync_status');
@@ -321,12 +406,16 @@
     isSaving = true;
     saveMessage = '';
     try {
-// `localConfig` is a Svelte 5 `$state` proxy; `structuredClone` in
+      // Issue #538: mirror `clamp_teams` before the payload leaves the
+      // frontend, so the store/UI never claims an entry the backend dropped.
+      localConfig.teams.profanity_extra_words = extraWordsClamp.clamped;
+      // `localConfig` is a Svelte 5 `$state` proxy; `structuredClone` in
       // `toSavePayload` rejects proxies with a DataCloneError, aborting the
       // save before IPC (#285). Snapshot to a plain object first.
       // Issue #297: adopt the value the backend actually persisted, so the
       // form shows the clamped numbers rather than the raw input.
       localConfig = await saveConfig($state.snapshot(localConfig));
+      extraWordsText = localConfig.teams.profanity_extra_words.join('\n');
       saveMessage = t('settings.saved');
       if (saveTimeout) clearTimeout(saveTimeout);
       saveTimeout = setTimeout(() => saveMessage = '', 2000);
@@ -697,6 +786,30 @@
       <p class="hint">
         {t('settings.presenceGateHint')}
       </p>
+      <!-- Findings #635/#637: the manual-status policy (ON by default) and the
+           opt-in out-of-office gate, in the card the meeting/call gate lives in. -->
+      <div class="toggle-row">
+        <label for="respect-manual-status">{t('settings.respectManualStatusLabel')}</label>
+        <input
+          id="respect-manual-status"
+          type="checkbox"
+          bind:checked={localConfig.teams.respect_manual_status}
+        />
+      </div>
+      <p class="hint">
+        {t('settings.respectManualStatusHint')}
+      </p>
+      <div class="toggle-row">
+        <label for="gate-out-of-office">{t('settings.gateOutOfOfficeLabel')}</label>
+        <input
+          id="gate-out-of-office"
+          type="checkbox"
+          bind:checked={localConfig.teams.gate_when_out_of_office}
+        />
+      </div>
+      <p class="hint">
+        {t('settings.gateOutOfOfficeHint')}
+      </p>
     </section>
     <section class="card">
       <header class="section-header">
@@ -752,12 +865,40 @@
                 </label>
               {/each}
             </div>
+            <div class="rule-row">
+              <!-- Issue #538: the quiet-hours replacement status was config-only
+                   until 4.6 — this is its editor. Finding #634: the same row
+                   carries the rule's Teams presence action. -->
+              <input
+                type="text"
+                bind:value={entry.replacement_status}
+                maxlength={MAX_RULE_STATUS_CHARS}
+                placeholder={t('rules.quietReplacementPlaceholder')}
+                aria-label={t('rules.quietReplacementPlaceholder')}
+              />
+              <select
+                value={presenceValue(entry.presence_availability, entry.presence_activity)}
+                onchange={(e) => applyPresenceValue(entry, (e.currentTarget as HTMLSelectElement).value)}
+                aria-label={t('rules.presenceLabel')}
+              >
+                <option value="">{t('rules.presenceNone')}</option>
+                {#each PRESENCE_OPTIONS as option}
+                  <option value={`${option.availability}|${option.activity}`}>{option.label}</option>
+                {/each}
+              </select>
+            </div>
+            {#if entry.replacement_status.length >= MAX_RULE_STATUS_CHARS}
+              <p class="clamp-hint" role="status">
+                {t('rules.replacementClampHint', { max: MAX_RULE_STATUS_CHARS })}
+              </p>
+            {/if}
+            <p class="hint">{t('rules.presenceHint')}</p>
           </div>
         {/each}
         <button
           type="button"
           class="btn-secondary"
-          onclick={() => { localConfig.status_rules.quiet_hours.push({ enabled: true, start_minutes: 1320, end_minutes: 420, days: [], replacement_status: '' }); }}
+          onclick={() => { localConfig.status_rules.quiet_hours.push({ enabled: true, start_minutes: 1320, end_minutes: 420, days: [], replacement_status: '', presence_availability: '', presence_activity: '' }); }}
         >{t('rules.addQuietHours')}</button>
       </div>
       <div class="form-group">
@@ -786,9 +927,20 @@
             <input
               type="text"
               bind:value={rule.replacement_status}
+              maxlength={MAX_RULE_STATUS_CHARS}
               placeholder={t('rules.replacementPlaceholder')}
               aria-label={t('rules.replacementPlaceholder')}
             />
+            <select
+              value={presenceValue(rule.presence_availability, rule.presence_activity)}
+              onchange={(e) => applyPresenceValue(rule, (e.currentTarget as HTMLSelectElement).value)}
+              aria-label={t('rules.presenceLabel')}
+            >
+              <option value="">{t('rules.presenceNone')}</option>
+              {#each PRESENCE_OPTIONS as option}
+                <option value={`${option.availability}|${option.activity}`}>{option.label}</option>
+              {/each}
+            </select>
             <button
               type="button"
               class="btn-link"
@@ -799,7 +951,7 @@
         <button
           type="button"
           class="btn-secondary"
-          onclick={() => { localConfig.status_rules.track_rules.push({ enabled: false, artist_substring: '', track_substring: '', replacement_status: '' }); }}
+          onclick={() => { localConfig.status_rules.track_rules.push({ enabled: false, artist_substring: '', track_substring: '', replacement_status: '', presence_availability: '', presence_activity: '' }); }}
         >{t('rules.addTrackRule')}</button>
       </div>
       {/if}
@@ -857,6 +1009,36 @@
             bind:checked={previewProfaneSample}
           />
         </div>
+        <!-- Issue #538: `teams.profanity_extra_words` was config-only until
+             4.6. The counter mirrors Rust's `clamp_teams` (64 entries × 32
+             chars) so the truncation is never silent. -->
+        <div class="form-group">
+          <label for="profanity-extra-words">{t('settings.extraWordsLabel')}</label>
+          <p class="hint">{t('settings.extraWordsHint')}</p>
+          <textarea
+            id="profanity-extra-words"
+            rows="3"
+            bind:value={extraWordsText}
+            placeholder={t('settings.extraWordsPlaceholder')}
+          ></textarea>
+          {#if extraWordsClamp.active}
+            <p class="clamp-hint" role="status">
+              {t('settings.extraWordsClampHint', {
+                max: extraWordsClamp.maxEntries,
+                chars: extraWordsClamp.maxChars,
+                kept: extraWordsClamp.kept
+              })}
+            </p>
+          {/if}
+        </div>
+        <div class="toggle-row">
+          <label for="profanity-preview-sample">{t('settings.profaneSampleToggle')}</label>
+          <input
+            id="profanity-preview-sample"
+            type="checkbox"
+            bind:checked={previewProfaneSample}
+          />
+        </div>
       {/if}
     </section>
 
@@ -901,6 +1083,30 @@
             bind:value={localConfig.polling.max_interval_seconds}
           />
         </div>
+      </div>
+      <!-- Issue #538: `polling.pause_backoff_max_seconds` was config-only
+           until 4.6. `min`/`max` mirror Rust's `clamp_polling` (60..=3600) and
+           the hint reports the effective value a typed value would land on. -->
+      <div class="form-group">
+        <label for="pause-backoff-max">
+          {t('settings.pauseBackoffMaxLabel')}
+        </label>
+        <input
+          id="pause-backoff-max"
+          type="number"
+          min={PAUSE_BACKOFF_MIN_SECONDS}
+          max={PAUSE_BACKOFF_MAX_SECONDS}
+          bind:value={localConfig.polling.pause_backoff_max_seconds}
+        />
+        {#if pauseBackoffClamp.active}
+          <p class="clamp-hint" role="status">
+            {t('settings.pauseBackoffClampHint', {
+              min: PAUSE_BACKOFF_MIN_SECONDS,
+              max: PAUSE_BACKOFF_MAX_SECONDS,
+              effective: pauseBackoffClamp.effective
+            })}
+          </p>
+        {/if}
       </div>
       {#if pollingClamp.active}
         <p class="clamp-hint" role="status">

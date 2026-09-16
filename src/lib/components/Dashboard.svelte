@@ -22,6 +22,35 @@
   import { t } from '$lib/i18n';
   import { useListenerTeardown } from '$lib/utils/useAuthListeners';
 
+  /**
+   * The `presence-gated` payload's `reason`, used only for the chip's copy.
+   * Not in the presence store: it is display state owned by this view, and the
+   * store's contract (`markPresenceGated()`) is deliberately shape-free.
+   */
+  let gatedReason = $state('');
+  let gatedLabel = $derived(gatedReasonLabel(gatedReason));
+
+  /**
+   * Map a gate reason to its chip label. Mirrors the Rust `teams.rs`
+   * constants — 'quiet-hours', 'track-rule', 'manual-status' and
+   * 'out of office' — falling back to the generic busy/meeting copy for a
+   * presence sample ('busy', 'in a call', …) and for any unknown reason.
+   */
+  function gatedReasonLabel(reason: string): string {
+    switch (reason) {
+      case 'quiet-hours':
+        return t('dashboard.presenceGatedQuietHours');
+      case 'track-rule':
+        return t('dashboard.presenceGatedTrackRule');
+      case 'manual-status':
+        return t('dashboard.presenceGatedManualStatus');
+      case 'out of office':
+        return t('dashboard.presenceGatedOutOfOffice');
+      default:
+        return t('dashboard.presenceGated');
+    }
+  }
+
   let isSyncing = $state(false);
   let isToggling = $state(false);
   let isRefreshing = $state(false);
@@ -151,6 +180,12 @@
     teardown.add(listen('presence-gated', (event: any) => {
       devLog('[DASHBOARD] EVENT: presence-gated received');
       devLog('[DASHBOARD] EVENT: reason=', event.payload?.reason);
+      // Findings #634/#635/#637: the payload's `reason` distinguishes the
+      // time- and rule-based gates from a presence sample, so the chip can say
+      // WHY the status is paused. Reason strings are the Rust constants in
+      // `teams.rs` (`GATE_REASON_*`); anything unrecognised keeps the generic
+      // copy.
+      gatedReason = String(event.payload?.reason ?? '');
       markPresenceGated();
     }));
 
@@ -468,7 +503,7 @@
 
   <main>
     {#if $presence.gated}
-      <div class="presence-chip" role="status">{t('dashboard.presenceGated')}</div>
+      <div class="presence-chip" role="status">{gatedLabel}</div>
     {/if}
     {#if availabilityAnnouncement}
       <div class="availability-chip" role="status">

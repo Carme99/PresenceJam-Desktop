@@ -39,7 +39,13 @@ export const defaultConfig: AppConfig = {
     presence_gate: true,
     // 4.6 (issue #538): user lexicon for the profanity filter, bounded to
     // 64 entries of 32 chars by Rust's `clamp_teams`.
-    profanity_extra_words: []
+    profanity_extra_words: [],
+    // 4.6 (finding #635): a status message the user set by hand is never
+    // overwritten. ON by default, mirroring Rust's serde default.
+    respect_manual_status: true,
+    // 4.6 (finding #637): the out-of-office gate is opt-in, like
+    // `availability_sync` before it.
+    gate_when_out_of_office: false
   },
   polling: {
     default_interval_seconds: BigInt(30),

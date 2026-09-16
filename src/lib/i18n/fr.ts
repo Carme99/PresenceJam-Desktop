@@ -414,4 +414,32 @@ export const fr: Dict = {
     "L'original illisible se trouve toujours à côté de votre fichier de réglages sous le nom config.json.",
   'diagnostics.quarantineWhere':
     "Les deux fichiers se trouvent dans le dossier PresenceJam de votre dossier de configuration utilisateur — la sauvegarde à côté de config.json.",
+  // 4.6 additions (presence rules #634/#635/#636/#637 + #538 consumption sites)
+  'rules.replacementClampHint':
+    'Le statut de remplacement est limité à {max} caractères — {kept} seront publiés.',
+  'rules.quietReplacementPlaceholder': 'Publier ceci à la place (vide = masquer)',
+  'rules.presenceLabel': 'Présence pendant cette règle',
+  'rules.presenceNone': 'Ne pas modifier ma présence',
+  'rules.presenceHint':
+    "Une règle peut définir la disponibilité/l'activité Teams, mais uniquement si « Synchronisation de la disponibilité » est activée ; elle ne prime jamais sur un appel, une réunion ou un statut que vous avez saisi.",
+  'settings.respectManualStatusLabel': 'Ne jamais écraser un statut saisi manuellement',
+  'settings.respectManualStatusHint':
+    "Réutilise la lecture de présence déjà effectuée par le filtre, donc sans requête supplémentaire — le texte est respecté jusqu'à ce que vous le changiez ou qu'il expire.",
+  'settings.gateOutOfOfficeLabel': 'Mettre en pause quand je suis absent',
+  'settings.gateOutOfOfficeHint':
+    "Ignore la mise à jour du statut tant que votre absence Teams est active. Une règle de piste avec sa propre action de présence est prioritaire.",
+  'settings.extraWordsLabel': 'Mots à filtrer personnalisés',
+  'settings.extraWordsHint':
+    'Un mot ou une expression par ligne. Les mêmes limites de mot que la liste intégrée s’appliquent.',
+  'settings.extraWordsPlaceholder': 'mot ou expression',
+  'settings.extraWordsClampHint':
+    'Seules les {max} premières entrées de {chars} caractères sont conservées — {kept} seront filtrées.',
+  'settings.pauseBackoffMaxLabel': 'Plafond du backoff en pause (secondes)',
+  'settings.pauseBackoffClampHint':
+    'Plage autorisée : {min}–{max} secondes ; {effective} sera utilisé.',
+  'dashboard.presenceGatedQuietHours': 'Statut en pause — heures calmes actives',
+  'dashboard.presenceGatedTrackRule': 'Statut en pause — une règle de piste correspond',
+  'dashboard.presenceGatedManualStatus':
+    'Statut en pause — vous avez saisi un statut manuellement',
+  'dashboard.presenceGatedOutOfOffice': 'Statut en pause — vous êtes absent',
 };
