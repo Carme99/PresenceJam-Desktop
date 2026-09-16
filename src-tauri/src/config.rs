@@ -407,54 +407,185 @@ impl Default for AppConfig {
     }
 }
 
+/// Field-level patch for the `spotify` section (CfgDiag#0, issue #535).
+///
+/// `client_secret_set` is deliberately absent: it is a derived display flag
+/// filled in by [`with_keychain_flags`] from the OS keychain and is never
+/// persisted, so a client must not be able to assert it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
+pub struct SpotifyPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect_uri: Option<String>,
+}
+
+/// Field-level patch for the `teams` section (CfgDiag#0, issue #535).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
+pub struct TeamsPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clear_on_pause: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profanity_filter: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profanity_placeholder: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_minimized: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub availability_sync: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence_gate: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profanity_extra_words: Option<Vec<String>>,
+}
+
+/// Field-level patch for the `polling` section (CfgDiag#0, issue #535). Every
+/// value is re-clamped by [`clamped_config`] after the merge.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
+pub struct PollingPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_interval_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimum_interval_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_interval_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expiry_buffer_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause_backoff_max_seconds: Option<u64>,
+}
+
+/// Field-level patch for the `logging` section (CfgDiag#0, issue #535).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
+pub struct LoggingPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_level: Option<String>,
+}
+
+/// Field-level patch for the `status_rules` section (CfgDiag#0, issue #535).
+///
+/// A named list is replaced wholesale — there is no per-entry addressing, so
+/// naming `quiet_hours` means "this is the new list". Omitting it leaves the
+/// stored list untouched.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
+pub struct StatusRulesPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quiet_hours: Option<Vec<QuietHoursEntry>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_rules: Option<Vec<TrackRuleEntry>>,
+}
+
 /// Field-level update to [`AppConfig`] for callers that only know part of
 /// the document (CfgDiag#0, issue #535).
 ///
-/// `save_config` is a whole-document replace, so every caller had to
-/// already hold a complete, current `AppConfig`. A caller that did not — the
-/// setup wizard being the first — silently reset everything it omitted,
-/// which is the backend half of the #531 config-clobber family. A patch can
-/// only ever touch the fields it explicitly names.
+/// `save_config` is a whole-document replace, so every caller had to already
+/// hold a complete, current `AppConfig`. A caller that did not — the setup
+/// wizard being the first — silently reset everything it omitted, which is
+/// the backend half of the #531 config-clobber family.
 ///
-/// Every field is `Option` and skipped when absent, so an older or partial
-/// payload cannot express "reset this section to empty".
-#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+/// **Every field of every nested patch is `Option` and skipped when absent.**
+/// That shape is load-bearing, not stylistic: typing a section as the whole
+/// `TeamsConfig` would deserialize a patch of `{"teams":
+/// {"status_format": "x"}}` into a fully populated `TeamsConfig` whose
+/// omitted fields took their *defaults*, and assigning that section would
+/// reset the user's `start_minimized`, profanity and presence settings — the
+/// very clobber this command exists to prevent, reproduced one level down.
+/// An absent key MUST leave the stored value untouched.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
 pub struct ConfigPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub spotify: Option<SpotifyConfig>,
+    pub spotify: Option<SpotifyPatch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub teams: Option<TeamsConfig>,
+    pub teams: Option<TeamsPatch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub polling: Option<PollingConfig>,
+    pub polling: Option<PollingPatch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub logging: Option<LoggingConfig>,
+    pub logging: Option<LoggingPatch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autostart: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status_rules: Option<StatusRulesConfig>,
+    pub status_rules: Option<StatusRulesPatch>,
 }
 
-/// Overwrite only the sections the patch names; everything else — including
-/// `extra` and the binary-owned `schema_version` — is left exactly as it was.
+/// Merge a patch into `base`, field by field. Only the fields the patch
+/// explicitly names are overwritten; everything else — including `extra` and
+/// the binary-owned `schema_version` — is left exactly as it was.
+///
 /// Pure, so the merge guarantee is unit-testable without touching disk.
 pub fn apply_patch(base: &mut AppConfig, patch: &ConfigPatch) {
-    if let Some(spotify) = &patch.spotify {
-        base.spotify = spotify.clone();
+    if let Some(p) = &patch.spotify {
+        if let Some(v) = &p.client_id {
+            base.spotify.client_id = v.clone();
+        }
+        if let Some(v) = &p.redirect_uri {
+            base.spotify.redirect_uri = v.clone();
+        }
     }
-    if let Some(teams) = &patch.teams {
-        base.teams = teams.clone();
+    if let Some(p) = &patch.teams {
+        if let Some(v) = &p.status_format {
+            base.teams.status_format = v.clone();
+        }
+        if let Some(v) = p.clear_on_pause {
+            base.teams.clear_on_pause = v;
+        }
+        if let Some(v) = p.profanity_filter {
+            base.teams.profanity_filter = v;
+        }
+        if let Some(v) = &p.profanity_placeholder {
+            base.teams.profanity_placeholder = v.clone();
+        }
+        if let Some(v) = p.start_minimized {
+            base.teams.start_minimized = v;
+        }
+        if let Some(v) = p.availability_sync {
+            base.teams.availability_sync = v;
+        }
+        if let Some(v) = p.presence_gate {
+            base.teams.presence_gate = v;
+        }
+        if let Some(v) = &p.profanity_extra_words {
+            base.teams.profanity_extra_words = v.clone();
+        }
     }
-    if let Some(polling) = &patch.polling {
-        base.polling = polling.clone();
+    if let Some(p) = &patch.polling {
+        if let Some(v) = p.default_interval_seconds {
+            base.polling.default_interval_seconds = v;
+        }
+        if let Some(v) = p.minimum_interval_seconds {
+            base.polling.minimum_interval_seconds = v;
+        }
+        if let Some(v) = p.max_interval_seconds {
+            base.polling.max_interval_seconds = v;
+        }
+        if let Some(v) = p.expiry_buffer_seconds {
+            base.polling.expiry_buffer_seconds = v;
+        }
+        if let Some(v) = p.pause_backoff_max_seconds {
+            base.polling.pause_backoff_max_seconds = v;
+        }
     }
-    if let Some(logging) = &patch.logging {
-        base.logging = logging.clone();
+    if let Some(p) = &patch.logging {
+        if let Some(v) = p.enabled {
+            base.logging.enabled = v;
+        }
+        if let Some(v) = &p.log_level {
+            base.logging.log_level = v.clone();
+        }
     }
-    if let Some(autostart) = patch.autostart {
-        base.autostart = autostart;
+    if let Some(v) = patch.autostart {
+        base.autostart = v;
     }
-    if let Some(status_rules) = &patch.status_rules {
-        base.status_rules = status_rules.clone();
+    if let Some(p) = &patch.status_rules {
+        if let Some(v) = &p.quiet_hours {
+            base.status_rules.quiet_hours = v.clone();
+        }
+        if let Some(v) = &p.track_rules {
+            base.status_rules.track_rules = v.clone();
+        }
     }
 }
 
@@ -1418,6 +1549,100 @@ mod tests {
     // CfgDiag#0 (#535): a partial-knowledge caller cannot lose fields.
     // ---------------------------------------------------------------
 
+    /// A config that differs from `AppConfig::default()` in EVERY field a
+    /// patch can name, so an accidental whole-section overwrite shows up as a
+    /// changed value instead of coincidentally matching a default.
+    fn non_default_config() -> AppConfig {
+        let mut cfg = AppConfig {
+            autostart: true,
+            schema_version: SCHEMA_VERSION,
+            ..AppConfig::default()
+        };
+        cfg.spotify.client_id = "stored-client-id".to_string();
+        cfg.spotify.redirect_uri = "presencejam://stored".to_string();
+        cfg.teams.status_format = "Stored {artist}".to_string();
+        cfg.teams.clear_on_pause = false;
+        cfg.teams.profanity_filter = false;
+        cfg.teams.profanity_placeholder = "Custom placeholder".to_string();
+        cfg.teams.start_minimized = true;
+        cfg.teams.availability_sync = true;
+        cfg.teams.presence_gate = false;
+        cfg.teams.profanity_extra_words = vec!["spam".to_string()];
+        cfg.polling.default_interval_seconds = 45;
+        cfg.polling.minimum_interval_seconds = 20;
+        cfg.polling.max_interval_seconds = 120;
+        cfg.polling.expiry_buffer_seconds = 5;
+        cfg.polling.pause_backoff_max_seconds = 600;
+        cfg.logging.enabled = false;
+        cfg.logging.log_level = "Debug".to_string();
+        cfg.status_rules.quiet_hours.push(QuietHoursEntry {
+            enabled: true,
+            start_minutes: 1320,
+            end_minutes: 420,
+            days: vec![1, 2, 3, 4, 5],
+            replacement_status: "Busy".to_string(),
+        });
+        cfg.status_rules.track_rules.push(TrackRuleEntry {
+            enabled: true,
+            artist_substring: "lofi".to_string(),
+            track_substring: String::new(),
+            replacement_status: "Focus".to_string(),
+        });
+        cfg.extra
+            .insert("future_key".to_string(), serde_json::json!({"a": 1}));
+        cfg
+    }
+
+    /// Every leaf path (`spotify.client_id`, `status_rules.quiet_hours`, …)
+    /// whose value differs between two configs.
+    ///
+    /// Comparing the whole document this way is what makes "the patch touched
+    /// nothing else" exhaustive, instead of a list of fields somebody
+    /// remembered to assert.
+    fn changed_paths(before: &AppConfig, after: &AppConfig) -> Vec<String> {
+        fn join(prefix: &str, key: &str) -> String {
+            if prefix.is_empty() {
+                key.to_string()
+            } else {
+                format!("{prefix}.{key}")
+            }
+        }
+        fn walk(a: &serde_json::Value, b: &serde_json::Value, prefix: &str, out: &mut Vec<String>) {
+            match (a, b) {
+                (serde_json::Value::Object(a_map), serde_json::Value::Object(b_map)) => {
+                    for (key, a_value) in a_map {
+                        let path = join(prefix, key);
+                        match b_map.get(key) {
+                            Some(b_value) => walk(a_value, b_value, &path, out),
+                            None => out.push(path),
+                        }
+                    }
+                    for key in b_map.keys() {
+                        if !a_map.contains_key(key) {
+                            out.push(join(prefix, key));
+                        }
+                    }
+                }
+                // A list is a leaf: a patch either replaces it or does not
+                // name it, there is no per-entry addressing.
+                _ => {
+                    if a != b {
+                        out.push(prefix.to_string());
+                    }
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(
+            &serde_json::to_value(before).expect("must serialize"),
+            &serde_json::to_value(after).expect("must serialize"),
+            "",
+            &mut out,
+        );
+        out.sort();
+        out
+    }
+
     /// The #531 failure mode in one test: a patch that carries only
     /// `teams.status_format` must leave the stored quiet hours, track rules,
     /// `start_minimized` and logging exactly as they were.
@@ -1427,30 +1652,7 @@ mod tests {
     /// unit test is not acceptable, and the merge itself is pure.
     #[test]
     fn test_apply_patch_preserves_unpatched_fields() {
-        let mut base = AppConfig {
-            autostart: true,
-            schema_version: SCHEMA_VERSION,
-            ..AppConfig::default()
-        };
-        base.teams.start_minimized = true;
-        base.teams.profanity_filter = false;
-        base.teams.profanity_extra_words = vec!["spam".to_string()];
-        base.logging.log_level = "Debug".to_string();
-        base.polling.minimum_interval_seconds = 15;
-        base.polling.max_interval_seconds = 90;
-        base.status_rules.quiet_hours.push(QuietHoursEntry {
-            enabled: true,
-            start_minutes: 1320,
-            end_minutes: 420,
-            days: vec![1, 2, 3, 4, 5],
-            replacement_status: "Busy".to_string(),
-        });
-        base.status_rules.track_rules.push(TrackRuleEntry {
-            enabled: true,
-            artist_substring: "lofi".to_string(),
-            track_substring: String::new(),
-            replacement_status: "Focus".to_string(),
-        });
+        let base = non_default_config();
 
         let patch: ConfigPatch =
             serde_json::from_str(r#"{"teams": {"status_format": "NEW {track}"}}"#)
@@ -1461,9 +1663,33 @@ mod tests {
         let mut merged = base.clone();
         apply_patch(&mut merged, &patch);
 
-        // The one patched field took the new value.
+        // The one patched field took the new value, and it is the ONLY leaf
+        // in the whole document that moved.
         assert_eq!(merged.teams.status_format, "NEW {track}");
-        // Everything else survived.
+        assert_eq!(
+            changed_paths(&base, &merged),
+            vec!["teams.status_format".to_string()],
+            "a patch naming one field must not move any other"
+        );
+
+        // The losses issue #531 reports, named explicitly.
+        assert!(merged.teams.start_minimized);
+        assert!(!merged.teams.profanity_filter);
+        assert_eq!(merged.teams.profanity_extra_words, vec!["spam".to_string()]);
+        assert_eq!(merged.teams.profanity_placeholder, "Custom placeholder");
+        assert!(!merged.teams.clear_on_pause);
+        assert!(merged.teams.availability_sync);
+        assert!(!merged.teams.presence_gate);
+        assert_eq!(merged.logging.log_level, "Debug");
+        assert!(!merged.logging.enabled);
+        assert!(merged.autostart);
+        assert_eq!(merged.spotify.client_id, "stored-client-id");
+        assert_eq!(merged.spotify.redirect_uri, "presencejam://stored");
+        assert_eq!(merged.polling.default_interval_seconds, 45);
+        assert_eq!(merged.polling.minimum_interval_seconds, 20);
+        assert_eq!(merged.polling.max_interval_seconds, 120);
+        assert_eq!(merged.polling.expiry_buffer_seconds, 5);
+        assert_eq!(merged.polling.pause_backoff_max_seconds, 600);
         assert_eq!(merged.status_rules.quiet_hours.len(), 1);
         assert_eq!(
             merged.status_rules.quiet_hours[0].replacement_status,
@@ -1474,13 +1700,6 @@ mod tests {
             merged.status_rules.track_rules[0].replacement_status,
             "Focus"
         );
-        assert!(merged.teams.start_minimized);
-        assert!(!merged.teams.profanity_filter);
-        assert_eq!(merged.teams.profanity_extra_words, vec!["spam".to_string()]);
-        assert_eq!(merged.logging.log_level, "Debug");
-        assert!(merged.autostart);
-        assert_eq!(merged.polling.minimum_interval_seconds, 15);
-        assert_eq!(merged.polling.max_interval_seconds, 90);
 
         // What actually lands on disk round-trips with the same values.
         let mut persisted = clamped_config(&merged);
@@ -1495,48 +1714,161 @@ mod tests {
         assert_eq!(back.schema_version, SCHEMA_VERSION);
     }
 
+    /// Naming ONE field inside a section must leave that section's other
+    /// fields alone — the case a whole-struct `Option<TeamsConfig>` patch
+    /// shape gets wrong, because a partial JSON object deserializes the
+    /// omitted fields to their defaults and the section is then assigned
+    /// wholesale.
+    ///
+    /// Table-driven over every patchable field (plus "named a section but no
+    /// field", which must be a no-op), asserting the exact set of leaves that
+    /// moved.
+    #[test]
+    fn test_apply_patch_merges_each_section_field_by_field() {
+        let cases: &[(&str, &[&str])] = &[
+            (
+                r#"{"spotify": {"client_id": "new"}}"#,
+                &["spotify.client_id"],
+            ),
+            (
+                r#"{"spotify": {"redirect_uri": "presencejam://new"}}"#,
+                &["spotify.redirect_uri"],
+            ),
+            (
+                r#"{"teams": {"status_format": "new"}}"#,
+                &["teams.status_format"],
+            ),
+            (
+                r#"{"teams": {"clear_on_pause": true}}"#,
+                &["teams.clear_on_pause"],
+            ),
+            (
+                r#"{"teams": {"profanity_filter": true}}"#,
+                &["teams.profanity_filter"],
+            ),
+            (
+                r#"{"teams": {"profanity_placeholder": "new"}}"#,
+                &["teams.profanity_placeholder"],
+            ),
+            (
+                r#"{"teams": {"start_minimized": false}}"#,
+                &["teams.start_minimized"],
+            ),
+            (
+                r#"{"teams": {"availability_sync": false}}"#,
+                &["teams.availability_sync"],
+            ),
+            (
+                r#"{"teams": {"presence_gate": true}}"#,
+                &["teams.presence_gate"],
+            ),
+            (
+                r#"{"teams": {"profanity_extra_words": ["a"]}}"#,
+                &["teams.profanity_extra_words"],
+            ),
+            (
+                r#"{"polling": {"default_interval_seconds": 100}}"#,
+                &["polling.default_interval_seconds"],
+            ),
+            (
+                r#"{"polling": {"minimum_interval_seconds": 25}}"#,
+                &["polling.minimum_interval_seconds"],
+            ),
+            (
+                r#"{"polling": {"max_interval_seconds": 200}}"#,
+                &["polling.max_interval_seconds"],
+            ),
+            (
+                r#"{"polling": {"expiry_buffer_seconds": 30}}"#,
+                &["polling.expiry_buffer_seconds"],
+            ),
+            (
+                r#"{"polling": {"pause_backoff_max_seconds": 1200}}"#,
+                &["polling.pause_backoff_max_seconds"],
+            ),
+            (r#"{"logging": {"enabled": true}}"#, &["logging.enabled"]),
+            (
+                r#"{"logging": {"log_level": "Trace"}}"#,
+                &["logging.log_level"],
+            ),
+            (
+                r#"{"status_rules": {"quiet_hours": []}}"#,
+                &["status_rules.quiet_hours"],
+            ),
+            (
+                r#"{"status_rules": {"track_rules": []}}"#,
+                &["status_rules.track_rules"],
+            ),
+            (r#"{"autostart": false}"#, &["autostart"]),
+            // Naming a section without naming a field is a no-op.
+            (r#"{}"#, &[]),
+            (r#"{"spotify": {}}"#, &[]),
+            (r#"{"teams": {}}"#, &[]),
+            (r#"{"polling": {}}"#, &[]),
+            (r#"{"logging": {}}"#, &[]),
+            (r#"{"status_rules": {}}"#, &[]),
+        ];
+
+        for (json, expected) in cases {
+            let base = non_default_config();
+            let patch: ConfigPatch = serde_json::from_str(json)
+                .unwrap_or_else(|e| panic!("patch {json} must parse: {e}"));
+            let mut merged = base.clone();
+            apply_patch(&mut merged, &patch);
+            let expected: Vec<String> = expected.iter().map(|path| (*path).to_string()).collect();
+            assert_eq!(
+                changed_paths(&base, &merged),
+                expected,
+                "patch {json} moved the wrong set of fields"
+            );
+        }
+    }
+
+    /// A named list is replaced wholesale: the patch value is what lands, not
+    /// a merge with the stored list, and the sibling list is untouched.
+    #[test]
+    fn test_apply_patch_replaces_a_named_list() {
+        let mut cfg = non_default_config();
+        let patch: ConfigPatch = serde_json::from_str(
+            r#"{"status_rules": {"quiet_hours": [{"enabled": false, "replacement_status": "Away"}]}}"#,
+        )
+        .expect("must parse");
+
+        apply_patch(&mut cfg, &patch);
+
+        assert_eq!(cfg.status_rules.quiet_hours.len(), 1);
+        assert!(!cfg.status_rules.quiet_hours[0].enabled);
+        assert_eq!(cfg.status_rules.quiet_hours[0].replacement_status, "Away");
+        assert_eq!(cfg.status_rules.track_rules.len(), 1);
+    }
+
     /// A patch that names nothing must change nothing (`update_config`'s
     /// base-config path relies on this).
     #[test]
     fn test_apply_patch_is_identity_when_empty() {
-        let mut base = AppConfig::default();
-        base.autostart = true;
-        base.status_rules.track_rules.push(TrackRuleEntry {
-            enabled: true,
-            artist_substring: String::new(),
-            track_substring: String::new(),
-            replacement_status: String::new(),
-        });
-        let before = serde_json::to_string(&base).expect("must serialize");
-        let patch = ConfigPatch {
-            spotify: None,
-            teams: None,
-            polling: None,
-            logging: None,
-            autostart: None,
-            status_rules: None,
-        };
-        apply_patch(&mut base, &patch);
-        assert_eq!(
-            serde_json::to_string(&base).expect("must serialize"),
-            before
+        let base = non_default_config();
+        let mut merged = base.clone();
+        apply_patch(&mut merged, &ConfigPatch::default());
+        assert!(
+            changed_paths(&base, &merged).is_empty(),
+            "an empty patch must be an identity"
         );
     }
 
     /// `extra` (the #379 forward-compat bucket) is never touched by a patch.
     #[test]
     fn test_apply_patch_leaves_extra_untouched() {
-        let mut base = AppConfig::default();
-        base.extra
-            .insert("future_key".to_string(), serde_json::json!({"a": 1}));
+        let base = non_default_config();
+        let mut merged = base.clone();
         let patch: ConfigPatch =
-            serde_json::from_str(r#"{"autostart": true}"#).expect("must parse");
-        apply_patch(&mut base, &patch);
-        assert!(base.autostart);
+            serde_json::from_str(r#"{"autostart": false}"#).expect("must parse");
+        apply_patch(&mut merged, &patch);
+        assert!(!merged.autostart);
         assert_eq!(
-            base.extra.get("future_key"),
+            merged.extra.get("future_key"),
             Some(&serde_json::json!({"a": 1}))
         );
+        assert_eq!(base.extra.get("future_key"), merged.extra.get("future_key"));
     }
 
     // ---------------------------------------------------------------
@@ -1552,21 +1884,25 @@ mod tests {
         assert_eq!(cfg.schema_version, 1);
         stamp_schema_version(&mut cfg);
         assert_eq!(cfg.schema_version, SCHEMA_VERSION);
-        assert!(SCHEMA_VERSION > 1, "4.6 must have bumped the schema");
+        const { assert!(SCHEMA_VERSION > 1, "4.6 must have bumped the schema") };
     }
 
     /// The dispatcher raises an old (or absent → v1) file to the current
     /// version and never relabels a file written by a newer binary.
     #[test]
     fn test_migrate_config_raises_old_and_preserves_newer() {
-        let mut old = AppConfig::default();
-        old.schema_version = 1;
+        let mut old = AppConfig {
+            schema_version: 1,
+            ..AppConfig::default()
+        };
         let from = old.schema_version;
         migrate_config(&mut old, from);
         assert_eq!(old.schema_version, SCHEMA_VERSION);
 
-        let mut newer = AppConfig::default();
-        newer.schema_version = 99;
+        let mut newer = AppConfig {
+            schema_version: 99,
+            ..AppConfig::default()
+        };
         let from = newer.schema_version;
         migrate_config(&mut newer, from);
         assert_eq!(
@@ -1575,8 +1911,10 @@ mod tests {
         );
 
         // v0 (a hand-edited or truncated key) is treated as old, not newer.
-        let mut zero = AppConfig::default();
-        zero.schema_version = 0;
+        let mut zero = AppConfig {
+            schema_version: 0,
+            ..AppConfig::default()
+        };
         let from = zero.schema_version;
         migrate_config(&mut zero, from);
         assert_eq!(zero.schema_version, SCHEMA_VERSION);

@@ -246,12 +246,12 @@ export async function saveConfig(cfg: AppConfig): Promise<AppConfig> {
  * read from the store in the same breath.
  */
 export interface ConfigPatchPayload {
-  spotify?: AppConfig['spotify'];
-  teams?: AppConfig['teams'];
-  polling?: AppConfig['polling'];
-  logging?: AppConfig['logging'];
+  spotify?: Partial<AppConfig['spotify']>;
+  teams?: Partial<AppConfig['teams']>;
+  polling?: Partial<AppConfig['polling']>;
+  logging?: Partial<AppConfig['logging']>;
   autostart?: boolean;
-  status_rules?: AppConfig['status_rules'];
+  status_rules?: Partial<AppConfig['status_rules']>;
 }
 
 export async function updateConfig(patch: ConfigPatchPayload): Promise<AppConfig> {

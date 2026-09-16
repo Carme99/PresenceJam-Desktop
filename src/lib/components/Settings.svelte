@@ -764,7 +764,7 @@
         <button
           type="button"
           class="btn-secondary"
-          onclick={() => { localConfig.status_rules.quiet_hours.push({ enabled: true, start_minutes: 1320, end_minutes: 420, days: [] }); }}
+          onclick={() => { localConfig.status_rules.quiet_hours.push({ enabled: true, start_minutes: 1320, end_minutes: 420, days: [], replacement_status: '' }); }}
         >{t('rules.addQuietHours')}</button>
       </div>
       <div class="form-group">
