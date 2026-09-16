@@ -146,6 +146,8 @@ Before diving in, check these basics:
 3. Wait for the next poll: with a track playing, the status updates within a few seconds; when nothing is playing, the app backs off between polls (30 s → 60 s → 120 s → 300 s), so an idle app can take up to five minutes to react. Failed polls retry after ~30 s (±20%)
 4. If still nothing, check the log viewer for API errors
 
+**Suppressed by status rules?** PresenceJam also suppresses the write on purpose: a quiet-hours entry covering the current time and weekday, or an enabled track rule whose *Post this instead* field is left empty. The Dashboard shows its *suppressed* chip for these as well, and the log records which one fired — `[POLLING] process_track: quiet hours active, skipping status write` or `[POLLING] process_track: track rule matched, skipping status write`. Open **Settings → Status rules** and look for an enabled quiet-hours range covering now, and for a rule matching what's playing (see [USAGE.md — Status rules](./USAGE.md#status-rules)).
+
 ### Status doesn't clear when Spotify is paused
 
 **Cause:** The `clear_on_pause` config option may be disabled, or you're using Spotify Web Player instead of the desktop app.
@@ -193,14 +195,16 @@ False positives are prevented via word-boundary checks — words like `class`, `
 
 **Direct filesystem** — a single `PresenceJam.log` file managed by the logging plugin:
 ```
-%APPDATA%\PresenceJam\logs\PresenceJam.log        (Windows)
-~/Library/Logs/PresenceJam/PresenceJam.log        (macOS)
-~/.local/share/PresenceJam/logs/PresenceJam.log   (Linux)
+%LOCALAPPDATA%\com.presencejam.app\logs\PresenceJam.log   (Windows)
+~/Library/Logs/com.presencejam.app/PresenceJam.log        (macOS)
+~/.local/share/com.presencejam.app/logs/PresenceJam.log   (Linux)
 ```
+
+The log directory is the **bundle-identifier folder** (`com.presencejam.app`) — `app_log_dir()` appends the bundle id to the platform's local data directory, so the logs do *not* sit next to `config.json` (issue #300). This is the same folder tray menu → **Open Logs Folder** opens.
 
 **From PowerShell:**
 ```powershell
-Start-Process "$env:APPDATA\PresenceJam\logs"
+Start-Process "$env:LOCALAPPDATA\com.presencejam.app\logs"
 ```
 
 ### How to read log levels
@@ -216,7 +220,7 @@ The current log level is set in your `config.json` under `logging.log_level` (de
 
 ### Attaching logs to bug reports
 
-1. Open the log folder: tray menu → **Open Logs Folder** (or `%APPDATA%\PresenceJam\logs` on Windows)
+1. Open the log folder: tray menu → **Open Logs Folder** (or `%LOCALAPPDATA%\com.presencejam.app\logs` on Windows)
 2. Attach `PresenceJam.log`
 3. Note the approximate time the issue occurred
 

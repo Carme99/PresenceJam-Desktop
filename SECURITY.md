@@ -225,10 +225,12 @@ encrypted at rest with AES-256-GCM since v3.0 (issue #140 — see
 Application logs are written to:
 
 ```
-%APPDATA%\PresenceJam\logs\          (Windows)
-~/Library/Logs/PresenceJam/          (macOS)
-~/.local/share/PresenceJam/logs/     (Linux)
+%LOCALAPPDATA%\com.presencejam.app\logs\   (Windows)
+~/Library/Logs/com.presencejam.app/        (macOS)
+~/.local/share/com.presencejam.app/logs/   (Linux)
 ```
+
+The directory is Tauri's `app_log_dir()`, which appends the **bundle identifier** (`com.presencejam.app`, `src-tauri/tauri.conf.json`) to the platform's local data directory — the same bundle-id nesting that separates `tokens.json` from `config.json` (issue #300). It is the folder tray menu → **Open Logs Folder** opens.
 
 Logs may contain:
 - Track titles and artist names (from Spotify API responses)

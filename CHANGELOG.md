@@ -5,6 +5,33 @@ All notable changes to PresenceJam are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+- **Documentation truth pass (#622, #623, #624, #625, #626):** the log file is
+  now documented at its real location on all three platforms
+  (`%LOCALAPPDATA%\com.presencejam.app\logs\`,
+  `~/Library/Logs/com.presencejam.app/` and
+  `~/.local/share/com.presencejam.app/logs/` — Tauri's `app_log_dir()` appends
+  the bundle identifier, and it is the folder tray → *Open Logs Folder* opens);
+  the v4.5.0 status rules (quiet hours + track rules) and the opt-in desktop
+  notifications are documented in README/USAGE/ARCHITECTURE/TROUBLESHOOTING;
+  the main-window-guarded command count is corrected to 13; the dependency
+  attribution tables in ACKNOWLEDGEMENTS.md are re-derived from `Cargo.toml` /
+  `package.json`; CONTRIBUTING.md no longer claims the vitest harness is
+  unlanded; the stale `~line` anchors are gone from docs/STATE-OF-FEATURES.md,
+  which also gained the release-smoke recipe for its two ⚠ Partial rows
+  (#630, #631).
+
+### Known issues
+- LogViewer virtualization (second half of #434) is still deferred;
+  `jumpToLatest` pre-exists.
+- Playlist-id matching (second half of #432) is out of scope — it needs
+  Spotify playlist context plus extra API budget.
+- The three ⚠ Partial rows in `docs/STATE-OF-FEATURES.md` (sign-in persistence,
+  install-on-quit updates, macOS deep-link defence) await the post-tag release
+  smoke; the recipe is in that file.
+
 ## [4.5.2] - 2026-09-16
 
 Follow-up to 4.5.1: a returning user whose Teams session alone needs a sign-in

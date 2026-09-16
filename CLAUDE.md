@@ -55,11 +55,11 @@ Types: `feat`, `fix`, `docs`, `test`, `refactor`, `chore`
 |------|---------|
 | `src-tauri/src/lib.rs` | Tauri entry, command registration, AppState setup |
 | `src-tauri/src/commands/` | All invoke() command handlers (config, auth, sync, window, playback, misc) |
-| `src-tauri/src/polling/` | Polling loop, token refresh, crash recovery |
+| `src-tauri/src/polling/` | Polling loop, token refresh, crash recovery, presence-gate + status-rule evaluation (`gated_track_key`, 240 s mid-track re-check) |
 | `src-tauri/src/spotify.rs` | Spotify Web API client (PKCE auth) |
 | `src-tauri/src/teams.rs` | Microsoft Graph API client (device code flow) |
 | `src-tauri/src/profanity.rs` | Profanity filter |
-| `src-tauri/src/config.rs` | AppConfig struct, JSON load/save |
+| `src-tauri/src/config.rs` | AppConfig struct (incl. `status_rules` — quiet hours + track rules), JSON load/save, `clamp_polling` |
 | `src-tauri/src/tray.rs` | System tray + playback menu |
 | `src-tauri/src/diagnostics.rs` | Local, redacted support snapshot (`get_diagnostics_snapshot`) |
 | `src-tauri/src/updater_bg.rs` | Silent background update checks + stage-deferred ("Install on quit") updates |
@@ -79,7 +79,7 @@ Types: `feat`, `fix`, `docs`, `test`, `refactor`, `chore`
 
 - Tokens stored as AES-256-GCM ciphertext in `%APPDATA%\com.presencejam.app\PresenceJam\tokens.json` (Windows), `~/Library/Application Support/com.presencejam.app/PresenceJam/tokens.json` (macOS), `$XDG_CONFIG_HOME/com.presencejam.app/PresenceJam/tokens.json` (Linux) via `token_io.rs` — NOT the same folder as `config.json` (issue #300: Tauri `app_config_dir()` appends the bundle id); the 256-bit key lives in the OS keychain via the `keyring` crate (DPAPI on Windows, Keychain on macOS, Secret Service on Linux)
 - Config stored as plain JSON in `%APPDATA%\PresenceJam\config.json` (Windows), `~/Library/Application Support/PresenceJam/` (macOS) or `$XDG_CONFIG_HOME/PresenceJam/` (Linux)
-- Logs: single `PresenceJam.log` via tauri-plugin-log's LogDir target (Windows `%APPDATA%\PresenceJam\logs\`, macOS `~/Library/Logs/PresenceJam/`, Linux `~/.local/share/PresenceJam/logs/`) — no rotation or retention pruning
+- Logs: single `PresenceJam.log` via tauri-plugin-log's LogDir target (Tauri `app_log_dir()` — Windows `%LOCALAPPDATA%\com.presencejam.app\logs\`, macOS `~/Library/Logs/com.presencejam.app/`, Linux `~/.local/share/com.presencejam.app/logs/`). The bundle-id segment matches the `tokens.json` folder, not `config.json` (issue #300) — no rotation or retention pruning
 
 ---
 

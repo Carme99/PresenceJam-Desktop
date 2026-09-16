@@ -22,9 +22,9 @@ PresenceJam uses the following open-source projects. We're grateful to all the m
 | [chrono](https://github.com/chronotope/chrono) | 0.4 | Apache-2.0 OR MIT | Date/time handling |
 | [sha2](https://github.com/RustCrypto/hashes) | 0.10 | Apache-2.0 OR MIT | SHA256 for PKCE |
 | [base64](https://github.com/marshallpierce/rust-base64) | 0.22 | Apache-2.0 OR MIT | Base64 encoding for PKCE |
-| [rand](https://github.com/rust-random/rand) | 0.8 | Apache-2.0 OR MIT | Random number generation |
+| [rand](https://github.com/rust-random/rand) | 0.9 | Apache-2.0 OR MIT | Random number generation — PKCE verifier + launch secret, and the AES-256 key / GCM nonce via `try_fill_bytes` |
 | [log](https://github.com/rust-lang/log) | 0.4 | Apache-2.0 OR MIT | Logging facade |
-| [dirs](https://github.com/dirs-dev/dirs-rs) | 5.x | Apache-2.0 OR MIT | Standard directory locations |
+| [directories](https://github.com/soc/directories-rs) | 6.x | Apache-2.0 OR MIT | Standard directory locations (maintained replacement for `dirs`, #418) |
 | [parking_lot](https://github.com/Amanieu/parking_lot) | 0.12 | Apache-2.0 OR MIT | Synchronization primitives |
 | [url](https://github.com/servo/rust-url) | 2.x | Apache-2.0 OR MIT | URL parsing |
 | [keyring](https://github.com/hwchen/keyring-rs) | 3.x | MIT OR Apache-2.0 | OS keychain access (client secret + tokens AES key) |
@@ -45,6 +45,7 @@ PresenceJam uses the following open-source projects. We're grateful to all the m
 | [@tauri-apps/plugin-updater](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Updater plugin |
 | [@tauri-apps/plugin-notification](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Notification plugin |
 | [@tauri-apps/plugin-opener](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Opener plugin |
+| [@tauri-apps/plugin-http](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | HTTP plugin (registered in `lib.rs`; no `http:*` capability is granted) |
 | [@sveltejs/adapter-static](https://github.com/sveltejs/kit) | 3.x | MIT | Static site adapter |
 | [@sveltejs/kit](https://github.com/sveltejs/kit) | 2.x | MIT | Svelte app framework |
 | [@sveltejs/vite-plugin-svelte](https://github.com/sveltejs/vite-plugin-svelte) | 5.x | MIT | Vite Svelte plugin |
@@ -52,6 +53,10 @@ PresenceJam uses the following open-source projects. We're grateful to all the m
 | [svelte-check](https://github.com/sveltejs/language-tools) | 4.x | MIT | Svelte/TypeScript type checking behind `npm run check` |
 | [typescript](https://github.com/microsoft/TypeScript) | 5.x | Apache-2.0 | TypeScript language |
 | [vite](https://github.com/vitejs/vite) | 6.x | MIT | Build tool |
+| [vitest](https://github.com/vitest-dev/vitest) | 3.x | MIT | Frontend unit-test runner behind `npm test` |
+| [jsdom](https://github.com/jsdom/jsdom) | 26.x | MIT | DOM implementation for the vitest environment |
+| [@testing-library/svelte](https://github.com/testing-library/svelte-testing-library) | 5.x | MIT | Component-mount helpers for the Svelte test suite |
+| [@types/node](https://github.com/DefinitelyTyped/DefinitelyTyped) | 20.x | MIT | Node.js type declarations for config and tooling files |
 
 ## Third-Party Services
 

@@ -50,7 +50,8 @@ PresenceJam is a Tauri 2 desktop application:
 graph TD
     subgraph Frontend ["Frontend (Svelte 5 SPA)"]
         UI["+page.svelte + lib/components/<br/>Dashboard / Onboarding / Settings / Reconnect / LogViewer"]
-        Stores["lib/stores/<br/>app.ts (view + error)<br/>config.ts (configStore)<br/>authFlow.svelte.ts<br/>useAuthListeners.ts"]
+        Stores["lib/stores/<br/>app.ts (view + error)<br/>config.ts (configStore)<br/>authFlow.svelte.ts<br/>detach.ts / theme.ts"]
+        Utils["lib/utils/<br/>boot.ts (boot gate)<br/>reconnect.ts<br/>useAuthListeners.ts<br/>dev.ts (devLog)"]
         Types["lib/types.ts<br/>(re-exports ts-rs codegen)"]
     end
 
@@ -223,7 +224,7 @@ back in), VS Code detached-panel style:
   they call `save_config` / `load_config`, `reconnect_spotify` /
   `reconnect_teams`, `poll_teams_auth` and `open_logs_folder` directly, none
   of which take a `window` argument — so config/polling state is shared by
-  construction. The 12 commands that assume the main window (auth *starts*,
+  construction. The 13 commands that assume the main window (auth *starts*,
   the token refreshes, `relaunch_app`, `app_exit`, `stage_deferred_update`,
   `start_syncing` / `stop_syncing`, …) are rejected by
   `require_main_window` (issue #241). That does not strand a detached user:
@@ -513,7 +514,8 @@ Two complementary rate-limits:
 
 ### Presence gating + availability sync (v3.0)
 
-Two `TeamsConfig` flags shape what the polling loop writes:
+Two `TeamsConfig` flags shape what the polling loop writes, and
+`AppConfig::status_rules` adds a third, track- and time-based gate:
 
 - **`presence_gate` (default ON, issue #3.0-P2):** on a *track change*
   the loop calls `get_teams_presence` *before* the status write.
@@ -535,6 +537,20 @@ Two `TeamsConfig` flags shape what the polling loop writes:
   the fade window. On pause/stop, `clear_teams_presence` drops the
   session (404 = already gone = success). Emits
   `presence-availability-updated` on each arm/clear.
+- **`status_rules` (v4.5.0, issue #432)** — `AppConfig::status_rules`
+  holds quiet-hours entries and track rules, evaluated on the same
+  track-change path immediately after `presence_gate`. A quiet-hours
+  entry covering the current local time + weekday suppresses
+  unconditionally (no presence read); a matching track rule with an
+  **empty** `replacement_status` suppresses the same way, and one with a
+  non-empty replacement supplies the status text instead of gating. Both
+  suppression causes record into the same `gated_track_key` slot and emit
+  `presence-gated` with `reason: "quiet-hours"` / `"track-rule"`, so the
+  #380 mid-track re-check re-projects the local clock and re-matches the
+  rule on the same 240 s cadence — a rule that stops matching (or a quiet
+  window that ends) posts the status late instead of pinning suppression
+  for the whole track. A rule with a non-empty replacement never gates;
+  its text flows into the normal #384 identical-write dedup.
 
 `is_syncing` ownership: `commands/sync::start_syncing` is the **sole claimer**
 (v2.6.3, fixes issue #60 — `compare_exchange(false, true, …)` is here).
@@ -593,7 +609,7 @@ sequenceDiagram
 | `polling-thread-panicked` | `null` | Polling thread panicked and was caught by `catch_unwind` |
 | `tray-click` | — | User clicks tray icon |
 | `toggle-pause` | — | User clicks Pause in tray menu |
-| `presence-gated` | `{reason, availability, activity, timestamp}` | Status write suppressed by busy/DND/**focusing** availability or in-meeting/in-call/presenting activity (v3.0; `focusing` added in #254) |
+| `presence-gated` | `{reason, availability, activity, timestamp}` | Status write suppressed — `reason` is either a presence verdict (busy / doNotDisturb / **focusing** availability, or in-meeting / in-call / presenting activity; v3.0, `focusing` added in #254) or a status rule (`quiet-hours` / `track-rule`; v4.5.0, #432) |
 | `presence-availability-updated` | `{available, label, timestamp}` | Availability session armed (`Available`) or cleared (v3.0) |
 | `playback-error` | `string` (error message) | Tray playback command failed — no active device, non-Premium 403, etc. (v3.0) |
 | `spotify-auth-complete` | `null` | Spotify sign-in finished and tokens were persisted (no token value in the payload — #299) |
@@ -607,6 +623,20 @@ sequenceDiagram
 | `app-shutdown` | `null` | User picks Quit in the tray or app menu |
 | `spotify-secret-conflict` | `{action: "reconnect-spotify", ...}` (once per process) | Legacy plaintext secret in `config.json` conflicts with a *different* keychain secret — plaintext left untouched, Settings prompts Reconnect Spotify (#376) |
 | `show-about` | `null` | User picks About in the app menu |
+
+### Frontend notification throttle (C8)
+
+`Dashboard.svelte` owns the opt-in desktop-notification path — the only
+consumer of `spotify-track-changed` that raises a toast. The flag lives in
+`localStorage.notificationsEnabled` (default off — **not** in `config.json`);
+the Settings toggle requests OS permission on first enable. Two guards run
+before `sendNotification`: the track key (`"<title>::<artist>"`,
+`lastNotifiedId`) suppresses a repeat of the same track, and a 5 s
+timestamp throttle (`NOTIFICATION_THROTTLE_MS`) caps the rate. A throttled
+track does **not** claim `lastNotifiedId`, so once the window elapses the
+genuinely current track can still notify. Toasts carry a stable `id` +
+`group`, which lets platforms that support it replace the previous
+notification in place instead of stacking.
 
 ## Deep Link Routing
 
@@ -695,9 +725,13 @@ PresenceJam-Desktop/
 │   │   │   ├── fr.ts                       # French dictionary (typed against Dict)
 │   │   │   └── store.svelte.ts             # locale $state store, localStorage persistence
 │   │   └── utils/
+│   │       ├── boot.ts                     # Launch gate → dashboard/onboarding/reconnect (bootView)
 │   │       ├── dev.ts                      # devLog() no-op in prod builds
-│   │       └── useAuthListeners.ts          # Shared 4-event listener setup
+│   │       ├── reconnect.ts                # shouldAutoStartSpotifyReconnect (v4.5.2, #530)
+│   │       └── useAuthListeners.ts         # Shared 4-event listener setup
 │   └── routes/
+│       ├── +layout.js                      # SvelteKit layout config (ssr = false)
+│       ├── +layout.svelte                  # Main-window-guarded reconnect/update listeners
 │       ├── +page.svelte                    # SPA entry, routes to views
 │       └── detached/[pane]/+page.svelte    # Renders LogViewer/Settings in detached mode (v4.0)
 ├── src-tauri/
