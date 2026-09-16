@@ -40,7 +40,12 @@ vi.mock('$lib/stores/detach', () => ({
 
 import Reconnect from '$lib/components/Reconnect.svelte';
 import Settings from '$lib/components/Settings.svelte';
-import { clientSecretStateOf, configStore, defaultConfig } from '$lib/stores/config';
+import {
+  clientSecretStateOf,
+  configStore,
+  defaultConfig,
+  mergeWizardConfig
+} from '$lib/stores/config';
 import { resetAuthFlow } from '$lib/stores/authFlow.svelte';
 import { currentView } from '$lib/stores/app';
 import type { AppConfig } from '$lib/types';
@@ -124,6 +129,19 @@ describe('config tri-state accessor (#560)', () => {
     // read as "absent" (that would offer setup for a stored secret).
     expect(clientSecretStateOf(missingFieldWire)).toBe('present');
   });
+
+  it('is "not absent" for every state that still holds a credential', () => {
+    // The predicate every routing gate uses (`clientSecretStateOf(cfg) !==
+    // 'absent'`; see +page.svelte's boot probe, +layout.svelte's
+    // `spotify-reconnect-required` handler and Dashboard's `goToSetup`): an
+    // unavailable keychain still *has* the secret, so it must not be treated
+    // as a missing credential. Only a positively absent entry justifies the
+    // setup wizard.
+
+    expect(clientSecretStateOf(configWith('present')) !== 'absent').toBe(true);
+    expect(clientSecretStateOf(configWith('unavailable')) !== 'absent').toBe(true);
+    expect(clientSecretStateOf(configWith('absent')) !== 'absent').toBe(false);
+  });
 });
 
 describe('Reconnect view (#560)', () => {
@@ -200,6 +218,26 @@ describe('Settings credential row (#560)', () => {
     expect(container.textContent).toContain("Stored securely in your operating system's keychain");
     expect(container.textContent).not.toContain('Not configured.');
     expect(container.textContent).not.toContain('System keychain unavailable');
+  });
+});
+
+describe('wizard merge keeps the derived keychain pair consistent (#560)', () => {
+  it('reports the freshly stored secret as present, not absent', () => {
+    // The set-up wizard stores the secret in the OS keychain, then hands the
+    // merged config straight to the store. `clientSecretStateOf` prioritises
+    // the state, so if only `client_secret_set` were written the pair would
+    // disagree and Settings' credential row would read "Not configured" until
+    // the next `load_config`.
+    const merged = mergeWizardConfig(configWith('absent'), {
+      spotify_client_id: CLIENT_ID,
+      status_format: '🎵 {artist} - {track} 🎧',
+      default_interval_seconds: BigInt(30),
+      autostart: false
+    });
+
+    expect(merged.spotify.client_secret_set).toBe(true);
+    expect(merged.spotify.client_secret_state).toBe('present');
+    expect(clientSecretStateOf(merged)).toBe('present');
   });
 });
 
