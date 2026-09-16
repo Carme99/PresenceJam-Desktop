@@ -380,6 +380,17 @@ export const en = {
     'PresenceJam could not read your saved Spotify Client Secret: the system keychain is locked or missing. Unlock it (or install a Secret Service provider such as gnome-keyring), then try again — your secret is still stored, so you do not need to set Spotify up again.',
   'settings.secretKeychainUnavailable':
     'System keychain unavailable — it may be locked or missing. Unlock it (or install a Secret Service provider) to use your saved secret; it is still stored.',
+  'diagnostics.quarantineTitle': 'Settings were reset',
+  'diagnostics.quarantineBodyNow':
+    'PresenceJam could not read your settings file, so every setting was reset to its default.',
+  'diagnostics.quarantineBodyEarlier':
+    'A previous launch could not read your settings file and reset it to its defaults.',
+  'diagnostics.quarantineBackupPresent':
+    'The unreadable original was kept next to your settings file as {name}, so the values it held can still be recovered.',
+  'diagnostics.quarantineBackupMissing':
+    'The unreadable original is still next to your settings file as config.json.',
+  'diagnostics.quarantineWhere':
+    'Both files live in the PresenceJam folder inside your user configuration folder — the backup sits next to config.json.',
 };
 
 export type Dict = { readonly [K in keyof typeof en]: string };

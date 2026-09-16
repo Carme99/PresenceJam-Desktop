@@ -394,4 +394,15 @@ export const de: Dict = {
     'PresenceJam konnte Ihr gespeichertes Spotify-Client-Geheimnis nicht lesen: Der Systemschlüsselbund ist gesperrt oder fehlt. Entsperren Sie ihn (oder installieren Sie einen Secret-Service-Anbieter wie gnome-keyring) und versuchen Sie es erneut — das Geheimnis ist weiterhin gespeichert, Sie müssen Spotify also nicht erneut einrichten.',
   'settings.secretKeychainUnavailable':
     'Systemschlüsselbund nicht verfügbar — er ist möglicherweise gesperrt oder fehlt. Entsperren Sie ihn (oder installieren Sie einen Secret-Service-Anbieter), um Ihr gespeichertes Geheimnis zu verwenden; es ist weiterhin gespeichert.',
+  'diagnostics.quarantineTitle': 'Einstellungen wurden zurückgesetzt',
+  'diagnostics.quarantineBodyNow':
+    'PresenceJam konnte Ihre Einstellungsdatei nicht lesen und hat deshalb jede Einstellung auf ihren Standardwert zurückgesetzt.',
+  'diagnostics.quarantineBodyEarlier':
+    'Ein früherer Start konnte Ihre Einstellungsdatei nicht lesen und hat sie auf ihre Standardwerte zurückgesetzt.',
+  'diagnostics.quarantineBackupPresent':
+    'Das unlesbare Original wurde neben Ihrer Einstellungsdatei als {name} aufbewahrt, sodass die darin enthaltenen Werte wiederhergestellt werden können.',
+  'diagnostics.quarantineBackupMissing':
+    'Das unlesbare Original liegt weiterhin neben Ihrer Einstellungsdatei als config.json.',
+  'diagnostics.quarantineWhere':
+    'Beide Dateien liegen im Ordner PresenceJam in Ihrem Benutzer-Konfigurationsordner – die Sicherung neben config.json.',
 };
