@@ -385,5 +385,6 @@ export const de: Dict = {
   'diagnostics.teamsRefreshTokenPresent': 'Teams-Aktualisierungstoken gespeichert',
   'reconnect.restartSignIn': 'Anmeldung neu starten',
   'update.stagingProgress': 'Update wird vorbereitet — {percent} %',
-  'update.cancelStage': 'Abbrechen'
+  'update.cancelStage': 'Abbrechen',
+  'onboarding.submitting': 'Wird übermittelt…'
 };

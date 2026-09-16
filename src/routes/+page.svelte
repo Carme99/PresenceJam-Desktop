@@ -63,8 +63,29 @@
     } catch (e) {
       console.error('[PAGE] boot: is_onboarding_complete FAILED:', e);
       bootError = e instanceof Error ? e.message : String(e);
-      currentView.set('onboarding');
-      devLog('[PAGE] boot: currentView set to onboarding (from error)');
+      // #544: a failed boot probe (IPC stall, transient keychain error, the
+      // 8s withBootTimeout) is not evidence that this is a new install, and
+      // hardcoding 'onboarding' here re-introduced the exact outcome #530
+      // removed for the success path. Route the failure through the same
+      // decision so a returning user with stored credentials keeps it.
+      //
+      // Fail direction: the credential probe fails OPEN to the wizard
+      // (`hasStoredSpotifyCredentials` returns false when its own invoke
+      // fails) — deliberately, because (a) that is the documented contract
+      // of the existing probe, (b) a keychain error means Reconnect could
+      // not read the stored secret either, so routing there would dead-end,
+      // and (c) since #542 the wizard MERGES into the stored config and
+      // prefills from it, so it no longer destroys working settings.
+      //
+      // The probe is bounded by the same policy as the gate itself: an
+      // unbounded second await would reintroduce the #405 hang on the very
+      // path that exists because IPC stalled.
+      const hasCredentials = await withBootTimeout(hasStoredSpotifyCredentials()).catch(
+        () => false
+      );
+      const view = bootView(false, hasCredentials);
+      currentView.set(view);
+      devLog('[PAGE] boot: currentView set to', view, '(from error)');
     }
     ready = true;
     devLog('[PAGE] boot: ready=true');

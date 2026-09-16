@@ -394,5 +394,6 @@ export const fr: Dict = {
   'diagnostics.teamsRefreshTokenPresent': 'Jeton de rafraîchissement Teams enregistré',
   'reconnect.restartSignIn': 'Redémarrer la connexion',
   'update.stagingProgress': 'Préparation de la mise à jour — {percent} %',
-  'update.cancelStage': 'Annuler'
+  'update.cancelStage': 'Annuler',
+  'onboarding.submitting': 'Envoi…'
 };

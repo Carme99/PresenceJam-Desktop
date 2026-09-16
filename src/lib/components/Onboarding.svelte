@@ -1,7 +1,7 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { onMount, onDestroy } from 'svelte';
-  import { configStore, saveConfig, DEFAULT_PROFANITY_PLACEHOLDER } from '$lib/stores/config';
+  import { loadConfig, mergeWizardConfig, saveConfig } from '$lib/stores/config';
   import type { AppConfig, DeviceCodeResponse } from '$lib/types';
   import { currentView } from '$lib/stores/app';
   import { authFlow, setSpotifyPhase, setTeamsPhase, setTeamsDeviceCode, expiresAtFromResponse, formatCountdownMs, resetSpotifyAuthFlow, resetTeamsAuthFlow, teamsPollMutex, tryAcquireTeamsPoll, releaseTeamsPoll, isSafeHttpUrl } from '$lib/stores/authFlow.svelte';
@@ -47,6 +47,10 @@
   let statusFormat = $state('🎵 {artist} - {track} 🎧');
   let launchAtLogin = $state(false);
   let pollingInterval = $state(30);
+  // #545: in-flight guard for the manual-URL submit. Every other flow entry
+  // point in this component sets its flag before the first await (#394); a
+  // double-click here used to consume an already-used authorization code.
+  let manualSubmitBusy = $state(false);
   let validationError = $state('');
   let isFinishing = $state(false);
   // #394: in-flight guards — set BEFORE the first await so a double-click
@@ -102,6 +106,25 @@
       unlistenAuth = unlisten;
     }
     devLog('[ONBOARDING] onMount: listeners registered');
+
+    // #531/#542: the wizard is reachable by RETURNING users (Dashboard's
+    // goToSetup, Settings' "Run onboarding", Reconnect), so it must show
+    // their stored settings rather than its own defaults — and `finish()`
+    // merges into that same stored config instead of replacing it. The
+    // store load also warms `configStore` for the views that follow.
+    try {
+      const loaded = await loadConfig();
+      statusFormat = loaded.teams.status_format;
+      launchAtLogin = loaded.autostart;
+      pollingInterval = Number(loaded.polling.default_interval_seconds);
+      spotifyClientId = loaded.spotify.client_id;
+      devLog('[ONBOARDING] onMount: prefilled from stored config');
+    } catch (e) {
+      // `loadConfig` already falls back to `defaultConfig` and never
+      // rejects; this guard only keeps a future change from breaking the
+      // wizard silently. Prefill is display-only — `finish()` re-reads.
+      console.warn('[ONBOARDING] onMount: config prefill failed:', e);
+    }
   });
 
   onDestroy(() => {
@@ -172,6 +195,12 @@
   }
 
   async function handleManualUrlPaste() {
+    // #545: in-flight guard set BEFORE the first await, mirroring the other
+    // flow entry points (#394). Without it a double-click (or Enter in the
+    // URL field) issued two `complete_spotify_auth_manual` calls and the
+    // second consumed an already-used authorization code.
+    if (manualSubmitBusy) return;
+    manualSubmitBusy = true;
     devLog('[ONBOARDING] handleManualUrlPaste: ENTRY');
     devLog('[ONBOARDING] handleManualUrlPaste: spotifyManualUrl.length=', spotifyManualUrl.length);
 
@@ -180,6 +209,11 @@
       devLog('[ONBOARDING] handleManualUrlPaste: extracted code:', extracted ? 'present' : 'null');
 
       if (extracted) {
+        // A prior failure must not survive a success: the
+        // `{#if validationError}` block sits outside the phase branches, so
+        // a stale "No code found in that URL" used to render above the
+        // 'Connected to Spotify' badge.
+        validationError = '';
         devLog('[ONBOARDING] handleManualUrlPaste: calling invoke complete_spotify_auth_manual');
         // Pass the OAuth `state` through so the backend can validate it
         // against the stored value (CSRF check) — see issue #162.
@@ -198,6 +232,8 @@
     } catch (e) {
       console.error('[ONBOARDING] handleManualUrlPaste: FAILED:', e);
       validationError = e instanceof Error ? e.message : String(e);
+    } finally {
+      manualSubmitBusy = false;
     }
 
     devLog('[ONBOARDING] handleManualUrlPaste: EXIT');
@@ -326,46 +362,40 @@
 
     isFinishing = true;
     try {
-      devLog('[ONBOARDING] finish: step 1 - building config');
+      devLog('[ONBOARDING] finish: step 1 - reading stored config');
+      // #531/#542: MERGE, never replace. The wizard is reachable by
+      // returning users (Dashboard goToSetup, Settings "Run onboarding",
+      // Reconnect), and the previous implementation built a whole
+      // `AppConfig` from this component's defaults — silently resetting
+      // their quiet hours, track rules, profanity filter/placeholder,
+      // polling bounds, logging level and start_minimized.
+      //
+      // The read is deliberately `invoke('load_config')` rather than
+      // `loadConfig()`: the store helper swallows a failure into
+      // `defaultConfig`, which would reintroduce exactly that clobber on a
+      // read error. A failed read must abort the save, not invent a base.
+      let stored: AppConfig;
+      try {
+        stored = await invoke<AppConfig>('load_config');
+        devLog('[ONBOARDING] finish: stored config read');
+      } catch (e) {
+        console.error('[ONBOARDING] finish: load_config FAILED, aborting save:', e);
+        validationError = t('validation.setupFailed', {
+          error: typeof e === 'string' ? e : (e as Error)?.message || String(e)
+        });
+        return;
+      }
+
       // The Spotify client_secret is sent once to `start_spotify_auth`
-      // (which writes it to the OS keychain) and is NOT included in the
-      // config saved to disk. See issue #9.
-      const cfg: AppConfig = {
-        spotify: {
-          client_id: spotifyClientId,
-          client_secret_set: true,
-          redirect_uri: 'presencejam://callback'
-        },
-        teams: {
-          status_format: statusFormat,
-          clear_on_pause: true,
-          profanity_filter: true,
-          // Single frontend canonical source — src/lib/stores/config.ts (issue #342).
-          profanity_placeholder: DEFAULT_PROFANITY_PLACEHOLDER,
-          start_minimized: false,
-          // P1/P2 defaults (mirror config.ts / config.rs): availability
-          // sync OFF, presence gate ON. Issue #3.0-P1/P2.
-          availability_sync: false,
-          presence_gate: true
-        },
-        polling: {
-          default_interval_seconds: BigInt(pollingInterval),
-          minimum_interval_seconds: BigInt(10),
-          max_interval_seconds: BigInt(60),
-          expiry_buffer_seconds: BigInt(10)
-        },
-        logging: {
-          enabled: true,
-          log_level: 'Info'
-        },
-        autostart: launchAtLogin,
-        // Issue #432: new installs start with no rules (Rust default).
-        status_rules: { quiet_hours: [], track_rules: [] },
-        // Mirrors Rust AppConfig::default_schema_version (issue #379).
-        // Required by the ts-rs AppConfig contract.
-        schema_version: 1
-      };
-      devLog('[ONBOARDING] finish: config built');
+      // (which writes it to the OS keychain) and is NOT part of the config
+      // saved to disk. See issue #9.
+      const cfg: AppConfig = mergeWizardConfig(stored, {
+        spotify_client_id: spotifyClientId,
+        status_format: statusFormat,
+        default_interval_seconds: BigInt(pollingInterval),
+        autostart: launchAtLogin
+      });
+      devLog('[ONBOARDING] finish: config merged');
 
       devLog('[ONBOARDING] finish: step 2 - calling saveConfig');
       await saveConfig(cfg);
@@ -485,7 +515,9 @@
               aria-describedby="manual-url-hint"
               onkeydown={(e) => e.key === 'Enter' && handleManualUrlPaste()}
             />
-            <button class="btn-secondary" onclick={handleManualUrlPaste}>{t('onboarding.submitCode')}</button>
+            <button class="btn-secondary" onclick={handleManualUrlPaste} disabled={manualSubmitBusy}>
+              {manualSubmitBusy ? t('onboarding.submitting') : t('onboarding.submitCode')}
+            </button>
           </div>
         {:else}
           <div class="success-badge">

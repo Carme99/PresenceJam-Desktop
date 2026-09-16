@@ -370,7 +370,8 @@ export const en = {
   'diagnostics.teamsRefreshTokenPresent': 'Teams refresh token stored',
   'reconnect.restartSignIn': 'Restart sign-in',
   'update.stagingProgress': 'Preparing update — {percent}%',
-  'update.cancelStage': 'Cancel'
+  'update.cancelStage': 'Cancel',
+  'onboarding.submitting': 'Submitting…'
 };
 
 export type Dict = { readonly [K in keyof typeof en]: string };
