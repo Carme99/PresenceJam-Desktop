@@ -193,14 +193,16 @@ False positives are prevented via word-boundary checks — words like `class`, `
 
 **Direct filesystem** — a single `PresenceJam.log` file managed by the logging plugin:
 ```
-%APPDATA%\PresenceJam\logs\PresenceJam.log        (Windows)
-~/Library/Logs/PresenceJam/PresenceJam.log        (macOS)
-~/.local/share/PresenceJam/logs/PresenceJam.log   (Linux)
+%LOCALAPPDATA%\com.presencejam.app\logs\PresenceJam.log   (Windows)
+~/Library/Logs/com.presencejam.app/PresenceJam.log        (macOS)
+~/.local/share/com.presencejam.app/logs/PresenceJam.log   (Linux)
 ```
+
+The log directory is the **bundle-identifier folder** (`com.presencejam.app`) — `app_log_dir()` appends the bundle id to the platform's local data directory, so the logs do *not* sit next to `config.json` (issue #300). This is the same folder tray menu → **Open Logs Folder** opens.
 
 **From PowerShell:**
 ```powershell
-Start-Process "$env:APPDATA\PresenceJam\logs"
+Start-Process "$env:LOCALAPPDATA\com.presencejam.app\logs"
 ```
 
 ### How to read log levels
@@ -216,7 +218,7 @@ The current log level is set in your `config.json` under `logging.log_level` (de
 
 ### Attaching logs to bug reports
 
-1. Open the log folder: tray menu → **Open Logs Folder** (or `%APPDATA%\PresenceJam\logs` on Windows)
+1. Open the log folder: tray menu → **Open Logs Folder** (or `%LOCALAPPDATA%\com.presencejam.app\logs` on Windows)
 2. Attach `PresenceJam.log`
 3. Note the approximate time the issue occurred
 

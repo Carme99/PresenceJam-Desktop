@@ -132,10 +132,12 @@ The 🩺 button in the Dashboard header opens the **Diagnostics** page: a one-cl
 PresenceJam writes a single log file, `PresenceJam.log`, managed by the logging plugin:
 
 ```
-%APPDATA%\PresenceJam\logs\PresenceJam.log        (Windows)
-~/Library/Logs/PresenceJam/PresenceJam.log        (macOS)
-~/.local/share/PresenceJam/logs/PresenceJam.log   (Linux)
+%LOCALAPPDATA%\com.presencejam.app\logs\PresenceJam.log   (Windows)
+~/Library/Logs/com.presencejam.app/PresenceJam.log        (macOS)
+~/.local/share/com.presencejam.app/logs/PresenceJam.log   (Linux)
 ```
+
+The log directory is the **bundle-identifier folder** (`com.presencejam.app`): Tauri's `app_log_dir()` appends the bundle id to the platform's local data directory, so `PresenceJam.log` does *not* sit next to `config.json` (issue #300). This is the directory tray menu → **Open Logs Folder** opens.
 
 The **Log Viewer** in-app lets you browse these logs without opening the filesystem — and can be popped out into its own window (see *Detachable Windows* above). You can also open the folder directly via tray menu → **Open Logs Folder**.
 

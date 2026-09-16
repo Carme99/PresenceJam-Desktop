@@ -80,11 +80,11 @@ See [ARCHITECTURE.md](./ARCHITECTURE.md#directory-structure) for the full direct
 
 ## Logging
 
-Logs are written by the logging plugin to a single `PresenceJam.log` file in `%APPDATA%\PresenceJam\logs\` (Windows; see USAGE.md for macOS/Linux paths) — there is no daily rotation or retention pruning.
+Logs are written by the logging plugin to a single `PresenceJam.log` file in `%LOCALAPPDATA%\com.presencejam.app\logs\` (Windows; see USAGE.md for macOS/Linux paths) — Tauri's `app_log_dir()` appends the bundle identifier to the platform's local data directory, so this is not the same folder as `config.json` (issue #300). There is no daily rotation or retention pruning.
 
 ```powershell
 # Open logs folder in Explorer
-Start-Process "$env:APPDATA\PresenceJam\logs"
+Start-Process "$env:LOCALAPPDATA\com.presencejam.app\logs"
 ```
 
 To see verbose output in dev mode, check the terminal where `npm run tauri dev` is running.
