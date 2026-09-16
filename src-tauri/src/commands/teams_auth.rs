@@ -3,7 +3,8 @@
 //! See issue #76. Teams uses an OAuth 2.0 device-code flow rather than the
 //! PKCE/redirect flow that Spotify uses.
 
-use crate::teams::{decode_teams_granted_scopes, DeviceCodeResponse};
+use crate::polling::{cas_refresh_or_discard, CasOutcome};
+use crate::teams::{decode_teams_granted_scopes, DeviceCodeResponse, TeamsApiError};
 use crate::token_io;
 use crate::AppState;
 use std::sync::Arc;
@@ -81,8 +82,24 @@ pub async fn poll_teams_auth(
                 *guard = Some(tokens);
                 log::info!("{CMD} poll_teams_auth: tokens stored in AppState");
             }
-            token_io::persist_tokens(state.inner(), &app)?;
-            log::info!("{CMD} poll_teams_auth: tokens persisted atomically");
+            // Issue #562: the sign-in already succeeded — the token endpoint
+            // returned tokens and they are live in AppState. A persist failure
+            // (keychain, full/read-only disk) must NOT be `?`-propagated: the
+            // frontend treats the poll's Err as a failed sign-in, and because
+            // an Entra device code is single-use the user would have to fetch
+            // a brand-new code even though sync works until restart. Keep the
+            // in-memory commit and surface the persistence gap on its own
+            // event, mirroring the polling loop's policy (poll_once.rs).
+            match token_io::persist_tokens(state.inner(), &app) {
+                Ok(()) => log::info!("{CMD} poll_teams_auth: tokens persisted atomically"),
+                Err(e) => {
+                    log::warn!(
+                        "{CMD} poll_teams_auth: sign-in succeeded but tokens could not be persisted (session is live until restart): {}",
+                        e
+                    );
+                    let _ = app.emit("teams-auth-persist-warning", e);
+                }
+            }
 
             // Issue #70: invalidate the onboarding cache.
             state.onboarding_cache.invalidate();
@@ -133,33 +150,71 @@ pub fn refresh_teams(
     };
     log::info!("{CMD} refresh_teams: current tokens found");
 
-    let new_tokens =
-        crate::teams::refresh_teams_token(&current_tokens).map_err(|e| e.to_string())?;
-    log::info!("{CMD} refresh_teams: new tokens received");
-
-    // CAS: only commit if state still holds the access token we refreshed
-    // from. If state changed during the refresh (e.g. user clicked
-    // Reconnect from another command), discard the result.
+    // The refresh error stays typed (`CasOutcome<T, E>` is generic over
+    // `E`) so the re-auth policy can classify it instead of string-sniffing
+    // every provider error into the same IPC message (issue #564). Pre-fix
+    // this hand-rolled the CAS and stringified `InvalidGrant`, so a dead
+    // refresh token stayed in AppState and in tokens.json while the UI saw a
+    // generic failure.
     let pre_refresh_access_token = current_tokens.access_token.clone();
-    let committed = {
-        let mut guard = state.tokens.teams_mut();
-        if guard.as_ref().map(|t| &t.access_token) == Some(&pre_refresh_access_token) {
-            *guard = Some(new_tokens.clone());
-            true
-        } else {
-            log::warn!("{CMD} refresh_teams: state changed during refresh, discarding result");
-            false
+    let outcome = cas_refresh_or_discard(
+        "teams-command",
+        &mut *state.tokens.teams_mut(),
+        &pre_refresh_access_token,
+        || crate::teams::refresh_teams_token(&current_tokens),
+        |t| &t.access_token,
+    );
+    match outcome {
+        // Issue #180: the write guard reborrowed into the CAS call above dies
+        // at the end of that statement, so persisting here cannot re-lock the
+        // same RwLock for reading.
+        CasOutcome::Committed(new_tokens) => {
+            token_io::persist_tokens(state.inner(), &app)?;
+            log::info!(
+                "{CMD} refresh_teams: SUCCESS (state updated and persisted, access_token.len={})",
+                new_tokens.access_token.len()
+            );
+            Ok(())
         }
-    };
-    if committed {
-        token_io::persist_tokens(state.inner(), &app)?;
-        log::info!("{CMD} refresh_teams: SUCCESS (state updated and persisted)");
-    } else {
-        log::info!("{CMD} refresh_teams: NOOP (concurrent state change; not persisted)");
+        // Somebody else replaced the token we refreshed from: whatever is in
+        // the slot now is newer, so this refresh is a no-op.
+        CasOutcome::Discarded { current } if current.is_some() => {
+            log::info!("{CMD} refresh_teams: NOOP (concurrent state change; not persisted)");
+            Ok(())
+        }
+        CasOutcome::Discarded { .. } => {
+            log::error!(
+                "{CMD} refresh_teams: state was cleared during the refresh; re-auth required"
+            );
+            Err(TEAMS_REAUTH_MSG.to_string())
+        }
+        CasOutcome::RefreshFailed(TeamsApiError::InvalidGrant) => {
+            log::error!(
+                "{CMD} refresh_teams: Teams refresh token is dead (invalid_grant); discarding tokens and requiring re-auth"
+            );
+            *state.tokens.teams_mut() = None;
+            // Issue #180: the clearing statement above drops its guard at the
+            // end of that statement, so this persist cannot self-deadlock.
+            if let Err(e) = token_io::persist_tokens(state.inner(), &app) {
+                log::warn!(
+                    "{CMD} refresh_teams: failed to persist cleared teams tokens: {}",
+                    e
+                );
+            }
+            Err(TEAMS_REAUTH_MSG.to_string())
+        }
+        CasOutcome::RefreshFailed(e) => {
+            log::warn!("{CMD} refresh_teams: refresh failed (session kept): {}", e);
+            Err(e.to_string())
+        }
     }
-
-    Ok(())
 }
+
+/// IPC error text for a session the user has to re-authorize. The frontend
+/// renders the error string verbatim, so it has to name the action rather
+/// than a provider error code (issue #564).
+const TEAMS_REAUTH_MSG: &str =
+    "Your Microsoft Teams session has expired. Sign in again from Settings.";
 
 /// Decodes the `scp` claim from the stored Teams access token's JWT payload
 /// (empty when undecodable or no token). Powers the Settings one-time

@@ -43,7 +43,7 @@ use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use tauri::Manager;
 
 /// Shape of `tokens.json` on disk (the *plaintext* payload — the file
@@ -344,6 +344,79 @@ fn tokens_from_bytes_with_key(
     }
 }
 
+/// Process-wide writer lock for tokens.json (issue #565).
+///
+/// The temp-file + rename write is atomic *per write*, but two overlapping
+/// persists (the Spotify refresh thread and the Teams device-code poll both
+/// write the whole file) would race on the same sidecar path and the last
+/// rename would win with whichever snapshot it happened to capture — which
+/// is how a stale access token can end up paired with a fresh refresh token
+/// on disk. Serialising every writer makes the last write the newest state.
+static WRITE_LOCK: LazyLock<parking_lot::Mutex<()>> = LazyLock::new(|| parking_lot::Mutex::new(()));
+
+/// Run `f` holding the process-wide tokens.json write lock. Every persist
+/// funnels through here, and the snapshot it writes must be taken inside the
+/// same critical section (see [`persist_tokens`]).
+fn with_tokens_write_lock<T>(f: impl FnOnce() -> T) -> T {
+    let _guard = WRITE_LOCK.lock();
+    f()
+}
+
+/// Temp path for one write: the live file's name plus a `.json.tmp.<pid>`
+/// suffix, so two processes can never share an in-flight sidecar.
+fn temp_tokens_path(path: &Path) -> PathBuf {
+    path.with_extension(format!("json.tmp.{}", std::process::id()))
+}
+
+/// Remove stale temp sidecars for `path` — crash leftovers from this or a
+/// previous process, plus the fixed-name `.json.tmp` used by ≤ 4.5 and the
+/// stale *plaintext* sidecar a ≤ v2.10.0 crash could have left next to the
+/// live file. `keep` (this write's own sidecar) is left alone. A missing
+/// directory is not an error: callers create it before writing.
+fn remove_stale_tokens_sidecars(path: &Path, keep: &Path) -> Result<(), String> {
+    let Some(dir) = path.parent() else {
+        return Ok(());
+    };
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return Ok(());
+    };
+    let prefix = format!("{}.tmp", name);
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            log::warn!(
+                "[TOKEN_IO] could not scan '{}' for stale tokens sidecars: {}",
+                dir.display(),
+                e
+            );
+            return Ok(());
+        }
+    };
+    for entry in entries.flatten() {
+        let candidate = entry.path();
+        if candidate == keep {
+            continue;
+        }
+        let matches = candidate
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with(&prefix));
+        if !matches {
+            continue;
+        }
+        if let Err(e) = fs::remove_file(&candidate) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return Err(format!(
+                    "Failed to remove stale temp tokens file '{}': {}",
+                    candidate.display(),
+                    e
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Atomic write: serialize, AES-256-GCM encrypt, write the *ciphertext*
 /// to a temp file in the same directory, fsync, then rename onto the
 /// target. The rename is atomic on POSIX (and on Windows for same-volume
@@ -382,25 +455,21 @@ fn write_tokens_atomic_with_key(
     // reaches the temp file or the rename source.
     let ciphertext = encrypt_tokens(key, &json)?;
 
-    let temp_path = path.with_extension("json.tmp");
+    // Issue #565: the temp file is per-process, so a second instance of the
+    // app (or a future caller that bypasses the write lock) cannot clobber
+    // this writer's in-flight sidecar. In-process writers are additionally
+    // serialised by `with_tokens_write_lock`.
+    let temp_path = temp_tokens_path(path);
     // Issue #135 path A: create the temp file with mode 0600 atomically.
-    // Pre-clear any stale sidecar from a previous crash (between temp-write
-    // and rename). Without this pre-clear, create_new(true) would error with
-    // AlreadyExists on a leftover `.json.tmp`, turning a one-off crash into
-    // a permanent save failure until the user manually deletes the sidecar.
-    // The pre-clear also removes any stale *plaintext* sidecar left by a
-    // ≤ v2.10.0 crash, so the plaintext→ciphertext migration has no
-    // leftover plaintext next to the live file. Deletion of a non-existent
-    // file is fine — we ignore NotFound.
-    if let Err(e) = fs::remove_file(&temp_path) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            return Err(format!(
-                "Failed to remove stale temp tokens file '{}': {}",
-                temp_path.display(),
-                e
-            ));
-        }
-    }
+    // Sweep stale sidecars from a previous crash (between temp-write and
+    // rename) first. Without this, create_new(true) would error with
+    // AlreadyExists on a leftover, turning a one-off crash into a permanent
+    // save failure until the user manually deletes the sidecar. The sweep
+    // also removes a stale *plaintext* sidecar left by a ≤ v2.10.0 crash and
+    // the fixed-name `.json.tmp` used by ≤ 4.5, so no plaintext lingers next
+    // to the live file. Missing files are fine — everything here is
+    // best-effort except an unexpected removal failure.
+    remove_stale_tokens_sidecars(path, &temp_path)?;
     // OpenOptions::create_new(true) prevents racing with a leftover sidecar;
     // .mode(0o600) sets the mode at file-creation time (no chmod-after-create
     // window where tokens would be world-readable). The subsequent
@@ -470,27 +539,51 @@ fn write_tokens_atomic_with_key(
 ///
 /// The on-disk file is AES-256-GCM ciphertext (issue #140); the key is
 /// created on first use via `write_tokens_atomic` → keychain.
+///
+/// Issue #565: writers are serialised and the snapshot is taken inside the
+/// same critical section as the write. The two slot guards are held
+/// together, so the pair written to disk is a consistent cut — with two
+/// independent reads, a Teams commit landing between them stayed in memory
+/// but was dropped from the file, leaving a stale access token paired with
+/// a fresh refresh token on the next launch.
 pub fn persist_tokens(state: &Arc<crate::AppState>, app: &tauri::AppHandle) -> Result<(), String> {
     let path = tokens_file_path(app)?;
-    let spotify_tokens = state.tokens.spotify().clone();
-    let teams_tokens = state.tokens.teams().clone();
-    let contents = TokensFile {
-        spotify_tokens,
-        teams_tokens,
-    };
-    write_tokens_atomic(&path, &contents)
+    with_tokens_write_lock(|| {
+        let contents = {
+            let spotify_tokens = state.tokens.spotify().clone();
+            let teams_tokens = state.tokens.teams().clone();
+            TokensFile {
+                spotify_tokens,
+                teams_tokens,
+            }
+        };
+        write_tokens_atomic(&path, &contents)
+    })
 }
 
-/// Delete the tokens file. Reserved for future reconnect flows that need
-/// to fully wipe persisted credentials. Currently unused — re-introduce
-/// when reconnect_spotify / reconnect_teams need to clear state without
-/// going through the empty-TokensFile write path.
+/// Recovery path for a tokens.json that cannot be decrypted: Drop the
+/// keychain-held AES key, then delete the tokens file.
+///
+/// This is the actionable half of issue #566 (a corrupt key entry made both
+/// the read *and* the write path fail forever) and reuses
+/// [`clear_tokens_file`]. The order matters: deleting the key first means a
+/// failure leaves the hash at worst with an orphan ciphertext file, which
+/// [`read_tokens_at`] already treats as "start empty"; deleting the file
+/// first and then failing to drop the key would leave nothing to recover
+/// from at all. The next persist generates a fresh key, and the user signs
+/// in again.
+pub fn reset_tokens_storage(app: &tauri::AppHandle) -> Result<(), String> {
+    crate::keychain::delete_tokens_aes_key()?;
+    clear_tokens_file(app)
+}
+
+/// Delete the tokens file. Used by [`reset_tokens_storage`]; reconnect flows
+/// clear state through the empty-`TokensFile` write path instead.
 ///
 /// The keychain-held AES key is deliberately kept: the key is a small
 /// per-install secret shared by the whole app (not a per-file credential),
 /// and deleting it would gain nothing — the tokens file itself is the
 /// credential container.
-#[allow(dead_code)]
 pub fn clear_tokens_file(app: &tauri::AppHandle) -> Result<(), String> {
     let path = tokens_file_path(app)?;
     if path.exists() {
@@ -670,6 +763,30 @@ mod tests {
         let mut p = env::temp_dir();
         p.push(format!("presencejam-test-{}-{}", std::process::id(), name));
         p
+    }
+
+    /// A fresh directory for one test, removed by that test on its normal exit
+    /// path. The shared temp dir is not a sandbox: sidecar names are keyed on
+    /// the pid, so a leftover from an earlier run at a recycled pid — or from a
+    /// test running in parallel — would otherwise decide a test's outcome. The
+    /// unique name means a panic (which skips the cleanup) cannot poison a
+    /// later run.
+    fn unique_tmp_dir(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = env::temp_dir().join(format!(
+            "presencejam-test-{}-{}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed),
+            nanos,
+            tag
+        ));
+        fs::create_dir_all(&dir).expect("a unique test dir must be creatable");
+        dir
     }
 
     fn read_tokens_inner(path: &std::path::Path) -> Result<TokensFile, String> {
@@ -987,6 +1104,135 @@ mod tests {
             err.contains("Failed to parse legacy plaintext tokens file"),
             "legacy parse error expected, got: {}",
             err
+        );
+    }
+
+    // Issue #565 (behavioral): concurrent writers must not fight over the
+    // temp sidecar. Two threads writing the same file through the write lock
+    // (as `persist_tokens` does) must each succeed, and the surviving file
+    // must be decryptable — with the old shared `.json.tmp` name and no
+    // serialisation, one writer's `remove_file` + `create_new` window made
+    // the other fail with AlreadyExists or a vanished sidecar, and the loser
+    // could also rename a half-torn-down temp into the live path.
+    #[test]
+    fn concurrent_writers_never_fight_over_the_sidecar() {
+        let path = tmp_path("concurrent.json");
+        let _ = fs::remove_file(&path);
+        let key = test_key();
+
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..4)
+                .map(|thread| {
+                    let path = path.clone();
+                    scope.spawn(move || {
+                        for i in 0..15 {
+                            let mut file = sample_file();
+                            file.spotify_tokens.as_mut().unwrap().access_token =
+                                format!("at-{thread}-{i}");
+                            with_tokens_write_lock(|| {
+                                write_tokens_atomic_with_key(&path, &file, &key)
+                            })
+                            .expect("a serialised write must never fail");
+                        }
+                    })
+                })
+                .collect();
+            for handle in handles {
+                handle.join().expect("writer thread must not panic");
+            }
+        });
+
+        // Whatever the interleaving, the file must hold a complete, decryptable
+        // snapshot — never a torn or unreadable one.
+        let loaded = read_tokens_inner(&path).unwrap();
+        assert!(loaded.spotify_tokens.is_some());
+        assert!(loaded.teams_tokens.is_some());
+        // No sidecars survive a completed write.
+        assert!(!temp_tokens_path(&path).exists());
+        assert!(!path.with_extension("json.tmp").exists());
+        let _ = fs::remove_file(&path);
+    }
+
+    // Issue #565 (behavioral): the write path sweeps stale sidecars of every
+    // generation — the fixed-name `.json.tmp` (≤ 4.5) and any per-pid leftover
+    // from a crashed process — but never its own in-flight sidecar.
+    //
+    // The fixture works in a directory of its own and names the foreign sidecar
+    // with a pid no live process can hold. `temp_tokens_path` keys a sidecar on
+    // *this* process's pid, so a fabricated file at that name is not a foreign
+    // leftover at all: it is the very path the write below opens with
+    // `create_new(true)`, the `keep` contract preserves it, and a recycled pid
+    // re-arms it from a previous run — a permanent AlreadyExists.
+    #[test]
+    fn stale_sidecars_of_every_generation_are_swept() {
+        // Above every platform's pid_max ceiling, so it can never be — nor
+        // later be reused as — this process's pid.
+        const FOREIGN_PID: u32 = u32::MAX;
+        assert_ne!(
+            FOREIGN_PID,
+            std::process::id(),
+            "the foreign pid must not be this process's"
+        );
+        let dir = unique_tmp_dir("sweep");
+        let path = dir.join("tokens.json");
+        let legacy_sidecar = path.with_extension("json.tmp");
+        let foreign_sidecar = path.with_extension(format!("json.tmp.{}", FOREIGN_PID));
+        let own_sidecar = temp_tokens_path(&path);
+        for sidecar in [&legacy_sidecar, &foreign_sidecar, &own_sidecar] {
+            fs::write(sidecar, b"{\"leaked\":\"PLAINTEXT\"}").unwrap();
+        }
+
+        remove_stale_tokens_sidecars(&path, &own_sidecar).unwrap();
+
+        assert!(
+            !legacy_sidecar.exists(),
+            "the ≤ 4.5 fixed-name sidecar must be swept"
+        );
+        assert!(
+            !foreign_sidecar.exists(),
+            "another process's crashed sidecar must be swept"
+        );
+        assert!(
+            own_sidecar.exists(),
+            "this write's own sidecar must be left alone"
+        );
+
+        // Write phase: the sweep above consumed the foreign sidecar, so plant a
+        // fresh one — and drop the fixture's stand-in at this process's own
+        // sidecar path, which the `keep` contract preserves and which would
+        // therefore make the write's `create_new(true)` fail with AlreadyExists.
+        fs::write(&foreign_sidecar, b"{\"leaked\":\"PLAINTEXT\"}").unwrap();
+        fs::remove_file(&own_sidecar).unwrap();
+
+        write_tokens_atomic_with_key(&path, &sample_file(), &test_key())
+            .expect("write must succeed with a foreign-pid sidecar present");
+        assert!(path.exists());
+        assert!(!own_sidecar.exists(), "rename must consume the sidecar");
+        assert!(
+            !foreign_sidecar.exists(),
+            "the write's own pre-clear must consume the foreign sidecar"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // Issue #565: two processes must never share a sidecar path.
+    #[test]
+    fn temp_path_is_per_process() {
+        let path = PathBuf::from("/tmp/presencejam-tokens.json");
+        let temp = temp_tokens_path(&path);
+        assert_eq!(
+            temp,
+            PathBuf::from(format!(
+                "/tmp/presencejam-tokens.json.tmp.{}",
+                std::process::id()
+            ))
+        );
+        assert_ne!(temp, path);
+        assert_eq!(
+            temp.parent(),
+            path.parent(),
+            "the sidecar must stay in the target directory for an atomic rename"
         );
     }
 }

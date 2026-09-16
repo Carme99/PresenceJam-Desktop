@@ -4,6 +4,7 @@
 //! for the async cache-first check) and the `ONBOARDING_CACHE_TTL` constant.
 
 use crate::config;
+use crate::keychain::{self, KeychainPresence};
 use crate::polling::{cas_refresh_or_discard, CasOutcome};
 use crate::token_io;
 use crate::AppState;
@@ -91,8 +92,9 @@ enum RefreshFailure {
     /// `invalid_grant`: the refresh token itself is gone (Spotify's 6-month
     /// lifetime, Microsoft's 90-day inactivity window, or a revocation).
     Dead,
-    /// The credential pair a refresh needs is unavailable — no `client_id`, or
-    /// no Spotify `client_secret` in the OS keychain.
+    /// The credential pair a refresh needs is unavailable, and retrying
+    /// cannot fix it: an empty `client_id`, or a Spotify `client_secret` the
+    /// keychain positively reports as absent (`keyring::Error::NoEntry`).
     Unavailable,
     /// Network error, 429 or 5xx: the session may well be fine.
     Transient,
@@ -150,8 +152,11 @@ fn discard_dead_session(label: &str, clear: impl FnOnce(), state: &Arc<AppState>
 /// Boot-gate check for the Spotify session (issue #530).
 ///
 /// Refreshing needs the `client_id` (config) plus the `client_secret` (OS
-/// keychain); a missing pair is `Unavailable` — retrying cannot fix it, so the
-/// user is routed to reconnect instead of looping.
+/// keychain); a missing pair is `Unavailable` — retrying cannot fix it, so
+/// the user is routed to reconnect instead of looping.
+///
+/// Issue #561: a keychain that cannot answer *right now* is not a missing
+/// credential. See [`boot_gate_client_secret`].
 fn spotify_session_verdict(
     state: &Arc<AppState>,
     app: &AppHandle,
@@ -162,15 +167,18 @@ fn spotify_session_verdict(
 
     session_verdict(is_token_expired(tokens), || {
         let client_id = &config.spotify.client_id;
-        let client_secret = crate::keychain::get_spotify_client_secret().unwrap_or_default();
-        if client_id.is_empty() || client_secret.is_empty() {
+        if client_id.is_empty() {
             log::warn!(
-                "{CMD} is_onboarding_complete: Spotify access token expired but credentials are unavailable (client_id empty: {}, client_secret empty: {}); re-auth required",
-                client_id.is_empty(),
-                client_secret.is_empty()
+                "{CMD} is_onboarding_complete: Spotify access token expired but no client_id is configured; re-auth required"
             );
             return Err(RefreshFailure::Unavailable);
         }
+        let client_secret = boot_gate_client_secret(
+            keychain::peek_spotify_client_secret(),
+            keychain::spotify_client_secret_presence,
+            keychain::get_spotify_client_secret,
+        )?;
+
         let pre_refresh_access_token = tokens.access_token.clone();
         // Shared CAS guard (ARCHITECTURE.md § Token-refresh concurrency): a
         // concurrent poll-thread refresh must win, and its newer token must not
@@ -200,6 +208,63 @@ fn spotify_session_verdict(
             CasOutcome::RefreshFailed(_) => Err(RefreshFailure::Transient),
         }
     })
+}
+
+/// Resolve the Spotify `client_secret` for the boot gate.
+///
+/// Issue #561: the keychain is a *tri-state* — present, absent, or
+/// unavailable (no Secret Service daemon, a locked keyring, denied storage
+/// access). Only a positively absent entry justifies sending the user to
+/// reconnect; an unavailable keychain is transient by construction (the
+/// secret is still there) and must keep the session, exactly like a flaky
+/// network does. Pre-fix this collapsed every keychain error into an empty
+/// string via `unwrap_or_default()`, which the gate read as "not
+/// configured" — so a locked keyring at launch bounced a fully credentialed
+/// user into the setup wizard, contradicting this module's own
+/// transient-failure policy.
+fn boot_gate_client_secret(
+    peeked: Option<String>,
+    presence: impl FnOnce() -> KeychainPresence,
+    fetch: impl FnOnce() -> Result<String, String>,
+) -> Result<String, RefreshFailure> {
+    // The polling thread primes the cache; a hit costs no keychain call.
+    if let Some(secret) = peeked.filter(|s| !s.is_empty()) {
+        return Ok(secret);
+    }
+    match presence() {
+        KeychainPresence::Present => match fetch() {
+            Ok(secret) if !secret.is_empty() => Ok(secret),
+            Ok(_) => {
+                log::warn!(
+                    "{CMD} is_onboarding_complete: keychain holds an empty Spotify client_secret; re-auth required"
+                );
+                Err(RefreshFailure::Unavailable)
+            }
+            Err(e) => {
+                // Readable a moment ago, failed now (the entry was deleted
+                // from the OS UI mid-call, or the keyring just locked):
+                // retryable, not re-auth.
+                log::warn!(
+                    "{CMD} is_onboarding_complete: keychain reported the Spotify client_secret present but the read failed: {}",
+                    e
+                );
+                Err(RefreshFailure::Transient)
+            }
+        },
+        KeychainPresence::Absent => {
+            log::warn!(
+                "{CMD} is_onboarding_complete: Spotify access token expired but no client_secret is stored; re-auth required"
+            );
+            Err(RefreshFailure::Unavailable)
+        }
+        KeychainPresence::Unavailable(help) => {
+            log::warn!(
+                "{CMD} is_onboarding_complete: OS keychain unavailable, keeping the session and retrying later: {}",
+                help
+            );
+            Err(RefreshFailure::Transient)
+        }
+    }
 }
 
 /// Boot-gate check for the Teams session (issue #530). Mirrors the Spotify
@@ -405,7 +470,8 @@ pub fn reconnect_teams(
 
 #[cfg(test)]
 mod tests {
-    use super::{session_verdict, RefreshFailure, SessionVerdict};
+    use super::{boot_gate_client_secret, session_verdict, RefreshFailure, SessionVerdict};
+    use crate::keychain::KeychainPresence;
 
     /// Issue #530: the boot gate must spend the refresh token for a
     /// locally-expired access token instead of reporting a dead session.
@@ -474,5 +540,92 @@ mod tests {
                 "{failure:?} must map to {expected:?}"
             );
         }
+    }
+
+    /// The priming cache hit must not touch the keychain at all: the polling
+    /// thread fills it, and a boot check runs on every onboarding remount.
+    #[test]
+    fn cached_client_secret_short_circuits_the_keychain() {
+        let secret = boot_gate_client_secret(
+            Some("cached-secret".to_string()),
+            || panic!("a cache hit must not probe the keychain"),
+            || panic!("a cache hit must not read the keychain"),
+        )
+        .expect("a primed cache is a usable credential");
+        assert_eq!(secret, "cached-secret");
+    }
+
+    /// Issue #561: present, absent and unavailable are three different
+    /// answers. A positively *absent* entry is the only one that can mean
+    /// "re-onboard"; anything the keychain cannot answer must keep the
+    /// session, because the secret is still stored and retrying is free.
+    #[test]
+    fn keychain_error_is_transient_not_unavailable() {
+        let absent = boot_gate_client_secret(
+            None,
+            || KeychainPresence::Absent,
+            || panic!("an absent entry must not be read"),
+        )
+        .expect_err("an absent secret cannot refresh");
+        assert_eq!(absent, RefreshFailure::Unavailable);
+
+        let locked = boot_gate_client_secret(
+            None,
+            || KeychainPresence::Unavailable("Secret Service locked".to_string()),
+            || panic!("an unavailable keychain must not be read"),
+        )
+        .expect_err("a locked keychain cannot refresh");
+        assert_eq!(
+            locked,
+            RefreshFailure::Transient,
+            "a locked keychain is recoverable; the secret is still stored"
+        );
+    }
+
+    /// The end-to-end boot-gate consequence: a keychain error must leave a
+    /// fully credentialed returning user out of the setup wizard, while an
+    /// actually absent secret still routes them to reconnect.
+    #[test]
+    fn boot_gate_keeps_the_session_when_the_keychain_is_locked() {
+        let verdict_for = |presence: KeychainPresence| {
+            session_verdict(true, || {
+                boot_gate_client_secret(None, || presence, || panic!("must not read")).map(|_| ())
+            })
+        };
+
+        assert_eq!(
+            verdict_for(KeychainPresence::Unavailable("locked".to_string())),
+            SessionVerdict::Valid
+        );
+        assert_eq!(
+            verdict_for(KeychainPresence::Absent),
+            SessionVerdict::ReauthRequired
+        );
+    }
+
+    /// A keychain that reports the entry present and then fails the read
+    /// (deleted from the OS UI mid-call, or locked between the two calls)
+    /// must not be treated as a missing credential either.
+    #[test]
+    fn present_then_failing_read_is_transient() {
+        let failure = boot_gate_client_secret(
+            None,
+            || KeychainPresence::Present,
+            || Err("Failed to read Spotify client secret from keychain".to_string()),
+        )
+        .expect_err("a failing read cannot refresh");
+        assert_eq!(failure, RefreshFailure::Transient);
+    }
+
+    /// The success path: a present, readable secret is returned verbatim.
+    #[test]
+    fn present_readable_secret_is_returned() {
+        let secret = boot_gate_client_secret(
+            None,
+            || KeychainPresence::Present,
+            || Ok("live-secret".to_string()),
+        )
+        .expect("a readable secret must refresh");
+        assert_eq!(secret, "live-secret");
     }
 }
