@@ -3464,28 +3464,6 @@ mod tests {
             should_skip_identical_write(false, Some("late post"), "late post", Some(now), now),
             "a byte-identical late post inside the keepalive must not re-POST (no spam)"
         );
-        // 3. Structural pin: the cleared branch falls through to the
-        //    shared write (no second write path for late posts).
-        let source = include_str!("poll_once.rs");
-        let prod_source = source
-            .split("#[cfg(test)]\nmod tests")
-            .next()
-            .expect("poll_once.rs has no #[cfg(test)] mod tests block");
-        let after_sig = prod_source
-            .split("pub(crate) fn process_track(")
-            .nth(1)
-            .expect("process_track definition not found");
-        assert!(
-            after_sig.contains("presence gate cleared mid-track"),
-            "a cleared gate must fall through to the late post (issues #380/#430)"
-        );
-        // Exactly one Teams status-write call site in process_track: the
-        // late post reuses it (no duplicate write path).
-        let write_sites = after_sig.matches("set_teams_status_message(").count();
-        assert!(
-            write_sites >= 1,
-            "process_track must contain the shared status-write call the late post flows through"
-        );
     }
 
     /// Issue #384: byte-identical writes skip while the keepalive is

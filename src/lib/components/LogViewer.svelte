@@ -1,3 +1,8 @@
+<!-- Issue #434 scope: snapshot-copy ONLY — the Copy-snapshot button
+  emits the backend redacted tail + version/platform. Virtualization is
+  deferred (the RENDER_WINDOW tail cap below is the pre-existing #399
+  fix, untouched here); jumpToLatest pre-exists for the #400 stickiness
+  path. No new commands, no new scopes. -->
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
