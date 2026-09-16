@@ -17,6 +17,7 @@
   import type { LogPayload } from '$lib/types';
   // C7 multi-window detach: pop-out/pop-back controls.
   import { popOut, popIn } from '$lib/stores/detach';
+  import { useListenerTeardown } from '$lib/utils/useAuthListeners';
 
   // When rendered in the detached `logs-detached` window, "Back" pops the
   // pane back into the main window (closes this one) instead of navigating
@@ -66,7 +67,12 @@
     Error: LEVEL_KEYS.Error
   };
   let filter = $state('All');
-  let unlisten: (() => void)[] = [];
+  // #692: `listen()` resolves asynchronously, so a pane that unmounts while
+  // the registration is still in flight used to leak that subscription (the
+  // unlisten landed in an array nobody swept again) — one leak per visit.
+  // `useListenerTeardown` releases a registration that settles after
+  // disposal, which is what every sibling component already uses.
+  const teardown = useListenerTeardown();
   let logContainer: HTMLDivElement;
 
   // #400: stickiness helpers — single source for "pinned to bottom".
@@ -235,8 +241,10 @@
   onMount(async () => {
     // Register the live stream FIRST: the disk read below is slower than the
     // first events, and `log://log` stays authoritative for everything from
-    // here on — the seed only prepends what already happened.
-    unlisten.push(await listen<LogPayload>('log://log', (event) => {
+    // here on — the seed only prepends what already happened. The
+    // registration is handed to the teardown rather than awaited, so an
+    // unmount before it resolves still releases it (#692).
+    teardown.add(listen<LogPayload>('log://log', (event) => {
       // #400: capture stickiness BEFORE the push changes the scroll height.
       atBottom = isAtBottom();
       // #600: anchor before the push shifts the rendered window.
@@ -258,7 +266,11 @@
     await seedHistory();
   });
 
-  onDestroy(() => unlisten.forEach(fn => fn()));
+  // #692: releasing an in-flight registration is the teardown's job, so
+  // there is nothing to await here.
+  onDestroy(() => {
+    void teardown.dispose();
+  });
 
   let filteredLogs = $derived(
     filter === 'All' ? logs : logs.filter(l => l.level === filter)

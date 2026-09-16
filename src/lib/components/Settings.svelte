@@ -223,6 +223,13 @@
   // Spotify reconnect; the plaintext is left untouched until then.
   let spotifySecretConflict = $state(false);
 
+  // #693: `poll_teams_auth` keeps a freshly obtained Teams session in memory
+  // when `persist_tokens` fails (locked keychain, full/read-only disk) and
+  // emits `teams-auth-persist-warning` — an event nobody listened to, so the
+  // user was never told the session would not survive a restart. The banner
+  // below names the failure and points at the retry path.
+  let teamsPersistWarning = $state(false);
+
   // #560: the OS keychain's answer about the stored client_secret —
   // `present` / `absent` / `unavailable`. The credential row must branch on
   // this rather than on `client_secret_set`, which cannot tell "the user never
@@ -349,6 +356,17 @@
           (event) => {
             devLog('[SETTINGS] spotify-secret-conflict received:', event.payload);
             spotifySecretConflict = true;
+          }
+        ],
+        // #693: the sign-in succeeded but the session could not be written
+        // to disk (keychain locked, disk full). The payload is the Rust-side
+        // error (English, documented limitation) and is only dev-logged —
+        // the banner copy below goes through `t()`.
+        [
+          'teams-auth-persist-warning',
+          (event) => {
+            devLog('[SETTINGS] teams-auth-persist-warning received:', event.payload);
+            teamsPersistWarning = true;
           }
         ]
       ]
@@ -758,6 +776,12 @@
       {#if teamsScopesMissing}
         <div class="scope-banner">
           <span class="hint">{t('settings.presenceScopeBanner')}</span>
+          <button type="button" class="btn-link" onclick={reconnectTeams} disabled={teamsAuthWaiting}>{t('common.reconnect')}</button>
+        </div>
+      {/if}
+      {#if teamsPersistWarning}
+        <div class="persist-banner" role="alert">
+          <span class="hint">{t('settings.teamsPersistWarning')}</span>
           <button type="button" class="btn-link" onclick={reconnectTeams} disabled={teamsAuthWaiting}>{t('common.reconnect')}</button>
         </div>
       {/if}
@@ -1261,6 +1285,21 @@
     gap: var(--sp-3);
     flex-wrap: wrap;
   }
+
+  /* #693: the Teams session could not be persisted (locked keychain, full
+     disk). Amber, like the dirty banner: the sign-in itself succeeded, so
+     this is a warning the user can still act on by reconnecting. */
+  .persist-banner {
+    margin-top: var(--sp-3);
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    padding: var(--sp-2) var(--sp-3);
+    background: var(--warning-soft);
+    color: var(--warning);
+    border-radius: var(--r-md);
+  }
+  .persist-banner .hint { margin: 0; color: inherit; }
   .connection-row .btn-secondary {
     width: auto;
     padding: var(--sp-2) var(--sp-4);

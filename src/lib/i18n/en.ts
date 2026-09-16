@@ -419,6 +419,10 @@ export const en = {
   'dashboard.presenceGatedManualStatus':
     'Status paused — you set a status message by hand',
   'dashboard.presenceGatedOutOfOffice': 'Status paused — you are out of office',
+
+  // 4.7.0 — S3 tray/logs hygiene
+  'settings.teamsPersistWarning':
+    'Signed in, but this device could not save the session — it works until you quit. Reconnect Teams to try saving it again.',
 };
 
 export type Dict = { readonly [K in keyof typeof en]: string };
