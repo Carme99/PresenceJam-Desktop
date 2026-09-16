@@ -796,7 +796,7 @@ fn interruptible_sleep(
     }
 }
 
-enum CasOutcome<T, E> {
+pub(crate) enum CasOutcome<T, E> {
     Committed(T),
     Discarded { current: Option<T> },
     RefreshFailed(E),
@@ -805,7 +805,7 @@ enum CasOutcome<T, E> {
 /// Generic over the refresh error type `E` so each caller keeps its
 /// provider's typed error (`SpotifyApiError` / `TeamsApiError`) for the
 /// re-auth policy, instead of a pre-stringified message.
-fn cas_refresh_or_discard<T, E, F, G>(
+pub(crate) fn cas_refresh_or_discard<T, E, F, G>(
     label: &str,
     lock: &mut Option<T>,
     pre_refresh_access_token: &str,

@@ -934,50 +934,6 @@ pub fn get_teams_presence(access_token: &str) -> Result<PresenceInfo, TeamsApiEr
         .map_err(|e| TeamsApiError::Other(200, format!("Failed to parse presence: {}", e)))
 }
 
-/// Validates that a Teams access token is still functional.
-///
-/// Short-circuits on the local `expires_at` field when the token is clearly
-/// still good (more than 60s of lifetime remaining), so the typical
-/// Onboarding mount doesn't pay for a network round-trip. Only when the
-/// token is on the refresh boundary (or already past it) do we make a real
-/// HTTP call to confirm.
-///
-/// Returns Ok(()) if the token works (locally valid OR 200), or
-/// Err(TeamsApiError) on failure. Callers should distinguish:
-///
-/// - `ExpiredToken` → permanent auth failure, re-auth required
-/// - `Forbidden` → permission/license problem; re-auth won't help (403)
-/// - `RateLimited` / `Transient` → temporary, treat as "valid enough" for onboarding
-/// - `Other` → non-retryable but onboarding may still proceed
-pub fn validate_teams_token(tokens: &TeamsTokens) -> Result<(), TeamsApiError> {
-    // Local pre-check: if the token clearly has plenty of life left, skip
-    // the network call. Mirrors the 60s refresh window used elsewhere.
-    if !is_token_expired(tokens) {
-        return Ok(());
-    }
-
-    let client = build_teams_client().map_err(TeamsApiError::Transient)?;
-    let response = client
-        .get("https://graph.microsoft.com/v1.0/me/presence")
-        .header("Authorization", format!("Bearer {}", tokens.access_token))
-        .send()
-        .map_err(|e| TeamsApiError::Transient(format!("request failed: {}", e)))?;
-
-    let status_code = response.status().as_u16();
-    let retry_after = parse_retry_after(&response);
-    match status_code {
-        200 => Ok(()),
-        // 401 = token missing/invalid → re-auth required; 403 = no
-        // permission/license (or conditional-access insufficient_claims)
-        // → re-auth won't help, surface as its own error. See #153.
-        // All other codes share the single classifier (issue #493).
-        other => {
-            let body = response.text().unwrap_or_default();
-            Err(classify_teams_status(other, retry_after, &body))
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::truncate_for_log;

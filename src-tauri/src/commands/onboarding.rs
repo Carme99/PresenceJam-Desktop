@@ -4,6 +4,7 @@
 //! for the async cache-first check) and the `ONBOARDING_CACHE_TTL` constant.
 
 use crate::config;
+use crate::polling::{cas_refresh_or_discard, CasOutcome};
 use crate::token_io;
 use crate::AppState;
 use std::sync::Arc;
@@ -11,25 +12,33 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
 /// TTL for the `is_onboarding_complete` result cache. The front-end remounts this
-/// command on every Onboarding view enter, and the upstream HTTPS calls can take
-/// up to 20s in the worst case (token validation against Spotify/Graph APIs), so
-/// a short cache is needed to avoid hammering the upstream APIs.
+/// command on every Onboarding view enter, and the check's refresh leaves can
+/// take up to 20s in the worst case (HTTPS round-trips to Spotify/Graph), so a
+/// short cache is needed to avoid hammering the upstream APIs.
 const ONBOARDING_CACHE_TTL: Duration = Duration::from_secs(30);
 
 /// Log tag prefix for this submodule (issue #79 item 3).
 const CMD: &str = "[CMD.ONBOARDING]";
 
-/// Onboarding check: `true` if both Spotify and Teams are configured and have a non-expired
-/// token. Network errors (5xx, 429) are treated as "still valid" (transient) so a flaky
-/// network doesn't bounce the user back into the onboarding flow.
+/// Onboarding check: `true` if both Spotify and Teams are configured and hold a
+/// usable session.
+///
+/// Issue #530: a locally-expired access token is NOT a dead session. This gate
+/// spends the refresh token (and persists the result) before deciding, exactly
+/// like the polling loop does; only `invalid_grant` or missing credentials ask
+/// the user to sign in again. Pre-fix it probed the upstream APIs with the stale
+/// bearer, took the unavoidable 401, and sent every returning user — whose app
+/// had been closed longer than the ~1 h access-token lifetime — back into the
+/// setup wizard. Transient failures (no network, 429, 5xx) still count as
+/// "valid" so a flaky network never bounces the user into onboarding.
 ///
 /// Result is cached on `AppState.onboarding_cache` for [`ONBOARDING_CACHE_TTL`] —
 /// the front-end remounts this command on every Onboarding view enter, and the
-/// upstream HTTPS calls can take up to 20s in the worst case (token validation
-/// against Spotify/Graph APIs).
+/// refresh leaves of the check make upstream calls.
 #[tauri::command]
 pub async fn is_onboarding_complete(
     state: tauri::State<'_, Arc<AppState>>,
+    app: AppHandle,
 ) -> Result<bool, String> {
     log::debug!("{CMD} is_onboarding_complete: ENTRY");
 
@@ -48,12 +57,14 @@ pub async fn is_onboarding_complete(
         }
     }
 
-    // Cache miss — run the actual validation on a blocking thread (HTTPS round-trips).
+    // Cache miss — run the actual check on a blocking thread (HTTPS round-trips).
     let state_clone: Arc<AppState> = Arc::clone(&state);
-    let result =
-        tauri::async_runtime::spawn_blocking(move || is_onboarding_complete_impl(&state_clone))
-            .await
-            .map_err(|e| format!("is_onboarding_complete task panicked: {}", e))??;
+    let app_clone = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        is_onboarding_complete_impl(&state_clone, &app_clone)
+    })
+    .await
+    .map_err(|e| format!("is_onboarding_complete task panicked: {}", e))??;
 
     // Store result in cache. We cache both `true` and `false` outcomes — a recent "complete"
     // result is just as valid as a recent "incomplete" one for the 30s window.
@@ -65,52 +76,190 @@ pub async fn is_onboarding_complete(
     Ok(result)
 }
 
-/// Blocking implementation of the onboarding check. Run via `spawn_blocking` from
-/// `is_onboarding_complete` so the async runtime can keep serving other commands while
-/// the HTTPS round-trips to Spotify/Graph complete.
-fn is_onboarding_complete_impl(state: &Arc<AppState>) -> Result<bool, String> {
+/// Boot-gate verdict for one provider's session (issue #530).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionVerdict {
+    /// Usable session — never ask this user to sign in again.
+    Valid,
+    /// Dead or unrepairable session — re-auth required.
+    ReauthRequired,
+}
+
+/// Why a refresh attempt did not yield a usable session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefreshFailure {
+    /// `invalid_grant`: the refresh token itself is gone (Spotify's 6-month
+    /// lifetime, Microsoft's 90-day inactivity window, or a revocation).
+    Dead,
+    /// The credential pair a refresh needs is unavailable — no `client_id`, or
+    /// no Spotify `client_secret` in the OS keychain.
+    Unavailable,
+    /// Network error, 429 or 5xx: the session may well be fine.
+    Transient,
+}
+
+/// Boot-gate decision table (issue #530).
+///
+/// `refresh` runs ONLY for a locally-expired access token, so a fresh session
+/// never pays for a network round-trip. Spending the refresh token instead of
+/// probing an API with a stale bearer is what keeps a returning user out of the
+/// setup wizard; a transient refresh failure keeps the pre-existing "a flaky
+/// network is not a dead session" policy.
+fn session_verdict(
+    expired: bool,
+    refresh: impl FnOnce() -> Result<(), RefreshFailure>,
+) -> SessionVerdict {
+    if !expired {
+        return SessionVerdict::Valid;
+    }
+    match refresh() {
+        Ok(()) | Err(RefreshFailure::Transient) => SessionVerdict::Valid,
+        Err(RefreshFailure::Dead) | Err(RefreshFailure::Unavailable) => {
+            SessionVerdict::ReauthRequired
+        }
+    }
+}
+
+/// Persist a refreshed session. Failure is logged, not propagated: the gate must
+/// still answer, and the polling loop re-persists on its next refresh.
+fn persist_refreshed(state: &Arc<AppState>, app: &AppHandle, label: &str) {
+    match token_io::persist_tokens(state, app) {
+        Ok(()) => log::info!(
+            "{CMD} is_onboarding_complete: {label} session refreshed (access token was expired at launch)"
+        ),
+        Err(e) => log::warn!(
+            "{CMD} is_onboarding_complete: refreshed {label} tokens could not be persisted: {e}"
+        ),
+    }
+}
+
+/// Drop a dead session from `AppState`, persist the cleared file, and make the
+/// re-auth reason loud — the same policy the polling loop applies to a dead
+/// refresh token (#160/#219). `clear` takes the write guard, so the guard is
+/// dropped before `persist_tokens` re-locks the slot for reading (issue #180).
+fn discard_dead_session(label: &str, clear: impl FnOnce(), state: &Arc<AppState>, app: &AppHandle) {
+    clear();
+    if let Err(e) = token_io::persist_tokens(state, app) {
+        log::warn!("{CMD} is_onboarding_complete: failed to persist cleared {label} tokens: {e}");
+    }
+    log::error!(
+        "{CMD} is_onboarding_complete: {label} refresh token is dead (invalid_grant); re-auth required"
+    );
+}
+
+/// Boot-gate check for the Spotify session (issue #530).
+///
+/// Refreshing needs the `client_id` (config) plus the `client_secret` (OS
+/// keychain); a missing pair is `Unavailable` — retrying cannot fix it, so the
+/// user is routed to reconnect instead of looping.
+fn spotify_session_verdict(
+    state: &Arc<AppState>,
+    app: &AppHandle,
+    config: &config::AppConfig,
+    tokens: &crate::spotify::SpotifyTokens,
+) -> SessionVerdict {
+    use crate::spotify::{is_token_expired, refresh_spotify_token, SpotifyApiError};
+
+    session_verdict(is_token_expired(tokens), || {
+        let client_id = &config.spotify.client_id;
+        let client_secret = crate::keychain::get_spotify_client_secret().unwrap_or_default();
+        if client_id.is_empty() || client_secret.is_empty() {
+            log::warn!(
+                "{CMD} is_onboarding_complete: Spotify access token expired but credentials are unavailable (client_id empty: {}, client_secret empty: {}); re-auth required",
+                client_id.is_empty(),
+                client_secret.is_empty()
+            );
+            return Err(RefreshFailure::Unavailable);
+        }
+        let pre_refresh_access_token = tokens.access_token.clone();
+        // Shared CAS guard (ARCHITECTURE.md § Token-refresh concurrency): a
+        // concurrent poll-thread refresh must win, and its newer token must not
+        // be clobbered by ours.
+        let outcome = cas_refresh_or_discard(
+            "spotify-onboarding",
+            &mut *state.tokens.spotify_mut(),
+            &pre_refresh_access_token,
+            || refresh_spotify_token(tokens, client_id, &client_secret),
+            |t| &t.access_token,
+        );
+        match outcome {
+            // The guard above is a temporary that died at the end of the
+            // statement, so persisting here cannot re-lock the held slot (#180).
+            CasOutcome::Committed(_) => {
+                persist_refreshed(state, app, "Spotify");
+                Ok(())
+            }
+            // Somebody else replaced the token we refreshed from: whatever is
+            // in the slot now is newer, so the session is alive.
+            CasOutcome::Discarded { current } if current.is_some() => Ok(()),
+            CasOutcome::Discarded { .. } => Err(RefreshFailure::Dead),
+            CasOutcome::RefreshFailed(SpotifyApiError::InvalidGrant) => {
+                discard_dead_session("Spotify", || *state.tokens.spotify_mut() = None, state, app);
+                Err(RefreshFailure::Dead)
+            }
+            CasOutcome::RefreshFailed(_) => Err(RefreshFailure::Transient),
+        }
+    })
+}
+
+/// Boot-gate check for the Teams session (issue #530). Mirrors the Spotify
+/// version; the device-code flow needs no client credentials to refresh.
+fn teams_session_verdict(
+    state: &Arc<AppState>,
+    app: &AppHandle,
+    tokens: &crate::teams::TeamsTokens,
+) -> SessionVerdict {
+    use crate::teams::{is_token_expired, refresh_teams_token, TeamsApiError};
+
+    session_verdict(is_token_expired(tokens), || {
+        let pre_refresh_access_token = tokens.access_token.clone();
+        let outcome = cas_refresh_or_discard(
+            "teams-onboarding",
+            &mut *state.tokens.teams_mut(),
+            &pre_refresh_access_token,
+            || refresh_teams_token(tokens),
+            |t| &t.access_token,
+        );
+        match outcome {
+            CasOutcome::Committed(_) => {
+                persist_refreshed(state, app, "Teams");
+                Ok(())
+            }
+            CasOutcome::Discarded { current } if current.is_some() => Ok(()),
+            CasOutcome::Discarded { .. } => Err(RefreshFailure::Dead),
+            CasOutcome::RefreshFailed(TeamsApiError::InvalidGrant) => {
+                discard_dead_session("Teams", || *state.tokens.teams_mut() = None, state, app);
+                Err(RefreshFailure::Dead)
+            }
+            CasOutcome::RefreshFailed(_) => Err(RefreshFailure::Transient),
+        }
+    })
+}
+
+/// Blocking implementation of the onboarding check. Run via `spawn_blocking`
+/// from `is_onboarding_complete` so the async runtime can keep serving other
+/// commands while the refresh round-trips complete.
+fn is_onboarding_complete_impl(state: &Arc<AppState>, app: &AppHandle) -> Result<bool, String> {
     let config = config::load_config()?;
     let spotify_configured = !config.spotify.client_id.is_empty();
 
-    // Check Teams tokens — only ExpiredToken (401) means invalid.
-    // RateLimited (429), Transient (5xx, network) and Forbidden (403 —
-    // permission/license problem, re-auth won't help) are treated as
-    // valid for onboarding purposes. See issue #153.
-    let (teams_configured, teams_valid) = {
-        let guard = state.tokens.teams();
-        match guard.as_ref() {
-            Some(tokens) => {
-                let valid = match crate::teams::validate_teams_token(tokens) {
-                    Ok(()) => true,
-                    Err(crate::teams::TeamsApiError::ExpiredToken(_)) => false,
-                    Err(_) => true, // transient — still valid for onboarding
-                };
-                (true, valid)
-            }
-            None => (false, false),
-        }
-    };
+    // Clone out of the token locks BEFORE any network call: a read guard held
+    // across a 10 s HTTPS round-trip would block the polling thread's write to
+    // the same slot for that whole window.
+    let spotify_tokens = state.tokens.spotify().clone();
+    let teams_tokens = state.tokens.teams().clone();
 
-    // Check Spotify tokens — only ExpiredToken means invalid.
-    // RateLimited and Other are transient → treat as valid.
-    let (spotify_valid, _spotify_token) = {
-        let guard = state.tokens.spotify();
-        match guard.as_ref() {
-            Some(tokens) => {
-                let valid = match crate::spotify::validate_spotify_token(tokens) {
-                    Ok(()) => true,
-                    Err(crate::spotify::SpotifyApiError::ExpiredToken) => false,
-                    Err(_) => true, // transient — still valid for onboarding
-                };
-                (valid, Some(tokens.clone()))
-            }
-            None => (false, None),
-        }
-    };
+    let spotify_valid = spotify_tokens.as_ref().is_some_and(|tokens| {
+        spotify_session_verdict(state, app, &config, tokens) == SessionVerdict::Valid
+    });
+    let teams_configured = teams_tokens.is_some();
+    let teams_valid = teams_tokens
+        .as_ref()
+        .is_some_and(|tokens| teams_session_verdict(state, app, tokens) == SessionVerdict::Valid);
 
     // Onboarding is complete only if:
-    // 1. Spotify is configured AND token is not permanently expired
-    // 2. Teams is configured AND token is not permanently expired
+    // 1. Spotify is configured AND its session is usable
+    // 2. Teams is configured AND its session is usable
     let complete = spotify_configured && spotify_valid && teams_configured && teams_valid;
     log::info!(
         "{CMD} is_onboarding_complete: result={} (spotify_configured={}, spotify_valid={}, teams_configured={}, teams_valid={})",
@@ -252,4 +401,78 @@ pub fn reconnect_teams(
 
     log::info!("{CMD} reconnect_teams: SUCCESS");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{session_verdict, RefreshFailure, SessionVerdict};
+
+    /// Issue #530: the boot gate must spend the refresh token for a
+    /// locally-expired access token instead of reporting a dead session.
+    /// Pre-fix the gate probed the API with the stale bearer, took the 401 and
+    /// sent a fully credentialed returning user back to the setup wizard.
+    #[test]
+    fn expired_token_with_successful_refresh_is_a_live_session() {
+        assert_eq!(
+            session_verdict(true, || Ok(())),
+            SessionVerdict::Valid,
+            "a refreshable session must never be reported as needing re-auth"
+        );
+    }
+
+    /// The refresh is only paid for when it is needed: a locally-fresh access
+    /// token must short-circuit without touching the network.
+    #[test]
+    fn fresh_token_never_calls_the_refresh() {
+        let calls = std::cell::Cell::new(0);
+        let verdict = session_verdict(false, || {
+            calls.set(calls.get() + 1);
+            Ok(())
+        });
+        assert_eq!(verdict, SessionVerdict::Valid);
+        assert_eq!(calls.get(), 0, "fresh token must not trigger a refresh");
+    }
+
+    /// `invalid_grant` is the only refresh outcome that really means "sign in
+    /// again", and unavailable credentials cannot be repaired by retrying.
+    #[test]
+    fn dead_or_unavailable_credentials_require_reauth() {
+        assert_eq!(
+            session_verdict(true, || Err(RefreshFailure::Dead)),
+            SessionVerdict::ReauthRequired
+        );
+        assert_eq!(
+            session_verdict(true, || Err(RefreshFailure::Unavailable)),
+            SessionVerdict::ReauthRequired
+        );
+    }
+
+    /// A flaky network must not bounce the user into onboarding — the
+    /// pre-existing policy that the refresh path has to preserve.
+    #[test]
+    fn transient_refresh_failure_keeps_the_session() {
+        assert_eq!(
+            session_verdict(true, || Err(RefreshFailure::Transient)),
+            SessionVerdict::Valid
+        );
+    }
+
+    /// The decision table must classify every provider error: a new
+    /// `RefreshFailure` arm cannot silently fall through to "valid" or to
+    /// "re-auth" — each is asserted above against the literal it maps to.
+    #[test]
+    fn every_refresh_failure_is_classified() {
+        let cases = [
+            (RefreshFailure::Dead, SessionVerdict::ReauthRequired),
+            (RefreshFailure::Unavailable, SessionVerdict::ReauthRequired),
+            (RefreshFailure::Transient, SessionVerdict::Valid),
+        ];
+        for (failure, expected) in cases {
+            assert_eq!(
+                session_verdict(true, || Err(failure)),
+                expected,
+                "{failure:?} must map to {expected:?}"
+            );
+        }
+    }
 }

@@ -11,6 +11,8 @@
   import { devLog } from '$lib/utils/dev';
   import About from '$lib/components/About.svelte';
   import Reconnect from '$lib/components/Reconnect.svelte';
+  import { bootView } from '$lib/utils/boot';
+  import type { AppConfig } from '$lib/types';
   import { t } from '$lib/i18n';
 
   // Build info — injected at build time via vite.config.js define
@@ -44,10 +46,20 @@
     devLog('[PAGE] boot: calling invoke is_onboarding_complete');
     bootError = '';
     try {
-      const complete = await withBootTimeout(invoke<boolean>('is_onboarding_complete'));
-      devLog('[PAGE] boot: is_onboarding_complete SUCCESS, complete=', complete);
-      currentView.set(complete ? 'dashboard' : 'onboarding');
-      devLog('[PAGE] boot: currentView set to:', complete ? 'dashboard' : 'onboarding');
+      // #530: the gate now refreshes an expired-but-refreshable session itself,
+      // so an incomplete verdict means a sign-in is genuinely required. When the
+      // credentials are still stored, that is a returning user, not a new one:
+      // route them to Reconnect instead of the setup wizard. The probe is inside
+      // the same timeout so a stalled keychain read cannot strand the spinner.
+      const view = await withBootTimeout(
+        (async () => {
+          const complete = await invoke<boolean>('is_onboarding_complete');
+          devLog('[PAGE] boot: is_onboarding_complete SUCCESS, complete=', complete);
+          return bootView(complete, await hasStoredSpotifyCredentials());
+        })()
+      );
+      currentView.set(view);
+      devLog('[PAGE] boot: currentView set to:', view);
     } catch (e) {
       console.error('[PAGE] boot: is_onboarding_complete FAILED:', e);
       bootError = e instanceof Error ? e.message : String(e);
@@ -56,6 +68,20 @@
     }
     ready = true;
     devLog('[PAGE] boot: ready=true');
+  }
+
+  // #530: does this install still hold the Spotify credentials (Client ID in
+  // config + secret in the OS keychain) that a reconnect can reuse? Any probe
+  // failure falls back to the wizard, which can recreate everything.
+  async function hasStoredSpotifyCredentials(): Promise<boolean> {
+    try {
+      const cfg = await invoke<AppConfig>('load_config');
+      if (!cfg.spotify.client_id?.trim()) return false;
+      return await invoke<boolean>('is_spotify_client_secret_set');
+    } catch (e) {
+      console.warn('[PAGE] boot: credential probe failed:', e);
+      return false;
+    }
   }
 
   function retryBoot() {
