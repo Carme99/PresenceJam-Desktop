@@ -23,10 +23,11 @@ The app lives in your system tray, syncs while you work, and stays out of the wa
 - **Smart polling** — sleeps until the track ends; ETag conditional GETs skip redundant Spotify calls.
 - **Auto-clear** — clears status when Spotify pauses or stops.
 - **Profanity filter** — replaces profane track names with a safe placeholder.
-- **Customisable status template** — `{artist}`, `{track}`, `{album}`, `{emoji}` placeholders.
+- **Customisable status template** — `{artist}`, `{track}`, `{album}`, `{emoji}`, `{device}`, `{playlist}` (or `{context}`), `{progress}`, `{shuffle}` and `{repeat}` placeholders, substituted in a single pass.
+- **Podcasts & audiobooks** — episodes get their own `🎙️ {show} - {episode}` template instead of being reported as "nothing playing" (adverts still clear the status).
 - **Light & dark themes** — pick whichever matches your desktop.
 - **System tray** — runs silently in the background.
-- **Tray playback controls** — Play/Pause, Previous, Next, plus Devices and Up Next submenus, straight from the tray icon.
+- **Tray playback controls** — Play/Pause, Previous, Next, Shuffle and Repeat toggles, plus Devices and Up Next submenus, straight from the tray icon.
 - **Diagnostics page** — one-click local support snapshot (versions, sanitized config, token expiry metadata, redacted log tail). Never leaves your machine.
 - **Detachable Logs & Settings** — pop Logs or Settings out into their own window and back in again.
 - **Interface languages** — English, German (Deutsch), and French (Français) via an in-app language picker.
@@ -34,7 +35,7 @@ The app lives in your system tray, syncs while you work, and stays out of the wa
 - **Meeting/call-aware gating** — pauses status updates while you're busy, in a meeting, on a call, or presenting.
 - **Status rules (quiet hours & track rules)** — suppress the Teams status write during chosen hours/days or for matching tracks, with an optional replacement status.
 - **Desktop notifications (opt-in)** — a toast on track change, throttled to one per 5 s and replaced in place where the OS supports it.
-- **Auto-update** — silent update checks at startup and every ~24h; install immediately in-app or defer with *Install on quit*, which applies the verified update as the app exits.
+- **Auto-update** — silent update checks at startup and every ~24h; install immediately in-app, or defer with *Install on quit*, which stages the verified payload with live progress and a Cancel action and applies it as the app exits.
 - **Launch at login** — optional auto-start on boot.
 - **Secure auth** — Authorization Code + PKCE OAuth for Spotify (confidential client), Device Code flow for Teams.
 
@@ -142,13 +143,20 @@ Customise your Teams status using placeholders:
 
 | Placeholder | Output |
 | --- | --- |
-| `{artist}` | Artist name |
-| `{track}` | Track name |
-| `{album}` | Album name |
-| `{emoji}` | 🎵 (playing) or ⏸ (paused) |
+| `{artist}` | Artist name — on an episode, the show name |
+| `{track}` | Track name — on an episode, the episode name |
+| `{album}` | Album name — on an episode, the publisher |
+| `{emoji}` | 🎵 (playing track), 🎙️ (playing episode) or ⏸️ (paused) |
+| `{device}` | Name of the device Spotify is playing on |
+| `{playlist}` / `{context}` | The playlist/album/artist/show it was started from (the two tokens are exact aliases) |
+| `{progress}` | Playback position (`3:07`); empty when Spotify reports none |
+| `{shuffle}` / `{repeat}` | 🔀 / 🔁 while on, nothing while off |
+| `{show}` / `{episode}` / `{publisher}` | Episode-only fields; empty on a music track |
 
 **Default:** `🎵 {artist} - {track} 🎧`
 **Example:** `🎵 Daft Punk - One More Time 🎧`
+
+Substitution is a **single pass**: text that a token produced is never re-scanned, so a track literally named `{album}` is not expanded into the album name. Podcast and audiobook episodes are formatted with their own built-in `🎙️ {show} - {episode}` template, so your music template is not applied to them. See [USAGE.md — Status Format](./USAGE.md#status-format) for the live-preview details.
 
 ## License
 

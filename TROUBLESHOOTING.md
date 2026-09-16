@@ -61,6 +61,17 @@ Before diving in, check these basics:
 
 **Fix:** Check your Spotify plan. If you have Premium but the controls still fail, reconnect Spotify once (see the next entry) so the token carries the new scope.
 
+### Tray Shuffle / Repeat does nothing, or asks for Premium
+
+**Cause:** Both are real Spotify player commands, so they carry exactly the same requirements as Play/Pause: a **Spotify Premium** account, the `user-modify-playback-state` scope (a one-time reconnect for tokens that predate it), and an **active device**.
+
+**Fix:**
+1. If an in-app toast reads **"Playback control requires Spotify Premium"**, check your Spotify plan — playback control is a Premium-only Web API surface.
+2. If it reads **"No active playback device - pick one from the tray Devices menu"**, open tray → **Devices** and pick one, or start playback on a device first.
+3. If nothing happens and no toast appears, the stored token predates the playback scope — click **Reconnect** once (see *"Playback control needs a one-time reconnect" banner* above).
+
+The **Repeat** item spells its mode out — `Repeat: Off` → `Repeat: Context` → `Repeat: Track` → back to off — because a check mark alone cannot distinguish *context* from *track*. A command Spotify rejects leaves the label and check mark where they were, so the menu never claims a state that was refused.
+
 ### "Playback control needs a one-time reconnect" banner
 
 **Cause:** Tray playback control needs the `user-modify-playback-state` scope, which older stored tokens don't carry — a token granted before that scope was added can't control playback until you re-auth.
@@ -72,6 +83,17 @@ Before diving in, check these basics:
 **Cause:** A legacy plaintext `spotify.client_secret` left in `config.json` disagrees with the value stored in the OS keychain (#376). The app keeps the plaintext (nothing is deleted) and asks you to resolve it.
 
 **Fix:** Click **Reconnect** in the banner (or Settings → reconnect Spotify) once — the fresh sign-in reconciles the stored secret and the banner dismisses on reconnect.
+
+### Reconnect shows "Keychain unavailable"
+
+**Cause:** The OS keychain could not be read — typically a locked Secret Service keyring on Linux, or a denied credential store. This is **not** the same as "no stored credential": your Spotify Client Secret is still in the keychain, the app just cannot reach it right now. Treating the two alike is what used to push a fully set-up user back through the Spotify wizard.
+
+**Fix:**
+1. On Linux, unlock your keyring and make sure a Secret Service daemon is running — see [SETUP.md — Linux: System Keyring Required](./SETUP.md#linux-keyring). On Windows/macOS an unavailable store usually means the credential manager is locked by policy.
+2. Re-enter the Reconnect view: it re-probes the keychain on every entry.
+3. There is deliberately **no Reconnect button** while this state is showing — the sign-in flow reads the secret from the same keychain that cannot answer, so it would only open a browser window that fails. You do **not** need to re-enter your Client ID/Secret.
+
+Settings shows the same state on the credential row ("System keychain unavailable — it may be locked or missing…"). A genuine *absent* credential is the only case that offers **Run onboarding**.
 
 ## Microsoft Teams
 
@@ -138,6 +160,23 @@ Before diving in, check these basics:
 
 **Fix:** Quit again (or relaunch) and check `PresenceJam.log` for `[UPDATER]` lines. If the staged update keeps failing, use **Download & Install** from the update banner instead — that path reports errors in-app. Note: since v4.2.0, a staged update that is stale (same version or older than your current install) is *deliberately* skipped with an `[UPDATER]` log line, not installed — the banner shows a skipped state with an **Install anyway** override (#431). Downgrades are off by default (`allowDowngrades: false`).
 
+### The app came up with default settings
+
+**Cause:** `config.json` no longer parsed as JSON, so PresenceJam refused to load it. Instead of overwriting a file it cannot read, it **renames the broken file next to itself as `config.json.bak`**, logs a `[CFG] corrupt config '…' quarantined to '…'` warning, and starts on the shipped defaults.
+
+**Fix:**
+1. Look for that `[CFG]` line in the log viewer — it names both the original and the backup.
+2. Your old settings are all still in the `.bak`. Repair the JSON by hand and put it back as `config.json`, or simply re-apply the settings in the app.
+3. Where to look (the backup sits beside the config file):
+
+   | OS | Path |
+   |----|------|
+   | Windows | `%APPDATA%\PresenceJam\config.json.bak` |
+   | macOS | `~/Library/Application Support/PresenceJam/config.json.bak` |
+   | Linux | `$XDG_CONFIG_HOME/PresenceJam/config.json.bak` (usually `~/.config/PresenceJam/`) |
+
+The backup name is fixed — `config.json.bak`, never timestamped — and the rename is best-effort: if it fails, the app logs that too and still boots on defaults, leaving your original file untouched. `tokens.json` is unaffected and lives in a different folder entirely (see [SETUP.md — What Gets Installed](./SETUP.md#what-gets-installed)).
+
 
 ### No status appears on Teams
 
@@ -191,7 +230,7 @@ False positives are prevented via word-boundary checks — words like `class`, `
 
 ### Where to find logs
 
-**In-app:** the **Log Viewer** view (it can be popped out into its own window) lets you scroll through the entries without touching the filesystem.
+**In-app:** the **Log Viewer** view (it can be popped out into its own window) lets you scroll through the entries without touching the filesystem. When it opens it is already backfilled with the last 500 lines of the on-disk file, so the history is there before the first new entry is logged; while you are scrolled up it holds your position as new lines arrive.
 
 **Direct filesystem** — a single `PresenceJam.log` file managed by the logging plugin:
 ```
