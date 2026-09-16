@@ -21,13 +21,15 @@ PresenceJam lives in your **system tray** (Windows taskbar or macOS menu bar). T
 | Play / Pause | Toggle playback on your active Spotify device |
 | Previous | Skip to the previous track |
 | Next | Skip to the next track |
+| Shuffle | Toggle Spotify shuffle. The check mark mirrors the state Spotify reports. |
+| Repeat | Cycle repeat mode: **Repeat: Off** → **Repeat: Context** → **Repeat: Track** → back to off. The label always spells the current mode out, because a check mark alone cannot tell *context* from *track*. |
 | Devices | List your Spotify devices — picking one transfers playback there and starts it |
 | Open Settings | Jump straight to the Settings view |
 | Open Logs Folder | Open the log directory in your OS file manager |
-| Up Next | Peek at the next tracks in your queue |
+| Up Next | Peek at the next tracks or episodes in your queue (up to 3). Rows read `{artist} - {title}`, so an episode shows as `Show name - Episode name`. |
 | Quit | Fully exit the app |
 
-> **Tray playback** (Play/Pause, Previous, Next, Devices, Up Next) requires a **Spotify Premium** account and a one-time reconnect that adds the `user-modify-playback-state` scope — needed only if your Spotify tokens predate that scope (see [SETUP.md — Upgrading from 2.x](./SETUP.md#upgrading-from-2x)). Until then, Settings shows a "Playback control needs a one-time reconnect" banner.
+> **Tray playback** (Play/Pause, Previous, Next, Shuffle, Repeat, Devices, Up Next) requires a **Spotify Premium** account and a one-time reconnect that adds the `user-modify-playback-state` scope — needed only if your Spotify tokens predate that scope (see [SETUP.md — Upgrading from 2.x](./SETUP.md#upgrading-from-2x)). Until then, Settings shows a "Playback control needs a one-time reconnect" banner. Shuffle and Repeat need an **active device** as well; with none, the action fails and an in-app toast reads "No active playback device - pick one from the tray Devices menu". A non-Premium account fails with "Playback control requires Spotify Premium". A failed toggle leaves the check mark untouched, so the menu never claims a state Spotify refused.
 
 > **Closing the window (X button) doesn't quit the app** — it minimizes to the tray. This is intentional so sync keeps running in the background. Use **Quit** from the tray menu to fully exit.
 
@@ -48,9 +50,9 @@ The main screen showing your current sync status.
 - **▶** starts polling Spotify and updating your Teams status; **⏸** pauses polling, and your Teams status remains unchanged
 
 **Currently playing card:**
-- Shows the active track (artist, track name, album art if available)
+- Shows the active track (artist, track name, album art if available) — or the active podcast/audiobook episode, with the show name where the artist goes and the publisher where the album goes
 - Updates in real-time as tracks change
-- Shows ⏸️ when nothing is playing
+- Shows ⏸️ when nothing is playing, including during adverts, which are never treated as "listening"
 
 ---
 
@@ -59,9 +61,30 @@ Unsaved changes are tracked per section: a **"You have unsaved changes"** banner
 
 ### Status Format
 
-Edit the template that formats your Teams status message. Supports `{artist}`, `{track}`, `{album}`, and `{emoji}`.
+Edit the template that formats your Teams status message. The default is `🎵 {artist} - {track} 🎧`.
+
+| Placeholder | Renders |
+|-------------|---------|
+| `{artist}` | Artist name — on an episode, the **show** name |
+| `{track}` | Track name — on an episode, the **episode** name |
+| `{album}` | Album name — on an episode, the **publisher** |
+| `{emoji}` | 🎵 while a track plays, 🎙️ while an episode plays, ⏸️ when paused |
+| `{device}` | The name of the device Spotify is playing on |
+| `{playlist}` | The playlist/album/artist/show the item was started from. `{context}` is an exact alias for it. |
+| `{progress}` | Playback position (`minutes:seconds` — `3:07`, `90:00`). Empty when Spotify reports no position, e.g. a live stream. |
+| `{shuffle}` | 🔀 while shuffle is on, nothing while it is off |
+| `{repeat}` | 🔁 while repeat is on (either *context* or *track*), nothing while it is off |
+| `{show}` | The podcast/audiobook name — only on an episode, empty on a music track |
+| `{episode}` | The episode name — only on an episode, empty on a music track |
+| `{publisher}` | The publisher — only on an episode, empty on a music track |
 
 **Example:** `🎵 {artist} - {track} 🎧` → `🎵 Daft Punk - One More Time 🎧`
+
+**Substitution is a single pass.** Tokens are replaced once, left to right, and the text a token produces is never re-scanned — a track literally named `{album}` is shown as `{album}`, not expanded into the album name. Tokens the app does not recognise, and an unclosed `{`, are left exactly as you typed them.
+
+The **live preview** below the field renders against a fixed sample item — device *Kitchen speaker*, playlist *Workout Mix*, position `0:00`, shuffle and repeat on — so the mode tokens are visible before anything is playing.
+
+> **Podcasts and audiobooks use their own template** — `🎙️ {show} - {episode}` — so a 90-minute episode never gets your music template. That template is built into the app; there is no setting for it yet.
 
 ### Teams Status
 
@@ -119,7 +142,7 @@ Notifications are throttled to at most one per 5 s, and the same track is never 
 ### General
 
 | Launch at login | Start PresenceJam automatically when your OS boots |
-| Language | Interface language: English, Deutsch (German), or Français (French). Defaults to your browser/OS language; the choice persists. |
+| Language | Interface language: English, Deutsch (German), or Français (French). Defaults to your browser/OS language; the choice persists. Switching it also retags `<html lang>` for screen readers and applies the locale's number and plural rules (French counts `0` as singular). Detached Logs and Settings windows follow the switch. |
 | Start minimized | Open the app minimized to the tray (window hidden on launch). There is no Settings toggle — set `teams.start_minimized` to `true` in `config.json` (consumed at `src-tauri/src/lib.rs`). On macOS, it also switches the app's activation policy to `Accessory`, removing the dock icon and menu-bar app menu — the app becomes a pure tray-resident app. The dock icon reappears when you set the field back to `false` (no restart needed). |
 
 ---
@@ -129,11 +152,11 @@ Notifications are throttled to at most one per 5 s, and the same track is never 
 On startup, PresenceJam checks GitHub Releases for a newer version, then re-checks silently every ~24 hours while the app runs. If a new version is found, a small banner appears at the top of the window: **"Update vX.Y.Z available"** with two choices:
 
 - **Download & Install** — downloads with a progress readout and relaunches into the new version immediately.
-- **Install on quit** — opens a confirmation showing the staged version against your current version, with install/skip. The verified update is applied the next time you quit the app (tray → Quit). If the staged update is stale (same version or older than what you're running), it is skipped instead of installed — the banner shows a skipped state with an **Install anyway** override if you really want it (#431). On Windows the installer relaunches the app; on macOS/Linux the new version is picked up on your next launch.
+- **Install on quit** — opens a confirmation showing the staged version against your current version, with install/skip. The download then runs **in the background with a live percentage in the banner** (`Preparing update — 42%`, or `Preparing…` when the server sends no payload size), so a multi-minute stage is no longer a black box. A **Cancel** button next to the progress readout discards the staged update; a cancel issued while the download is still running cannot stop the transfer already in flight, so it marks the stage abandoned and throws the payload away the moment it lands. Either way the banner returns to its plain offer. The verified update is applied the next time you quit the app (tray → Quit). If the staged update is stale (same version or older than what you're running), it is skipped instead of installed — the banner shows a skipped state with an **Install anyway** override if you really want it (#431). On Windows the installer relaunches the app; on macOS/Linux the new version is picked up on your next launch.
 
 The banner is dismissible, and a failed *check* (offline, unreachable endpoint, mismatched signature key) is silent — it never blocks the UI.
 
-Update payloads are signature-verified against a key baked into the app (minisign), which is independent of OS code signing — so the macOS unsigned/Gatekeeper note in the README applies to updated builds too. Deferred "Install on quit" updates go through the same verification before they're staged.
+Update payloads are signature-verified against a key baked into the app (minisign), which is independent of OS code signing — so the macOS unsigned/Gatekeeper note in the README applies to updated builds too. Deferred "Install on quit" updates go through the same verification before they're staged, and are held in memory only — cancelling releases them instead of leaving a file behind.
 
 ---
 
@@ -169,7 +192,7 @@ PresenceJam writes a single log file, `PresenceJam.log`, managed by the logging 
 
 The log directory is the **bundle-identifier folder** (`com.presencejam.app`): Tauri's `app_log_dir()` appends the bundle id to the platform's local data directory, so `PresenceJam.log` does *not* sit next to `config.json` (issue #300). This is the directory tray menu → **Open Logs Folder** opens.
 
-The **Log Viewer** in-app lets you browse these logs without opening the filesystem — and can be popped out into its own window (see *Detachable Windows* above). You can also open the folder directly via tray menu → **Open Logs Folder**.
+The **Log Viewer** in-app lets you browse these logs without opening the filesystem — and can be popped out into its own window (see *Detachable Windows* above). It opens already filled with the **last 500 lines of the on-disk file** — read off the UI thread and capped at the trailing 256 KiB — so the history is there before the first new line is logged. While you are scrolled away from the bottom the pane holds your place as entries arrive instead of sliding the text under you; **Jump to latest** pins it back to the bottom. **Clear** empties the pane and suppresses that initial backfill for as long as the window stays open. You can also open the folder directly via tray menu → **Open Logs Folder**.
 
 **Log levels:**
 
