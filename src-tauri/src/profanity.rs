@@ -117,6 +117,8 @@ fn strip_diacritic(c: char) -> Option<&'static str> {
 /// Leet map. `6` folds to `b` (covers `6itch`); `2` folds to `i`
 /// (covers `sh2t`; no list word contains `z`, so `2` -> `z` was dead weight).
 /// `z` folds to `s` (covers `niggaz`/`bitchez` plurals; still no `z` in the list).
+/// `(` is deliberately absent: it folds to `c` only next to a stem
+/// onset, which needs lookahead (`normalize`, #578).
 fn leet_fold(c: char) -> (char, bool) {
     match c {
         '1' | '!' | '|' => ('i', true),
@@ -129,10 +131,32 @@ fn leet_fold(c: char) -> (char, bool) {
         '6' | '8' => ('b', true),
         '9' => ('g', true),
         '+' => ('t', true),
-        '(' => ('c', true),
         'z' => ('s', true),
         _ => (c, false),
     }
+}
+
+/// Stem onsets an `x`-for-`ck` spelling can be hiding (#377): `fux`,
+/// `shix`, `bix`, `bax`, `dix`, `pix`, `cux`, `nix`, `pux`. Applied
+/// unconditionally the fold also rewrote innocent names — `Cox`
+/// normalized to `cock` — so it only fires after one of these (#578).
+fn x_reads_as_ck(prev: &[NormChar]) -> bool {
+    const ONSETS: [&str; 9] = ["fu", "shi", "bi", "ba", "di", "pi", "cu", "ni", "pu"];
+    let take = prev.len().min(3);
+    let recent: String = prev[prev.len() - take..].iter().map(|n| n.ch).collect();
+    ONSETS.iter().any(|onset| recent.ends_with(onset))
+}
+
+/// The stems a leading `(` was folded to `c` for (#377): `(ock` (`cock`),
+/// `(unt` (`cunt`), `(rap` (`crap`), `(um` (`cum`). Applied unconditionally
+/// the fold also prefixed innocent parentheses — `Song (Uncut)`
+/// normalized to `cuncut` — so it only fires when the text actually
+/// spells one of these (#578). The lookahead runs through the single-char
+/// leet map so `(0ck` counts too.
+fn paren_reads_as_c(rest: impl Iterator<Item = char>) -> bool {
+    const STEMS: [&str; 4] = ["ock", "unt", "rap", "um"];
+    let look: String = rest.take(3).map(|c| leet_fold(c).0).collect();
+    STEMS.iter().any(|stem| look.starts_with(stem))
 }
 
 fn normalize(text: &str) -> Vec<NormChar> {
@@ -170,9 +194,11 @@ fn normalize(text: &str) -> Vec<NormChar> {
                 folded = ascii;
             }
         }
-        // Multi-char leet: `x` reads as `ck` (#377: `fux`).
-        // Placed after the fullwidth fold so fullwidth `ｘ` expands too.
-        if folded == 'x' {
+        // Multi-char leet: `x` reads as `ck` (#377: `fux`), but only after
+        // a stem onset — applied globally it rewrote innocent names
+        // (`Cox` reads as `co` + `ck`) (#578). Placed after the fullwidth
+        // fold so fullwidth `ｘ` expands too.
+        if folded == 'x' && x_reads_as_ck(&result) {
             result.push(NormChar {
                 ch: 'c',
                 leet: true,
@@ -181,6 +207,24 @@ fn normalize(text: &str) -> Vec<NormChar> {
                 ch: 'k',
                 leet: true,
             });
+            continue;
+        }
+        // `(` reads as `c` only when it spells one of the stems it was
+        // added for (#377: `(ock`); applied globally it prefixed innocent
+        // parentheses with a `c` (#578: `Song (Uncut)`). Outside those
+        // stems it stays a literal, non-alphanumeric separator.
+        if folded == '(' {
+            if paren_reads_as_c(chars.clone()) {
+                result.push(NormChar {
+                    ch: 'c',
+                    leet: true,
+                });
+            } else {
+                result.push(NormChar {
+                    ch: '(',
+                    leet: false,
+                });
+            }
             continue;
         }
         let folded_is_lossy = folded != c;
@@ -281,11 +325,12 @@ fn is_clean_compound(stem: &str, token: &str) -> bool {
 }
 
 /// Continuations that extend a stem into profanity rather than a new
-/// word: inflections (`ing`/`er`/`ed`/plurals) and insult compounds
-/// (`head`). Anything else (`pit`, `ens`, `ake`) is a distinct clean
-/// word (#328).
+/// word: inflections (`ing`/`er`/`ed`/plurals), insult compounds
+/// (`head`) and the glued compounds modern titles use (`boy`/`face`/
+/// `wad`/`post` — #579: `fuckboy`, `fuckface`, `shitposting`). Anything
+/// else (`pit`, `ens`, `ake`) is a distinct clean word (#328).
 fn is_profane_continuation(token: &str) -> bool {
-    ["ing", "er", "ed", "es", "s", "head"]
+    ["ing", "er", "ed", "es", "s", "head", "boy", "face", "wad", "post"]
         .iter()
         .any(|p| token.starts_with(p))
 }
@@ -347,6 +392,20 @@ fn contains_profanity(text: &str) -> bool {
             // no separator keep the glued strong-stem rule below.
             if sep_skipped {
                 let left_boundary = start == 0 || !chars[start - 1].ch.is_alphanumeric();
+                // A separator-spanning match may substitute or skip
+                // formatting, but it must not ALSO swallow alphabetic
+                // characters: `Song (Uncut)` reads a leading `c` out of the
+                // parenthesis and then drops the real `cu` of `uncut`,
+                // fabricating `cunt` (#578). The span covers every char the
+                // matcher consumed, so more alphabetic chars in it than the
+                // word has means at least one was skipped.
+                let alnum_in_span = chars[start..end]
+                    .iter()
+                    .filter(|n| n.ch.is_alphanumeric())
+                    .count();
+                if alnum_in_span > word_len {
+                    continue;
+                }
                 if !(left_boundary && right_clean) {
                     continue;
                 }
@@ -686,5 +745,52 @@ mod tests {
         assert!(!contains_profanity("Uptown Funk"));
         assert!(!contains_profanity("Explicit"));
         assert!(!contains_profanity("Zombie"));
+    }
+
+    // issue #578: the `x`-for-`ck` and `(`-for-`c` folds were applied
+    // globally, so real metadata fabricated matches — `Cox` normalized to
+    // `cock`, and the parenthesis in `Song (Uncut)` became the `c` of a
+    // fabricated `cunt`. Both folds are now scoped to the stem onsets they
+    // exist for, while the #377 evasions they were added for still flag.
+    #[test]
+    fn test_issue_578_scoped_x_and_paren_expansions() {
+        assert!(!contains_profanity("Cox"));
+        assert!(!contains_profanity("Carl Cox"));
+        assert!(!contains_profanity("Coxon"));
+        assert!(!contains_profanity("Lynx"));
+        assert!(!contains_profanity("Sphinx"));
+        assert!(!contains_profanity("Song (Uncut)"));
+        // The evasions the folds exist for are untouched.
+        assert!(contains_profanity("fux"));
+        assert!(contains_profanity("Fux"));
+        assert!(contains_profanity("phux"));
+        assert!(contains_profanity("(ock"));
+        assert!(contains_profanity("(unt"));
+        assert!(contains_profanity("(0ck"));
+    }
+
+    // issue #579: the glued-right continuation list stopped at
+    // `ing/er/ed/es/s/head`, so the compounds modern titles actually use
+    // passed the filter. `ake`/`ens`-style distinct words stay clean
+    // (#328) — the list is extended, never turned into "flag anything".
+    #[test]
+    fn test_issue_579_glued_compound_continuations() {
+        assert!(contains_profanity("fuckboy"));
+        assert!(contains_profanity("Fuckface"));
+        assert!(contains_profanity("fuckwad"));
+        assert!(contains_profanity("shitpost"));
+        assert!(contains_profanity("shitposting"));
+        assert!(contains_profanity("bitchboy"));
+        assert!(contains_profanity("bullshit"));
+        assert!(contains_profanity("horseshit"));
+        assert!(contains_profanity("dipshit"));
+        assert!(contains_profanity("sonofabitch"));
+        // Clean controls: a glued right token is only profane when it is a
+        // known continuation.
+        assert!(!contains_profanity("shitake"));
+        assert!(!contains_profanity("shiitake"));
+        assert!(!contains_profanity("Fukushima"));
+        assert!(!contains_profanity("cocktail"));
+        assert!(!contains_profanity("Push It"));
     }
 }
