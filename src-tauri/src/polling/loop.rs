@@ -1,13 +1,13 @@
 //! Polling driver.
 //!
-//! `polling_loop` is the outermost loop: it owns the per-thread mutable
-//! state whose lifetime spans iterations (`last_track_key`, `last_etag`,
-//! `last_teams_update`, `last_posted_placeholder`, `consecutive_pauses`,
-//! `transient_failure_count`, `gated_track_key`, `last_availability_arm`,
-//! `first_iteration`, `last_posted_status`, `last_gate_check`),
-//! checks the stop channel and the `is_syncing` flag, dispatches one
-//! iteration to [`super::poll_once::run`], refreshes the tray, and
-//! sleeps for the duration the iteration returned.
+//! `polling_loop` is the outermost loop: it owns the per-thread state whose
+//! lifetime spans iterations (`consecutive_pauses`, `transient_failure_count`,
+//! `consecutive_network_failures`, `last_etag`, `first_iteration`) and the
+//! write-decision clocks (`WriteClocks`, which live in [`super::poll_once`]
+//! because the manual `run_oneshot` refresh shares them), checks the stop
+//! channel and the `is_syncing` flag, dispatches one iteration to
+//! [`super::poll_once::run`], refreshes the tray, and sleeps for the duration
+//! the iteration returned.
 //!
 //! The actual fetch / 401-retry / no-track / CAS-discard logic lives in
 //! [`super::poll_once`] — the single source of truth for one iteration,
@@ -17,7 +17,7 @@
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::sync::Arc;
-use std::time::{Duration as StdDuration, Instant};
+use std::time::Duration as StdDuration;
 
 use tauri::AppHandle;
 
@@ -30,59 +30,40 @@ use crate::AppState;
 pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()>) {
     log::info!("[POLLING] polling_loop: STARTED");
     // Tracks consecutive empty/paused responses so we can widen the poll
-    // interval (30→60→120→300s) instead of hammering the API on a paused user.
-    // See issue #38. Owned by the driver because the counter's lifetime spans
-    // iterations; `poll_once::run` mutates it as a side effect of computing
-    // the per-iteration sleep. There is exactly ONE increment site per
-    // no-track outcome — inside poll_once::run — so the 401-retry no-track
-    // branch and the main no-track branch cannot drift apart. (Issue #72
-    // drift point #1.)
+    // interval (30→60→120→300s, bounded by the configured max interval) instead
+    // of hammering the API on a paused user. See issue #38. Owned by the driver
+    // because the counter's lifetime spans iterations; `poll_once::run` mutates
+    // it as a side effect of computing the per-iteration sleep. There is exactly
+    // ONE increment site per no-track outcome — inside poll_once::run — so the
+    // 401-retry no-track branch and the main no-track branch cannot drift apart.
+    // (Issue #72 drift point #1.)
     let mut consecutive_pauses: u8 = 0;
-    let mut last_track_key: Option<String> = None;
-    let mut last_teams_update: Option<Instant> = None;
-    // Tracks the last placeholder content posted by the clear path so
-    // byte-identical pause/no-track POSTs are skipped (issue #155). Owned by
-    // the driver because the value's lifetime spans iterations; `poll_once`
-    // sets it on a successful placeholder post and clears it when a real
-    // track starts. Reset on a successful post or a real track, so the gate
-    // never suppresses a placeholder that was replaced by real content.
-    let mut last_posted_placeholder: Option<String> = None;
-    // Counts consecutive transient errors toward the 5-strikes exit that
-    // emits `reconnect-required`. Owned by the driver because the counter's
-    // lifetime spans iterations; `poll_once::run` mutates it inside the
-    // single error arm. Reset by `poll_once` on any non-error iteration.
+    // Counts consecutive AUTH failures toward the 5-strikes exit that emits
+    // `reconnect-required`. Owned by the driver because the counter's lifetime
+    // spans iterations; `poll_once::run` mutates it inside the single error arm.
+    // Reset by `poll_once` on any non-error iteration. Finding PollCore#0
+    // (issue #568): this counter is bumped ONLY for genuinely dead credentials
+    // (`ExpiredToken`/`InvalidGrant`) — a network failure can no longer stop the
+    // session nor pop an OAuth window.
     let mut transient_failure_count: u8 = 0;
-    // P2 (issue #3.0-P2): the track key whose status write was suppressed
-    // by the presence gate. Owned by the driver because the decision spans
-    // iterations — a gated track stays gated until the next track change
-    // re-evaluates the presence. `poll_once::run` sets/clears it inside
-    // `process_track`.
-    let mut gated_track_key: Option<String> = None;
-    // P1 (issue #3.0-P1): when the "Available" presence session was last
-    // armed via setPresence. Owned by the driver because the re-arm cadence
-    // (≤4 min, sessions fade after 5) spans iterations; `poll_once::run`
-    // arms/clears it inside `process_track` / `handle_no_track`.
-    let mut last_availability_arm: Option<Instant> = None;
+    // Finding PollCore#0 (issue #568): consecutive NETWORK failures (transport
+    // errors, 5xx, JSON parse failures and 429s). Warning-only: once it reaches
+    // its own higher threshold it escalates the backoff (capped) and is
+    // surfaced as a warning — it never breaks the loop and never asks for a
+    // reconnect. Reset by any successful iteration.
+    let mut consecutive_network_failures: u8 = 0;
     // Candidate C11 (docs/scope-3.3.md §C11): the ETag validator from the
-    // last conditional GET /me/player/currently-playing response. Owned by
-    // the driver because its lifetime spans iterations; `poll_once::run`
-    // stores it from each 200/204 and echoes it back as `If-None-Match` on
-    // the next poll. Absent ⇒ unconditional GET (graceful degradation:
-    // Spotify's ETag support is empirical, not documented).
+    // last conditional GET /me/player/currently-playing response. Owned by the
+    // driver because its lifetime spans iterations; `poll_once::run` stores it
+    // from each 200/204 and echoes it back as `If-None-Match` on the next poll.
+    // Absent ⇒ unconditional GET (graceful degradation: Spotify's ETag support
+    // is empirical, not documented).
     let mut last_etag: Option<String> = None;
     // Issue #373: fresh threads start with `last_track_key=None` — this
     // flag lets the first no-track poll attempt one clear instead of
     // returning early and leaving pre-restart status stale. Consumed
     // exactly once; `poll_once` owns the consumption.
     let mut first_iteration = true;
-    // Issue #384: the last playing-track status text posted, alongside
-    // `last_teams_update` (which times the keepalive). `poll_once` sets
-    // it on a successful write and clears it when a placeholder replaces it.
-    let mut last_posted_status: Option<String> = None;
-    // Issue #380: when the presence-gate re-check last ran. Own clock so
-    // re-checks never shift the debounce + keepalive write windows timed
-    // by `last_teams_update`.
-    let mut last_gate_check: Option<Instant> = None;
 
     loop {
         log::debug!("[POLLING] polling_loop: iteration start");
@@ -104,28 +85,39 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
             break;
         }
 
+        // Finding PollCore#4 (issue #572): the write-decision clocks describe
+        // the single Teams status this app shows, so they are process-wide
+        // rather than per-thread. Load them for this iteration and store them
+        // back afterwards — the manual refresh (`run_oneshot`) loads the same
+        // slot, which is what stops it re-arming the availability session on a
+        // fresh clock or re-POSTing a status the #384 guard would skip. A
+        // concurrent load/store can only lose dedup precision (one redundant
+        // write), never correctness.
+        let mut clocks = super::poll_once::load_write_clocks();
+
         // Delegate the iteration. The driver passes `&mut` to per-iteration
-        // state so poll_once can mutate consecutive_pauses / last_track_key /
-        // last_teams_update / last_posted_placeholder / transient_failure_count
-        // without owning them.
+        // state so poll_once can mutate consecutive_pauses / transient counters
+        // / the shared write clocks without owning them.
         // The returned `PollIteration` tells the driver what to do next:
         // sleep N seconds, or break.
         let iteration = super::poll_once::run(
             &state,
             &app,
             &stop_rx,
-            &mut last_track_key,
-            &mut last_teams_update,
-            &mut last_posted_placeholder,
+            &mut clocks.last_track_key,
+            &mut clocks.last_teams_update,
+            &mut clocks.last_posted_placeholder,
             &mut consecutive_pauses,
             &mut transient_failure_count,
-            &mut gated_track_key,
-            &mut last_availability_arm,
+            &mut consecutive_network_failures,
+            &mut clocks.gated_track_key,
+            &mut clocks.last_availability_arm,
             &mut last_etag,
             &mut first_iteration,
-            &mut last_posted_status,
-            &mut last_gate_check,
+            &mut clocks.last_posted_status,
+            &mut clocks.last_gate_check,
         );
+        super::poll_once::store_write_clocks(&clocks);
 
         // Post-iteration tray sync — independent of the API result.
         let is_syncing = state.polling.is_syncing(Ordering::Acquire);
@@ -134,7 +126,7 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
             log::warn!("[POLLING] polling_loop: failed to update tray menu: {}", e);
         }
 
-        tray::set_presence_gated_badge(&app, gated_track_key.is_some());
+        tray::set_presence_gated_badge(&app, clocks.gated_track_key.is_some());
         match iteration {
             super::poll_once::PollIteration::Break => {
                 log::info!("[POLLING] polling_loop: poll_once requested break");
@@ -155,6 +147,12 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
         }
     }
 
+    // Finding PollCore#4 (issue #572): a session's clocks die with the
+    // session. Without this the next session (or a manual refresh issued while
+    // no session runs) would read a stale `last_track_key`/gate and skip the
+    // `spotify-track-changed` emit and the `current_track` update for a track
+    // that is already playing.
+    super::poll_once::reset_write_clocks();
     tray::set_presence_gated_badge(&app, false);
 
     log::info!("[POLLING] polling_loop: ENDED");
