@@ -909,7 +909,11 @@ fn record_no_track_outcome(
     consecutive_pauses: &mut u8,
     config: &Option<crate::config::AppConfig>,
 ) -> PollIteration {
-    let no_track_sleep = pause_backoff(*consecutive_pauses, config_default_interval(config));
+    let no_track_sleep = pause_backoff(
+        *consecutive_pauses,
+        config_default_interval(config),
+        config_pause_backoff_max(config),
+    );
     *consecutive_pauses = consecutive_pauses.saturating_add(1).min(4);
     log::info!(
         "[POLLING] poll_once: sleeping for {} seconds (no track)",
@@ -2286,7 +2290,17 @@ pub(crate) fn process_track(
             let final_status = if let Some(replacement) = rule_replacement.as_deref() {
                 replacement.to_string()
             } else if profanity_filter_enabled {
-                profanity::filter_status(&status_message, placeholder, track.is_playing)
+                // Issue #538: the user's own lexicon takes part in the filter.
+                let extra_words: &[String] = config
+                    .as_ref()
+                    .map(|c| c.teams.profanity_extra_words.as_slice())
+                    .unwrap_or(&[]);
+                profanity::filter_status(
+                    &status_message,
+                    placeholder,
+                    track.is_playing,
+                    extra_words,
+                )
             } else {
                 status_message.clone()
             };
@@ -2654,7 +2668,11 @@ pub(crate) fn process_track(
         let remaining_ms = corrected_progress_ms.map(|c| track.duration_ms.saturating_sub(c));
         playing_track_sleep(remaining_ms, config)
     } else {
-        let sleep = pause_backoff(*consecutive_pauses, config_default_interval(config));
+        let sleep = pause_backoff(
+            *consecutive_pauses,
+            config_default_interval(config),
+            config_pause_backoff_max(config),
+        );
         *consecutive_pauses = consecutive_pauses.saturating_add(1).min(4);
         sleep
     }
@@ -2999,6 +3017,15 @@ fn config_minimum_interval(config: &Option<crate::config::AppConfig>) -> u64 {
         .unwrap_or(10)
 }
 
+/// `polling.pause_backoff_max_seconds` (issue #538), defaulted to the
+/// documented 300 s so an untouched config keeps 4.5 behaviour.
+fn config_pause_backoff_max(config: &Option<crate::config::AppConfig>) -> u64 {
+    config
+        .as_ref()
+        .map(|c| c.polling.pause_backoff_max_seconds)
+        .unwrap_or(300)
+}
+
 fn config_maximum_interval(config: &Option<crate::config::AppConfig>) -> u64 {
     config
         .as_ref()
@@ -3106,20 +3133,29 @@ fn clamp_poll_interval(secs: u64, config: &Option<crate::config::AppConfig>) -> 
     secs.max(minimum).min(maximum)
 }
 
-/// The documented pause ladder (issue #38: default → 2× → 4× → 300s cap, see
-/// ARCHITECTURE.md / TROUBLESHOOTING.md) is deliberately NOT bounded by
+/// The documented pause ladder (issue #38: default → 2× → 4× → ceiling, see
+/// ARCHITECTURE.md / TROUBLESHOOTING.md — both still describe the 300 s
+/// default as the cap) is deliberately NOT bounded by
 /// `maximum_interval_seconds`: it is the idle-work reduction the docs promise,
-/// its 300s ceiling is the documented 5-minute cap, and clamping it by the
-/// default 60s max would silently multiply idle API traffic. Finding
-/// PollCore#6 (issue #573) is therefore fixed at the one path whose sleep was
-/// never a ladder rung — the tracked-track 304 (see
+/// and clamping it by the default 60s max would silently multiply idle API
+/// traffic. Finding PollCore#6 (issue #573) is therefore fixed at the one path
+/// whose sleep was never a ladder rung — the tracked-track 304 (see
 /// `not_modified_iteration`).
-fn pause_backoff(consecutive_pauses: u8, default_secs: u64) -> u64 {
+///
+/// Issue #538 / CfgDiag#3(c): the ceiling is `ceiling_secs`, i.e.
+/// `polling.pause_backoff_max_seconds` (clamped to 60..=3600 by
+/// `config::clamp_polling`, default 300). Pre-fix the literal `300` was
+/// hardcoded here, so the config key the Settings card exposes had no effect
+/// on the ladder it is named after.
+fn pause_backoff(consecutive_pauses: u8, default_secs: u64, ceiling_secs: u64) -> u64 {
+    // A ceiling below the base would otherwise produce a ladder that shrinks
+    // as the pause count grows.
+    let ceiling = ceiling_secs.max(default_secs);
     match consecutive_pauses {
         0 => default_secs,
-        1 => default_secs.saturating_mul(2).min(300),
-        2 => default_secs.saturating_mul(4).min(300),
-        _ => 300,
+        1 => default_secs.saturating_mul(2).min(ceiling),
+        2 => default_secs.saturating_mul(4).min(ceiling),
+        _ => ceiling,
     }
 }
 
@@ -3155,29 +3191,59 @@ fn network_failure_backoff(count: u8) -> u64 {
 mod tests {
     use super::*;
 
+    /// Issue #538: the ladder with the DOCUMENTED default ceiling (300 s), so
+    /// an untouched config behaves exactly as it did in 4.5.
     #[test]
     fn test_pause_backoff_grows_then_caps() {
-        assert_eq!(pause_backoff(0, 30), 30);
-        assert_eq!(pause_backoff(1, 30), 60);
-        assert_eq!(pause_backoff(2, 30), 120);
-        assert_eq!(pause_backoff(3, 30), 300);
-        assert_eq!(pause_backoff(4, 30), 300);
-        assert_eq!(pause_backoff(255, 30), 300);
+        assert_eq!(pause_backoff(0, 30, 300), 30);
+        assert_eq!(pause_backoff(1, 30, 300), 60);
+        assert_eq!(pause_backoff(2, 30, 300), 120);
+        assert_eq!(pause_backoff(3, 30, 300), 300);
+        assert_eq!(pause_backoff(4, 30, 300), 300);
+        assert_eq!(pause_backoff(255, 30, 300), 300);
     }
 
     #[test]
     fn test_pause_backoff_uses_configured_default() {
-        assert_eq!(pause_backoff(0, 45), 45);
-        assert_eq!(pause_backoff(1, 45), 90);
-        assert_eq!(pause_backoff(2, 45), 180);
-        assert_eq!(pause_backoff(3, 45), 300);
+        assert_eq!(pause_backoff(0, 45, 300), 45);
+        assert_eq!(pause_backoff(1, 45, 300), 90);
+        assert_eq!(pause_backoff(2, 45, 300), 180);
+        assert_eq!(pause_backoff(3, 45, 300), 300);
     }
 
     #[test]
     fn test_pause_backoff_caps_with_large_default() {
-        assert_eq!(pause_backoff(0, 200), 200);
-        assert_eq!(pause_backoff(1, 200), 300);
-        assert_eq!(pause_backoff(2, 200), 300);
+        assert_eq!(pause_backoff(0, 200, 300), 200);
+        assert_eq!(pause_backoff(1, 200, 300), 300);
+        assert_eq!(pause_backoff(2, 200, 300), 300);
+    }
+
+    /// Issue #538: `polling.pause_backoff_max_seconds` IS the ladder's ceiling
+    /// — the config key the Settings card exposes must govern the ladder it is
+    /// named after (pre-fix `pause_backoff` hardcoded 300 and the key was
+    /// consumed nowhere, so a user's 900 s ceiling changed nothing).
+    #[test]
+    fn test_pause_backoff_honours_the_configured_ceiling() {
+        // A raised ceiling lets the ladder climb past the old 300 s literal.
+        assert_eq!(pause_backoff(1, 120, 900), 240);
+        assert_eq!(pause_backoff(2, 120, 900), 480);
+        assert_eq!(pause_backoff(3, 120, 900), 900);
+        assert_eq!(pause_backoff(255, 120, 900), 900);
+        // A lowered ceiling caps sooner (clamp_polling's floor is 60).
+        assert_eq!(pause_backoff(1, 30, 60), 60);
+        assert_eq!(pause_backoff(2, 30, 60), 60);
+        assert_eq!(pause_backoff(4, 30, 60), 60);
+        // A ceiling below the base cannot invert the ladder.
+        assert_eq!(pause_backoff(3, 120, 60), 120);
+        // The accessor reads the config, defaulting to the documented 300.
+        assert_eq!(config_pause_backoff_max(&None), 300);
+        assert_eq!(
+            config_pause_backoff_max(&Some(crate::config::AppConfig::default())),
+            300
+        );
+        let mut raised = crate::config::AppConfig::default();
+        raised.polling.pause_backoff_max_seconds = 900;
+        assert_eq!(config_pause_backoff_max(&Some(raised)), 900);
     }
 
     /// Regression guard for issue #72 drift point #3.
@@ -4923,10 +4989,21 @@ mod tests {
         narrow.polling.minimum_interval_seconds = 10;
         narrow.polling.max_interval_seconds = 60;
         let narrow = Some(narrow);
-        assert_eq!(pause_backoff(3, config_default_interval(&narrow)), 300);
+        assert_eq!(
+            pause_backoff(
+                3,
+                config_default_interval(&narrow),
+                config_pause_backoff_max(&narrow)
+            ),
+            300
+        );
         assert!(
-            pause_backoff(3, config_default_interval(&narrow)) > config_maximum_interval(&narrow),
-            "the ladder's documented 5-minute cap sits above the default max"
+            pause_backoff(
+                3,
+                config_default_interval(&narrow),
+                config_pause_backoff_max(&narrow)
+            ) > config_maximum_interval(&narrow),
+            "the ladder's default 5-minute ceiling sits above the default max"
         );
     }
 
