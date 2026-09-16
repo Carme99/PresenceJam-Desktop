@@ -95,7 +95,7 @@ The **live preview** below the field renders against a fixed sample item — dev
 | Clear on pause | On | Clears your Teams status when Spotify pauses or stops. There is no Settings toggle for this — edit `teams.clear_on_pause` in `config.json` directly (consumed at `src-tauri/src/polling/poll_once.rs`). |
 | Profanity filter | On | Replaces profane track/artist names with a safe placeholder |
 | Profanity placeholder | `Currently Listening to Spotify` | Shown when a track name is filtered. Supports `{emoji}`. |
-| Custom words to filter | empty | Extra words/phrases, one per line, bounded to the first **64 entries of 32 characters** and shown with the same clamp feedback as the polling fields. **Documented gap:** the list is stored and validated but the filter does not yet use it — only the built-in list is applied (see [TROUBLESHOOTING.md — A profane track isn't being filtered](./TROUBLESHOOTING.md#a-profane-track-isnt-being-filtered)). |
+| Custom words to filter | empty | Extra words/phrases, one per line, bounded to the first **64 entries of 32 characters** and shown with the same clamp feedback as the polling fields. A word you add is matched with the same rules as the built-in list — word boundaries are respected (adding `spam` does not flag `spamalot`), and the usual evasions (`s.p.a.m`, `5pam`) are caught — so the effect is visible immediately in the status preview below. |
 
 ### Presence
 
@@ -140,10 +140,10 @@ Both lists live in `config.json` under `status_rules` (`quiet_hours[]`, `track_r
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| Default interval | 30s | The baseline poll gap when a track is playing but Spotify reports no playback position (live streams, #165) — slider range 10–60 s. It is also the base for the pause backoff: each consecutive non-playing response doubles it (30 → 60 → 120 s) up to a 300 s cap, resetting on the next playing track. |
+| Default interval | 30s | The baseline poll gap when a track is playing but Spotify reports no playback position (live streams, #165) — slider range 10–60 s. It is also the base for the pause backoff: each consecutive non-playing response doubles it (30 → 60 → 120 s) up to the paused-backoff ceiling (300 s by default), resetting on the next playing track. |
 | Min interval | 10s | Floor for the track-end smart sleep — while a track plays, PresenceJam never polls sooner than this (5–30 s in Settings). |
 | Max interval | 60s | Ceiling for the track-end smart sleep — while a track plays, PresenceJam never sleeps longer than this (up to 300 s in Settings). |
-| Paused backoff ceiling | 300s | The upper bound for the pause backoff ladder (30 → 60 → 120 s → this value), accepted in the range 60–3600 s with inline clamp feedback. **Documented gap:** the setting is stored and validated but the polling loop still caps the ladder at the documented 300 s, so raising it has no effect yet — the code comments call that cap the promise the docs make about idle-work reduction. |
+| Paused backoff ceiling | 300s | The upper bound for the pause backoff ladder (30 → 60 → 120 s → this value), accepted in the range 60–3600 s with inline clamp feedback. Raising it lets the ladder climb further before settling (fewer idle API calls); lowering it settles sooner. A value below the base interval is floored at the base, so the ladder never shrinks as pauses accumulate. |
 
 All four are clamped by the backend (`config.rs::clamp_polling`): default 5–300 s, min 5–30 s, max between min and 300 s, and the pause ceiling 60–3600 s. The Settings form previews the clamped values before saving ("Min interval exceeds max interval — max will be saved as {max}s.").
 

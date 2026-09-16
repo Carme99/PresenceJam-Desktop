@@ -634,7 +634,7 @@ flowchart TD
     KeepSkip -->|yes| SmartSleep
     KeepSkip -->|no| Set[POST /me/presence<br/>setStatusMessage]
     Set --> SmartSleep[Smart sleep until track ends - 5s]
-    Consec --> Backoff[Pause-aware exponential backoff:<br/>30s → 60s → 120s → 300s cap]
+    Consec --> Backoff[Pause-aware exponential backoff:<br/>30s → 60s → 120s → `pause_backoff_max_seconds`]
     SmartSleep --> Tick
     Backoff --> Tick
 ```
@@ -818,15 +818,15 @@ mirroring the backend bound:
 | Field | Bound (backend, `config.rs`) | Settings | Consumed by |
 |-------|------------------------------|----------|-------------|
 | `status_rules.quiet_hours[].replacement_status` | `MAX_RULE_STATUS_CHARS` = 160 | "Post this instead (empty = suppress)" per quiet-hours row | ✅ the playing path *and* the no-track clear — a quiet-hours replacement is posted from both |
-| `teams.profanity_extra_words` | `clamp_teams`: at most 64 entries, each truncated to 32 chars | "Custom words to filter", one per line | ❌ **nothing** — `profanity::filter_status(text, placeholder, is_playing)` takes no extra lexicon, and no other module reads the field |
-| `polling.pause_backoff_max_seconds` | `clamp_polling`: 60–3600 s | "Paused backoff ceiling (seconds)" | ❌ **nothing** — `poll_once::pause_backoff` hardcodes the documented `.min(300)` ladder ceiling |
+| `teams.profanity_extra_words` | `clamp_teams`: at most 64 entries, each truncated to 32 chars | "Custom words to filter", one per line | ✅ `profanity::filter_status(text, placeholder, is_playing, extra_words)` → `contains_extra_word` (built-in boundary/evasion rules, no built-in stem carve-outs) — consumed by the polling status write and by `preview_status` |
+| `polling.pause_backoff_max_seconds` | `clamp_polling`: 60–3600 s | "Paused backoff ceiling (seconds)" | ✅ `poll_once::pause_backoff(consecutive, default, ceiling)` — the ladder's top rung (default 300 s; floored at the base interval so it cannot invert the ladder) |
 
-> **Documented gap (must not be papered over):** all three are persisted,
-> clamped and validated, and the two `❌` rows are presented in the UI as if
-> they worked — `settings.extraWordsHint` promises the words are "applied with
-> the same boundaries as the built-in list" and `pauseBackoffClampHint` implies
-> the ceiling is honoured. Neither is true on `main`; the doc lines here and in
-> `USAGE.md` say so explicitly rather than describing intended behaviour.
+> All three are persisted, clamped, validated **and consumed**, and the Settings
+> hints describe implemented behaviour: `settings.extraWordsHint` (the words run
+> through the built-in boundary and evasion rules) and
+> `settings.pauseBackoffClampHint` (the ceiling is the ladder's top rung) are
+> both true on `main`. The matching implementation is covered by the profiling
+> tests in `profanity.rs` and the pause-ladder tests in `poll_once.rs`.
 
 ### Profanity filter
 

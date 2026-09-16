@@ -236,6 +236,11 @@ The list is in `src-tauri/src/profanity.rs` and covers common English profanity.
 - Leetspeak variants: `sh1t`, `$hit`, `d@mn`, `p1ss`, `n1gg3r`
 - Repeated-character variants: `shiiit`, `fuuuuck`
 - "fucking", "fucked", "fucker" variants
+- Any words you add under Settings → Profanity filter → *Custom words to filter*
+  (one per line, up to 64 entries of 32 characters). Your words go through the
+  same boundary and evasion rules as the list above — adding `spam` does not flag
+  `spamalot`, and `s.p.a.m` / `5pam` are still caught — and the status preview
+  updates as soon as you type them.
 
 False positives are prevented via word-boundary checks — words like `class`, `cocktail`, `assassin`, `vacuum`, `cumulative` are not flagged.
 
