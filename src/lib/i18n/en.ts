@@ -95,8 +95,8 @@ export const en = {
   'logs.level.info': 'Info',
   'logs.level.warning': 'Warning',
   'logs.level.error': 'Error',
-  'logs.countOne': '{count} entry',
-  'logs.countOther': '{count} entries',
+  'logs.count_one': '{count} entry',
+  'logs.count_other': '{count} entries',
   'logs.showingOf': 'Showing {shown} of {total}',
   'logs.jumpToLatest': 'Jump to latest',
   'logs.popOut': 'Pop out',
@@ -226,7 +226,6 @@ export const en = {
   'reconnect.missingCredentials': 'Missing credentials',
   'reconnect.failed': 'Failed',
   'reconnect.readyToReconnect': 'Ready to reconnect',
-  'reconnect.needsReconnect': 'Ready to reconnect',
   'reconnect.spotifyOk': 'Spotify reconnected successfully.',
   'reconnect.spotifyNotConfigured':
     'Spotify credentials are not configured on this machine.',

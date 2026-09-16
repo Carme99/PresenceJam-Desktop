@@ -1,8 +1,12 @@
 /**
- * Runtime store tests (#420, #425, #422, #423) — import and call the
+ * Runtime store tests (#420, #425, #422, #423, #618) — import and call the
  * real stores with mocked Tauri IPC. Fail pre-fix (raw numbers stored,
- * aliased default, zombie flag stuck, no cross-window sync); pass
- * post-fix.
+ * aliased default, zombie flag stuck, no cross-window sync, a badge that
+ * survives its window); pass post-fix.
+ *
+ * Every store is pulled in with `await import()` inside the test that needs
+ * it: the module state under test (`detachedPanes`, `configStore`) is
+ * process-wide, so the load boundary has to sit inside the per-test reset.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -10,9 +14,18 @@ const invoke = vi.fn();
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke }));
 
+type FakeWindow = {
+  setFocus: () => Promise<void>;
+  close: () => Promise<void>;
+};
+
 const winState = {
-  win: null as null | { setFocus: () => Promise<void> },
-  created: 0
+  win: null as FakeWindow | null,
+  created: 0,
+  closed: 0,
+  // tauri://destroyed / tauri://error handlers the store registered on the
+  // window it created — recorded so the badge-teardown paths are reachable.
+  handlers: {} as Record<string, (e?: unknown) => void>
 };
 
 class FakeWebviewWindow {
@@ -22,11 +35,8 @@ class FakeWebviewWindow {
   constructor() {
     winState.created++;
   }
-  async setFocus() {
-    await winState.win?.setFocus();
-  }
-  once() {
-    return 0;
+  once(event: string, handler: (e?: unknown) => void) {
+    winState.handlers[event] = handler;
   }
 }
 
@@ -38,6 +48,8 @@ beforeEach(() => {
   invoke.mockReset();
   winState.win = null;
   winState.created = 0;
+  winState.closed = 0;
+  winState.handlers = {};
 });
 
 describe('config store runtime (#420, #425)', () => {
@@ -134,7 +146,8 @@ describe('detach store runtime (#422)', () => {
     winState.win = {
       setFocus: async () => {
         throw new Error('stale handle');
-      }
+      },
+      close: async () => {}
     };
     await d.popOut('logs');
     // Fell through to creation (not stuck on the zombie handle).
@@ -142,19 +155,61 @@ describe('detach store runtime (#422)', () => {
     expect(get(d.detachedPanes).logs).toBe(true);
   });
 
+  it('re-creates exactly one window when two popOut calls race', async () => {
+    const d = await import('$lib/stores/detach');
+    winState.win = null;
+    await Promise.all([d.popOut('settings'), d.popOut('settings')]);
+    // Not `toBeLessThanOrEqual(1)`: a guard that returned early and created
+    // nothing would satisfy that. Coalescing means exactly one creation.
+    expect(winState.created).toBe(1);
+  });
+
+  it('clears the badge when the detached window is destroyed or fails to open', async () => {
+    const { get } = await import('svelte/store');
+    const d = await import('$lib/stores/detach');
+    winState.win = null;
+
+    await d.popOut('logs');
+    expect(get(d.detachedPanes).logs).toBe(true);
+    winState.handlers['tauri://destroyed']?.();
+    expect(get(d.detachedPanes).logs).toBe(false);
+
+    await d.popOut('logs');
+    expect(get(d.detachedPanes).logs).toBe(true);
+    winState.handlers['tauri://error']?.({ message: 'creation failed' });
+    expect(get(d.detachedPanes).logs).toBe(false);
+  });
+
+  it('popIn closes a live window and clears the badge when it is gone', async () => {
+    const { get } = await import('svelte/store');
+    const d = await import('$lib/stores/detach');
+
+    let closeCalls = 0;
+    winState.win = {
+      setFocus: async () => {},
+      close: async () => {
+        closeCalls++;
+      }
+    };
+    d.detachedPanes.set({ logs: false, settings: true });
+    await d.popIn('settings');
+    expect(closeCalls).toBe(1);
+
+    // No window behind the badge (closed from its own title bar): the flag
+    // must still clear, or the Dashboard keeps offering "focus".
+    winState.win = null;
+    d.detachedPanes.set({ logs: false, settings: true });
+    await d.popIn('settings');
+    expect(get(d.detachedPanes).settings).toBe(false);
+  });
+
   it('focusDetached on a missing window clears the badge', async () => {
     const { get } = await import('svelte/store');
     const d = await import('$lib/stores/detach');
     winState.win = null;
+    d.detachedPanes.set({ logs: false, settings: true });
     await d.focusDetached('settings');
     expect(get(d.detachedPanes).settings).toBe(false);
-  });
-
-  it('concurrent popOut creates at most one window', async () => {
-    const d = await import('$lib/stores/detach');
-    winState.win = null;
-    await Promise.all([d.popOut('settings'), d.popOut('settings')]);
-    expect(winState.created).toBeLessThanOrEqual(1);
   });
 });
 

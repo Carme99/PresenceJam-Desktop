@@ -13,10 +13,10 @@
   import { onMount, onDestroy, tick } from 'svelte';
   import PageHeader from './PageHeader.svelte';
   import { currentView } from '$lib/stores/app';
+  import { t, tCount, type TKey } from '$lib/i18n';
   import type { LogPayload } from '$lib/types';
   // C7 multi-window detach: pop-out/pop-back controls.
   import { popOut, popIn } from '$lib/stores/detach';
-  import { t, type TKey } from '$lib/i18n';
 
   // When rendered in the detached `logs-detached` window, "Back" pops the
   // pane back into the main window (closes this one) instead of navigating
@@ -155,8 +155,7 @@
   // Three-way count label without a nested template ternary.
   function describeCount(shown: number, total: number): string {
     if (shown < total) return t('logs.showingOf', { shown, total });
-    if (total === 1) return t('logs.countOne', { count: total });
-    return t('logs.countOther', { count: total });
+    return tCount('logs.count', total);
   }
 
   // #595: seed the buffer from the on-disk tail. The pane used to open empty

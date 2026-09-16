@@ -1,6 +1,5 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
-  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { onMount, onDestroy } from 'svelte';
   import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notification';
   import { currentView } from '$lib/stores/app';
@@ -117,7 +116,7 @@
   // a flow started in Onboarding/Reconnect keeps its countdown here. The
   // 1s ticker only runs while a code with known expiry is waiting;
   // $effect cleanup clears the interval on unmount, independent of the
-  // onMount/onDestroy listener guard (#392).
+  // onMount/onDestroy listener teardown (#615).
   let expiryNow = $state(Date.now());
   let teamsRemainingMs = $derived(
     authFlow.teams.expiresAt == null ? null : authFlow.teams.expiresAt - expiryNow
@@ -208,23 +207,64 @@
     }, 300);
   });
 
-  let unlistenFns: UnlistenFn[] = [];
-  // #419: combined teardown is async — call sites must await it.
-  let unlistenAuth: (() => Promise<void>) | null = null;
-  // #392: onMount awaits config/sync/scope IPC before registering auth
-  // listeners, so an unmount while suspended must drop the late
-  // subscription (Dashboard.svelte:31-33 pattern).
-  let authListenersDestroyed = false;
-  // Issue #376 conflict listener handle + unmount race flag (issue #392
-  // pattern from +layout.svelte: `listen()` resolves async, so an unmount
-  // before resolution must immediately release the subscription).
-  let unlistenSecretConflict: UnlistenFn | null = null;
-  let secretConflictDestroyed = false;
+  // #615: `useAuthListeners` returns one teardown synchronously (it covers
+  // both the four auth events and the #376 extra listener below) and tracks
+  // the unmount-while-registering race internally, so this is just a handle.
+  let teardownAuth: (() => Promise<void>) | null = null;
 
   onMount(async () => {
-    if (authListenersDestroyed) return;
+    // #615: registered first, synchronously — before the config/scope IPC
+    // below can suspend — so the `onDestroy` teardown always has a handle to
+    // release. That ordering is what removes the old `destroyed` flags.
+    //
+    // Issue #376: the one-time `spotify-secret-conflict` event comes from the
+    // setup-path migration (config.json holds a legacy plaintext secret that
+    // differs from the keychain entry). The payload message stays Rust-side
+    // English (documented limitation) and is only dev-logged — the banner
+    // copy below goes through `t()`.
+    teardownAuth = useAuthListeners(
+      {
+        onSpotifyComplete: () => {
+          devLog('[SETTINGS] spotify-auth-complete received');
+          setSpotifyPhase('done');
+          isConnected = true;
+          // A completed reconnect resolves the #376 secret conflict (the
+          // current secret is in the keychain; next launch strips the stale
+          // plaintext), so dismiss the banner.
+          spotifySecretConflict = false;
+          // The new token carries the freshly-granted scope set — refresh so
+          // the playback banner disappears. Issue #3.0-P3.
+          refreshGrantedScopes();
+        },
+        onSpotifyFailed: (payload) => {
+          console.error('[SETTINGS] spotify-auth-failed:', payload);
+          setSpotifyPhase('error', String(payload));
+        },
+        onTeamsComplete: () => {
+          devLog('[SETTINGS] teams-auth-complete received');
+          setTeamsPhase('done');
+          teamsStatusConnected = true;
+          // The new token carries the freshly-granted scope set — refresh so
+          // the presence banner disappears. Issue #3.0-P1/P2.
+          refreshTeamsGrantedScopes();
+        },
+        onTeamsFailed: (payload) => {
+          console.error('[SETTINGS] teams-auth-failed:', payload);
+          setTeamsPhase('error', String(payload));
+        }
+      },
+      [
+        [
+          'spotify-secret-conflict',
+          (event) => {
+            devLog('[SETTINGS] spotify-secret-conflict received:', event.payload);
+            spotifySecretConflict = true;
+          }
+        ]
+      ]
+    );
+
     await loadConfig();
-    if (authListenersDestroyed) return;
     localConfig = structuredClone($configStore);
 
     try {
@@ -257,60 +297,6 @@
     // Settings-only listener would drop the event. The layout listener
     // sets the authFlow phase, navigates to Settings, and starts the
     // device-code flow; Settings renders the code/URI from the store.
-
-    // Auth completion/failure events via the shared helper.
-    const unlisten = await useAuthListeners({
-      onSpotifyComplete: () => {
-        if (authListenersDestroyed) return;
-        devLog('[SETTINGS] spotify-auth-complete received');
-        setSpotifyPhase('done');
-        isConnected = true;
-        // A completed reconnect resolves the #376 secret conflict (the
-        // current secret is in the keychain; next launch strips the stale
-        // plaintext), so dismiss the banner.
-        spotifySecretConflict = false;
-        // The new token carries the freshly-granted scope set — refresh so
-        // the playback banner disappears. Issue #3.0-P3.
-        refreshGrantedScopes();
-      },
-      onSpotifyFailed: (payload) => {
-        if (authListenersDestroyed) return;
-        console.error('[SETTINGS] spotify-auth-failed:', payload);
-        setSpotifyPhase('error', String(payload));
-      },
-      onTeamsComplete: () => {
-        if (authListenersDestroyed) return;
-        devLog('[SETTINGS] teams-auth-complete received');
-        setTeamsPhase('done');
-        teamsStatusConnected = true;
-        // The new token carries the freshly-granted scope set — refresh so
-        // the presence banner disappears. Issue #3.0-P1/P2.
-        refreshTeamsGrantedScopes();
-      },
-      onTeamsFailed: (payload) => {
-        if (authListenersDestroyed) return;
-        console.error('[SETTINGS] teams-auth-failed:', payload);
-        setTeamsPhase('error', String(payload));
-      }
-    });
-    if (authListenersDestroyed) {
-      await unlisten();
-    } else {
-      unlistenAuth = unlisten;
-    }
-    // Issue #376: one-time `spotify-secret-conflict` event from the
-    // setup-path migration (config.json holds a legacy plaintext secret
-    // that differs from the keychain entry). `useAuthListeners` only
-    // covers the four auth events, so subscribe directly; the payload
-    // message stays Rust-side English (documented limitation) and is
-    // only dev-logged — the banner copy below goes through `t()`.
-    listen<{ action: string; message: string }>('spotify-secret-conflict', (event) => {
-      devLog('[SETTINGS] spotify-secret-conflict received:', event.payload);
-      spotifySecretConflict = true;
-    }).then((u) => {
-      if (secretConflictDestroyed) u();
-      else unlistenSecretConflict = u;
-    });
   });
 
   onDestroy(() => {
@@ -322,13 +308,7 @@
       clearTimeout(previewDebounce);
       previewDebounce = null;
     }
-    authListenersDestroyed = true;
-    for (const unlisten of unlistenFns) {
-      unlisten();
-    }
-    if (unlistenAuth) void unlistenAuth();
-    secretConflictDestroyed = true;
-    if (unlistenSecretConflict) unlistenSecretConflict();
+    if (teardownAuth) void teardownAuth();
   });
 
   async function handleSave() {

@@ -57,9 +57,9 @@
   // cannot start two flows. Mirrors Settings.svelte / Reconnect.svelte.
   let spotifyConnecting = $state(false);
   let teamsConnecting = $state(false);
-  // #392: `useAuthListeners` resolves async, so an unmount before
-  // resolution must immediately release the subscription (Dashboard.svelte:31-33 pattern).
-  let destroyed = false;
+  // #615: `useAuthListeners` now returns its teardown synchronously and
+  // handles the #392 unmount-while-registering race internally, so the
+  // call site only holds the handle (no `destroyed` flag).
   let unlistenAuth: (() => Promise<void>) | null = null;
   // #387: after a step change the removed Continue button drops focus to
   // <body> — move it to the new step heading (tabindex -1, no visual change).
@@ -69,42 +69,32 @@
     });
   }
 
-  onMount(async () => {
+  onMount(() => {
     devLog('[ONBOARDING] onMount: ENTRY');
-
-    const unlisten = await useAuthListeners({
+    unlistenAuth = useAuthListeners({
       onSpotifyComplete: () => {
-        if (destroyed) return;
         devLog('[ONBOARDING] EVENT: spotify-auth-complete received');
         setSpotifyPhase('done');
         validationError = '';
         devLog('[ONBOARDING] EVENT: setSpotifyPhase(done), validationError cleared');
       },
       onSpotifyFailed: (payload) => {
-        if (destroyed) return;
         console.error('[ONBOARDING] EVENT: spotify-auth-failed received:', payload);
         setSpotifyPhase('error', String(payload));
         devLog('[ONBOARDING] EVENT: setSpotifyPhase(error)');
       },
       onTeamsComplete: () => {
-        if (destroyed) return;
         devLog('[ONBOARDING] EVENT: teams-auth-complete received');
         setTeamsPhase('done');
         validationError = '';
         devLog('[ONBOARDING] EVENT: setTeamsPhase(done), validationError cleared');
       },
       onTeamsFailed: (payload) => {
-        if (destroyed) return;
         console.error('[ONBOARDING] EVENT: teams-auth-failed received:', payload);
         setTeamsPhase('error', String(payload));
         devLog('[ONBOARDING] EVENT: setTeamsPhase(error)');
       }
     });
-    if (destroyed) {
-      await unlisten();
-    } else {
-      unlistenAuth = unlisten;
-    }
     devLog('[ONBOARDING] onMount: listeners registered');
 
     // #531/#542: the wizard is reachable by RETURNING users (Dashboard's
@@ -112,24 +102,29 @@
     // their stored settings rather than its own defaults — and `finish()`
     // merges into that same stored config instead of replacing it. The
     // store load also warms `configStore` for the views that follow.
-    try {
-      const loaded = await loadConfig();
-      statusFormat = loaded.teams.status_format;
-      launchAtLogin = loaded.autostart;
-      pollingInterval = Number(loaded.polling.default_interval_seconds);
-      spotifyClientId = loaded.spotify.client_id;
-      devLog('[ONBOARDING] onMount: prefilled from stored config');
-    } catch (e) {
-      // `loadConfig` already falls back to `defaultConfig` and never
-      // rejects; this guard only keeps a future change from breaking the
-      // wizard silently. Prefill is display-only — `finish()` re-reads.
-      console.warn('[ONBOARDING] onMount: config prefill failed:', e);
-    }
+    // The prefill is awaited inside an IIFE rather than by making the
+    // `onMount` callback `async`: Svelte treats an async callback's returned
+    // promise as a teardown function (#392), and the listener registration
+    // above must stay synchronous.
+    void (async () => {
+      try {
+        const loaded = await loadConfig();
+        statusFormat = loaded.teams.status_format;
+        launchAtLogin = loaded.autostart;
+        pollingInterval = Number(loaded.polling.default_interval_seconds);
+        spotifyClientId = loaded.spotify.client_id;
+        devLog('[ONBOARDING] onMount: prefilled from stored config');
+      } catch (e) {
+        // `loadConfig` already falls back to `defaultConfig` and never
+        // rejects; this guard only keeps a future change from breaking the
+        // wizard silently. Prefill is display-only — `finish()` re-reads.
+        console.warn('[ONBOARDING] onMount: config prefill failed:', e);
+      }
+    })();
   });
 
   onDestroy(() => {
     devLog('[ONBOARDING] onDestroy: cleaning up listeners');
-    destroyed = true;
     if (unlistenAuth) void unlistenAuth();
     devLog('[ONBOARDING] onDestroy: listeners cleaned up');
   });

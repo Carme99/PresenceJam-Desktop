@@ -88,8 +88,8 @@ export const de: Dict = {
   'logs.level.info': 'Info',
   'logs.level.warning': 'Warnung',
   'logs.level.error': 'Fehler',
-  'logs.countOne': '{count} Eintrag',
-  'logs.countOther': '{count} Einträge',
+  'logs.count_one': '{count} Eintrag',
+  'logs.count_other': '{count} Einträge',
   'logs.showingOf': '{shown} von {total} angezeigt',
   'logs.jumpToLatest': 'Zum Neuesten springen',
   'logs.popOut': 'Abkoppeln',
@@ -236,7 +236,6 @@ export const de: Dict = {
   'reconnect.missingCredentials': 'Fehlende Anmeldedaten',
   'reconnect.failed': 'Fehlgeschlagen',
   'reconnect.readyToReconnect': 'Bereit zur Neuverbindung',
-  'reconnect.needsReconnect': 'Bereit zur Neuverbindung',
   'reconnect.spotifyOk': 'Spotify erfolgreich neu verbunden.',
   'reconnect.spotifyNotConfigured':
     'Spotify-Anmeldedaten sind auf diesem Rechner nicht konfiguriert.',

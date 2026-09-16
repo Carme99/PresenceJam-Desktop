@@ -20,6 +20,7 @@
   import { notificationsEnabled } from '$lib/stores/notifications';
   import Logo from './Logo.svelte';
   import { t } from '$lib/i18n';
+  import { useListenerTeardown } from '$lib/utils/useAuthListeners';
 
   let isSyncing = $state(false);
   let isToggling = $state(false);
@@ -49,12 +50,11 @@
   // #408: goToSetup re-enable timer must be cleared on destroy so a
   // late callback cannot touch state after unmount.
   let goToSetupTimeout: ReturnType<typeof setTimeout> | null = null;
-  let unlisten: (() => void)[] = [];
-  // #287: onMount is async and awaits get_sync_status / updateMenuState
-  // before registering listeners, so a destroy while it is suspended
-  // would leave `unlisten` empty and leak every registration. Mirrors
-  // the guard already used in +page.svelte and +layout.svelte.
-  let destroyed = false;
+  // #615: one teardown for every `listen()` below. It is created here,
+  // before onMount's first `await`, and the "destroy while onMount is
+  // suspended" race (#287) — a registration that settles after unmount —
+  // is handled inside it, so the old `destroyed` flag is gone.
+  const teardown = useListenerTeardown();
   let lastNotifiedId = '';
   // C8: throttle — at most one track-change notification every 5 s.
   const NOTIFICATION_THROTTLE_MS = 5000;
@@ -67,8 +67,7 @@
   const TRACK_NOTIFICATION_GROUP = 'presencejam-track-change';
 
   onDestroy(() => {
-    destroyed = true;
-    unlisten.forEach(fn => fn());
+    void teardown.dispose();
     if (displayErrorTimeout) clearTimeout(displayErrorTimeout);
     if (goToSetupTimeout) clearTimeout(goToSetupTimeout);
     if (availabilityTimeout) clearTimeout(availabilityTimeout);
@@ -97,7 +96,7 @@
     }
 
     devLog('[DASHBOARD] onMount: setting up spotify-track-changed listener');
-    listen('spotify-track-changed', async (event: any) => {
+    teardown.add(listen('spotify-track-changed', async (event: any) => {
       devLog('[DASHBOARD] EVENT: spotify-track-changed received');
       devLog('[DASHBOARD] EVENT: track.title=', event.payload.title);
       devLog('[DASHBOARD] EVENT: track.artist=', event.payload.artist);
@@ -130,33 +129,33 @@
           } catch {}
         }
       }
-    }).then(fn => { if (destroyed) fn(); else unlisten.push(fn); });
-    listen('presence-updated', (event: any) => {
+    }));
+    teardown.add(listen('presence-updated', (event: any) => {
       devLog('[DASHBOARD] EVENT: presence-updated received');
       devLog('[DASHBOARD] EVENT: status=', event.payload.status);
       // A real status write means the gate is no longer suppressing —
       // markStatusPosted clears it (issue #3.0-P2).
       markStatusPosted(event.payload.status);
-    }).then(fn => { if (destroyed) fn(); else unlisten.push(fn); });
+    }));
 
     devLog('[DASHBOARD] onMount: setting up presence-cleared listener');
-    listen('presence-cleared', async () => {
+    teardown.add(listen('presence-cleared', async () => {
       devLog('[DASHBOARD] EVENT: presence-cleared received');
       currentTrack = null;
       markPresenceCleared();
       devLog('[DASHBOARD] EVENT: currentTrack=null, presence cleared');
       await updateMenuState();
-    }).then(fn => { if (destroyed) fn(); else unlisten.push(fn); });
+    }));
 
     devLog('[DASHBOARD] onMount: setting up presence-gated listener');
-    listen('presence-gated', (event: any) => {
+    teardown.add(listen('presence-gated', (event: any) => {
       devLog('[DASHBOARD] EVENT: presence-gated received');
       devLog('[DASHBOARD] EVENT: reason=', event.payload?.reason);
       markPresenceGated();
-    }).then(fn => { if (destroyed) fn(); else unlisten.push(fn); });
+    }));
 
     devLog('[DASHBOARD] onMount: setting up presence-availability-updated listener');
-    listen('presence-availability-updated', (event: any) => {
+    teardown.add(listen('presence-availability-updated', (event: any) => {
       devLog('[DASHBOARD] EVENT: presence-availability-updated received');
       // #551: derive the chip copy from the structured flag instead of
       // rendering the backend's English `label`, and make the "cleared"
@@ -165,10 +164,10 @@
       const available = event.payload?.available === true;
       setAvailabilityListening(available);
       showAvailability(available);
-    }).then(fn => { if (destroyed) fn(); else unlisten.push(fn); });
+    }));
 
     devLog('[DASHBOARD] onMount: setting up error listener');
-    listen<ErrorEventPayload>('error', (event) => {
+    teardown.add(listen<ErrorEventPayload>('error', (event) => {
       const payload = event.payload;
       console.error('[DASHBOARD] EVENT: error received:', payload);
       // Issue #79: only `severity: "error"` (i.e. an error the polling
@@ -186,27 +185,27 @@
       if (displayErrorTimeout) clearTimeout(displayErrorTimeout);
       displayError = message;
       displayErrorTimeout = setTimeout(() => { displayError = ''; displayErrorTimeout = null; }, 5000);
-    }).then(fn => { if (destroyed) fn(); else unlisten.push(fn); });
+    }));
 
     // toggle-pause is now handled in +page.svelte (always-mounted) — Dashboard no longer owns it (#230).
     devLog('[DASHBOARD] onMount: setting up sync-started listener');
-    listen('sync-started', () => {
+    teardown.add(listen('sync-started', () => {
       devLog('[DASHBOARD] EVENT: sync-started received');
       isSyncing = true;
       devLog('[DASHBOARD] EVENT: isSyncing=true');
       updateMenuState();
-    }).then(fn => { if (destroyed) fn(); else unlisten.push(fn); });
+    }));
 
     devLog('[DASHBOARD] onMount: setting up sync-stopped listener');
-    listen('sync-stopped', () => {
+    teardown.add(listen('sync-stopped', () => {
       devLog('[DASHBOARD] EVENT: sync-stopped received');
       isSyncing = false;
       devLog('[DASHBOARD] EVENT: isSyncing=false');
       updateMenuState();
-    }).then(fn => { if (destroyed) fn(); else unlisten.push(fn); });
+    }));
 
     devLog('[DASHBOARD] onMount: setting up polling-thread-panicked listener');
-    listen('polling-thread-panicked', () => {
+    teardown.add(listen('polling-thread-panicked', () => {
       // Rust side resets is_syncing in polling.rs:321, but the JS-side
       // mirror (this rune) was not being flipped — UI would stay
       // "Syncing" forever after a thread panic. See issue #33.
@@ -217,10 +216,10 @@
       displayError = t('dashboard.syncCrashed');
       displayErrorTimeout = setTimeout(() => { displayError = ''; displayErrorTimeout = null; }, 5000);
       updateMenuState();
-    }).then(fn => { if (destroyed) fn(); else unlisten.push(fn); });
+    }));
 
     devLog('[DASHBOARD] onMount: setting up reconnect-required listener');
-    listen('reconnect-required', () => {
+    teardown.add(listen('reconnect-required', () => {
       // Generic reconnect signal from polling.rs:633 (e.g. when the
       // auth refresh loop has been failing for too long). The
       // provider-specific events are handled elsewhere:
@@ -232,7 +231,7 @@
       devLog('[DASHBOARD] EVENT: isSyncing=false (reconnect)');
       currentView.set('reconnect');
       updateMenuState();
-    }).then(fn => { if (destroyed) fn(); else unlisten.push(fn); });
+    }));
   });
 
   /**

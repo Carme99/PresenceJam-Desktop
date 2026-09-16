@@ -91,6 +91,17 @@ async function listenerReady(event: string, count = 1) {
   });
 }
 
+/**
+ * Unmount and wait for the teardown to finish. `useListenerTeardown` awaits
+ * each `listen()` promise before releasing it, so asserting listener counts
+ * immediately after `unmount()` would still see the outgoing instance's
+ * registrations.
+ */
+async function unmountAndDrain(component: { unmount: () => void }) {
+  component.unmount();
+  await waitFor(() => expect(listeners.length).toBe(0));
+}
+
 beforeEach(() => {
   listeners.length = 0;
   presence.set({ postedStatus: null, gated: false, availabilityListening: false });
@@ -133,7 +144,7 @@ describe('Dashboard presence hydration (#547)', () => {
     expect(first.container.querySelector('.availability-chip')).not.toBeNull();
 
     // A view switch: Dashboard is destroyed and rebuilt from the store.
-    first.unmount();
+    await unmountAndDrain(first);
     const second = render(Dashboard);
     await listenerReady('presence-updated');
 
@@ -148,7 +159,7 @@ describe('Dashboard presence hydration (#547)', () => {
     const first = render(Dashboard);
     await listenerReady('presence-updated');
     await emit('presence-updated', { status: 'first' });
-    first.unmount();
+    await unmountAndDrain(first);
 
     const second = render(Dashboard);
     await listenerReady('presence-updated');

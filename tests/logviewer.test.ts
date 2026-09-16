@@ -9,6 +9,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, fireEvent, cleanup } from '@testing-library/svelte';
+import { tick } from 'svelte';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 
@@ -29,6 +30,7 @@ vi.mock('$lib/stores/detach', () => ({
 // Static import: component path is author-time known (vi.mock calls hoist
 // above it, so Tauri mocks still apply at load time).
 import LogViewer from '$lib/components/LogViewer.svelte';
+import { i18n } from '$lib/i18n';
 
 function emit(level: number, message: string) {
   for (const fn of listeners) fn({ payload: { level, message } });
@@ -81,5 +83,29 @@ describe('LogViewer behavior (#492)', () => {
     list.scrollTop = 100;
     await fireEvent.scroll(list);
     expect(container.querySelector('.jump-latest')).not.toBeNull();
+  });
+
+  it('labels the count through CLDR plural rules, not `count === 1` (#616)', async () => {
+    const { container, getByRole } = render(LogViewer, { detached: false });
+    const count = () => container.querySelector('.count')?.textContent?.trim();
+
+    emit(3, 'first');
+    await Promise.resolve();
+    expect(count()).toBe('1 entry');
+
+    emit(3, 'second');
+    await Promise.resolve();
+    expect(count()).toBe('2 entries');
+
+    await fireEvent.click(getByRole('button', { name: 'Clear' }));
+    await tick();
+    expect(count()).toBe('0 entries');
+
+    // CLDR fr puts 0 in the `one` category, and the label follows the locale
+    // live — the hand-rolled `count === 1` rendered "0 entrées" here.
+    i18n.set('fr');
+    await tick();
+    expect(count()).toBe('0 entrée');
+    i18n.set('en');
   });
 });
