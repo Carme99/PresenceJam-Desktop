@@ -7,6 +7,8 @@ use tauri::{
     AppHandle, Emitter, Manager,
 };
 
+use crate::spotify::RepeatState;
+
 // Menu item IDs
 const ID_SHOW_HIDE: &str = "show_hide_window";
 const ID_PAUSE_SYNC: &str = "pause_sync";
@@ -29,6 +31,16 @@ const ID_PLAY_PAUSE: &str = "play_pause";
 const PLAY_PAUSE_LABEL: &str = "Play/Pause";
 const ID_PREVIOUS: &str = "previous";
 const ID_NEXT: &str = "next";
+/// Shuffle toggle (issue #582). A check item whose mark comes from the
+/// `shuffle_state` the poll body already carries — no extra request.
+const ID_SHUFFLE: &str = "shuffle";
+/// Static label for the Shuffle check item, mirroring `PLAY_PAUSE_LABEL`:
+/// the state is carried by the native check mark.
+const SHUFFLE_LABEL: &str = "Shuffle";
+/// Repeat toggle (issue #582). Repeat has THREE states (`off`/`context`/
+/// `track`), so the item's label spells the mode out — a check mark alone
+/// cannot tell `context` from `track`.
+const ID_REPEAT: &str = "repeat";
 const ID_DEVICES: &str = "devices";
 const ID_QUEUE: &str = "queue";
 /// Menu-item id prefix for device submenu entries (`{ID_DEVICES}|{device id}`).
@@ -152,9 +164,9 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
                         |token| crate::spotify::get_currently_playing(token, None),
                     ) {
                         Ok(crate::spotify::CurrentlyPlaying::Modified {
-                            track: Some(track),
+                            now: Some(now),
                             ..
-                        }) => track.is_playing,
+                        }) => now.media.is_playing,
                         Ok(_) => false,
                         Err(e) => {
                             log::warn!("[TRAY] play/pause: playback state read failed: {}", e);
@@ -163,13 +175,21 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
                         }
                     };
                     if should_pause {
-                        run_player_action(&app_handle, "pause", Some(false), |t| {
-                            crate::spotify::player_pause(t, None)
-                        });
+                        run_player_action(
+                            &app_handle,
+                            "pause",
+                            Some(false),
+                            None,
+                            |t| crate::spotify::player_pause(t, None),
+                        );
                     } else {
-                        run_player_action(&app_handle, "play", Some(true), |t| {
-                            crate::spotify::player_play(t, None)
-                        });
+                        run_player_action(
+                            &app_handle,
+                            "play",
+                            Some(true),
+                            None,
+                            |t| crate::spotify::player_play(t, None),
+                        );
                     }
                 });
             }
@@ -178,7 +198,7 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
                 // menu-event thread. Skipping doesn't change playing state.
                 let app_handle = app.clone();
                 std::thread::spawn(move || {
-                    run_player_action(&app_handle, "previous", None, |token| {
+                    run_player_action(&app_handle, "previous", None, None, |token| {
                         crate::spotify::player_previous(token, None)
                     });
                 });
@@ -188,9 +208,54 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
                 // menu-event thread. Skipping doesn't change playing state.
                 let app_handle = app.clone();
                 std::thread::spawn(move || {
-                    run_player_action(&app_handle, "next", None, |token| {
+                    run_player_action(&app_handle, "next", None, None, |token| {
                         crate::spotify::player_next(token, None)
                     });
+                });
+            }
+            ID_SHUFFLE => {
+                // Issue #582: the target state is the inverse of the last
+                // state we know about (the poll body's `shuffle_state`, or
+                // this item's own last successful toggle). Issue #386: the
+                // blocking Spotify HTTP must not run on the menu-event
+                // thread.
+                //
+                // The new state is handed to `run_player_action` instead of
+                // being stored here: that function records it in its success
+                // arm *before* the menu rebuild it triggers, so the rebuilt
+                // item shows the state the API just accepted (storing after
+                // the call would repaint the old state and no later rebuild
+                // would correct it). On a 403 from a non-Premium account
+                // nothing is recorded and the item keeps showing the truth.
+                let app_handle = app.clone();
+                std::thread::spawn(move || {
+                    let target = shuffle_toggle_target(LAST_SHUFFLE_STATE.load(Ordering::Acquire));
+                    let repeat = last_repeat_state();
+                    run_player_action(
+                        &app_handle,
+                        "shuffle",
+                        None,
+                        Some((target, repeat)),
+                        |token| crate::spotify::player_set_shuffle(token, target, None),
+                    );
+                });
+            }
+            ID_REPEAT => {
+                // Issue #582: repeat cycles off → context → track → off,
+                // matching Spotify's own player button, so "repeat one" is
+                // reachable from the tray. Same off-thread and
+                // record-on-success discipline as Shuffle above.
+                let app_handle = app.clone();
+                std::thread::spawn(move || {
+                    let target = last_repeat_state().next();
+                    let shuffle = LAST_SHUFFLE_STATE.load(Ordering::Acquire);
+                    run_player_action(
+                        &app_handle,
+                        "repeat",
+                        None,
+                        Some((shuffle, target)),
+                        |token| crate::spotify::player_set_repeat(token, target, None),
+                    );
                 });
             }
             id if id.starts_with(DEVICE_ITEM_PREFIX) => {
@@ -210,7 +275,7 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
                     match device_id {
                         Some(device_id) => {
                             // Transfer starts playback on the target device.
-                            run_player_action(&app_handle, "transfer", Some(true), |token| {
+                            run_player_action(&app_handle, "transfer", Some(true), None, |token| {
                                 crate::spotify::player_transfer(token, &device_id, true)
                             });
                         }
@@ -303,6 +368,17 @@ fn build_initial_menu(app: &tauri::App) -> Result<tauri::menu::Menu<tauri::Wry>,
     let next = MenuItemBuilder::with_id(ID_NEXT, "Next")
         .build(app)
         .map_err(|e| e.to_string())?;
+    // Issue #582: the two playback-mode toggles. They start off here (this
+    // menu is transient — `update_tray_menu` follows immediately) and take
+    // their real marks from the poll body thereafter.
+    let shuffle = CheckMenuItemBuilder::with_id(ID_SHUFFLE, SHUFFLE_LABEL)
+        .checked(false)
+        .build(app)
+        .map_err(|e| e.to_string())?;
+    let repeat = CheckMenuItemBuilder::with_id(ID_REPEAT, repeat_menu_label(RepeatState::Off))
+        .checked(false)
+        .build(app)
+        .map_err(|e| e.to_string())?;
     let playback_separator = PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?;
     let devices_submenu = build_devices_submenu(app.handle(), None)?;
     let queue_submenu = build_queue_submenu(app.handle(), None)?;
@@ -315,6 +391,8 @@ fn build_initial_menu(app: &tauri::App) -> Result<tauri::menu::Menu<tauri::Wry>,
             &play_pause,
             &previous,
             &next,
+            &shuffle,
+            &repeat,
             &playback_separator,
             &devices_submenu,
             &queue_submenu,
@@ -356,6 +434,12 @@ fn tray_write_lock() -> &'static parking_lot::Mutex<()> {
 /// here and re-used until the window lapses.
 const TRAY_SPOTIFY_FETCH_THROTTLE: Duration = Duration::from_secs(60);
 
+/// The shuffle state a click switches to: the inverse of the last observed
+/// one. Pure so the toggle contract is unit-testable.
+fn shuffle_toggle_target(current: bool) -> bool {
+    !current
+}
+
 /// Cache slot for the throttled devices fetch: `(fetched_at, devices)`.
 /// Fast path for the device submenu's click dispatch, which resolves the
 /// stable `{ID_DEVICES}|{device id}` against this list and falls back to a
@@ -378,6 +462,52 @@ static QUEUE_CACHE: std::sync::LazyLock<
 /// invert the toggle. Issue #3.0-P3.
 static LAST_PLAYING_STATE: std::sync::LazyLock<std::sync::atomic::AtomicBool> =
     std::sync::LazyLock::new(|| std::sync::atomic::AtomicBool::new(false));
+
+/// Last known shuffle state, driving the Shuffle item's check mark
+/// (issue #582). Written by the polling loop from the poll body
+/// (`note_playback_modes`) and optimistically by the tray's own successful
+/// toggle, so a same-track toggle does not wait for the next poll. It is a
+/// module-level atomic rather than a field on the app's frozen `TrackInfo`
+/// because that type is the ts-rs-exported IPC shape shared with the
+/// Dashboard and built by exhaustive literals outside this module.
+static LAST_SHUFFLE_STATE: std::sync::LazyLock<std::sync::atomic::AtomicBool> =
+    std::sync::LazyLock::new(|| std::sync::atomic::AtomicBool::new(false));
+
+/// Last known repeat mode, encoded as [`RepeatState`]'s `u8` discriminant.
+/// Same lifecycle as `LAST_SHUFFLE_STATE`.
+static LAST_REPEAT_STATE: std::sync::LazyLock<std::sync::atomic::AtomicU8> =
+    std::sync::LazyLock::new(|| std::sync::atomic::AtomicU8::new(RepeatState::Off as u8));
+
+/// Records the playback modes a poll body reported. Called by the polling
+/// loop for every observed item (playing or paused) — the poll response is
+/// the source of truth for both toggles, so no extra Spotify request is
+/// needed to render them. See issue #582.
+pub(crate) fn note_playback_modes(shuffle: bool, repeat: RepeatState) {
+    LAST_SHUFFLE_STATE.store(shuffle, Ordering::Release);
+    LAST_REPEAT_STATE.store(repeat as u8, Ordering::Release);
+}
+
+/// The tray's view of the current repeat mode. An out-of-range byte (only
+/// possible if the encoder above is changed without this decoder) degrades
+/// to `Off` rather than panicking in a menu build.
+fn last_repeat_state() -> RepeatState {
+    match LAST_REPEAT_STATE.load(Ordering::Acquire) {
+        1 => RepeatState::Context,
+        2 => RepeatState::Track,
+        _ => RepeatState::Off,
+    }
+}
+
+/// Menu label for the Repeat item: the mode is spelled out because the
+/// documented state space has three values and a check mark only carries
+/// on/off. Pure so the label contract is unit-testable.
+fn repeat_menu_label(state: RepeatState) -> &'static str {
+    match state {
+        RepeatState::Off => "Repeat: Off",
+        RepeatState::Context => "Repeat: Context",
+        RepeatState::Track => "Repeat: Track",
+    }
+}
 
 /// Coalescing guard for the delayed one-shot refresh kicked after a
 /// successful tray player action: rapid next/previous clicks must not pile
@@ -646,20 +776,26 @@ fn build_queue_submenu_from_queue(
 }
 
 /// Runs a Spotify player action from a tray click using the stored access
-/// token. On success the tray menu is force-refreshed and, when the action
-/// deterministically changes the playing state (`resulting_playing` is
-/// `Some`), that state is recorded for the Play/Pause toggle; `None` leaves
-/// the toggle unchanged (next/previous don't change playing state). On
+/// token. On success the tray menu is force-refreshed and the action's
+/// deterministic outcome is recorded for the items that mirror it:
+/// `resulting_playing` for the Play/Pause item (`None` for actions that do
+/// not change the playing state), `resulting_modes` for the shuffle/repeat
+/// toggles (issue #582). Both are applied BEFORE `force_tray_refresh`, so the
+/// rebuild renders the state the API just accepted; recording them in the
+/// caller after this function returned would repaint the replaced state and
+/// the tray's dedup key would not change again until the next track ends. On
 /// failure the error is logged and emitted on the `playback-error` event so
-/// the frontend can surface it. A `NoActiveDevice` error (404) is logged
-/// distinctly — the Devices submenu offers transfer in that case.
-/// See issue #3.0-P3.
+/// the frontend can surface it; a `NoActiveDevice` error (404) is logged
+/// distinctly — the Devices submenu offers transfer in that case. Returns
+/// `true` when the action succeeded.
+/// See issues #3.0-P3 and #582.
 fn run_player_action(
     app: &AppHandle,
     label: &str,
     resulting_playing: Option<bool>,
+    resulting_modes: Option<(bool, RepeatState)>,
     action: impl Fn(&str) -> Result<(), crate::spotify::SpotifyApiError>,
-) {
+) -> bool {
     // Issue #586: route the tray's player actions through the shared
     // refresh-aware policy instead of a raw `state.tokens.spotify()`
     // snapshot — a stale access token is refreshed proactively, and an
@@ -671,6 +807,9 @@ fn run_player_action(
             log::info!("[TRAY] {}: success", label);
             if let Some(playing) = resulting_playing {
                 LAST_PLAYING_STATE.store(playing, Ordering::Release);
+            }
+            if let Some((shuffle, repeat)) = resulting_modes {
+                note_playback_modes(shuffle, repeat);
             }
             force_tray_refresh(app);
             // Immediate Teams catch-up after a successful player action:
@@ -717,6 +856,7 @@ fn run_player_action(
                     label
                 );
             }
+            true
         }
         Err(crate::spotify::SpotifyApiError::NoActiveDevice) => {
             log::warn!(
@@ -727,10 +867,12 @@ fn run_player_action(
                 "playback-error",
                 "No active playback device - pick one from the tray Devices menu",
             );
+            false
         }
         Err(e) => {
             log::error!("[TRAY] {}: failed: {}", label, e);
             let _ = app.emit("playback-error", e.to_string());
+            false
         }
     }
 }
@@ -1048,6 +1190,35 @@ pub fn update_tray_menu(
             log::warn!("[TRAY] update_tray_menu: failed to build next item: {}", e);
             e.to_string()
         })?;
+    // Issue #582: the playback-mode toggles. Their marks come from the
+    // module-level atoms the polling loop feeds from the poll body (the
+    // shuffle/repeat state is free — the same response the app already
+    // parses), so no extra request and no cache machinery is involved. The
+    // dedup key below stays track-scoped on purpose (#229), so a mode
+    // changed from another client is picked up at the next rebuild rather
+    // than forcing one; a click on these items rebuilds through
+    // `force_tray_refresh` and is reflected immediately.
+    let shuffle = CheckMenuItemBuilder::with_id(ID_SHUFFLE, SHUFFLE_LABEL)
+        .checked(LAST_SHUFFLE_STATE.load(Ordering::Acquire))
+        .build(app)
+        .map_err(|e| {
+            log::warn!(
+                "[TRAY] update_tray_menu: failed to build shuffle item: {}",
+                e
+            );
+            e.to_string()
+        })?;
+    let repeat_state = last_repeat_state();
+    let repeat = CheckMenuItemBuilder::with_id(ID_REPEAT, repeat_menu_label(repeat_state))
+        .checked(repeat_state.is_on())
+        .build(app)
+        .map_err(|e| {
+            log::warn!(
+                "[TRAY] update_tray_menu: failed to build repeat item: {}",
+                e
+            );
+            e.to_string()
+        })?;
     let playback_separator = PredefinedMenuItem::separator(app).map_err(|e| {
         log::warn!(
             "[TRAY] update_tray_menu: failed to build playback_separator: {}",
@@ -1074,7 +1245,8 @@ pub fn update_tray_menu(
     // Build menu with optional track info
     let mut menu_builder = MenuBuilder::new(app)
         .items(&[&sync_status, &show_hide, &pause_resume, &separator1])
-        .items(&[&play_pause, &previous, &next, &playback_separator])
+        .items(&[&play_pause, &previous, &next, &shuffle, &repeat])
+        .item(&playback_separator)
         .items(&[&devices_submenu, &queue_submenu]);
 
     // Add current track item if playing — insert separator2 here too
@@ -1484,5 +1656,39 @@ mod tests {
             "Paused — Artist — Track",
             "a same-track pause is reported from the live playing state"
         );
+    }
+
+    /// Issue #582: a check mark can only carry on/off, while `repeat_state`
+    /// has three documented values — so the label must name the mode, or a
+    /// user cannot tell "repeat one" from "repeat the playlist".
+    #[test]
+    fn repeat_menu_label_spells_out_the_mode() {
+        assert_eq!(repeat_menu_label(RepeatState::Off), "Repeat: Off");
+        assert_eq!(repeat_menu_label(RepeatState::Context), "Repeat: Context");
+        assert_eq!(repeat_menu_label(RepeatState::Track), "Repeat: Track");
+    }
+
+    /// Issue #582: the two toggles render the state the poll body reported
+    /// (`note_playback_modes` → the atoms the menu build reads), and the
+    /// click target is the documented cycle, so a successful toggle leaves
+    /// the item showing what the API was just told to adopt.
+    #[test]
+    fn playback_modes_feed_both_toggle_items() {
+        note_playback_modes(true, RepeatState::Track);
+        assert!(LAST_SHUFFLE_STATE.load(Ordering::Acquire));
+        assert_eq!(last_repeat_state(), RepeatState::Track);
+        assert_eq!(repeat_menu_label(last_repeat_state()), "Repeat: Track");
+        // The click targets: Repeat advances along the documented cycle,
+        // Shuffle flips whatever was last observed.
+        assert_eq!(last_repeat_state().next(), RepeatState::Off);
+        assert!(!shuffle_toggle_target(
+            LAST_SHUFFLE_STATE.load(Ordering::Acquire)
+        ));
+
+        // A poll that reports everything off must clear both items.
+        note_playback_modes(false, RepeatState::Off);
+        assert!(!LAST_SHUFFLE_STATE.load(Ordering::Acquire));
+        assert_eq!(last_repeat_state(), RepeatState::Off);
+        assert!(!last_repeat_state().is_on());
     }
 }

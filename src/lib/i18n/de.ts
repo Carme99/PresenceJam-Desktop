@@ -142,7 +142,7 @@ export const de: Dict = {
   'settings.formatTemplatePlaceholder': '🎵 {artist} - {track} 🎧',
   'settings.livePreview': 'Live-Vorschau',
   'settings.placeholdersHint':
-    'Verfügbare Platzhalter: {artist}, {track}, {album}, {emoji}',
+    'Verfügbare Platzhalter: {artist}, {track}, {album}, {emoji}, {device}, {playlist} (oder {context}), {progress}, {shuffle}, {repeat}. Shuffle und Repeat zeigen 🔀/🔁 nur, wenn sie aktiv sind.',
   'settings.profanityFilterLabel': 'Vulgärsprache im Status filtern',
   'settings.placeholderTextLabel': 'Platzhaltertext',
   'settings.placeholderTextHint':
@@ -321,7 +321,7 @@ export const de: Dict = {
     'Wählen Sie, wie Ihre Statusmeldung aussehen soll und ob PresenceJam bei Ihrer Anmeldung gestartet werden soll.',
   'onboarding.statusTemplate': 'Statusvorlage',
   'onboarding.placeholdersHint':
-    'Platzhalter: {artist}, {track}, {album}, {emoji}',
+    'Platzhalter: {artist}, {track}, {album}, {emoji}, {device}, {playlist} (oder {context}), {progress}, {shuffle}, {repeat}',
   'onboarding.pollInterval': 'Wie oft Spotify geprüft wird: {seconds}s',
   'onboarding.settingUp': 'Einrichtung läuft…',
   'onboarding.finishSetup': 'Einrichtung abschließen',
@@ -385,5 +385,7 @@ export const de: Dict = {
   'reconnect.restartSignIn': 'Anmeldung neu starten',
   'update.stagingProgress': 'Update wird vorbereitet — {percent} %',
   'update.cancelStage': 'Abbrechen',
-  'onboarding.submitting': 'Wird übermittelt…'
+  'onboarding.submitting': 'Wird übermittelt…',
+  'settings.episodeFormatHint':
+    'Podcasts und Hörbücher nutzen eine eigene Vorlage – 🎙️ {show} - {episode} – Ihre Musikvorlage oben wird dafür nicht verwendet.',
 };

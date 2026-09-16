@@ -65,6 +65,37 @@ describe('i18n key coverage (#488)', () => {
     expect(m?.[1]).toContain('{artist}');
   });
 
+  // Issue #580/#581: the Settings hint is the only place a user can learn
+  // which tokens exist, so every token the formatter substitutes must be
+  // listed there — and the braces must survive `t()` unsubstituted (only
+  // the listed names are interpolated). The episode template has no config
+  // key yet, so its own hint must state the template instead of offering
+  // tokens the music template cannot use.
+  it('lists every status-format token, and the episode template, in the hints', () => {
+    for (const token of [
+      '{artist}',
+      '{track}',
+      '{album}',
+      '{emoji}',
+      '{device}',
+      '{playlist}',
+      '{context}',
+      '{progress}',
+      '{shuffle}',
+      '{repeat}',
+    ]) {
+      expect(t('settings.placeholdersHint')).toContain(token);
+      expect(t('onboarding.placeholdersHint')).toContain(token);
+      expect(t('settings.episodeFormatHint')).not.toContain(token);
+    }
+    for (const token of ['{show}', '{episode}']) {
+      expect(t('settings.episodeFormatHint')).toContain(token);
+    }
+    for (const src of [enSrc, deSrc, frSrc]) {
+      expect(src).toContain("'settings.episodeFormatHint'");
+    }
+  });
+
   it('settings.reconnectSpotify stays live (Reconnect view uses it)', () => {
     // #426 delete itself is ux-owned; this slice only guards the live
     // sibling the Reconnect view renders.
