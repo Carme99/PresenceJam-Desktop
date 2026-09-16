@@ -75,6 +75,56 @@ describe('config store runtime (#420, #425)', () => {
     expect(out).not.toBe(cfg.defaultConfig);
     expect(get(cfg.configStore)).not.toBe(cfg.defaultConfig);
   });
+
+  it('backfills a partial polling section so a save can never send null (#541)', async () => {
+    // `await import()` (not a static import) is deliberate: the module under
+    // test must load after the hoisted `vi.mock` factory has initialised the
+    // `invoke` it captures — this file's whole pattern.
+    const cfg = await import('$lib/stores/config');
+    // The shape a hand-edited config.json produces: the section exists but
+    // only one of its fields does. Before the fix the rest stayed
+    // `undefined`, `toSavePayload` turned that into `NaN` → `null`, and Rust
+    // rejected the `u64` with a raw English IPC error.
+    invoke.mockResolvedValueOnce({
+      polling: { default_interval_seconds: 42 }
+    });
+    const out = await cfg.loadConfig();
+    expect(out.polling.default_interval_seconds).toBe(BigInt(42));
+    for (const k of [
+      'default_interval_seconds',
+      'minimum_interval_seconds',
+      'max_interval_seconds',
+      'expiry_buffer_seconds'
+    ] as const) {
+      expect(typeof out.polling[k]).toBe('bigint');
+    }
+    expect(out.polling.minimum_interval_seconds).toBe(
+      cfg.defaultConfig.polling.minimum_interval_seconds
+    );
+  });
+
+  it('toSavePayload never emits a value Rust will reject (#541)', async () => {
+    const cfg = await import('$lib/stores/config');
+    const broken = structuredClone(cfg.defaultConfig);
+    const rawPolling = broken.polling as unknown as Record<string, unknown>;
+    rawPolling.default_interval_seconds = undefined;
+    rawPolling.max_interval_seconds = 'not-a-number';
+
+    const payload = cfg.toSavePayload(broken);
+
+    for (const k of [
+      'default_interval_seconds',
+      'minimum_interval_seconds',
+      'max_interval_seconds',
+      'expiry_buffer_seconds'
+    ] as const) {
+      expect(Number.isFinite(payload.polling[k])).toBe(true);
+      expect(typeof payload.polling[k]).toBe('number');
+    }
+    expect(payload.polling.default_interval_seconds).toBe(
+      Number(cfg.defaultConfig.polling.default_interval_seconds)
+    );
+  });
 });
 
 describe('detach store runtime (#422)', () => {
