@@ -10,7 +10,7 @@
   // the pane back into the main window (closes this one); the onboarding
   // redirect forwards the navigation to the main window first.
   let { detached = false }: { detached?: boolean } = $props();
-  import { configStore, saveConfig, loadConfig, defaultConfig, clientSecretStateOf } from '$lib/stores/config';
+  import { configStore, saveConfig, loadConfig, defaultConfig, clientSecretStateOf, SHORTCUT_SLOTS, shortcutBindingsOf, setShortcutBindings, type ShortcutSlot } from '$lib/stores/config';
   import type { AppConfig, SyncStatus } from '$lib/types';
   import { authFlow, setSpotifyPhase, setTeamsPhase, formatCountdownMs, resetSpotifyAuthFlow, resetTeamsAuthFlow, teamsPollMutex, tryAcquireTeamsPoll, releaseTeamsPoll, isSafeHttpUrl } from '$lib/stores/authFlow.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
@@ -363,6 +363,188 @@
   // the unmount-while-registering race internally, so this is just a handle.
   let teardownAuth: (() => Promise<void>) | null = null;
 
+  // ── global shortcuts (issue #676) ───────────────────────────────────────
+  //
+  // The bindings live in the config (the backend's single source of truth) and
+  // this pane edits them like any other field, so `isDirty` and the
+  // unsaved-changes banner cover them too. Registration is a separate step:
+  // only the OS can say whether a grab was accepted.
+
+  /** What the backend reported for one slot's last registration pass. */
+  type SlotRegistration = { accelerator: string | null; registered: boolean; error: string | null };
+  type ShortcutStatus = Record<ShortcutSlot, SlotRegistration>;
+
+  const SHORTCUT_LABEL_KEYS: Record<ShortcutSlot, TKey> = {
+    toggle_playback: 'settings.shortcutTogglePlayback',
+    toggle_sync: 'settings.shortcutToggleSync'
+  };
+
+  const NO_REGISTRATION: SlotRegistration = { accelerator: null, registered: false, error: null };
+  let shortcutStatus = $state<ShortcutStatus>({
+    toggle_playback: { ...NO_REGISTRATION },
+    toggle_sync: { ...NO_REGISTRATION }
+  });
+  /** The backend's reason for the last rejected edit, per slot. */
+  let shortcutErrors = $state<Record<ShortcutSlot, string>>({ toggle_playback: '', toggle_sync: '' });
+  /**
+   * The slot whose field is recording a combination. Its grab is released for
+   * as long as it records: the OS delivers the key to the grab, not to the
+   * input, so re-recording a live binding would fire its action instead of
+   * being captured.
+   */
+  let capturingSlot = $state<ShortcutSlot | null>(null);
+
+  let shortcutBindings = $derived(shortcutBindingsOf(localConfig));
+
+  /**
+   * Key tokens the plugin's parser accepts, keyed by DOM `KeyboardEvent.code`.
+   * Anything neither listed here nor a letter/digit/F-key is not captured at
+   * all, so the field can never store an accelerator the backend cannot parse.
+   */
+  const SHORTCUT_KEY_TOKENS: Record<string, string> = {
+    Space: 'Space', Enter: 'Enter', Tab: 'Tab', Escape: 'Escape',
+    ArrowUp: 'ArrowUp', ArrowDown: 'ArrowDown', ArrowLeft: 'ArrowLeft', ArrowRight: 'ArrowRight',
+    Backspace: 'Backspace', Delete: 'Delete', Insert: 'Insert',
+    Home: 'Home', End: 'End', PageUp: 'PageUp', PageDown: 'PageDown',
+    Minus: 'Minus', Equal: 'Equal', Comma: 'Comma', Period: 'Period',
+    Slash: 'Slash', Semicolon: 'Semicolon', Quote: 'Quote',
+    BracketLeft: 'BracketLeft', BracketRight: 'BracketRight',
+    Backslash: 'Backslash', Backquote: 'Backquote',
+    MediaPlayPause: 'MediaPlayPause', MediaStop: 'MediaStop'
+  };
+
+  /** The plugin accelerator a key press describes, or `null` when unusable. */
+  function acceleratorFromEvent(e: KeyboardEvent): string | null {
+    const code = e.code;
+    let key = SHORTCUT_KEY_TOKENS[code] ?? null;
+    if (key === null && /^Key[A-Z]$/.test(code)) key = code.slice(3);
+    if (key === null && /^Digit[0-9]$/.test(code)) key = code.slice(5);
+    if (key === null && /^F([1-9]|1[0-9]|2[0-4])$/.test(code)) key = code;
+    if (key === null) return null;
+
+    // The platform's primary modifier normalises to `CmdOrCtrl` — the spelling
+    // the defaults use and the plugin resolves per platform — so the binding
+    // still means the same key when the config moves to another machine. The
+    // secondary modifier keeps its own name.
+    const isMac = /mac/i.test(navigator.userAgent ?? '');
+    const modifiers: string[] = [];
+    if (isMac ? e.metaKey : e.ctrlKey) modifiers.push('CmdOrCtrl');
+    if (isMac ? e.ctrlKey : e.metaKey) modifiers.push(isMac ? 'Ctrl' : 'Cmd');
+    if (e.altKey) modifiers.push('Alt');
+    if (e.shiftKey) modifiers.push('Shift');
+    return [...modifiers, key].join('+');
+  }
+
+  /**
+   * Asks the backend whether a combination may bind this slot, so an unparsable
+   * or conflicting one is named inline instead of only failing at registration.
+   * The other row's *pending* value is sent along: the conflict a user creates
+   * here is between the two rows on screen, and neither is saved yet.
+   */
+  async function validateShortcut(slot: ShortcutSlot): Promise<boolean> {
+    const accelerator = shortcutBindings[slot];
+    if (accelerator === null || accelerator.trim() === '') {
+      shortcutErrors[slot] = '';
+      return true;
+    }
+    const otherSlot = slot === 'toggle_playback' ? 'toggle_sync' : 'toggle_playback';
+    try {
+      await invoke('validate_shortcut', {
+        accelerator,
+        action: slot,
+        other: shortcutBindings[otherSlot]
+      });
+      shortcutErrors[slot] = '';
+      return true;
+    } catch (e) {
+      shortcutErrors[slot] = String(e).slice(0, 180);
+      return false;
+    }
+  }
+
+  /** Writes one binding into the config and re-checks the pair. */
+  function setShortcutBinding(slot: ShortcutSlot, accelerator: string | null) {
+    const bindings = shortcutBindingsOf(localConfig);
+    bindings[slot] = accelerator;
+    setShortcutBindings(localConfig, bindings);
+    const otherSlot = slot === 'toggle_playback' ? 'toggle_sync' : 'toggle_playback';
+    void validateShortcut(slot);
+    void validateShortcut(otherSlot);
+  }
+
+  /** Records the pressed combination, or leaves the field as it was. */
+  function onShortcutKeydown(e: KeyboardEvent, slot: ShortcutSlot) {
+    // A modifier-only press never completes a combination: keep waiting.
+    if (['Control', 'Meta', 'Alt', 'Shift', 'CapsLock'].includes(e.key)) return;
+    e.preventDefault();
+    const accelerator = acceleratorFromEvent(e);
+    if (accelerator === null) return;
+    setShortcutBinding(slot, accelerator);
+  }
+
+  /**
+   * One slot's status from an unvalidated IPC payload.
+   *
+   * `register_shortcuts` / `unregister_shortcuts` are a boundary: the payload
+   * is whatever the backend serialized. A malformed or missing slot becomes
+   * "not registered" — never a claim that a binding is live, and never a crash
+   * while rendering (a stale chunk or a partial payload used to reach
+   * `status[slot].error` unchecked).
+   */
+  function registrationFrom(raw: unknown, slot: ShortcutSlot): SlotRegistration {
+    if (raw === null || typeof raw !== 'object') return { ...NO_REGISTRATION };
+    // Named widening (the value was just proven to be an object) rather than a
+    // cast at the field; every value read below is type-checked before use.
+    const table = raw as Record<string, unknown>;
+    const entry = table[slot];
+    if (entry === undefined || entry === null || typeof entry !== 'object') {
+      return { ...NO_REGISTRATION };
+    }
+    // `in`-narrowing, not a cast: the three fields this card reads are proven
+    // present before any of them is touched.
+    if (!('accelerator' in entry) || !('registered' in entry) || !('error' in entry)) {
+      return { ...NO_REGISTRATION };
+    }
+
+    return {
+      accelerator: typeof entry.accelerator === 'string' ? entry.accelerator : null,
+      registered: entry.registered === true,
+      error: typeof entry.error === 'string' ? entry.error : null
+    };
+  }
+
+  /** Both slots' status from one IPC payload. */
+  function statusFrom(raw: unknown): ShortcutStatus {
+    return {
+      toggle_playback: registrationFrom(raw, 'toggle_playback'),
+      toggle_sync: registrationFrom(raw, 'toggle_sync')
+    };
+  }
+
+  /** Re-registers from the persisted config and adopts the reported status. */
+  async function refreshShortcutStatus() {
+    try {
+      shortcutStatus = statusFrom(await invoke<unknown>('register_shortcuts'));
+    } catch (e) {
+      console.warn('[SETTINGS] register_shortcuts failed:', e);
+    }
+  }
+
+  async function beginShortcutCapture(slot: ShortcutSlot) {
+    capturingSlot = slot;
+    try {
+      shortcutStatus = statusFrom(await invoke<unknown>('unregister_shortcuts'));
+    } catch (e) {
+      console.warn('[SETTINGS] unregister_shortcuts failed:', e);
+    }
+  }
+
+  async function endShortcutCapture(slot: ShortcutSlot) {
+    if (capturingSlot !== slot) return;
+    capturingSlot = null;
+    await refreshShortcutStatus();
+  }
+
   onMount(async () => {
     // #615: registered first, synchronously — before the config/scope IPC
     // below can suspend — so the `onDestroy` teardown always has a handle to
@@ -422,6 +604,13 @@
     // post-save adoption below.
     extraWordsText = localConfig.teams.profanity_extra_words.join('\n');
 
+    // 4.7.0 (issue #676): name any stored binding the backend will not accept,
+    // and re-register from the config that was just loaded — the startup pass
+    // ran before this pane existed, so this makes the status on screen the
+    // status of the config on screen.
+    for (const slot of SHORTCUT_SLOTS) void validateShortcut(slot);
+    await refreshShortcutStatus();
+
     try {
       const syncStatus = await invoke<SyncStatus>('get_sync_status');
       isConnected = syncStatus.spotify_connected ?? false;
@@ -464,6 +653,9 @@
       previewDebounce = null;
     }
     if (teardownAuth) void teardownAuth();
+    // 4.7.0 (issue #676): the grabs are released while a field records a
+    // combination. Navigating away mid-recording must not leave them released.
+    if (capturingSlot) void refreshShortcutStatus();
   });
 
   async function handleSave() {
@@ -472,6 +664,14 @@
     try {
       // Issue #538: mirror `clamp_teams` before the payload leaves the
       // frontend, so the store/UI never claims an entry the backend dropped.
+      // 4.7.0 (issue #676): a combination the backend rejects must neither be
+      // saved nor registered — name the reason instead.
+      for (const slot of SHORTCUT_SLOTS) {
+        if (!(await validateShortcut(slot))) {
+          saveMessage = t('settings.shortcutRejected', { reason: shortcutErrors[slot] });
+          return;
+        }
+      }
       localConfig.teams.profanity_extra_words = extraWordsClamp.clamped;
       // #675: the notification classes live in the shared store and are not
       // form-edited — the checkboxes read it directly — so the authoritative
@@ -488,6 +688,9 @@
       // form shows the clamped numbers rather than the raw input.
       localConfig = await saveConfig($state.snapshot(localConfig));
       extraWordsText = localConfig.teams.profanity_extra_words.join('\n');
+      // The persisted config is what the grabs are registered from, and this
+      // may be the first save after a capture released them.
+      await refreshShortcutStatus();
       saveMessage = t('settings.saved');
       if (saveTimeout) clearTimeout(saveTimeout);
       saveTimeout = setTimeout(() => saveMessage = '', 2000);
@@ -1529,6 +1732,49 @@
       {#if backupMessage}
         <p class="hint" role="status">{backupMessage}</p>
       {/if}
+    <!-- 4.7.0 (issue #676): global shortcuts. The field records what is
+         pressed — the grab is released while it records, otherwise the key
+         would fire the binding instead of being captured. -->
+    <section class="card">
+      <header class="section-header">
+        <h2>{t('settings.sectionShortcuts')}</h2>
+      </header>
+      <p class="hint">{t('settings.shortcutsHint')}</p>
+      {#each SHORTCUT_SLOTS as slot (slot)}
+        <div class="form-group">
+          <label for={`shortcut-${slot}`}>{t(SHORTCUT_LABEL_KEYS[slot])}</label>
+          <div class="shortcut-row">
+            <input
+              id={`shortcut-${slot}`}
+              type="text"
+              readonly
+              value={shortcutBindings[slot] ?? ''}
+              placeholder={t('settings.shortcutUnbound')}
+              onfocus={() => beginShortcutCapture(slot)}
+              onblur={() => endShortcutCapture(slot)}
+              onkeydown={(e) => onShortcutKeydown(e, slot)}
+            />
+            <button type="button" class="btn-link" onclick={() => setShortcutBinding(slot, null)}>
+              {t('settings.shortcutClear')}
+            </button>
+          </div>
+          {#if shortcutErrors[slot]}
+            <p class="error-message" role="alert">
+              {t('settings.shortcutRejected', { reason: shortcutErrors[slot] })}
+            </p>
+          {:else if shortcutStatus[slot].error}
+            <p class="error-message" role="alert">
+              {t('settings.shortcutRegistrationFailed', { reason: shortcutStatus[slot].error })}
+            </p>
+          {:else if shortcutStatus[slot].registered}
+            <p class="hint" role="status">{t('settings.shortcutRegistered')}</p>
+          {:else if capturingSlot === slot}
+            <p class="hint" role="status">{t('settings.shortcutCaptureReleased')}</p>
+          {:else}
+            <p class="hint" role="status">{t('settings.shortcutNotRegistered')}</p>
+          {/if}
+        </div>
+      {/each}
     </section>
 
     <!-- 4.7.0 (issue #678): release channel the updater reads. The saved
@@ -1810,6 +2056,27 @@
     color: var(--fg);
   }
 
+
+  /* 4.7.0 (issue #676): a shortcut row pairs the capture field with its Clear
+     action. The field is read-only on purpose — a combination is recorded, not
+     typed — so it is rendered monospaced like the other machine-readable
+     values in this pane. */
+  .shortcut-row {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+  }
+  .shortcut-row input[type='text'] {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-family: var(--font-mono);
+    font-size: var(--fs-sm);
+    cursor: pointer;
+  }
+  .shortcut-row .btn-link {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
   .theme-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;

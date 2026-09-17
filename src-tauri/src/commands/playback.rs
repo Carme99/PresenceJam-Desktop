@@ -141,8 +141,10 @@ pub(crate) fn player_with_refresh_typed<T>(
 }
 
 /// [`player_with_refresh_typed`] with the user-facing wording applied — the
-/// shape every command handler returns (issues #375, #428, #464).
-fn player_with_refresh<T>(
+/// shape every command handler returns, and (issue #676) the entry point the
+/// global-shortcut handler shares with them, so a shortcut cannot take a
+/// second, divergent path to Spotify (issues #375, #428, #464).
+pub(crate) fn player_with_refresh<T>(
     state: &Arc<crate::AppState>,
     app: &AppHandle,
     label: &str,

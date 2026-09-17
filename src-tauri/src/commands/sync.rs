@@ -48,6 +48,16 @@ pub async fn start_syncing(
     // the Rust-side `complete_onboarding` caller, which forwards its own
     // main-window handle). Detached windows never legitimately start sync.
     super::require_main_window(&window)?;
+    start_syncing_with(Arc::clone(state.inner()), &app).await
+}
+
+/// `start_syncing`'s body, callable outside an IPC context (issue #676): the
+/// global-shortcut handler has no `State` to hand a command, and asking the
+/// frontend back over an event would make a shortcut — whose entire point is
+/// working with no visible window — depend on a live webview. The IPC command
+/// is a thin wrapper (window guard + this call), so both paths run exactly one
+/// implementation of the lifecycle.
+pub async fn start_syncing_with(state: Arc<AppState>, app: &AppHandle) -> Result<(), String> {
     log::debug!("{CMD} start_syncing: ENTRY");
 
     // Issue #69: drain any previous polling thread BEFORE claiming the
@@ -72,7 +82,7 @@ pub async fn start_syncing(
         { state.polling.handle().is_some() || state.polling.is_syncing(Ordering::Acquire) };
     if needs_drain {
         log::info!("{CMD} start_syncing: previous thread still considered live (handle present or is_syncing true); draining");
-        let state_clone = Arc::clone(state.inner());
+        let state_clone = Arc::clone(&state);
         stop_polling_and_join(state_clone, "start_syncing_drain").await;
     }
 
@@ -91,7 +101,7 @@ pub async fn start_syncing(
     // #215: start_polling thread creation is offloaded to the blocking pool
     // so the async command does not block the Tauri async runtime. The
     // returned JoinHandle is stored under the polling lock.
-    let state_for_spawn = Arc::clone(state.inner());
+    let state_for_spawn = Arc::clone(&state);
     let app_for_spawn = app.clone();
     let handle = tauri::async_runtime::spawn_blocking(move || {
         polling::start_polling(state_for_spawn, app_for_spawn)
@@ -314,10 +324,16 @@ pub async fn stop_syncing(
     // Issue #241: polling lifecycle is main-window-only (Dashboard/+page are
     // main-window surfaces; detached windows never legitimately stop sync).
     super::require_main_window(&window)?;
+    stop_syncing_with(Arc::clone(state.inner()), &app).await
+}
+
+/// `stop_syncing`'s body, callable outside an IPC context — see
+/// [`start_syncing_with`] for why the global-shortcut handler needs it
+/// (issue #676).
+pub async fn stop_syncing_with(state: Arc<AppState>, app: &AppHandle) -> Result<(), String> {
     log::debug!("{CMD} stop_syncing: ENTRY");
 
-    let state_clone = Arc::clone(state.inner());
-    stop_polling_and_join(state_clone, "stop_syncing").await;
+    stop_polling_and_join(state, "stop_syncing").await;
 
     log::info!("{CMD} stop_syncing: EMIT sync-stopped event");
     // #675: this emitter is the explicit user stop, so the payload says so —

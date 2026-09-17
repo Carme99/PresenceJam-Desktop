@@ -490,6 +490,20 @@ export const en = {
     'No beta build is published yet, so the Beta channel falls back to the stable release — the app logs the fall-through on every check. Beta builds install on quit only.',
   'update.betaOnQuitOnly':
     'Beta channel: updates install when you quit — there is no download-and-relaunch path on Beta.',
+  // 4.7.0 — S8 global hotkeys
+  'settings.sectionShortcuts': 'Global shortcuts',
+  'settings.shortcutsHint':
+    'These work while the window is hidden. Click a field and press the combination you want — the field records what you press, not what you type.',
+  'settings.shortcutTogglePlayback': 'Toggle playback',
+  'settings.shortcutToggleSync': 'Pause or resume sync',
+  'settings.shortcutUnbound': 'Not set — click and press a combination',
+  'settings.shortcutClear': 'Clear',
+  'settings.shortcutRegistered': 'Active',
+  'settings.shortcutNotRegistered': 'Not registered on this desktop',
+  'settings.shortcutCaptureReleased':
+    'Released while recording — the current binding would fire instead of being recorded',
+  'settings.shortcutRejected': 'Cannot be used: {reason}',
+  'settings.shortcutRegistrationFailed': 'Registration failed on this desktop: {reason}',
 };
 
 export type Dict = { readonly [K in keyof typeof en]: string };

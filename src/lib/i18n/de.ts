@@ -503,4 +503,19 @@ export const de: Dict = {
     'Es ist noch kein Beta-Build veröffentlicht, daher greift der Beta-Kanal derzeit auf die stabile Version zurück — der Rückfall wird bei jeder Prüfung protokolliert. Beta-Builds werden nur beim Beenden installiert.',
   'update.betaOnQuitOnly':
     'Beta-Kanal: Updates werden beim Beenden installiert — auf Beta gibt es keinen Download-und-Neustart-Pfad.',
+  // 4.7.0 — S8 global hotkeys
+  'settings.sectionShortcuts': 'Globale Tastenkürzel',
+  'settings.shortcutsHint':
+    'Diese funktionieren auch, wenn das Fenster ausgeblendet ist. Klicken Sie in ein Feld und drücken Sie die gewünschte Kombination — das Feld zeichnet auf, was Sie drücken, nicht was Sie tippen.',
+  'settings.shortcutTogglePlayback': 'Wiedergabe umschalten',
+  'settings.shortcutToggleSync': 'Synchronisierung pausieren oder fortsetzen',
+  'settings.shortcutUnbound': 'Nicht belegt — klicken und Kombination drücken',
+  'settings.shortcutClear': 'Löschen',
+  'settings.shortcutRegistered': 'Aktiv',
+  'settings.shortcutNotRegistered': 'Auf diesem Desktop nicht registriert',
+  'settings.shortcutCaptureReleased':
+    'Während der Aufzeichnung freigegeben — die aktuelle Belegung würde sonst ausgelöst',
+  'settings.shortcutRejected': 'Nicht verwendbar: {reason}',
+  'settings.shortcutRegistrationFailed':
+    'Registrierung auf diesem Desktop fehlgeschlagen: {reason}',
 };

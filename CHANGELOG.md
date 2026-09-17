@@ -26,6 +26,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `notificationsEnabled` value has it migrated into `track_change` exactly
   once (only after the write lands, so a rejected save cannot lose an
   opt-out), after which the config is the only source of truth.
+- **Global shortcuts for playback and sync, with a rebinding UI (#676):** two
+  app-wide bindings — `CmdOrCtrl+Alt+P` toggles playback, `CmdOrCtrl+Alt+S`
+  pauses or resumes sync — that work while the window is hidden, plus a
+  Settings card that records a combination, clears a binding, and names the
+  reason a combination is refused. Registration is per slot and never fatal: a
+  desktop that cannot grab one binding (a Wayland compositor, or a combination
+  another application already owns) reports that failure in the card and leaves
+  the other binding — and the rest of the app — working. The bindings live in
+  `config.json` beside the other settings, so they survive a relaunch, and the
+  card's edits take part in the unsaved-changes gate. Both actions drive paths
+  that already existed: the shortcuts call the same refresh-aware Spotify player
+  policy as the playback commands and the tray, and the same polling lifecycle
+  as `start_syncing` / `stop_syncing`, so there is no second implementation to
+  drift. While a field is recording, the card releases the grabs — a live grab
+  would swallow the key instead of letting it be captured.
 
 - **Track rules can be scheduled, and quiet hours can stop polling (#672):** a
   track rule now carries its own weekday set and time window (empty weekdays =
