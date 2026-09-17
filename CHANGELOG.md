@@ -124,14 +124,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - **Frontend coverage ratchet, and tests for the polling driver (#681):** CI's
   `frontend` job now runs `npm run test:coverage` in place of `npm test` — the
-  same vitest suite through the v8 provider, over the whole `src/**` source set,
+  same vitest suite through the v8 provider, over the `src/**` source set (the
+  generated `src/lib/types-generated/` output and the two files the provider
+  cannot instrument are excluded explicitly, in the config, with the reason),
   failing the job when any of the four measured percentages (statements,
   branches, functions, lines) drops. The thresholds are the numbers measured on
-  the merged tree rather than an aspiration, so the gate can only be raised
-  deliberately. The same change adds the first behavioural tests for the
-  polling driver's stop/restart handshake and for the process-wide
+  the tree the branch merges into rather than an aspiration, so the gate can
+  only be raised deliberately. The same change adds the first behavioural tests
+  for the polling driver's stop/restart handshake and for the process-wide
   write-decision clock and exit snapshot (`polling/loop.rs`,
-  `polling/state.rs`). Rust coverage tooling stays out of scope in 4.7.0: the
+  `polling/state.rs`), plus a source guard pinning the driver's three
+  stop-aware wait sites. Rust coverage tooling stays out of scope in 4.7.0: the
   ratchet is frontend-only.
 
 ### Changed
