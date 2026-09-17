@@ -24,6 +24,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   All new fields are additive with serde defaults, so a pre-4.7 config loads
   unchanged.
 
+- **Log rotation and config backup (#673):** the log file is now rotated at a
+  configurable size (`logging.max_file_size_mb`, 1–500 MB, default 10) with a
+  configurable number of *archived* log files kept (`logging.keep_files`,
+  1–20, default 3 — the active log is kept in addition, so the directory holds
+  at most `keep_files + 1`), wired into the `tauri-plugin-log` file target and
+  editable in a new Settings → Logging card. The same release adds Settings →
+  Backup: **Export settings** writes a copy of `config.json` (never the Spotify
+  client secret, which is keychain-only) and **Import settings** replaces the
+  stored settings from a file — asking first, refusing any document that carries
+  a plaintext `client_secret`, clamping out-of-band values, and keeping the
+  previous file as `config.json.bak`.
+
 ### Changed
 
 ### Fixed
@@ -111,7 +123,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   that could not be persisted (locked keychain, full disk) now surfaces as an
   amber banner in Settings naming the failure and the reconnect that retries
   it.
-
 ### Security
 
 ## [4.6.0] - 2026-09-16

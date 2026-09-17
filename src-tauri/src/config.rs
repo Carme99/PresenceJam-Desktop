@@ -387,6 +387,17 @@ pub struct LoggingConfig {
     pub enabled: bool,
     #[serde(default = "default_log_level")]
     pub log_level: String,
+    /// Rotation ceiling for the log file, in mebibytes (4.7.0). The
+    /// rotating file target renames the active log and starts a fresh one
+    /// once it would exceed this size. Clamped to 1..=500 by
+    /// [`clamp_logging`].
+    #[serde(default = "default_max_file_size_mb")]
+    pub max_file_size_mb: u64,
+    /// How many *archived* log files to retain (4.7.0). The active
+    /// `PresenceJam.log` is not counted, so the directory holds at most
+    /// `keep_files + 1` log files. Clamped to 1..=20 by [`clamp_logging`].
+    #[serde(default = "default_keep_files")]
+    pub keep_files: u32,
 }
 
 fn default_logging_enabled() -> bool {
@@ -395,6 +406,27 @@ fn default_logging_enabled() -> bool {
 
 fn default_log_level() -> String {
     "Info".to_string()
+}
+
+fn default_max_file_size_mb() -> u64 {
+    10
+}
+
+fn default_keep_files() -> u32 {
+    3
+}
+
+/// Bound the log-rotation settings (4.7.0, S5). Mirrors [`clamp_polling`]:
+/// the Settings number inputs' `min`/`max` attributes do not constrain a
+/// typed value and a hand-edited `config.json` is not policed by anyone
+/// else, so this is the only normalizer — it runs on load and on every save.
+///
+/// `keep_files >= 1` matters beyond taste: the rotating target is built as
+/// `KeepSome(keep_files)` (see `lib.rs::log_rotation_strategy`) and the
+/// plugin's archive pass computes `keep_count - 1`.
+fn clamp_logging(cfg: &mut LoggingConfig) {
+    cfg.max_file_size_mb = cfg.max_file_size_mb.clamp(1, 500);
+    cfg.keep_files = cfg.keep_files.clamp(1, 20);
 }
 
 /// Single place the logger's max level is wired from `logging.enabled` /
@@ -705,6 +737,8 @@ impl Default for LoggingConfig {
         Self {
             enabled: default_logging_enabled(),
             log_level: default_log_level(),
+            max_file_size_mb: default_max_file_size_mb(),
+            keep_files: default_keep_files(),
         }
     }
 }
@@ -974,7 +1008,10 @@ pub fn config_was_quarantined() -> bool {
 }
 
 /// Backup path alongside the original: `config.json` → `config.json.bak`.
-fn quarantine_backup_path(path: &std::path::Path) -> PathBuf {
+///
+/// Shared with the config-import command (4.7.0, S5), which moves the
+/// outgoing file here before an imported document replaces it.
+pub(crate) fn quarantine_backup_path(path: &std::path::Path) -> PathBuf {
     let mut backup = path.as_os_str().to_owned();
     backup.push(".bak");
     PathBuf::from(backup)
@@ -1090,9 +1127,43 @@ pub fn load_config() -> Result<AppConfig, String> {
     clamp_polling(&mut config.polling);
     clamp_teams(&mut config.teams);
     clamp_rules(&mut config.status_rules);
+    clamp_logging(&mut config.logging);
 
     log::info!("[CFG] Loaded configuration from '{}'", path.display());
     Ok(with_keychain_flags(config))
+}
+
+/// The persisted `logging` section, read without a full config load
+/// (4.7.0, S5).
+///
+/// The log plugin is registered on the Tauri builder *before* the `setup`
+/// hook runs, so the rotating file target needs its size and retention
+/// settings before [`load_config`] is reached. Deliberately narrow:
+/// no migration, no quarantine side effects, and **no keychain probe** —
+/// `load_config` runs moments later and a second probe at startup is a real
+/// macOS prompt risk (see [`with_keychain_flags`]).
+///
+/// A missing, unreadable or unparsable file yields the defaults; the real
+/// load still handles the corrupt-file case.
+pub fn logging_config_for_startup() -> LoggingConfig {
+    let mut logging = match get_config_path()
+        .ok()
+        .and_then(|path| fs::read_to_string(path).ok())
+    {
+        Some(contents) => match serde_json::from_str::<AppConfig>(&contents) {
+            Ok(cfg) => cfg.logging,
+            Err(e) => {
+                log::warn!(
+                    "[CFG] startup log-rotation read: config unparsable ({}); using log defaults",
+                    e
+                );
+                LoggingConfig::default()
+            }
+        },
+        None => LoggingConfig::default(),
+    };
+    clamp_logging(&mut logging);
+    logging
 }
 
 /// Populate derived/display fields that are not persisted to disk.
@@ -1332,7 +1403,7 @@ fn run_legacy_secret_migration() -> LegacySecretOutcome {
     LegacySecretOutcome::Migrated
 }
 
-fn atomic_write_json(path: &std::path::Path, json: &str) -> Result<(), String> {
+pub(crate) fn atomic_write_json(path: &std::path::Path, json: &str) -> Result<(), String> {
     let temp_path = path.with_extension("tmp");
 
     // Issue #135 path A: create the temp file with mode 0600 atomically.
@@ -1416,6 +1487,7 @@ pub fn clamped_config(config: &AppConfig) -> AppConfig {
     clamp_polling(&mut cfg.polling);
     clamp_teams(&mut cfg.teams);
     clamp_rules(&mut cfg.status_rules);
+    clamp_logging(&mut cfg.logging);
     cfg
 }
 
@@ -1433,6 +1505,241 @@ pub fn save_config(config: &AppConfig) -> Result<(), String> {
 
     log::info!("[CFG] Saved configuration to '{}'", path.display());
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 4.7.0 (S5): config export / import.
+//
+// The Spotify client secret is keychain-only (issue #9), so an exported
+// document is a *shareable* file: every `client_secret` key is stripped on
+// the way out and an incoming document that carries one is refused outright,
+// rather than silently dropping the plaintext the user asked us to import.
+// ---------------------------------------------------------------------------
+
+/// Timestamp suffix of an export file name — `YYYYMMDD-HHMMSS`, UTC.
+fn export_timestamp(at: chrono::DateTime<chrono::Utc>) -> String {
+    at.format("%Y%m%d-%H%M%S").to_string()
+}
+
+/// Name an export is offered under:
+/// `presencejam-config-<version>-<YYYYMMDD-HHMMSS>.json`.
+pub fn export_file_name(version: &str, at: chrono::DateTime<chrono::Utc>) -> String {
+    format!(
+        "presencejam-config-{}-{}.json",
+        version,
+        export_timestamp(at)
+    )
+}
+
+/// Collect the dotted paths of every `client_secret` key anywhere in `value`.
+///
+/// Walks nested objects and arrays: a secret cannot hide inside `extra`
+/// (the unknown-top-level-key retention map) or a hand-written nested object
+/// just because the typed schema has no such field. Only keys are matched —
+/// values are irrelevant to the decision.
+fn client_secret_paths(value: &serde_json::Value) -> Vec<String> {
+    fn walk(value: &serde_json::Value, prefix: &str, out: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, child) in map {
+                    let path = if prefix.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{}.{}", prefix, key)
+                    };
+                    if key == "client_secret" {
+                        out.push(path.clone());
+                    }
+                    walk(child, &path, out);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for (index, child) in items.iter().enumerate() {
+                    walk(child, &format!("{}[{}]", prefix, index), out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(value, "", &mut out);
+    out
+}
+
+/// Remove every `client_secret` key anywhere in the tree; returns how many
+/// were removed.
+fn strip_client_secret_keys(value: &mut serde_json::Value) -> usize {
+    let mut removed = 0;
+    match value {
+        serde_json::Value::Object(map) => {
+            if map.remove("client_secret").is_some() {
+                removed += 1;
+            }
+            for child in map.values_mut() {
+                removed += strip_client_secret_keys(child);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for child in items.iter_mut() {
+                removed += strip_client_secret_keys(child);
+            }
+        }
+        _ => {}
+    }
+    removed
+}
+
+/// The document an export writes (4.7.0, S5): the persisted shape of `cfg`,
+/// clamped exactly as [`save_config`] would write it, with every
+/// `client_secret` key and both derived keychain views stripped.
+///
+/// The secret strip is a guard, not the normal path — the secret lives in the
+/// OS keychain and there is no typed field to carry it — but a secret reaching
+/// a file the user is explicitly told to keep or share would undo the keychain
+/// migration. Token material never enters `AppConfig` at all.
+///
+/// `client_secret_set` / `client_secret_state` go too: they are display
+/// projections of *this* machine's keychain (issue #560), so an exported file
+/// that carried them would describe the exporting machine to whoever imports
+/// it. `load_config` re-stamps both from the real keychain on the next read.
+pub fn export_document(cfg: &AppConfig) -> Result<String, String> {
+    let mut value = serde_json::to_value(clamped_config(cfg))
+        .map_err(|e| format!("Failed to serialize config to JSON: {}", e))?;
+    let stripped = strip_client_secret_keys(&mut value);
+    if stripped > 0 {
+        log::warn!(
+            "[CFG] export: stripped {} client_secret key(s) from the exported document",
+            stripped
+        );
+    }
+    if let Some(spotify) = value
+        .get_mut("spotify")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        spotify.remove("client_secret_set");
+        spotify.remove("client_secret_state");
+    }
+    serde_json::to_string_pretty(&value)
+        .map_err(|e| format!("Failed to serialize config to JSON: {}", e))
+}
+
+/// An imported document that passed validation and normalization.
+#[derive(Debug)]
+pub struct PreparedImport {
+    /// Migrated and clamped config, with the keychain views neutralized.
+    pub config: AppConfig,
+    /// The exact JSON [`import_config_document`] writes for it.
+    pub document: String,
+}
+
+/// Validate and normalize an imported config document (4.7.0, S5).
+///
+/// Refuses a document carrying a `client_secret` key anywhere (the pre-#560
+/// plaintext shape, or a hand-edited file) instead of quietly dropping it:
+/// silently discarding a credential the user meant to import is worse than
+/// telling them why it will not be imported. Every other field takes the same
+/// route a file read off disk takes — the version migration and all the
+/// clamps — so an import cannot introduce a value the UI could not have saved.
+pub fn prepare_import(raw: &str) -> Result<PreparedImport, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| format!("Imported file is not valid JSON: {}", e))?;
+    if !value.is_object() {
+        return Err(
+            "Imported file is not a PresenceJam configuration (expected a JSON object)".to_string(),
+        );
+    }
+
+    let secrets = client_secret_paths(&value);
+    if !secrets.is_empty() {
+        return Err(format!(
+            "Imported file carries a plaintext client_secret ({}); PresenceJam keeps the Spotify client secret in the OS keychain, never in config.json",
+            secrets.join(", ")
+        ));
+    }
+    // No strip pass here: `client_secret_paths` matches the *key* regardless of
+    // value, so every shape of it — a string, an explicit null, a nested object
+    // — was already refused above. Nothing can reach the document below.
+
+    let mut config: AppConfig = serde_json::from_value(value).map_err(|e| {
+        format!(
+            "Imported file does not match the PresenceJam configuration schema: {}",
+            e
+        )
+    })?;
+
+    // Same ordering as `load_config`: the version dispatcher runs before the
+    // clamps, so a migration's rewritten values are never re-clamped away.
+    let from_version = config.schema_version;
+    migrate_config(&mut config, from_version);
+    clamp_polling(&mut config.polling);
+    clamp_teams(&mut config.teams);
+    clamp_rules(&mut config.status_rules);
+    clamp_logging(&mut config.logging);
+    // Deliberately NOT `stamp_schema_version`: `migrate_config` raises the
+    // version to the floor and passes a *newer* file through at its own
+    // version, exactly as `load_config` does. Stamping would relabel a
+    // newer document as if this binary had produced it.
+
+    // The two keychain views describe the machine the file came from, never
+    // the importing one — `load_config` re-stamps them from the real keychain
+    // as soon as the import lands.
+    config.spotify.client_secret_set = false;
+    config.spotify.client_secret_state = ClientSecretState::Absent;
+
+    let document = serde_json::to_string_pretty(&config)
+        .map_err(|e| format!("Failed to serialize imported config to JSON: {}", e))?;
+    Ok(PreparedImport { config, document })
+}
+
+/// Replace the config at `path` with an imported document (4.7.0, S5).
+///
+/// `confirm_overwrite` is the user's decision, asked **after** the document has
+/// been validated and only when there is a current file to replace: a decline is
+/// a clean no-op that leaves the live file byte-identical and writes no `.bak`.
+/// The dialog itself lives in the command (it needs an `AppHandle`); this shape
+/// keeps the decision itself testable against real files.
+///
+/// The outgoing file is moved to `<path>.bak` first (the same backup path the
+/// corrupt-file quarantine uses), so an import is never a one-way door; a
+/// missing current file is not an error (a fresh install has nothing to back up)
+/// and does not prompt. Refuses before touching disk, so a rejected import
+/// leaves both the live config and the previous `.bak` untouched. `Ok(None)`
+/// means the user declined.
+pub fn import_config_document(
+    raw: &str,
+    path: &std::path::Path,
+    confirm_overwrite: impl FnOnce() -> bool,
+) -> Result<Option<AppConfig>, String> {
+    let prepared = prepare_import(raw)?;
+
+    if path.exists() && !confirm_overwrite() {
+        log::info!(
+            "[CFG] import: DECLINED by the user; '{}' left untouched",
+            path.display()
+        );
+        return Ok(None);
+    }
+    if path.exists() {
+        let backup = quarantine_backup_path(path);
+        fs::rename(path, &backup).map_err(|e| {
+            format!(
+                "Failed to move the current config to '{}': {}",
+                backup.display(),
+                e
+            )
+        })?;
+        log::info!(
+            "[CFG] import: previous config moved to '{}'",
+            backup.display()
+        );
+    }
+
+    atomic_write_json(path, &prepared.document)?;
+    log::info!(
+        "[CFG] import: configuration imported into '{}'",
+        path.display()
+    );
+    Ok(Some(prepared.config))
 }
 
 #[cfg(test)]
@@ -2350,6 +2657,7 @@ mod tests {
         apply_log_level(&LoggingConfig {
             enabled: false,
             log_level: "Debug".to_string(),
+            ..LoggingConfig::default()
         });
         assert_eq!(
             log::max_level(),
@@ -2360,12 +2668,14 @@ mod tests {
         apply_log_level(&LoggingConfig {
             enabled: true,
             log_level: "DEBUG".to_string(),
+            ..LoggingConfig::default()
         });
         assert_eq!(log::max_level(), log::LevelFilter::Debug);
 
         apply_log_level(&LoggingConfig {
             enabled: true,
             log_level: "not-a-level".to_string(),
+            ..LoggingConfig::default()
         });
         assert_eq!(
             log::max_level(),
@@ -2916,5 +3226,351 @@ mod tests {
             checked >= 20,
             "the scan found only {checked} log macros — the needles are wrong"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // 4.7.0 (S5): log rotation defaults/clamps + config export/import
+    // ---------------------------------------------------------------
+
+    /// The rotation fields are additive and `#[serde(default)]`, so a
+    /// `config.json` written before 4.7.0 has neither key and must load with
+    /// the shipped defaults — a `0` here would build `KeepSome(0)` and make
+    /// the plugin's archive pass underflow.
+    #[test]
+    fn pre_4_7_logging_config_gets_rotation_defaults() {
+        let legacy: LoggingConfig = serde_json::from_str(r#"{"enabled":true,"log_level":"Debug"}"#)
+            .expect("a logging section written before 4.7.0 must still deserialize");
+        assert_eq!(legacy.max_file_size_mb, 10);
+        assert_eq!(legacy.keep_files, 3);
+        assert_eq!(LoggingConfig::default().max_file_size_mb, 10);
+        assert_eq!(LoggingConfig::default().keep_files, 3);
+    }
+
+    /// Out-of-band rotation values — typed past the number inputs' `min`/
+    /// `max`, or hand-edited — clamp to the band the UI offers.
+    #[test]
+    fn clamp_logging_bounds_rotation_fields() {
+        let bounded = |max_file_size_mb: u64, keep_files: u32| {
+            let mut logging = LoggingConfig {
+                enabled: true,
+                log_level: "Info".into(),
+                max_file_size_mb,
+                keep_files,
+            };
+            clamp_logging(&mut logging);
+            (logging.max_file_size_mb, logging.keep_files)
+        };
+        assert_eq!(bounded(0, 0), (1, 1), "below the floor");
+        assert_eq!(bounded(9000, 99), (500, 20), "above the ceiling");
+        assert_eq!(bounded(25, 7), (25, 7), "inside the band is untouched");
+    }
+
+    /// `clamped_config` is what `save_config` writes, so an out-of-band
+    /// rotation value must never reach disk.
+    #[test]
+    fn clamped_config_bounds_logging() {
+        let mut config = AppConfig::default();
+        config.logging.keep_files = 0;
+        config.logging.max_file_size_mb = 10_000;
+        let clamped = clamped_config(&config);
+        assert_eq!(clamped.logging.keep_files, 1);
+        assert_eq!(clamped.logging.max_file_size_mb, 500);
+    }
+
+    /// The export file name carries the app version and a sortable UTC stamp.
+    #[test]
+    fn export_file_name_is_versioned_and_timestamped() {
+        let at = chrono::DateTime::parse_from_rfc3339("2026-09-17T04:05:06Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            export_file_name("4.7.0", at),
+            "presencejam-config-4.7.0-20260917-040506.json"
+        );
+    }
+
+    /// An export must never carry the plaintext secret, wherever a legacy or
+    /// hand-edited file parked it — including the unknown-key retention map,
+    /// which the typed schema knows nothing about.
+    #[test]
+    fn export_document_strips_client_secret() {
+        let mut config = AppConfig::default();
+        config.spotify.client_id = "abc".into();
+        config
+            .extra
+            .insert("client_secret".into(), serde_json::json!("SEKRIT"));
+
+        let json = export_document(&config).unwrap();
+
+        assert!(!json.contains("SEKRIT"), "exported document: {json}");
+        assert!(!json.contains("client_secret"), "exported document: {json}");
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["spotify"]["client_id"], "abc");
+    }
+
+    /// A plaintext `client_secret` is refused, and the refusal names the path
+    /// it found: importing it "successfully" while silently dropping the
+    /// credential would look like a completed sign-in.
+    #[test]
+    fn import_rejects_document_with_client_secret() {
+        let err = prepare_import(r#"{"spotify":{"client_id":"a","client_secret":"SEKRIT"}}"#)
+            .expect_err("a plaintext client_secret must be refused");
+        assert!(
+            err.contains("spotify.client_secret"),
+            "refusal must name the offending path: {err}"
+        );
+
+        // The reject is on the key, not on the value: an explicit null is
+        // still a client_secret field.
+        assert!(prepare_import(r#"{"spotify":{"client_secret":null}}"#).is_err());
+
+        // Nested inside the unknown-key retention map is the same answer.
+        assert!(prepare_import(r#"{"schema_version":2,"client_secret":"SEKRIT"}"#).is_err());
+
+        // A document without the key is not falsely rejected.
+        assert!(prepare_import(r#"{"spotify":{"client_id":"a"}}"#).is_ok());
+    }
+
+    /// A document that is not a JSON object never reaches the schema parser.
+    #[test]
+    fn import_rejects_non_object_document() {
+        assert!(prepare_import("[1, 2, 3]").is_err());
+        assert!(prepare_import("not json at all").is_err());
+    }
+
+    /// Export → import keeps every value, including unknown top-level keys,
+    /// and re-importing the written document is stable.
+    #[test]
+    fn export_import_round_trips_a_config() {
+        let mut config = AppConfig::default();
+        config.spotify.client_id = "abc123".into();
+        config.teams.status_format = "🎧 {track}".into();
+        config.polling.default_interval_seconds = 45;
+        config.logging.max_file_size_mb = 25;
+        config.logging.keep_files = 7;
+        config
+            .extra
+            .insert("future_key".into(), serde_json::json!({"nested": [1, 2]}));
+
+        let exported = export_document(&config).unwrap();
+        let imported = prepare_import(&exported).unwrap();
+
+        assert_eq!(imported.config.spotify.client_id, "abc123");
+        assert_eq!(imported.config.teams.status_format, "🎧 {track}");
+        assert_eq!(imported.config.polling.default_interval_seconds, 45);
+        assert_eq!(imported.config.logging.max_file_size_mb, 25);
+        assert_eq!(imported.config.logging.keep_files, 7);
+        assert_eq!(
+            imported.config.extra.get("future_key"),
+            Some(&serde_json::json!({"nested": [1, 2]}))
+        );
+
+        let again = prepare_import(&imported.document).unwrap();
+        assert_eq!(
+            again.document, imported.document,
+            "the written document must be a fixed point of prepare_import"
+        );
+    }
+
+    /// The whole pipeline the two commands run, minus the file dialogs: export
+    /// writes the document with the same crash-safe helper `save_config` uses,
+    /// and importing that file lands the same settings with no secret in it.
+    #[test]
+    fn exported_file_imports_back_to_the_same_settings() {
+        let dir = std::env::temp_dir().join(format!(
+            "pj-test-export-import-{}-{}",
+            std::process::id(),
+            chrono_like_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let export_path = dir.join(export_file_name(
+            "4.7.0",
+            chrono::DateTime::parse_from_rfc3339("2026-09-17T04:05:06Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        ));
+        let live_path = dir.join("config.json");
+
+        let mut config = AppConfig::default();
+        config.spotify.client_id = "abc123".into();
+        config.teams.status_format = "🎧 {track}".into();
+        config.logging.max_file_size_mb = 25;
+        config.logging.keep_files = 7;
+        config
+            .extra
+            .insert("client_secret".into(), serde_json::json!("SEKRIT"));
+
+        // export_config: serialize, then write through the shared helper.
+        atomic_write_json(&export_path, &export_document(&config).unwrap()).unwrap();
+        assert_eq!(
+            export_path.file_name().unwrap().to_string_lossy(),
+            "presencejam-config-4.7.0-20260917-040506.json"
+        );
+        let exported = std::fs::read_to_string(&export_path).unwrap();
+        assert!(!exported.contains("SEKRIT"));
+
+        // import_config: read the chosen file, validate, confirm, replace.
+        let imported = import_config_document(&exported, &live_path, || true)
+            .unwrap()
+            .expect("the overwrite was confirmed");
+
+        assert_eq!(imported.spotify.client_id, "abc123");
+        assert_eq!(imported.teams.status_format, "🎧 {track}");
+        assert_eq!(imported.logging.max_file_size_mb, 25);
+        assert_eq!(imported.logging.keep_files, 7);
+        assert_eq!(
+            imported.extra.get("client_secret"),
+            None,
+            "the stripped key must not come back through an import"
+        );
+        assert!(!std::fs::read_to_string(&live_path)
+            .unwrap()
+            .contains("SEKRIT"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Declining the overwrite confirmation is a clean no-op: the live file is
+    /// left byte-identical and no `.bak` appears. This is the cancel path of the
+    /// import confirmation, and it is the reason the prompt is a parameter
+    /// rather than a dialog buried inside the command — the decision is
+    /// testable against real files without a desktop.
+    #[test]
+    fn declined_import_touches_nothing() {
+        let dir = std::env::temp_dir().join(format!(
+            "pj-test-import-decline-{}-{}",
+            std::process::id(),
+            chrono_like_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let previous = r#"{"spotify":{"client_id":"LIVE"},"logging":{"keep_files":7}}"#;
+        std::fs::write(&path, previous).unwrap();
+
+        let outcome =
+            import_config_document(r#"{"spotify":{"client_id":"NEW"}}"#, &path, || false).unwrap();
+
+        assert!(
+            outcome.is_none(),
+            "declining must report 'nothing happened'"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            previous,
+            "the live config must be byte-identical after a decline"
+        );
+        assert!(
+            !dir.join("config.json.bak").exists(),
+            "a decline must not quarantine the file it did not replace"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Importing over an existing config moves it to `<path>.bak` (the same
+    /// backup the corrupt-file quarantine uses) and writes the imported
+    /// document clamped, not raw.
+    #[test]
+    fn import_quarantines_the_outgoing_config() {
+        let dir = std::env::temp_dir().join(format!(
+            "pj-test-import-{}-{}",
+            std::process::id(),
+            chrono_like_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let previous = r#"{"spotify":{"client_id":"OLD"}}"#;
+        std::fs::write(&path, previous).unwrap();
+
+        let imported = import_config_document(
+            r#"{"spotify":{"client_id":"NEW"},"logging":{"keep_files":900}}"#,
+            &path,
+            || true,
+        )
+        .unwrap()
+        .expect("the overwrite was confirmed");
+
+        assert_eq!(
+            std::fs::read_to_string(dir.join("config.json.bak")).unwrap(),
+            previous,
+            "the outgoing config must be preserved next to the new one"
+        );
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written["spotify"]["client_id"], "NEW");
+        assert_eq!(
+            written["logging"]["keep_files"], 20,
+            "an imported out-of-range value must land clamped on disk"
+        );
+        assert_eq!(imported.logging.keep_files, 20);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A refused import must not touch the live config or leave a `.bak`
+    /// behind — refusal happens before anything is moved.
+    #[test]
+    fn rejected_import_leaves_the_config_untouched() {
+        let dir = std::env::temp_dir().join(format!(
+            "pj-test-import-reject-{}-{}",
+            std::process::id(),
+            chrono_like_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let previous = r#"{"spotify":{"client_id":"LIVE"}}"#;
+        std::fs::write(&path, previous).unwrap();
+
+        let asked = std::cell::Cell::new(false);
+        assert!(import_config_document(
+            r#"{"spotify":{"client_id":"NEW","client_secret":"SEKRIT"}}"#,
+            &path,
+            || {
+                asked.set(true);
+                true
+            }
+        )
+        .is_err());
+        assert!(
+            !asked.get(),
+            "a refused document must be rejected before the user is asked anything"
+        );
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), previous);
+        assert!(!dir.join("config.json.bak").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A fresh install has no `config.json`; an import must create one
+    /// rather than fail on the missing backup step.
+    #[test]
+    fn import_into_a_missing_config_creates_it() {
+        let dir = std::env::temp_dir().join(format!(
+            "pj-test-import-fresh-{}-{}",
+            std::process::id(),
+            chrono_like_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+
+        let asked = std::cell::Cell::new(false);
+        import_config_document(r#"{"spotify":{"client_id":"FRESH"}}"#, &path, || {
+            asked.set(true);
+            true
+        })
+        .unwrap()
+        .expect("a fresh install has nothing to decline");
+        assert!(
+            !asked.get(),
+            "with no current file there is nothing to overwrite, so nothing to confirm"
+        );
+
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written["spotify"]["client_id"], "FRESH");
+        assert!(!dir.join("config.json.bak").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -693,3 +693,157 @@ describe('Settings rule scheduling and priority controls (S4/#672)', () => {
     });
   });
 });
+
+/**
+ * 4.7.0 (#673): the Logging and Backup cards.
+ *
+ * The Rust half is covered by `config.rs` tests (rotation clamps, the export
+ * document, import validation); what only this test can pin is the seam —
+ * the logging fields ride the normal `save_config` path, and the two backup
+ * buttons reach the commands the Rust side registers, with the localized
+ * dialog title as the only argument.
+ */
+describe('Settings logging and backup cards (#673)', () => {
+  const buttonByText = (container: HTMLElement, label: string) =>
+    [...container.querySelectorAll('button')].find(
+      (b) => b.textContent?.trim() === label
+    ) as HTMLButtonElement;
+
+  /** Serve the backup commands; everything else keeps the harness default. */
+  function armBackupCommands(exportPath: string | null, importPath: string | null) {
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'load_config') return configuredConfig();
+      if (cmd === 'get_sync_status') {
+        return {
+          is_syncing: false,
+          current_track: null,
+          spotify_connected: true,
+          teams_connected: true
+        };
+      }
+      if (cmd === 'get_spotify_granted_scopes') return ['user-modify-playback-state'];
+      if (cmd === 'get_teams_granted_scopes') return ['Presence.Read', 'profile'];
+      if (cmd === 'export_config') return exportPath;
+      if (cmd === 'import_config') {
+        // `null` is the command's "declined or dismissed" answer (the
+        // confirmation lives in Rust), so a null path here exercises the
+        // decline branch rather than the success one.
+        return importPath === null ? null : { path: importPath, config: configuredConfig() };
+      }
+      if (args != null && typeof args === 'object' && 'config' in args) return args.config;
+      return [];
+    });
+  }
+
+  it('saves the rotation fields through the normal save path', async () => {
+    const { container } = await mountSettings();
+
+    const keepInput = container.querySelector('#log-keep-files') as HTMLInputElement;
+    expect(keepInput).not.toBeNull();
+    await fireEvent.input(keepInput, { target: { value: '7' } });
+
+    await fireEvent.click(buttonByText(container, t('settings.saveChanges')));
+
+    await waitFor(() => {
+      expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'save_config')).toBe(true);
+      // The harness echoes the payload back and Settings adopts it (#297), so
+      // the store holding the typed value proves the card's binding is live —
+      // the u64 wire encoding is pinned in tests/stores.test.ts, where the
+      // payload shape is the subject rather than a harness artefact.
+      expect(get(configStore).logging.keep_files).toBe(7);
+    });
+  });
+
+  it('exports through export_config and reports the resolved path', async () => {
+    const { container } = await mountSettings();
+    const exportPath = '/tmp/presencejam-config-4.7.0-20260917-040506.json';
+    armBackupCommands(exportPath, '/tmp/imported.json');
+
+    await fireEvent.click(buttonByText(container, t('settings.backupExport')));
+
+    await waitFor(() => {
+      const call = invokeMock.mock.calls.find(([cmd]) => cmd === 'export_config');
+      expect(call).toBeTruthy();
+      // The dialog title is the localized string: Rust renders the native
+      // dialog and has no dictionary of its own.
+      expect(call![1]).toEqual({ title: t('settings.backupExportDialogTitle') });
+    });
+    await waitFor(() => {
+      expect(container.textContent).toContain(exportPath);
+    });
+  });
+
+  // The overwrite confirmation is the Rust command's native message dialog (so
+  // it behaves the same in the main window and a popped-out pane); the card's
+  // only job is to hand it the localized copy and honour a decline.
+  const importArgs = (container: HTMLElement) => {
+    const call = invokeMock.mock.calls.find(([cmd]) => cmd === 'import_config');
+    expect(call).toBeTruthy();
+    return call![1];
+  };
+
+  it('passes the localized confirm copy, and a decline changes nothing', async () => {
+    const { container } = await mountSettings();
+    // A null import outcome is the command's "declined or dismissed" answer.
+    armBackupCommands(null, null);
+    const loadsBefore = invokeMock.mock.calls.filter(([cmd]) => cmd === 'load_config').length;
+
+    await fireEvent.click(buttonByText(container, t('settings.backupImport')));
+
+    await waitFor(() => {
+      // Rust has no dictionary: every user-visible string of the confirmation
+      // travels with the call, including both button labels (the plugin's own
+      // defaults are English).
+      expect(importArgs(container)).toEqual({
+        title: t('settings.backupImportDialogTitle'),
+        confirmBody: t('settings.backupConfirmOverwrite'),
+        confirmOk: t('common.yes'),
+        confirmCancel: t('common.no')
+      });
+    });
+    // Drain the click's await chain before asserting on its absence: the
+    // `waitFor` above returns as soon as the call is recorded, which is before
+    // the card's continuation would have run. Two flushes (Svelte's update plus
+    // the promise chain behind the mocked invoke) are deterministic and, unlike
+    // a timer, do not tie the test to wall-clock time. Without this the
+    // "no message" check could pass by winning a race — the positive half of
+    // the pair is the next test, which does see `settings.backupImported`.
+    await tick();
+    await tick();
+    // A decline is a clean no-op in the card: no reload, and no status message
+    // (neither the imported path nor an error). That the file itself was left
+    // alone is `declined_import_touches_nothing`'s business on the Rust side,
+    // where the real files are.
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'load_config').length).toBe(loadsBefore);
+    expect(container.querySelector('[role="status"]')).toBeNull();
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'import_config')).toHaveLength(1);
+  });
+
+  it('imports after confirmation and adopts the reloaded config', async () => {
+    const { container } = await mountSettings();
+    armBackupCommands(null, '/tmp/imported.json');
+    const loadsBefore = invokeMock.mock.calls.filter(([cmd]) => cmd === 'load_config').length;
+
+    await fireEvent.click(buttonByText(container, t('settings.backupImport')));
+
+    await waitFor(() => {
+      expect(importArgs(container)).toEqual({
+        title: t('settings.backupImportDialogTitle'),
+        confirmBody: t('settings.backupConfirmOverwrite'),
+        confirmOk: t('common.yes'),
+        confirmCancel: t('common.no')
+      });
+    });
+    // The UI reloads from the file the import wrote rather than trusting a
+    // pre-import copy — the store must come from `load_config`, not the
+    // `ImportOutcome` payload alone.
+    await waitFor(() => {
+      expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'load_config').length).toBeGreaterThan(
+        loadsBefore
+      );
+    });
+    await waitFor(() => {
+      expect(container.textContent).toContain('/tmp/imported.json');
+    });
+  });
+});

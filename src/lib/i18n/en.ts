@@ -442,6 +442,27 @@ export const en = {
     'The text posted as your Teams status while playback is paused and when nothing is playing. The music emoji is added for you; clearing a field restores the default.',
   'rules.pausedStatusPlaceholder': 'Paused',
   'rules.stoppedStatusPlaceholder': 'Nothing playing on Spotify',
+
+  // 4.7.0 — S5 (log rotation + settings export/import)
+  'settings.sectionLogging': 'Logging',
+  'settings.loggingEnabledLabel': 'Write a log file',
+  'settings.logLevelLabel': 'Log level',
+  'settings.logMaxSizeLabel': 'Maximum log file size (MB)',
+  'settings.logKeepFilesLabel': 'Archived log files to keep',
+  'settings.logRotationHint':
+    'The size limit and the number of archived files apply the next time PresenceJam starts. The log being written right now is not one of them: the log folder holds at most one more file than the number you set. Turning logging off or changing the level takes effect immediately.',
+  'settings.sectionBackup': 'Backup',
+  'settings.backupHint':
+    'Export writes a copy of these settings that you can keep or move to another machine. Your Spotify client secret stays in the system keychain and is never included — and a file that carries one is refused on import.',
+  'settings.backupExport': 'Export settings…',
+  'settings.backupImport': 'Import settings…',
+  'settings.backupExportDialogTitle': 'Export PresenceJam settings',
+  'settings.backupImportDialogTitle': 'Import PresenceJam settings',
+  'settings.backupConfirmOverwrite':
+    'Importing replaces all of your current settings. The current file is kept beside it as config.json.bak. Continue?',
+  'settings.backupExported': 'Settings exported to {path}',
+  'settings.backupImported': 'Settings imported from {path}',
+  'settings.backupError': 'The backup action could not be completed: {error}',
 };
 
 export type Dict = { readonly [K in keyof typeof en]: string };

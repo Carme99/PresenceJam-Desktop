@@ -5,7 +5,7 @@
 //! unchanged from the pre-split single file; this is a cut-and-paste refactor.
 //!
 //! Submodule map (each lists every `#[tauri::command]` it owns):
-//!   - `config` — load_config, save_config, update_config
+//!   - `config` — load_config, save_config, update_config, export_config, import_config
 //!   - `spotify_auth` — start_spotify_auth, start_spotify_reconnect, complete_spotify_auth_manual, refresh_spotify, is_spotify_client_secret_set, reconnect_spotify_session
 //!   - `playback` — playback_play, playback_pause, playback_next, playback_previous, playback_transfer, get_playback_devices, get_playback_queue, get_spotify_granted_scopes
 //!   - `teams_auth` — start_teams_auth_device_code, poll_teams_auth, refresh_teams, get_teams_granted_scopes
@@ -91,7 +91,9 @@ pub fn require_main_window(window: &tauri::Window) -> Result<(), String> {
 /// open_external_url (Teams verification-URL open during detached
 /// device-code flow), save_config (whole-document config write) and
 /// update_config (field-level config write, issue #535) — both are reached
-/// from Settings, which is one of the two detached-hosting views;
+/// from Settings, which is one of the two detached-hosting views, as are
+/// export_config (reads the config, writes a user-chosen file) and
+/// import_config (replaces the config from a user-chosen file) — issue #673;
 /// get_recent_logs (LogViewer history backfill, issue #595) — the Logs pane
 /// is hosted in either window, and the file it tails is the same local file
 /// `open_logs_folder` already exposes to both, unredacted there and here

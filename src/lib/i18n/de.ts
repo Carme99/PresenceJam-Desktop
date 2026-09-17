@@ -456,4 +456,25 @@ export const de: Dict = {
     'Der Text, der als Teams-Status gepostet wird, wenn die Wiedergabe pausiert bzw. nichts läuft. Das Musik-Emoji wird automatisch vorangestellt; ein leeres Feld stellt den Standard wieder her.',
   'rules.pausedStatusPlaceholder': 'Pausiert',
   'rules.stoppedStatusPlaceholder': 'Nichts läuft auf Spotify',
+
+  // 4.7.0 — S5 (Protokollrotation + Einstellungen exportieren/importieren)
+  'settings.sectionLogging': 'Protokollierung',
+  'settings.loggingEnabledLabel': 'Protokolldatei schreiben',
+  'settings.logLevelLabel': 'Protokollstufe',
+  'settings.logMaxSizeLabel': 'Maximale Protokolldateigröße (MB)',
+  'settings.logKeepFilesLabel': 'Aufzubewahrende archivierte Protokolldateien',
+  'settings.logRotationHint':
+    'Größenlimit und Anzahl der archivierten Dateien gelten ab dem nächsten Start von PresenceJam. Die gerade geschriebene Datei zählt nicht dazu: Der Protokollordner enthält höchstens eine Datei mehr als die hier eingestellte Anzahl. Das Ausschalten der Protokollierung oder eine andere Stufe wirkt sofort.',
+  'settings.sectionBackup': 'Sicherung',
+  'settings.backupHint':
+    'Exportieren schreibt eine Kopie dieser Einstellungen, die Sie aufbewahren oder auf einen anderen Rechner übertragen können. Ihr Spotify-Client-Geheimnis bleibt im Systemschlüsselbund und ist nie enthalten — eine Datei, die eines enthält, wird beim Import abgelehnt.',
+  'settings.backupExport': 'Einstellungen exportieren…',
+  'settings.backupImport': 'Einstellungen importieren…',
+  'settings.backupExportDialogTitle': 'PresenceJam-Einstellungen exportieren',
+  'settings.backupImportDialogTitle': 'PresenceJam-Einstellungen importieren',
+  'settings.backupConfirmOverwrite':
+    'Beim Import werden alle aktuellen Einstellungen ersetzt. Die aktuelle Datei bleibt daneben als config.json.bak erhalten. Fortfahren?',
+  'settings.backupExported': 'Einstellungen exportiert nach {path}',
+  'settings.backupImported': 'Einstellungen importiert aus {path}',
+  'settings.backupError': 'Die Sicherungsaktion konnte nicht abgeschlossen werden: {error}',
 };

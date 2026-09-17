@@ -468,6 +468,83 @@
     }
   }
 
+  // ── 4.7.0 (S5): logging + backup cards ────────────────────────────────
+  //
+  // Rust mirrors of `config.rs::clamp_logging` (1..=500 MB, 1..=20 files), so
+  // a typed value shows the value the backend will actually store.
+  const LOG_MAX_FILE_SIZE_MB = { min: 1, max: 500 } as const;
+  const LOG_KEEP_FILES = { min: 1, max: 20 } as const;
+  /**
+   * The wire values `config.rs::apply_log_level` matches (case-insensitively).
+   * Shown verbatim: they are identifiers a log reader is looking for, like the
+   * locale endonyms in the appearance card, not prose to translate.
+   */
+  const LOG_LEVELS = ['Off', 'Error', 'Warn', 'Info', 'Debug', 'Trace'] as const;
+
+  let backupBusy = $state(false);
+  let backupMessage = $state('');
+
+  /** `{ path, config }` — the Rust `ImportOutcome` (commands/config.rs). */
+  type ImportOutcome = { path: string; config: AppConfig };
+
+  function backupError(e: unknown): string {
+    return String((e as Error)?.message ?? e).slice(0, 180);
+  }
+
+  async function exportConfig() {
+    if (backupBusy) return;
+    backupBusy = true;
+    backupMessage = '';
+    try {
+      const path = await invoke<string | null>('export_config', {
+        title: t('settings.backupExportDialogTitle')
+      });
+      // `null` = the dialog was dismissed: not a failure, and no message.
+      if (path) backupMessage = t('settings.backupExported', { path });
+    } catch (e) {
+      console.error('[SETTINGS] export_config failed:', e);
+      backupMessage = t('settings.backupError', { error: backupError(e) });
+    } finally {
+      backupBusy = false;
+    }
+  }
+
+  async function importConfig() {
+    if (backupBusy) return;
+    backupBusy = true;
+    backupMessage = '';
+    try {
+      // Both the picker and the overwrite confirmation live in the
+      // `import_config` command (Rust), so the same dialog appears in the main
+      // window and in a popped-out Settings pane — the JS dialog plugin is
+      // ACL-gated per window, and granting it to detached panes would hand them
+      // the file dialogs too. Only the *copy* is localized here: Rust has no
+      // dictionary, so the title, the body and both button labels arrive as
+      // arguments and every one of them goes through `t()`.
+      const outcome = await invoke<ImportOutcome | null>('import_config', {
+        title: t('settings.backupImportDialogTitle'),
+        confirmBody: t('settings.backupConfirmOverwrite'),
+        confirmOk: t('common.yes'),
+        confirmCancel: t('common.no')
+      });
+      if (!outcome) return;
+      // Adopt what is now on disk (the #297 invariant) — including the
+      // lexicon textarea, which is a projection of the stored list.
+      localConfig = await loadConfig();
+      extraWordsText = localConfig.teams.profanity_extra_words.join('\n');
+      saveMessage = '';
+      backupMessage = t('settings.backupImported', { path: outcome.path });
+    } catch (e) {
+      console.error('[SETTINGS] import_config failed:', e);
+      // Rust refuses an import that carries a plaintext client_secret and
+      // names the offending path; surface that text rather than a generic
+      // failure, since it is the only way the user learns why.
+      backupMessage = t('settings.backupError', { error: backupError(e) });
+    } finally {
+      backupBusy = false;
+    }
+  }
+
   async function reconnectSpotify() {
     if (spotifyAuthWaiting || !localConfig.spotify.client_id) return;
     // #550: `reconnect_spotify_session` emits `spotify-reconnect-required`,
@@ -1342,6 +1419,77 @@
       </div>
     </section>
 
+    <!-- 4.7.0 (S5): log rotation. Rust owns the file target; this card is the
+         only place `logging.*` is edited. `enabled`/`log_level` take effect
+         immediately (config::apply_log_level, CfgDiag#4); size and retention
+         are read once when the log plugin is built, i.e. at the next launch —
+         the hint says so rather than implying an immediate effect. -->
+    <section class="card">
+      <header class="section-header">
+        <h2>{t('settings.sectionLogging')}</h2>
+      </header>
+      <div class="toggle-row">
+        <label for="logging-enabled">{t('settings.loggingEnabledLabel')}</label>
+        <input id="logging-enabled" type="checkbox" bind:checked={localConfig.logging.enabled} />
+      </div>
+      <div class="form-group">
+        <label for="log-level">{t('settings.logLevelLabel')}</label>
+        <select id="log-level" bind:value={localConfig.logging.log_level}>
+          {#each LOG_LEVELS as level (level)}
+            <option value={level}>{level}</option>
+          {/each}
+        </select>
+      </div>
+      <div class="row-2">
+        <div class="form-group">
+          <label for="log-max-size">{t('settings.logMaxSizeLabel')}</label>
+          <input
+            id="log-max-size"
+            type="number"
+            min={LOG_MAX_FILE_SIZE_MB.min}
+            max={LOG_MAX_FILE_SIZE_MB.max}
+            bind:value={localConfig.logging.max_file_size_mb}
+          />
+        </div>
+        <div class="form-group">
+          <label for="log-keep-files">{t('settings.logKeepFilesLabel')}</label>
+          <input
+            id="log-keep-files"
+            type="number"
+            min={LOG_KEEP_FILES.min}
+            max={LOG_KEEP_FILES.max}
+            bind:value={localConfig.logging.keep_files}
+          />
+        </div>
+      </div>
+      <p class="hint">{t('settings.logRotationHint')}</p>
+      <button class="btn-secondary btn-full" onclick={openLogs}>
+        {t('settings.openLogsFolder')}
+      </button>
+    </section>
+
+    <!-- 4.7.0 (S5): backup. Both actions run in Rust, which owns the file
+         dialogs and the resolved path; the export never carries the Spotify
+         client secret (keychain-only) and the import refuses a document that
+         does. -->
+    <section class="card">
+      <header class="section-header">
+        <h2>{t('settings.sectionBackup')}</h2>
+      </header>
+      <p class="hint">{t('settings.backupHint')}</p>
+      <div class="row-2">
+        <button class="btn-secondary btn-full" onclick={exportConfig} disabled={backupBusy}>
+          {t('settings.backupExport')}
+        </button>
+        <button class="btn-secondary btn-full" onclick={importConfig} disabled={backupBusy}>
+          {t('settings.backupImport')}
+        </button>
+      </div>
+      {#if backupMessage}
+        <p class="hint" role="status">{backupMessage}</p>
+      {/if}
+    </section>
+
     <section class="actions">
       <button class="btn-full" onclick={handleSave} disabled={isSaving}>
         {isSaving ? t('settings.saving') : t('settings.saveChanges')}
@@ -1349,7 +1497,6 @@
       {#if saveMessage}
         <p class="save-message" aria-live="polite">{saveMessage}</p>
       {/if}
-      <button class="btn-secondary btn-full" onclick={openLogs}>{t('settings.openLogsFolder')}</button>
     </section>
   </div>
 </div>
