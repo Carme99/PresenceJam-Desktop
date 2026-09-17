@@ -14,7 +14,6 @@
   import Reconnect from '$lib/components/Reconnect.svelte';
   import { bootView } from '$lib/utils/boot';
   import { clientSecretStateOf, loadConfig } from '$lib/stores/config';
-  import type { AppConfig } from '$lib/types';
   import { t } from '$lib/i18n';
 
   // Build info — injected at build time via vite.config.js define
@@ -58,19 +57,6 @@
       // the same timeout so a stalled keychain read cannot strand the spinner.
       const view = await withBootTimeout(
         (async () => {
-          // 4.7.0 (issue #674): hydrate the shared config store on every
-          // launch. Nothing else does it on the Dashboard-first path — the
-          // normal one for an already-configured user — and the i18n store
-          // reads `config.locale` from this store (and keys its one-shot
-          // legacy-locale migration on the store's hydration flag), so without
-          // this the webview stayed on the frontend defaults for the whole
-          // session: a German UI with an English tray.
-          //
-          // It runs inside the boot timeout with the other probes, so a
-          // stalled `load_config` IPC is bounded by the same 8 s policy
-          // (#405); `loadConfig` itself never rejects — a failed read falls
-          // back to the frontend defaults and leaves the store un-hydrated.
-          await loadConfig();
           const complete = await invoke<boolean>('is_onboarding_complete');
           devLog('[PAGE] boot: is_onboarding_complete SUCCESS, complete=', complete);
           return bootView(complete, await hasStoredSpotifyCredentials());
@@ -88,7 +74,7 @@
       // decision so a returning user with stored credentials keeps it.
       //
       // Fail direction: the credential probe fails OPEN to the wizard
-      // (`hasStoredSpotifyCredentials` returns false when its own invoke
+      // (`hasStoredSpotifyCredentials` returns false when its config read
       // fails) — deliberately, because (a) that is the documented contract
       // of the existing probe, (b) a keychain error means Reconnect could
       // not read the stored secret either, so routing there would dead-end,
@@ -112,9 +98,23 @@
   // #530: does this install still hold the Spotify credentials (Client ID in
   // config + secret in the OS keychain) that a reconnect can reuse? Any probe
   // failure falls back to the wizard, which can recreate everything.
+  //
+  // 4.7.0 (issue #674): the read goes through the shared store instead of a raw
+  // `invoke('load_config')`, so this probe — which runs on every boot, on both
+  // the success and the failure path below — is what hydrates `configStore`.
+  // Nothing else does on a Dashboard-first launch (the normal one for an
+  // already-configured user), and the i18n store reads `config.locale` from
+  // that store (and keys its one-shot legacy-locale migration on the store's
+  // hydration flag): without it the webview kept the frontend defaults for the
+  // whole session — a German UI with an English tray.
+  //
+  // `loadConfig()` never rejects: a failed read resolves with the frontend
+  // defaults, whose secret state is `absent`, so this still fails OPEN to the
+  // wizard, and `configHydrated` stays false so nothing is written on the
+  // defaults' behalf.
   async function hasStoredSpotifyCredentials(): Promise<boolean> {
     try {
-      const cfg = await invoke<AppConfig>('load_config');
+      const cfg = await loadConfig();
       if (!cfg.spotify.client_id?.trim()) return false;
       // #560: only a *positively absent* secret means there is nothing to
       // reuse. `is_spotify_client_secret_set` is the `Present`-only projection

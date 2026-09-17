@@ -397,6 +397,7 @@ pub async fn import_config(
         path: source_path,
         config: persisted,
     }))
+}
 
 /// Installs the persisted locale on the native surfaces and repaints them when
 /// it actually changed (4.7.0, issue #674).
