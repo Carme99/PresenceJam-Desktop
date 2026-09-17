@@ -211,11 +211,15 @@ pub(crate) fn load_write_clocks() -> WriteClocks {
 /// re-derives, while a resurrected gate decision is not recoverable.
 ///
 /// Residual, accepted and by design: two writers that loaded the SAME
-/// generation are last-writer-wins — the second store lands on the first's
-/// state. That costs dedup precision for at most one iteration (the next
-/// iteration re-derives it from live state and any gate it re-reads is
-/// re-recorded), which is the price of keeping the load/store pair lock-free
-/// across a whole HTTP iteration rather than holding a mutex through it.
+/// generation are first-publish-wins — the first store lands and moves the
+/// generation on, and the second is then discarded wholesale, so THAT
+/// iteration's own advances (including any gate it just re-read) are lost and
+/// re-derived on the next one. It costs dedup precision for at most one
+/// iteration, which is the price of keeping the load/store pair lock-free across
+/// a whole HTTP iteration instead of holding a mutex through it; the alternative
+/// (letting the loser merge field-by-field) cannot distinguish its own advances
+/// from the winner's and would resurrect exactly the stale decisions the
+/// generation guard exists to drop.
 pub(crate) fn store_write_clocks(clocks: &WriteClocks) {
     let mut slot = WRITE_CLOCKS.lock().unwrap_or_else(|e| e.into_inner());
     if slot.generation != clocks.generation {
