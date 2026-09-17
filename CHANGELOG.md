@@ -138,6 +138,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the tray tooltip/status line states the remaining time. `snooze_until` is
   additive with a serde default, so a pre-4.7 config loads unchanged.
 
+- **Frontend coverage ratchet, and tests for the polling driver (#681):** CI's
+  `frontend` job now runs `npm run test:coverage` in place of `npm test` — the
+  same vitest suite through the v8 provider, over the whole `src/**` source set,
+  failing the job when any of the four measured percentages (statements,
+  branches, functions, lines) drops. The thresholds are the numbers measured on
+  the merged tree rather than an aspiration, so the gate can only be raised
+  deliberately. The same change adds the first behavioural tests for the
+  polling driver's stop/restart handshake and for the process-wide
+  write-decision clock and exit snapshot (`polling/loop.rs`,
+  `polling/state.rs`). Rust coverage tooling stays out of scope in 4.7.0: the
+  ratchet is frontend-only.
 
 ### Changed
 

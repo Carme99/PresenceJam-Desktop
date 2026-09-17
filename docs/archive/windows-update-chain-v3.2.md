@@ -1,4 +1,5 @@
 # Windows Update Chain — v3.2.0 Rescue Checklist
+> **Superseded** — kept for history; current state is [`docs/STATE-OF-FEATURES.md`](../STATE-OF-FEATURES.md).
 
 Stuck fleet: Windows clients on ≤ v3.1.0 that never received an auto-update because the v3.1.0 release uploaded `PresenceJam_3.1.0_x64_en-US.msi` (bundler filename) while `latest.json` referenced `PresenceJam-v3.1.0.msi` (renamed). Tauri's updater treats a 404 on the platform URL as "no update" — silently, no error — so the fleet remained pinned.
 

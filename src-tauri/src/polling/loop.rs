@@ -249,3 +249,141 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
 
     log::info!("[POLLING] polling_loop: ENDED");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc::RecvTimeoutError;
+
+    /// #681, start/stop/restart: the driver's only two waits are
+    /// `stop_rx.recv_timeout(ZERO)` at the top of an iteration and the
+    /// stop-aware sleep between iterations; both break on `Ok(())` /
+    /// `Disconnected` and continue on `Timeout`. `stop_polling` is the ONLY
+    /// writer that clears the stored sender, and that drop is what wakes the
+    /// driver immediately instead of after up to one `max_interval` (issue #10
+    /// — the 300 s freeze) and what the exit block reads to decide whether
+    /// `commands::sync` already owns the `sync-stopped` emit (finding D5).
+    #[test]
+    fn test_stop_handshake_wakes_the_driver_and_restart_isolates_the_old_thread() {
+        let state = AppState::new();
+        // Exactly the pair `start_polling` installs before handing `rx` to the
+        // driver; `stop_polling` only has to drop the stored sender.
+        let (tx, rx) = mpsc::channel::<()>();
+        *state.polling.stop_tx_mut() = Some(tx);
+        state.polling.set_syncing(true, Ordering::Release);
+
+        assert!(
+            matches!(
+                rx.recv_timeout(StdDuration::ZERO),
+                Err(RecvTimeoutError::Timeout)
+            ),
+            "with a live stop channel the driver's pre-iteration check must \
+             report no stop, so the loop keeps polling"
+        );
+
+        crate::polling::state::stop_polling(&state);
+
+        assert!(
+            state.polling.stop_tx().is_none(),
+            "stop_polling must clear the stored sender: it is the sole writer \
+             that does, which is how the driver's exit block tells a requested \
+             stop from a self-termination (finding D5)"
+        );
+        assert!(
+            matches!(
+                rx.recv_timeout(StdDuration::ZERO),
+                Ok(()) | Err(RecvTimeoutError::Disconnected)
+            ),
+            "closing the channel must wake the driver's very next wait — Pause \
+             Sync may not block for up to one poll interval (issue #10)"
+        );
+        assert!(
+            state.polling.is_syncing(Ordering::Acquire),
+            "stop_polling must leave is_syncing set for the join side: a \
+             concurrent Stop->Start must not be able to claim the flag while \
+             the old thread is still in blocking HTTP (#69)"
+        );
+
+        // Restart: a new session installs a fresh pair. The superseded
+        // receiver stays dead, so the old driver cannot be woken into — or
+        // mistaken for — the new session.
+        let (tx2, rx2) = mpsc::channel::<()>();
+        *state.polling.stop_tx_mut() = Some(tx2);
+        assert!(
+            matches!(
+                rx.recv_timeout(StdDuration::ZERO),
+                Ok(()) | Err(RecvTimeoutError::Disconnected)
+            ),
+            "a superseded driver's waits must stay closed across a restart"
+        );
+        assert!(
+            matches!(
+                rx2.recv_timeout(StdDuration::ZERO),
+                Err(RecvTimeoutError::Timeout)
+            ),
+            "the restarted session must get a live stop channel"
+        );
+    }
+
+    /// Finding D1 (issue #684), driver side: the exit tail's first act leaves
+    /// the session's clocks cold, and the quit cleanup must NOT be decided from
+    /// them — the Teams residue lives in the exit snapshot, which no session
+    /// boundary clears. Asserted through the accessors the cleanup reads and
+    /// across a stop->start boundary (this tail, then the next session's start,
+    /// which resets the same slot), so a tail that started clearing the
+    /// snapshot fails here instead of silently leaving the music status and the
+    /// armed `Available` session live on Teams after a quit.
+    #[test]
+    fn test_a_cold_session_end_still_carries_the_teams_residue() {
+        let _guard = crate::polling::state::global_state_lock();
+        // Start from a clean slate through the poller's own recorders: this
+        // file must stay free of a snapshot-reset call (the D1 source guard in
+        // `poll_once.rs` reads this file, and the driver must never retire the
+        // residue — only a completed exit cleanup may).
+        crate::polling::state::record_posted_status(None);
+        crate::polling::state::record_armed_presence(None);
+        crate::polling::state::record_manual_status_blocks(false);
+        crate::polling::state::record_posted_status(Some("\u{1F3B5} A - T \u{1F3A7}"));
+        crate::polling::state::record_armed_presence(Some((
+            "Available",
+            "Available",
+            "Listening (Available)",
+        )));
+
+        // The exit tail, verbatim...
+        crate::polling::poll_once::reset_write_clocks();
+        // ...and the next session's start, which resets the same slot.
+        crate::polling::poll_once::reset_write_clocks();
+
+        let cold = crate::polling::poll_once::load_write_clocks();
+        assert!(
+            cold.last_track_key.is_none()
+                && cold.last_posted_status.is_none()
+                && cold.armed_presence.is_none(),
+            "the tail must leave the clocks cold — that is precisely why the \
+             cleanup cannot read them (finding D1)"
+        );
+
+        let residue = crate::polling::state::load_exit_snapshot();
+        assert_eq!(
+            residue.last_posted_status.as_deref(),
+            Some("\u{1F3B5} A - T \u{1F3A7}"),
+            "a cold session boundary must not erase the status Teams still \
+             shows (finding D1)"
+        );
+        assert_eq!(
+            residue
+                .armed_presence
+                .as_ref()
+                .map(|(availability, _, _)| availability.as_str()),
+            Some("Available"),
+            "a cold session boundary must not erase the armed presence session \
+             (finding D1)"
+        );
+        // The retirement of a completed cleanup is asserted in `state.rs`
+        // (`test_snapshot_fields_record_and_retire_independently`); the driver
+        // owns only the "do not clear it here" half of that contract, and this
+        // file is deliberately free of a `reset_exit_snapshot` call — the D1
+        // source guard in `poll_once.rs` reads this file to prove it.
+    }
+}
