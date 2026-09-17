@@ -150,7 +150,7 @@ Payload signing is independent of OS code signing: the updater works on
 unsigned builds, and the macOS unsigned/Gatekeeper story (README
 "macOS first-run note") applies to updated `.app` builds too. The release
 matrix builds **aarch64 macOS only** — Intel Macs never receive updates
-(known gap, see `docs/3.0-release-research.md`).
+(known gap, see [`docs/archive/3.0-release-research.md`](./archive/3.0-release-research.md)).
 
 ## System Tray (v4.6)
 
