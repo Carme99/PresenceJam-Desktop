@@ -65,13 +65,22 @@ go under `## [Unreleased]`.
 
 At release time, **in one commit**:
 
-1. rename `## [Unreleased]` → `## [X.Y.Z] - YYYY-MM-DD`, and
-2. add a fresh `## [Unreleased]` section on top for the next cycle, and
-3. add the link definition:
+1. rename `## [Unreleased]` → `## [X.Y.Z] - YYYY-MM-DD`,
+2. add a fresh, empty `## [Unreleased]` section on top for the next cycle (the
+   4.6.0 cut left `Added` / `Changed` / … headings behind it, as the file does
+   today), and
+3. add the new section's link definition:
 
-```markdown
-[X.Y.Z]: https://github.com/Carme99/PresenceJam-Desktop/compare/vPREVIOUS...vX.Y.Z
-```
+   ```markdown
+   [X.Y.Z]: https://github.com/Carme99/PresenceJam-Desktop/compare/vPREVIOUS...vX.Y.Z
+   ```
+
+4. re-base the `[Unreleased]` definition on the tag you just created, or the new
+   empty section links to the wrong diff range:
+
+   ```markdown
+   [Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/vX.Y.Z...HEAD
+   ```
 
 The `changelog-links` job in `ci.yml` (~lines 282-299) iterates every
 `^## [X]` header and fails on the first one whose `[X]:` definition is missing
@@ -177,8 +186,8 @@ behind the tag-push run.
 
 1. `main` is green, and every slice PR for the release is merged.
 2. Bump all six literals in §1 (branch `release/X.Y` or a PR into `main`).
-3. Update `CHANGELOG.md` per §2 — rename **and** add the link definition in the
-   same commit. If the release changes shipped behaviour, update
+3. Update `CHANGELOG.md` per §2 — rename, add the new link definition and re-base
+   `[Unreleased]`, all in the same commit. If the release changes shipped behaviour, update
    [`STATE-OF-FEATURES.md`](./STATE-OF-FEATURES.md) too (including its version
    header).
 4. Open the release PR and wait for `version-consistency`, `changelog-links`,
