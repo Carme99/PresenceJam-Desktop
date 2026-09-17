@@ -5,12 +5,16 @@
     <link rel="icon" href="%sveltekit.assets%/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>PresenceJam</title>
-    <!-- Pre-paint theme bootstrap (#423 + #433): runs before first paint in
-      every webview (main + detached) so stored-'light' users never see a
-      dark flash. Reads the `presencejam:theme` key the theme store persists
-      (plus the `?theme=` override the detached opener appends) before
-      SvelteKit paints. No dependencies, no imports — key literal duplicated
-      deliberately so this file never couples to the store.
+    <!-- Pre-paint bootstrap (#423 + #433 + #680): runs before first paint in
+      every webview (main + detached) so a stored preference is never one frame
+      late — a 'light' user sees no dark flash and a compact user sees no
+      comfortable spacing. It resolves the theme from the `?theme=` override the
+      detached opener appends, else the stored `presencejam:theme` key (a stored
+      `system` resolves through the OS), else the OS preference, and paints
+      `data-theme`; then it paints `data-density` from the stored
+      `presencejam:density` key (absent/garbage → the comfortable default the
+      store applies by itself). No dependencies, no imports — key literals
+      duplicated deliberately so this file never couples to the store.
       CSP evidence (empirical, not spec reading): this exact CSP
       (tauri.conf.json `security.csp`: `default-src 'self'`, NO
       `script-src`) already ships in every release including 4.4.0, and
