@@ -1498,6 +1498,24 @@ fn decision_from(
 /// (playing gate, mid-track quiet entry, paused clear, no-track clear, tray).
 /// `availability`/`activity` are empty for the time- and rule-based reasons,
 /// which carry no Graph presence sample.
+/// The `presence-paused` payload (finding D7, issue #690).
+///
+/// A cross-slice contract: the Dashboard reads `status` to keep the track card
+/// and show the paused state, so a rename here is a silent break there. Built by
+/// a function rather than inline so the shape can be asserted (review round 2,
+/// item 5).
+fn presence_paused_payload(status: &str) -> serde_json::Value {
+    json!({ "status": status })
+}
+
+/// The `playback-state-changed` payload (finding D6, issue #689).
+///
+/// Cross-slice contract: the Dashboard reads `is_playing` and the tray re-seeds
+/// from `track_key`. Exactly these two fields (review round 2, item 5).
+fn playback_state_changed_payload(is_playing: bool, track_key: &str) -> serde_json::Value {
+    json!({ "is_playing": is_playing, "track_key": track_key })
+}
+
 fn emit_presence_gated(app: &AppHandle, reason: &str, availability: &str, activity: &str) {
     let _ = app.emit(
         "presence-gated",
@@ -2025,6 +2043,28 @@ fn no_track_gate_key(blocked: bool) -> Option<&'static str> {
     blocked.then_some(NO_TRACK_GATE_KEY)
 }
 
+/// Review round 2 (item 4): whether the paused clear can skip its Graph
+/// `/presence` read entirely.
+///
+/// True exactly when the read cannot change the outcome: the placeholder Teams
+/// already shows is the one this pause wants (#155 dedup would skip the POST
+/// whatever the verdict says), no rule suppresses the clear (a rule verdict is
+/// time/track based and needs no read, and it must still be recorded and
+/// announced), and no recorded gate has reached its re-check (a due re-check is
+/// what clears a stale gate, so that read must happen).
+///
+/// What finding D3 (issue #686) actually required was that a suppressed write
+/// must not mark itself as POSTED — the ordering fix is what does that, and it
+/// does not depend on the read happening first. This helper restores the
+/// pre-fix no-read fast path without restoring the poisoning.
+fn paused_clear_skips_gate_read(
+    already_posted: bool,
+    rule_suppresses: bool,
+    recorded_gate_due: bool,
+) -> bool {
+    already_posted && !rule_suppresses && !recorded_gate_due
+}
+
 /// Finding D6 (issue #689): whether the observed item represents a playback
 /// STATE change for an otherwise-unchanged track.
 ///
@@ -2119,6 +2159,18 @@ pub(crate) fn process_track(
                         posted: Option<&str>,
                         placeholder: Option<&str>|
      -> Option<String> {
+        // Review round 2 (item 7): every gate read doubles as the exit path's
+        // manual-status observation. `manual_status_blocks_write` is the SAME
+        // predicate the verdict uses, so the quit cleanup and the write gate can
+        // never disagree about whose status is on Teams — and the exit path
+        // needs no Graph call of its own to respect it.
+        super::state::record_manual_status_blocks(manual_status_blocks_write(
+            respect_manual_status,
+            Some(presence),
+            posted,
+            placeholder,
+            Utc::now(),
+        ));
         presence_gate_decision(
             presence,
             presence_gate_enabled,
@@ -2184,10 +2236,7 @@ pub(crate) fn process_track(
         *LAST_NOW_PLAYING.lock() = Some(now.clone());
         let _ = app.emit(
             "playback-state-changed",
-            json!({
-                "is_playing": track.is_playing,
-                "track_key": track_key,
-            }),
+            playback_state_changed_payload(track.is_playing, &track_key),
         );
     }
 
@@ -2713,10 +2762,32 @@ pub(crate) fn process_track(
             // A gate recorded by the playing path is therefore re-decided as
             // soon as its re-check is due (the #380 clock, exactly like the
             // playing branch), instead of suppressing the pause indefinitely.
+            //
+            // Review round 2 (item 4): the ORDER of the verdict and the
+            // byte-identity comparison does not by itself justify a Graph read
+            // per paused poll — the pre-fix code short-circuited here, and a
+            // steady pause must not pay for a `/presence` GET it cannot act on.
+            // The read is skipped exactly where its result cannot matter:
+            let already_posted = last_posted_placeholder.as_deref() == Some(placeholder);
+            let recorded_gate_due = gated_track_key.as_deref() == Some(track_key.as_str())
+                && gate_recheck_due(*last_gate_check, Instant::now());
             let mut gate_blocked = false;
             let mut gate_reason: Option<String> = None;
             let mut gate_sample: Option<(String, String)> = None;
-            if let Some(reason) = rule_suppression_reason {
+            if paused_clear_skips_gate_read(
+                already_posted,
+                rule_suppression_reason.is_some(),
+                recorded_gate_due,
+            ) {
+                // Every outcome of a fresh read is the same no-write
+                // `SkipDuplicate` (#155) here, so nothing is pending — which also
+                // means a suppression marker left over from an earlier episode
+                // would only mute a future announced suppression.
+                log::debug!(
+                    "[POLLING] process_track: paused placeholder unchanged, skipping gate read and clear POST"
+                );
+                *suppressed_placeholder = None;
+            } else if let Some(reason) = rule_suppression_reason {
                 log::info!(
                     "[POLLING] process_track: paused-clear suppressed ({}), keeping presence untouched",
                     reason
@@ -2763,7 +2834,6 @@ pub(crate) fn process_track(
                 }
             }
 
-            let already_posted = last_posted_placeholder.as_deref() == Some(placeholder);
             let already_suppressed = suppressed_placeholder.as_deref() == Some(placeholder);
             match placeholder_write_decision(gate_blocked, already_posted, already_suppressed) {
                 PlaceholderWrite::Suppress { announce } => {
@@ -2810,7 +2880,8 @@ pub(crate) fn process_track(
                             // track card and show the paused state;
                             // `presence-cleared` stays reserved for the genuine
                             // no-track path.
-                            let _ = app.emit("presence-paused", json!({ "status": placeholder }));
+                            let _ =
+                                app.emit("presence-paused", presence_paused_payload(placeholder));
                         }
                         Err(e) => {
                             log::error!(
@@ -2941,7 +3012,14 @@ pub(crate) fn handle_no_track(
     // path — one shared helper, no cloned-without-expiry token.
     let teams_tok = match teams_token_for_write(app, state) {
         Some(t) => t,
-        None => return 0,
+        None => {
+            // Review round 2, item 3: this early return cannot post a clear, so
+            // the finished track's gate must not survive it either — leaving it
+            // makes `get_sync_status` answer `presence_gated = true` over a
+            // "Nothing playing" card forever.
+            *gated_track_key = no_track_gate_key(false).map(str::to_string);
+            return 0;
+        }
     };
 
     // P1 (issue #3.0-P1): availability sync — clear the Graph presence session
@@ -2970,6 +3048,10 @@ pub(crate) fn handle_no_track(
         .map(|c| c.teams.clear_on_pause)
         .unwrap_or(true)
     {
+        // Review round 2, item 3: the user's config — not a gate — is what
+        // suppresses this clear, so no gate is in force; retire the finished
+        // track's key rather than leave a stale one on the clock.
+        *gated_track_key = no_track_gate_key(false).map(str::to_string);
         return teams_backoff_secs;
     }
 
@@ -3314,7 +3396,13 @@ fn exit_cleanup_plan(
 ) -> ExitCleanupPlan {
     ExitCleanupPlan {
         clear_presence: availability_sync && snapshot.armed_presence.is_some(),
-        post_placeholder: clear_on_pause && snapshot.last_posted_status.is_some(),
+        // Review round 2 (item 7): never replace a Teams status the USER owns on
+        // the way out — the poller recorded whether one is in force (see
+        // `manual_status_blocks_write`). Clearing our OWN armed availability
+        // session stays correct either way.
+        post_placeholder: clear_on_pause
+            && snapshot.last_posted_status.is_some()
+            && !snapshot.manual_status_blocks,
     }
 }
 
@@ -5942,13 +6030,12 @@ mod tests {
     // ---------------------------------------------------------------
 
     /// Serialises the tests that mutate the process-wide clock / exit-snapshot
-    /// statics. `cargo test` runs a module's tests in parallel threads and
-    /// these slots are shared, so an interleaved reset would make the
-    /// generation assertions flaky (they would be asserting about another
-    /// test's slot).
+    /// statics. ONE lock for both module's tests (it lives in `state.rs`, next
+    /// to the snapshot): `cargo test` runs tests in parallel threads, the slots
+    /// are shared, and several tests touch both — an interleaved reset would
+    /// make the generation / snapshot assertions flaky.
     fn global_state_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: Mutex<()> = Mutex::new(());
-        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        crate::polling::state::global_state_lock()
     }
 
     /// Finding D1 (issue #684): `polling_loop`'s exit tail empties the
@@ -6091,6 +6178,9 @@ mod tests {
         let owner = body
             .find("if is_owner {")
             .expect("start_polling must keep the ownership check");
+        let gate = body.find("let stop_requested =").expect(
+            "the announce decision must hinge on whether a stop was requested (D5/round 2)",
+        );
         let emit = body
             .find("app.emit(\"sync-stopped\", ())")
             .expect("sync-stopped emit");
@@ -6098,6 +6188,18 @@ mod tests {
             emit > owner,
             "the emit must sit inside the ownership-checked block (finding D5), so a \
              superseded thread's exit cannot report a stop for the live one"
+        );
+        assert!(
+            emit > gate,
+            "the emit must be decided by `stop_requested`, not before it"
+        );
+        assert!(
+            !body[gate..emit].contains("is_syncing"),
+            "the announce decision must NOT hinge on `is_syncing` (review round 2, item 2): \
+             an explicit stop leaves it true until after the join (so gating on it emitted \
+             a SECOND sync-stopped) while a self-terminating exit may leave it false (so it \
+             emitted NONE). `stop_polling` clearing the stored stop sender is the requested-\
+             stop signal, and commands::sync::stop_syncing owns that path's emit."
         );
         // The payload shape is the existing emitter's, verbatim.
         let sync_source = include_str!("../commands/sync.rs");
@@ -6159,14 +6261,21 @@ mod tests {
         let verdict = paused
             .find("let mut gate_blocked = false;")
             .expect("the paused branch must compute a gate verdict (finding D3)");
-        let dedup = paused
-            .find("let already_posted =")
-            .expect("the paused branch must compare against what Teams shows");
+        let decision = paused
+            .find("placeholder_write_decision(gate_blocked,")
+            .expect("the paused branch must decide from the verdict (finding D3)");
         assert!(
-            verdict < dedup,
-            "the gate verdict must precede the byte-identity comparison: pre-fix the \
-             dedup ran first and a suppressed write claimed it had been posted \
-             (finding D3)"
+            verdict < decision,
+            "the gate verdict must be computed before the outcome is decided: pre-fix \
+             the byte-identity comparison ran first and a suppressed write claimed it \
+             had been posted (finding D3). `already_posted` may be computed earlier — \
+             it also feeds the no-read fast path (review round 2, item 4) — but it is \
+             only an INPUT to the decision, never the decision itself."
+        );
+        assert!(
+            !paused.contains("if last_posted_placeholder.as_deref() == Some(placeholder) {"),
+            "the paused branch must not branch on the dedup directly: that is the \
+             pre-fix shape that let a suppressed write look posted (finding D3)"
         );
         let suppress_arm_start = paused
             .find("PlaceholderWrite::Suppress")
@@ -6266,9 +6375,23 @@ mod tests {
         let arm_body = &track_body[arm..];
         assert!(
             arm_body.contains("current_track_mut()")
-                && arm_body.contains("\"playback-state-changed\""),
+                && arm_body.contains("\"playback-state-changed\"")
+                && arm_body.contains("playback_state_changed_payload("),
             "the arm must re-store the observed track — so the sync status reports \
-             the paused track — and emit playback-state-changed (finding D6)"
+             the paused track — and emit the playback-state-changed payload (finding D6)"
+        );
+        // Review round 2, item 1: the arm's guard must be the REAL predicate.
+        // Disabling the feature with `let playing_changed = false;` leaves every
+        // other assertion in this test passing, so the derivation itself is what
+        // has to be pinned — process_track needs a live AppHandle and a Graph
+        // read, so there is no unit-level way to observe the arm's effect.
+        assert!(
+            track_body.contains(
+                "let playing_changed = !changed && playback_state_changed(stored_is_playing, track.is_playing);"
+            ),
+            "the playback-state arm must be driven by playback_state_changed(...) on the \
+             observations (finding D6): forcing `playing_changed` to false silently \
+             disables the whole fix (review round 2, item 1)"
         );
     }
 
@@ -6422,6 +6545,182 @@ mod tests {
             body.matches("no_track_gate_key(false)").count() >= 2,
             "both non-suppressing outcomes (dedup and the posted clear) must retire the \
              gate, so no path leaves a stale one behind"
+        );
+    }
+    /// Review round 2, item 4: the paused clear must not spend a Graph
+    /// `/presence` GET per poll on a steady pause — and the fast path may not
+    /// come back at the price of the D3 poisoning (a suppressed write claiming
+    /// it was posted).
+    #[test]
+    fn test_paused_clear_skips_the_gate_read_only_when_it_cannot_matter() {
+        // The steady pause: the placeholder is on Teams, no rule suppresses,
+        // no gate is due for re-check -> skip the read (#155 dedup decides).
+        assert!(paused_clear_skips_gate_read(true, false, false));
+        // A rule suppression is computed without a read and must still be
+        // recorded and announced (the Dashboard chip), so take the full path.
+        assert!(!paused_clear_skips_gate_read(true, true, false));
+        // A recorded gate that reached its re-check is exactly what a read
+        // clears, so it must happen.
+        assert!(!paused_clear_skips_gate_read(true, false, true));
+        // Nothing posted yet: the clear may have to happen.
+        assert!(!paused_clear_skips_gate_read(false, false, false));
+        assert!(!paused_clear_skips_gate_read(false, true, true));
+
+        // Structural: the skip decision is taken BEFORE the read, and the arm
+        // that takes it never records a post (the D3 poisoning).
+        let prod = prod_source();
+        let track_body = prod_fn_body(prod, "pub(crate) fn process_track(");
+        let paused_start = track_body
+            .find("let placeholder = \"\\u{1F3B5} Paused\";")
+            .expect("process_track must keep the paused placeholder literal");
+        let paused = &track_body[paused_start..];
+        let skip_check = paused
+            .find("if paused_clear_skips_gate_read(")
+            .expect("the paused branch must take the no-read fast path (review round 2, item 4)");
+        let read = paused
+            .find("get_teams_presence(")
+            .expect("the paused branch keeps its gate read");
+        assert!(
+            skip_check < read,
+            "the skip decision must precede the Graph read it exists to avoid"
+        );
+        let skip_arm_end = paused[skip_check..]
+            .find("} else if let Some(reason) = rule_suppression_reason {")
+            .expect("the fast path must be the FIRST arm of the verdict chain")
+            + skip_check;
+        let skip_arm = &paused[skip_check..skip_arm_end];
+        assert!(
+            !skip_arm.contains("last_posted_placeholder = Some"),
+            "the fast path must never claim the placeholder was posted — that is the \
+             finding D3 defect this ordering fix exists for"
+        );
+        assert!(
+            !skip_arm.contains("suppressed_placeholder = Some"),
+            "and it must not record a suppression it did not observe"
+        );
+    }
+
+    /// Review round 2, item 5: `presence-paused` and `playback-state-changed`
+    /// are cross-slice contracts (the Dashboard reads `status` / `is_playing`,
+    /// the tray reads `track_key`), so their serialized shapes are pinned.
+    #[test]
+    fn test_event_payload_shapes_are_pinned() {
+        assert_eq!(
+            presence_paused_payload("\u{1F3B5} Paused"),
+            json!({ "status": "\u{1F3B5} Paused" }),
+            "presence-paused is {{ status }} — the Dashboard renders that text"
+        );
+        assert_eq!(
+            playback_state_changed_payload(false, "A - T | track | f"),
+            json!({ "is_playing": false, "track_key": "A - T | track | f" }),
+            "playback-state-changed is {{ is_playing, track_key }} — the Dashboard and \
+             the tray both consume it"
+        );
+        let value = playback_state_changed_payload(true, "k");
+        let obj = value.as_object().expect("an object payload");
+        assert_eq!(
+            obj.len(),
+            2,
+            "exactly is_playing + track_key: a renamed or extra field is a silent \
+             break for S2/the tray (review round 2, item 5)"
+        );
+        assert!(obj.contains_key("is_playing") && obj.contains_key("track_key"));
+
+        // ...and the emit sites must go through those builders.
+        let prod = prod_source();
+        let track_body = prod_fn_body(prod, "pub(crate) fn process_track(");
+        assert!(
+            track_body.contains("presence_paused_payload("),
+            "the paused clear must emit through the pinned builder"
+        );
+        assert!(
+            track_body.contains("playback_state_changed_payload("),
+            "the playback-state arm must emit through the pinned builder"
+        );
+        assert!(
+            !track_body.contains("\"presence-paused\", json!")
+                && !track_body.contains("\"playback-state-changed\", json!"),
+            "an inline json! at the emit site would bypass the pinned shape"
+        );
+    }
+
+    /// Review round 2, item 7: quitting must not replace a Teams status the user
+    /// typed with our "Paused" placeholder — while our own armed availability
+    /// session is still cleared.
+    #[test]
+    fn test_exit_plan_respects_a_manual_teams_status() {
+        let snapshot = crate::polling::state::ExitSnapshot {
+            last_posted_status: Some("\u{1F3B5} A - T \u{1F3A7}".to_string()),
+            armed_presence: Some((
+                "Available".to_string(),
+                "Available".to_string(),
+                "Listening (Available)".to_string(),
+            )),
+            manual_status_blocks: false,
+        };
+        assert_eq!(
+            exit_cleanup_plan(&snapshot, true, true),
+            ExitCleanupPlan {
+                clear_presence: true,
+                post_placeholder: true,
+            },
+            "with no manual status observed, the quit cleanup replaces our own status"
+        );
+
+        let manual = crate::polling::state::ExitSnapshot {
+            manual_status_blocks: true,
+            ..snapshot.clone()
+        };
+        assert_eq!(
+            exit_cleanup_plan(&manual, true, true),
+            ExitCleanupPlan {
+                clear_presence: true,
+                post_placeholder: false,
+            },
+            "a status the USER owns must survive the quit (the shipped 4.6 \
+             respect-the-manual-status behaviour), while our own armed presence \
+             session is still cleared"
+        );
+
+        // The verdict the plan reads is the poller's own predicate, recorded at
+        // every gate read (see process_track's `gate_verdict`).
+        let prod = prod_source();
+        let track_body = prod_fn_body(prod, "pub(crate) fn process_track(");
+        assert!(
+            track_body.contains("record_manual_status_blocks(manual_status_blocks_write("),
+            "every gate read must record the manual-status verdict for the exit path \
+             (review round 2, item 7) — the exit path has no Graph sample of its own"
+        );
+    }
+
+    /// Review round 2, item 3: `handle_no_track`'s early returns cannot post a
+    /// clear, so they must retire the finished track's gate instead of leaving
+    /// `get_sync_status` answering `presence_gated = true` forever.
+    #[test]
+    fn test_no_track_early_returns_retire_the_gate() {
+        let prod = prod_source();
+        let body = prod_fn_body(prod, "pub(crate) fn handle_no_track(");
+        let token_site = body
+            .find("teams_token_for_write(app, state)")
+            .expect("handle_no_track must try to refresh its Teams token");
+        let token_region = &body[token_site..(token_site + 700).min(body.len())];
+        assert!(
+            token_region.contains("no_track_gate_key(false)"),
+            "the no-Teams-token early return must retire the gate (review round 2, item 3)"
+        );
+        let pause_site = body
+            .find("c.teams.clear_on_pause")
+            .expect("handle_no_track must honor clear_on_pause");
+        let pause_region = &body[pause_site..(pause_site + 500).min(body.len())];
+        assert!(
+            pause_region.contains("no_track_gate_key(false)"),
+            "with clear_on_pause off nothing is gated — retire the finished track's key \
+             (review round 2, item 3)"
+        );
+        assert!(
+            body.matches("no_track_gate_key(false)").count() >= 4,
+            "all four no-write outcomes (two early returns, the dedup, and the posted \
+             clear) retire the gate"
         );
     }
 }

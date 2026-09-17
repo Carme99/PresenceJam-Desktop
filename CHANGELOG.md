@@ -21,7 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   session on Teams, which is the exact outcome #636 exists to prevent. The
   cleanup now reads a process-wide exit snapshot, written by every successful
   status write and presence arm, which neither the session-end reset nor a new
-  session clears — Teams keeps showing that status across a stop/start.
+  session clears — Teams keeps showing that status across a stop/start. The
+  snapshot also records the manual-status verdict the poller already observes, so
+  quitting never replaces a status message the *user* typed with the "Paused"
+  placeholder (the shipped 4.6 respect-the-manual-status behaviour) — while the
+  app's own armed availability session is still cleared.
 - **A gated clear was recorded as posted and could never be retried (#686,
   #687):** on the paused-track and no-track paths the byte-identity check ran
   *before* the gate verdict, and the suppressing branch then recorded the
@@ -35,12 +39,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `presence_gated` can no longer stay true — and the Dashboard chip keep saying
   "you're busy, in a call, or presenting" — above a "Nothing playing" card. A
   suppression with nothing playing is still reported as gated; it just carries
-  the no-track marker instead of the finished track's key.
+  the no-track marker instead of the finished track's key, and the two early
+  returns (no Teams token, `clear_on_pause` off) retire it as well. The paused
+  clear also keeps its pre-4.7 no-read fast path: while the placeholder Teams
+  shows is the one the pause wants, no rule suppresses the clear and no recorded
+  gate has reached its re-check, the outcome cannot change, so the steady pause
+  no longer costs a Graph `/presence` GET per poll.
 - **A poller that stopped itself never announced it (#688):** the five-strike
   auth exit (and every other thread exit that is not a `stop_syncing`) emitted
   nothing, so the Dashboard mirror stayed on "Syncing" and the tray on "Pause
   Sync" until a restart. The ownership-checked thread-exit point now emits the
-  same `sync-stopped` payload the command does, and logs the exit reason.
+  same `sync-stopped` payload the command does, and logs the exit reason —
+  gated on whether a stop was actually *requested* (the stored stop sender being
+  gone) rather than on `is_syncing`, which an explicit Stop leaves true until
+  after the join (that gating emitted the event twice) and a self-terminating
+  exit can leave false (that gating emitted nothing at all). Exactly one
+  `sync-stopped` per stop, on both paths.
 - **Pausing a track was invisible to everything downstream (#689):** `is_playing`
   is not part of the status change key and the stored track was only written on a
   track *change*, so pressing pause left the tray, the sync status and the

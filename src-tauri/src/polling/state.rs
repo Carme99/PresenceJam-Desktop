@@ -50,11 +50,20 @@ pub(crate) struct ExitSnapshot {
     /// The playing-status text this app last posted to Teams. `None` = Teams
     /// shows a placeholder (or nothing of ours).
     pub(crate) last_posted_status: Option<String>,
+    /// Review round 2 (item 7): the last observed verdict of
+    /// [`super::poll_once::manual_status_blocks_write`] — `true` while a status
+    /// message the USER owns (not one of ours) is in force on Teams. Recorded
+    /// from every presence sample the poller takes, so the exit path can honour
+    /// the shipped 4.6 respect-the-manual-status behaviour without a Graph call
+    /// of its own: quitting must not replace the user's own Teams status with
+    /// our "Paused" placeholder. `false` when nothing of the sort was observed.
+    pub(crate) manual_status_blocks: bool,
 }
 
 static EXIT_SNAPSHOT: Mutex<ExitSnapshot> = Mutex::new(ExitSnapshot {
     armed_presence: None,
     last_posted_status: None,
+    manual_status_blocks: false,
 });
 
 /// Snapshot the exit state. A poisoned lock is recovered rather than
@@ -90,6 +99,14 @@ pub(crate) fn record_armed_presence(pair: Option<(&str, &str, &str)>) {
 pub(crate) fn record_posted_status(status: Option<&str>) {
     let mut snapshot = EXIT_SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner());
     snapshot.last_posted_status = status.map(|s| s.to_string());
+}
+
+/// Record the manual-status verdict observed alongside a presence sample
+/// (review round 2, item 7). Called from the poller's read sites with the same
+/// predicate the write gate uses, so the exit path's view cannot drift from it.
+pub(crate) fn record_manual_status_blocks(blocks: bool) {
+    let mut snapshot = EXIT_SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner());
+    snapshot.manual_status_blocks = blocks;
 }
 
 /// Forget the snapshot, once a completed exit cleanup has made it moot (and so
@@ -182,24 +199,45 @@ pub fn start_polling(
                 stored == Some(this_tid)
             };
             if is_owner {
-                if state_for_cleanup.polling.is_syncing(Ordering::Acquire) {
-                    // Finding D5 (issue #688): the poller can end the session on
-                    // ITS OWN — the five-strike auth exit in `poll_once`, an
-                    // externally cleared `is_syncing`, or a closed stop channel
-                    // — and none of those paths emitted `sync-stopped` (only
-                    // `commands::sync::stop_syncing` did, after a join that
-                    // self-termination never goes through), so the Dashboard
-                    // mirror stayed on "Syncing" and the tray on "Pause Sync"
-                    // until a restart. This ownership-checked exit point is the
-                    // one place every thread exit funnels through.
+                // Finding D5 (issue #688) + review round 2 (item 2): the poller
+                // can end the session on ITS OWN — the five-strike auth exit in
+                // `poll_once`, an externally cleared `is_syncing`, a closed
+                // channel — and none of those paths emitted `sync-stopped`, so
+                // the Dashboard mirror stayed on "Syncing" and the tray on
+                // "Pause Sync" until a restart. This ownership-checked exit point
+                // is the one place every thread exit funnels through.
+                //
+                // Which exits must announce it is NOT `is_syncing`: an explicit
+                // `commands::sync::stop_syncing` joins this thread first and
+                // emits `sync-stopped` itself afterwards (the flag is still true
+                // here, so emitting would double the event — two user-visible
+                // toasts once S7's notification class lands), while a
+                // self-terminating exit may well have `is_syncing == false`
+                // already (so gating on the flag emitted nothing at all —
+                // exactly backwards).
+                //
+                // `stop_polling` is the ONLY writer that clears the stored stop
+                // sender, so "the sender is gone while we still own the thread"
+                // is precisely "a stop was requested, and its emitter is
+                // sync.rs": announce only when that is NOT the case. That gives
+                // exactly one `sync-stopped` per stop on both paths.
+                let stop_requested = state_for_cleanup.polling.stop_tx().is_none();
+                if stop_requested {
+                    log::debug!(
+                        "[POLLING] start_polling: polling thread {:?} ended after a requested stop; commands::sync::stop_syncing owns the sync-stopped emit",
+                        this_tid
+                    );
+                } else {
                     log::info!(
-                        "[POLLING] start_polling: polling thread {:?} ended ({} exit) while is_syncing was still true; emitting sync-stopped so the frontend mirror cannot stay on \"Syncing\"",
+                        "[POLLING] start_polling: polling thread {:?} ended on its own ({} exit); emitting sync-stopped so the frontend mirror cannot stay on \"Syncing\"",
                         this_tid,
                         exit_reason
                     );
                     // Payload shape copied verbatim from the event's only other
                     // emitter, `commands::sync::stop_syncing`: a unit payload.
                     let _ = app.emit("sync-stopped", ());
+                }
+                if state_for_cleanup.polling.is_syncing(Ordering::Acquire) {
                     log::warn!(
                         "[POLLING] start_polling: polling thread {:?} exited without stop_syncing; cleaning up sync state for owner",
                         this_tid
@@ -251,4 +289,75 @@ pub fn stop_polling(state: &AppState) {
     }
 
     log::info!("[POLLING] stop_polling: stop channel closed (is_syncing left set until join)");
+}
+
+/// Serialises the tests (in this module and in `poll_once`) that mutate the
+/// process-wide write-clock / exit-snapshot statics. `cargo test` runs tests in
+/// parallel threads and those slots are shared, so several tests touching both
+/// need ONE lock rather than one each.
+#[cfg(test)]
+pub(crate) fn global_state_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Finding D1 (issue #684), review round 2 (item 6) — the ordering
+    /// guarantee as BEHAVIOUR, not source text: `polling_loop`'s exit tail
+    /// resets the write-decision clocks before `RunEvent::Exit` runs the
+    /// cleanup, so the snapshot must survive that reset. If the reset ever
+    /// reaches the snapshot (or the cleanup loses its read), a quit mid-song
+    /// silently stops clearing Teams again.
+    #[test]
+    fn test_exit_snapshot_survives_the_write_clock_reset() {
+        let _guard = global_state_lock();
+        reset_exit_snapshot();
+        record_posted_status(Some("\u{1F3B5} A - T \u{1F3A7}"));
+        record_armed_presence(Some(("Available", "Available", "Listening (Available)")));
+
+        // Exactly what `polling_loop`'s exit tail does before `RunEvent::Exit`:
+        crate::polling::poll_once::reset_write_clocks();
+
+        let snapshot = load_exit_snapshot();
+        assert_eq!(
+            snapshot.last_posted_status.as_deref(),
+            Some("\u{1F3B5} A - T \u{1F3A7}"),
+            "the session-end clock reset must not erase what Teams still shows (finding D1)"
+        );
+        assert_eq!(
+            snapshot.armed_presence.as_ref().map(|(a, _, _)| a.as_str()),
+            Some("Available"),
+            "the session-end clock reset must not erase the armed presence session (finding D1)"
+        );
+
+        // The clocks really did reset — the snapshot is what survives.
+        let cold = crate::polling::poll_once::load_write_clocks();
+        assert!(
+            cold.last_posted_status.is_none() && cold.last_availability_arm.is_none(),
+            "this test only means something if the reset actually happened"
+        );
+    }
+
+    /// Review round 2 (item 7): the exit path must not replace a Teams status
+    /// the user owns. The poller records the verdict it already observes, and
+    /// the exit plan honours it without a Graph read of its own.
+    #[test]
+    fn test_manual_status_verdict_round_trips_into_the_snapshot() {
+        let _guard = global_state_lock();
+        reset_exit_snapshot();
+        record_posted_status(Some("\u{1F3B5} A - T \u{1F3A7}"));
+        record_manual_status_blocks(true);
+        assert!(
+            load_exit_snapshot().manual_status_blocks,
+            "the observed manual-status verdict must be part of the exit snapshot"
+        );
+        reset_exit_snapshot();
+        assert!(
+            !load_exit_snapshot().manual_status_blocks,
+            "a fresh snapshot starts with no manual-status verdict on record"
+        );
+    }
 }
