@@ -14,8 +14,33 @@
  * identical in both density states.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { render, cleanup } from '@testing-library/svelte';
 import { get } from 'svelte/store';
+import { tick } from 'svelte';
 import { readFileSync } from 'node:fs';
+import PageHeader from '$lib/components/PageHeader.svelte';
+import { theme as themeStore, toggleTheme } from '$lib/stores/theme';
+
+// The header-toggle tests must drive the *same* theme instance the component
+// subscribes to, so both are statically imported (`vi.resetModules` would give
+// the test a fresh store, and a component re-imported afterwards would bind a
+// second Svelte runtime — `Cannot read properties of undefined`). A media-query
+// stub therefore has to exist before this file's imports run, which is what
+// `vi.hoisted` is for: the statically-imported store captures this instance.
+const osMedia = vi.hoisted(() => {
+  const listeners: Array<() => void> = [];
+  const mql = {
+    matches: false,
+    media: '(prefers-color-scheme: light)',
+    addEventListener: (_type: string, cb: () => void) => listeners.push(cb),
+    removeEventListener: () => {},
+    addListener: (cb: () => void) => listeners.push(cb),
+    removeListener: () => {},
+    onchange: null
+  };
+  vi.stubGlobal('matchMedia', vi.fn(() => mql));
+  return { mql, listeners };
+});
 
 const LIGHT_QUERY = '(prefers-color-scheme: light)';
 // Vitest runs with the repo root as cwd (`npm test`); `import.meta.url` is not a
@@ -84,9 +109,13 @@ beforeEach(() => {
   document.documentElement.removeAttribute('data-density');
   document.head.querySelectorAll('style[data-test="app-css"]').forEach((el) => el.remove());
   window.history.replaceState({}, '', '/');
+  // The statically-imported store outlives the per-test module resets above.
+  osMedia.mql.matches = false;
+  themeStore.set('dark');
 });
 
 afterEach(() => {
+  cleanup();
   vi.unstubAllGlobals();
 });
 
@@ -236,5 +265,88 @@ describe('pre-paint bootstrap in app.html (#680)', () => {
 
     runPrePaintBootstrap();
     expect(paintedTheme()).toBe('light');
+  });
+});
+
+/**
+ * The header toggle (`PageHeader`, used by Settings / Reconnect / LogViewer and
+ * mirrored in `Dashboard`) must describe the *painted* theme. Derived from the
+ * preference alone, `system` on a dark desktop rendered the same moon as an
+ * explicit-light preference — wrong about both the current state and what the
+ * click would do.
+ */
+function mountThemeToggle() {
+  const { container } = render(PageHeader, { title: 'Settings', onBack: () => {} });
+  return () => container.querySelector('.theme-btn')?.textContent?.trim() ?? '';
+}
+
+/** Flip the OS appearance the statically-imported store captured. */
+async function setOsLight(value: boolean) {
+  osMedia.mql.matches = value;
+  for (const cb of [...osMedia.listeners]) cb();
+  await tick();
+}
+
+describe('theme toggle glyph describes the painted theme (#680)', () => {
+  it('shows the sun under system on a dark desktop, and the click yields light', async () => {
+    themeStore.set('system');
+    await tick();
+    const toggleGlyph = mountThemeToggle();
+    await tick();
+
+    expect(paintedTheme()).toBe('dark');
+    expect(toggleGlyph()).toBe('☀');
+
+    toggleTheme();
+    await tick();
+    expect(get(themeStore)).toBe('light');
+    expect(paintedTheme()).toBe('light');
+    expect(toggleGlyph()).toBe('☾');
+  });
+
+  it('shows the moon under system on a light desktop, and the click yields dark', async () => {
+    osMedia.mql.matches = true;
+    themeStore.set('system');
+    await tick();
+    const toggleGlyph = mountThemeToggle();
+    await tick();
+
+    expect(paintedTheme()).toBe('light');
+    expect(toggleGlyph()).toBe('☾');
+
+    toggleTheme();
+    await tick();
+    expect(get(themeStore)).toBe('dark');
+    expect(paintedTheme()).toBe('dark');
+    expect(toggleGlyph()).toBe('☀');
+  });
+
+  it('follows the OS live while selected, glyph included', async () => {
+    themeStore.set('system');
+    const toggleGlyph = mountThemeToggle();
+    await tick();
+    expect(toggleGlyph()).toBe('☀');
+
+    await setOsLight(true);
+    expect(paintedTheme()).toBe('light');
+    expect(toggleGlyph()).toBe('☾');
+
+    await setOsLight(false);
+    expect(toggleGlyph()).toBe('☀');
+  });
+
+  it('keeps an explicit dark or light glyph unchanged by an OS change', async () => {
+    themeStore.set('dark');
+    const toggleGlyph = mountThemeToggle();
+    await tick();
+    expect(toggleGlyph()).toBe('☀');
+    await setOsLight(true);
+    expect(toggleGlyph()).toBe('☀');
+
+    themeStore.set('light');
+    await tick();
+    expect(toggleGlyph()).toBe('☾');
+    await setOsLight(false);
+    expect(toggleGlyph()).toBe('☾');
   });
 });

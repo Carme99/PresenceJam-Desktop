@@ -506,9 +506,10 @@ export const en = {
   'settings.shortcutRegistrationFailed': 'Registration failed on this desktop: {reason}',
   // 4.7.0 — S12 hygiene (theme/density)
   'settings.themeSystem': 'System',
+  'settings.themeHint':
+    '“System” follows your operating system’s appearance; Dark and Light stay pinned.',
   'settings.densityCompactLabel': 'Compact spacing',
-  'settings.densityHint':
-    'Tightens the spacing and type scale. Independent of the theme; “System” follows your OS appearance.',
+  'settings.densityHint': 'Tightens the spacing and type scale. Independent of the theme.',
 };
 
 export type Dict = { readonly [K in keyof typeof en]: string };

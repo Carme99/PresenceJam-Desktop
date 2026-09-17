@@ -520,7 +520,8 @@ export const de: Dict = {
     'Registrierung auf diesem Desktop fehlgeschlagen: {reason}',
   // 4.7.0 — S12 Hygiene (Design/Dichte)
   'settings.themeSystem': 'System',
+  'settings.themeHint':
+    '„System“ folgt der Darstellung Ihres Betriebssystems; Dunkel und Hell bleiben fest gewählt.',
   'settings.densityCompactLabel': 'Kompakte Abstände',
-  'settings.densityHint':
-    'Verkleinert Abstände und Schriftgrößen. Unabhängig vom Design; „System“ folgt der Darstellung Ihres Betriebssystems.',
+  'settings.densityHint': 'Verkleinert Abstände und Schriftgrößen. Unabhängig vom Design.',
 };

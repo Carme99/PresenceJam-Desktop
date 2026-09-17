@@ -529,7 +529,8 @@ export const fr: Dict = {
     'Échec de l’enregistrement sur ce bureau : {reason}',
   // 4.7.0 — S12 hygiène (thème/densité)
   'settings.themeSystem': 'Système',
+  'settings.themeHint':
+    "« Système » suit l'apparence de votre système d'exploitation ; Sombre et Clair restent fixes.",
   'settings.densityCompactLabel': 'Espacement compact',
-  'settings.densityHint':
-    "Resserre les espacements et l'échelle typographique. Indépendant du thème ; « Système » suit l'apparence de votre système d'exploitation.",
+  'settings.densityHint': "Resserre les espacements et l'échelle typographique. Indépendant du thème.",
 };

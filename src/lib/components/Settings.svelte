@@ -1644,6 +1644,7 @@
             <span class="theme-name">{t('settings.themeSystem')}</span>
           </button>
         </div>
+        <p class="hint">{t('settings.themeHint')}</p>
       </div>
       <!-- #680: spacing/type density. Token-scale override only (app.css
         `[data-density="compact"]`), independent of the theme picker. -->
