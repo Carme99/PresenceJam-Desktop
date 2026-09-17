@@ -625,6 +625,35 @@ describe('Settings rule scheduling and priority controls (S4/#672)', () => {
     });
   });
 
+  it('treats a picked 00:00 end time as midnight on a quiet window too', async () => {
+    const { container } = await mountSettings();
+
+    const addQuiet = [...container.querySelectorAll('.btn-secondary')].find(
+      (b) => b.textContent?.trim() === t('rules.addQuietHours')
+    ) as HTMLButtonElement;
+    await fireEvent.click(addQuiet);
+    await tick();
+
+    // The new entry defaults to 22:00–07:00; picking 00:00 for the end must save
+    // midnight (= 1440, the end of the day) rather than 0, which would be an
+    // empty window the user cannot tell from a broken rule.
+    const start = container.querySelector(
+      'input[aria-label="' + t('rules.quietStart') + '"]'
+    ) as HTMLInputElement;
+    const end = container.querySelector(
+      'input[aria-label="' + t('rules.quietEnd') + '"]'
+    ) as HTMLInputElement;
+    await fireEvent.change(start, { target: { value: '00:00' } });
+    await fireEvent.change(end, { target: { value: '00:00' } });
+    await fireEvent.click(container.querySelector('.actions .btn-full') as HTMLElement);
+
+    await waitFor(() => {
+      const entry = get(configStore).status_rules.quiet_hours[0];
+      expect(entry.start_minutes).toBe(0);
+      expect(entry.end_minutes).toBe(1440);
+    });
+  });
+
   it('saves the pause-polling toggle and the two manual-status texts', async () => {
     const { container } = await mountSettings();
 

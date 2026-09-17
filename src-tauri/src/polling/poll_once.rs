@@ -5447,8 +5447,21 @@ mod tests {
             "an overlapping second window that asks for the pause must stop polling"
         );
 
-        // Two pausing windows: the reported end is the latest one, so the log
-        // describes the union of the windows.
+        // The Settings picker saves a quiet window of `00:00 – 00:00` as
+        // `start 0, end 1440` (midnight = the end of the day). That must be an
+        // ALL-DAY window, not an inert one: pre-mapping the pair was 0..0, which
+        // matches nothing, and the user got no feedback.
+        assert_eq!(
+            quiet_pause_at(&Some(config(true, true, 0, 1440)), 720, 3),
+            Some((60, 1440)),
+            "a 00:00–00:00 quiet window is the whole day, not a dead window"
+        );
+
+        // Two pausing windows, asserted at a time when BOTH are live so the
+        // expectation can only come from the union rule: 22:00→07:00 (wrap) and
+        // 20:00→23:00 overlap on [22:00, 23:00), so 22:30 is inside both. Their
+        // ends are 07:00 (420) and 23:00 (1380) — an implementation taking the
+        // FIRST/minimum would report 420 here, so this assertion is not vacuous.
         let mut two_pausing = config(true, true, 1320, 420);
         two_pausing.status_rules.quiet_hours.push(QuietHoursEntry {
             enabled: true,
@@ -5457,10 +5470,20 @@ mod tests {
             pause_polling: true,
             ..QuietHoursEntry::default()
         });
+        assert!(quiet_entry_contains(
+            &two_pausing.status_rules.quiet_hours[0],
+            1350,
+            3
+        ));
+        assert!(quiet_entry_contains(
+            &two_pausing.status_rules.quiet_hours[1],
+            1350,
+            3
+        ));
         assert_eq!(
-            quiet_pause_at(&Some(two_pausing), 1300, 3),
+            quiet_pause_at(&Some(two_pausing), 1350, 3),
             Some((60, 1380)),
-            "with two pausing windows the log reports the latest end"
+            "with two live pausing windows the log reports the latest end"
         );
 
         // The sleep follows the user's ceiling.

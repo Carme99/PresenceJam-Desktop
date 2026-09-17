@@ -876,6 +876,7 @@
       {:else}
       <div class="form-group">
         <span class="form-label">{t('rules.quietHoursLabel')}</span>
+        <p class="hint">{t('rules.quietWindowHint')}</p>
         {#if localConfig.status_rules.quiet_hours.length === 0}
           <p class="hint">{t('rules.noQuietHours')}</p>
         {/if}
@@ -890,10 +891,15 @@
                 aria-label={t('rules.quietStart')}
               />
               <span aria-hidden="true">–</span>
+              <!-- S4 (issue #672): the same `00:00`-means-midnight mapping the
+                   track-rule window uses, so the picker can never save a
+                   silently inert `00:00–00:00` quiet window (Rust clamps the end
+                   to 1439 for the comparison, and 1440 is the end of the day
+                   there too). -->
               <input
                 type="time"
                 value={minutesToTime(entry.end_minutes)}
-                onchange={(e) => { entry.end_minutes = timeToMinutes((e.currentTarget as HTMLInputElement).value, entry.end_minutes); }}
+                onchange={(e) => { entry.end_minutes = endMinutesFromTime((e.currentTarget as HTMLInputElement).value, entry.end_minutes); }}
                 aria-label={t('rules.quietEnd')}
               />
               <button

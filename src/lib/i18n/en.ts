@@ -425,6 +425,8 @@ export const en = {
     'Signed in, but this device could not save the session — it works until you quit. Reconnect Teams to try saving it again.',
 
   // 4.7.0 — S4 (rules engine)
+  'rules.quietWindowHint':
+    'Quiet hours wrap over midnight — 22:00–07:00 runs through the night. An end time of 00:00 means midnight (the end of the day), and a start equal to the end never matches.',
   'rules.pausePollingLabel': 'Stop polling during this window',
   'rules.pausePollingHint':
     'While this window is active Spotify is not queried at all — no status update and no Teams call. Polling resumes by itself when the window ends.',

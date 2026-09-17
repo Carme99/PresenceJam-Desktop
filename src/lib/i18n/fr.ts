@@ -448,6 +448,8 @@ export const fr: Dict = {
     'Connecté, mais cet appareil n’a pas pu enregistrer la session — elle fonctionne jusqu’à la fermeture. Reconnectez Teams pour réessayer l’enregistrement.',
 
   // 4.7.0 — S4 (rules engine)
+  'rules.quietWindowHint':
+    "Les heures calmes passent minuit — 22:00–07:00 court toute la nuit. Une heure de fin à 00:00 signifie minuit (la fin de la journée), et un début égal à la fin ne correspond jamais.",
   'rules.pausePollingLabel': "Suspendre l'interrogation pendant cette plage",
   'rules.pausePollingHint':
     "Pendant cette plage, Spotify n'est pas interrogé du tout — aucun statut écrit, aucun appel Teams. L'interrogation reprend d'elle-même à la fin de la plage.",

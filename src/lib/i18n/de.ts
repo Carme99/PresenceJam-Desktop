@@ -439,6 +439,8 @@ export const de: Dict = {
     'Angemeldet, aber dieses Gerät konnte die Sitzung nicht speichern — sie funktioniert bis zum Beenden. Teams erneut verbinden, um das Speichern zu wiederholen.',
 
   // 4.7.0 — S4 (rules engine)
+  'rules.quietWindowHint':
+    'Ruhezeiten laufen über Mitternacht — 22:00–07:00 gilt durch die Nacht. Eine Endzeit von 00:00 bedeutet Mitternacht (Tagesende), und gleicher Beginn und Schluss passen nie.',
   'rules.pausePollingLabel': 'Abfrage in diesem Zeitraum anhalten',
   'rules.pausePollingHint':
     'Während dieses Zeitraums wird Spotify gar nicht abgefragt — kein Status, kein Teams-Aufruf. Die Abfrage läuft automatisch weiter, sobald der Zeitraum endet.',
