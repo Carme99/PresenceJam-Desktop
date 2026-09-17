@@ -89,6 +89,55 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
             break;
         }
 
+        // S9 (issue #677): a tray snooze outranks everything else here — the
+        // user asked for quiet on purpose. Same shape as the quiet-hours pause
+        // below and ahead of it, so a snoozed iteration issues no
+        // Spotify/Graph request and moves no keepalive/debounce clock. The
+        // deadline is re-derived from the stored value on every iteration, so
+        // the snooze ends by itself and the thread is never stopped or parked.
+        let snooze_gate = {
+            // Scoped: the config read guard must not be held across the sleep.
+            let config = state.config.get();
+            super::poll_once::snooze_gate(&config)
+        };
+        match snooze_gate {
+            super::poll_once::SnoozeGate::Skipped(seconds) => {
+                // Repaint the tray so its countdown line and the submenu's
+                // "Resume sync now" entry follow the snooze. The rebuild is
+                // forced into its cache-only fetch mode by the active snooze
+                // itself, so this costs no Spotify request. Skipped when the
+                // cache is cold — the Devices/Up Next submenus then show what
+                // they last showed, exactly like any other rebuild.
+                let is_syncing = state.polling.is_syncing(Ordering::Acquire);
+                let current_track = state.polling.current_track().clone();
+                if let Err(e) = tray::update_tray_menu(&app, is_syncing, current_track) {
+                    log::warn!(
+                        "[POLLING] polling_loop: tray update while snoozed failed: {}",
+                        e
+                    );
+                }
+                log::debug!(
+                    "[POLLING] polling_loop: snoozed, sleeping for {} seconds",
+                    seconds
+                );
+                match stop_rx.recv_timeout(StdDuration::from_secs(seconds)) {
+                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        log::info!(
+                            "[POLLING] polling_loop: stop signal during a snooze, breaking loop"
+                        );
+                        break;
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                }
+            }
+            super::poll_once::SnoozeGate::Expired => {
+                // The deadline passed while the thread slept. Clear the stored
+                // value once, so the chip and the tray stop claiming a snooze,
+                // then fall through to a normal iteration.
+                super::poll_once::clear_snooze_if_expired(&state);
+            }
+            super::poll_once::SnoozeGate::Inactive => {}
+        }
         // S4 (issue #672): quiet hours may stop polling entirely for the
         // duration of the window. Decided BEFORE the write clocks are loaded
         // and before `poll_once::run`, so a skipped iteration issues no

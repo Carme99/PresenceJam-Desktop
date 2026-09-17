@@ -6,7 +6,7 @@
   import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
   import { currentView } from '$lib/stores/app';
   import { detachedPanes, focusDetached } from '$lib/stores/detach';
-  import { configStore, loadConfig, clientSecretStateOf } from '$lib/stores/config';
+  import { configStore, loadConfig, saveConfig, clientSecretStateOf } from '$lib/stores/config';
   import type { ErrorEventPayload, SyncStatus, TrackInfo } from '$lib/types';
   import { devLog } from '$lib/utils/dev';
   import { theme, toggleTheme } from '$lib/stores/theme';
@@ -76,6 +76,53 @@
   // state, either from the poller's pause signal or from the hydrated track's
   // own playback flag.
   let isPaused = $derived($presence.paused || currentTrack?.is_playing === false);
+
+  // ── 4.7.0 — S9 (issue #677): the tray snooze ─────────────────────────────
+  //
+  // `configStore.snooze_until` is the persisted RFC3339 UTC deadline the tray
+  // writes (and the backend owns). "Snoozed" is derived from the INSTANT being
+  // in the future, never from the field being present: a deadline that has
+  // already passed — in this session, or while the app was closed and the
+  // startup clamp has not run yet — must not render a chip.
+  let nowMs = $state(Date.now());
+  let snoozeUntilMs = $derived.by(() => {
+    const raw = $configStore.snooze_until;
+    if (!raw) return null;
+    const parsed = Date.parse(raw);
+    return Number.isFinite(parsed) ? parsed : null;
+  });
+  let snoozeRemainingMs = $derived(
+    snoozeUntilMs === null ? null : Math.max(0, snoozeUntilMs - nowMs)
+  );
+  let snoozeActive = $derived(snoozeRemainingMs !== null && snoozeRemainingMs > 0);
+  let isResuming = $state(false);
+
+  /**
+   * `m:ss`, or `h:mm:ss` past an hour. Rounded UP like the tray's countdown, so
+   * a freshly set 30-minute snooze reads `30:00` rather than `29:59`.
+   */
+  function formatRemaining(ms: number): string {
+    const total = Math.max(1, Math.ceil(ms / 1000));
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const seconds = total % 60;
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return hours > 0
+      ? `${hours}:${pad(minutes)}:${pad(seconds)}`
+      : `${minutes}:${pad(seconds)}`;
+  }
+
+  let snoozeLabel = $derived(
+    snoozeActive && snoozeUntilMs !== null && snoozeRemainingMs !== null
+      ? t('dashboard.snoozeChip', {
+          remaining: formatRemaining(snoozeRemainingMs),
+          time: new Date(snoozeUntilMs).toLocaleTimeString(undefined, {
+            hour: '2-digit',
+            minute: '2-digit'
+          })
+        })
+      : ''
+  );
   let displayErrorTimeout: ReturnType<typeof setTimeout> | null = null;
   // #408: goToSetup re-enable timer must be cleared on destroy so a
   // late callback cannot touch state after unmount.
@@ -140,8 +187,35 @@
     void updateMenuState();
   });
 
+  // S9 (issue #677): tick the countdown once a second, and only while a snooze
+  // is live. The effect reads `snoozeActive` but never writes the clock itself,
+  // so it starts one interval per snooze episode (and clears it when the
+  // countdown reaches zero or the user resumes) instead of re-arming on every
+  // tick. `nowMs` is a plain read elsewhere, so each tick re-renders the label.
+  $effect(() => {
+    if (!snoozeActive) return;
+    const id = setInterval(() => {
+      nowMs = Date.now();
+    }, 1000);
+    return () => clearInterval(id);
+  });
+
   onMount(async () => {
     devLog('[DASHBOARD] onMount: ENTRY');
+
+    // S9 (issue #677): the tray writes `snooze_until` straight into the config,
+    // with no event and no webview involvement, and this view is destroyed on
+    // every view switch (`+page.svelte`). Re-reading the config on mount is
+    // therefore what makes a snooze started from the tray show up as a chip —
+    // including on the way back from the tray while the window was hidden.
+    // `loadConfig` resolves with the frontend defaults on a read failure, which
+    // here only means the chip stays hidden until the next mount.
+    try {
+      await loadConfig();
+    } catch (e) {
+      console.error('[DASHBOARD] onMount: loadConfig FAILED:', e);
+    }
+    nowMs = Date.now();
 
     try {
       devLog('[DASHBOARD] onMount: calling invoke get_sync_status');
@@ -307,6 +381,39 @@
 
     devLog('[DASHBOARD] toggleSync: EXIT');
   }
+
+  /**
+   * S9 (issue #677): the chip's Resume button.
+   *
+   * Clearing `snooze_until` is a config write, and the config is shared with the
+   * tray, so this goes through the same whole-document save every other config
+   * write uses (`saveConfig`), against the shared store as the base — never
+   * against a locally held copy, which could resurrect a sibling field the user
+   * changed elsewhere in the meantime. The poller re-reads the config on its
+   * next iteration, so polling resumes within one sleep.
+   *
+   * On failure the field stays set (the backend only stores what it wrote), so
+   * the chip remains and the user can retry — the honest outcome for a write
+   * that did not happen.
+   */
+  async function resumeSnooze() {
+    if (isResuming) return;
+    devLog('[DASHBOARD] resumeSnooze: ENTRY');
+    isResuming = true;
+    try {
+      await saveConfig({ ...get(configStore), snooze_until: null });
+      nowMs = Date.now();
+      devLog('[DASHBOARD] resumeSnooze: snooze cleared');
+    } catch (e) {
+      console.error('[DASHBOARD] resumeSnooze failed:', e);
+      if (displayErrorTimeout) clearTimeout(displayErrorTimeout);
+      displayError = t('dashboard.snoozeResumeFailed');
+      displayErrorTimeout = setTimeout(() => { displayError = ''; displayErrorTimeout = null; }, 5000);
+    } finally {
+      isResuming = false;
+    }
+  }
+
 
   async function refreshStatus() {
     if (isRefreshing || !$presence.syncing) return;
@@ -490,6 +597,16 @@
   <main>
     {#if $presence.gated}
       <div class="presence-chip" role="status">{gatedLabel}</div>
+    {/if}
+    {#if snoozeActive}
+      <!-- S9 (issue #677): the tray snooze, mirrored from the persisted config
+           with a live countdown and the one action that ends it. -->
+      <div class="snooze-chip" role="status">
+        <span>{snoozeLabel}</span>
+        <button class="snooze-resume" onclick={resumeSnooze} disabled={isResuming}>
+          {isResuming ? t('dashboard.snoozeResuming') : t('dashboard.snoozeResume')}
+        </button>
+      </div>
     {/if}
     {#if availabilityAnnouncement}
       <div class="availability-chip" role="status">
@@ -675,6 +792,38 @@
     padding: var(--sp-2) var(--sp-3);
     font-size: var(--fs-sm);
     color: var(--fg);
+  }
+
+  /* S9 (issue #677): the tray-snooze chip. Same shell as the presence chips,
+     with the "still holding your updates back" accent and a Resume button
+     beside the countdown so the way out is one click. */
+  .snooze-chip {
+    align-self: flex-start;
+    display: flex;
+    align-items: center;
+    gap: var(--sp-3);
+    background: var(--bg-elevated);
+    border: 1px solid var(--accent, var(--border));
+    border-radius: var(--r-md);
+    padding: var(--sp-2) var(--sp-3);
+    font-size: var(--fs-sm);
+    color: var(--fg);
+  }
+  .snooze-resume {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+    color: var(--fg);
+    cursor: pointer;
+    font-size: var(--fs-sm);
+    padding: var(--sp-1) var(--sp-2);
+  }
+  .snooze-resume:hover:not(:disabled) {
+    background: var(--bg-surface);
+  }
+  .snooze-resume:disabled {
+    cursor: default;
+    opacity: 0.6;
   }
 
   .setup-card {

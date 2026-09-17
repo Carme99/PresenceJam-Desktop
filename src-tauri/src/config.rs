@@ -429,6 +429,191 @@ fn clamp_logging(cfg: &mut LoggingConfig) {
     cfg.keep_files = cfg.keep_files.clamp(1, 20);
 }
 
+/// Whether a stored snooze deadline is still in the future (4.7.0, S9 /
+/// issue #677). `None` for an absent, unparsable or non-UTC-shifted value, so
+/// a hand-edited `config.json` can never resurrect a snooze.
+///
+/// The parse is deliberately strict about the offset: `chrono`'s RFC3339
+/// reader accepts `+02:00` and normalizes it to the same instant, which is
+/// what a value re-serialized by another tool may carry, so only a *past*
+/// instant (or garbage) is rejected here.
+pub fn snooze_deadline(
+    stored: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    let deadline = chrono::DateTime::parse_from_rfc3339(stored.trim())
+        .ok()?
+        .with_timezone(&chrono::Utc);
+    (deadline > now).then_some(deadline)
+}
+
+/// Drops an expired (or unparsable) `snooze_until` (4.7.0, S9 / issue #677).
+///
+/// Returns `true` when the field was cleared, so the caller can log the one
+/// event that matters — a deadline that passed while the app was closed, or
+/// between two iterations — without spamming a line per load/save. Pure apart
+/// from its `now` argument, so the boundary is unit-testable; runs on every
+/// load and on every save (through [`clamped_config`]), which is what makes an
+/// expired deadline unable to outlive the snooze it belonged to.
+pub fn clamp_snooze(cfg: &mut AppConfig, now: chrono::DateTime<chrono::Utc>) -> bool {
+    let Some(stored) = cfg.snooze_until.clone() else {
+        return false;
+    };
+    if snooze_deadline(&stored, now).is_some() {
+        return false;
+    }
+    cfg.snooze_until = None;
+    true
+}
+
+/// A snooze preset offered by the tray submenu (4.7.0, S9 / issue #677).
+///
+/// The first two are instant offsets (`now + delta`), which no timezone can
+/// move. The third is a LOCAL calendar boundary, which is why it is a variant
+/// of its own rather than a `Duration` — see [`next_local_midnight_utc`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnoozePreset {
+    ThirtyMinutes,
+    OneHour,
+    UntilTomorrow,
+}
+
+/// The deadline a preset denotes (4.7.0, S9 / issue #677).
+///
+/// Both clocks are arguments rather than read inside, so the "until tomorrow"
+/// boundary can be pinned at an exact wall-clock time and timezone in a unit
+/// test — the boundary is where a timezone bug would hide.
+pub fn snooze_preset_deadline<Tz: chrono::TimeZone>(
+    preset: SnoozePreset,
+    now_utc: chrono::DateTime<chrono::Utc>,
+    now_local: chrono::DateTime<Tz>,
+) -> chrono::DateTime<chrono::Utc> {
+    match preset {
+        SnoozePreset::ThirtyMinutes => now_utc + chrono::TimeDelta::minutes(30),
+        SnoozePreset::OneHour => now_utc + chrono::TimeDelta::minutes(60),
+        SnoozePreset::UntilTomorrow => next_local_midnight_utc(now_local),
+    }
+}
+
+/// The start of the next LOCAL calendar day, as a UTC instant — the "until
+/// tomorrow" deadline (4.7.0, S9 / issue #677).
+///
+/// ## Semantics
+///
+/// "Until tomorrow" means *the next local midnight*, never `now + 24 h`:
+///
+/// - `snooze_until` is persisted as a UTC instant, but "tomorrow" is read from
+///   the machine's local calendar. Computing the deadline as a fixed offset
+///   from `now` would silently stretch or shrink the snooze by the UTC offset:
+///   at 23:00 in UTC+13 the user means one hour of quiet, not twenty-five, and
+///   at 00:05 in UTC−11 they mean almost a full day.
+/// - The boundary is the START of the next day. At exactly local midnight the
+///   deadline is a full day away; one second later it is one second short of a
+///   day. Either way it is strictly in the future, so an "until tomorrow"
+///   snooze is always at least one second long.
+/// - A DST transition inside the window changes the real duration, never the
+///   wall-clock boundary: a fall-back night lasts 25 hours, a spring-forward
+///   night 23. Keeping the calendar boundary is what makes the label true.
+///
+/// ## DST edge cases at local midnight
+///
+/// - **Ambiguous** — a fall-back repeats local midnight (e.g.
+///   `America/Santiago`): the EARLIER of the two instants wins. It is the
+///   conservative choice for a deadline (the user asked to stop) and, being
+///   derived from the wall clock alone, gives the same answer on every
+///   evaluation.
+/// - **Gap** — a spring-forward swallows local midnight in a zone whose
+///   transition is at 00:00: the first instant that exists on the new day is
+///   used, so the deadline lands inside tomorrow instead of on a wall-clock
+///   time that never happens.
+fn next_local_midnight_utc<Tz: chrono::TimeZone>(
+    now_local: chrono::DateTime<Tz>,
+) -> chrono::DateTime<chrono::Utc> {
+    let midnight = (now_local.date_naive() + chrono::Days::new(1))
+        .and_hms_opt(0, 0, 0)
+        .expect("00:00:00 is always a valid wall-clock time");
+    resolve_local_forward(&now_local.timezone(), midnight)
+}
+
+/// The earliest UTC instant at or after the local wall-clock time `naive`
+/// (4.7.0, S9 / issue #677).
+///
+/// `Single` is the normal case, `Ambiguous` takes the earlier instant and
+/// `None` (a gap: the wall clock does not exist) walks forward a minute at a
+/// time to the first instant that does. A real offset change is minutes, never
+/// hours, and the walk is bounded by [`LOCAL_GAP_PROBE_MINUTES`], so it can
+/// neither spin nor run long.
+fn resolve_local_forward<Tz: chrono::TimeZone>(
+    tz: &Tz,
+    naive: chrono::NaiveDateTime,
+) -> chrono::DateTime<chrono::Utc> {
+    let mut probe = naive;
+    for _ in 0..LOCAL_GAP_PROBE_MINUTES {
+        match tz.from_local_datetime(&probe) {
+            chrono::LocalResult::Single(dt) => return dt.with_timezone(&chrono::Utc),
+            chrono::LocalResult::Ambiguous(earlier, _) => {
+                return earlier.with_timezone(&chrono::Utc)
+            }
+            chrono::LocalResult::None => probe += chrono::TimeDelta::minutes(1),
+        }
+    }
+    // Unreachable for any real timezone — no DST gap is twelve hours deep.
+    // Reading the wall clock as UTC keeps a menu click from panicking over a
+    // deadline; the resulting snooze is simply long.
+    chrono::DateTime::from_naive_utc_and_offset(naive, chrono::Utc)
+}
+
+/// Upper bound on the spring-forward walk in [`resolve_local_forward`]: twelve
+/// hours in minutes, far past any real gap (the deepest known is two hours).
+const LOCAL_GAP_PROBE_MINUTES: u32 = 720;
+
+/// The persisted spelling of a deadline: RFC3339, UTC, second precision
+/// (`2026-09-17T13:45:00Z`) (4.7.0, S9 / issue #677).
+///
+/// One constructor, so the spelling the tray writes and the spelling
+/// [`snooze_deadline`] parses cannot drift. Second precision because the
+/// presets are whole minutes and a sub-second deadline would only make two
+/// equal states look different.
+pub fn snooze_store_form(deadline: chrono::DateTime<chrono::Utc>) -> String {
+    deadline.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+/// A snooze that is currently active, as the tray renders it (4.7.0, S9 /
+/// issue #677).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnoozeStatus {
+    /// The stored deadline, as the instant it denotes.
+    pub deadline: chrono::DateTime<chrono::Utc>,
+    /// Whole seconds left; always `>= 1`.
+    pub remaining_seconds: i64,
+}
+
+/// The active snooze for a config, or `None` when there is none / it has
+/// passed / the stored value cannot be parsed (4.7.0, S9 / issue #677).
+pub fn snooze_status(cfg: &AppConfig, now: chrono::DateTime<chrono::Utc>) -> Option<SnoozeStatus> {
+    let stored = cfg.snooze_until.as_deref()?;
+    let deadline = snooze_deadline(stored, now)?;
+    Some(SnoozeStatus {
+        deadline,
+        remaining_seconds: (deadline - now).num_seconds(),
+    })
+}
+
+/// The countdown the tray and the Dashboard both render: whole minutes left,
+/// rounded UP, and never below 1 (4.7.0, S9 / issue #677).
+///
+/// Rounding up means a freshly-set 30-minute snooze reads "30 min" rather than
+/// "29", and the last minute reads "1 min" rather than "0" for a snooze that is
+/// still active. `min(1440)` bounds a hand-edited config's absurd deadline
+/// without hiding it.
+pub fn snooze_minutes_left(remaining_seconds: i64) -> i64 {
+    // `i64::div_ceil` is still unstable (`int_roundings`), so round up by hand;
+    // the `max(0)` makes the pair exact for every input.
+    let seconds = remaining_seconds.max(0);
+    // `saturating_add`: a hand-edited absurd deadline must clamp, not panic.
+    ((seconds.saturating_add(59)) / 60).clamp(1, 24 * 60)
+}
+
 /// Single place the logger's max level is wired from `logging.enabled` /
 /// `logging.log_level` (CfgDiag#4, issue #539).
 ///
@@ -682,6 +867,20 @@ pub struct AppConfig {
     /// value as the single source of truth for the language picker.
     #[serde(default)]
     pub locale: Option<String>,
+    /// Persisted "pause sync" deadline set from the tray's snooze submenu
+    /// (4.7.0, S9 / issue #677). RFC3339 **in UTC** (`2026-09-17T13:45:00Z`):
+    /// the value has to survive a relaunch, a timezone change and a DST
+    /// transition without moving, so the three presets are computed from the
+    /// local clock and stored as that instant
+    /// (`crate::polling::poll_once::snooze`). `None` — the documented default
+    /// and every config file written before this release — means polling runs
+    /// normally.
+    ///
+    /// A value that has already passed is cleared by [`clamp_snooze`] on load
+    /// and by the polling driver on the iteration that observes it, so an
+    /// expired deadline can never outlive the snooze it belonged to.
+    #[serde(default)]
+    pub snooze_until: Option<String>,
     #[serde(default)]
     pub status_rules: StatusRulesConfig,
     /// Config schema version (issue #379). Files written before 4.3.0 carry
@@ -766,6 +965,7 @@ impl Default for AppConfig {
             logging: LoggingConfig::default(),
             autostart: false,
             locale: None,
+            snooze_until: None,
             status_rules: StatusRulesConfig::default(),
             extra: BTreeMap::new(),
             schema_version: default_schema_version(),
@@ -1138,6 +1338,14 @@ pub fn load_config() -> Result<AppConfig, String> {
     clamp_teams(&mut config.teams);
     clamp_rules(&mut config.status_rules);
     clamp_logging(&mut config.logging);
+    // 4.7.0 (S9, issue #677): the startup clamp. A snooze that expired while
+    // the app was closed must not resume polling "later" on a deadline that is
+    // already behind us — the poller would wake, see the deadline in the past
+    // and clear it anyway, but the chip and the tray would claim a snooze the
+    // user never got. Cleared here, once, with the reason logged.
+    if clamp_snooze(&mut config, chrono::Utc::now()) {
+        log::info!("[CFG] snooze: the stored deadline had already passed — cleared");
+    }
 
     log::info!("[CFG] Loaded configuration from '{}'", path.display());
     Ok(with_keychain_flags(config))
@@ -1498,6 +1706,11 @@ pub fn clamped_config(config: &AppConfig) -> AppConfig {
     clamp_teams(&mut cfg.teams);
     clamp_rules(&mut cfg.status_rules);
     clamp_logging(&mut cfg.logging);
+    // 4.7.0 (S9, issue #677): a write that carries an already-expired deadline
+    // (a whole-document save from a stale draft, or a resume click that raced
+    // its own deadline) normalizes it away, so the in-memory copy, the file on
+    // disk and the tray can never disagree about a snooze being active.
+    clamp_snooze(&mut cfg, chrono::Utc::now());
     cfg
 }
 
@@ -3582,5 +3795,404 @@ mod tests {
         assert!(!dir.join("config.json.bak").exists());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // S9 (issue #677): snooze deadlines.
+    //
+    // The feature is judged on one thing above all: "until tomorrow" must mean
+    // the next LOCAL midnight, so a snooze never silently stretches or shrinks
+    // by the machine's UTC offset — nor by a DST transition it spans.
+    // -----------------------------------------------------------------------
+
+    /// A fixed-offset zone at `hours` east of UTC. `FixedOffset` is the
+    /// timezone-typed stand-in for "the user's machine is here", which is what
+    /// makes these boundary tests independent of the test runner's TZ.
+    fn zone(hours: i32) -> chrono::FixedOffset {
+        chrono::FixedOffset::east_opt(hours * 3600).expect("valid offset")
+    }
+
+    fn utc(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> chrono::DateTime<chrono::Utc> {
+        chrono::NaiveDate::from_ymd_opt(y, mo, d)
+            .unwrap()
+            .and_hms_opt(h, mi, s)
+            .unwrap()
+            .and_utc()
+    }
+
+    /// "Until tomorrow" is the START of the next local calendar day, converted
+    /// to UTC — never `now + 24 h`.
+    ///
+    /// Each row pins a boundary: a second before midnight (the old second must
+    /// still land on tomorrow), exactly midnight (a full day, not zero) and a
+    /// time where the UTC day and the local day differ, in both directions of
+    /// offset.
+    #[test]
+    fn until_tomorrow_is_the_next_local_midnight() {
+        // 23:59:59 in UTC+2 → one second later is tomorrow's midnight.
+        let late = utc(2026, 1, 5, 21, 59, 59).with_timezone(&zone(2));
+        let deadline = next_local_midnight_utc(late);
+        assert_eq!(deadline, utc(2026, 1, 5, 22, 0, 0));
+        assert_eq!(
+            (deadline - late.with_timezone(&chrono::Utc)).num_seconds(),
+            1
+        );
+
+        // Exactly local midnight: the deadline is the START of the FOLLOWING
+        // day (a full day), never "today" (which would already be in the past).
+        let midnight = utc(2026, 1, 5, 22, 0, 0).with_timezone(&zone(2));
+        assert_eq!(next_local_midnight_utc(midnight), utc(2026, 1, 6, 22, 0, 0));
+
+        // 00:05 in UTC−11: local date 2026-01-05, so the deadline is
+        // 2026-01-06T00:00−11:00 = 11:00Z — ~23 h away in real time.
+        let early = utc(2026, 1, 5, 11, 5, 0).with_timezone(&zone(-11));
+        let far = next_local_midnight_utc(early);
+        assert_eq!(far, utc(2026, 1, 6, 11, 0, 0));
+
+        // The same instant seen from UTC+13 is 2026-01-06 00:05 locally, so the
+        // deadline is the NEXT midnight — a timezone read of the same UTC value
+        // must not reuse the previous day's boundary.
+        let east = utc(2026, 1, 5, 11, 5, 0).with_timezone(&zone(13));
+        assert_eq!(next_local_midnight_utc(east), utc(2026, 1, 6, 11, 0, 0));
+    }
+
+    /// The duration of an "until tomorrow" snooze stays in `(0, 24h]` for every
+    /// offset — the property that a `now + 24 h` implementation would violate.
+    #[test]
+    fn until_tomorrow_never_shifts_by_the_offset() {
+        for hours in [-12, -11, -5, -1, 0, 1, 2, 5, 12, 13, 14] {
+            let tz = zone(hours);
+            for (h, mi) in [(0, 0), (0, 1), (12, 30), (23, 59)] {
+                let now = utc(2026, 3, 4, h, mi, 0).with_timezone(&tz);
+                let deadline = next_local_midnight_utc(now);
+                let secs = (deadline - now.with_timezone(&chrono::Utc)).num_seconds();
+                assert!(
+                    secs > 0 && secs <= 24 * 3600,
+                    "offset {}h at {:02}:{:02} produced a {} s snooze",
+                    hours,
+                    h,
+                    mi,
+                    secs
+                );
+            }
+        }
+    }
+
+    /// A DST transition inside the window changes the real duration, never the
+    /// wall-clock boundary (issue #677): `next_local_midnight_utc` reads the
+    /// zone's rules rather than adding 24 h.
+    #[test]
+    fn until_tomorrow_keeps_the_calendar_boundary_across_dst() {
+        // Europe/Berlin springs forward on 2026-03-29 at 02:00 (+1 h), so the
+        // night of the 28th is 23 real hours long. `chrono-tz` is not a
+        // dependency; `Local` is, and the assertion holds on any machine whose
+        // zone has that transition only where the test can pin it — so the
+        // check here is the DST-agnostic half: the deadline's LOCAL wall clock
+        // is exactly 00:00:00 of the following day, whatever the offset did.
+        let now = chrono::Local::now();
+        let deadline = next_local_midnight_utc(now);
+        let local = deadline.with_timezone(&chrono::Local);
+        use chrono::Timelike;
+        assert_eq!(
+            (local.hour(), local.minute(), local.second()),
+            (0, 0, 0),
+            "the deadline must be LOCAL midnight even when the zone shifted"
+        );
+        assert_eq!(
+            local.date_naive(),
+            now.date_naive() + chrono::Days::new(1),
+            "the deadline must be TOMORROW's local date"
+        );
+        assert!(
+            deadline > now.with_timezone(&chrono::Utc),
+            "a deadline in the past would make the snooze end instantly"
+        );
+    }
+
+    /// A spring-forward that swallows local midnight (some zones transition at
+    /// 00:00) leaves no wall clock to resolve. The walk must land on the first
+    /// instant that exists rather than panicking or producing a past deadline.
+    ///
+    /// `FixedOffset` cannot express a gap, so the branch is pinned through a
+    /// minimal stateful zone: offset +1 h before the gap, +2 h after it, with
+    /// the local 00:00 of the target day inside the transition.
+    #[test]
+    fn resolve_local_forward_walks_out_of_a_dst_gap() {
+        /// +1 h until 23:00 UTC on 2026-03-28, +2 h from then on (a zone whose
+        /// spring-forward is at local midnight).
+        #[derive(Debug, Clone, Copy)]
+        struct GapZone;
+        impl chrono::TimeZone for GapZone {
+            type Offset = chrono::FixedOffset;
+            fn from_offset(_: &Self::Offset) -> Self {
+                GapZone
+            }
+            fn offset_from_local_date(
+                &self,
+                _: &chrono::NaiveDate,
+            ) -> chrono::LocalResult<Self::Offset> {
+                // Never used by the code under test; a single offset keeps the
+                // provided `ymd` helpers well-defined.
+                chrono::LocalResult::Single(zone(1))
+            }
+            fn offset_from_local_datetime(
+                &self,
+                local: &chrono::NaiveDateTime,
+            ) -> chrono::LocalResult<Self::Offset> {
+                // The gap: local wall clock 2026-03-29T00:00..00:59 never
+                // happens.
+                let gap_start = chrono::NaiveDate::from_ymd_opt(2026, 3, 29)
+                    .unwrap()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap();
+                let gap_end = gap_start + chrono::TimeDelta::minutes(60);
+                if *local >= gap_start && *local < gap_end {
+                    return chrono::LocalResult::None;
+                }
+                let offset = if *local < gap_start { zone(1) } else { zone(2) };
+                chrono::LocalResult::Single(offset)
+            }
+            fn offset_from_utc_date(&self, utc: &chrono::NaiveDate) -> Self::Offset {
+                if *utc < chrono::NaiveDate::from_ymd_opt(2026, 3, 28).unwrap() {
+                    zone(1)
+                } else {
+                    zone(2)
+                }
+            }
+            fn offset_from_utc_datetime(&self, utc: &chrono::NaiveDateTime) -> Self::Offset {
+                if utc.date() < chrono::NaiveDate::from_ymd_opt(2026, 3, 29).unwrap() {
+                    zone(1)
+                } else {
+                    zone(2)
+                }
+            }
+        }
+
+        // 2026-03-28T23:30 local (+1 h) → tomorrow's midnight is inside the gap.
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 3, 28)
+            .unwrap()
+            .and_hms_opt(23, 30, 0)
+            .unwrap();
+        let deadline = next_local_midnight_utc(
+            chrono::TimeZone::from_local_datetime(&GapZone, &now)
+                .single()
+                .expect("23:30 is not in the gap"),
+        );
+        // Local 00:00..00:59 on the 29th never happens, so the first instant of
+        // the new day is local 01:00 at +2 h — which is 23:00Z on the 28th, i.e.
+        // 30 minutes after this `now`. Not panicking, and not a deadline in the
+        // past, is the property that matters: the snooze still ends just after
+        // the calendar day turns.
+        assert_eq!(deadline, utc(2026, 3, 28, 23, 0, 0));
+        assert!(deadline > utc(2026, 3, 28, 22, 30, 0), "never in the past");
+    }
+
+    /// An ambiguous local midnight (a fall-back repeats it) resolves to the
+    /// EARLIER instant: the conservative, shorter snooze.
+    #[test]
+    fn resolve_local_forward_prefers_the_earlier_ambiguous_instant() {
+        #[derive(Debug, Clone, Copy)]
+        struct FallBackAtMidnight;
+        impl chrono::TimeZone for FallBackAtMidnight {
+            type Offset = chrono::FixedOffset;
+            fn from_offset(_: &Self::Offset) -> Self {
+                FallBackAtMidnight
+            }
+            fn offset_from_local_date(
+                &self,
+                _: &chrono::NaiveDate,
+            ) -> chrono::LocalResult<Self::Offset> {
+                chrono::LocalResult::Single(zone(2))
+            }
+            fn offset_from_local_datetime(
+                &self,
+                local: &chrono::NaiveDateTime,
+            ) -> chrono::LocalResult<Self::Offset> {
+                let ambiguous = chrono::NaiveDate::from_ymd_opt(2026, 10, 25)
+                    .unwrap()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap();
+                if *local == ambiguous {
+                    return chrono::LocalResult::Ambiguous(zone(1), zone(2));
+                }
+                chrono::LocalResult::Single(zone(2))
+            }
+            fn offset_from_utc_date(&self, _: &chrono::NaiveDate) -> Self::Offset {
+                zone(2)
+            }
+            fn offset_from_utc_datetime(&self, _: &chrono::NaiveDateTime) -> Self::Offset {
+                zone(2)
+            }
+        }
+
+        let resolved = resolve_local_forward(
+            &FallBackAtMidnight,
+            chrono::NaiveDate::from_ymd_opt(2026, 10, 25)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap(),
+        );
+        assert_eq!(
+            resolved,
+            utc(2026, 10, 24, 23, 0, 0),
+            "the earlier of the two midnights is the shorter, safer snooze"
+        );
+    }
+
+    /// The preset table: the two duration presets are pure instant offsets (no
+    /// timezone can move them), and "until tomorrow" is the local boundary.
+    #[test]
+    fn snooze_presets_map_to_deadlines() {
+        let now_utc = utc(2026, 6, 1, 9, 0, 0);
+        let now_local = now_utc.with_timezone(&zone(2));
+        assert_eq!(
+            snooze_preset_deadline(SnoozePreset::ThirtyMinutes, now_utc, now_local),
+            utc(2026, 6, 1, 9, 30, 0)
+        );
+        assert_eq!(
+            snooze_preset_deadline(SnoozePreset::OneHour, now_utc, now_local),
+            utc(2026, 6, 1, 10, 0, 0)
+        );
+        assert_eq!(
+            snooze_preset_deadline(SnoozePreset::UntilTomorrow, now_utc, now_local),
+            utc(2026, 6, 1, 22, 0, 0),
+            "11:00 local → the midnight that follows it, in UTC"
+        );
+    }
+
+    /// The stored spelling round-trips through the parser the clamp uses, and
+    /// the persisted value is UTC regardless of what the machine reads.
+    #[test]
+    fn snooze_deadline_round_trips_and_survives_an_offset_spelling() {
+        let deadline = utc(2026, 9, 17, 13, 45, 0);
+        let stored = snooze_store_form(deadline);
+        assert_eq!(stored, "2026-09-17T13:45:00Z");
+        assert_eq!(
+            snooze_deadline(&stored, deadline - chrono::TimeDelta::seconds(1)),
+            Some(deadline)
+        );
+
+        // A value re-serialized by another tool as +02:00 denotes the same
+        // instant and must not be discarded.
+        assert_eq!(
+            snooze_deadline(
+                "2026-09-17T15:45:00+02:00",
+                deadline - chrono::TimeDelta::seconds(1)
+            ),
+            Some(deadline),
+            "an offset-shifted spelling of the same instant is still the deadline"
+        );
+        // Whitespace from a hand edit is tolerated.
+        assert_eq!(
+            snooze_deadline(
+                "  2026-09-17T13:45:00Z ",
+                deadline - chrono::TimeDelta::seconds(1)
+            ),
+            Some(deadline)
+        );
+    }
+
+    /// The boundaries of "active": the instant of the deadline itself is
+    /// already over, and anything unparsable is never a snooze.
+    #[test]
+    fn snooze_deadline_is_exclusive_at_its_own_instant() {
+        let deadline = utc(2026, 9, 17, 13, 45, 0);
+        let stored = snooze_store_form(deadline);
+        assert!(snooze_deadline(&stored, deadline - chrono::TimeDelta::seconds(1)).is_some());
+        assert!(
+            snooze_deadline(&stored, deadline).is_none(),
+            "at the deadline the snooze is over — otherwise it would never end"
+        );
+        assert!(snooze_deadline(&stored, deadline + chrono::TimeDelta::seconds(1)).is_none());
+        assert!(snooze_deadline("", deadline).is_none());
+        assert!(snooze_deadline("not a timestamp", deadline).is_none());
+        assert!(snooze_deadline("2026-09-17", deadline).is_none());
+    }
+
+    /// The startup clamp: a deadline that passed while the app was closed is
+    /// cleared (and reported), a future one and an absent one are untouched.
+    #[test]
+    fn clamp_snooze_clears_only_expired_deadlines() {
+        let now = utc(2026, 9, 17, 13, 45, 0);
+        let with = |value: Option<&str>| AppConfig {
+            snooze_until: value.map(str::to_string),
+            ..AppConfig::default()
+        };
+
+        let mut future = with(Some("2026-09-17T14:00:00Z"));
+        assert!(!clamp_snooze(&mut future, now));
+        assert_eq!(future.snooze_until.as_deref(), Some("2026-09-17T14:00:00Z"));
+
+        let mut expired = with(Some("2026-09-17T13:00:00Z"));
+        assert!(
+            clamp_snooze(&mut expired, now),
+            "an expired snooze is dropped"
+        );
+        assert_eq!(expired.snooze_until, None);
+
+        let mut garbage = with(Some("yesterday-ish"));
+        assert!(
+            clamp_snooze(&mut garbage, now),
+            "an unparsable value is dropped"
+        );
+        assert_eq!(garbage.snooze_until, None);
+
+        let mut absent = with(None);
+        assert!(!clamp_snooze(&mut absent, now));
+
+        // Idempotent: a second pass finds nothing to clear, which is what keeps
+        // the one-line log from repeating on every load and save.
+        assert!(!clamp_snooze(&mut expired, now));
+    }
+
+    /// The countdown rounds UP and never reads zero while the snooze is live —
+    /// the difference between "30 min left" the moment it is set and "29".
+    #[test]
+    fn snooze_minutes_left_rounds_up() {
+        assert_eq!(snooze_minutes_left(30 * 60), 30);
+        assert_eq!(snooze_minutes_left(30 * 60 - 1), 30);
+        assert_eq!(snooze_minutes_left(29 * 60), 29);
+        assert_eq!(snooze_minutes_left(60), 1);
+        assert_eq!(snooze_minutes_left(1), 1);
+        // Never zero, never negative — and bounded for an absurd stored value.
+        assert_eq!(snooze_minutes_left(0), 1);
+        assert_eq!(snooze_minutes_left(-5), 1);
+        assert_eq!(snooze_minutes_left(i64::MAX), 24 * 60);
+    }
+
+    /// `snooze_status` is the single read the tray and the driver share: it
+    /// reports the remaining seconds and refuses everything else.
+    #[test]
+    fn snooze_status_reports_only_a_live_deadline() {
+        let now = utc(2026, 9, 17, 13, 45, 0);
+        let cfg = |value: Option<&str>| AppConfig {
+            snooze_until: value.map(str::to_string),
+            ..AppConfig::default()
+        };
+        let status = snooze_status(&cfg(Some("2026-09-17T14:15:00Z")), now).expect("live snooze");
+        assert_eq!(status.remaining_seconds, 30 * 60);
+        assert_eq!(snooze_store_form(status.deadline), "2026-09-17T14:15:00Z");
+
+        assert!(snooze_status(&cfg(Some("2026-09-17T13:45:00Z")), now).is_none());
+        assert!(snooze_status(&cfg(Some("nope")), now).is_none());
+        assert!(snooze_status(&cfg(None), now).is_none());
+    }
+
+    /// A pre-4.7 config file has no `snooze_until` key and must keep loading —
+    /// the field is additive with a serde default, and the default is "not
+    /// snoozed".
+    #[test]
+    fn snooze_until_is_additive_for_pre_4_7_configs() {
+        let cfg: AppConfig =
+            serde_json::from_str(r#"{"spotify":{"client_id":"X"},"schema_version":2}"#).unwrap();
+        assert_eq!(cfg.snooze_until, None);
+        assert!(snooze_status(&cfg, chrono::Utc::now()).is_none());
+        // …and it serializes back out, so a snooze survives a restart.
+        let json = serde_json::to_value(AppConfig {
+            snooze_until: Some("2026-09-17T14:15:00Z".to_string()),
+            ..AppConfig::default()
+        })
+        .unwrap();
+        assert_eq!(json["snooze_until"], "2026-09-17T14:15:00Z");
     }
 }

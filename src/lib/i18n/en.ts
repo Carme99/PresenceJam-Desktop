@@ -467,6 +467,13 @@ export const en = {
   'settings.backupExported': 'Settings exported to {path}',
   'settings.backupImported': 'Settings imported from {path}',
   'settings.backupError': 'The backup action could not be completed: {error}',
+
+  // 4.7.0 — S9 (issue #677: the tray snooze / "pause sync for a while")
+  'dashboard.snoozeChip': 'Snoozed — {remaining} left (until {time})',
+  'dashboard.snoozeResume': 'Resume now',
+  'dashboard.snoozeResuming': 'Resuming…',
+  'dashboard.snoozeResumeFailed':
+    'Could not resume syncing. The snooze is still stored — try again.',
 };
 
 export type Dict = { readonly [K in keyof typeof en]: string };

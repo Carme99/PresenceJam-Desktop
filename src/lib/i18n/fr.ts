@@ -489,4 +489,11 @@ export const fr: Dict = {
   'settings.backupExported': 'Réglages exportés vers {path}',
   'settings.backupImported': 'Réglages importés depuis {path}',
   'settings.backupError': 'L’action de sauvegarde n’a pas pu aboutir : {error}',
+
+  // 4.7.0 — S9 (issue #677 : la pause depuis la barre de menus)
+  'dashboard.snoozeChip': 'En pause — {remaining} restantes (jusqu’à {time})',
+  'dashboard.snoozeResume': 'Reprendre maintenant',
+  'dashboard.snoozeResuming': 'Reprise…',
+  'dashboard.snoozeResumeFailed':
+    'Impossible de reprendre la synchronisation. La pause reste enregistrée — réessayez.',
 };

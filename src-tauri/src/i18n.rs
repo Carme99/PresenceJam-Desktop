@@ -71,6 +71,18 @@ pub struct Strings {
     pub menu_show_dashboard: &'static str,
     pub menu_show_logs: &'static str,
     pub menu_about: &'static str,
+    // ── Snooze submenu (4.7.0, S9 / issue #677) ────────────────────────────
+    /// Title of the tray's "pause sync for a while" submenu.
+    pub snooze_pause_menu: &'static str,
+    pub snooze_30_minutes: &'static str,
+    pub snooze_1_hour: &'static str,
+    pub snooze_until_tomorrow: &'static str,
+    /// Only present while a snooze is active.
+    pub snooze_resume_now: &'static str,
+    /// Leading status word while snoozed: "Snoozed — 29 min left (→ 14:32)".
+    pub snooze_paused: &'static str,
+    /// Countdown unit, composed as `{word} — {n} {unit} (→ HH:MM)`.
+    pub snooze_minutes_left: &'static str,
 }
 
 /// English table — the source of truth the other two mirror.
@@ -106,6 +118,13 @@ pub const EN: Strings = Strings {
     menu_show_dashboard: "Show Dashboard",
     menu_show_logs: "Show Logs",
     menu_about: "About PresenceJam",
+    snooze_pause_menu: "Pause sync for…",
+    snooze_30_minutes: "30 minutes",
+    snooze_1_hour: "1 hour",
+    snooze_until_tomorrow: "Until tomorrow",
+    snooze_resume_now: "Resume sync now",
+    snooze_paused: "Snoozed",
+    snooze_minutes_left: "min left",
 };
 
 /// German table.
@@ -141,6 +160,13 @@ pub const DE: Strings = Strings {
     menu_show_dashboard: "Dashboard anzeigen",
     menu_show_logs: "Protokolle anzeigen",
     menu_about: "Über PresenceJam",
+    snooze_pause_menu: "Sync pausieren für…",
+    snooze_30_minutes: "30 Minuten",
+    snooze_1_hour: "1 Stunde",
+    snooze_until_tomorrow: "Bis morgen",
+    snooze_resume_now: "Sync jetzt fortsetzen",
+    snooze_paused: "Sync pausiert",
+    snooze_minutes_left: "Min. verbleibend",
 };
 
 /// French table.
@@ -176,6 +202,13 @@ pub const FR: Strings = Strings {
     menu_show_dashboard: "Afficher le tableau de bord",
     menu_show_logs: "Afficher les journaux",
     menu_about: "À propos de PresenceJam",
+    snooze_pause_menu: "Suspendre la synchro pour…",
+    snooze_30_minutes: "Pendant 30 minutes",
+    snooze_1_hour: "Pendant 1 heure",
+    snooze_until_tomorrow: "Jusqu’à demain",
+    snooze_resume_now: "Reprendre la synchro maintenant",
+    snooze_paused: "Synchro en pause",
+    snooze_minutes_left: "min restant",
 };
 
 /// Canonical locale tags, in table order. The value persisted in
@@ -315,6 +348,13 @@ impl Strings {
             ("menu_show_dashboard", self.menu_show_dashboard),
             ("menu_show_logs", self.menu_show_logs),
             ("menu_about", self.menu_about),
+            ("snooze_pause_menu", self.snooze_pause_menu),
+            ("snooze_30_minutes", self.snooze_30_minutes),
+            ("snooze_1_hour", self.snooze_1_hour),
+            ("snooze_until_tomorrow", self.snooze_until_tomorrow),
+            ("snooze_resume_now", self.snooze_resume_now),
+            ("snooze_paused", self.snooze_paused),
+            ("snooze_minutes_left", self.snooze_minutes_left),
         ]
     }
 }

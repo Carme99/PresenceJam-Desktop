@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
 
-use chrono::Utc;
+use chrono::{DateTime, Local, TimeZone, Utc};
 use rand::Rng;
 use serde_json::json;
 use tauri::{AppHandle, Emitter};
@@ -1519,6 +1519,157 @@ fn quiet_pause_log_line(
 fn format_minutes_of_day(minutes: u16) -> String {
     let minutes = minutes.min(1439);
     format!("{:02}:{:02}", minutes / 60, minutes % 60)
+}
+
+// ---------------------------------------------------------------------------
+// 4.7.0 (S9, issue #677): the tray snooze ("Pause sync → 30 minutes / 1 hour /
+// until tomorrow").
+//
+// A snooze is a user-chosen deadline stored in `AppConfig::snooze_until` as an
+// RFC3339 UTC instant. While it is in the future the polling driver performs no
+// Spotify or Graph work at all and sleeps at `polling.max_interval_seconds` —
+// the same shape as the quiet-hours pause above (S4): decided before the write
+// clocks are loaded and before `poll_once::run`, with the thread never stopped
+// or parked, so the deadline is re-evaluated on every iteration and the snooze
+// ends by itself.
+//
+// The deadline arithmetic (including the LOCAL meaning of "until tomorrow")
+// lives with the field it produces, in `crate::config`. What is here is the
+// decision: skip, resume, or nothing.
+// ---------------------------------------------------------------------------
+
+/// What the polling driver must do with an iteration while a snooze may be
+/// stored (4.7.0, S9 / issue #677).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SnoozeGate {
+    /// Skip the iteration entirely and sleep for this many seconds
+    /// (`polling.max_interval_seconds`).
+    Skipped(u64),
+    /// The stored deadline has passed: run a normal iteration and clear the
+    /// field, so the countdown stops and an expired value never lingers on
+    /// disk.
+    Expired,
+    /// No snooze is stored.
+    Inactive,
+}
+
+/// Whether the previous iteration was skipped by [`snooze_gate`], so the pause
+/// and the resume are each logged exactly once. The DECISION is never cached —
+/// it is re-derived from the stored deadline on every iteration, which is what
+/// lets the snooze end by itself.
+static SNOOZE_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// S9 (issue #677): the tray snooze gate.
+///
+/// The polling driver consults this BEFORE the quiet-hours gate, before it
+/// loads the write clocks and before it runs an iteration, so a snoozed
+/// iteration issues no Spotify/Graph request and moves no keepalive/debounce
+/// clock. The thread is never stopped or parked — a parked thread could not
+/// notice the deadline — so the gate is re-evaluated every iteration and the
+/// pause/resume transitions are logged once each.
+///
+/// The sleep is the configured ceiling, exactly as the quiet-hours pause uses
+/// it, so resuming can overshoot the deadline by at most one interval. That
+/// bound is deliberate: a shorter sleep would mean waking (and re-reading the
+/// clock) more often than a normal poll, for a deadline the user set in
+/// minutes.
+pub(crate) fn snooze_gate(config: &Option<AppConfig>) -> SnoozeGate {
+    let now = Utc::now();
+    if let Some((seconds, deadline)) = snooze_pause_at(config, now) {
+        if !SNOOZE_ACTIVE.swap(true, Ordering::Relaxed) {
+            log::info!(
+                "{}",
+                snooze_pause_log_line(
+                    &snooze_deadline_hhmm(deadline, &Local),
+                    crate::config::snooze_minutes_left((deadline - now).num_seconds()),
+                )
+            );
+        }
+        return SnoozeGate::Skipped(seconds);
+    }
+    if snooze_expired(config, now) {
+        if SNOOZE_ACTIVE.swap(false, Ordering::Relaxed) {
+            log::info!("[POLLING] snooze: polling resumed");
+        } else {
+            log::info!("[POLLING] snooze: the stored deadline has already passed — clearing it");
+        }
+        return SnoozeGate::Expired;
+    }
+    SNOOZE_ACTIVE.store(false, Ordering::Relaxed);
+    SnoozeGate::Inactive
+}
+
+/// [`snooze_gate`]'s decision with an explicit clock:
+/// `Some((sleep_seconds, deadline))` while a snooze is active. Pure, so the
+/// skip decision and the sleep value are unit-testable without a Tauri runtime.
+///
+/// The sleep is `polling.max_interval_seconds`, floored at 1 s so a hand-edited
+/// 0 cannot spin the thread — the same floor [`quiet_pause_at`] applies.
+fn snooze_pause_at(config: &Option<AppConfig>, now: DateTime<Utc>) -> Option<(u64, DateTime<Utc>)> {
+    let cfg = config.as_ref()?;
+    let status = crate::config::snooze_status(cfg, now)?;
+    Some((cfg.polling.max_interval_seconds.max(1), status.deadline))
+}
+
+/// Whether a snooze is stored but no longer active — the deadline has passed,
+/// or the value cannot be parsed at all (4.7.0, S9 / issue #677).
+///
+/// Distinct from "no snooze stored": only this state asks the driver to persist
+/// a clear, and it is exactly the state the startup clamp ([`crate::config::clamp_snooze`])
+/// handles for a deadline that expired while the app was closed.
+fn snooze_expired(config: &Option<AppConfig>, now: DateTime<Utc>) -> bool {
+    config
+        .as_ref()
+        .is_some_and(|c| c.snooze_until.is_some() && crate::config::snooze_status(c, now).is_none())
+}
+
+/// `HH:MM` of a deadline in the given zone, for the pause log line (4.7.0, S9).
+/// Local wall-clock time, because that is the clock the user set the snooze
+/// against — the stored value is UTC and would read as an arbitrary hour.
+fn snooze_deadline_hhmm<Tz: TimeZone>(deadline: DateTime<Utc>, tz: &Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    deadline.with_timezone(tz).format("%H:%M").to_string()
+}
+
+/// The pause log line: until when, and how long is left (4.7.0, S9).
+fn snooze_pause_log_line(local_hhmm: &str, minutes_left: i64) -> String {
+    format!(
+        "[POLLING] snooze: polling paused until {} ({} min left)",
+        local_hhmm, minutes_left
+    )
+}
+
+/// Clears a stored, already-expired `snooze_until` and persists the config
+/// (4.7.0, S9 / issue #677).
+///
+/// Called by the driver on the iteration that observed [`SnoozeGate::Expired`].
+/// Runs once per expiry — the clear removes the value that produced the
+/// verdict — and holds the config write guard across the write exactly like
+/// `commands::config::update_config`, storing the same value that reached disk
+/// (the #297 invariant). A failed write leaves the guard untouched, so the next
+/// iteration retries rather than believing a deadline is gone.
+pub(crate) fn clear_snooze_if_expired(state: &AppState) {
+    let mut guard = state.config.get_mut();
+    let Some(current) = guard.as_ref().cloned() else {
+        return;
+    };
+    let mut next = current;
+    if !crate::config::clamp_snooze(&mut next, Utc::now()) {
+        return;
+    }
+    crate::config::stamp_schema_version(&mut next);
+    match crate::config::save_config(&next) {
+        Ok(()) => {
+            log::info!("[POLLING] snooze: cleared the expired deadline");
+            *guard = Some(next);
+        }
+        Err(e) => log::warn!(
+            "[POLLING] snooze: could not clear the expired deadline ({}); retrying next iteration",
+            e
+        ),
+    }
 }
 
 /// The per-iteration rule decision, factored out of `process_track` so EVERY
@@ -7480,6 +7631,204 @@ mod tests {
             body.matches("no_track_gate_key(false)").count() >= 4,
             "all four no-write outcomes (two early returns, the dedup, and the posted \
              clear) retire the gate"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // S9 (issue #677): the tray snooze gate.
+    //
+    // The strongest in-tree proof of "a snooze performs no Spotify or Graph
+    // work": a real iteration needs an `AppHandle` (tauri's `test` feature is
+    // off), so — exactly like the S4 quiet-hours gate — the ORDERING in the
+    // driver is pinned at the source, and the decision itself is driven through
+    // the pure predicate. What that leaves unproven is stated on the guard.
+    // -----------------------------------------------------------------------
+
+    /// A config with a stored `snooze_until`, in the spelling the tray writes.
+    fn snooze_config(stored: Option<&str>, max_interval: u64) -> Option<AppConfig> {
+        let mut cfg = AppConfig {
+            snooze_until: stored.map(str::to_string),
+            ..AppConfig::default()
+        };
+        cfg.polling.max_interval_seconds = max_interval;
+        Some(cfg)
+    }
+
+    fn stored_in(seconds: i64) -> String {
+        crate::config::snooze_store_form(Utc::now() + chrono::TimeDelta::seconds(seconds))
+    }
+
+    /// The skip decision and its sleep value: a live deadline skips for the
+    /// configured ceiling, everything else polls normally.
+    #[test]
+    fn snooze_pause_at_skips_only_for_a_live_deadline() {
+        let now = Utc::now();
+        let live = snooze_config(Some(&stored_in(30 * 60)), 60);
+        let (seconds, deadline) =
+            snooze_pause_at(&live, now).expect("a future deadline must skip the iteration");
+        assert_eq!(seconds, 60, "the skip sleeps the configured ceiling");
+        assert!(deadline > now);
+
+        // The ceiling is floored at 1 s so a hand-edited 0 cannot spin the
+        // thread — the same floor `quiet_pause_at` applies.
+        assert_eq!(
+            snooze_pause_at(&snooze_config(Some(&stored_in(60)), 0), now),
+            Some((
+                1,
+                crate::config::snooze_status(&snooze_config(Some(&stored_in(60)), 0).unwrap(), now)
+                    .unwrap()
+                    .deadline
+            ))
+        );
+
+        // Expired, unparsable, absent and unloaded configs all poll normally.
+        assert!(snooze_pause_at(&snooze_config(Some(&stored_in(-1)), 60), now).is_none());
+        assert!(snooze_pause_at(&snooze_config(Some("2026-01-01T00:00:00Z"), 60), now).is_none());
+        assert!(snooze_pause_at(&snooze_config(Some("garbage"), 60), now).is_none());
+        assert!(snooze_pause_at(&snooze_config(None, 60), now).is_none());
+        assert!(snooze_pause_at(&None, now).is_none());
+    }
+
+    /// "Expired" is a distinct state from "never snoozed": it is what asks the
+    /// driver to persist a clear, and it must not fire for an absent field (or
+    /// the driver would rewrite config.json on every idle iteration).
+    #[test]
+    fn snooze_expired_distinguishes_passed_from_absent() {
+        let now = Utc::now();
+        assert!(snooze_expired(
+            &snooze_config(Some(&stored_in(-1)), 60),
+            now
+        ));
+        assert!(
+            snooze_expired(&snooze_config(Some("not a timestamp"), 60), now),
+            "an unparsable value is dead weight and must be cleared too"
+        );
+        assert!(!snooze_expired(
+            &snooze_config(Some(&stored_in(300)), 60),
+            now
+        ));
+        assert!(!snooze_expired(&snooze_config(None, 60), now));
+        assert!(!snooze_expired(&None, now));
+    }
+
+    /// The pause log line states until when and how long is left.
+    #[test]
+    fn snooze_pause_log_line_reports_the_deadline_and_the_countdown() {
+        assert_eq!(
+            snooze_pause_log_line("14:32", 29),
+            "[POLLING] snooze: polling paused until 14:32 (29 min left)"
+        );
+        // The `HH:MM` comes from the LOCAL clock the user set the snooze
+        // against, whatever zone that is.
+        let deadline = Utc::now() + chrono::TimeDelta::minutes(30);
+        let east = chrono::FixedOffset::east_opt(2 * 3600).unwrap();
+        assert_eq!(
+            snooze_deadline_hhmm(deadline, &east),
+            deadline.with_timezone(&east).format("%H:%M").to_string()
+        );
+        assert_eq!(snooze_deadline_hhmm(deadline, &Utc).len(), 5);
+    }
+
+    /// S9 acceptance, structural half: the driver consults the snooze gate
+    /// BEFORE the quiet-hours gate, before it loads the write clocks and before
+    /// it runs an iteration, so a snoozed iteration issues no Spotify/Graph
+    /// request and moves no keepalive/debounce clock. It also sleeps on the
+    /// STOP-AWARE receiver and `continue`s, so the deadline is re-evaluated
+    /// next iteration instead of the thread ending.
+    ///
+    /// Unproven here (and stated in the PR): the driver itself needs an
+    /// `AppHandle`, so this pins the ORDER and the pure decision rather than
+    /// executing a real iteration. The remaining runtime evidence is the
+    /// `[POLLING] snooze:` lines and the absence of Spotify GETs in the log.
+    #[test]
+    fn snooze_gate_precedes_the_quiet_gate_the_clock_load_and_the_iteration() {
+        let loop_source = include_str!("loop.rs");
+        let snooze = loop_source
+            .find("snooze_gate(&config)")
+            .expect("polling_loop must consult the snooze gate (S9)");
+        let quiet = loop_source
+            .find("quiet_pause_iteration(")
+            .expect("the quiet-hours pause must still be consulted (S4)");
+        let clocks = loop_source
+            .find("load_write_clocks()")
+            .expect("polling_loop must still snapshot the shared clocks");
+        let run = loop_source
+            .find("super::poll_once::run(")
+            .expect("polling_loop must still dispatch the iteration");
+        assert!(
+            snooze < quiet,
+            "an explicit user snooze outranks a scheduled quiet window (S9)"
+        );
+        assert!(
+            snooze < clocks,
+            "the snooze gate must run BEFORE the clocks are loaded: a skipped \
+             iteration must not move (or discard) a keepalive/debounce clock (S9)"
+        );
+        assert!(
+            snooze < run,
+            "the snooze gate must run BEFORE the iteration: a snoozed iteration \
+             must issue no Spotify GET (S9)"
+        );
+        assert_eq!(
+            loop_source.matches("snooze_gate(&config)").count(),
+            1,
+            "exactly one snooze-gate call site is expected in the driver"
+        );
+
+        let skip_arm = &loop_source[snooze..quiet];
+        assert!(
+            skip_arm.contains("SnoozeGate::Skipped(seconds)"),
+            "the gate's skip verdict must be handled (S9)"
+        );
+        assert!(
+            skip_arm.contains("recv_timeout"),
+            "the snoozed iteration must sleep on the interruptible receiver (S9)"
+        );
+        assert!(
+            skip_arm.contains("continue"),
+            "the snoozed iteration must re-evaluate the deadline next iteration (S9)"
+        );
+        // The expiry arm must persist the clear rather than silently ignoring
+        // it — an expired deadline left in config.json would keep the tray and
+        // the Dashboard chip claiming a snooze that is over.
+        let expiry_arm = &loop_source[snooze..clocks];
+        assert!(
+            expiry_arm.contains("SnoozeGate::Expired")
+                && expiry_arm.contains("clear_snooze_if_expired("),
+            "the expired verdict must clear the stored deadline (S9)"
+        );
+    }
+
+    /// `clear_snooze_if_expired` must persist what it stores, exactly like the
+    /// config commands: hold the write guard, clamp, stamp, save, then adopt.
+    /// The behavioural half (that it clears an expired field and leaves a live
+    /// one alone) is `config::clamp_snooze`'s unit test — this function writes
+    /// to the real config path, so a test must not call it.
+    #[test]
+    fn clear_snooze_if_expired_persists_before_adopting() {
+        let prod = prod_source();
+        let body = prod_fn_body(prod, "pub(crate) fn clear_snooze_if_expired(");
+        for marker in [
+            "state.config.get_mut()",
+            "crate::config::clamp_snooze(",
+            "crate::config::save_config(&next)",
+            "*guard = Some(next)",
+        ] {
+            assert!(
+                body.contains(marker),
+                "clear_snooze_if_expired must contain `{}`",
+                marker
+            );
+        }
+        assert!(
+            body.find("save_config(&next)").unwrap() < body.find("*guard = Some(next)").unwrap(),
+            "the in-memory config must only be updated after a successful write"
+        );
+        // A failed write keeps the field, so the next iteration retries instead
+        // of leaving an expired deadline on disk that nothing will clear.
+        assert!(
+            body.contains("retrying next iteration"),
+            "a failed clear must say it will retry"
         );
     }
 }
