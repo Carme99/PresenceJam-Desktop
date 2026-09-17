@@ -198,7 +198,7 @@ The banner names the `.bak` when one is still on disk. When the banner appears *
 | *you are out of office* | **Pause while I am out of office** is on and Teams reports you out of office |
 | *busy, in a call, or presenting* | the meeting/call/DND gate — busy, Do Not Disturb, focusing, in a meeting, in a call, or presenting |
 
-The log records the same verdicts — `[POLLING] process_track: quiet hours active, skipping status write`, `… track rule matched, …`, and `… presence-gated, skipping status write` for the policies. Nothing is paused: the app keeps polling on its normal cadence and the write resumes by itself once the cause clears (a quiet window ending, your presence going available, or the hand-set message expiring). Open **Settings → Status rules** for the first two, **Settings → Presence** for the policies (see [USAGE.md — Status rules](./USAGE.md#status-rules)).
+The log records the same verdicts — `[POLLING] process_track: quiet hours active, skipping status write`, `… track rule matched, …`, and `… presence-gated, skipping status write` for the policies. Nothing is paused *by these rules*: the app keeps polling on its normal cadence and the write resumes by itself once the cause clears (a quiet window ending, your presence going available, or the hand-set message expiring) — the one exception is a quiet-hours row with **Stop polling during this window** ticked, which pauses polling for that window only (see [USAGE.md — Status rules](./USAGE.md#status-rules)). Open **Settings → Status rules** for the first two, **Settings → Presence** for the policies (see [USAGE.md — Status rules](./USAGE.md#status-rules)).
 
 ### Status doesn't clear when Spotify is paused
 
