@@ -4094,6 +4094,12 @@ mod tests {
     /// deadline's local time is `now`'s local time, e.g. 12:30, not 00:00.
     /// These rows sit at 23:59 / 00:01 / 12:30 precisely so that a same-wall-
     /// clock deadline is distinguishable from midnight in every row.
+    ///
+    /// Driven through `snooze_preset_deadline` (the table the tray actually
+    /// calls) rather than `next_local_midnight_utc` directly, so the sweep also
+    /// covers the DISPATCH arm: a mutant that replaced
+    /// `SnoozePreset::UntilTomorrow` with `now + 24 h` used to survive this test
+    /// because the test bypassed the arm it lived in.
     #[test]
     fn until_tomorrow_never_shifts_by_the_offset() {
         use chrono::Timelike;
@@ -4101,8 +4107,9 @@ mod tests {
             let tz = zone(hours);
             for (h, mi) in [(0, 0), (0, 1), (12, 30), (23, 59)] {
                 let now = utc(2026, 3, 4, h, mi, 0).with_timezone(&tz);
-                let deadline = next_local_midnight_utc(now);
-                let secs = (deadline - now.with_timezone(&chrono::Utc)).num_seconds();
+                let now_utc = now.with_timezone(&chrono::Utc);
+                let deadline = snooze_preset_deadline(SnoozePreset::UntilTomorrow, now_utc, now);
+                let secs = (deadline - now_utc).num_seconds();
                 assert!(
                     secs > 0 && secs <= 24 * 3600,
                     "offset {}h at {:02}:{:02} produced a {} s snooze",

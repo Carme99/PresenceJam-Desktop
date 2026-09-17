@@ -399,11 +399,15 @@ mod tests {
     /// decides) would leave the behavioural test above green. Rather than hide
     /// that gap, this pins the driver's wait contract at the source, in the shape
     /// this repo already uses for exactly that reason (the #572/D1 and S4 guards
-    /// in `poll_once.rs`): exactly three stop-aware wait sites — the
-    /// non-blocking pre-iteration probe, the quiet-hours pause and the
-    /// between-iteration sleep — no plain `thread::sleep`, and a closed channel
-    /// treated as "break" at every one of them, which is what makes
-    /// `stop_polling` immediate (issue #10).
+    /// in `poll_once.rs`): exactly four stop-aware wait sites — the
+    /// non-blocking pre-iteration probe, the **snooze pause** (S9, #677) and the
+    /// quiet-hours pause, and the between-iteration sleep — no plain
+    /// `thread::sleep`, and a closed channel treated as "break" at every one of
+    /// them, which is what makes `stop_polling` immediate (issue #10).
+    ///
+    /// The count is deliberately exact: adding a fifth gate that waits without
+    /// consulting `stop_rx` is precisely the regression this pins, so a new
+    /// wait site must be added here *and* be stop-aware.
     #[test]
     fn test_every_driver_wait_site_is_stop_aware() {
         let source = include_str!("loop.rs");
@@ -415,10 +419,10 @@ mod tests {
 
         assert_eq!(
             prod.matches("stop_rx.recv_timeout(").count(),
-            3,
-            "the driver must wait on the STOP-AWARE receiver at all three sites: \
-             the pre-iteration probe, the quiet-hours pause and the \
-             between-iteration sleep"
+            4,
+            "the driver must wait on the STOP-AWARE receiver at all four sites: \
+             the pre-iteration probe, the snooze pause, the quiet-hours pause and \
+             the between-iteration sleep"
         );
         assert!(
             !prod.contains("thread::sleep("),
@@ -433,14 +437,16 @@ mod tests {
         );
         assert_eq!(
             prod.matches("StdDuration::from_secs(").count(),
-            2,
-            "both waits that can outlive a request (the quiet-hours pause and the \
-             iteration sleep) must be bounded by the returned interval"
+            3,
+            "every wait that can outlive a request — the snooze pause, the \
+             quiet-hours pause and the iteration sleep — must be bounded by the \
+             returned interval"
         );
         for (idx, _) in prod.match_indices("stop_rx.recv_timeout(") {
-            // Wide enough to swallow the longest arm — the quiet-hours pause arm
-            // (~410 bytes, it logs before breaking) — while still being local to
-            // the site, so a matched arm cannot come from the next wait.
+            // Wide enough to swallow the longest arm — the snooze and quiet-hours
+            // pause arms (each ~400 bytes: they log before breaking) — while still
+            // being local to the site, so a matched arm cannot come from the next
+            // wait.
             let arm = &prod[idx..(idx + 700).min(prod.len())];
             assert!(
                 arm.contains("Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected)"),
