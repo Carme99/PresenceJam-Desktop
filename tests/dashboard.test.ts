@@ -157,7 +157,9 @@ beforeEach(() => {
     gatedReason: '',
     availabilityListening: false,
     stopped: false,
-    syncing: false
+    syncing: false,
+    authPersistWarning: null,
+    revision: 0
   });
   setNotificationsEnabled(false);
   i18n.set('en');
@@ -376,5 +378,75 @@ describe('Dashboard tray refresh is claim-free (#592, #670)', () => {
     for (const call of invokeMock.mock.calls) {
       if (call[0] === 'update_tray_menu_state') expect(call[1]).toBeUndefined();
     }
+  });
+});
+
+describe('Hydration loses to a newer event (#670)', () => {
+  it('discards a get_sync_status snapshot assembled before a pause already on screen', async () => {
+    status = syncStatus({ last_posted_status: '🎵 An Artist - A Track 🎧' });
+    await mountShell();
+
+    // Hold the IPC answer so the pause event can land while it is in flight —
+    // the snapshot genuinely predates the event that would otherwise revert it.
+    const { promise: pendingStatus, resolve: answerStatus } = Promise.withResolvers<unknown>();
+    let requested = false;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'get_sync_status') {
+        requested = true;
+        return pendingStatus;
+      }
+      return Promise.resolve(undefined);
+    });
+
+    const dash = render(Dashboard);
+    await waitFor(() => expect(requested).toBe(true));
+    await emit('presence-paused', { status: '🎵 Paused' });
+    expect(get(presence).paused).toBe(true);
+
+    answerStatus(syncStatus({ last_posted_status: '🎵 An Artist - A Track 🎧' }));
+    await tick();
+
+    // The pre-pause snapshot must not undo the pause the user can see.
+    expect(get(presence).paused).toBe(true);
+    expect(get(presence).pausedStatus).toBe('🎵 Paused');
+    await waitFor(() => expect(dash.container.querySelector('.track-card')).not.toBeNull());
+    expect(dash.container.querySelector('.paused-indicator')).not.toBeNull();
+  });
+});
+
+describe('Auth persistence warning while another view owns the screen (#670 / D10)', () => {
+  it('records the warning from the always-mounted layout', async () => {
+    await mountShell();
+    await emit('teams-auth-persist-warning', 'keychain locked: could not persist tokens');
+    expect(get(presence).authPersistWarning).toBe('keychain locked: could not persist tokens');
+  });
+});
+
+describe('Dashboard tray refresh is not refired by unrelated presence updates (#670)', () => {
+  it('refreshes the tray only when the sync state actually changes', async () => {
+    await mountShell();
+    const dash = render(Dashboard);
+    await waitFor(() => expect(dash.container.querySelector('.track-card')).not.toBeNull());
+    await tick();
+    const trayCallsBefore = invokeMock.mock.calls.filter(
+      (c) => c[0] === 'update_tray_menu_state'
+    ).length;
+
+    // Status / gate / pause events do not change the poller's run state.
+    await emit('presence-updated', { status: '🎵 An Artist - A Track 🎧' });
+    await emit('presence-gated', { reason: 'quiet-hours' });
+    await emit('presence-paused', { status: '🎵 Paused' });
+
+    expect(
+      invokeMock.mock.calls.filter((c) => c[0] === 'update_tray_menu_state').length
+    ).toBe(trayCallsBefore);
+
+    // A real sync transition still refreshes it.
+    await emit('sync-stopped', {});
+    await waitFor(() =>
+      expect(
+        invokeMock.mock.calls.filter((c) => c[0] === 'update_tray_menu_state').length
+      ).toBe(trayCallsBefore + 1)
+    );
   });
 });

@@ -1,4 +1,5 @@
 import { writable } from 'svelte/store';
+import { devLog } from '$lib/utils/dev';
 import type { SyncStatus } from '$lib/types';
 
 /**
@@ -46,6 +47,21 @@ export interface PresenceState {
    * announces it, and the announcement survives an unmounted Dashboard.
    */
   syncing: boolean;
+  /**
+   * Message from `teams-auth-persist-warning`: the Teams sign-in succeeded but
+   * the tokens could not be written (locked keychain, full disk), so the
+   * session dies at the next restart. Emitted while the sign-in flows own the
+   * screen, so the always-mounted layout captures it here for whichever view
+   * renders the banner (finding D10). `null` = nothing to report.
+   */
+  authPersistWarning: string | null;
+  /**
+   * Incremented by every mutator that writes a field `hydrate()` can also
+   * write. A caller reads it *before* asking the backend for a snapshot and
+   * passes it back to `hydrate()`, so an answer that was assembled before an
+   * event the store has since applied is discarded instead of reverting it.
+   */
+  revision: number;
 }
 
 export const INITIAL_PRESENCE: PresenceState = {
@@ -56,7 +72,9 @@ export const INITIAL_PRESENCE: PresenceState = {
   gatedReason: '',
   availabilityListening: false,
   stopped: false,
-  syncing: false
+  syncing: false,
+  authPersistWarning: null,
+  revision: 0
 };
 
 export const presence = writable<PresenceState>({ ...INITIAL_PRESENCE });
@@ -66,7 +84,27 @@ export const presence = writable<PresenceState>({ ...INITIAL_PRESENCE });
  * `SyncStatus.is_syncing` when a view hydrates).
  */
 export function setSyncing(value: boolean): void {
-  presence.update((s) => (s.syncing === value ? s : { ...s, syncing: value }));
+  presence.update((s) =>
+    s.syncing === value ? s : { ...s, syncing: value, revision: s.revision + 1 }
+  );
+}
+
+/**
+ * `teams-auth-persist-warning` (finding D10): the Teams sign-in succeeded but
+ * the tokens could not be written, so the session is live only until the next
+ * restart. Emitted while Onboarding/Reconnect owns the screen, so the
+ * always-mounted layout records it here and whichever view renders the banner
+ * (Settings) consumes it.
+ */
+export function markAuthPersistWarning(message: string): void {
+  presence.update((s) =>
+    s.authPersistWarning === message ? s : { ...s, authPersistWarning: message }
+  );
+}
+
+/** Drop the persistence banner once it has been shown or the session recovered. */
+export function clearAuthPersistWarning(): void {
+  presence.update((s) => (s.authPersistWarning === null ? s : { ...s, authPersistWarning: null }));
 }
 
 /**
@@ -82,13 +120,20 @@ export function markStatusPosted(status: string): void {
     pausedStatus: null,
     gated: false,
     gatedReason: '',
-    stopped: false
+    stopped: false,
+    revision: s.revision + 1
   }));
 }
 
 /** `presence-gated`: the write is being suppressed, with the poller's reason. */
 export function markPresenceGated(reason: string): void {
-  presence.update((s) => ({ ...s, gated: true, gatedReason: reason, stopped: false }));
+  presence.update((s) => ({
+    ...s,
+    gated: true,
+    gatedReason: reason,
+    stopped: false,
+    revision: s.revision + 1
+  }));
 }
 
 /**
@@ -102,7 +147,8 @@ export function markPresencePaused(status: string): void {
     postedStatus: null,
     paused: true,
     pausedStatus: status,
-    stopped: false
+    stopped: false,
+    revision: s.revision + 1
   }));
 }
 
@@ -118,7 +164,8 @@ export function markPresenceCleared(): void {
     pausedStatus: null,
     gated: false,
     gatedReason: '',
-    stopped: true
+    stopped: true,
+    revision: s.revision + 1
   }));
 }
 
@@ -132,10 +179,10 @@ export function setPlaybackState(isPlaying: boolean): void {
   presence.update((s) => {
     if (isPlaying) {
       if (!s.paused && !s.stopped) return s;
-      return { ...s, paused: false, pausedStatus: null, stopped: false };
+      return { ...s, paused: false, pausedStatus: null, stopped: false, revision: s.revision + 1 };
     }
     if (s.paused) return s;
-    return { ...s, paused: true };
+    return { ...s, paused: true, revision: s.revision + 1 };
   });
 }
 
@@ -149,24 +196,38 @@ export function setAvailabilityListening(listening: boolean): void {
 /**
  * Seed the store from the backend's session state (`get_sync_status`).
  *
- * `last_posted_status` / `presence_gated` / `presence_paused` are answers only
- * the backend holds for a view that never saw the events, so where it has an
- * answer it wins. `null` means "nothing posted this session" — not "cleared" —
- * so the fields the events already reported are kept rather than wiped on
- * every mount. `stopped` and `availabilityListening` are event-only state and
- * are left untouched. `is_syncing` is seeded too: a mount is the one moment
- * the poller's run state is asked for rather than announced.
+ * `snapshotRevision` is the store `revision` the caller read *before* it asked
+ * the backend. The IPC answer and the event stream are independent (the poller
+ * emits while the command reads), so a snapshot that was assembled before an
+ * event the store has since applied is staler than what the user is already
+ * looking at: it is discarded wholesale rather than reverting a pause, gate or
+ * sync transition. That is the whole point of the slice — a view mounting
+ * mid-session must not show state the events already superseded.
+ *
+ * A snapshot taken at the current revision is authoritative for the fields
+ * only the backend can answer: `last_posted_status` / `presence_paused` /
+ * `presence_gated` / `is_syncing`. `null` there means "nothing posted this
+ * session" — not "cleared" — so an already-known `postedStatus` is kept rather
+ * than wiped on every mount, and `gatedReason` (event-only) is kept while the
+ * backend still reports the gate. `stopped` and `availabilityListening` are
+ * event-only and are never written here.
  */
-export function hydrate(status: SyncStatus): void {
-  presence.update((s) => ({
-    ...s,
-    postedStatus: status.presence_paused ? null : (status.last_posted_status ?? s.postedStatus),
-    paused: status.presence_paused,
-    pausedStatus: status.presence_paused
-      ? (status.last_posted_status ?? s.pausedStatus)
-      : null,
-    gated: status.presence_gated,
-    gatedReason: status.presence_gated ? s.gatedReason : '',
-    syncing: status.is_syncing
-  }));
+export function hydrate(status: SyncStatus, snapshotRevision: number): void {
+  presence.update((s) => {
+    if (s.revision !== snapshotRevision) {
+      devLog('[PRESENCE] hydrate: snapshot predates a newer event, discarded');
+      return s;
+    }
+    return {
+      ...s,
+      postedStatus: status.presence_paused ? null : (status.last_posted_status ?? s.postedStatus),
+      paused: status.presence_paused,
+      pausedStatus: status.presence_paused
+        ? (status.last_posted_status ?? s.pausedStatus)
+        : null,
+      gated: status.presence_gated,
+      gatedReason: status.presence_gated ? s.gatedReason : '',
+      syncing: status.is_syncing
+    };
+  });
 }

@@ -22,7 +22,8 @@
     markPresenceCleared,
     setAvailabilityListening,
     setPlaybackState,
-    setSyncing
+    setSyncing,
+    markAuthPersistWarning
   } from '$lib/stores/presence';
 
   // C7: this layout is shared by every webview window (the SPA fallback
@@ -205,6 +206,17 @@
       listen('sync-stopped', () => {
         devLog('[LAYOUT] sync-stopped received');
         setSyncing(false);
+      })
+    );
+
+    // #670 / finding D10: `teams-auth-persist-warning` fires while the
+    // sign-in flows own the screen (Onboarding/Reconnect call
+    // `poll_teams_auth`), so a Settings-only listener would drop it. The
+    // always-mounted layout records it and Settings renders the banner.
+    presenceTeardown.add(
+      listen<string>('teams-auth-persist-warning', (event) => {
+        devLog('[LAYOUT] teams-auth-persist-warning received');
+        markAuthPersistWarning(String(event.payload ?? ''));
       })
     );
 

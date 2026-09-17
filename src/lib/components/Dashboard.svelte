@@ -128,9 +128,14 @@
 
   // #670: the tray mirror follows the shared sync state, so every transition —
   // the hydrated mount, a `sync-started`/`sync-stopped` handled by the layout,
-  // a sync toggle, a panic or a reconnect — refreshes it exactly once.
+  // a sync toggle, a panic or a reconnect — refreshes it exactly once. The
+  // store notifies on *any* presence update, so the comparison is explicit:
+  // an unrelated status/gate/pause event must not re-invoke the backend.
+  let syncingObserved: boolean | null = null;
   $effect(() => {
     const isSyncing = $presence.syncing;
+    if (isSyncing === syncingObserved) return;
+    syncingObserved = isSyncing;
     devLog(`[DASHBOARD] sync state changed: isSyncing=${isSyncing}`);
     void updateMenuState();
   });
@@ -140,6 +145,7 @@
 
     try {
       devLog('[DASHBOARD] onMount: calling invoke get_sync_status');
+      const snapshotRevision = get(presence).revision;
       const status = await invoke<SyncStatus>('get_sync_status');
       devLog('[DASHBOARD] initial sync status:', {
         is_syncing: status.is_syncing,
@@ -151,7 +157,7 @@
       spotifyConnected = status.spotify_connected;
       teamsConnected = status.teams_connected;
       currentTrack = status.current_track;
-      hydrate(status);
+      hydrate(status, snapshotRevision);
     } catch (e) {
       console.error('[DASHBOARD] onMount: get_sync_status FAILED:', e);
     }
@@ -312,11 +318,12 @@
       devLog('[DASHBOARD] refreshStatus: calling invoke refresh_status');
       await invoke('refresh_status');
       devLog('[DASHBOARD] refreshStatus: calling invoke get_sync_status');
+      const snapshotRevision = get(presence).revision;
       const status = await invoke<SyncStatus>('get_sync_status');
       spotifyConnected = status.spotify_connected;
       teamsConnected = status.teams_connected;
       currentTrack = status.current_track;
-      hydrate(status);
+      hydrate(status, snapshotRevision);
       await updateMenuState();
     } catch (e) {
       console.error('[DASHBOARD] refreshStatus failed:', e);
