@@ -442,4 +442,8 @@ export const fr: Dict = {
   'dashboard.presenceGatedManualStatus':
     'Statut en pause — vous avez saisi un statut manuellement',
   'dashboard.presenceGatedOutOfOffice': 'Statut en pause — vous êtes absent',
+
+  // 4.7.0 — S3 tray/logs hygiene
+  'settings.teamsPersistWarning':
+    'Connecté, mais cet appareil n’a pas pu enregistrer la session — elle fonctionne jusqu’à la fermeture. Reconnectez Teams pour réessayer l’enregistrement.',
 };

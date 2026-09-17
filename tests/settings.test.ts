@@ -45,6 +45,11 @@ import { resetSpotifyAuthFlow, resetTeamsAuthFlow } from '$lib/stores/authFlow.s
 import { theme } from '$lib/stores/theme';
 import { t } from '$lib/i18n';
 
+// #693: the persist warning is captured in the always-mounted layout listener
+// and rendered from the shared presence store, so the test drives the store,
+// not an event this pane no longer subscribes to.
+import { presence, INITIAL_PRESENCE, markAuthPersistWarning } from '$lib/stores/presence';
+
 const invokeMock = invoke as unknown as Mock;
 const emitToMock = emitTo as unknown as Mock;
 const popInMock = popIn as unknown as Mock;
@@ -78,6 +83,7 @@ const formatInput = (container: HTMLElement) =>
   container.querySelector('#status-format') as HTMLInputElement;
 
 beforeEach(() => {
+  presence.set({ ...INITIAL_PRESENCE });
   currentView.set('dashboard');
   configStore.set(configuredConfig());
   theme.set('dark');
@@ -406,5 +412,59 @@ describe('Settings custom lexicon reaches the profanity matcher (#538)', () => {
         'badword'
       ]);
     });
+  });
+});
+
+/**
+ * #693 — a Teams sign-in whose tokens could not be persisted (locked
+ * keychain, full disk) used to fail silently: `poll_teams_auth` kept the
+ * session in memory and emitted `teams-auth-persist-warning`, but nothing
+ * listened, so the user only found out when the session was gone after a
+ * restart. The always-mounted layout listener captures it into the shared
+ * presence store (S2's half); this pane renders it and offers the retry.
+ *
+ * Fails pre-fix: nothing stored or rendered the warning, so no banner
+ * appeared and no retry path existed.
+ */
+describe('Settings Teams persistence warning (#693)', () => {
+  it('renders the captured warning and clears it from the reconnect that retries the save', async () => {
+    markAuthPersistWarning('tokens could not be written');
+    const { container } = await mountSettings();
+
+    const banner = container.querySelector('.persist-banner');
+    expect(banner).not.toBeNull();
+    expect(banner?.textContent).toContain(t('settings.teamsPersistWarning'));
+    const reconnect = banner?.querySelector('button');
+    expect(reconnect?.textContent).toContain(t('common.reconnect'));
+
+    // The retry path: reconnecting re-runs the sign-in (and its persist), and
+    // the warning clears so a success leaves no banner behind.
+    await fireEvent.click(reconnect as HTMLButtonElement);
+    await waitFor(() => expect(get(presence).authPersistWarning).toBeNull());
+    expect(container.querySelector('.persist-banner')).toBeNull();
+    await waitFor(() =>
+      expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'reconnect_teams')).toBe(true)
+    );
+  });
+
+  it('is dismissable without a reconnect, so an unfixable cause is not a permanent banner', async () => {
+    markAuthPersistWarning('keychain is locked');
+    const { container } = await mountSettings();
+    const banner = container.querySelector('.persist-banner');
+    expect(banner).not.toBeNull();
+
+    const dismiss = banner?.querySelector('button.dismiss');
+    expect(dismiss?.textContent).toContain(t('common.dismiss'));
+    await fireEvent.click(dismiss as HTMLButtonElement);
+
+    await waitFor(() => expect(get(presence).authPersistWarning).toBeNull());
+    expect(container.querySelector('.persist-banner')).toBeNull();
+    // Dismissing is not a retry: it must not re-run the sign-in.
+    expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'reconnect_teams')).toBe(false);
+  });
+
+  it('shows no banner while the store holds no persistence fault', async () => {
+    const { container } = await mountSettings();
+    expect(container.querySelector('.persist-banner')).toBeNull();
   });
 });

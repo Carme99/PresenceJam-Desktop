@@ -433,4 +433,8 @@ export const de: Dict = {
   'dashboard.presenceGatedManualStatus':
     'Status pausiert — Sie haben eine Statusmeldung selbst gesetzt',
   'dashboard.presenceGatedOutOfOffice': 'Status pausiert — Sie sind abwesend',
+
+  // 4.7.0 — S3 tray/logs hygiene
+  'settings.teamsPersistWarning':
+    'Angemeldet, aber dieses Gerät konnte die Sitzung nicht speichern — sie funktioniert bis zum Beenden. Teams erneut verbinden, um das Speichern zu wiederholen.',
 };

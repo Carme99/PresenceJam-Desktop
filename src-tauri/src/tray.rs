@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use tauri::{
     menu::{CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager,
+    AppHandle, Emitter, Listener, Manager,
 };
 
 use crate::spotify::RepeatState;
@@ -312,6 +312,17 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
     TRAY.set(tray)
         .map_err(|_| "Tray already initialized".to_string())?;
 
+    // Issue #689 (D6): the polling loop emits `playback-state-changed` when
+    // a track's playing state changes without the track itself changing.
+    // The Play/Pause mark and the status line read `LAST_PLAYING_STATE`,
+    // which a rebuild only re-seeds on a new track key — so a same-track
+    // pause would leave the mark claiming "playing" until the next track.
+    // Consuming the event here keeps the tray's belief truthful; the
+    // poller's own re-store then drives the rebuild that paints it.
+    app.listen("playback-state-changed", |event| {
+        consume_playback_state_changed(event.payload());
+    });
+
     // Immediately update tray menu to reflect actual state (Bug 11 fix).
     // Without this, the initial menu always shows "Pause Sync" regardless of actual
     // sync state, and the menu doesn't show the current track if one is cached.
@@ -408,9 +419,50 @@ fn build_initial_menu(app: &tauri::App) -> Result<tauri::menu::Menu<tauri::Wry>,
 /// Snapshot of the last tray-menu state, used for the dedup guard in
 /// `update_tray_menu` (issue #71). The polling thread calls
 /// `update_tray_menu` on every successful poll; the menu only needs to
-/// change when `is_syncing`, window visibility (the Show/Hide label),
-/// or the current track's title/is_playing change.
-type TrayStateSnapshot = (bool, bool, Option<String>); // (is_syncing, is_window_visible, track_key)
+/// change when `is_syncing`, window visibility (the Show/Hide label), the
+/// current track's title/is_playing, or one of the two playback modes
+/// changes.
+///
+/// The two playback modes are part of the key (issue #691): their atoms
+/// drive the Shuffle/Repeat check marks, so an external mode change has to
+/// force a rebuild — otherwise the marks stayed on the previous mode. The
+/// click target is unaffected: `shuffle_toggle_target` reads the live atom.
+#[derive(Clone, PartialEq, Eq)]
+struct TrayStateSnapshot {
+    is_syncing: bool,
+    is_window_visible: bool,
+    /// `artist|title|is_playing` — is_playing is in the key so a same-track
+    /// pause repaints the Play/Pause mark (issue #229).
+    track_key: Option<String>,
+    shuffle: bool,
+    repeat: RepeatState,
+}
+
+/// True when `next` differs from the last committed snapshot, i.e. when the
+/// tray menu must be rebuilt. Pure, so the dedup contract is unit-testable
+/// without a Tauri runtime.
+fn tray_state_changed(prev: Option<&TrayStateSnapshot>, next: &TrayStateSnapshot) -> bool {
+    prev != Some(next)
+}
+
+/// Builds the dedup key from the same inputs the rebuild renders from: the
+/// caller's sync flag and precomputed window visibility, the track's
+/// artist/title/is_playing, and the two playback-mode atoms the polling loop
+/// feeds (`note_playback_modes`). Single construction site so the key can
+/// never be built from a subset of what the menu shows (issue #691).
+fn tray_snapshot_for(
+    is_syncing: bool,
+    is_window_visible: bool,
+    current_track: Option<&crate::spotify::TrackInfo>,
+) -> TrayStateSnapshot {
+    TrayStateSnapshot {
+        is_syncing,
+        is_window_visible,
+        track_key: current_track.map(|t| format!("{}|{}|{}", t.artist, t.title, t.is_playing)),
+        shuffle: LAST_SHUFFLE_STATE.load(Ordering::Acquire),
+        repeat: last_repeat_state(),
+    }
+}
 
 static LAST_TRAY_STATE: std::sync::OnceLock<parking_lot::Mutex<Option<TrayStateSnapshot>>> =
     std::sync::OnceLock::new();
@@ -453,15 +505,46 @@ static QUEUE_CACHE: std::sync::LazyLock<
     parking_lot::Mutex<Option<(Instant, crate::spotify::QueueInfo)>>,
 > = std::sync::LazyLock::new(|| parking_lot::Mutex::new(None));
 
-/// Last known Spotify playing state, driving the Play/Pause toggle label
-/// (and its fallback dispatch). Seeded from the polling loop's stored track
-/// on a genuine track change and updated by the tray's own successful
-/// play/pause/transfer actions. Needed because the polling loop only
-/// re-stores `current_track` on title/artist change, so its `is_playing`
-/// goes stale on a same-track pause — dispatching on it directly would
-/// invert the toggle. Issue #3.0-P3.
+/// Last known Spotify playing state, driving the Play/Pause check mark and
+/// the tray status line (and the toggle's fallback dispatch). Re-seeded
+/// from the polling loop's stored track on a genuine track change, from the
+/// poller's `playback-state-changed` event when the playing state changes
+/// for the same track (issue #689), and by the tray's own successful
+/// play/pause/transfer actions. Issue #3.0-P3.
 static LAST_PLAYING_STATE: std::sync::LazyLock<std::sync::atomic::AtomicBool> =
     std::sync::LazyLock::new(|| std::sync::atomic::AtomicBool::new(false));
+
+/// Records the playing state the Play/Pause mark and the status line render.
+/// Every path that learns the truth writes it here, so the mark never infers
+/// playback from a candidate that may already be stale. Issue #3.0-P3.
+fn note_playing_state(is_playing: bool) {
+    LAST_PLAYING_STATE.store(is_playing, Ordering::Release);
+}
+
+/// Payload of the polling loop's `playback-state-changed` event (issue
+/// #689). Only `is_playing` is consumed: the event's `track_key` is part of
+/// the shared contract, but the tray's dedup key already carries the track
+/// identity.
+#[derive(serde::Deserialize)]
+struct PlaybackStateChanged {
+    is_playing: bool,
+}
+
+/// Consumes a `playback-state-changed` payload (issue #689, tray half): the
+/// poll body's playing state is authoritative for a same-track change, and
+/// the poller has already re-stored it, so recording it here keeps the
+/// Play/Pause mark and the status line truthful without waiting for the
+/// next track. An unparsable payload keeps the last known state rather than
+/// inventing one.
+fn consume_playback_state_changed(payload: &str) {
+    match serde_json::from_str::<PlaybackStateChanged>(payload) {
+        Ok(state) => note_playing_state(state.is_playing),
+        Err(e) => log::warn!(
+            "[TRAY] playback-state-changed: unparsable payload, keeping the last playing state: {}",
+            e
+        ),
+    }
+}
 
 /// Last known shuffle state, driving the Shuffle item's check mark
 /// (issue #582). Written by the polling loop from the poll body
@@ -806,7 +889,7 @@ fn run_player_action(
         Ok(()) => {
             log::info!("[TRAY] {}: success", label);
             if let Some(playing) = resulting_playing {
-                LAST_PLAYING_STATE.store(playing, Ordering::Release);
+                note_playing_state(playing);
             }
             if let Some((shuffle, repeat)) = resulting_modes {
                 note_playback_modes(shuffle, repeat);
@@ -951,13 +1034,14 @@ fn force_tray_refresh(app: &AppHandle) {
     let state = app.state::<std::sync::Arc<crate::AppState>>();
     let is_syncing = state.polling.is_syncing(Ordering::Acquire);
     let current_track = state.polling.current_track().clone();
-    // Include is_playing in the key so a same-track pause is not deduped away. See issue #229.
-    let track_key = current_track
-        .as_ref()
-        .map(|t| format!("{}|{}|{}", t.artist, t.title, t.is_playing));
-    // Flip the sync bit: the real (is_syncing, visible, track_key) tuple is
-    // committed by the rebuild below, so this can never match the dedup key.
-    *last_tray_state().lock() = Some((!is_syncing, false, track_key));
+    // Nudge the dedup snapshot (not clear it) with the *current* track key so
+    // the rebuild below can't early-return while the re-seed logic stays
+    // inert: a cleared snapshot would look like a genuine track change and
+    // clobber the toggle state the action just recorded. Flipping the sync
+    // bit is enough — the real snapshot is committed by that rebuild.
+    let mut nudge = tray_snapshot_for(is_syncing, false, current_track.as_ref());
+    nudge.is_syncing = !is_syncing;
+    *last_tray_state().lock() = Some(nudge);
     let _ = update_tray_menu(app, is_syncing, current_track);
 }
 
@@ -996,11 +1080,14 @@ pub fn update_tray_menu(
         }
     };
 
-    // Issue #71 + #229: dedup guard. The polling thread calls this on every
-    // successful poll; the menu only needs rebuilding when is_syncing,
-    // window visibility (drives the Show/Hide label), or the track's
-    // title/artist/is_playing actually changes. is_playing is included so a
-    // same-track pause flips the Play/Pause label without waiting for a poll.
+    // Issue #71 + #229 + #691: dedup guard. The polling thread calls this on
+    // every successful poll; the menu only needs rebuilding when is_syncing,
+    // window visibility (drives the Show/Hide label), the track's
+    // title/artist/is_playing, or one of the playback modes actually
+    // changes. is_playing is included so a same-track pause flips the
+    // Play/Pause mark without waiting for a poll; the modes are included so
+    // a change made in another Spotify client repaints the Shuffle/Repeat
+    // check marks (and the next click toggles from the fresh belief).
     //
     // Window visibility is computed up front so the dedup key includes
     // it — otherwise a hide/show click would early-return and the label
@@ -1009,22 +1096,21 @@ pub fn update_tray_menu(
         .get_webview_window("main")
         .and_then(|w| w.is_visible().ok())
         .unwrap_or(false);
-    let track_key = current_track
-        .as_ref()
-        .map(|t| format!("{}|{}|{}", t.artist, t.title, t.is_playing));
+    let snapshot = tray_snapshot_for(is_syncing, is_window_visible, current_track.as_ref());
     {
         let last = last_tray_state().lock();
-        if last.as_ref() == Some(&(is_syncing, is_window_visible, track_key.clone())) {
+        if !tray_state_changed(last.as_ref(), &snapshot) {
             // No-op: menu state hasn't changed.
             return Ok(());
         }
         // Re-seed the Play/Pause toggle's playing state when the polling
         // loop observed a genuinely new track (or a stop): its stored
         // `is_playing` is only fresh at track-change time. Tray-initiated
-        // actions update LAST_PLAYING_STATE themselves, and a forced
-        // rebuild keeps the same track_key, so neither path re-seeds here.
+        // actions and the poller's `playback-state-changed` event update
+        // LAST_PLAYING_STATE themselves, and a forced rebuild keeps the
+        // same track_key, so neither path re-seeds here.
         let track_changed = match last.as_ref() {
-            Some((_, _, prev_key)) => prev_key != &track_key,
+            Some(prev) => prev.track_key != snapshot.track_key,
             None => true,
         };
         if track_changed {
@@ -1032,7 +1118,7 @@ pub fn update_tray_menu(
                 .as_ref()
                 .map(|t| t.is_playing)
                 .unwrap_or(false);
-            LAST_PLAYING_STATE.store(fresh_playing, Ordering::Release);
+            note_playing_state(fresh_playing);
         }
         // Do NOT update the snapshot yet. If the rebuild below fails
         // (e.g., set_menu returns Err), we want the next call with the
@@ -1193,11 +1279,11 @@ pub fn update_tray_menu(
     // Issue #582: the playback-mode toggles. Their marks come from the
     // module-level atoms the polling loop feeds from the poll body (the
     // shuffle/repeat state is free — the same response the app already
-    // parses), so no extra request and no cache machinery is involved. The
-    // dedup key below stays track-scoped on purpose (#229), so a mode
-    // changed from another client is picked up at the next rebuild rather
-    // than forcing one; a click on these items rebuilds through
-    // `force_tray_refresh` and is reflected immediately.
+    // parses), so no extra request and no cache machinery is involved.
+    // Both atoms are part of the dedup snapshot (issue #691), so a mode
+    // changed from another client forces the rebuild that repaints the
+    // mark; a click on these items rebuilds through `force_tray_refresh`
+    // and is reflected immediately.
     let shuffle = CheckMenuItemBuilder::with_id(ID_SHUFFLE, SHUFFLE_LABEL)
         .checked(LAST_SHUFFLE_STATE.load(Ordering::Acquire))
         .build(app)
@@ -1315,7 +1401,7 @@ pub fn update_tray_menu(
     // Commit the snapshot only after a successful set_menu. A failed
     // set_menu above left the snapshot at the previous value, so the
     // next call with the same state will retry rather than no-op.
-    *last_tray_state().lock() = Some((is_syncing, is_window_visible, track_key));
+    *last_tray_state().lock() = Some(snapshot);
 
     log::info!(
         "[TRAY] update_tray_menu: tray menu updated - is_syncing={}, visible={}, track={:?}",
@@ -1674,6 +1760,9 @@ mod tests {
     /// the item showing what the API was just told to adopt.
     #[test]
     fn playback_modes_feed_both_toggle_items() {
+        // The mode atoms are process-global and read by the rebuild path, so
+        // the tests that drive them must not interleave.
+        let _guard = MODE_ATOM_LOCK.lock();
         note_playback_modes(true, RepeatState::Track);
         assert!(LAST_SHUFFLE_STATE.load(Ordering::Acquire));
         assert_eq!(last_repeat_state(), RepeatState::Track);
@@ -1690,5 +1779,148 @@ mod tests {
         assert!(!LAST_SHUFFLE_STATE.load(Ordering::Acquire));
         assert_eq!(last_repeat_state(), RepeatState::Off);
         assert!(!last_repeat_state().is_on());
+    }
+
+    /// Serialises the tests that drive the process-global playback-mode
+    /// atoms, which the rebuild path also reads.
+    static MODE_ATOM_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+    /// Issue #691: the dedup key is built by the same function the rebuild
+    /// path uses, and it carries both playback modes — so a shuffle/repeat
+    /// change made in another Spotify client forces the repaint that updates
+    /// the check marks (and the next click toggles from the fresh belief),
+    /// while an unchanged poll still dedupes to a no-op.
+    #[test]
+    fn mode_change_forces_a_tray_rebuild() {
+        let _guard = MODE_ATOM_LOCK.lock();
+        let track = |is_playing: bool| crate::spotify::TrackInfo {
+            title: "Title".to_string(),
+            artist: "Artist".to_string(),
+            album: "Album".to_string(),
+            album_art_url: String::new(),
+            is_playing,
+            progress_ms: None,
+            duration_ms: 0,
+        };
+        let key = |sync: bool, visible: bool| tray_snapshot_for(sync, visible, Some(&track(true)));
+
+        note_playback_modes(false, RepeatState::Off);
+        let base = key(true, true);
+
+        // The poll body reports a shuffle the user toggled in the Spotify app.
+        note_playback_modes(true, RepeatState::Off);
+        let shuffled = key(true, true);
+        assert!(
+            tray_state_changed(Some(&base), &shuffled),
+            "an external shuffle change must repaint the tray (issue #691)"
+        );
+
+        // …and a repeat-mode change.
+        note_playback_modes(true, RepeatState::Context);
+        let repeated = key(true, true);
+        assert!(
+            tray_state_changed(Some(&shuffled), &repeated),
+            "an external repeat change must repaint the tray (issue #691)"
+        );
+
+        // An unchanged poll is still a no-op.
+        assert!(
+            !tray_state_changed(Some(&repeated), &key(true, true)),
+            "an unchanged poll must not rebuild the menu"
+        );
+        assert!(
+            tray_state_changed(None, &repeated),
+            "the first call has no snapshot and must always rebuild"
+        );
+
+        // The pre-existing parts of the key still repaint.
+        assert!(
+            tray_state_changed(Some(&repeated), &key(false, true)),
+            "a sync toggle must still repaint (issue #71)"
+        );
+        assert!(
+            tray_state_changed(Some(&repeated), &key(true, false)),
+            "a Show/Hide click must still repaint (issue #71)"
+        );
+
+        // A same-track pause lives in the track half of the key (issue #229).
+        let paused = tray_snapshot_for(true, true, Some(&track(false)));
+        assert!(
+            tray_state_changed(Some(&repeated), &paused),
+            "a same-track pause must still repaint the Play/Pause mark (#229)"
+        );
+
+        // Leave the shared atoms as a fresh poll would find them.
+        note_playback_modes(false, RepeatState::Off);
+    }
+
+    /// Issue #689 (D6, tray half): the poller emits `playback-state-changed`
+    /// when a track's playing state changes without the track itself
+    /// changing. Consuming it moves the Play/Pause mark and the status line
+    /// off "playing" — the tray used to keep claiming the stale state until
+    /// the next track emerged.
+    #[test]
+    fn playback_state_event_moves_the_play_pause_mark() {
+        let track = crate::spotify::TrackInfo {
+            title: "Track".to_string(),
+            artist: "Artist".to_string(),
+            album: "Album".to_string(),
+            album_art_url: String::new(),
+            is_playing: true,
+            progress_ms: None,
+            duration_ms: 0,
+        };
+        let mark = |playing: bool| sync_status_line(true, playing, Some(&track));
+
+        note_playing_state(true);
+        assert_eq!(
+            mark(LAST_PLAYING_STATE.load(Ordering::Acquire)),
+            "Syncing — Artist — Track"
+        );
+
+        // The exact payload shape the poller emits for a same-track pause.
+        consume_playback_state_changed(r#"{"is_playing":false,"track_key":"Artist|Title"}"#);
+        assert!(
+            !LAST_PLAYING_STATE.load(Ordering::Acquire),
+            "the tray must believe a same-track pause (issue #689)"
+        );
+        assert_eq!(
+            mark(LAST_PLAYING_STATE.load(Ordering::Acquire)),
+            "Paused — Artist — Track"
+        );
+
+        consume_playback_state_changed(r#"{"is_playing":true,"track_key":"Artist|Title"}"#);
+        assert!(LAST_PLAYING_STATE.load(Ordering::Acquire));
+        assert_eq!(
+            mark(LAST_PLAYING_STATE.load(Ordering::Acquire)),
+            "Syncing — Artist — Track"
+        );
+
+        // A payload the tray cannot parse must keep the last known state
+        // rather than invent one.
+        consume_playback_state_changed("not json");
+        assert!(
+            LAST_PLAYING_STATE.load(Ordering::Acquire),
+            "an unparsable payload must not clobber the last playing state"
+        );
+    }
+
+    /// Issue #689 (D6): the tray's belief only moves if the poller's
+    /// `playback-state-changed` event is actually subscribed. A mistyped or
+    /// deleted `app.listen` would leave the functional test above green — it
+    /// calls the consumer directly — while the running app ignored the event.
+    /// Guards the registration inside `setup_tray`, like the click-arm scans.
+    #[test]
+    fn setup_tray_subscribes_to_playback_state_changes() {
+        let src = include_str!("tray.rs");
+        let body = body_of(prod_source(src), "pub fn setup_tray(");
+        assert!(
+            body.contains("app.listen(\"playback-state-changed\""),
+            "setup_tray must subscribe to the poller's playback-state-changed event (issue #689)"
+        );
+        assert!(
+            body.contains("consume_playback_state_changed(event.payload())"),
+            "the subscription must hand the payload to the tray's consumer"
+        );
     }
 }
