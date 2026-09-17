@@ -161,8 +161,8 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
     // `clear_presence_on_exit` AFTER this tail, so resetting the snapshot here
     // (or deciding the cleanup from these now-cold clocks) is precisely the
     // defect: a quit mid-song would leave the music status and the armed
-    // `Available` session live. Only a NEW session (and a completed cleanup)
-    // clears it.
+    // `Available` session live. Only a newer write/arm (which records over it)
+    // or a completed exit cleanup clears it — never a session boundary.
     tray::set_presence_gated_badge(&app, false);
 
     log::info!("[POLLING] polling_loop: ENDED");

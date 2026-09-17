@@ -35,10 +35,13 @@ use crate::AppState;
 /// `clear_presence_on_exit`, so a quit mid-song used to find cold clocks and
 /// skip the cleanup entirely — exactly what #636 was written for. This
 /// snapshot is written at every successful Teams write / presence arm and is
-/// deliberately NOT reset by a session's exit tail; it is cleared when a new
-/// session starts (a fresh session must not inherit the previous residue) and
-/// after a complete exit cleanup. It describes what THIS app left on Teams,
-/// not what the thread is still tracking.
+/// deliberately NOT reset by a session's exit tail — or by a session START: it
+/// records what this app has live on Teams, which stopping or restarting sync
+/// does not change. Only a newer write/arm (which records over it) or a
+/// completed exit cleanup clears it.
+///
+/// It describes what THIS app left on Teams, not what the thread is still
+/// tracking.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ExitSnapshot {
     /// The `setPresence` session this app armed, as
@@ -89,8 +92,9 @@ pub(crate) fn record_posted_status(status: Option<&str>) {
     snapshot.last_posted_status = status.map(|s| s.to_string());
 }
 
-/// Forget the snapshot — a new session must not inherit the previous one's
-/// Teams residue, and a completed exit cleanup must not repeat.
+/// Forget the snapshot, once a completed exit cleanup has made it moot (and so
+/// a repeated `RunEvent::Exit` is a no-op). Deliberately NOT called when a
+/// session starts: see the struct docs.
 pub(crate) fn reset_exit_snapshot() {
     store_exit_snapshot(ExitSnapshot::default());
 }
@@ -118,12 +122,13 @@ pub fn start_polling(
     // covers the case it cannot — a previous thread that died by panic, whose
     // `catch_unwind` below never reaches the loop's own reset.
     super::poll_once::reset_write_clocks();
-    // Finding D1 (issue #684): the exit snapshot describes what a SESSION left
-    // on Teams — a new one starts cold, so a quit before its first write must
-    // not clear the previous session's residue. The clocks' own reset above
-    // cannot carry this: `polling_loop`'s exit tail resets the clocks BEFORE
-    // `clear_presence_on_exit` reads them, which is the D1 defect.
-    reset_exit_snapshot();
+    // Finding D1 (issue #684): the EXIT SNAPSHOT is deliberately NOT reset
+    // here, unlike the clocks above. It is not a dedup input but a record of
+    // what this app currently has live on Teams — and stopping or starting a
+    // session does not change that: Teams keeps showing the same status and the
+    // armed presence session survives, so a stop→start→quit sequence would
+    // forget them and skip the very cleanup #636/D1 exist for. Only an actual
+    // write/arm (which records over it) or a completed exit cleanup clears it.
     {
         let mut tx_guard = state.polling.stop_tx_mut();
         *tx_guard = Some(stop_tx);

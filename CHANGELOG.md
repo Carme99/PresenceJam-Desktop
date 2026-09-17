@@ -20,8 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   mid-song therefore left the `🎵 …` status message and the armed `Available`
   session on Teams, which is the exact outcome #636 exists to prevent. The
   cleanup now reads a process-wide exit snapshot, written by every successful
-  status write and presence arm, which the session-end reset deliberately does
-  not erase (a new session still cold-starts it).
+  status write and presence arm, which neither the session-end reset nor a new
+  session clears — Teams keeps showing that status across a stop/start.
 - **A gated clear was recorded as posted and could never be retried (#686,
   #687):** on the paused-track and no-track paths the byte-identity check ran
   *before* the gate verdict, and the suppressing branch then recorded the

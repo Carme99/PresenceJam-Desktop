@@ -1966,7 +1966,7 @@ fn should_skip_identical_write(
 /// the paused-track clear and the no-track clear share it, so the two paths
 /// cannot drift again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PlaceholderWrite {
+enum PlaceholderWrite {
     /// POST the placeholder (and only then record it as posted).
     Post,
     /// A byte-identical placeholder is already on Teams: stay silent.
@@ -1992,7 +1992,7 @@ pub(crate) enum PlaceholderWrite {
 ///   suppressed write must never look like a posted one);
 /// * `already_posted` ⇒ `SkipDuplicate` (#155);
 /// * otherwise      ⇒ `Post`.
-pub(crate) fn placeholder_write_decision(
+fn placeholder_write_decision(
     blocked: bool,
     already_posted: bool,
     already_suppressed: bool,
@@ -2017,10 +2017,7 @@ pub(crate) fn placeholder_write_decision(
 /// client left the process-wide store claiming it was still playing, and the
 /// sync status / tray / Dashboard all reported the wrong playback state. An
 /// absent stored track counts as a change (re-store rather than assume).
-pub(crate) fn playback_state_changed(
-    stored_is_playing: Option<bool>,
-    observed_is_playing: bool,
-) -> bool {
+fn playback_state_changed(stored_is_playing: Option<bool>, observed_is_playing: bool) -> bool {
     stored_is_playing != Some(observed_is_playing)
 }
 
@@ -3265,7 +3262,7 @@ pub(crate) fn clear_presence_on_exit(app: &AppHandle) {
 /// the pre-fix code decided this inline from `clocks.last_availability_arm` /
 /// `clocks.last_posted_status`, which the loop's exit tail has already emptied.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct ExitCleanupPlan {
+struct ExitCleanupPlan {
     pub(crate) clear_presence: bool,
     pub(crate) post_placeholder: bool,
 }
@@ -5970,7 +5967,19 @@ mod tests {
              (the pre-fix code) does nothing"
         );
 
-        // A new session starts cold, so its quit cannot clear OUR residue.
+        // A session BOUNDARY must not forget it either: stopping and restarting
+        // sync does not change what Teams shows, so a stop→start→quit sequence
+        // must still clean up (the clocks' own session reset cannot be the
+        // snapshot's model).
+        reset_write_clocks();
+        assert_eq!(
+            crate::polling::state::load_exit_snapshot(),
+            snapshot,
+            "a session boundary must not forget the residue a previous session \
+             left on Teams (finding D1)"
+        );
+
+        // Only a completed exit cleanup retires it.
         crate::polling::state::reset_exit_snapshot();
         assert_eq!(
             exit_cleanup_plan(&crate::polling::state::load_exit_snapshot(), true, true),
@@ -6008,10 +6017,17 @@ mod tests {
              resurrect finding D1"
         );
         let state_source = include_str!("state.rs");
+        let start_body = prod_fn_body(state_source, "pub fn start_polling(");
         assert!(
-            // The CALL, not merely the definition in this module.
-            state_source.contains("reset_exit_snapshot();"),
-            "start_polling must cold-start the exit snapshot for the new session"
+            !start_body.contains("reset_exit_snapshot"),
+            "a session START must not clear the snapshot: Teams keeps showing the \
+             previous session's status, so a stop→start→quit would skip the \
+             cleanup (finding D1)"
+        );
+        assert!(
+            body.contains("reset_exit_snapshot();"),
+            "a completed exit cleanup must retire the snapshot so a repeated \
+             RunEvent::Exit is a no-op"
         );
     }
 
