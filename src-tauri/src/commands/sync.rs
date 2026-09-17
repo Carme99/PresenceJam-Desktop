@@ -392,7 +392,16 @@ pub async fn app_exit(
 #[tauri::command]
 pub fn get_sync_status(state: tauri::State<'_, Arc<AppState>>) -> Result<SyncStatus, String> {
     log::debug!("{CMD} get_sync_status: ENTRY");
+    Ok(sync_status_from_state(state.inner()))
+}
 
+/// Assemble the status snapshot from `state`.
+///
+/// The body of the `get_sync_status` command, split out (issue #679) so the
+/// headless `--status` CLI flag reports exactly the shape and the field
+/// semantics the IPC returns instead of a second, drifting copy of them. See
+/// the doc comment above for the lock-ordering contract this fn implements.
+pub fn sync_status_from_state(state: &AppState) -> SyncStatus {
     // Single critical section: all read guards held at once, clones below
     // cannot observe a writer interleaving between fields.
     let track_guard = state.polling.current_track();
@@ -423,7 +432,7 @@ pub fn get_sync_status(state: tauri::State<'_, Arc<AppState>>) -> Result<SyncSta
     let teams_connected = teams_guard.is_some();
 
     log::info!(
-        "{CMD} get_sync_status: is_syncing={}, spotify_connected={}, teams_connected={}, presence_gated={}, presence_paused={}",
+        "{CMD} sync_status_from_state: is_syncing={}, spotify_connected={}, teams_connected={}, presence_gated={}, presence_paused={}",
         is_syncing,
         spotify_connected,
         teams_connected,
@@ -431,7 +440,7 @@ pub fn get_sync_status(state: tauri::State<'_, Arc<AppState>>) -> Result<SyncSta
         presence_paused
     );
 
-    Ok(SyncStatus {
+    SyncStatus {
         is_syncing,
         current_track,
         spotify_connected,
@@ -439,7 +448,7 @@ pub fn get_sync_status(state: tauri::State<'_, Arc<AppState>>) -> Result<SyncSta
         last_posted_status: clocks.last_posted_status.clone(),
         presence_gated: clocks.gated_track_key.is_some(),
         presence_paused,
-    })
+    }
 }
 #[tauri::command]
 pub async fn refresh_status(
@@ -527,9 +536,14 @@ mod tests {
         );
     }
 
-    /// Issue #398: `get_sync_status` must read under a single critical
-    /// section — all four read guards held at once — so torn snapshots are
-    /// unobservable, with the lock order documented.
+    /// Issue #398: the status snapshot must be assembled under a single
+    /// critical section — all four read guards held at once — so torn snapshots
+    /// are unobservable, with the lock order documented.
+    ///
+    /// Issue #679 moved the assembly out of the `get_sync_status` command into
+    /// `sync_status_from_state` (the command, and the headless `--status` CLI
+    /// flag, both call it) — the invariant follows the code, so the guard names
+    /// the fn that now holds the guards.
     #[test]
     fn test_get_sync_status_reads_under_single_critical_section() {
         let source = include_str!("sync.rs");
@@ -537,7 +551,7 @@ mod tests {
             .split("#[cfg(test)]\nmod tests")
             .next()
             .expect("sync.rs has no #[cfg(test)] mod tests block");
-        let body = fn_body(prod_source, "pub fn get_sync_status(");
+        let body = fn_body(prod_source, "pub fn sync_status_from_state(");
         for marker in [
             "state.polling.current_track()",
             "state.tokens.spotify()",
@@ -546,13 +560,17 @@ mod tests {
         ] {
             assert!(
                 body.contains(marker),
-                "get_sync_status must hold {} inside its critical section (issue #398)",
+                "sync_status_from_state must hold {} inside its critical section (issue #398)",
                 marker
             );
         }
         assert!(
             prod_source.contains("Single critical section"),
-            "the lock-ordering contract must stay documented on get_sync_status (issue #398)"
+            "the lock-ordering contract must stay documented (issue #398)"
+        );
+        assert!(
+            fn_body(prod_source, "pub fn get_sync_status(").contains("sync_status_from_state("),
+            "the command must return the shared derivation, never a second copy of it (issue #679)"
         );
     }
 }
