@@ -473,6 +473,14 @@
       // Issue #538: mirror `clamp_teams` before the payload leaves the
       // frontend, so the store/UI never claims an entry the backend dropped.
       localConfig.teams.profanity_extra_words = extraWordsClamp.clamped;
+      // #675: the notification classes live in the shared store and are not
+      // form-edited — the checkboxes read it directly — so the authoritative
+      // value goes into the payload here, next to the clamped-lexicon precedent
+      // above. The `$effect` keeps the form visibly in step, but it cannot cover
+      // the mount race: `onMount`'s `localConfig = <loaded cfg>` can land
+      // *after* a sibling window's mirror convergence, re-staling this section
+      // without `configStore` changing again.
+      localConfig.notifications = { ...$configStore.notifications };
       // `localConfig` is a Svelte 5 `$state` proxy; `structuredClone` in
       // `toSavePayload` rejects proxies with a DataCloneError, aborting the
       // save before IPC (#285). Snapshot to a plain object first.
