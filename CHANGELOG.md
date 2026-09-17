@@ -5,6 +5,77 @@ All notable changes to PresenceJam are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+### Changed
+
+### Fixed
+
+- **Quit-time Teams cleanup was cancelled by the poller's own exit tail (#684):**
+  `polling_loop` resets the write-decision clocks on its way out, and
+  `RunEvent::Exit` runs `clear_presence_on_exit` *after* it — so a cleanup that
+  decided from those clocks found two `None`s and returned early. Quitting
+  mid-song therefore left the `🎵 …` status message and the armed `Available`
+  session on Teams, which is the exact outcome #636 exists to prevent. The
+  cleanup now reads a process-wide exit snapshot, written by every successful
+  status write and presence arm, which neither the session-end reset nor a new
+  session clears — Teams keeps showing that status across a stop/start. The
+  snapshot also records the manual-status verdict observed on *every* presence
+  read — the change-time gate, the paused clear and the due mid-track re-check
+  all funnel through one recorder — so quitting never replaces a status message
+  the *user* typed with the "Paused" placeholder (the shipped 4.6
+  respect-the-manual-status behaviour) — while the app's own armed availability
+  session is still cleared.
+- **A gated clear was recorded as posted and could never be retried (#686,
+  #687):** on the paused-track and no-track paths the byte-identity check ran
+  *before* the gate verdict, and the suppressing branch then recorded the
+  placeholder as posted although nothing was sent. A quiet window ending — or a
+  meeting ending while the track stayed paused — re-ran the same dedup and
+  skipped the clear for good. The verdict now comes first, a suppression is
+  recorded as a suppression (never as a post), and the paused clear re-evaluates
+  its recorded gate on the same re-check clock the playing branch uses. The
+  no-track path also owns the gate state now: a gate recorded for a track is
+  retired when that track ends (or when the clear is already showing), so
+  `presence_gated` can no longer stay true — and the Dashboard chip keep saying
+  "you're busy, in a call, or presenting" — above a "Nothing playing" card. A
+  suppression with nothing playing is still reported as gated; it just carries
+  the no-track marker instead of the finished track's key, and the two early
+  returns (no Teams token, `clear_on_pause` off) retire it as well. The paused
+  clear also keeps its pre-4.7 no-read fast path: while the placeholder Teams
+  shows is the one the pause wants, no rule suppresses the clear and no recorded
+  gate has reached its re-check, the outcome cannot change, so the steady pause
+  no longer costs a Graph `/presence` GET per poll.
+- **A poller that stopped itself never announced it (#688):** the five-strike
+  auth exit (and every other thread exit that is not a `stop_syncing`) emitted
+  nothing, so the Dashboard mirror stayed on "Syncing" and the tray on "Pause
+  Sync" until a restart. The ownership-checked thread-exit point now emits the
+  same `sync-stopped` payload the command does, and logs the exit reason —
+  gated on whether a stop was actually *requested* (the stored stop sender being
+  gone) rather than on `is_syncing`, which an explicit Stop leaves true until
+  after the join (that gating emitted the event twice) and a self-terminating
+  exit can leave false (that gating emitted nothing at all). Exactly one
+  `sync-stopped` per stop, on both paths.
+- **Pausing a track was invisible to everything downstream (#689):** `is_playing`
+  is not part of the status change key and the stored track was only written on a
+  track *change*, so pressing pause left the tray, the sync status and the
+  Dashboard reporting the track as still playing. A playback-state change now
+  re-stores the observed item and emits `playback-state-changed`.
+- **A pause was reported as a stop (#690):** the paused-track clear emitted
+  `presence-cleared`, which the Dashboard reads as "nothing is playing". Pauses
+  now emit `presence-paused` with the posted status; `presence-cleared` is kept
+  for the genuine no-track path.
+- **A concurrent manual refresh could resurrect a pre-gate clock snapshot
+  (#694):** `run_oneshot` loads the shared write-decision clocks once around its
+  whole iteration while the loop loads per iteration, so a refresh that stored
+  later wrote back a snapshot taken before the loop's gate decision — silently
+  dropping `gated_track_key` and letting the next write through mid-meeting. The
+  shared slot is now generation-checked: a snapshot whose generation was
+  superseded is discarded and logged instead of resurrecting an old decision.
+
+### Security
+
 ## [4.6.0] - 2026-09-16
 
 The largest PresenceJam release since 4.0: a full repository audit produced 90
@@ -1147,7 +1218,7 @@ Closes #60 #61 #62 #63
 ### Removed
 
 - PowerShell script version — this is a full rewrite
-[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.5.2...HEAD
+[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.6.0...HEAD
 [4.6.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.5.2...v4.6.0
 [4.5.2]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.5.1...v4.5.2
 [4.5.1]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.5.0...v4.5.1
