@@ -53,6 +53,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   native surfaces cannot disagree. An unknown tag falls back to English and is
   logged.
 
+- **Headless CLI flags (#679):** the binary now answers `--status` (print the
+  sync status as JSON on stdout, exit 0), `--sync-once` (run exactly one poll
+  iteration — status write included — and exit 0, or 1 with the reason on
+  stderr) and `--help`. All three are handled before any Tauri app is built, so
+  they work on a machine with no display: no window, no tray icon, no
+  single-instance lock. `--sync-once` gates on a configured Spotify client and
+  a Spotify *and* Teams sign-in before it builds anything, registers no tray
+  and skips the quit-time hooks (it must not clear the status it just wrote).
+  Unknown arguments keep their previous behaviour — ignored, GUI launches,
+  exactly like `--minimized` and `presencejam://` deep links.
+
 ### Changed
 
 ### Fixed

@@ -758,43 +758,387 @@ fn log_rotation_strategy(keep_files: u32) -> tauri_plugin_log::RotationStrategy 
     tauri_plugin_log::RotationStrategy::KeepSome(keep_files.max(1) as usize)
 }
 
+// =====================================================================
+// CLI flags (issue #679)
+// =====================================================================
+//
+// `--help`, `--status` and `--sync-once` are resolved at the TOP of `run()`,
+// before any Tauri app exists. That placement is load-bearing rather than
+// stylistic: the runtime is created by `Builder::build()`, and on a machine
+// with no display (a cron host, a CI box, `XDG_SESSION_TYPE=tty`) creating it
+// fails outright — a flag routed through the normal launch could therefore
+// never answer headless. `--help` and `--status` never build an app at all;
+// `--sync-once` builds one only once it has credentials to poll with (see
+// [`cli_sync_once_preflight`]) and then builds it in CLI mode: no window
+// (`context.config_mut()` clears `create`), no tray icon, no app menu, no
+// deep-link registration, no single-instance lock and no quit-time cleanup.
+//
+// Unknown arguments keep the pre-#679 behaviour — ignored, GUI launches — the
+// same treatment `--minimized` and a `presencejam://` URL already get.
+
+/// `--status`: print the current `SyncStatus` as JSON on stdout, exit 0.
+const STATUS_FLAG: &str = "--status";
+/// `--sync-once`: run exactly one poll iteration, then exit 0/1.
+const SYNC_ONCE_FLAG: &str = "--sync-once";
+/// `--help`: print usage text and exit 0.
+const HELP_FLAG: &str = "--help";
+
+/// What the argv asked for. A CLI flag is an *alternative* to launching the
+/// GUI, never a modifier of it — which is why an unrecognised argument still
+/// launches normally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CliCommand {
+    Help,
+    Status,
+    SyncOnce,
+}
+
+/// Parse the CLI intent out of argv; `None` means "launch the GUI".
+///
+/// Matching is exact and left-to-right: the first recognised flag wins, and
+/// every unrecognised argument is ignored. Generic over the argv element type
+/// so the parser is unit-testable without touching the real process argv
+/// (mirroring `has_minimized_flag`).
+fn cli_command<I, S>(args: I) -> Option<CliCommand>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    args.into_iter().find_map(|arg| {
+        let arg = arg.as_ref();
+        if arg == std::ffi::OsStr::new(HELP_FLAG) {
+            Some(CliCommand::Help)
+        } else if arg == std::ffi::OsStr::new(STATUS_FLAG) {
+            Some(CliCommand::Status)
+        } else if arg == std::ffi::OsStr::new(SYNC_ONCE_FLAG) {
+            Some(CliCommand::SyncOnce)
+        } else {
+            None
+        }
+    })
+}
+
+/// Usage text for `--help`.
+fn cli_help_text() -> String {
+    format!(
+        "\
+PresenceJam {version}
+
+USAGE:
+  presencejam [FLAG]
+
+FLAGS:
+  --status      Print the current sync status as JSON on stdout and exit 0.
+                Runs without a window, a tray icon or the single-instance lock,
+                so it also works on a headless machine. The fields are the ones
+                the app's `get_sync_status` command returns; a freshly started
+                process has no poller, so `is_syncing`, `current_track` and the
+                presence fields are empty unless this process polls.
+  --sync-once   Run exactly one poll iteration (including the Teams status
+                write) and exit 0 on success, or exit 1 with the reason on
+                stderr. Logs go to the normal log file. Requires the app to be
+                signed in to Spotify and Teams; without credentials it exits 1
+                before anything else happens.
+  --help        Print this help and exit 0.
+  --minimized   Start with the window hidden. The autostart plugin passes
+                this, and it still launches the GUI.
+
+Any other argument is ignored and the app starts normally, as it always has.
+",
+        version = env!("CARGO_PKG_VERSION")
+    )
+}
+
+/// Read the stored tokens without a `tauri::AppHandle` (issue #679), through
+/// the same reader the app's setup uses.
+fn cli_read_tokens() -> Result<token_io::TokensFile, String> {
+    let path = token_io::tokens_file_path_headless()?;
+    token_io::read_tokens_at_path(&path)
+}
+
+/// Build the `AppState` the GUI's setup builds, without a Tauri app.
+///
+/// Config and tokens come from the same files (`config::load_config`, the
+/// headless tokens read), so a CLI process reports the state the app would
+/// report. A missing or unreadable file is not fatal here — setup degrades to
+/// "no config / no tokens" the same way, and `--status` must still answer the
+/// question it was asked. Returns the load failures instead of logging them:
+/// the log plugin only exists on the app path, so a headless `log::warn!`
+/// would go nowhere and the caller decides what to say on stderr.
+fn cli_headless_state() -> (Arc<AppState>, Vec<String>) {
+    let state = Arc::new(AppState::new());
+    let mut failures = Vec::new();
+    match config::load_config() {
+        Ok(cfg) => *state.config.get_mut() = Some(cfg),
+        Err(e) => failures.push(format!(
+            "no config loaded ({e}); reporting the built-in defaults"
+        )),
+    }
+    match cli_read_tokens() {
+        Ok(tokens) => {
+            *state.tokens.spotify_mut() = tokens.spotify_tokens;
+            *state.tokens.teams_mut() = tokens.teams_tokens;
+        }
+        Err(e) => failures.push(format!(
+            "no tokens loaded ({e}); reporting both providers as disconnected"
+        )),
+    }
+    (state, failures)
+}
+
+/// `--status`: print the status JSON and return the process exit code.
+fn cli_status_exit_code() -> i32 {
+    let (state, failures) = cli_headless_state();
+    for failure in &failures {
+        // stderr, not the log file: this path never registers the log plugin
+        // (no app is built), and stdout must stay parseable JSON.
+        eprintln!("presencejam: {STATUS_FLAG}: {failure}");
+    }
+    let status = crate::commands::sync::sync_status_from_state(&state);
+    match serde_json::to_string_pretty(&status) {
+        Ok(json) => {
+            // `println!` is this flag's output channel, not logging: see the
+            // note above — a caller pipes stdout into `jq`.
+            println!("{json}");
+            0
+        }
+        Err(e) => {
+            eprintln!("presencejam: {STATUS_FLAG}: failed to serialise the status: {e}");
+            1
+        }
+    }
+}
+
+/// The credential test a `--sync-once` run must pass before anything else
+/// happens (issue #679). Pure, so the "with credentials it would exit 0" half
+/// of the contract is pinned without a signed-in machine: the credentialed
+/// run itself needs a display (the poller works through a `tauri::AppHandle`,
+/// which only exists once the GUI runtime does).
+///
+/// Both providers are required: the iteration's whole point is the Teams
+/// status write, and with no Spotify tokens the poller logs "No Spotify tokens
+/// available, waiting..." and does nothing — a silent no-op is the worst
+/// possible exit-0.
+fn cli_sync_once_preflight(
+    config: &crate::config::AppConfig,
+    tokens: &token_io::TokensFile,
+) -> Result<(), String> {
+    if config.spotify.client_id.trim().is_empty() {
+        return Err(
+            "no Spotify client_id configured — sign in from the app before using this flag"
+                .to_string(),
+        );
+    }
+    if tokens.spotify_tokens.is_none() {
+        return Err(
+            "not signed in to Spotify (no Spotify tokens stored) — sign in from the app first"
+                .to_string(),
+        );
+    }
+    if tokens.teams_tokens.is_none() {
+        return Err(
+            "not signed in to Microsoft Teams (no Teams tokens stored) — the status write needs it"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// Load the files [`cli_sync_once_preflight`] decides on, turning a load
+/// failure into the reason the CLI prints.
+fn cli_sync_once_preflight_from_disk() -> Result<(), String> {
+    let config =
+        config::load_config().map_err(|e| format!("cannot read the stored config: {e}"))?;
+    let tokens = cli_read_tokens().map_err(|e| format!("cannot read the stored tokens: {e}"))?;
+    cli_sync_once_preflight(&config, &tokens)
+}
+
+/// Subscribe to the poller's failure signals for the duration of one
+/// `--sync-once` iteration: first failure wins.
+fn cli_listen_for_failures(
+    handle: &AppHandle,
+    sink: Arc<Mutex<Option<String>>>,
+) -> Vec<tauri::EventId> {
+    use tauri::Listener;
+
+    // `error` is `polling::emit_error`'s centralised shape (every Spotify
+    // fetch/refresh failure and every failed Teams write goes through it);
+    // `reconnect-required` is the poller's "the user must sign in again"
+    // signal, and `spotify-reconnect-required` / `teams-reconnect-required`
+    // are its provider-specific siblings (the Teams one is emitted on its own).
+    const FAILURE_EVENTS: [&str; 4] = [
+        "error",
+        "reconnect-required",
+        "spotify-reconnect-required",
+        "teams-reconnect-required",
+    ];
+    let mut ids = Vec::with_capacity(FAILURE_EVENTS.len());
+    for event in FAILURE_EVENTS {
+        let sink = Arc::clone(&sink);
+        ids.push(handle.listen(event, move |message| {
+            let mut slot = sink.lock();
+            if slot.is_none() {
+                *slot = Some(cli_failure_reason(event, message.payload()));
+            }
+        }));
+    }
+    ids
+}
+
+/// One line for stderr out of a poller failure event.
+fn cli_failure_reason(event: &str, payload: &str) -> String {
+    if event != "error" {
+        return format!("{event}: a provider needs to be reconnected");
+    }
+    match serde_json::from_str::<serde_json::Value>(payload) {
+        Ok(value) => {
+            let source = value
+                .get("source")
+                .and_then(|s| s.as_str())
+                .unwrap_or("unknown");
+            let message = value
+                .get("message")
+                .and_then(|s| s.as_str())
+                .unwrap_or(payload);
+            format!("{source}: {message}")
+        }
+        Err(_) => payload.to_string(),
+    }
+}
+
+/// `--sync-once` inside the CLI-mode app: run one iteration through the
+/// poller's own one-shot entry point — the same `polling::run_oneshot` the
+/// tray's "Refresh" uses, so the status write, the dedup clocks and the
+/// presence gate are the ones a loop iteration gets — then exit with its
+/// verdict.
+///
+/// The verdict comes from the poller's failure events rather than from
+/// `run_oneshot`'s return value: that fn deliberately discards the iteration
+/// verdict (in `RunMode::OneShot` every parking sleep is an immediate Break),
+/// but every failure it can hit announces itself — `polling::emit_error` for a
+/// Spotify/Teams error, the `*-reconnect-required` pair for dead credentials.
+/// Anything else (no track playing, a deduped write, a suppressed gate) is a
+/// completed iteration.
+fn cli_sync_once_iteration(
+    app: &tauri::App,
+    state: Arc<AppState>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use tauri::Listener;
+
+    let handle = app.handle().clone();
+    let failure: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let listeners = cli_listen_for_failures(&handle, Arc::clone(&failure));
+
+    log::info!("[CLI] {SYNC_ONCE_FLAG}: running one poll iteration");
+    polling::run_oneshot(&state, &handle);
+
+    for id in listeners {
+        handle.unlisten(id);
+    }
+    match failure.lock().clone() {
+        None => {
+            log::info!("[CLI] {SYNC_ONCE_FLAG}: iteration completed");
+            handle.exit(0);
+        }
+        Some(reason) => {
+            eprintln!("presencejam: {SYNC_ONCE_FLAG}: {reason}");
+            log::warn!("[CLI] {SYNC_ONCE_FLAG}: iteration failed: {reason}");
+            handle.exit(1);
+        }
+    }
+    Ok(())
+}
+
+/// Clear `create` on every window `tauri.conf.json` declares (issue #679):
+/// `App::run` builds one webview per `create = true` entry, so a CLI mode that
+/// left this alone would flash a window on screen (and would already have
+/// failed on a headless machine). Returns how many windows were suppressed.
+fn suppress_config_windows<R: tauri::Runtime>(context: &mut tauri::Context<R>) -> usize {
+    let mut suppressed = 0;
+    for window in context.config_mut().app.windows.iter_mut() {
+        window.create = false;
+        suppressed += 1;
+    }
+    suppressed
+}
+
+/// The single-instance callback: raise the already-running window and forward
+/// a `presencejam://` deep link carried in the second launch's argv.
+///
+/// Named rather than an inline closure (issue #679) so the registration site —
+/// which CLI mode has to skip — stays one line. Windows and Linux pass deep
+/// links as argv when the scheme is invoked; macOS goes through the deep-link
+/// plugin's `on_open_url` callback, which is wired in setup.
+#[cfg(desktop)]
+fn forward_launch_to_running_instance(app: &AppHandle, argv: Vec<String>, _cwd: String) {
+    // Raise the existing window so the user sees it when a second
+    // instance is launched (e.g., double-click the .msi shortcut
+    // while the app is running, or a deep-link click from a
+    // browser when the app is already open).
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+    // Issue #592: raising the window changes its visibility, which
+    // drives the tray's Show/Hide label — repaint from backend state
+    // on a worker (the rebuild may perform blocking Spotify HTTP).
+    crate::tray::refresh_tray_from_state(app);
+    // argv[0] is the exe path; scan for a presencejam:// URL.
+    for arg in argv.iter().skip(1) {
+        if arg.starts_with("presencejam://") {
+            log::info!("[APP] single_instance: forwarding deep-link argv to handle_deep_link");
+            handle_deep_link(arg, app.clone());
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     log::info!("[APP] run: ENTRY");
 
+    // Issue #679: the CLI flags are resolved before anything else, and
+    // `--help` / `--status` / a credential-less `--sync-once` never reach the
+    // builder at all. `sync_once` carries the only case that continues into
+    // the GUI builder — and then in CLI mode.
+    let sync_once = match cli_command(std::env::args_os()) {
+        Some(CliCommand::Help) => {
+            println!("{}", cli_help_text());
+            std::process::exit(0);
+        }
+        Some(CliCommand::Status) => std::process::exit(cli_status_exit_code()),
+        Some(CliCommand::SyncOnce) => match cli_sync_once_preflight_from_disk() {
+            Ok(()) => true,
+            Err(reason) => {
+                eprintln!("presencejam: {SYNC_ONCE_FLAG}: {reason}");
+                std::process::exit(1);
+            }
+        },
+        None => false,
+    };
+
     let mut builder = tauri::Builder::default();
+
+    // Issue #679: a `--sync-once` run must not put a window on the user's
+    // screen for the duration of one poll. The config-declared windows are
+    // created by `App::run`, not by `build`, so clearing `create` here keeps
+    // this launch windowless without touching the GUI's own config.
+    let mut context = tauri::generate_context!();
+    if sync_once {
+        suppress_config_windows(&mut context);
+    }
 
     #[cfg(desktop)]
     {
         use tauri_plugin_single_instance::init as single_instance_init;
 
-        builder = builder.plugin(single_instance_init(|app, argv, _cwd| {
-            // Raise the existing window so the user sees it when a second
-            // instance is launched (e.g., double-click the .msi shortcut
-            // while the app is running, or a deep-link click from a
-            // browser when the app is already open).
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.unminimize();
-                let _ = window.set_focus();
-            }
-            // Issue #592: raising the window changes its visibility, which
-            // drives the tray's Show/Hide label — repaint from backend state
-            // on a worker (the rebuild may perform blocking Spotify HTTP).
-            crate::tray::refresh_tray_from_state(app);
-            // argv[0] is the exe path; scan for a presencejam:// URL
-            // (Windows + Linux pass deep links as argv when the scheme
-            // is invoked; macOS uses the deep-link plugin's on_open_url
-            // callback, which is also wired below).
-            for arg in argv.iter().skip(1) {
-                if arg.starts_with("presencejam://") {
-                    log::info!(
-                        "[APP] single_instance: forwarding deep-link argv to handle_deep_link"
-                    );
-                    handle_deep_link(arg, app.clone());
-                }
-            }
-        }));
+        // Issue #679: a `--sync-once` run must not take the single-instance
+        // lock. With it registered, a CLI run while the app is already open
+        // would be forwarded to the running instance as a "second launch" and
+        // exit 0 without polling anything.
+        if !sync_once {
+            builder = builder.plugin(single_instance_init(forward_launch_to_running_instance));
+        }
 
         builder = builder.plugin(tauri_plugin_deep_link::init());
         log::info!("[APP] run: deep_link plugin registered");
@@ -834,7 +1178,7 @@ pub fn run() {
             .max_file_size(startup_logging.max_file_size_mb as u128 * 1024 * 1024)
             .rotation_strategy(log_rotation)
             .build())
-        .setup(|app| {
+        .setup(move |app| {
             // Set panic hook to log crashes
             std::panic::set_hook(Box::new(|panic_info| {
                 let msg = if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
@@ -917,7 +1261,10 @@ pub fn run() {
                     // it stays exact-match only (never a prefix of some
                     // other argument).
                     let launched_minimized = has_minimized_flag(std::env::args_os());
-                    if cfg.teams.start_minimized || launched_minimized {
+                    // Issue #679: CLI mode has no window to hide and must not
+                    // switch the macOS activation policy either — the flag it
+                    // was asked for has nothing to do with the launch intent.
+                    if !sync_once && (cfg.teams.start_minimized || launched_minimized) {
                         log::info!(
                             "[APP] setup: starting hidden (config start_minimized={}, {}={})",
                             cfg.teams.start_minimized,
@@ -981,6 +1328,16 @@ pub fn run() {
                 Err(e) => {
                     log::warn!("[APP] setup: failed to load tokens.json: {}", e);
                 }
+            }
+
+            // Issue #679: `--sync-once` has everything it needs — the app is
+            // built windowless in CLI mode, and the state above is loaded — so
+            // run its one poll iteration now and exit. Everything below belongs
+            // to the GUI: deep-link registration, the tray icon, the app menu.
+            // A CLI one-shot must touch none of those surfaces (and would fail
+            // on the menu step, which needs the window CLI mode never creates).
+            if sync_once {
+                return cli_sync_once_iteration(app, state.clone());
             }
             #[cfg(desktop)]
             {
@@ -1227,7 +1584,7 @@ pub fn run() {
                 api.prevent_close();
             }
         })
-        .build(tauri::generate_context!());
+        .build(context);
     // Issue #417: a build failure (missing icon, bad capability, plugin
     // init) must not panic the release binary with `.expect` — log the
     // cause and exit non-zero. No panic backtrace, but the OS launcher
@@ -1239,15 +1596,19 @@ pub fn run() {
             std::process::exit(1);
         }
     };
-    app.run(|app, event| {
+    app.run(move |app, event| {
         // C3(c) "install on quit": both real exit paths (the shared
         // request_graceful_shutdown in menu.rs backing tray + app-menu
         // Quit, and the app_exit command) funnel into AppHandle::exit,
         // which fires RunEvent::Exit once the event loop has finished —
         // the safe point to apply a staged update (the plugin requires
         // the app to be quitting on Windows).
+        // Issue #679: a `--sync-once` run skips both hooks. Installing a
+        // staged update is a GUI decision (and the user is not quitting an
+        // app), and the presence cleanup would wipe the very status the
+        // one-shot was asked to write.
         #[cfg(desktop)]
-        if matches!(event, tauri::RunEvent::Exit) {
+        if matches!(event, tauri::RunEvent::Exit) && !sync_once {
             // Order is load-bearing (finding #636, issue #636): the staged
             // update is applied FIRST so a Graph round-trip can never delay an
             // install — and on Windows, where the installer exits the process
@@ -1664,6 +2025,289 @@ mod tests {
                 tauri_plugin_log::RotationStrategy::KeepSome(1)
             ),
             "a 0 that slipped past clamp_logging must still floor at KeepSome(1)"
+        );
+    }
+
+    /// Brace-counted body isolation for a top-level `fn` in this file (house
+    /// style — order-independent, never anchored on the following fn, which
+    /// drifts).
+    fn body_of<'a>(prod_source: &'a str, sig: &str) -> &'a str {
+        let after_sig = prod_source
+            .split(sig)
+            .nth(1)
+            .unwrap_or_else(|| panic!("lib.rs has no `{}`", sig));
+        let open = after_sig
+            .find('{')
+            .unwrap_or_else(|| panic!("{} has no opening brace", sig));
+        let mut depth = 0usize;
+        let mut end = None;
+        for (i, ch) in after_sig[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(open + i + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        &after_sig[..end.unwrap_or_else(|| panic!("{} body never closed", sig))]
+    }
+
+    /// Issue #679: the three CLI flags are recognised, matched exactly (never
+    /// as a prefix of something else) and nothing else is.
+    #[test]
+    fn test_cli_command_matches_only_the_exact_flags() {
+        for (argv, expected) in [
+            (vec!["presencejam", "--help"], Some(CliCommand::Help)),
+            (vec!["presencejam", "--status"], Some(CliCommand::Status)),
+            (
+                vec!["presencejam", "--sync-once"],
+                Some(CliCommand::SyncOnce),
+            ),
+            // Exact match only: a longer argument that merely starts with a
+            // flag is not that flag (issue #589's rule, applied here too).
+            (vec!["presencejam", "--statuses"], None),
+            (vec!["presencejam", "--sync-once-now"], None),
+            (vec!["presencejam", "--help-me"], None),
+            (vec!["presencejam", "-s"], None),
+            (vec!["presencejam", "--status=1"], None),
+            (Vec::<&str>::new(), None),
+        ] {
+            assert_eq!(
+                cli_command(argv.clone()),
+                expected,
+                "argv {:?} must parse to {:?}",
+                argv,
+                expected
+            );
+        }
+
+        // OsString argv elements must work too — that is what the real process
+        // argv hands the parser.
+        assert_eq!(
+            cli_command(vec![
+                std::ffi::OsString::from("presencejam"),
+                std::ffi::OsString::from(SYNC_ONCE_FLAG),
+            ]),
+            Some(CliCommand::SyncOnce),
+            "OsString argv elements must be recognised, like has_minimized_flag"
+        );
+    }
+
+    /// Issue #679: the flags are an alternative to launching the GUI, never a
+    /// modifier of it — every argv shape the app already receives (a bare
+    /// launch, the autostart plugin's `--minimized`, a `presencejam://` deep
+    /// link and the occasional stray argument) must still launch as it did
+    /// before, i.e. parse to no CLI command at all.
+    #[test]
+    fn test_cli_command_leaves_every_gui_launch_alone() {
+        for argv in [
+            vec!["presencejam"],
+            vec!["/usr/bin/presence-jam"],
+            vec!["presence-jam.exe", MINIMIZED_FLAG],
+            vec![
+                "presencejam",
+                "--minimized",
+                "presencejam://callback?code=abc&state=def",
+            ],
+            vec!["presencejam", "presencejam://callback"],
+            vec!["presencejam", "--some-future-flag", "value"],
+            vec!["presencejam", "-"],
+        ] {
+            assert_eq!(
+                cli_command(argv.clone()),
+                None,
+                "argv {:?} must launch the GUI, not a CLI mode",
+                argv
+            );
+        }
+    }
+
+    /// Issue #679: the parser is documented as "first recognised flag wins",
+    /// left to right.
+    #[test]
+    fn test_cli_command_first_recognised_flag_wins() {
+        assert_eq!(
+            cli_command(vec!["presencejam", SYNC_ONCE_FLAG, STATUS_FLAG]),
+            Some(CliCommand::SyncOnce),
+            "the leftmost recognised flag decides"
+        );
+        assert_eq!(
+            cli_command(vec!["presencejam", "--unknown", STATUS_FLAG, HELP_FLAG]),
+            Some(CliCommand::Status),
+            "unknown arguments are skipped, not treated as a choice"
+        );
+    }
+
+    /// Issue #679: `--help` (and the README/USAGE docs, asserted in the docs
+    /// themselves) must document all four flags, and say what happens to
+    /// anything else.
+    #[test]
+    fn test_cli_help_text_documents_every_flag() {
+        let help = cli_help_text();
+        for flag in [STATUS_FLAG, SYNC_ONCE_FLAG, HELP_FLAG, MINIMIZED_FLAG] {
+            assert!(help.contains(flag), "the usage text must document {}", flag);
+        }
+        assert!(
+            help.contains("exit 0") && help.contains("exit 1"),
+            "the usage text must state the exit codes"
+        );
+        assert!(
+            help.to_lowercase().contains("ignored"),
+            "the usage text must state that unknown arguments are ignored"
+        );
+    }
+
+    /// Issue #679: the `--sync-once` credential gate. This is the seam the
+    /// contract's "with credentials it would exit 0" half is proven at: the
+    /// credentialed run itself needs a display (the poller works through an
+    /// `AppHandle`, which only exists once a GUI runtime does), so the decision
+    /// is pinned here instead of being assumed.
+    #[test]
+    fn test_sync_once_preflight_requires_both_providers() {
+        use crate::spotify::SpotifyTokens;
+        use crate::teams::TeamsTokens;
+
+        let complete_tokens = token_io::TokensFile {
+            spotify_tokens: Some(SpotifyTokens {
+                access_token: "at".to_string(),
+                refresh_token: "rt".to_string(),
+                expires_at: chrono::Utc::now() + chrono::Duration::seconds(3600),
+            }),
+            teams_tokens: Some(TeamsTokens {
+                access_token: "tat".to_string(),
+                refresh_token: None,
+                expires_at: chrono::Utc::now() + chrono::Duration::seconds(3600),
+            }),
+        };
+        let mut config = crate::config::AppConfig::default();
+
+        // Functionally signed in: the one-shot may run.
+        config.spotify.client_id = "client-id".to_string();
+        assert_eq!(
+            cli_sync_once_preflight(&config, &complete_tokens),
+            Ok(()),
+            "configured + signed in to both providers must pass the gate"
+        );
+
+        // Not configured at all.
+        config.spotify.client_id = String::new();
+        let reason = cli_sync_once_preflight(&config, &complete_tokens)
+            .expect_err("an unconfigured client_id must be rejected");
+        assert!(
+            reason.contains("client_id"),
+            "the reason must name the missing client_id, got: {reason}"
+        );
+
+        // Configured but no Spotify session.
+        config.spotify.client_id = "client-id".to_string();
+        let no_spotify = token_io::TokensFile {
+            spotify_tokens: None,
+            teams_tokens: complete_tokens.teams_tokens.clone(),
+        };
+        let reason = cli_sync_once_preflight(&config, &no_spotify)
+            .expect_err("no Spotify tokens must be rejected");
+        assert!(
+            reason.contains("Spotify"),
+            "the reason must name Spotify, got: {reason}"
+        );
+
+        // Spotify ok, but the Teams status write has no session to use.
+        let no_teams = token_io::TokensFile {
+            spotify_tokens: complete_tokens.spotify_tokens.clone(),
+            teams_tokens: None,
+        };
+        let reason = cli_sync_once_preflight(&config, &no_teams)
+            .expect_err("no Teams tokens must be rejected");
+        assert!(
+            reason.contains("Teams"),
+            "the reason must name Teams, got: {reason}"
+        );
+    }
+
+    /// Issue #679: the flags must be reachable only as an alternative to the
+    /// GUI, and `--sync-once` must reach its one-shot before any GUI surface is
+    /// set up. That ordering is what keeps a bare launch on the old path
+    /// (asserted by the parser tests above) and a CLI run windowless.
+    #[test]
+    fn test_cli_flags_short_circuit_before_the_gui_is_built() {
+        let source = include_str!("lib.rs");
+        let prod_source = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("lib.rs has no #[cfg(test)] mod tests block");
+
+        let run_body = body_of(prod_source, "pub fn run()");
+        let dispatch = run_body
+            .find("cli_command(std::env::args_os())")
+            .expect("run() must consult the CLI parser (issue #679)");
+        let builder = run_body
+            .find("tauri::Builder::default()")
+            .expect("run() must still build the Tauri app");
+        assert!(
+            dispatch < builder,
+            "the CLI dispatch must precede the Tauri builder: a flag handled \
+             after the builder exists has already created a runtime, which is \
+             exactly what cannot happen headless (issue #679)"
+        );
+        assert!(
+            run_body.contains("std::process::exit(cli_status_exit_code())"),
+            "--status must print and exit without building an app (issue #679)"
+        );
+        assert!(
+            run_body.contains("suppress_config_windows(&mut context)"),
+            "--sync-once must suppress the config-declared windows (issue #679)"
+        );
+
+        let setup_body = body_of(prod_source, ".setup(move |app|");
+        let one_shot = setup_body
+            .find("return cli_sync_once_iteration(")
+            .expect("setup must hand --sync-once its iteration (issue #679)");
+        let tray = setup_body
+            .find("tray::setup_tray(")
+            .expect("setup must still build the tray for the GUI");
+        assert!(
+            one_shot < tray,
+            "the --sync-once early return must come before the tray/menu setup \
+             so a CLI run registers no tray icon (issue #679)"
+        );
+        assert!(
+            !setup_body[..one_shot].contains("register_all()"),
+            "a CLI run must not re-register the deep-link scheme (issue #679)"
+        );
+    }
+
+    /// Issue #679: `--sync-once` must run without a window, so the windows
+    /// `tauri.conf.json` declares must have their `create` flag cleared before
+    /// the app is built (`App::run` builds one webview per `create = true`
+    /// entry). Exercised against the real embedded config, so a window added to
+    /// `tauri.conf.json` later is covered without touching this test.
+    #[test]
+    fn test_cli_mode_suppresses_every_config_window() {
+        let mut context: tauri::Context<tauri::Wry> = tauri::generate_context!();
+        let declared = context.config().app.windows.len();
+        assert!(
+            declared > 0,
+            "the app must declare at least one window for this guard to mean anything"
+        );
+        assert!(
+            context.config().app.windows.iter().any(|w| w.create),
+            "at least one declared window must be created by default — otherwise \
+             the suppression below is vacuous"
+        );
+
+        let suppressed = suppress_config_windows(&mut context);
+        assert_eq!(
+            suppressed, declared,
+            "every declared window must be accounted for"
+        );
+        assert!(
+            context.config().app.windows.iter().all(|w| !w.create),
+            "no config-declared window may be created in CLI mode (issue #679)"
         );
     }
 }

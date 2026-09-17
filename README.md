@@ -113,6 +113,22 @@ npm run tauri dev
 npm run tauri build
 ```
 
+## Command-line flags
+
+PresenceJam is a tray app, but the binary also answers three **headless flags** — useful from a
+script, a cron job or a support session. None of them opens the app window, and any *other*
+argument is ignored, so the app starts normally exactly as it always has.
+
+| Command | What it does |
+| --- | --- |
+| `presencejam --status` | Prints the sync status as **JSON on stdout** and exits `0` — the same fields the app's `get_sync_status` command returns. Builds no window and no tray icon and takes no single-instance lock, so it works headless; `spotify_connected` / `teams_connected` come from the same `config.json` and `tokens.json` the app reads. |
+| `presencejam --sync-once` | Runs **exactly one poll iteration** (including the Teams status write) and exits `0` on success, or `1` with the reason on stderr. Needs a configured Spotify `client_id` and a sign-in to both Spotify and Teams; logs go to the normal log file. |
+| `presencejam --help` | Prints the usage text — these three flags plus `--minimized` — and exits `0`. |
+| `presencejam --minimized` | Starts with the window hidden (what the autostart plugin passes at login). This is a normal GUI launch. |
+
+See [USAGE.md — Command-line flags](./USAGE.md#command-line-flags) for the field-by-field
+details and the exact exit conditions.
+
 ## Documentation
 
 | Doc | What it's for |

@@ -225,6 +225,29 @@ The current log level is set in `config.json` under `logging.log_level`.
 
 ---
 
+## Command-line flags
+
+PresenceJam is a tray app, but the binary also answers **three headless flags** — handy from a
+script, a cron job or a support session. None of them opens the app window. Any *other*
+argument is ignored and the app starts normally, exactly as it always has (that includes the
+autostart plugin's `--minimized` and a `presencejam://` deep-link URL, which are both normal
+GUI launches).
+
+| Command | What it does |
+|---------|--------------|
+| `presencejam --status` | Prints the sync status as **JSON on stdout** and exits `0`. The fields are the ones the app's `get_sync_status` command returns: `is_syncing`, `current_track`, `spotify_connected`, `teams_connected`, `last_posted_status`, `presence_gated`, `presence_paused`. It builds no window and no tray icon and takes no single-instance lock, so it works on a **headless machine**. A freshly started process has no poller, so `is_syncing` is `false`, `current_track` is `null` and the presence fields are empty — the values describe *that* process. `spotify_connected` / `teams_connected` are read from the same `config.json` and `tokens.json` the app uses. If either file cannot be read, the JSON is still printed (both providers reported as disconnected) and the reason goes to **stderr**. |
+| `presencejam --sync-once` | Runs **exactly one poll iteration** — including the Teams status write — and exits `0` on success or `1` with the reason on **stderr**. Requires a configured Spotify `client_id` and a sign-in to **both** Spotify and Teams; without them it exits `1` before doing anything else. Logs go to the normal log file. |
+| `presencejam --help` | Prints the usage text — the three flags above plus `--minimized` — and exits `0`. |
+| `presencejam --minimized` | Starts with the window hidden (what the autostart plugin passes at login). This is a normal GUI launch. |
+
+Both `--status` and `--sync-once` read `config.json` and `tokens.json` directly, so the app
+does **not** have to be running. `--sync-once` does not take the single-instance lock either,
+so it can run next to a running app; the app's own polling keeps going. Running a one-shot
+while a track plays simply posts the status that track deserves — a later iteration with an
+unchanged status is deduplicated exactly as usual.
+
+The first recognised flag wins if you pass more than one.
+
 ## Status Expiry
 
 Teams custom status messages automatically expire. PresenceJam sets the message's expiry (`expiryDateTime`) to the **track's end time + a buffer** (default 10 s; `polling.expiry_buffer_seconds` in `config.json`). This is an app-side choice — the Graph API doesn't shorten it. When playback pauses or stops, PresenceJam replaces the message with a `🎵 Paused` / `🎵 Nothing playing on Spotify` placeholder that **expires 60 s after it is posted** (`placeholder_expiry_str()` in `src-tauri/src/polling/poll_once.rs` sets a fixed now + 60 s, on both the paused and the no-track path) — the pause placeholder does *not* inherit the track-end buffer. Graph has no "clear status message" action, so the short-lived placeholder is the documented clear mechanism: it self-removes ~1 min after the last successful post even if the app quits.
