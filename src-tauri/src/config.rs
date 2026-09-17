@@ -430,13 +430,14 @@ fn clamp_logging(cfg: &mut LoggingConfig) {
 }
 
 /// Whether a stored snooze deadline is still in the future (4.7.0, S9 /
-/// issue #677). `None` for an absent, unparsable or non-UTC-shifted value, so
-/// a hand-edited `config.json` can never resurrect a snooze.
+/// issue #677), as a UTC instant.
 ///
-/// The parse is deliberately strict about the offset: `chrono`'s RFC3339
-/// reader accepts `+02:00` and normalizes it to the same instant, which is
-/// what a value re-serialized by another tool may carry, so only a *past*
-/// instant (or garbage) is rejected here.
+/// `None` for an absent, unparsable or already-passed value, so a hand-edited
+/// `config.json` can never resurrect a snooze. The parse itself is
+/// **tolerant of the offset**: RFC3339 accepts `+02:00` as well as `Z` and both
+/// denote an instant, which is what a value re-serialized by another tool (or
+/// by a future version that writes local time) may carry — only a *past*
+/// instant, a malformed string or a bare date is rejected here.
 pub fn snooze_deadline(
     stored: &str,
     now: chrono::DateTime<chrono::Utc>,
@@ -4086,29 +4087,48 @@ mod tests {
     /// zone's rules rather than adding 24 h.
     #[test]
     fn until_tomorrow_keeps_the_calendar_boundary_across_dst() {
-        // Europe/Berlin springs forward on 2026-03-29 at 02:00 (+1 h), so the
-        // night of the 28th is 23 real hours long. `chrono-tz` is not a
-        // dependency; `Local` is, and the assertion holds on any machine whose
-        // zone has that transition only where the test can pin it — so the
-        // check here is the DST-agnostic half: the deadline's LOCAL wall clock
-        // is exactly 00:00:00 of the following day, whatever the offset did.
+        // The deadline is the next LOCAL calendar day whatever the zone's
+        // offset does in between. `chrono-tz` is not a dependency, so this runs
+        // against the machine's own `Local` and asserts only what holds in
+        // EVERY zone — including one whose spring-forward swallows local
+        // midnight (America/Santiago, Asia/Beirut in some years), where the
+        // correct answer is the first instant the new day exists (01:00), not
+        // 00:00. Asserting `00:00:00` outright would therefore fail on those
+        // machines while passing on a UTC CI runner.
         let now = chrono::Local::now();
         let deadline = next_local_midnight_utc(now);
         let local = deadline.with_timezone(&chrono::Local);
         use chrono::Timelike;
-        assert_eq!(
-            (local.hour(), local.minute(), local.second()),
-            (0, 0, 0),
-            "the deadline must be LOCAL midnight even when the zone shifted"
+
+        assert!(
+            deadline > now.with_timezone(&chrono::Utc),
+            "a deadline in the past would make the snooze end instantly"
         );
         assert_eq!(
             local.date_naive(),
             now.date_naive() + chrono::Days::new(1),
             "the deadline must be TOMORROW's local date"
         );
+        if local.hour() == 0 {
+            assert_eq!(
+                (local.minute(), local.second()),
+                (0, 0),
+                "a midnight that exists is exactly 00:00:00"
+            );
+        } else {
+            // A gap swallowed midnight: the deadline is the first instant of
+            // the new day that exists, which is what `resolve_local_forward`
+            // walks to. It must still be well inside the new day and short of
+            // its end.
+            assert_eq!(
+                (local.hour(), local.minute(), local.second()),
+                (1, 0, 0),
+                "a swallowed midnight resolves to the first existing instant"
+            );
+        }
         assert!(
-            deadline > now.with_timezone(&chrono::Utc),
-            "a deadline in the past would make the snooze end instantly"
+            local.date_naive() == now.date_naive() + chrono::Days::new(1),
+            "the boundary is the new day's start, never the current day's"
         );
     }
 
