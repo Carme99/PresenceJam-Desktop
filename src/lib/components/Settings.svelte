@@ -699,6 +699,14 @@
       saveTimeout = setTimeout(() => saveMessage = '', 2000);
     } catch (e) { const msg = String((e as Error)?.message ?? e).slice(0, 180); saveMessage = msg || t('settings.failedToSave'); console.error('[SETTINGS] handleSave failed:', e); }
     finally { isSaving = false; }
+    // 4.7.0 (issue #676): re-register from the config the backend just
+    // persisted — this may be the first save after a capture released the
+    // grabs. Fire-and-forget, and *after* the `finally`: awaiting it here
+    // would hold `isSaving` (and so the Save button's `disabled`) open past
+    // the store write, which is not this card's business. A rejected slot
+    // returned above, so nothing is re-registered for a save that never
+    // happened; both save paths (Save and "Save & leave") go through here.
+    void refreshShortcutStatus();
   }
 
   async function openLogs() {
@@ -968,19 +976,6 @@
     const target = pendingNav;
     pendingNav = null;
     if (target) leaveSettings(target);
-  }
-
-  /**
-   * The Save button: persist, then re-register the grabs from the config the
-   * backend just persisted.
-   *
-   * Registration is deliberately *after* `handleSave` rather than inside it:
-   * the save path is where every other field in this pane is persisted, and
-   * this card must not add IPC round trips to it.
-   */
-  async function saveAndSyncShortcuts() {
-    await handleSave();
-    await refreshShortcutStatus();
   }
 
   function discardAndLeave() {
@@ -1748,6 +1743,8 @@
       {#if backupMessage}
         <p class="hint" role="status">{backupMessage}</p>
       {/if}
+
+    </section>
     <!-- 4.7.0 (issue #676): global shortcuts. The field records what is
          pressed — the grab is released while it records, otherwise the key
          would fire the binding instead of being captured. -->
@@ -1818,7 +1815,7 @@
     </section>
 
     <section class="actions">
-      <button class="btn-full" onclick={saveAndSyncShortcuts} disabled={isSaving}>
+      <button class="btn-full" onclick={handleSave} disabled={isSaving}>
         {isSaving ? t('settings.saving') : t('settings.saveChanges')}
       </button>
       {#if saveMessage}

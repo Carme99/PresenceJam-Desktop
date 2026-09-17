@@ -882,9 +882,12 @@ describe('Settings logging and backup cards (#673)', () => {
     // A decline is a clean no-op in the card: no reload, and no status message
     // (neither the imported path nor an error). That the file itself was left
     // alone is `declined_import_touches_nothing`'s business on the Rust side,
-    // where the real files are.
+    // where the real files are. Scoped to the backup card: other cards now
+    // carry `role="status"` lines of their own (the shortcuts rows, #676), and
+    // an unscoped query would be asserting about *them*.
     expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'load_config').length).toBe(loadsBefore);
-    expect(container.querySelector('[role="status"]')).toBeNull();
+    const backupCard = buttonByText(container, t('settings.backupImport')).closest('.card');
+    expect(backupCard?.querySelector('[role="status"]')).toBeNull();
     expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'import_config')).toHaveLength(1);
   });
 
