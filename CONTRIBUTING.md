@@ -6,8 +6,8 @@ Thank you for your interest in contributing!
 
 ### Prerequisites
 
-- **Rust** 1.96 ([rustup](https://rustup.rs/)) — version CI installs; MSRV not declared (no `rust-version` in `Cargo.toml`, no `toolchain:` pin on the `dtolnay/rust-toolchain` steps — actions SHA-pinned only, see `ci.yml`)
-- **Node.js** 20+ ([nodejs.org](https://nodejs.org/))
+- **Rust** 1.96 ([rustup](https://rustup.rs/)) — the **declared MSRV**: `src-tauri/Cargo.toml` sets `rust-version = "1.96"`, and the root `rust-toolchain.toml` pins `channel = "1.96"` with the `rustfmt` + `clippy` components, so `cargo fmt` / `cargo check` / `cargo clippy` in this repository cannot silently run on a different toolchain. CI keeps its SHA-pinned `dtolnay/rust-toolchain` action (`ci.yml`).
+- **Node.js** 24 ([nodejs.org](https://nodejs.org/)) — what every CI job installs (`node-version: 24` in `ci.yml`); `package.json` requires `">=22"`.
 - **npm** 9+
 - **Tauri CLI** v2 — provided by repo-pinned local `@tauri-apps/cli`; use `npm run tauri ...`. A global install is unnecessary.
 
@@ -35,7 +35,9 @@ npm run tauri dev
 | `cargo test` | Run Rust unit tests |
 | `cargo fmt` | Format Rust code |
 | `npm run check` | Type-check Svelte/TypeScript |
-| `npm test` | Run frontend unit tests (vitest, `tests/*.test.ts`); run it for any change under `src/` — CI runs `npm test --if-present` in the `frontend` job |
+| `npm test` | Run frontend unit tests (vitest, `tests/*.test.ts`); run it for any change under `src/`. CI's `frontend` job runs `npm run test:coverage` instead — the same suite through the v8 provider, which fails the job when any of the four measured percentages in `vitest.config.js` drops (the ratchet). |
+
+`cargo test` also regenerates `src/lib/types-generated/` — ts-rs output, gitignored, and produced by the `#[ts(export)]` derives at test time. Run the Rust tests **before** `npm run check` whenever an exported struct changed, or the frontend type-check reads stale generated types (CI does `cargo test --lib` first for the same reason).
 
 ## Coding Standards
 
@@ -80,7 +82,7 @@ See [the architecture frontend page](./docs/architecture/frontend.md#directory-s
 
 ## Logging
 
-Logs are written by the logging plugin to a single `PresenceJam.log` file in `%LOCALAPPDATA%\com.presencejam.app\logs\` (Windows; see USAGE.md for macOS/Linux paths) — Tauri's `app_log_dir()` appends the bundle identifier to the platform's local data directory, so this is not the same folder as `config.json` (issue #300). There is no daily rotation or retention pruning.
+Logs are written by the logging plugin to `PresenceJam.log` in `%LOCALAPPDATA%\com.presencejam.app\logs\` (Windows; see USAGE.md for macOS/Linux paths) — Tauri's `app_log_dir()` appends the bundle identifier to the platform's local data directory, so this is not the same folder as `config.json` (issue #300). The file rotates on size and keeps a bounded number of archives: `logging.max_file_size_mb` (1–500 MB, default 10) and `logging.keep_files` (1–20, default 3) feed `lib.rs::log_rotation_strategy`, and the live log is kept **in addition** to the archives, so the folder holds at most `keep_files + 1` files. Both fields are editable in Settings → Logging.
 
 ```powershell
 # Open logs folder in Explorer

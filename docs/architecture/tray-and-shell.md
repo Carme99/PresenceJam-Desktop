@@ -65,9 +65,16 @@ The UI is localized to **English, German, and French** via the i18n barrel
 - All three dictionaries are typed against `Dict = keyof typeof en`, so a
   key present in `en.ts` but missing from `de.ts`/`fr.ts` is a TypeScript
   compile error — translation parity is enforced, not convention.
-- The locale persists to `localStorage` under `locale`; first run defaults
-  to the browser language (`de`/`fr` prefixes), falling back to English.
-  The picker lives in Settings → General.
+- **4.7.0 (issue #674): `config.locale` is the source of truth.** The picker
+  writes `AppConfig.locale` through the `set_locale` command (which also
+  relabels the tray and the native application menu without a restart).
+  `localStorage` under `locale` survives only as a pre-paint mirror — it is read
+  at module load, because the config arrives over an async IPC round-trip and
+  the first frame must already be in the right language — it still converges
+  detached windows through the `storage` listener below, and a value found
+  there while the config carries none is migrated into the config once. First
+  run still defaults to the browser language (`de`/`fr` prefixes), falling back
+  to English. The picker lives in Settings → General.
 - **Intl formatting (4.6):** the locale's `Intl.NumberFormat` and
   `Intl.PluralRules` are built once per locale and reused (constructing a
   formatter per render would dominate `t()`). Numeric params go through the
@@ -80,9 +87,14 @@ The UI is localized to **English, German, and French** via the i18n barrel
   Detached Logs/Settings windows own independent locale instances, so a `storage`
   listener converges them on the main window's write (the same pattern as the
   `#423` theme listener, with a same-value guard that stops a write loop) (#620).
+- **Native surfaces (4.7.0, #674):** the tray menu (`tray.rs`) and the native
+  application menu (`menu.rs`) render from a Rust string table
+  (`src-tauri/src/i18n.rs`: one `Strings` field per literal, with `EN`/`DE`/`FR`
+  tables). An unknown `locale` falls back to English and is logged, and a Rust
+  parity test fails when the three tables drift apart or a label is hard-coded
+  back into `tray.rs`/`menu.rs`.
 - Known limitation: Rust-side error strings surfaced through `invoke()`
-  rejections and event payloads remain English. Tray menu labels are English
-  literals too — they are built in Rust (`tray.rs`) and never route through `t()`.
+  rejections and event payloads remain English, as does the app name.
 
 ## Auto-Update (v3.0)
 
