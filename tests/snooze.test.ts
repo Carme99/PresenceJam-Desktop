@@ -189,4 +189,53 @@ describe('Dashboard snooze chip (S9 / #677)', () => {
       expect(container.querySelector('.snooze-chip')).not.toBeNull();
     });
   });
+
+  it('counts a deadline past an hour down as h:mm:ss', async () => {
+    configStore.set(configWith(deadlineIn(2 * 60 * 60 + 5)));
+    const { container } = render(Dashboard as never);
+    await waitFor(() => {
+      expect(container.querySelector('.snooze-chip')).not.toBeNull();
+    });
+    // The `hours > 0` arm of the formatter: `h:mm:ss`, not `mm:ss`. The stored
+    // deadline is second-precision, so a couple of seconds of render slack is
+    // expected — hence the tolerant seconds pair.
+    expect(container.querySelector('.snooze-chip')?.textContent).toMatch(/2:00:0[0-5]/);
+  });
+
+  it('ignores an unparsable stored deadline instead of guessing one', async () => {
+    // A hand-edited config can carry anything; `Date.parse` failing must read as
+    // "not snoozed", never as a zero or NaN countdown.
+    configStore.set(configWith('not a timestamp'));
+    const { container } = render(Dashboard as never);
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('get_sync_status');
+    });
+    expect(container.querySelector('.snooze-chip')).toBeNull();
+  });
+
+  it('keeps the chip and reports the failure when Resume cannot be saved', async () => {
+    configStore.set(configWith(deadlineIn(30 * 60)));
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'load_config') return configWith(deadlineIn(30 * 60));
+      if (cmd === 'get_sync_status') return CONNECTED_STATUS;
+      if (cmd === 'save_config') throw new Error('disk full');
+      return undefined;
+    });
+
+    const { container } = render(Dashboard as never);
+    await waitFor(() => {
+      expect(container.querySelector('.snooze-resume')).not.toBeNull();
+    });
+    (container.querySelector('.snooze-resume') as HTMLButtonElement).click();
+
+    // The write did not happen, so the snooze stands and the user is told —
+    // claiming success would leave the poller asleep with no way back.
+    await waitFor(() => {
+      expect(container.querySelector('.error-banner')?.textContent).toContain(
+        'Could not resume syncing'
+      );
+    });
+    expect(container.querySelector('.snooze-chip')).not.toBeNull();
+    expect(currentStore().snooze_until).not.toBeNull();
+  });
 });

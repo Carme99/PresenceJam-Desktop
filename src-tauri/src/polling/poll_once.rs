@@ -327,7 +327,37 @@ pub(crate) fn run(
 /// dropped sender here would make every one-shot a silent no-op. Never
 /// collapse this to `let _`. Never parks either: `RunMode::OneShot` turns
 /// every parking sleep site into an immediate `Break`.
+///
+/// S9 (issue #677): a one-shot is an iteration, so it respects an active snooze
+/// exactly like the driver's loop — decided HERE, before the shared write clocks
+/// are loaded, so a refresh during a snooze issues no Spotify/Graph request and
+/// moves no clock. Without this, `refresh_status`, the tray's post-action
+/// catch-up and the CLI's `--sync-once` were three silent bypasses of the
+/// feature's "no work while snoozed" promise.
 pub(crate) fn run_oneshot(state: &Arc<AppState>, app: &AppHandle) {
+    // S9 (issue #677): the snooze gate, BEFORE the shared clocks are loaded.
+    // Every entry point to an iteration has to honour it, and this is the second
+    // one (the driver's loop is the first) — see the fn docs. The expiry case
+    // falls through to a normal iteration so an explicit refresh after the
+    // deadline still refreshes.
+    let gate = {
+        // Scoped: the config read guard must not outlive the decision.
+        let config = state.config.get();
+        snooze_gate(&config)
+    };
+    match gate {
+        SnoozeGate::Skipped(_) => {
+            log::info!(
+                "[POLLING] run_oneshot: skipped — a snooze is active, so this refresh performed no request"
+            );
+            return;
+        }
+        SnoozeGate::Expired => clear_snooze_if_expired(state),
+        SnoozeGate::Inactive => {}
+    }
+    // `_tx` is a live binding (not `let _`): the top stop-check treats a
+    // `Disconnected` receiver as Break, so a dropped sender would make every
+    // one-shot a silent no-op. Never collapse this to `let _`.
     let (_tx, rx) = mpsc::channel::<()>();
     let mut clocks = load_write_clocks();
     let mut consecutive_pauses: u8 = 0;
@@ -1615,12 +1645,13 @@ fn snooze_pause_at(config: &Option<AppConfig>, now: DateTime<Utc>) -> Option<(u6
 /// or the value cannot be parsed at all (4.7.0, S9 / issue #677).
 ///
 /// Distinct from "no snooze stored": only this state asks the driver to persist
-/// a clear, and it is exactly the state the startup clamp ([`crate::config::clamp_snooze`])
-/// handles for a deadline that expired while the app was closed.
+/// a clear. Delegates to `config::snooze_expired_deadline` so the tray, the
+/// chip, the load-time report and this gate cannot disagree about what "no
+/// longer live" means.
 fn snooze_expired(config: &Option<AppConfig>, now: DateTime<Utc>) -> bool {
     config
         .as_ref()
-        .is_some_and(|c| c.snooze_until.is_some() && crate::config::snooze_status(c, now).is_none())
+        .is_some_and(|c| crate::config::snooze_expired_deadline(c, now))
 }
 
 /// `HH:MM` of a deadline in the given zone, for the pause log line (4.7.0, S9).
@@ -7840,6 +7871,56 @@ mod tests {
         assert!(
             body.contains("retrying next iteration"),
             "a failed clear must say it will retry"
+        );
+    }
+
+    /// S9 (issue #677): EVERY entry point to an iteration honours the snooze —
+    /// the driver's loop is pinned by `snooze_gate_precedes_...` above, and
+    /// `run_oneshot` is pinned here. `refresh_status`, the tray's post-action
+    /// catch-up and the CLI's `--sync-once` all route through it, so a gate that
+    /// only the loop consulted left three silent bypasses of the feature's
+    /// "no Spotify or Graph work while snoozed" promise.
+    #[test]
+    fn run_oneshot_honours_the_snooze_gate() {
+        let prod = prod_source();
+        let body = prod_fn_body(prod, "pub(crate) fn run_oneshot(");
+        let gate = body
+            .find("snooze_gate(&config)")
+            .expect("run_oneshot must consult the snooze gate (S9)");
+        let clocks = body
+            .find("load_write_clocks()")
+            .expect("run_oneshot must still load the shared clocks");
+        let inner = body
+            .find("run_inner(")
+            .expect("run_oneshot must still dispatch the iteration");
+        assert!(
+            gate < clocks,
+            "the one-shot gate must run BEFORE the clocks are loaded: a snoozed \
+             refresh must not move (or discard) a keepalive/debounce clock (S9)"
+        );
+        assert!(
+            gate < inner,
+            "the one-shot gate must run BEFORE the iteration: a snoozed refresh \
+             must issue no Spotify GET (S9)"
+        );
+        assert_eq!(
+            body.matches("snooze_gate(").count(),
+            1,
+            "exactly one gate call site is expected in the one-shot"
+        );
+        let skip_arm = &body[gate..clocks];
+        assert!(
+            skip_arm.contains("SnoozeGate::Skipped(_)") && skip_arm.contains("return;"),
+            "the skip verdict must return before any request (S9)"
+        );
+        assert!(
+            skip_arm.contains("SnoozeGate::Expired")
+                && skip_arm.contains("clear_snooze_if_expired(state)"),
+            "an expired deadline must still be cleared by a manual refresh (S9)"
+        );
+        assert!(
+            skip_arm.contains("skipped — a snooze is active"),
+            "a refresh that did nothing must say why (S9)"
         );
     }
 }

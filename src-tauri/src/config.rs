@@ -448,19 +448,29 @@ pub fn snooze_deadline(
     (deadline > now).then_some(deadline)
 }
 
+/// Whether a config carries a `snooze_until` that is no longer a live deadline
+/// (4.7.0, S9 / issue #677) — the non-mutating twin of [`clamp_snooze`], for
+/// readers (`load_config`) that must report the state without changing it.
+///
+/// True for an absent field? No: an absent field is simply "not snoozed", which
+/// is not something to report or clean. True for an unparsable value and for an
+/// instant that has passed — both are dead weight that a writer should remove.
+pub fn snooze_expired_deadline(cfg: &AppConfig, now: chrono::DateTime<chrono::Utc>) -> bool {
+    cfg.snooze_until.is_some() && snooze_status(cfg, now).is_none()
+}
+
 /// Drops an expired (or unparsable) `snooze_until` (4.7.0, S9 / issue #677).
 ///
-/// Returns `true` when the field was cleared, so the caller can log the one
-/// event that matters — a deadline that passed while the app was closed, or
-/// between two iterations — without spamming a line per load/save. Pure apart
-/// from its `now` argument, so the boundary is unit-testable; runs on every
-/// load and on every save (through [`clamped_config`]), which is what makes an
-/// expired deadline unable to outlive the snooze it belonged to.
+/// Returns `true` when the field was cleared. Pure apart from its `now`
+/// argument, so the boundary is unit-testable. Only the WRITE paths call it:
+/// [`clamped_config`] (so every save normalizes the value) and the two guarded
+/// cleaners that own a config-write guard — `poll_once::clear_snooze_if_expired`
+/// on the iteration that observes the expiry, and the tray's startup cleaner.
+/// `load_config` deliberately uses [`snooze_expired_deadline`] instead: it is a
+/// reader on paths that hold no write guard, and clearing in memory there would
+/// hide the expiry from the very cleaners that can fix the file.
 pub fn clamp_snooze(cfg: &mut AppConfig, now: chrono::DateTime<chrono::Utc>) -> bool {
-    let Some(stored) = cfg.snooze_until.clone() else {
-        return false;
-    };
-    if snooze_deadline(&stored, now).is_some() {
+    if !snooze_expired_deadline(cfg, now) {
         return false;
     }
     cfg.snooze_until = None;
@@ -1051,9 +1061,15 @@ pub struct AppConfig {
     /// and every config file written before this release — means polling runs
     /// normally.
     ///
-    /// A value that has already passed is cleared by [`clamp_snooze`] on load
-    /// and by the polling driver on the iteration that observes it, so an
-    /// expired deadline can never outlive the snooze it belonged to.
+    /// An expired (or unparsable) value is INERT everywhere — [`snooze_status`]
+    /// and therefore the tray, the chip and the poller's gate all treat "no
+    /// longer a live deadline" as "not snoozed" — and it is removed by the first
+    /// WRITE that touches the document: [`clamp_snooze`] through
+    /// [`clamped_config`] on any save, `poll_once::clear_snooze_if_expired` on
+    /// the iteration that observes the expiry, or the tray's startup cleaner.
+    /// `load_config` only reports it (see [`snooze_expired_deadline`]), because
+    /// a reader that fixes the field in memory would hide the expiry from the
+    /// writers that can actually correct `config.json`.
     #[serde(default)]
     pub snooze_until: Option<String>,
     #[serde(default)]
@@ -1521,13 +1537,21 @@ pub fn load_config() -> Result<AppConfig, String> {
     clamp_teams(&mut config.teams);
     clamp_rules(&mut config.status_rules);
     clamp_logging(&mut config.logging);
-    // 4.7.0 (S9, issue #677): the startup clamp. A snooze that expired while
-    // the app was closed must not resume polling "later" on a deadline that is
-    // already behind us — the poller would wake, see the deadline in the past
-    // and clear it anyway, but the chip and the tray would claim a snooze the
-    // user never got. Cleared here, once, with the reason logged.
-    if clamp_snooze(&mut config, chrono::Utc::now()) {
-        log::info!("[CFG] snooze: the stored deadline had already passed — cleared");
+    // 4.7.0 (S9, issue #677): an expired snooze is reported here and REMOVED by
+    // the guarded writers below, never by this reader.
+    //
+    // The distinction is load-bearing twice over. (a) `load_config` runs on
+    // paths that hold no config-write guard — the startup load, the
+    // `load_config` command, `update_config`'s cold read — so writing the file
+    // from here could clobber a concurrent save and break the #297 invariant
+    // that the file and the in-memory copy agree. (b) An expired value must stay
+    // VISIBLE to the consumer that can persist its removal: `poll_once`'s
+    // `SnoozeGate::Expired` arm and the tray's startup cleaner both read the
+    // stored field. Clearing it here made the disk drift permanent — the
+    // in-memory copy looked clean, so nothing ever rewrote `config.json`, and
+    // the line below repeated on every launch.
+    if snooze_expired_deadline(&config, chrono::Utc::now()) {
+        log::info!("[CFG] snooze: the stored deadline had already passed — it is ignored and cleared on the next write");
     }
 
     log::info!("[CFG] Loaded configuration from '{}'", path.display());
@@ -4060,10 +4084,19 @@ mod tests {
         assert_eq!(next_local_midnight_utc(east), utc(2026, 1, 6, 11, 0, 0));
     }
 
-    /// The duration of an "until tomorrow" snooze stays in `(0, 24h]` for every
-    /// offset — the property that a `now + 24 h` implementation would violate.
+    /// An "until tomorrow" snooze is the local MIDNIGHT that follows `now`, in
+    /// every offset — and nothing about `now`'s own wall clock leaks into it.
+    ///
+    /// Both halves are asserted per row because the second is what makes this
+    /// test able to fail: the `(0, 24h]` duration bound alone does NOT kill a
+    /// `now + 24 h` implementation (that returns exactly 24 h, which is inside
+    /// the bound). The wall-clock assertion does — under `now + 24 h` the
+    /// deadline's local time is `now`'s local time, e.g. 12:30, not 00:00.
+    /// These rows sit at 23:59 / 00:01 / 12:30 precisely so that a same-wall-
+    /// clock deadline is distinguishable from midnight in every row.
     #[test]
     fn until_tomorrow_never_shifts_by_the_offset() {
+        use chrono::Timelike;
         for hours in [-12, -11, -5, -1, 0, 1, 2, 5, 12, 13, 14] {
             let tz = zone(hours);
             for (h, mi) in [(0, 0), (0, 1), (12, 30), (23, 59)] {
@@ -4077,6 +4110,27 @@ mod tests {
                     h,
                     mi,
                     secs
+                );
+
+                // The boundary itself: tomorrow's local date, at exactly local
+                // midnight. `FixedOffset` has no DST, so midnight always exists.
+                let local = deadline.with_timezone(&tz);
+                assert_eq!(
+                    (local.hour(), local.minute(), local.second()),
+                    (0, 0, 0),
+                    "offset {}h at {:02}:{:02} did not land on local midnight \
+                     (a `now + 24 h` deadline would keep the current wall clock)",
+                    hours,
+                    h,
+                    mi
+                );
+                assert_eq!(
+                    local.date_naive(),
+                    now.date_naive() + chrono::Days::new(1),
+                    "offset {}h at {:02}:{:02} did not land on tomorrow",
+                    hours,
+                    h,
+                    mi
                 );
             }
         }
@@ -4366,6 +4420,43 @@ mod tests {
         // Idempotent: a second pass finds nothing to clear, which is what keeps
         // the one-line log from repeating on every load and save.
         assert!(!clamp_snooze(&mut expired, now));
+
+        // The reader's twin reports the same states WITHOUT mutating, which is
+        // what lets `load_config` log the expiry while leaving the stored value
+        // visible to the writers that can correct `config.json`.
+        let reported = with(Some("2026-09-17T13:00:00Z"));
+        assert!(snooze_expired_deadline(&reported, now));
+        assert_eq!(
+            reported.snooze_until.as_deref(),
+            Some("2026-09-17T13:00:00Z"),
+            "the reader must not touch the field"
+        );
+        assert!(snooze_expired_deadline(&with(Some("yesterday-ish")), now));
+        assert!(!snooze_expired_deadline(
+            &with(Some("2026-09-17T14:00:00Z")),
+            now
+        ));
+        assert!(
+            !snooze_expired_deadline(&with(None), now),
+            "an absent field is 'not snoozed', not something to clean or report"
+        );
+        // …and the writer's verdict agrees with the reader's on every row, so a
+        // value the load path reports is always one a save will remove.
+        for value in [
+            Some("2026-09-17T13:00:00Z"),
+            Some("yesterday-ish"),
+            Some("2026-09-17T14:00:00Z"),
+            None,
+        ] {
+            let mut cfg = with(value);
+            let cleared = clamp_snooze(&mut cfg, now);
+            assert_eq!(
+                cleared,
+                snooze_expired_deadline(&with(value), now),
+                "clamp and report must agree for {:?}",
+                value
+            );
+        }
     }
 
     /// The countdown rounds UP and never reads zero while the snooze is live —

@@ -77,6 +77,11 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
     // labels; an unknown/absent value installs English.
     let state = app.state::<std::sync::Arc<crate::AppState>>();
     crate::i18n::install_from_app_state(state.inner());
+    // 4.7.0 (S9 / issue #677): the startup cleanup for a snooze deadline that
+    // expired while the app was closed. Runs before the first menu build so the
+    // tray never renders a state the config no longer holds, and only writes
+    // when there is actually something to clear.
+    clear_expired_snooze_at_startup(app.handle());
     // Build initial menu
     let menu = build_initial_menu(app)?;
 
@@ -1104,16 +1109,18 @@ fn parse_snooze_menu_id(id: &str) -> Option<SnoozeMenuSelection> {
 /// Persists a snooze deadline (or clears it) into `AppConfig::snooze_until`
 /// (4.7.0, S9 / issue #677).
 ///
-/// The tray owns the three presets, so this is the only writer besides the
-/// polling driver's expiry clear. It follows `commands::config::update_config`
-/// exactly: hold the config write guard across the atomic write, persist the
-/// CLAMPED copy with the binary-owned `schema_version` stamped, and store THAT
-/// value — otherwise the in-memory config (what the poller reads) and
-/// config.json disagree until the next launch (issues #297 / #536).
+/// The write half only — callers log the action, so the copy matches what
+/// happened (a preset, an explicit resume, or the startup cleanup of a deadline
+/// that expired while the app was closed). Follows
+/// `commands::config::update_config` exactly: hold the config write guard across
+/// the atomic write, persist the CLAMPED copy with the binary-owned
+/// `schema_version` stamped, and store THAT value — otherwise the in-memory
+/// config (what the poller reads) and config.json disagree until the next launch
+/// (issues #297 / #536).
 ///
 /// `None` clears the field, which is both "Resume sync now" and the state the
 /// frontend writes when its chip's Resume button is used.
-fn write_snooze(
+fn store_snooze(
     app: &AppHandle,
     until: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<(), String> {
@@ -1131,6 +1138,16 @@ fn write_snooze(
     crate::config::save_config(&persisted)?;
     *guard = Some(persisted);
 
+    Ok(())
+}
+
+/// Persists a user-chosen snooze (or its removal) and logs the action
+/// (4.7.0, S9 / issue #677). The tray's three click paths all land here.
+fn write_snooze(
+    app: &AppHandle,
+    until: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<(), String> {
+    store_snooze(app, until)?;
     match until {
         Some(deadline) => log::info!(
             "[TRAY] snooze: polling paused until {} (local {}, {} min)",
@@ -1141,6 +1158,38 @@ fn write_snooze(
         None => log::info!("[TRAY] snooze: resumed by the user"),
     }
     Ok(())
+}
+
+/// Clears a stored snooze deadline that has already passed, once, as the app
+/// comes up (4.7.0, S9 / issue #677).
+///
+/// `config::load_config` is a READER on paths that hold no config-write guard,
+/// so it reports an expired deadline without touching the document (a reader
+/// that fixed the field in memory would hide the expiry from every writer that
+/// can correct `config.json` — see that fn). This is the writer: a guarded
+/// store through [`store_snooze`], run at startup, so a snooze that expired
+/// while the app was closed does not sit in `config.json` logging a clamp line
+/// on every launch. The poller's own expiry arm covers a deadline that lapses
+/// while the app is running; either writer alone is sufficient.
+fn clear_expired_snooze_at_startup(app: &AppHandle) {
+    let state = app.state::<std::sync::Arc<crate::AppState>>();
+    let expired = state
+        .config
+        .get()
+        .as_ref()
+        .is_some_and(|cfg| crate::config::snooze_expired_deadline(cfg, chrono::Utc::now()));
+    if !expired {
+        return;
+    }
+    match store_snooze(app, None) {
+        Ok(()) => {
+            log::info!("[TRAY] snooze: cleared the expired deadline left by the previous session")
+        }
+        Err(e) => log::warn!(
+            "[TRAY] snooze: could not clear the expired deadline ({}); the poller will retry",
+            e
+        ),
+    }
 }
 
 /// Runs a Spotify player action from a tray click using the stored access
@@ -2595,14 +2644,14 @@ mod tests {
         );
     }
 
-    /// `write_snooze` is the tray's only writer, and it follows the same
-    /// store-what-was-persisted discipline as `commands::config::update_config`
-    /// (issues #297 / #536) — an in-memory value that disagrees with disk would
-    /// show a countdown for a snooze the next launch does not honour.
+    /// The tray's snooze writer follows the same store-what-was-persisted
+    /// discipline as `commands::config::update_config` (issues #297 / #536) — an
+    /// in-memory value that disagrees with disk would show a countdown for a
+    /// snooze the next launch does not honour.
     #[test]
-    fn write_snooze_persists_the_clamped_stamped_value() {
+    fn store_snooze_persists_the_clamped_stamped_value() {
         let prod = prod_source(include_str!("tray.rs"));
-        let body = body_of(prod, "fn write_snooze(");
+        let body = body_of(prod, "fn store_snooze(");
         for marker in [
             "state.config.get_mut()",
             "crate::config::clamped_config(&next)",
@@ -2612,7 +2661,7 @@ mod tests {
         ] {
             assert!(
                 body.contains(marker),
-                "write_snooze must contain `{}`",
+                "store_snooze must contain `{}`",
                 marker
             );
         }
@@ -2623,6 +2672,12 @@ mod tests {
                 < body.find("*guard = Some(persisted)").unwrap_or(0),
             "the store must happen only after a successful save"
         );
+        // The write half holds no log lines: the copy belongs to the caller, so
+        // the startup cleanup cannot masquerade as a user resume.
+        assert!(
+            !body.contains("log::info!"),
+            "store_snooze must not log — the caller owns the message"
+        );
     }
 
     /// The tray must log what it did: the deadline on the way in and the
@@ -2632,12 +2687,53 @@ mod tests {
         let prod = prod_source(include_str!("tray.rs"));
         let body = body_of(prod, "fn write_snooze(");
         assert!(
+            body.contains("store_snooze(app, until)?"),
+            "write_snooze must be the logging wrapper around the writer"
+        );
+        assert!(
             body.contains("[TRAY] snooze: polling paused until"),
             "the snooze start must be logged with its deadline"
         );
         assert!(
             body.contains("[TRAY] snooze: resumed by the user"),
             "the manual resume must be logged"
+        );
+    }
+
+    /// A deadline that expired while the app was closed is cleared from
+    /// `config.json` at startup, so the clamp log line cannot repeat on every
+    /// launch and the persisted document matches what the app honours.
+    #[test]
+    fn startup_cleanup_clears_an_expired_deadline_through_the_guarded_writer() {
+        let prod = prod_source(include_str!("tray.rs"));
+        let body = body_of(prod, "fn clear_expired_snooze_at_startup(");
+        assert!(
+            body.contains("crate::config::snooze_expired_deadline(cfg"),
+            "the cleaner must ask the shared predicate whether the deadline is dead"
+        );
+        assert!(
+            body.contains("store_snooze(app, None)"),
+            "the cleaner must go through the guarded writer, not write the file itself"
+        );
+        assert!(
+            body.contains("cleared the expired deadline left by the previous session"),
+            "the cleanup must be logged, and with its own copy"
+        );
+        // Wired into startup: a cleaner nothing calls would leave the stale
+        // deadline on disk forever.
+        let setup = body_of(prod, "pub fn setup_tray(");
+        assert!(
+            setup.contains("clear_expired_snooze_at_startup(app.handle())"),
+            "setup_tray must run the cleanup once, before the first menu build"
+        );
+        let cleanup = setup
+            .find("clear_expired_snooze_at_startup(")
+            .expect("call site");
+        let menu = setup.find("build_initial_menu(").expect("menu build");
+        assert!(
+            cleanup < menu,
+            "the cleanup must precede the first menu build, so the tray never \
+             renders a state the config no longer holds"
         );
     }
 }
