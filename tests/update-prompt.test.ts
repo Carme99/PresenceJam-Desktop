@@ -49,7 +49,7 @@ vi.mock('@tauri-apps/plugin-updater', () => ({
 import { invoke } from '@tauri-apps/api/core';
 import UpdatePrompt from '$lib/components/UpdatePrompt.svelte';
 import { i18n, t } from '$lib/i18n';
-import { configStore, defaultConfig } from '$lib/stores/config';
+import { configHydrated, configStore, defaultConfig } from '$lib/stores/config';
 import type { AppConfig } from '$lib/types';
 
 const invokeMock = invoke as unknown as Mock;
@@ -128,10 +128,11 @@ beforeEach(() => {
     }
     return Promise.resolve(undefined);
   });
-  // #678: the banner hydrates the store itself; start every test from the
-  // un-hydrated, default-valued store so the hydration path is what is under
-  // test rather than a value a previous test left behind.
+  // #678: the banner hydrates the store itself when nothing has yet; start
+  // every test from the un-hydrated, default-valued store so the hydration
+  // path is what is under test, not a value a previous test left behind.
   configStore.set(structuredClone(defaultConfig));
+  configHydrated.set(false);
 });
 
 afterEach(() => {
@@ -256,11 +257,13 @@ describe('UpdatePrompt release channel (#678)', () => {
   });
 
   it('opens the channel gate on the first paint when the store is already hydrated', async () => {
-    // The other order: boot (S6's `+page.svelte`) hydrated `configStore`
-    // before this banner mounted. The gate must then already be open once the
-    // banner has a candidate, i.e. it must not hold the stable action behind a
-    // second round-trip after the channel is known.
+    // The other order: boot hydrated `configStore` before this banner mounted
+    // (`+page.svelte` reads through the store and flags `configHydrated`). The
+    // channel is authoritative then, so the gate must already be open once the
+    // banner has a candidate — not held behind a re-read of a value the app
+    // already has.
     configStore.set({ ...structuredClone(defaultConfig), updates: { channel: 'stable' } });
+    configHydrated.set(true);
     persistChannel('stable');
     const { container } = await mountBanner();
 
@@ -270,6 +273,9 @@ describe('UpdatePrompt release channel (#678)', () => {
       within(container).getByRole('button', { name: t('update.downloadAndInstall') })
     ).toBeTruthy();
     expect(container.querySelector('.update-beta')).toBeNull();
+    expect(
+      invokeMock.mock.calls.map(([cmd]) => cmd).filter((cmd) => cmd === 'load_config')
+    ).toHaveLength(0);
   });
 
   it('hydrates the persisted beta channel itself and offers only install-on-quit', async () => {

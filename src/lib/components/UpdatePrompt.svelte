@@ -1,11 +1,12 @@
 <script lang="ts">
+  import { get } from 'svelte/store';
   import { onMount } from 'svelte';
   import { check } from '@tauri-apps/plugin-updater';
   import { invoke } from '@tauri-apps/api/core';
   import { getVersion } from '@tauri-apps/api/app';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { t } from '$lib/i18n';
-  import { configStore, loadConfig } from '$lib/stores/config';
+  import { configHydrated, configStore, loadConfig } from '$lib/stores/config';
 
   // Always-mounted update banner (3.0-P5). On mount it asks the updater
   // plugin whether a newer release exists; if it does it shows a small
@@ -81,11 +82,11 @@
   // downloads from the plugin's static `plugins.updater.endpoints` entry
   // (pinned to the stable manifest), so it is offered on Stable only.
   //
-  // `configStore` is hydrated HERE rather than assumed: the banner is mounted
-  // unconditionally by the layout, and the boot path loads the config through
-  // its own raw invoke, so nothing guarantees the store holds the user's
-  // persisted channel by the time this renders. Reading the mirror's default
-  // (`stable`) would offer the stable-only JS path on a Beta install.
+  // `configStore` is hydrated HERE rather than assumed: the layout mounts this
+  // banner from the start, while boot loads the config on its own schedule, so
+  // nothing guarantees the store holds the user's persisted channel by the time
+  // this renders. Reading the mirror's default (`stable`) would offer the
+  // stable-only JS path on a Beta install.
   let channelResolved = $state(false);
   const isBeta = $derived($configStore.updates.channel === 'beta');
 
@@ -134,10 +135,16 @@
   }
 
   onMount(() => {
-    // Point-of-use hydration (see above). `loadConfig` is the store's own
-    // cached entry point and never rejects — it falls back to the defaults and
-    // logs — so the gate below resolves on either outcome.
-    loadConfig().finally(() => (channelResolved = true));
+    // Point-of-use hydration (see above), in the two orders this banner can
+    // find the store:
+    //  - already hydrated (`configHydrated`) — boot went through the store, so
+    //    the channel is authoritative now and the gate opens on the first paint
+    //    instead of behind a redundant re-read;
+    //  - not hydrated — `loadConfig` is the store's own entry point and caches
+    //    an in-flight promise, so this joins boot's read rather than racing it,
+    //    and never rejects (it falls back to the defaults and logs).
+    if (get(configHydrated)) channelResolved = true;
+    else loadConfig().finally(() => (channelResolved = true));
     checkForUpdate();
     const interval = setInterval(checkForUpdate, CHECK_INTERVAL_MS);
     // #590: staging progress. `listen()` resolves asynchronously, so an
