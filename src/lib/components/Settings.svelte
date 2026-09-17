@@ -438,8 +438,13 @@
   /**
    * Asks the backend whether a combination may bind this slot, so an unparsable
    * or conflicting one is named inline instead of only failing at registration.
-   * The other row's *pending* value is sent along: the conflict a user creates
-   * here is between the two rows on screen, and neither is saved yet.
+   *
+   * The other row's *pending* value goes along — the conflict a user creates
+   * here is between the two rows on screen, and neither is saved yet — and a
+   * cleared row is sent as an explicit empty string, never `null`: the backend
+   * reads a present-but-blank value as "that row is unbound now", which is what
+   * makes clearing one row and moving its accelerator to the other row a single
+   * allowed edit.
    */
   async function validateShortcut(slot: ShortcutSlot): Promise<boolean> {
     const accelerator = shortcutBindings[slot];
@@ -452,7 +457,7 @@
       await invoke('validate_shortcut', {
         accelerator,
         action: slot,
-        other: shortcutBindings[otherSlot]
+        other: shortcutBindings[otherSlot] ?? ''
       });
       shortcutErrors[slot] = '';
       return true;

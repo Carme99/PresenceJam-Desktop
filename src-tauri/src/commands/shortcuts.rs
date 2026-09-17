@@ -628,21 +628,32 @@ pub fn unregister_shortcuts(app: AppHandle) -> ShortcutsStatus {
     release_all(&app)
 }
 
-/// The binding a conflict is checked against: the caller's *pending* value for
-/// the other slot when it has one, else that slot's persisted binding.
+/// The binding a conflict is checked against: the other slot's *pending* value
+/// when the caller describes it, else that slot's persisted binding.
 ///
-/// The Settings card validates a pair the user has not saved yet — the conflict
-/// it is about to create is between the two rows on screen — so the pending
-/// value has to win. A blank pending value is not a binding (it means "unbound")
-/// and falls through to the persisted one.
+/// The Settings card validates the pair the user is looking at, so a pending
+/// value is authoritative — including a blank one, which means that row is
+/// unbound *right now*. That is not a detail: clearing one row and then moving
+/// its old accelerator onto the other row is a single unsaved edit, and a check
+/// that consulted the persisted value would refuse the accelerator the user
+/// just freed. Only a caller that says nothing about the other slot (`None`,
+/// i.e. the argument was omitted) falls back to what is persisted.
 pub fn conflict_reference(
     pending_other: Option<String>,
     cfg: &ShortcutsConfig,
     slot: ShortcutSlot,
 ) -> Option<String> {
-    pending_other
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| configured_binding(cfg, slot.other()))
+    match pending_other {
+        Some(pending) => {
+            let trimmed = pending.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        None => configured_binding(cfg, slot.other()),
+    }
 }
 
 /// Validates one accelerator for one slot, so the Settings field can name the
@@ -788,9 +799,9 @@ mod tests {
         );
     }
     /// The unsaved pair is what the user is looking at: a pending value for the
-    /// other row wins over the persisted one, a blank pending value falls back
-    /// to it (blank means "unbound", not "no value"), and an omitted pending
-    /// value uses the persisted binding.
+    /// other row wins over the persisted one — a blank one meaning "unbound
+    /// over there" — and only an omitted value falls back to the persisted
+    /// binding.
     #[test]
     fn conflict_reference_prefers_the_pending_value() {
         let config = cfg(Some("CmdOrCtrl+Alt+P"), Some("CmdOrCtrl+Alt+S"));
@@ -805,15 +816,63 @@ mod tests {
             "the row the user has not saved yet is the one a conflict is against"
         );
         assert_eq!(
-            conflict_reference(Some("   ".to_string()), &config, ShortcutSlot::ToggleSync)
-                .as_deref(),
-            Some("CmdOrCtrl+Alt+P"),
-            "a blank pending value is not a binding: fall back to the persisted one"
+            conflict_reference(Some(String::new()), &config, ShortcutSlot::ToggleSync),
+            None,
+            "a blank pending value says that row is unbound now, not that it still holds the old one"
+        );
+        assert_eq!(
+            conflict_reference(Some("   ".to_string()), &config, ShortcutSlot::ToggleSync),
+            None,
+            "whitespace is blank too"
         );
         assert_eq!(
             conflict_reference(None, &config, ShortcutSlot::ToggleSync).as_deref(),
             Some("CmdOrCtrl+Alt+P"),
-            "no pending value uses the persisted binding"
+            "no pending value at all uses the persisted binding"
+        );
+    }
+
+    /// Clearing one row and moving its old accelerator onto the other row is a
+    /// single unsaved edit, and the whole point of the clear is that the
+    /// accelerator is free. A check that consulted the persisted value refused
+    /// exactly this.
+    #[test]
+    fn an_in_flight_swap_of_a_cleared_accelerator_is_allowed() {
+        let config = cfg(Some("CmdOrCtrl+Alt+P"), Some("CmdOrCtrl+Alt+S"));
+        // The card sends the other row's pending value; `''` is the cleared row.
+        let reference =
+            conflict_reference(Some(String::new()), &config, ShortcutSlot::TogglePlayback);
+        assert_eq!(reference, None, "the cleared row frees its accelerator");
+        assert!(
+            validate_accelerator(
+                ShortcutSlot::TogglePlayback,
+                "CmdOrCtrl+Alt+S",
+                reference.as_deref()
+            )
+            .is_ok(),
+            "moving a just-cleared accelerator onto the other row must be allowed"
+        );
+    }
+
+    /// The genuine conflict is unchanged: both rows pending the same
+    /// combination is refused, and the reason names the slot that holds it.
+    #[test]
+    fn a_pending_pair_sharing_one_accelerator_is_still_refused() {
+        let config = cfg(Some("CmdOrCtrl+Alt+P"), Some("CmdOrCtrl+Alt+S"));
+        let reference = conflict_reference(
+            Some("CmdOrCtrl+Alt+S".to_string()),
+            &config,
+            ShortcutSlot::TogglePlayback,
+        );
+        let err = validate_accelerator(
+            ShortcutSlot::TogglePlayback,
+            "CmdOrCtrl+Alt+S",
+            reference.as_deref(),
+        )
+        .expect_err("two rows cannot hold the same accelerator");
+        assert!(
+            err.contains("toggle_sync"),
+            "the reason must name the row that already has it, got: {err}"
         );
     }
 

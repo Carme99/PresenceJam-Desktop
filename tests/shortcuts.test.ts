@@ -188,12 +188,51 @@ describe('Settings — global shortcuts (#676)', () => {
     await waitFor(() => {
       expect(field(container, 'toggle_playback').value).toBe('CmdOrCtrl+Shift+K');
     });
-    // Validated before it can be saved, naming the slot it is bound to.
-    expect(invokeMock).toHaveBeenCalledWith(
-      'validate_shortcut',
-      expect.objectContaining({ action: 'toggle_playback', accelerator: 'CmdOrCtrl+Shift+K' })
-    );
+    // Validated before it can be saved, naming the slot it is bound to *and*
+    // the other row's pending value — the pair is what a conflict is judged
+    // against, so dropping `other` here would silently disable that check
+    // (Tauri ignores arguments the command does not declare).
+    expect(invokeMock).toHaveBeenCalledWith('validate_shortcut', {
+      accelerator: 'CmdOrCtrl+Shift+K',
+      action: 'toggle_playback',
+      other: 'CmdOrCtrl+Alt+S'
+    });
   });
+
+  /**
+   * Clearing one row and moving its accelerator onto the other row is a single
+   * unsaved edit, and the whole point of the clear is that the accelerator is
+   * free. The card therefore sends a cleared row as an explicit empty string
+   * (not `null`, which is indistinguishable from "says nothing"), and the save
+   * that follows must go through.
+   */
+  it('sends a cleared row as an explicit blank so an in-flight swap is allowed', async () => {
+    const { container } = await mountSettings();
+
+    await fireEvent.click(clearButton(container, 'toggle_sync'));
+    await waitFor(() => {
+      expect(field(container, 'toggle_sync').value).toBe('');
+    });
+
+    const target = field(container, 'toggle_playback');
+    await fireEvent.focus(target);
+    await fireEvent.keyDown(target, { key: 'S', code: 'KeyS', ctrlKey: true, altKey: true });
+
+    await waitFor(() => {
+      expect(field(container, 'toggle_playback').value).toBe('CmdOrCtrl+Alt+S');
+    });
+    expect(invokeMock).toHaveBeenCalledWith('validate_shortcut', {
+      accelerator: 'CmdOrCtrl+Alt+S',
+      action: 'toggle_playback',
+      other: ''
+    });
+
+    await fireEvent.click(saveButton(container));
+    await waitFor(() => expect(commandsCalled('save_config')).toBe(1));
+    expect(persisted.toggle_playback).toBe('CmdOrCtrl+Alt+S');
+    expect(persisted.toggle_sync).toBeNull();
+  });
+
 
   it('ignores a modifier-only press and a key it cannot name', async () => {
     const { container } = await mountSettings();
