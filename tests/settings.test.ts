@@ -801,6 +801,15 @@ describe('Settings logging and backup cards (#673)', () => {
         confirmCancel: t('common.no')
       });
     });
+    // Drain the click's await chain before asserting on its absence: the
+    // `waitFor` above returns as soon as the call is recorded, which is before
+    // the card's continuation would have run. Two flushes (Svelte's update plus
+    // the promise chain behind the mocked invoke) are deterministic and, unlike
+    // a timer, do not tie the test to wall-clock time. Without this the
+    // "no message" check could pass by winning a race — the positive half of
+    // the pair is the next test, which does see `settings.backupImported`.
+    await tick();
+    await tick();
     // A decline is a clean no-op in the card: no reload, and no status message
     // (neither the imported path nor an error). That the file itself was left
     // alone is `declined_import_touches_nothing`'s business on the Rust side,
