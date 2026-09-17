@@ -628,23 +628,43 @@ pub fn unregister_shortcuts(app: AppHandle) -> ShortcutsStatus {
     release_all(&app)
 }
 
+/// The binding a conflict is checked against: the caller's *pending* value for
+/// the other slot when it has one, else that slot's persisted binding.
+///
+/// The Settings card validates a pair the user has not saved yet — the conflict
+/// it is about to create is between the two rows on screen — so the pending
+/// value has to win. A blank pending value is not a binding (it means "unbound")
+/// and falls through to the persisted one.
+pub fn conflict_reference(
+    pending_other: Option<String>,
+    cfg: &ShortcutsConfig,
+    slot: ShortcutSlot,
+) -> Option<String> {
+    pending_other
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| configured_binding(cfg, slot.other()))
+}
+
 /// Validates one accelerator for one slot, so the Settings field can name the
 /// reason a combo is rejected instead of only refusing to save it.
 ///
-/// `action` is the slot's wire name ([`ShortcutSlot::name`]). The *other* slot's
-/// binding is resolved from the persisted config, never taken from the caller,
-/// so a pane cannot validate against a binding that is not in force.
+/// `action` is the slot's wire name ([`ShortcutSlot::name`]). `other` is the
+/// caller's pending value for the other slot (see [`conflict_reference`]); it
+/// only feeds a *message* — what gets registered is decided by
+/// [`plan_shortcuts`] from the persisted config, so no caller can use this
+/// argument to smuggle a binding past the planner.
 #[tauri::command]
 pub fn validate_shortcut(
     accelerator: String,
     action: String,
+    other: Option<String>,
     app: AppHandle,
 ) -> Result<(), String> {
     let slot = ShortcutSlot::from_name(&action)
         .ok_or_else(|| format!("Unknown shortcut action \"{action}\""))?;
     let cfg = config_or_default(&app);
-    let other = configured_binding(&cfg.shortcuts, slot.other());
-    validate_accelerator(slot, &accelerator, other.as_deref()).map(|_| ())
+    let reference = conflict_reference(other, &cfg.shortcuts, slot);
+    validate_accelerator(slot, &accelerator, reference.as_deref()).map(|_| ())
 }
 
 #[cfg(test)]
@@ -765,6 +785,35 @@ mod tests {
             )
             .is_ok(),
             "distinct accelerators must validate"
+        );
+    }
+    /// The unsaved pair is what the user is looking at: a pending value for the
+    /// other row wins over the persisted one, a blank pending value falls back
+    /// to it (blank means "unbound", not "no value"), and an omitted pending
+    /// value uses the persisted binding.
+    #[test]
+    fn conflict_reference_prefers_the_pending_value() {
+        let config = cfg(Some("CmdOrCtrl+Alt+P"), Some("CmdOrCtrl+Alt+S"));
+        assert_eq!(
+            conflict_reference(
+                Some("CmdOrCtrl+Alt+K".to_string()),
+                &config,
+                ShortcutSlot::ToggleSync
+            )
+            .as_deref(),
+            Some("CmdOrCtrl+Alt+K"),
+            "the row the user has not saved yet is the one a conflict is against"
+        );
+        assert_eq!(
+            conflict_reference(Some("   ".to_string()), &config, ShortcutSlot::ToggleSync)
+                .as_deref(),
+            Some("CmdOrCtrl+Alt+P"),
+            "a blank pending value is not a binding: fall back to the persisted one"
+        );
+        assert_eq!(
+            conflict_reference(None, &config, ShortcutSlot::ToggleSync).as_deref(),
+            Some("CmdOrCtrl+Alt+P"),
+            "no pending value uses the persisted binding"
         );
     }
 
