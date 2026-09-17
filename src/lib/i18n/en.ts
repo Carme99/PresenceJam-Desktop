@@ -504,6 +504,11 @@ export const en = {
     'Released while recording — the current binding would fire instead of being recorded',
   'settings.shortcutRejected': 'Cannot be used: {reason}',
   'settings.shortcutRegistrationFailed': 'Registration failed on this desktop: {reason}',
+  // 4.7.0 — S12 hygiene (theme/density)
+  'settings.themeSystem': 'System',
+  'settings.densityCompactLabel': 'Compact spacing',
+  'settings.densityHint':
+    'Tightens the spacing and type scale. Independent of the theme; “System” follows your OS appearance.',
 };
 
 export type Dict = { readonly [K in keyof typeof en]: string };

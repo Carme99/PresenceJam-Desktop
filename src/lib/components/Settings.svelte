@@ -16,7 +16,7 @@
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
   import PageHeader from './PageHeader.svelte';
   import { t, i18n, type Locale, type TKey } from '$lib/i18n';
-  import { theme } from '$lib/stores/theme';
+  import { theme, density } from '$lib/stores/theme';
   import {
     NOTIFICATION_CLASSES,
     notificationPreferences,
@@ -205,16 +205,28 @@
   // which carries no single-selection contract at all.
   let themeDarkButton: HTMLButtonElement | undefined = $state();
   let themeLightButton: HTMLButtonElement | undefined = $state();
+  let themeSystemButton: HTMLButtonElement | undefined = $state();
 
-  function themeRadioKeydown(e: KeyboardEvent, current: 'dark' | 'light') {
+  // #680: `system` joins the radiogroup, so the arrow-key walk has to cycle
+  // through three cards instead of toggling two.
+  const THEME_OPTIONS = ['dark', 'light', 'system'] as const;
+  type ThemeOption = (typeof THEME_OPTIONS)[number];
+
+  function themeRadioKeydown(e: KeyboardEvent, current: ThemeOption) {
     const isNext = e.key === 'ArrowRight' || e.key === 'ArrowDown';
     const isPrev = e.key === 'ArrowLeft' || e.key === 'ArrowUp';
     if (!isNext && !isPrev) return;
     e.preventDefault();
-    const next = current === 'dark' ? 'light' : 'dark';
+    const step = isNext ? 1 : THEME_OPTIONS.length - 1;
+    const next = THEME_OPTIONS[(THEME_OPTIONS.indexOf(current) + step) % THEME_OPTIONS.length];
     theme.set(next);
     // Selection follows focus, and the roving tabindex moves with it.
-    (next === 'dark' ? themeDarkButton : themeLightButton)?.focus();
+    const buttons: Record<ThemeOption, HTMLButtonElement | undefined> = {
+      dark: themeDarkButton,
+      light: themeLightButton,
+      system: themeSystemButton
+    };
+    buttons[next]?.focus();
   }
 
   // #675: one toggle per desktop-notification class. The store is the shared
@@ -1623,8 +1635,29 @@
             <span class="swatch swatch-light"></span>
             <span class="theme-name">{t('settings.themeLight')}</span>
           </button>
+          <button type="button" class="theme-card" role="radio" bind:this={themeSystemButton}
+            aria-checked={$theme === 'system'} tabindex={$theme === 'system' ? 0 : -1}
+            class:is-active={$theme === 'system'}
+            onclick={() => theme.set('system')}
+            onkeydown={(e) => themeRadioKeydown(e, 'system')}>
+            <span class="swatch swatch-system"></span>
+            <span class="theme-name">{t('settings.themeSystem')}</span>
+          </button>
         </div>
       </div>
+      <!-- #680: spacing/type density. Token-scale override only (app.css
+        `[data-density="compact"]`), independent of the theme picker. -->
+      <div class="toggle-row">
+        <label for="compact-density">{t('settings.densityCompactLabel')}</label>
+        <input
+          id="compact-density"
+          type="checkbox"
+          checked={$density === 'compact'}
+          onchange={(e) =>
+            density.set((e.currentTarget as HTMLInputElement).checked ? 'compact' : 'comfortable')}
+        />
+      </div>
+      <p class="hint">{t('settings.densityHint')}</p>
       <div class="form-group">
         <label for="language">{t('settings.languageLabel')}</label>
         <!-- Language names are endonyms: shown in their own language by convention. -->
@@ -2092,7 +2125,7 @@
   }
   .theme-grid {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(3, 1fr);
     gap: var(--sp-3);
   }
   .theme-card {
@@ -2125,6 +2158,7 @@
   }
   .swatch-dark { background: linear-gradient(135deg, #0F1226 0%, #232852 100%); }
   .swatch-light { background: linear-gradient(135deg, #F6F7FB 0%, #FFFFFF 100%); }
+  .swatch-system { background: linear-gradient(100deg, #0F1226 0 48%, #F6F7FB 48% 100%); }
   .theme-name {
     font-size: var(--fs-sm);
     font-weight: 600;

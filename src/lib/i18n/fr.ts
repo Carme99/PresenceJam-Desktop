@@ -527,4 +527,9 @@ export const fr: Dict = {
   'settings.shortcutRejected': 'Inutilisable : {reason}',
   'settings.shortcutRegistrationFailed':
     'Échec de l’enregistrement sur ce bureau : {reason}',
+  // 4.7.0 — S12 hygiène (thème/densité)
+  'settings.themeSystem': 'Système',
+  'settings.densityCompactLabel': 'Espacement compact',
+  'settings.densityHint':
+    "Resserre les espacements et l'échelle typographique. Indépendant du thème ; « Système » suit l'apparence de votre système d'exploitation.",
 };

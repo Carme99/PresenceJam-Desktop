@@ -27,14 +27,23 @@
       try {
         // #423/#433: `?theme=` override first (detached), then stored key,
         // then OS preference. `let` + explicit catch param (review style).
+        // #680: `system` is a stored preference, not a paint value — it
+        // resolves through the OS now, and the theme store keeps following
+        // the media query after paint.
         let t = new URLSearchParams(location.search).get('theme');
-        if (t !== 'dark' && t !== 'light') {
+        if (t !== 'dark' && t !== 'light' && t !== 'system') {
           t = localStorage.getItem('presencejam:theme');
         }
         if (t !== 'dark' && t !== 'light') {
           t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
         }
         document.documentElement.setAttribute('data-theme', t);
+        // #680: density is painted pre-paint too, or a compact user sees one
+        // frame of comfortable spacing on every boot.
+        let d = localStorage.getItem('presencejam:density');
+        if (d === 'compact' || d === 'comfortable') {
+          document.documentElement.setAttribute('data-density', d);
+        }
       } catch (err) { /* storage blocked — theme store applies its default */ }
     </script>
     %sveltekit.head%

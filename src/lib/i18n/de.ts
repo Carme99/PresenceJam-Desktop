@@ -518,4 +518,9 @@ export const de: Dict = {
   'settings.shortcutRejected': 'Nicht verwendbar: {reason}',
   'settings.shortcutRegistrationFailed':
     'Registrierung auf diesem Desktop fehlgeschlagen: {reason}',
+  // 4.7.0 — S12 Hygiene (Design/Dichte)
+  'settings.themeSystem': 'System',
+  'settings.densityCompactLabel': 'Kompakte Abstände',
+  'settings.densityHint':
+    'Verkleinert Abstände und Schriftgrößen. Unabhängig vom Design; „System“ folgt der Darstellung Ihres Betriebssystems.',
 };
