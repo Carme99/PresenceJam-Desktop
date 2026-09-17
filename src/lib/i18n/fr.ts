@@ -446,4 +446,23 @@ export const fr: Dict = {
   // 4.7.0 — S3 tray/logs hygiene
   'settings.teamsPersistWarning':
     'Connecté, mais cet appareil n’a pas pu enregistrer la session — elle fonctionne jusqu’à la fermeture. Reconnectez Teams pour réessayer l’enregistrement.',
+
+  // 4.7.0 — S4 (rules engine)
+  'rules.quietWindowHint':
+    "Les heures calmes passent minuit — 22:00–07:00 court toute la nuit. Une heure de fin à 00:00 signifie minuit (la fin de la journée), et un début égal à la fin ne correspond jamais.",
+  'rules.pausePollingLabel': "Suspendre l'interrogation pendant cette plage",
+  'rules.pausePollingHint':
+    "Pendant cette plage, Spotify n'est pas interrogé du tout — aucun statut écrit, aucun appel Teams. L'interrogation reprend d'elle-même à la fin de la plage.",
+  'rules.trackRulesOrderHint':
+    "Les règles sont évaluées de haut en bas — la première qui correspond l'emporte. Sans jour sélectionné, une règle s'applique tous les jours ; une heure de fin à 00:00 signifie la fin de la journée, et un début égal à la fin ne correspond jamais.",
+  'rules.ruleStart': 'Début de la plage de la règle',
+  'rules.ruleEnd': 'Fin de la plage de la règle',
+  'rules.ruleDays': 'Jours actifs de cette règle (aucun sélectionné = tous les jours)',
+  'rules.moveRuleUp': 'Déplacer la règle {n} vers le haut',
+  'rules.moveRuleDown': 'Déplacer la règle {n} vers le bas',
+  'rules.manualStatusLabel': "Texte du statut en pause et à l'arrêt",
+  'rules.manualStatusHint':
+    "Texte publié comme statut Teams lorsque la lecture est en pause ou qu'il n'y a rien à jouer. L'émoji de musique est ajouté automatiquement ; vider le champ rétablit la valeur par défaut.",
+  'rules.pausedStatusPlaceholder': 'En pause',
+  'rules.stoppedStatusPlaceholder': 'Rien ne joue sur Spotify',
 };

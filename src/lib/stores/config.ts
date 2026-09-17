@@ -45,7 +45,12 @@ export const defaultConfig: AppConfig = {
     respect_manual_status: true,
     // 4.6 (finding #637): the out-of-office gate is opt-in, like
     // `availability_sync` before it.
-    gate_when_out_of_office: false
+    gate_when_out_of_office: false,
+    // 4.7.0 — S4 (issue #672): the user-templatable paused/stopped status
+    // texts. Rust keeps the emoji prefix out of the field, so these mirror
+    // the serde defaults verbatim.
+    paused_status_format: 'Paused',
+    stopped_status_format: 'Nothing playing on Spotify'
   },
   polling: {
     default_interval_seconds: BigInt(30),

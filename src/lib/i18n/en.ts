@@ -423,6 +423,25 @@ export const en = {
   // 4.7.0 — S3 tray/logs hygiene
   'settings.teamsPersistWarning':
     'Signed in, but this device could not save the session — it works until you quit. Reconnect Teams to try saving it again.',
+
+  // 4.7.0 — S4 (rules engine)
+  'rules.quietWindowHint':
+    'Quiet hours wrap over midnight — 22:00–07:00 runs through the night. An end time of 00:00 means midnight (the end of the day), and a start equal to the end never matches.',
+  'rules.pausePollingLabel': 'Stop polling during this window',
+  'rules.pausePollingHint':
+    'While this window is active Spotify is not queried at all — no status update and no Teams call. Polling resumes by itself when the window ends.',
+  'rules.trackRulesOrderHint':
+    'Rules are evaluated top to bottom — the first matching one wins. A rule with no weekdays applies every day, an end time of 00:00 means the end of the day, and a start equal to the end never matches.',
+  'rules.ruleStart': 'Rule window start',
+  'rules.ruleEnd': 'Rule window end',
+  'rules.ruleDays': 'Active days for this rule (none selected = every day)',
+  'rules.moveRuleUp': 'Move rule {n} up',
+  'rules.moveRuleDown': 'Move rule {n} down',
+  'rules.manualStatusLabel': 'Pause and stop status text',
+  'rules.manualStatusHint':
+    'The text posted as your Teams status while playback is paused and when nothing is playing. The music emoji is added for you; clearing a field restores the default.',
+  'rules.pausedStatusPlaceholder': 'Paused',
+  'rules.stoppedStatusPlaceholder': 'Nothing playing on Spotify',
 };
 
 export type Dict = { readonly [K in keyof typeof en]: string };

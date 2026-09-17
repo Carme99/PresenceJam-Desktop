@@ -468,3 +468,228 @@ describe('Settings Teams persistence warning (#693)', () => {
     expect(container.querySelector('.persist-banner')).toBeNull();
   });
 });
+
+
+/**
+ * S4 (issue #672): the rules card's scheduling, priority and manual-status
+ * controls, exercised through the real component.
+ *
+ * Fails pre-fix: a track-rule row has no window inputs, no weekday picker and
+ * no reorder controls, quiet hours have no pause-polling toggle, and the two
+ * manual-status texts have no editor — so every `querySelector` below is null
+ * and a saved rule carries no schedule.
+ */
+describe('Settings rule scheduling and priority controls (S4/#672)', () => {
+  it('saves a track rule window and weekday set', async () => {
+    const { container } = await mountSettings();
+
+    const addRule = [...container.querySelectorAll('.btn-secondary')].find(
+      (b) => b.textContent?.trim() === t('rules.addTrackRule')
+    ) as HTMLButtonElement;
+    await fireEvent.click(addRule);
+    await tick();
+
+    const group = container.querySelector(
+      '[role="group"][aria-label="' + t('rules.trackRulesLabel') + '"]'
+    ) as HTMLElement;
+    expect(group).not.toBeNull();
+    const start = group.querySelector(
+      'input[aria-label="' + t('rules.ruleStart') + '"]'
+    ) as HTMLInputElement;
+    const end = group.querySelector(
+      'input[aria-label="' + t('rules.ruleEnd') + '"]'
+    ) as HTMLInputElement;
+    // The new rule starts as the config default — every day, the whole day
+    // (the 1440 end renders as midnight).
+    expect(start.value).toBe('00:00');
+    expect(end.value).toBe('00:00');
+
+    await fireEvent.change(start, { target: { value: '08:00' } });
+    await fireEvent.change(end, { target: { value: '17:00' } });
+    const days = group.querySelector(
+      '[role="group"][aria-label="' + t('rules.ruleDays') + '"]'
+    ) as HTMLElement;
+    // Index 0 is Monday.
+    await fireEvent.click(days.querySelectorAll('input[type="checkbox"]')[0] as HTMLElement);
+    await tick();
+
+    await fireEvent.click(container.querySelector('.actions .btn-full') as HTMLElement);
+    await waitFor(() => {
+      const rule = get(configStore).status_rules.track_rules[0];
+      expect(rule.start_minutes).toBe(480);
+      expect(rule.end_minutes).toBe(1020);
+      expect(rule.days).toEqual([1]);
+    });
+  });
+
+  it('treats a picked 00:00 end time as the end of the day, not an empty window', async () => {
+    const { container } = await mountSettings();
+
+    const addRule = [...container.querySelectorAll('.btn-secondary')].find(
+      (b) => b.textContent?.trim() === t('rules.addTrackRule')
+    ) as HTMLButtonElement;
+    await fireEvent.click(addRule);
+    await tick();
+
+    const end = container.querySelector(
+      'input[aria-label="' + t('rules.ruleEnd') + '"]'
+    ) as HTMLInputElement;
+    await fireEvent.change(end, { target: { value: '23:00' } });
+    await fireEvent.click(container.querySelector('.actions .btn-full') as HTMLElement);
+    await waitFor(() => {
+      expect(get(configStore).status_rules.track_rules[0].end_minutes).toBe(1380);
+    });
+
+    // 00:00 is midnight — the same instant as the config's 1440 end of day, not
+    // an empty 0..0 window that would silently never match.
+    await fireEvent.change(end, { target: { value: '00:00' } });
+    await fireEvent.click(container.querySelector('.actions .btn-full') as HTMLElement);
+    await waitFor(() => {
+      expect(get(configStore).status_rules.track_rules[0].end_minutes).toBe(1440);
+    });
+  });
+
+  it('reorders rules, because the first match wins', async () => {
+    const { container } = await mountSettings();
+
+    const addRule = [...container.querySelectorAll('.btn-secondary')].find(
+      (b) => b.textContent?.trim() === t('rules.addTrackRule')
+    ) as HTMLButtonElement;
+    await fireEvent.click(addRule);
+    await fireEvent.click(addRule);
+    await tick();
+
+    const artists = [
+      ...container.querySelectorAll(
+        'input[aria-label="' + t('rules.artistPlaceholder') + '"]'
+      )
+    ] as HTMLInputElement[];
+    await fireEvent.input(artists[0], { target: { value: 'first' } });
+    await fireEvent.input(artists[1], { target: { value: 'second' } });
+    await tick();
+
+    // The first row's "up" control is disabled; the second row moves up.
+    const upFirst = container.querySelector(
+      'button[aria-label="' + t('rules.moveRuleUp', { n: 1 }) + '"]'
+    ) as HTMLButtonElement;
+    expect(upFirst.disabled).toBe(true);
+    await fireEvent.click(
+      container.querySelector(
+        'button[aria-label="' + t('rules.moveRuleUp', { n: 2 }) + '"]'
+      ) as HTMLElement
+    );
+    await tick();
+
+    await fireEvent.click(container.querySelector('.actions .btn-full') as HTMLElement);
+    await waitFor(() => {
+      expect(
+        get(configStore).status_rules.track_rules.map((r) => r.artist_substring)
+      ).toEqual(['second', 'first']);
+    });
+  });
+
+  it('resets the two manual-status editors the rules card renders', async () => {
+    const { container } = await mountSettings();
+
+    const pausedText = container.querySelector(
+      'input[aria-label="' + t('rules.pausedStatusPlaceholder') + '"]'
+    ) as HTMLInputElement;
+    const stoppedText = container.querySelector(
+      'input[aria-label="' + t('rules.stoppedStatusPlaceholder') + '"]'
+    ) as HTMLInputElement;
+    await fireEvent.input(pausedText, { target: { value: 'Back in 5' } });
+    await fireEvent.input(stoppedText, { target: { value: 'Idle' } });
+    await tick();
+
+    // Scope to the rules card: three other cards carry a "reset to default"
+    // control, and the first one in DOM order belongs to the presence card.
+    const rulesCard = [...container.querySelectorAll('section.card')].find(
+      (section) => section.querySelector('h2')?.textContent?.trim() === t('rules.sectionTitle')
+    ) as HTMLElement;
+    const reset = rulesCard.querySelector('button.btn-link') as HTMLButtonElement;
+    await fireEvent.click(reset);
+    await tick();
+
+    // The visible editors are back to the defaults, not left stale.
+    expect(pausedText.value).toBe(defaultConfig.teams.paused_status_format);
+    expect(stoppedText.value).toBe(defaultConfig.teams.stopped_status_format);
+
+    await fireEvent.click(container.querySelector('.actions .btn-full') as HTMLElement);
+    await waitFor(() => {
+      expect(get(configStore).teams.paused_status_format).toBe(
+        defaultConfig.teams.paused_status_format
+      );
+      expect(get(configStore).teams.stopped_status_format).toBe(
+        defaultConfig.teams.stopped_status_format
+      );
+    });
+  });
+
+  it('treats a picked 00:00 end time as midnight on a quiet window too', async () => {
+    const { container } = await mountSettings();
+
+    const addQuiet = [...container.querySelectorAll('.btn-secondary')].find(
+      (b) => b.textContent?.trim() === t('rules.addQuietHours')
+    ) as HTMLButtonElement;
+    await fireEvent.click(addQuiet);
+    await tick();
+
+    // The new entry defaults to 22:00–07:00; picking 00:00 for the end must save
+    // midnight (= 1440, the end of the day) rather than 0, which would be an
+    // empty window the user cannot tell from a broken rule.
+    const start = container.querySelector(
+      'input[aria-label="' + t('rules.quietStart') + '"]'
+    ) as HTMLInputElement;
+    const end = container.querySelector(
+      'input[aria-label="' + t('rules.quietEnd') + '"]'
+    ) as HTMLInputElement;
+    await fireEvent.change(start, { target: { value: '00:00' } });
+    await fireEvent.change(end, { target: { value: '00:00' } });
+    await fireEvent.click(container.querySelector('.actions .btn-full') as HTMLElement);
+
+    await waitFor(() => {
+      const entry = get(configStore).status_rules.quiet_hours[0];
+      expect(entry.start_minutes).toBe(0);
+      expect(entry.end_minutes).toBe(1440);
+    });
+  });
+
+  it('saves the pause-polling toggle and the two manual-status texts', async () => {
+    const { container } = await mountSettings();
+
+    const addQuiet = [...container.querySelectorAll('.btn-secondary')].find(
+      (b) => b.textContent?.trim() === t('rules.addQuietHours')
+    ) as HTMLButtonElement;
+    await fireEvent.click(addQuiet);
+    await tick();
+
+    const pauseLabel = [...container.querySelectorAll('label.rule-check')].find((l) =>
+      l.textContent?.includes(t('rules.pausePollingLabel'))
+    ) as HTMLElement;
+    expect(pauseLabel).toBeTruthy();
+    const pauseToggle = pauseLabel.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    expect(pauseToggle.checked).toBe(false);
+
+    const pausedText = container.querySelector(
+      'input[aria-label="' + t('rules.pausedStatusPlaceholder') + '"]'
+    ) as HTMLInputElement;
+    const stoppedText = container.querySelector(
+      'input[aria-label="' + t('rules.stoppedStatusPlaceholder') + '"]'
+    ) as HTMLInputElement;
+    // The editors show the Rust serde defaults.
+    expect(pausedText.value).toBe('Paused');
+    expect(stoppedText.value).toBe('Nothing playing on Spotify');
+
+    await fireEvent.click(pauseToggle);
+    await fireEvent.input(pausedText, { target: { value: 'Back in 5' } });
+    await fireEvent.input(stoppedText, { target: { value: 'Idle' } });
+    await tick();
+
+    await fireEvent.click(container.querySelector('.actions .btn-full') as HTMLElement);
+    await waitFor(() => {
+      expect(get(configStore).status_rules.quiet_hours[0].pause_polling).toBe(true);
+      expect(get(configStore).teams.paused_status_format).toBe('Back in 5');
+      expect(get(configStore).teams.stopped_status_format).toBe('Idle');
+    });
+  });
+});

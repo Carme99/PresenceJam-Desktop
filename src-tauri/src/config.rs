@@ -118,6 +118,18 @@ pub struct TeamsConfig {
     /// user opts in.
     #[serde(default = "default_gate_when_out_of_office")]
     pub gate_when_out_of_office: bool,
+    /// S4 (issue #672): the text posted as the Teams status message while
+    /// playback is paused — the user-templatable form of the literal the
+    /// paused clear used to hardcode (`"🎵 Paused"`, emoji included by
+    /// `poll_once`). Defaults to that literal's text, so an existing config
+    /// renders byte-identically.
+    #[serde(default = "default_paused_status_format")]
+    pub paused_status_format: String,
+    /// S4 (issue #672): the text posted when nothing is playing — the
+    /// user-templatable form of the no-track clear's hardcoded
+    /// `"🎵 Nothing playing on Spotify"`. Defaults to that literal's text.
+    #[serde(default = "default_stopped_status_format")]
+    pub stopped_status_format: String,
 }
 
 fn default_status_format() -> String {
@@ -154,6 +166,14 @@ fn default_respect_manual_status() -> bool {
 
 fn default_gate_when_out_of_office() -> bool {
     false
+}
+
+fn default_paused_status_format() -> String {
+    "Paused".to_string()
+}
+
+fn default_stopped_status_format() -> String {
+    "Nothing playing on Spotify".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
@@ -214,9 +234,12 @@ fn clamp_polling(cfg: &mut PollingConfig) {
     cfg.pause_backoff_max_seconds = cfg.pause_backoff_max_seconds.clamp(60, 3600);
 }
 
-/// Bound the user-supplied profanity lexicon (CfgDiag#3(b), issue #538):
-/// at most 64 entries, each at most 32 characters. `clamped_config` is the
-/// only normalizer, so this runs on load and on every save.
+/// Bound the user-supplied teams text fields: the profanity lexicon
+/// (CfgDiag#3(b), issue #538) to at most 64 entries of 32 characters, and the
+/// two manual-status texts (S4, issue #672) to
+/// [`MAX_RULE_STATUS_CHARS`] like a rule's replacement text.
+/// `clamped_config` is the only normalizer, so this runs on load and on every
+/// save.
 fn clamp_teams(cfg: &mut TeamsConfig) {
     cfg.profanity_extra_words.truncate(64);
     for word in &mut cfg.profanity_extra_words {
@@ -224,6 +247,11 @@ fn clamp_teams(cfg: &mut TeamsConfig) {
             *word = word.chars().take(32).collect();
         }
     }
+    // S4 (issue #672): the two manual-status texts are status lines too, so they
+    // are bounded exactly like a rule's replacement text. An empty text is left
+    // alone — `poll_once` reads it as "use the default".
+    clamp_rule_text(&mut cfg.paused_status_format);
+    clamp_rule_text(&mut cfg.stopped_status_format);
 }
 
 /// The closed set of `availability`/`activity` pairs the Graph
@@ -284,6 +312,11 @@ pub fn normalize_presence_pair(availability: &str, activity: &str) -> Option<Pre
 /// never silent.
 pub const MAX_RULE_STATUS_CHARS: usize = 128;
 
+/// S4 (issue #672): minutes in a track rule's day. `end_minutes` may be
+/// `TRACK_RULE_DAY_MINUTES` (= the end of the day), which is why the track-rule
+/// window uses `u32` while [`QuietHoursEntry`] clamps to `0..=1439`.
+pub const TRACK_RULE_DAY_MINUTES: u32 = 1440;
+
 /// Normalize the rule model (finding #634, issue #634): canonicalize every
 /// presence pair and bound every replacement text. Mirrors `clamp_polling` /
 /// `clamp_teams`, so it runs on load and on every save through
@@ -299,6 +332,7 @@ fn clamp_rules(cfg: &mut StatusRulesConfig) {
     for rule in &mut cfg.track_rules {
         clamp_presence_pair(&mut rule.presence_availability, &mut rule.presence_activity);
         clamp_rule_text(&mut rule.replacement_status);
+        clamp_track_rule_window(rule);
     }
 }
 
@@ -323,6 +357,27 @@ fn clamp_rule_text(text: &mut String) {
     if text.chars().count() > MAX_RULE_STATUS_CHARS {
         *text = text.chars().take(MAX_RULE_STATUS_CHARS).collect();
     }
+}
+
+/// S4 (issue #672): normalize a track rule's schedule in place.
+///
+/// Minutes are clamped into `0..=TRACK_RULE_DAY_MINUTES`, so a hand-edited
+/// config cannot wedge the comparison, and the weekday filter is reduced to the
+/// documented ISO range `1..=7` (deduplicated, so `days` matches the `days`
+/// invariant [`QuietHoursEntry`] relies on). The window itself keeps
+/// [`QuietHoursEntry`]'s semantics: `[start, end)` with a wrap-around pair
+/// (`start > end`, e.g. 22:00→07:00) honoured, and `start == end` matching
+/// nothing.
+fn clamp_track_rule_window(rule: &mut TrackRuleEntry) {
+    // A START of 1440 is unreachable: `now` never exceeds 1439, so such a rule
+    // could never match while the picker happily renders it as 00:00. Clamp the
+    // start to the last minute of the day instead, and the end to the end of
+    // the day (1440), which IS reachable as "until midnight".
+    rule.start_minutes = rule.start_minutes.min(TRACK_RULE_DAY_MINUTES - 1);
+    rule.end_minutes = rule.end_minutes.min(TRACK_RULE_DAY_MINUTES);
+    rule.days.retain(|day| (1..=7).contains(day));
+    rule.days.sort_unstable();
+    rule.days.dedup();
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
@@ -449,6 +504,13 @@ pub struct QuietHoursEntry {
     pub presence_availability: String,
     #[serde(default)]
     pub presence_activity: String,
+    /// S4 (issue #672): also stop POLLING while this window is active, not
+    /// just the status write — no Spotify GET, no Graph work, and no clock
+    /// movement for the duration (the polling driver re-evaluates the window
+    /// every iteration, so it resumes by itself). OFF by default: 4.6
+    /// behaviour is unchanged until the user opts in.
+    #[serde(default = "default_pause_polling")]
+    pub pause_polling: bool,
 }
 
 /// Mirrors the serde defaults field-by-field (note `end_minutes` defaults to
@@ -464,12 +526,31 @@ impl Default for QuietHoursEntry {
             replacement_status: String::new(),
             presence_availability: String::new(),
             presence_activity: String::new(),
+            pause_polling: default_pause_polling(),
         }
     }
 }
 
 fn default_quiet_end() -> u16 {
     420
+}
+
+fn default_pause_polling() -> bool {
+    false
+}
+
+fn default_track_rule_days() -> Vec<u8> {
+    Vec::new()
+}
+
+fn default_track_rule_start() -> u32 {
+    0
+}
+
+/// The contract's default end: the end of the day, so the default window
+/// covers every minute (0 → 1440).
+fn default_track_rule_end() -> u32 {
+    TRACK_RULE_DAY_MINUTES
 }
 
 /// One track-matching rule for issue #432: when `artist_substring` /
@@ -499,6 +580,22 @@ pub struct TrackRuleEntry {
     pub presence_availability: String,
     #[serde(default)]
     pub presence_activity: String,
+    /// S4 (issue #672): ISO weekday numbers 1 (Mon)..=7 (Sun) this rule
+    /// applies on; empty = every day — the same shape and semantics
+    /// [`QuietHoursEntry::days`] uses, normalized by `clamp_rules` (see
+    /// [`clamp_track_rule_window`]).
+    #[serde(default = "default_track_rule_days")]
+    pub days: Vec<u8>,
+    /// S4 (issue #672): start of the rule's local-time window, in minutes since
+    /// midnight. The window is `[start_minutes, end_minutes)` with the same
+    /// wrap-around rule as [`QuietHoursEntry`] (22:00→07:00 works); the
+    /// default pair (`0`, `1440`) covers every minute of the day.
+    #[serde(default = "default_track_rule_start")]
+    pub start_minutes: u32,
+    /// S4 (issue #672): end of the rule's local-time window, in minutes since
+    /// midnight; `1440` is the end of the day.
+    #[serde(default = "default_track_rule_end")]
+    pub end_minutes: u32,
 }
 
 /// Mirrors the serde defaults field-by-field — see [`QuietHoursEntry`].
@@ -511,6 +608,9 @@ impl Default for TrackRuleEntry {
             replacement_status: String::new(),
             presence_availability: String::new(),
             presence_activity: String::new(),
+            days: default_track_rule_days(),
+            start_minutes: default_track_rule_start(),
+            end_minutes: default_track_rule_end(),
         }
     }
 }
@@ -582,6 +682,8 @@ impl Default for TeamsConfig {
             profanity_extra_words: Vec::new(),
             respect_manual_status: default_respect_manual_status(),
             gate_when_out_of_office: default_gate_when_out_of_office(),
+            paused_status_format: default_paused_status_format(),
+            stopped_status_format: default_stopped_status_format(),
         }
     }
 }
@@ -659,6 +761,13 @@ pub struct TeamsPatch {
     pub presence_gate: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profanity_extra_words: Option<Vec<String>>,
+    /// S4 (issue #672): the user-templatable paused/stopped status texts, part
+    /// of the same field-level patch as the rest of the section — a Settings
+    /// save that omitted them would leave the stored text untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_status_format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped_status_format: Option<String>,
 }
 
 /// Field-level patch for the `polling` section (CfgDiag#0, issue #535). Every
@@ -769,6 +878,12 @@ pub fn apply_patch(base: &mut AppConfig, patch: &ConfigPatch) {
         }
         if let Some(v) = &p.profanity_extra_words {
             base.teams.profanity_extra_words = v.clone();
+        }
+        if let Some(v) = &p.paused_status_format {
+            base.teams.paused_status_format = v.clone();
+        }
+        if let Some(v) = &p.stopped_status_format {
+            base.teams.stopped_status_format = v.clone();
         }
     }
     if let Some(p) = &patch.polling {
@@ -1852,6 +1967,8 @@ mod tests {
         cfg.teams.availability_sync = true;
         cfg.teams.presence_gate = false;
         cfg.teams.profanity_extra_words = vec!["spam".to_string()];
+        cfg.teams.paused_status_format = "Custom paused".to_string();
+        cfg.teams.stopped_status_format = "Custom stopped".to_string();
         cfg.polling.default_interval_seconds = 45;
         cfg.polling.minimum_interval_seconds = 20;
         cfg.polling.max_interval_seconds = 120;
@@ -1865,12 +1982,16 @@ mod tests {
             end_minutes: 420,
             days: vec![1, 2, 3, 4, 5],
             replacement_status: "Busy".to_string(),
+            pause_polling: true,
             ..QuietHoursEntry::default()
         });
         cfg.status_rules.track_rules.push(TrackRuleEntry {
             enabled: true,
             artist_substring: "lofi".to_string(),
             track_substring: String::new(),
+            days: vec![6, 7],
+            start_minutes: 480,
+            end_minutes: 1020,
             replacement_status: "Focus".to_string(),
             presence_availability: "DoNotDisturb".to_string(),
             presence_activity: "Presenting".to_string(),
@@ -2052,6 +2173,14 @@ mod tests {
             (
                 r#"{"teams": {"profanity_extra_words": ["a"]}}"#,
                 &["teams.profanity_extra_words"],
+            ),
+            (
+                r#"{"teams": {"paused_status_format": "BRB"}}"#,
+                &["teams.paused_status_format"],
+            ),
+            (
+                r#"{"teams": {"stopped_status_format": "Idle"}}"#,
+                &["teams.stopped_status_format"],
             ),
             (
                 r#"{"polling": {"default_interval_seconds": 100}}"#,
@@ -2292,6 +2421,135 @@ mod tests {
         assert_eq!(back.status_rules.quiet_hours[0].replacement_status, "Busy");
     }
 
+    // ---------------------------------------------------------------
+    // S4 (#672): rule schedules, `pause_polling`, manual-status texts.
+    // ---------------------------------------------------------------
+
+    /// Pre-4.7 files keep loading: every new field carries a serde default, and
+    /// the defaults describe the 4.6 behaviour (a rule with no schedule applies
+    /// every day, quiet hours do not pause polling, and the two status texts
+    /// render what 4.6 posted).
+    #[test]
+    fn test_rule_schedule_additions_default_on_old_files() {
+        let cfg: AppConfig = serde_json::from_str(
+            r#"{
+                "teams": {},
+                "status_rules": {
+                    "quiet_hours": [{"enabled": true}],
+                    "track_rules": [{"enabled": true, "artist_substring": "lofi"}]
+                }
+            }"#,
+        )
+        .expect("a pre-4.7 document must still parse");
+
+        let rule = &cfg.status_rules.track_rules[0];
+        assert!(rule.days.is_empty(), "no weekday set means every day");
+        assert_eq!(rule.start_minutes, 0);
+        assert_eq!(rule.end_minutes, TRACK_RULE_DAY_MINUTES);
+        assert!(!cfg.status_rules.quiet_hours[0].pause_polling);
+        assert_eq!(cfg.teams.paused_status_format, "Paused");
+        assert_eq!(
+            cfg.teams.stopped_status_format,
+            "Nothing playing on Spotify"
+        );
+
+        // The serde defaults and the hand-written `Default` impls agree, so a
+        // fixture built with `..Default::default()` describes the same rule a
+        // config file missing the fields does.
+        assert_eq!(rule.days, TrackRuleEntry::default().days);
+        assert_eq!(rule.start_minutes, TrackRuleEntry::default().start_minutes);
+        assert_eq!(rule.end_minutes, TrackRuleEntry::default().end_minutes);
+        assert!(!QuietHoursEntry::default().pause_polling);
+    }
+
+    /// The new fields round-trip through serde — load, save, load again.
+    #[test]
+    fn test_rule_schedule_additions_round_trip() {
+        let cfg: AppConfig = serde_json::from_str(
+            r#"{
+                "teams": {
+                    "paused_status_format": "Back in 5",
+                    "stopped_status_format": "Idle"
+                },
+                "status_rules": {
+                    "quiet_hours": [{"enabled": true, "pause_polling": true}],
+                    "track_rules": [{
+                        "enabled": true,
+                        "days": [1, 3],
+                        "start_minutes": 480,
+                        "end_minutes": 1020
+                    }]
+                }
+            }"#,
+        )
+        .expect("must parse");
+        assert!(cfg.status_rules.quiet_hours[0].pause_polling);
+        assert_eq!(cfg.status_rules.track_rules[0].days, vec![1, 3]);
+        assert_eq!(cfg.status_rules.track_rules[0].start_minutes, 480);
+        assert_eq!(cfg.status_rules.track_rules[0].end_minutes, 1020);
+
+        let json = serde_json::to_string(&cfg).expect("must serialize");
+        let back: AppConfig = serde_json::from_str(&json).expect("must re-parse");
+        assert_eq!(back.teams.paused_status_format, "Back in 5");
+        assert_eq!(back.teams.stopped_status_format, "Idle");
+        assert!(back.status_rules.quiet_hours[0].pause_polling);
+        assert_eq!(back.status_rules.track_rules[0].days, vec![1, 3]);
+        assert_eq!(back.status_rules.track_rules[0].start_minutes, 480);
+        assert_eq!(back.status_rules.track_rules[0].end_minutes, 1020);
+    }
+
+    /// `clamp_rules` normalizes the schedule too: the window is bounded to
+    /// `0..=1440` and the weekday set to the documented ISO range `1..=7`,
+    /// deduplicated — on load and on every save.
+    #[test]
+    fn test_clamp_rules_normalizes_the_track_rule_window() {
+        let mut rules = StatusRulesConfig {
+            quiet_hours: Vec::new(),
+            track_rules: vec![
+                TrackRuleEntry {
+                    start_minutes: 5000,
+                    end_minutes: 9000,
+                    days: vec![0, 7, 1, 9, 1, 8],
+                    ..TrackRuleEntry::default()
+                },
+                TrackRuleEntry {
+                    start_minutes: 480,
+                    end_minutes: 1020,
+                    days: vec![6, 7],
+                    ..TrackRuleEntry::default()
+                },
+            ],
+        };
+        clamp_rules(&mut rules);
+        assert_eq!(
+            rules.track_rules[0].start_minutes,
+            TRACK_RULE_DAY_MINUTES - 1,
+            "a start of 1440 is unreachable, so it clamps to the last minute"
+        );
+        assert_eq!(rules.track_rules[0].end_minutes, TRACK_RULE_DAY_MINUTES);
+        assert_eq!(
+            rules.track_rules[0].days,
+            vec![1, 7],
+            "weekday bytes outside 1..=7 are dropped and duplicates collapse"
+        );
+        assert_eq!(rules.track_rules[1].start_minutes, 480);
+        assert_eq!(rules.track_rules[1].end_minutes, 1020);
+        assert_eq!(rules.track_rules[1].days, vec![6, 7]);
+
+        // What is persisted is the normalized rule, not the raw file.
+        let json = serde_json::to_string_pretty(&clamped_config(&AppConfig {
+            status_rules: rules,
+            ..AppConfig::default()
+        }))
+        .expect("must serialize");
+        let back: AppConfig = serde_json::from_str(&json).expect("must re-parse");
+        assert_eq!(back.status_rules.track_rules[0].days, vec![1, 7]);
+        assert_eq!(
+            back.status_rules.track_rules[0].end_minutes,
+            TRACK_RULE_DAY_MINUTES
+        );
+    }
+
     /// An oversized user lexicon is bounded, not rejected: the filter must
     /// never take an unbounded amount of work from a hand-edited file.
     #[test]
@@ -2319,6 +2577,37 @@ mod tests {
         };
         clamp_teams(&mut teams);
         assert_eq!(teams.profanity_extra_words[0].chars().count(), 32);
+    }
+
+    /// S4 (issue #672): the two manual-status texts are status lines, so
+    /// `clamp_teams` bounds them like a rule's replacement text — and an EMPTY
+    /// text is left empty (the renderer reads that as "use the default").
+    #[test]
+    fn test_clamp_teams_bounds_the_manual_status_texts() {
+        let mut teams = TeamsConfig {
+            paused_status_format: "ü".repeat(200),
+            stopped_status_format: "z".repeat(200),
+            ..TeamsConfig::default()
+        };
+        clamp_teams(&mut teams);
+        assert_eq!(
+            teams.paused_status_format.chars().count(),
+            MAX_RULE_STATUS_CHARS
+        );
+        assert_eq!(
+            teams.stopped_status_format.chars().count(),
+            MAX_RULE_STATUS_CHARS
+        );
+        // Char-boundary safe (the truncation above would have panicked
+        // otherwise) and short texts are untouched.
+        let mut short = TeamsConfig {
+            paused_status_format: "Back in 5".to_string(),
+            stopped_status_format: String::new(),
+            ..TeamsConfig::default()
+        };
+        clamp_teams(&mut short);
+        assert_eq!(short.paused_status_format, "Back in 5");
+        assert!(short.stopped_status_format.is_empty());
     }
 
     /// `clamped_config` is applied on load AND on save, so the bounded

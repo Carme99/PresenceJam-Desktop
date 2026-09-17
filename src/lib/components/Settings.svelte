@@ -73,6 +73,10 @@
   // additive with serde defaults, so a default section is always valid.
   function resetRulesDefaults() {
     localConfig.status_rules = structuredClone(defaultConfig.status_rules);
+    // S4 (issue #672): the card also renders the two manual-status texts, so
+    // Reset must not leave those editors showing a stale value.
+    localConfig.teams.paused_status_format = defaultConfig.teams.paused_status_format;
+    localConfig.teams.stopped_status_format = defaultConfig.teams.stopped_status_format;
   }
   // Issue #432: format minutes-since-midnight as HH:MM for time inputs.
   function minutesToTime(m: number): string {
@@ -86,6 +90,28 @@
     const h = Math.min(23, Math.max(0, Number(match[1])));
     const mm = Math.min(59, Math.max(0, Number(match[2])));
     return h * 60 + mm;
+  }
+
+  // S4 (issue #672): a track rule's window END spans 0..=1440, where 1440 is
+  // the end of the day (the config default). `<input type="time">` can only
+  // express 00:00–23:59, and a picked 00:00 is midnight — the same instant as
+  // 1440 — so it is stored as 1440 instead of 0, which would be an empty
+  // window that never matches.
+  function endMinutesFromTime(value: string, fallback: number): number {
+    const minutes = timeToMinutes(value, fallback % 1440);
+    return minutes === 0 ? 1440 : minutes;
+  }
+  // S4 (issue #672): array order is priority (the first matching rule wins), so
+  // the card needs a way to reorder the rules.
+  function moveRule(
+    rules: AppConfig['status_rules']['track_rules'],
+    index: number,
+    delta: number
+  ): void {
+    const target = index + delta;
+    if (target < 0 || target >= rules.length) return;
+    const [moved] = rules.splice(index, 1);
+    rules.splice(target, 0, moved);
   }
   function resetPollingDefaults() {
     localConfig.polling = structuredClone(defaultConfig.polling);
@@ -850,6 +876,7 @@
       {:else}
       <div class="form-group">
         <span class="form-label">{t('rules.quietHoursLabel')}</span>
+        <p class="hint">{t('rules.quietWindowHint')}</p>
         {#if localConfig.status_rules.quiet_hours.length === 0}
           <p class="hint">{t('rules.noQuietHours')}</p>
         {/if}
@@ -864,10 +891,15 @@
                 aria-label={t('rules.quietStart')}
               />
               <span aria-hidden="true">–</span>
+              <!-- S4 (issue #672): the same `00:00`-means-midnight mapping the
+                   track-rule window uses, so the picker can never save a
+                   silently inert `00:00–00:00` quiet window (Rust clamps the end
+                   to 1439 for the comparison, and 1440 is the end of the day
+                   there too). -->
               <input
                 type="time"
                 value={minutesToTime(entry.end_minutes)}
-                onchange={(e) => { entry.end_minutes = timeToMinutes((e.currentTarget as HTMLInputElement).value, entry.end_minutes); }}
+                onchange={(e) => { entry.end_minutes = endMinutesFromTime((e.currentTarget as HTMLInputElement).value, entry.end_minutes); }}
                 aria-label={t('rules.quietEnd')}
               />
               <button
@@ -893,6 +925,13 @@
                 </label>
               {/each}
             </div>
+            <div class="rule-row">
+              <label class="rule-check">
+                <input type="checkbox" bind:checked={entry.pause_polling} />
+                <span>{t('rules.pausePollingLabel')}</span>
+              </label>
+            </div>
+            <p class="hint">{t('rules.pausePollingHint')}</p>
             <div class="rule-row">
               <!-- Issue #538: the quiet-hours replacement status was config-only
                    until 4.6 — this is its editor. Finding #634: the same row
@@ -926,61 +965,142 @@
         <button
           type="button"
           class="btn-secondary"
-          onclick={() => { localConfig.status_rules.quiet_hours.push({ enabled: true, start_minutes: 1320, end_minutes: 420, days: [], replacement_status: '', presence_availability: '', presence_activity: '' }); }}
+          onclick={() => { localConfig.status_rules.quiet_hours.push({ enabled: true, start_minutes: 1320, end_minutes: 420, days: [], replacement_status: '', presence_availability: '', presence_activity: '', pause_polling: false }); }}
         >{t('rules.addQuietHours')}</button>
       </div>
       <div class="form-group">
         <span class="form-label">{t('rules.trackRulesLabel')}</span>
+        <p class="hint">{t('rules.trackRulesOrderHint')}</p>
         {#if localConfig.status_rules.track_rules.length === 0}
           <p class="hint">{t('rules.noTrackRules')}</p>
         {/if}
         {#each localConfig.status_rules.track_rules as rule, j}
           <div class="rule-row rule-col" role="group" aria-label={t('rules.trackRulesLabel')}>
-            <label class="rule-check">
-              <input type="checkbox" bind:checked={rule.enabled} />
-              <span>{t('rules.ruleEnabled')}</span>
-            </label>
-            <input
-              type="text"
-              bind:value={rule.artist_substring}
-              placeholder={t('rules.artistPlaceholder')}
-              aria-label={t('rules.artistPlaceholder')}
-            />
-            <input
-              type="text"
-              bind:value={rule.track_substring}
-              placeholder={t('rules.trackPlaceholder')}
-              aria-label={t('rules.trackPlaceholder')}
-            />
-            <input
-              type="text"
-              bind:value={rule.replacement_status}
-              maxlength={MAX_RULE_STATUS_CHARS}
-              placeholder={t('rules.replacementPlaceholder')}
-              aria-label={t('rules.replacementPlaceholder')}
-            />
-            <select
-              value={presenceValue(rule.presence_availability, rule.presence_activity)}
-              onchange={(e) => applyPresenceValue(rule, (e.currentTarget as HTMLSelectElement).value)}
-              aria-label={t('rules.presenceLabel')}
-            >
-              <option value="">{t('rules.presenceNone')}</option>
-              {#each PRESENCE_OPTIONS as option}
-                <option value={`${option.availability}|${option.activity}`}>{option.label}</option>
+            <div class="rule-row">
+              <label class="rule-check">
+                <input type="checkbox" bind:checked={rule.enabled} />
+                <span>{t('rules.ruleEnabled')}</span>
+              </label>
+              <button
+                type="button"
+                class="btn-link"
+                disabled={j === 0}
+                aria-label={t('rules.moveRuleUp', { n: j + 1 })}
+                onclick={() => moveRule(localConfig.status_rules.track_rules, j, -1)}
+              >↑</button>
+              <button
+                type="button"
+                class="btn-link"
+                disabled={j === localConfig.status_rules.track_rules.length - 1}
+                aria-label={t('rules.moveRuleDown', { n: j + 1 })}
+                onclick={() => moveRule(localConfig.status_rules.track_rules, j, 1)}
+              >↓</button>
+              <button
+                type="button"
+                class="btn-link"
+                onclick={() => { localConfig.status_rules.track_rules.splice(j, 1); }}
+              >{t('rules.removeRule')}</button>
+            </div>
+            <div class="rule-row">
+              <input
+                type="text"
+                bind:value={rule.artist_substring}
+                placeholder={t('rules.artistPlaceholder')}
+                aria-label={t('rules.artistPlaceholder')}
+              />
+              <input
+                type="text"
+                bind:value={rule.track_substring}
+                placeholder={t('rules.trackPlaceholder')}
+                aria-label={t('rules.trackPlaceholder')}
+              />
+            </div>
+            <div class="rule-row">
+              <input
+                type="text"
+                bind:value={rule.replacement_status}
+                maxlength={MAX_RULE_STATUS_CHARS}
+                placeholder={t('rules.replacementPlaceholder')}
+                aria-label={t('rules.replacementPlaceholder')}
+              />
+              <select
+                value={presenceValue(rule.presence_availability, rule.presence_activity)}
+                onchange={(e) => applyPresenceValue(rule, (e.currentTarget as HTMLSelectElement).value)}
+                aria-label={t('rules.presenceLabel')}
+              >
+                <option value="">{t('rules.presenceNone')}</option>
+                {#each PRESENCE_OPTIONS as option}
+                  <option value={`${option.availability}|${option.activity}`}>{option.label}</option>
+                {/each}
+              </select>
+            </div>
+            {#if rule.replacement_status.length >= MAX_RULE_STATUS_CHARS}
+              <p class="clamp-hint" role="status">
+                {t('rules.replacementClampHint', { max: MAX_RULE_STATUS_CHARS })}
+              </p>
+            {/if}
+            <!-- S4 (issue #672): the rule's own window, reusing the quiet-hours
+                 time inputs and weekday picker verbatim. -->
+            <div class="rule-row">
+              <input
+                type="time"
+                value={minutesToTime(rule.start_minutes)}
+                onchange={(e) => { rule.start_minutes = timeToMinutes((e.currentTarget as HTMLInputElement).value, rule.start_minutes); }}
+                aria-label={t('rules.ruleStart')}
+              />
+              <span aria-hidden="true">–</span>
+              <input
+                type="time"
+                value={minutesToTime(rule.end_minutes)}
+                onchange={(e) => { rule.end_minutes = endMinutesFromTime((e.currentTarget as HTMLInputElement).value, rule.end_minutes); }}
+                aria-label={t('rules.ruleEnd')}
+              />
+            </div>
+            <div class="rule-row days-row" role="group" aria-label={t('rules.ruleDays')}>
+              {#each [1, 2, 3, 4, 5, 6, 7] as day}
+                <label class="rule-check day-check">
+                  <input
+                    type="checkbox"
+                    checked={rule.days.includes(day)}
+                    onchange={(e) => {
+                      const on = (e.currentTarget as HTMLInputElement).checked;
+                      rule.days = on
+                        ? [...rule.days, day].sort()
+                        : rule.days.filter((d) => d !== day);
+                    }}
+                  />
+                  <span>{t(`rules.day${day}` as 'rules.day1')}</span>
+                </label>
               {/each}
-            </select>
-            <button
-              type="button"
-              class="btn-link"
-              onclick={() => { localConfig.status_rules.track_rules.splice(j, 1); }}
-            >{t('rules.removeRule')}</button>
+            </div>
+            <p class="hint">{t('rules.presenceHint')}</p>
           </div>
         {/each}
         <button
           type="button"
           class="btn-secondary"
-          onclick={() => { localConfig.status_rules.track_rules.push({ enabled: false, artist_substring: '', track_substring: '', replacement_status: '', presence_availability: '', presence_activity: '' }); }}
+          onclick={() => { localConfig.status_rules.track_rules.push({ enabled: false, artist_substring: '', track_substring: '', replacement_status: '', presence_availability: '', presence_activity: '', days: [], start_minutes: 0, end_minutes: 1440 }); }}
         >{t('rules.addTrackRule')}</button>
+      </div>
+      <div class="form-group">
+        <span class="form-label">{t('rules.manualStatusLabel')}</span>
+        <p class="hint">{t('rules.manualStatusHint')}</p>
+        <div class="rule-row">
+          <input
+            type="text"
+            bind:value={localConfig.teams.paused_status_format}
+            maxlength={MAX_RULE_STATUS_CHARS}
+            placeholder={t('rules.pausedStatusPlaceholder')}
+            aria-label={t('rules.pausedStatusPlaceholder')}
+          />
+          <input
+            type="text"
+            bind:value={localConfig.teams.stopped_status_format}
+            maxlength={MAX_RULE_STATUS_CHARS}
+            placeholder={t('rules.stoppedStatusPlaceholder')}
+            aria-label={t('rules.stoppedStatusPlaceholder')}
+          />
+        </div>
       </div>
       {/if}
     </section>

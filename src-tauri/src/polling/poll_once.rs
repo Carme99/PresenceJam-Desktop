@@ -14,6 +14,7 @@
 //! All three collapse to a single function here. See the regression
 //! tests at the bottom of this file for invariants.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -1369,25 +1370,41 @@ fn matching_quiet_hours(
     now_minutes: u16,
     weekday: u8,
 ) -> Option<&crate::config::QuietHoursEntry> {
+    rules
+        .quiet_hours
+        .iter()
+        .find(|entry| quiet_entry_contains(entry, now_minutes, weekday))
+}
+
+/// Whether ONE quiet-hours entry is active at the given local time: enabled, the
+/// weekday filter passes (empty = every day), and the time falls in
+/// `[start, end)` — with wrap-around (e.g. 22:00→07:00) handled as
+/// `now >= start || now < end`. Minutes are clamped to 0..=1439 so a hand-edited
+/// config cannot wedge the comparison, and a zero-length window (`start == end`)
+/// matches nothing. Extracted (S4, issue #672) so the "pause polling" gate can
+/// ask the question per entry instead of only of the first match.
+fn quiet_entry_contains(
+    entry: &crate::config::QuietHoursEntry,
+    now_minutes: u16,
+    weekday: u8,
+) -> bool {
     let now = now_minutes.min(1439);
-    rules.quiet_hours.iter().find(|entry| {
-        if !entry.enabled {
-            return false;
-        }
-        if !entry.days.is_empty() && !entry.days.contains(&weekday) {
-            return false;
-        }
-        let start = entry.start_minutes.min(1439);
-        let end = entry.end_minutes.min(1439);
-        if start == end {
-            return false;
-        }
-        if start < end {
-            now >= start && now < end
-        } else {
-            now >= start || now < end
-        }
-    })
+    if !entry.enabled {
+        return false;
+    }
+    if !entry.days.is_empty() && !entry.days.contains(&weekday) {
+        return false;
+    }
+    let start = entry.start_minutes.min(1439);
+    let end = entry.end_minutes.min(1439);
+    if start == end {
+        return false;
+    }
+    if start < end {
+        now >= start && now < end
+    } else {
+        now >= start || now < end
+    }
 }
 
 /// Finding PollCore#1 (issue #569): whether the mid-track quiet-hours ENTRY
@@ -1421,6 +1438,87 @@ fn quiet_hours_active_now(config: &Option<crate::config::AppConfig>) -> bool {
     config
         .as_ref()
         .is_some_and(|c| quiet_hours_active(&c.status_rules, now_minutes, weekday))
+}
+
+/// Whether the previous iteration was skipped by [`quiet_pause_iteration`], so
+/// the pause and the resume are each logged exactly once. The DECISION is never
+/// cached — it is re-derived from the local clock on every iteration, which is
+/// what lets the window end by itself.
+static QUIET_PAUSE_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// S4 (issue #672): the quiet-hours "pause polling" gate.
+///
+/// Returns the sleep duration for an iteration the ACTIVE quiet-hours entry —
+/// the first one whose window contains the local clock, the same entry
+/// [`matching_quiet_hours`] hands the write decision — asks to skip entirely.
+/// `None` means poll normally.
+///
+/// The polling driver consults this BEFORE it loads the write clocks and before
+/// it runs an iteration, so a skipped iteration issues no Spotify/Graph request
+/// and moves no keepalive/debounce clock. The thread is never stopped or
+/// parked: a parked thread could not notice the window ending, so the window is
+/// re-evaluated every iteration and the pause/resume transitions are logged
+/// once each.
+pub(crate) fn quiet_pause_iteration(config: &Option<AppConfig>) -> Option<u64> {
+    let (now_minutes, weekday) = local_minutes_and_weekday();
+    let decision = quiet_pause_at(config, now_minutes, weekday);
+    let was_paused = QUIET_PAUSE_ACTIVE.swap(decision.is_some(), Ordering::Relaxed);
+    if let Some(line) =
+        quiet_pause_log_line(decision.is_some(), was_paused, decision.map(|(_, end)| end))
+    {
+        log::info!("{}", line);
+    }
+    decision.map(|(seconds, _)| seconds)
+}
+
+/// [`quiet_pause_iteration`] with an explicit clock:
+/// `Some((sleep_seconds, window_end_minutes))` when polling must be skipped.
+///
+/// ANY active quiet-hours entry that sets `pause_polling` can assert the pause —
+/// quiet hours are not an ordered list for this decision (first-match-wins is
+/// the TRACK rules' contract), so a second overlapping window that asks for
+/// "stop polling" is not ignored just because an earlier window owns the
+/// replacement text. When more than one pausing window is active the reported
+/// end is the LATEST of them, so the "paused until …" log line describes the
+/// union of the windows instead of understating it.
+///
+/// The sleep is the configured ceiling (`polling.max_interval_seconds`, clamped
+/// to 5..=300 by `config::clamp_polling`), floored at 1 s so a hand-edited 0
+/// cannot spin the thread.
+fn quiet_pause_at(config: &Option<AppConfig>, now_minutes: u16, weekday: u8) -> Option<(u64, u16)> {
+    let cfg = config.as_ref()?;
+    let until = cfg
+        .status_rules
+        .quiet_hours
+        .iter()
+        .filter(|entry| entry.pause_polling && quiet_entry_contains(entry, now_minutes, weekday))
+        .map(|entry| entry.end_minutes)
+        .max()?;
+    Some((cfg.polling.max_interval_seconds.max(1), until))
+}
+
+/// The log line for a pause/resume transition, or `None` when the state did not
+/// change — the "once per transition" contract for both edges.
+fn quiet_pause_log_line(
+    paused_now: bool,
+    was_paused: bool,
+    until_minutes: Option<u16>,
+) -> Option<String> {
+    match (paused_now, was_paused) {
+        (true, false) => Some(format!(
+            "[POLLING] quiet hours: polling paused until {}",
+            format_minutes_of_day(until_minutes.unwrap_or(0))
+        )),
+        (false, true) => Some("[POLLING] quiet hours: polling resumed".to_string()),
+        _ => None,
+    }
+}
+
+/// `HH:MM` for a minutes-since-midnight value; anything past the end of the day
+/// folds back into it so a hand-edited config cannot print `24:00`.
+fn format_minutes_of_day(minutes: u16) -> String {
+    let minutes = minutes.min(1439);
+    format!("{:02}:{:02}", minutes / 60, minutes % 60)
 }
 
 /// The per-iteration rule decision, factored out of `process_track` so EVERY
@@ -1485,7 +1583,7 @@ fn rule_gate_at(
             &entry.presence_activity,
         );
     }
-    match matching_track_rule(&cfg.status_rules, artist, title) {
+    match matching_track_rule_at(&cfg.status_rules, now_minutes, weekday, artist, title) {
         Some(rule) => decision_from(
             GATE_REASON_TRACK_RULE,
             &rule.replacement_status,
@@ -1702,18 +1800,99 @@ fn track_rule_hit(rule: &crate::config::TrackRuleEntry, artist: &str, title: &st
     artist_ok && title_ok
 }
 
-/// Issue #432: first matching enabled track rule for this track, if any.
-fn matching_track_rule<'a>(
+/// S4 (issue #672): whether a rule's `days` / `start_minutes` / `end_minutes`
+/// window contains the given local time. The semantics are
+/// [`crate::config::QuietHoursEntry`]'s, field for field: an empty `days`
+/// applies every day, the window is `[start, end)` with wrap-around
+/// (`start > end`, e.g. 22:00→07:00) honoured, and `start == end` matches
+/// nothing. `end_minutes == 1440` is the end of the day, so the default window
+/// covers every minute.
+fn track_rule_schedule_matches(
+    rule: &crate::config::TrackRuleEntry,
+    now_minutes: u16,
+    weekday: u8,
+) -> bool {
+    if !rule.days.is_empty() && !rule.days.contains(&weekday) {
+        return false;
+    }
+    let now = u32::from(now_minutes.min(1439));
+    let start = rule
+        .start_minutes
+        .min(crate::config::TRACK_RULE_DAY_MINUTES);
+    let end = rule.end_minutes.min(crate::config::TRACK_RULE_DAY_MINUTES);
+    if start == end {
+        return false;
+    }
+    if start < end {
+        now >= start && now < end
+    } else {
+        now >= start || now < end
+    }
+}
+
+/// Issue #432 + S4 (issue #672): the first enabled track rule whose substrings
+/// match this track AND whose schedule contains the given local time.
+///
+/// Array order is priority — the first match wins — so the Settings card states
+/// that explicitly and offers move-up/move-down controls.
+fn matching_track_rule_at<'a>(
     rules: &'a crate::config::StatusRulesConfig,
+    now_minutes: u16,
+    weekday: u8,
     artist: &str,
     title: &str,
 ) -> Option<&'a crate::config::TrackRuleEntry> {
-    rules
-        .track_rules
-        .iter()
-        .find(|rule| track_rule_hit(rule, artist, title))
+    rules.track_rules.iter().find(|rule| {
+        track_rule_schedule_matches(rule, now_minutes, weekday)
+            && track_rule_hit(rule, artist, title)
+    })
 }
 
+/// The music-note prefix on both placeholder clears. Kept out of the config
+/// fields so their defaults stay plain text (`"Paused"`), which is what the
+/// fixed schema in the release contract specifies.
+const MUSIC_EMOJI: &str = "\u{1F3B5}";
+/// S4 (issue #672): fallbacks used when no config is loaded — the same literals
+/// `config.rs` defaults to, so a config-less iteration renders exactly what a
+/// default config renders.
+const DEFAULT_PAUSED_STATUS_FORMAT: &str = "Paused";
+const DEFAULT_STOPPED_STATUS_FORMAT: &str = "Nothing playing on Spotify";
+
+/// S4 (issue #672): the configured paused text, falling back to the contract
+/// default when the field is absent OR EMPTY. An empty text would otherwise post
+/// a bare music emoji, and clearing a Settings field means "back to the
+/// default", not "post nothing that identifies me".
+fn paused_status_text(config: &Option<AppConfig>) -> &str {
+    config
+        .as_ref()
+        .map(|c| c.teams.paused_status_format.as_str())
+        .filter(|text| !text.is_empty())
+        .unwrap_or(DEFAULT_PAUSED_STATUS_FORMAT)
+}
+
+/// [`paused_status_text`]'s no-track sibling — same empty-field contract.
+fn stopped_status_text(config: &Option<AppConfig>) -> &str {
+    config
+        .as_ref()
+        .map(|c| c.teams.stopped_status_format.as_str())
+        .filter(|text| !text.is_empty())
+        .unwrap_or(DEFAULT_STOPPED_STATUS_FORMAT)
+}
+
+/// S4 (issue #672): the paused-clear placeholder. The emoji is ours; the text is
+/// `teams.paused_status_format` (default "Paused"), so the default renders
+/// byte-identically to the pre-4.7 literal `"🎵 Paused"`.
+fn paused_status_placeholder(config: &Option<AppConfig>) -> String {
+    format!("{MUSIC_EMOJI} {}", paused_status_text(config))
+}
+
+/// S4 (issue #672): the no-track clear's placeholder — the same emoji contract
+/// as [`paused_status_placeholder`], with `teams.stopped_status_format`
+/// (default `"Nothing playing on Spotify"`). A matching rule's replacement text
+/// still takes precedence over it.
+fn stopped_status_placeholder(config: &Option<AppConfig>) -> String {
+    format!("{MUSIC_EMOJI} {}", stopped_status_text(config))
+}
 /// Issue #343: fingerprint of the status-shaping config. Embedded in the
 /// track change key so a filter/placeholder/format flip mid-track reads as
 /// a change and forces one rewrite on the next poll, instead of leaving
@@ -1733,6 +1912,14 @@ fn status_config_fingerprint(config: &Option<crate::config::AppConfig>) -> Strin
         .as_ref()
         .map(|c| c.teams.status_format.as_str())
         .unwrap_or("🎵 {artist} - {track} 🎧");
+    // S4 (issue #672): the manual-status texts and the rule schedules are part
+    // of the same key, so editing a window, a weekday set, `pause_polling` or
+    // one of the two placeholder texts mid-track forces the same one-off
+    // rewrite.
+    // The API accessors, not the raw fields, so an empty field fingerprints the
+    // same as an absent one (it renders the same) instead of forcing a rewrite.
+    let paused_format = paused_status_text(config);
+    let stopped_format = stopped_status_text(config);
     // Issue #432: rule edits flip the key too, so enabling/disabling a
     // rule or quiet-hours entry mid-track forces one rewrite pass instead
     // of leaving the stale gate decision until the next track change.
@@ -1752,14 +1939,15 @@ fn status_config_fingerprint(config: &Option<crate::config::AppConfig>) -> Strin
                 // must flip the key and force one rewrite (issue #432's
                 // contract, widened to the new fields).
                 format!(
-                    "{}:{}-{}:{:?}:{}:{}:{}",
+                    "{}:{}-{}:{:?}:{}:{}:{}:{}",
                     e.enabled,
                     e.start_minutes,
                     e.end_minutes,
                     e.days,
                     e.replacement_status,
                     e.presence_availability,
-                    e.presence_activity
+                    e.presence_activity,
+                    e.pause_polling
                 )
             })
             .collect();
@@ -1769,10 +1957,13 @@ fn status_config_fingerprint(config: &Option<crate::config::AppConfig>) -> Strin
             .iter()
             .map(|r| {
                 format!(
-                    "{}:{}:{}:{}:{}:{}",
+                    "{}:{}:{}:{:?}:{}-{}:{}:{}:{}",
                     r.enabled,
                     r.artist_substring,
                     r.track_substring,
+                    r.days,
+                    r.start_minutes,
+                    r.end_minutes,
                     r.replacement_status,
                     r.presence_availability,
                     r.presence_activity
@@ -1782,7 +1973,7 @@ fn status_config_fingerprint(config: &Option<crate::config::AppConfig>) -> Strin
         format!("quiet=[{}] rules=[{}]", q.join(","), t.join(","))
     });
     format!(
-        "filter={filter} placeholder={placeholder} format={format} rules={}",
+        "filter={filter} placeholder={placeholder} format={format} paused={paused_format} stopped={stopped_format} rules={}",
         rules.as_deref().unwrap_or("quiet=[] rules=[]")
     )
 }
@@ -2783,7 +2974,8 @@ pub(crate) fn process_track(
             // Issue #155: the clear path posts a short-lived placeholder
             // (Graph has no "clear status message" action) and skips
             // byte-identical repeat posts.
-            let placeholder = "\u{1F3B5} Paused";
+            let placeholder_text = paused_status_placeholder(config);
+            let placeholder = placeholder_text.as_str();
             // P2 (issue #3.0-P2): gate the paused-clear the same way as
             // the playing write — don't replace a busy/meeting presence
             // with a "Paused" placeholder. `gated_track_key` carries the
@@ -3116,7 +3308,7 @@ pub(crate) fn handle_no_track(
     let placeholder = no_track_rule
         .replacement
         .clone()
-        .unwrap_or_else(|| "\u{1F3B5} Nothing playing on Spotify".to_string());
+        .unwrap_or_else(|| stopped_status_placeholder(config));
     let suppression_reason: Option<&str> = if no_track_rule.suppresses() {
         no_track_rule.reason
     } else {
@@ -3404,9 +3596,13 @@ pub(crate) fn clear_presence_on_exit(app: &AppHandle) {
         }
     }
     if cleared && plan.post_placeholder {
+        // S4 (issue #672): the exit placeholder is the SAME text the paused
+        // clear posts, so a configured `teams.paused_status_format` is not
+        // replaced by the default on the way out.
+        let placeholder = paused_status_placeholder(&config);
         match clear_teams_status_message_quick(
             &tokens.access_token,
-            "\u{1F3B5} Paused",
+            &placeholder,
             Some(&placeholder_expiry_str()),
         ) {
             Ok(_) => log::info!(
@@ -4597,6 +4793,86 @@ mod tests {
             status_config_fingerprint(&Some(ruled)),
             "adding a quiet-hours entry must change the fingerprint"
         );
+
+        // S4 (issue #672): the rule schedule, `pause_polling` and the two
+        // manual-status texts are part of the decision, so editing any of them
+        // mid-track must flip the key (and force one rewrite).
+        let scheduled = crate::config::AppConfig {
+            status_rules: crate::config::StatusRulesConfig {
+                quiet_hours: Vec::new(),
+                track_rules: vec![crate::config::TrackRuleEntry {
+                    enabled: true,
+                    days: vec![1],
+                    start_minutes: 480,
+                    end_minutes: 1020,
+                    ..Default::default()
+                }],
+            },
+            ..Default::default()
+        };
+        let scheduled_fp = status_config_fingerprint(&Some(scheduled.clone()));
+        assert_ne!(
+            fp, scheduled_fp,
+            "adding a scheduled rule must change the fingerprint"
+        );
+
+        // The SAME rule with a different window is a different fingerprint: that
+        // is what re-evaluates the rule mid-track.
+        let mut moved = scheduled.clone();
+        moved.status_rules.track_rules[0].end_minutes = 1021;
+        assert_ne!(
+            scheduled_fp,
+            status_config_fingerprint(&Some(moved)),
+            "editing a rule's window must change the fingerprint"
+        );
+        let mut other_days = scheduled.clone();
+        other_days.status_rules.track_rules[0].days = vec![2];
+        assert_ne!(
+            scheduled_fp,
+            status_config_fingerprint(&Some(other_days)),
+            "editing a rule's weekday set must change the fingerprint"
+        );
+
+        let mut pauses = crate::config::AppConfig::default();
+        pauses
+            .status_rules
+            .quiet_hours
+            .push(crate::config::QuietHoursEntry {
+                enabled: true,
+                start_minutes: 0,
+                end_minutes: 1439,
+                pause_polling: true,
+                ..Default::default()
+            });
+        let pauses_fp = status_config_fingerprint(&Some(pauses));
+        assert_ne!(fp, pauses_fp, "`pause_polling` must change the fingerprint");
+
+        let mut paused_text = crate::config::AppConfig::default();
+        paused_text.teams.paused_status_format = "BRB".to_string();
+        assert_ne!(
+            fp,
+            status_config_fingerprint(&Some(paused_text)),
+            "editing the paused status text must change the fingerprint"
+        );
+
+        let mut stopped_text = crate::config::AppConfig::default();
+        stopped_text.teams.stopped_status_format = "Idle".to_string();
+        assert_ne!(
+            fp,
+            status_config_fingerprint(&Some(stopped_text)),
+            "editing the stopped status text must change the fingerprint"
+        );
+        // An EMPTY text renders the default, so it must fingerprint like the
+        // default — otherwise clearing a field would force a rewrite that
+        // changes nothing on Teams.
+        let mut cleared_texts = crate::config::AppConfig::default();
+        cleared_texts.teams.paused_status_format = String::new();
+        cleared_texts.teams.stopped_status_format = String::new();
+        assert_eq!(
+            fp,
+            status_config_fingerprint(&Some(cleared_texts)),
+            "an empty status text must fingerprint like the default it renders"
+        );
     }
 
     /// Issue #343: the 304 force-rewrite fires exactly when the stored key
@@ -4972,9 +5248,374 @@ mod tests {
             // all) so the enabled second rule wins for artist "b".
             track_rules: vec![rule(false, "", ""), rule(true, "b", "")],
         };
-        let hit = matching_track_rule(&rules, "b", "anything").expect("must hit second rule");
+        // S4: the schedule is part of the match — 10:00 on a Monday is inside
+        // the default (every day, 0..1440) window, so the substring result is
+        // unchanged.
+        let hit =
+            matching_track_rule_at(&rules, 600, 1, "b", "anything").expect("must hit second rule");
         assert_eq!(hit.artist_substring, "b");
-        assert!(matching_track_rule(&rules, "a", "zzz").is_none());
+        assert!(matching_track_rule_at(&rules, 600, 1, "a", "zzz").is_none());
+    }
+
+    /// S4 (issue #672): a track rule's `days` / `start_minutes` /
+    /// `end_minutes` schedule reuses quiet hours' window semantics. Both
+    /// boundaries of a same-day window, the empty-`days` case and the
+    /// wrap-around pair are pinned here: a rule whose window does not contain
+    /// "now" must not match.
+    #[test]
+    fn test_track_rule_schedule_matching() {
+        use crate::config::TrackRuleEntry;
+        let rule = |days: Vec<u8>, start: u32, end: u32| TrackRuleEntry {
+            enabled: true,
+            days,
+            start_minutes: start,
+            end_minutes: end,
+            ..TrackRuleEntry::default()
+        };
+
+        // Empty `days` applies every day, and the default window (0, 1440)
+        // covers every minute of it.
+        let every_day = rule(Vec::new(), 0, crate::config::TRACK_RULE_DAY_MINUTES);
+        for weekday in 1..=7 {
+            assert!(track_rule_schedule_matches(&every_day, 0, weekday));
+            assert!(track_rule_schedule_matches(&every_day, 1439, weekday));
+        }
+
+        // A weekday filter excludes every day it does not name.
+        let mondays = rule(vec![1], 0, crate::config::TRACK_RULE_DAY_MINUTES);
+        assert!(track_rule_schedule_matches(&mondays, 600, 1));
+        assert!(!track_rule_schedule_matches(&mondays, 600, 2));
+
+        // A same-day window is `[start, end)` in minutes since midnight.
+        let work = rule(Vec::new(), 480, 1020);
+        assert!(!track_rule_schedule_matches(&work, 479, 3));
+        assert!(track_rule_schedule_matches(&work, 480, 3));
+        assert!(track_rule_schedule_matches(&work, 1019, 3));
+        assert!(!track_rule_schedule_matches(&work, 1020, 3));
+
+        // A wrap-around window (22:00→07:00) is honoured like quiet hours', and
+        // its end boundary is exclusive too.
+        let night = rule(Vec::new(), 1320, 420);
+        assert!(!track_rule_schedule_matches(&night, 1319, 3));
+        assert!(track_rule_schedule_matches(&night, 1320, 3));
+        assert!(track_rule_schedule_matches(&night, 1439, 3));
+        assert!(track_rule_schedule_matches(&night, 0, 3));
+        assert!(track_rule_schedule_matches(&night, 419, 3));
+        assert!(!track_rule_schedule_matches(&night, 420, 3));
+
+        // `start == end` is an empty window: it matches nothing, exactly as in
+        // quiet hours.
+        let empty = rule(Vec::new(), 600, 600);
+        assert!(!track_rule_schedule_matches(&empty, 600, 3));
+    }
+
+    /// S4 (issue #672): array order is PRIORITY, and this test can OBSERVE it:
+    /// the first two rules overlap on `[600, 1020)`, so at 10:00 both match the
+    /// same track and only the order decides which action reaches Teams (a
+    /// last-match-wins or any-match implementation posts "Evening" instead of
+    /// "Morning"). A first rule whose window excludes "now" yields to the later
+    /// one, and a same-window pair is decided purely by order too.
+    #[test]
+    fn test_track_rule_first_match_wins_with_overlapping_windows() {
+        use crate::config::{AppConfig, StatusRulesConfig, TrackRuleEntry};
+        let rule = |text: &str, days: Vec<u8>, start: u32, end: u32| TrackRuleEntry {
+            enabled: true,
+            artist_substring: "lofi".to_string(),
+            days,
+            start_minutes: start,
+            end_minutes: end,
+            replacement_status: text.to_string(),
+            ..TrackRuleEntry::default()
+        };
+        let with_rules = |rules: Vec<TrackRuleEntry>| {
+            Some(AppConfig {
+                status_rules: StatusRulesConfig {
+                    quiet_hours: Vec::new(),
+                    track_rules: rules,
+                },
+                ..AppConfig::default()
+            })
+        };
+
+        let overlapping = with_rules(vec![
+            rule("Morning", Vec::new(), 480, 1020),
+            // Overlaps the first rule on [600, 1020).
+            rule(
+                "Evening",
+                Vec::new(),
+                600,
+                crate::config::TRACK_RULE_DAY_MINUTES,
+            ),
+        ]);
+        assert_eq!(
+            rule_gate_at(&overlapping, 600, 3, "Lofi Girl", "Rain Sounds")
+                .replacement
+                .as_deref(),
+            Some("Morning"),
+            "both rules cover 10:00, so the FIRST one wins"
+        );
+        assert_eq!(
+            rule_gate_at(&overlapping, 1200, 3, "Lofi Girl", "Rain Sounds")
+                .replacement
+                .as_deref(),
+            Some("Evening"),
+            "a rule whose window excludes 'now' yields to the next one"
+        );
+        assert_eq!(
+            rule_gate_at(&overlapping, 60, 3, "Lofi Girl", "Rain Sounds"),
+            RuleDecision::default(),
+            "outside both windows nothing matches"
+        );
+
+        // Same window, different text: nothing but the order can decide.
+        let identical_windows = with_rules(vec![
+            rule("First", Vec::new(), 600, 1440),
+            rule("Second", Vec::new(), 600, 1440),
+        ]);
+        assert_eq!(
+            rule_gate_at(&identical_windows, 700, 3, "Lofi Girl", "Rain Sounds")
+                .replacement
+                .as_deref(),
+            Some("First"),
+            "with identical windows the first rule in the array wins"
+        );
+    }
+
+    /// S4 (issue #672): the quiet-hours "pause polling" gate. Only the ACTIVE
+    /// entry can stop polling, the skip sleeps for the configured ceiling, and
+    /// the decision follows the clock — so the window ending resumes polling by
+    /// itself, with no thread stop or park.
+    #[test]
+    fn test_quiet_pause_gate_follows_the_window_and_the_pause_flag() {
+        use crate::config::{AppConfig, QuietHoursEntry, StatusRulesConfig};
+        let config = |pause_polling: bool, enabled: bool, start: u16, end: u16| AppConfig {
+            status_rules: StatusRulesConfig {
+                quiet_hours: vec![QuietHoursEntry {
+                    enabled,
+                    start_minutes: start,
+                    end_minutes: end,
+                    pause_polling,
+                    ..QuietHoursEntry::default()
+                }],
+                track_rules: Vec::new(),
+            },
+            ..AppConfig::default()
+        };
+
+        // Inside the window with the flag on: the iteration is skipped, and it
+        // sleeps for the configured ceiling (60 s by default) — not the error
+        // retry interval.
+        let paused = config(true, true, 1320, 420);
+        assert_eq!(
+            quiet_pause_at(&Some(paused.clone()), 1380, 3),
+            Some((60, 420))
+        );
+        // 07:00 is the exclusive end, so the window is already over.
+        assert_eq!(quiet_pause_at(&Some(paused.clone()), 420, 3), None);
+        // 22:00 is the inclusive start.
+        assert_eq!(
+            quiet_pause_at(&Some(paused.clone()), 1320, 3),
+            Some((60, 420))
+        );
+        // The flag off = quiet hours suppress the WRITE, never the poll.
+        assert_eq!(
+            quiet_pause_at(&Some(config(false, true, 1320, 420)), 1380, 3),
+            None
+        );
+        // A disabled entry is not active at all.
+        assert_eq!(
+            quiet_pause_at(&Some(config(true, false, 1320, 420)), 1380, 3),
+            None
+        );
+        // Quiet hours are NOT an ordered list for this decision: a window that
+        // starts later can assert the pause even though the first match owns the
+        // replacement text.
+        let mut second_window_pauses = config(false, true, 0, 1439);
+        second_window_pauses
+            .status_rules
+            .quiet_hours
+            .push(QuietHoursEntry {
+                enabled: true,
+                start_minutes: 1200,
+                end_minutes: 1380,
+                pause_polling: true,
+                ..QuietHoursEntry::default()
+            });
+        assert_eq!(
+            quiet_pause_at(&Some(second_window_pauses), 1300, 3),
+            Some((60, 1380)),
+            "an overlapping second window that asks for the pause must stop polling"
+        );
+
+        // The Settings picker saves a quiet window of `00:00 – 00:00` as
+        // `start 0, end 1440` (midnight = the end of the day). That must be an
+        // ALL-DAY window, not an inert one: pre-mapping the pair was 0..0, which
+        // matches nothing, and the user got no feedback.
+        assert_eq!(
+            quiet_pause_at(&Some(config(true, true, 0, 1440)), 720, 3),
+            Some((60, 1440)),
+            "a 00:00–00:00 quiet window is the whole day, not a dead window"
+        );
+
+        // Two pausing windows, asserted at a time when BOTH are live so the
+        // expectation can only come from the union rule: 22:00→07:00 (wrap) and
+        // 20:00→23:00 overlap on [22:00, 23:00), so 22:30 is inside both. Their
+        // ends are 07:00 (420) and 23:00 (1380) — an implementation taking the
+        // FIRST/minimum would report 420 here, so this assertion is not vacuous.
+        let mut two_pausing = config(true, true, 1320, 420);
+        two_pausing.status_rules.quiet_hours.push(QuietHoursEntry {
+            enabled: true,
+            start_minutes: 1200,
+            end_minutes: 1380,
+            pause_polling: true,
+            ..QuietHoursEntry::default()
+        });
+        assert!(quiet_entry_contains(
+            &two_pausing.status_rules.quiet_hours[0],
+            1350,
+            3
+        ));
+        assert!(quiet_entry_contains(
+            &two_pausing.status_rules.quiet_hours[1],
+            1350,
+            3
+        ));
+        assert_eq!(
+            quiet_pause_at(&Some(two_pausing), 1350, 3),
+            Some((60, 1380)),
+            "with two live pausing windows the log reports the latest end"
+        );
+
+        // The sleep follows the user's ceiling.
+        let mut slow = paused.clone();
+        slow.polling.max_interval_seconds = 300;
+        assert_eq!(quiet_pause_at(&Some(slow), 1380, 3), Some((300, 420)));
+        // No config loaded: nothing can pause the poll.
+        assert_eq!(quiet_pause_at(&None, 1380, 3), None);
+    }
+
+    /// S4 (issue #672): the pause and the resume are each logged exactly once —
+    /// driven here from explicit minutes instead of the wall clock, so the
+    /// transition contract is testable without waiting for a window.
+    #[test]
+    fn test_quiet_pause_logs_the_transition_once() {
+        assert_eq!(
+            quiet_pause_log_line(true, false, Some(420)).as_deref(),
+            Some("[POLLING] quiet hours: polling paused until 07:00")
+        );
+        assert_eq!(
+            quiet_pause_log_line(false, true, None).as_deref(),
+            Some("[POLLING] quiet hours: polling resumed")
+        );
+        // Steady states repeat nothing.
+        assert_eq!(quiet_pause_log_line(true, true, Some(420)), None);
+        assert_eq!(quiet_pause_log_line(false, false, None), None);
+        assert_eq!(format_minutes_of_day(0), "00:00");
+        assert_eq!(format_minutes_of_day(1320), "22:00");
+        assert_eq!(format_minutes_of_day(1439), "23:59");
+    }
+
+    /// S4 (issue #672): the two manual-status texts replace the hardcoded
+    /// literals — a default (or absent) config renders exactly what 4.6 posted,
+    /// and a configured text is what gets posted, emoji prefix included.
+    #[test]
+    fn test_manual_status_placeholders_use_the_configured_text() {
+        use crate::config::AppConfig;
+        let default = Some(AppConfig::default());
+        assert_eq!(paused_status_placeholder(&default), "\u{1F3B5} Paused");
+        assert_eq!(
+            stopped_status_placeholder(&default),
+            "\u{1F3B5} Nothing playing on Spotify"
+        );
+        // No config loaded: the same fallbacks a default config renders.
+        assert_eq!(paused_status_placeholder(&None), "\u{1F3B5} Paused");
+        assert_eq!(
+            stopped_status_placeholder(&None),
+            "\u{1F3B5} Nothing playing on Spotify"
+        );
+
+        let mut custom = AppConfig::default();
+        custom.teams.paused_status_format = "Back in 5".to_string();
+        custom.teams.stopped_status_format = "Idle".to_string();
+        assert_eq!(
+            paused_status_placeholder(&Some(custom.clone())),
+            "\u{1F3B5} Back in 5"
+        );
+        assert_eq!(stopped_status_placeholder(&Some(custom)), "\u{1F3B5} Idle");
+        // An EMPTY field means "back to the default": posting a bare emoji
+        // would be a status message that no longer names the state.
+        let mut emptied = AppConfig::default();
+        emptied.teams.paused_status_format = String::new();
+        emptied.teams.stopped_status_format = String::new();
+        assert_eq!(
+            paused_status_placeholder(&Some(emptied)),
+            "\u{1F3B5} Paused"
+        );
+        assert_eq!(
+            stopped_status_placeholder(&Some(AppConfig::default())),
+            "\u{1F3B5} Nothing playing on Spotify"
+        );
+        assert_eq!(
+            paused_status_text(&Some(AppConfig::default())),
+            DEFAULT_PAUSED_STATUS_FORMAT
+        );
+        assert_eq!(
+            stopped_status_text(&Some(AppConfig::default())),
+            DEFAULT_STOPPED_STATUS_FORMAT
+        );
+    }
+
+    /// S4 (issue #672) acceptance (c) structural guard: the driver consults the
+    /// quiet-hours pause gate BEFORE it loads the write clocks and before it
+    /// runs an iteration, so a skipped iteration issues no Spotify/Graph
+    /// request and moves no keepalive/debounce clock. The driver itself needs
+    /// an `AppHandle`, so the ordering is pinned at the source — the same shape
+    /// as the #572/D1 loop guards — while the gate's own behaviour is covered
+    /// by the tests above.
+    #[test]
+    fn test_quiet_pause_gate_precedes_the_clock_load_and_the_iteration() {
+        let loop_source = include_str!("loop.rs");
+        let gate = loop_source
+            .find("quiet_pause_iteration(")
+            .expect("polling_loop must consult the quiet-hours pause gate (S4)");
+        let clocks = loop_source
+            .find("load_write_clocks()")
+            .expect("polling_loop must still snapshot the shared clocks");
+        let run = loop_source
+            .find("super::poll_once::run(")
+            .expect("polling_loop must still dispatch the iteration");
+        assert!(
+            gate < clocks,
+            "the pause gate must run BEFORE the clocks are loaded: a skipped \
+             iteration must not move (or discard) a keepalive/debounce clock (S4)"
+        );
+        assert!(
+            gate < run,
+            "the pause gate must run BEFORE the iteration: a skipped iteration \
+             must issue no Spotify GET (S4)"
+        );
+        assert_eq!(
+            loop_source.matches("quiet_pause_iteration(").count(),
+            1,
+            "exactly one pause-gate call site is expected in the driver"
+        );
+        // ...and the pause arm itself: the slice between the gate and the clock
+        // load must sleep on the STOP-AWARE receiver (so stop_syncing still
+        // interrupts immediately) and `continue` (so the window is re-evaluated
+        // on the next iteration instead of the thread ending).
+        let skip_arm = &loop_source[gate..clocks];
+        assert!(
+            skip_arm.contains("recv_timeout"),
+            "the paused iteration must sleep on the interruptible receiver (S4)"
+        );
+        assert!(
+            skip_arm.contains("continue"),
+            "the paused iteration must re-evaluate the window next iteration (S4)"
+        );
+        assert!(
+            skip_arm.contains("quiet_pause_seconds"),
+            "the paused arm must sleep the duration the gate returned (S4)"
+        );
     }
 
     /// Issues #380/#430 behavioral late-post contract: a gated track whose
@@ -6312,8 +6953,8 @@ mod tests {
         let prod = prod_source();
         let track_body = prod_fn_body(prod, "pub(crate) fn process_track(");
         let paused_start = track_body
-            .find("let placeholder = \"\\u{1F3B5} Paused\";")
-            .expect("process_track must keep the paused placeholder literal");
+            .find("let placeholder_text = paused_status_placeholder(config);")
+            .expect("process_track must keep the config-driven paused placeholder (S4)");
         let paused = &track_body[paused_start..];
         let verdict = paused
             .find("let mut gate_blocked = false;")
@@ -6628,8 +7269,8 @@ mod tests {
         let prod = prod_source();
         let track_body = prod_fn_body(prod, "pub(crate) fn process_track(");
         let paused_start = track_body
-            .find("let placeholder = \"\\u{1F3B5} Paused\";")
-            .expect("process_track must keep the paused placeholder literal");
+            .find("let placeholder_text = paused_status_placeholder(config);")
+            .expect("process_track must keep the config-driven paused placeholder (S4)");
         let paused = &track_body[paused_start..];
         let skip_check = paused
             .find("if paused_clear_skips_gate_read(")

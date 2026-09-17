@@ -437,4 +437,23 @@ export const de: Dict = {
   // 4.7.0 — S3 tray/logs hygiene
   'settings.teamsPersistWarning':
     'Angemeldet, aber dieses Gerät konnte die Sitzung nicht speichern — sie funktioniert bis zum Beenden. Teams erneut verbinden, um das Speichern zu wiederholen.',
+
+  // 4.7.0 — S4 (rules engine)
+  'rules.quietWindowHint':
+    'Ruhezeiten laufen über Mitternacht — 22:00–07:00 gilt durch die Nacht. Eine Endzeit von 00:00 bedeutet Mitternacht (Tagesende), und gleicher Beginn und Schluss passen nie.',
+  'rules.pausePollingLabel': 'Abfrage in diesem Zeitraum anhalten',
+  'rules.pausePollingHint':
+    'Während dieses Zeitraums wird Spotify gar nicht abgefragt — kein Status, kein Teams-Aufruf. Die Abfrage läuft automatisch weiter, sobald der Zeitraum endet.',
+  'rules.trackRulesOrderHint':
+    'Regeln werden von oben nach unten geprüft — die erste passende gewinnt. Ohne Wochentage gilt eine Regel jeden Tag; eine Endzeit von 00:00 bedeutet Tagesende, und gleicher Beginn und Schluss passen nie.',
+  'rules.ruleStart': 'Beginn des Regelzeitraums',
+  'rules.ruleEnd': 'Ende des Regelzeitraums',
+  'rules.ruleDays': 'Aktive Tage dieser Regel (keine Auswahl = jeden Tag)',
+  'rules.moveRuleUp': 'Regel {n} nach oben verschieben',
+  'rules.moveRuleDown': 'Regel {n} nach unten verschieben',
+  'rules.manualStatusLabel': 'Statustext für Pause und Stopp',
+  'rules.manualStatusHint':
+    'Der Text, der als Teams-Status gepostet wird, wenn die Wiedergabe pausiert bzw. nichts läuft. Das Musik-Emoji wird automatisch vorangestellt; ein leeres Feld stellt den Standard wieder her.',
+  'rules.pausedStatusPlaceholder': 'Pausiert',
+  'rules.stoppedStatusPlaceholder': 'Nichts läuft auf Spotify',
 };
