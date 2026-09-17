@@ -786,9 +786,24 @@ pub fn run() {
         log::info!("[APP] run: updater plugin registered");
     }
 
+    // 4.7.0 (S5): the rotating file target is configured from `logging.*`
+    // before the plugin is built, which is the only point the plugin offers —
+    // Tauri's `setup` hook (and therefore `config::load_config`) has not run
+    // yet. `logging_config_for_startup` reads just that section, with no
+    // keychain probe; a change to size/retention takes effect at the next
+    // launch, while `logging.enabled`/`log_level` keep their immediate
+    // `apply_log_level` path.
+    let startup_logging = config::logging_config_for_startup();
+    let log_rotation = if startup_logging.keep_files <= 1 {
+        tauri_plugin_log::RotationStrategy::KeepOne
+    } else {
+        tauri_plugin_log::RotationStrategy::KeepSome(startup_logging.keep_files as usize)
+    };
+
     let built = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--minimized"]),
@@ -803,6 +818,8 @@ pub fn run() {
             .target(tauri_plugin_log::Target::new(
                 tauri_plugin_log::TargetKind::Webview,
             ))
+            .max_file_size(startup_logging.max_file_size_mb as u128 * 1024 * 1024)
+            .rotation_strategy(log_rotation)
             .build())
         .setup(|app| {
             // Set panic hook to log crashes
@@ -1156,6 +1173,8 @@ pub fn run() {
             commands::window::open_external_url,
             commands::onboarding::is_onboarding_complete,
             commands::onboarding::complete_onboarding,
+            commands::config::export_config,
+            commands::config::import_config,
             commands::onboarding::reconnect_spotify,
             commands::onboarding::reconnect_teams,
             commands::misc::preview_status,

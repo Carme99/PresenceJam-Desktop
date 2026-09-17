@@ -465,4 +465,25 @@ export const fr: Dict = {
     "Texte publié comme statut Teams lorsque la lecture est en pause ou qu'il n'y a rien à jouer. L'émoji de musique est ajouté automatiquement ; vider le champ rétablit la valeur par défaut.",
   'rules.pausedStatusPlaceholder': 'En pause',
   'rules.stoppedStatusPlaceholder': 'Rien ne joue sur Spotify',
+
+  // 4.7.0 — S5 (rotation des journaux + export/import des réglages)
+  'settings.sectionLogging': 'Journalisation',
+  'settings.loggingEnabledLabel': 'Écrire un fichier journal',
+  'settings.logLevelLabel': 'Niveau de journalisation',
+  'settings.logMaxSizeLabel': 'Taille maximale du fichier journal (Mo)',
+  'settings.logKeepFilesLabel': 'Fichiers journaux à conserver',
+  'settings.logRotationHint':
+    'La taille limite et le nombre de fichiers conservés s’appliquent au prochain démarrage de PresenceJam ; désactiver la journalisation ou changer de niveau prend effet immédiatement.',
+  'settings.sectionBackup': 'Sauvegarde',
+  'settings.backupHint':
+    'L’export écrit une copie de ces réglages que vous pouvez conserver ou transférer sur une autre machine. Votre secret client Spotify reste dans le trousseau du système et n’est jamais inclus — et un fichier qui en contient un est refusé à l’import.',
+  'settings.backupExport': 'Exporter les réglages…',
+  'settings.backupImport': 'Importer les réglages…',
+  'settings.backupExportDialogTitle': 'Exporter les réglages PresenceJam',
+  'settings.backupImportDialogTitle': 'Importer les réglages PresenceJam',
+  'settings.backupConfirmOverwrite':
+    'L’import remplace tous vos réglages actuels. Le fichier actuel est conservé à côté sous le nom config.json.bak. Continuer ?',
+  'settings.backupExported': 'Réglages exportés vers {path}',
+  'settings.backupImported': 'Réglages importés depuis {path}',
+  'settings.backupError': 'L’action de sauvegarde n’a pas pu aboutir : {error}',
 };

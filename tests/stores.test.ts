@@ -137,6 +137,35 @@ describe('config store runtime (#420, #425)', () => {
       Number(cfg.defaultConfig.polling.default_interval_seconds)
     );
   });
+
+  /**
+   * `logging.max_file_size_mb` joined the ts-rs `u64` fields in 4.7.0 (#673),
+   * so it needs the same two-way treatment polling gets: a bigint in the store
+   * (what the backend types are) and a plain number in the payload (a bigint
+   * cannot be encoded, a NaN serializes as null and Rust's `u64` rejects it).
+   * A pre-4.7 or hand-edited file omits the key entirely — it must land on the
+   * default, not `undefined`.
+   */
+  it('normalises the logging u64 exactly like the polling ones (#673)', async () => {
+    const cfg = await import('$lib/stores/config');
+    invoke.mockResolvedValueOnce({
+      logging: { enabled: true, log_level: 'Debug', keep_files: 7 },
+      polling: { default_interval_seconds: 30 }
+    });
+
+    const loaded = await cfg.loadConfig();
+
+    expect(loaded.logging.max_file_size_mb).toBe(BigInt(10));
+    expect(typeof loaded.logging.max_file_size_mb).toBe('bigint');
+    expect(loaded.logging.keep_files).toBe(7);
+
+    const payload = cfg.toSavePayload(loaded);
+
+    expect(typeof payload.logging.max_file_size_mb).toBe('number');
+    expect(payload.logging.max_file_size_mb).toBe(10);
+    expect(payload.logging.keep_files).toBe(7);
+    expect(() => JSON.stringify(payload)).not.toThrow();
+  });
 });
 
 describe('detach store runtime (#422)', () => {

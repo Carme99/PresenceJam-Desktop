@@ -6,6 +6,7 @@ use crate::config::{self, AppConfig, ConfigPatch};
 use crate::AppState;
 use std::sync::Arc;
 use tauri::AppHandle;
+use tauri_plugin_dialog::DialogExt;
 
 /// Log tag prefix for this submodule (issue #79 item 3).
 const CMD: &str = "[CMD.CONFIG]";
@@ -182,4 +183,152 @@ async fn after_persist(app: &AppHandle, persisted: &AppConfig) {
             log::warn!("{CMD} failed to sync autostart state: {}", e);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// 4.7.0 (S5): config export / import.
+//
+// Both commands own their file dialog so the resolved path is the one the
+// file work uses: a path chosen in the webview and handed back over IPC could
+// be anything, and the settings file is worth keeping in one place.
+//
+// The dialog *titles* arrive from the caller: they are user-visible copy, and
+// the frontend dictionaries are the only place UI text lives (the i18n rule in
+// CLAUDE.md). Error strings stay English, as documented for Rust-side errors.
+// ---------------------------------------------------------------------------
+
+/// Write a shareable copy of the current config to a user-chosen path.
+///
+/// The document is the persisted shape of the loaded config — clamped, with
+/// every `client_secret` key stripped (`config::export_document`) — so the
+/// Spotify client secret (keychain-only, issue #9) and any token material can
+/// never leave the machine inside a file the user is told to keep or share.
+///
+/// Returns the path written, or `None` when the dialog was dismissed.
+#[tauri::command]
+pub async fn export_config(
+    app: AppHandle,
+    title: String,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<Option<String>, String> {
+    log::info!("{CMD} export_config: ENTRY");
+
+    // Snapshot before the dialog: the config read guard must not be held
+    // across a user-driven wait.
+    let current = {
+        let guard = state.config.get();
+        match guard.as_ref() {
+            Some(cfg) => cfg.clone(),
+            None => config::load_config()?,
+        }
+    };
+    let json = config::export_document(&current)?;
+    let suggested = config::export_file_name(env!("CARGO_PKG_VERSION"), chrono::Utc::now());
+
+    let chosen = app
+        .dialog()
+        .file()
+        .set_title(title)
+        .set_file_name(&suggested)
+        .add_filter("JSON", &["json"])
+        .blocking_save_file();
+    let Some(chosen) = chosen else {
+        log::info!("{CMD} export_config: CANCELLED - dialog dismissed");
+        return Ok(None);
+    };
+
+    let mut path = chosen
+        .into_path()
+        .map_err(|e| format!("export_config: unusable destination: {}", e))?;
+    // The native dialog does not append the filter's extension on every
+    // platform; a file the user cannot tell is JSON is a support ticket.
+    if path.extension().is_none() {
+        path.set_extension("json");
+    }
+    // Same crash-safe write as `save_config` (sidecar + fsync + rename, mode
+    // 0600): a failed export must not leave a half-written file where the user
+    // was told a complete copy lives.
+    config::atomic_write_json(&path, &json)?;
+
+    let written = path.to_string_lossy().into_owned();
+    log::info!(
+        "{CMD} export_config: SUCCESS - {} bytes to {}",
+        json.len(),
+        written
+    );
+    Ok(Some(written))
+}
+
+/// What an import did: the document the user chose and the config now on disk.
+///
+/// Both halves are needed: the Settings card names the file it read (so a
+/// user with several exports can tell which one landed), and the config is
+/// what was actually persisted (the #297 invariant — the caller adopts that,
+/// never its own pre-import copy).
+#[derive(serde::Serialize)]
+pub struct ImportOutcome {
+    pub path: String,
+    pub config: AppConfig,
+}
+
+/// Replace the stored config with a document the user picks.
+///
+/// Validation happens in `config::import_config_document` before anything is
+/// written: a document carrying a plaintext `client_secret` is refused, the
+/// rest is migrated and clamped, and the outgoing file is kept as
+/// `config.json.bak`. Returns `None` when the dialog was dismissed.
+#[tauri::command]
+pub async fn import_config(
+    app: AppHandle,
+    title: String,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<Option<ImportOutcome>, String> {
+    log::info!("{CMD} import_config: ENTRY");
+
+    let chosen = app
+        .dialog()
+        .file()
+        .set_title(title)
+        .add_filter("JSON", &["json"])
+        .blocking_pick_file();
+    let Some(chosen) = chosen else {
+        log::info!("{CMD} import_config: CANCELLED - dialog dismissed");
+        return Ok(None);
+    };
+    let source = chosen
+        .into_path()
+        .map_err(|e| format!("import_config: unusable source: {}", e))?;
+    let raw = std::fs::read_to_string(&source).map_err(|e| {
+        format!(
+            "import_config: failed to read '{}': {}",
+            source.display(),
+            e
+        )
+    })?;
+
+    // #215 pattern: the read-modify-write runs on the blocking pool under the
+    // config write guard, so a concurrent write cannot interleave with it.
+    let state_clone = Arc::clone(state.inner());
+    let source_path = source.to_string_lossy().into_owned();
+    let persisted = tauri::async_runtime::spawn_blocking(move || {
+        let mut config_guard = state_clone.config.get_mut();
+        config::import_config_document(&raw, &config::get_config_path()?)?;
+        // The authoritative view of what is now on disk: a real load re-derives
+        // the keychain display fields, which never come from an imported file.
+        let persisted = config::load_config()?;
+        *config_guard = Some(persisted.clone());
+        Ok::<AppConfig, String>(persisted)
+    })
+    .await
+    .map_err(|e| format!("import_config spawn_blocking panicked: {:?}", e))??;
+
+    after_persist(&app, &persisted).await;
+    log::info!(
+        "{CMD} import_config: SUCCESS - imported from {}",
+        source_path
+    );
+    Ok(Some(ImportOutcome {
+        path: source_path,
+        config: persisted,
+    }))
 }

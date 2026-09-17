@@ -27,6 +27,10 @@ vi.mock('@tauri-apps/plugin-notification', () => ({
   isPermissionGranted: vi.fn(async () => true),
   requestPermission: vi.fn(async () => 'granted')
 }));
+// 4.7.0 (S5): the Backup card's overwrite confirmation is the native
+// `ask()` dialog from the dialog plugin; the file open/save dialogs live in
+// the Rust `export_config`/`import_config` commands.
+vi.mock('@tauri-apps/plugin-dialog', () => ({ ask: vi.fn(async () => true) }));
 vi.mock('$lib/stores/detach', () => ({
   popOut: vi.fn(async () => {}),
   popIn: vi.fn(async () => {}),
@@ -37,6 +41,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { emitTo } from '@tauri-apps/api/event';
 import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notification';
 import { popIn } from '$lib/stores/detach';
+import { ask } from '@tauri-apps/plugin-dialog';
 import Settings from '$lib/components/Settings.svelte';
 import { currentView } from '$lib/stores/app';
 import { configStore, defaultConfig } from '$lib/stores/config';
@@ -55,6 +60,7 @@ const emitToMock = emitTo as unknown as Mock;
 const popInMock = popIn as unknown as Mock;
 const isPermissionGrantedMock = isPermissionGranted as unknown as Mock;
 const requestPermissionMock = requestPermission as unknown as Mock;
+const askMock = ask as unknown as Mock;
 
 /** A configured install: the Spotify reconnect button needs a stored Client ID. */
 function configuredConfig() {
@@ -93,6 +99,8 @@ beforeEach(() => {
   requestPermissionMock.mockResolvedValue('granted');
   emitToMock.mockClear();
   popInMock.mockClear();
+  askMock.mockReset();
+  askMock.mockResolvedValue(true);
   invokeMock.mockReset();
   invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
     switch (cmd) {
@@ -690,6 +698,125 @@ describe('Settings rule scheduling and priority controls (S4/#672)', () => {
       expect(get(configStore).status_rules.quiet_hours[0].pause_polling).toBe(true);
       expect(get(configStore).teams.paused_status_format).toBe('Back in 5');
       expect(get(configStore).teams.stopped_status_format).toBe('Idle');
+    });
+  });
+});
+
+/**
+ * 4.7.0 (#673): the Logging and Backup cards.
+ *
+ * The Rust half is covered by `config.rs` tests (rotation clamps, the export
+ * document, import validation); what only this test can pin is the seam —
+ * the logging fields ride the normal `save_config` path, and the two backup
+ * buttons reach the commands the Rust side registers, with the localized
+ * dialog title as the only argument.
+ */
+describe('Settings logging and backup cards (#673)', () => {
+  const buttonByText = (container: HTMLElement, label: string) =>
+    [...container.querySelectorAll('button')].find(
+      (b) => b.textContent?.trim() === label
+    ) as HTMLButtonElement;
+
+  /** Serve the backup commands; everything else keeps the harness default. */
+  function armBackupCommands(exportPath: string | null, importPath: string) {
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'load_config') return configuredConfig();
+      if (cmd === 'get_sync_status') {
+        return {
+          is_syncing: false,
+          current_track: null,
+          spotify_connected: true,
+          teams_connected: true
+        };
+      }
+      if (cmd === 'get_spotify_granted_scopes') return ['user-modify-playback-state'];
+      if (cmd === 'get_teams_granted_scopes') return ['Presence.Read', 'profile'];
+      if (cmd === 'export_config') return exportPath;
+      if (cmd === 'import_config') {
+        return { path: importPath, config: configuredConfig() };
+      }
+      if (args != null && typeof args === 'object' && 'config' in args) return args.config;
+      return [];
+    });
+  }
+
+  it('saves the rotation fields through the normal save path', async () => {
+    const { container } = await mountSettings();
+
+    const keepInput = container.querySelector('#log-keep-files') as HTMLInputElement;
+    expect(keepInput).not.toBeNull();
+    await fireEvent.input(keepInput, { target: { value: '7' } });
+
+    await fireEvent.click(buttonByText(container, t('settings.saveChanges')));
+
+    await waitFor(() => {
+      expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'save_config')).toBe(true);
+      // The harness echoes the payload back and Settings adopts it (#297), so
+      // the store holding the typed value proves the card's binding is live —
+      // the u64 wire encoding is pinned in tests/stores.test.ts, where the
+      // payload shape is the subject rather than a harness artefact.
+      expect(get(configStore).logging.keep_files).toBe(7);
+    });
+  });
+
+  it('exports through export_config and reports the resolved path', async () => {
+    const { container } = await mountSettings();
+    const exportPath = '/tmp/presencejam-config-4.7.0-20260917-040506.json';
+    armBackupCommands(exportPath, '/tmp/imported.json');
+
+    await fireEvent.click(buttonByText(container, t('settings.backupExport')));
+
+    await waitFor(() => {
+      const call = invokeMock.mock.calls.find(([cmd]) => cmd === 'export_config');
+      expect(call).toBeTruthy();
+      // The dialog title is the localized string: Rust renders the native
+      // dialog and has no dictionary of its own.
+      expect(call![1]).toEqual({ title: t('settings.backupExportDialogTitle') });
+    });
+    await waitFor(() => {
+      expect(container.textContent).toContain(exportPath);
+    });
+  });
+
+  it('cancelling the overwrite confirmation never opens a picker', async () => {
+    const { container } = await mountSettings();
+    armBackupCommands(null, '/tmp/imported.json');
+    askMock.mockResolvedValue(false);
+
+    await fireEvent.click(buttonByText(container, t('settings.backupImport')));
+
+    await waitFor(() => {
+      expect(askMock).toHaveBeenCalledWith(t('settings.backupConfirmOverwrite'), {
+        title: t('settings.backupImportDialogTitle'),
+        kind: 'warning'
+      });
+    });
+    expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'import_config')).toBe(false);
+  });
+
+  it('imports after confirmation and adopts the reloaded config', async () => {
+    const { container } = await mountSettings();
+    armBackupCommands(null, '/tmp/imported.json');
+    askMock.mockResolvedValue(true);
+    const loadsBefore = invokeMock.mock.calls.filter(([cmd]) => cmd === 'load_config').length;
+
+    await fireEvent.click(buttonByText(container, t('settings.backupImport')));
+
+    await waitFor(() => {
+      const call = invokeMock.mock.calls.find(([cmd]) => cmd === 'import_config');
+      expect(call).toBeTruthy();
+      expect(call![1]).toEqual({ title: t('settings.backupImportDialogTitle') });
+    });
+    // The UI reloads from the file the import wrote rather than trusting a
+    // pre-import copy — the store must come from `load_config`, not the
+    // `ImportOutcome` payload alone.
+    await waitFor(() => {
+      expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'load_config').length).toBeGreaterThan(
+        loadsBefore
+      );
+    });
+    await waitFor(() => {
+      expect(container.textContent).toContain('/tmp/imported.json');
     });
   });
 });
