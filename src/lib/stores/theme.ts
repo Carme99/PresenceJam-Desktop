@@ -33,12 +33,28 @@ function readInitial(): Theme {
 const storedDensity =
   typeof window === 'undefined' ? null : window.localStorage.getItem(DENSITY_STORAGE_KEY);
 
-export const theme = writable<Theme>(readInitial());
+const initialTheme = readInitial();
+
+export const theme = writable<Theme>(initialTheme);
+/**
+ * What is painted on `<html>` right now — `system` resolved to the OS value,
+ * and republished whenever the OS appearance changes. Components that render
+ * from the theme (the header toggle glyph) must read this, not `theme`: the
+ * preference alone cannot say what the user is looking at (#680).
+ */
+export const appliedTheme = writable<ResolvedTheme>(resolveTheme(initialTheme));
 export const density = writable<Density>(storedDensity === 'compact' ? 'compact' : 'comfortable');
+
+/** Paint `<html>` and publish the resolved value to `appliedTheme`. */
+function paint(value: Theme): void {
+  const applied = resolveTheme(value);
+  document.documentElement.setAttribute('data-theme', applied);
+  appliedTheme.set(applied);
+}
 
 if (typeof document !== 'undefined') {
   theme.subscribe((value) => {
-    document.documentElement.setAttribute('data-theme', resolveTheme(value));
+    paint(value);
     try {
       window.localStorage.setItem(STORAGE_KEY, value);
     } catch {
@@ -68,12 +84,10 @@ if (typeof document !== 'undefined') {
 // on, but only while the preference is `system`: an explicit light/dark is a
 // user decision and an OS change must not override it.
 if (typeof document !== 'undefined') {
-  const media = window.matchMedia?.(LIGHT_QUERY);
-  media?.addEventListener?.('change', () => {
+  lightQuery?.addEventListener?.('change', () => {
     if (get(theme) !== 'system') return;
-    const applied = resolveTheme('system');
-    if (document.documentElement.getAttribute('data-theme') === applied) return;
-    document.documentElement.setAttribute('data-theme', applied);
+    if (get(appliedTheme) === resolveTheme('system')) return;
+    paint('system');
     window.dispatchEvent(new CustomEvent('presencejam:theme-changed', { detail: 'system' }));
   });
 }
