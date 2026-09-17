@@ -464,7 +464,7 @@ export const de: Dict = {
   'settings.logMaxSizeLabel': 'Maximale Protokolldateigröße (MB)',
   'settings.logKeepFilesLabel': 'Aufzubewahrende archivierte Protokolldateien',
   'settings.logRotationHint':
-    'Größenlimit und Anzahl der aufbewahrten archivierten Dateien gelten ab dem nächsten Start von PresenceJam; die aktuelle Protokolldatei bleibt zusätzlich erhalten. Das Ausschalten der Protokollierung oder eine andere Stufe wirkt sofort.',
+    'Größenlimit und Anzahl der archivierten Dateien gelten ab dem nächsten Start von PresenceJam. Die gerade geschriebene Datei zählt nicht dazu: Der Protokollordner enthält höchstens eine Datei mehr als die hier eingestellte Anzahl. Das Ausschalten der Protokollierung oder eine andere Stufe wirkt sofort.',
   'settings.sectionBackup': 'Sicherung',
   'settings.backupHint':
     'Exportieren schreibt eine Kopie dieser Einstellungen, die Sie aufbewahren oder auf einen anderen Rechner übertragen können. Ihr Spotify-Client-Geheimnis bleibt im Systemschlüsselbund und ist nie enthalten — eine Datei, die eines enthält, wird beim Import abgelehnt.',

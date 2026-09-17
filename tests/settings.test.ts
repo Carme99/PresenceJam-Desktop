@@ -710,7 +710,7 @@ describe('Settings logging and backup cards (#673)', () => {
     ) as HTMLButtonElement;
 
   /** Serve the backup commands; everything else keeps the harness default. */
-  function armBackupCommands(exportPath: string | null, importPath: string) {
+  function armBackupCommands(exportPath: string | null, importPath: string | null) {
     invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
       if (cmd === 'load_config') return configuredConfig();
       if (cmd === 'get_sync_status') {
@@ -725,7 +725,10 @@ describe('Settings logging and backup cards (#673)', () => {
       if (cmd === 'get_teams_granted_scopes') return ['Presence.Read', 'profile'];
       if (cmd === 'export_config') return exportPath;
       if (cmd === 'import_config') {
-        return { path: importPath, config: configuredConfig() };
+        // `null` is the command's "declined or dismissed" answer (the
+        // confirmation lives in Rust), so a null path here exercises the
+        // decline branch rather than the success one.
+        return importPath === null ? null : { path: importPath, config: configuredConfig() };
       }
       if (args != null && typeof args === 'object' && 'config' in args) return args.config;
       return [];
@@ -781,8 +784,9 @@ describe('Settings logging and backup cards (#673)', () => {
 
   it('passes the localized confirm copy, and a decline changes nothing', async () => {
     const { container } = await mountSettings();
-    // `null` is the command's "declined or dismissed" answer.
-    armBackupCommands(null, '/tmp/imported.json');
+    // A null import outcome is the command's "declined or dismissed" answer.
+    armBackupCommands(null, null);
+    const loadsBefore = invokeMock.mock.calls.filter(([cmd]) => cmd === 'load_config').length;
 
     await fireEvent.click(buttonByText(container, t('settings.backupImport')));
 
@@ -797,10 +801,11 @@ describe('Settings logging and backup cards (#673)', () => {
         confirmCancel: t('common.no')
       });
     });
-    // A decline is a clean no-op in the card: no status message (neither the
-    // imported path nor an error) and exactly one command call. That the file
-    // itself was not touched is `declined_import_touches_nothing`'s business on
-    // the Rust side, where the real files are.
+    // A decline is a clean no-op in the card: no reload, and no status message
+    // (neither the imported path nor an error). That the file itself was left
+    // alone is `declined_import_touches_nothing`'s business on the Rust side,
+    // where the real files are.
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'load_config').length).toBe(loadsBefore);
     expect(container.querySelector('[role="status"]')).toBeNull();
     expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'import_config')).toHaveLength(1);
   });
