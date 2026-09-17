@@ -916,3 +916,41 @@ describe('Settings logging and backup cards (#673)', () => {
     });
   });
 });
+
+/**
+ * #678 (update-channel slice) — the release channel is a real config field:
+ * the picker must both save the choice into the persisted payload and show
+ * the persisted value on the next launch.
+ *
+ * Fails pre-fix: there is no channel field and no Updates card.
+ */
+describe('Settings update channel (#678)', () => {
+  it('saves the chosen channel into the config payload', async () => {
+    const { container, getByRole } = await mountSettings();
+    const select = container.querySelector('#update-channel') as HTMLSelectElement;
+    expect(select.value).toBe('stable');
+
+    await fireEvent.change(select, { target: { value: 'beta' } });
+    await tick();
+    await fireEvent.click(getByRole('button', { name: t('settings.saveChanges') }));
+
+    // The harness's `save_config` echo returns exactly the payload it was
+    // given (#297), so a store that settled on `beta` can only have received
+    // it from the picker's saved payload.
+    await waitFor(() => expect(get(configStore).updates.channel).toBe('beta'));
+    expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'save_config')).toBe(true);
+  });
+
+  it('shows the persisted channel after a relaunch', async () => {
+    const base = invokeMock.getMockImplementation()!;
+    const beta = structuredClone(defaultConfig);
+    beta.updates = { channel: 'beta' };
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) =>
+      cmd === 'load_config' ? beta : base(cmd, args)
+    );
+
+    const { container } = await mountSettings();
+    const select = container.querySelector('#update-channel') as HTMLSelectElement;
+    expect(select.value).toBe('beta');
+  });
+});

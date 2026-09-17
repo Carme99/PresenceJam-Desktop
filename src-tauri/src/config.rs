@@ -706,6 +706,34 @@ fn default_notification_class() -> bool {
     true
 }
 
+/// Which release manifest the updater consults (4.7.0, issue #678).
+///
+/// Serialized lowercase — `stable`/`beta` is the on-disk and on-the-wire
+/// spelling the Settings picker round-trips, so `rename_all` is part of the
+/// contract, not cosmetics (same convention as [`ClientSecretState`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
+pub enum UpdateChannel {
+    /// Published releases (`releases/latest`): the default, and the only
+    /// channel with a published manifest in 4.7.0.
+    #[default]
+    Stable,
+    /// Pre-release builds. 4.7.0 ships the switch only — no
+    /// `latest-beta.json` is published yet, so a beta check falls through to
+    /// the stable manifest (see `updater_bg::update_endpoints`).
+    Beta,
+}
+
+/// Updater settings (4.7.0, issue #678). Additive on `AppConfig` with
+/// `#[serde(default)]`, so a pre-4.7 config loads as the stable channel.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
+pub struct UpdatesConfig {
+    #[serde(default)]
+    pub channel: UpdateChannel,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct AppConfig {
@@ -717,6 +745,9 @@ pub struct AppConfig {
     pub polling: PollingConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
+    /// Release channel the updater reads (issue #678).
+    #[serde(default)]
+    pub updates: UpdatesConfig,
     #[serde(default)]
     pub autostart: bool,
     /// Desktop-notification classes (4.7.0 / issue #675). Additive on
@@ -815,6 +846,7 @@ impl Default for AppConfig {
             teams: TeamsConfig::default(),
             polling: PollingConfig::default(),
             logging: LoggingConfig::default(),
+            updates: UpdatesConfig::default(),
             autostart: false,
             notifications: NotificationsConfig::default(),
             locale: None,
@@ -3661,5 +3693,34 @@ mod tests {
         assert!(!dir.join("config.json.bak").exists());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #678: a `config.json` written before 4.7.0 has no `updates`
+    /// key, and must keep loading on the stable channel (additive serde
+    /// default — the schema version does not move for it).
+    #[test]
+    fn test_updates_channel_defaults_to_stable_for_pre_4_7_configs() {
+        let cfg: AppConfig = serde_json::from_str("{}").expect("empty object must parse");
+        assert_eq!(cfg.updates.channel, UpdateChannel::Stable);
+        assert_eq!(AppConfig::default().updates.channel, UpdateChannel::Stable);
+    }
+
+    /// The persisted spelling is what the Settings picker round-trips across
+    /// a relaunch, so both directions must hold the lowercase wire form.
+    #[test]
+    fn test_update_channel_wire_spelling() {
+        for (channel, wire) in [
+            (UpdateChannel::Stable, "\"stable\""),
+            (UpdateChannel::Beta, "\"beta\""),
+        ] {
+            assert_eq!(serde_json::to_string(&channel).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_str::<UpdateChannel>(wire).unwrap(),
+                channel
+            );
+        }
+        let stored: AppConfig =
+            serde_json::from_str(r#"{"updates": {"channel": "beta"}}"#).expect("must parse");
+        assert_eq!(stored.updates.channel, UpdateChannel::Beta);
     }
 }

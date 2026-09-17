@@ -53,6 +53,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   stored settings from a file — asking first, refusing any document that carries
   a plaintext `client_secret`, clamping out-of-band values, and keeping the
   previous file as `config.json.bak`.
+- **Release channel for the updater (#678):** Settings → Updates picks between
+  the stable and beta channels, and the banner's candidate is resolved by the
+  backend (`check_for_update`) from that choice instead of the plugin's JS
+  `check()`, which cannot take an endpoint list. No beta manifest
+  (`latest-beta.json`) is published yet, so a beta check falls through to the
+  stable release — the fall-through is logged on every check, and the picker
+  says so. On beta the immediate download-and-relaunch action is replaced by
+  install-on-quit, because the JS path is hard-wired to the static stable
+  endpoint in `tauri.conf.json`. A deferred stage that succeeds now also emits
+  `update-stage-complete { version }`, so an always-mounted listener can
+  notify when an update is ready to install on quit.
 
 - **Tray and app-menu localization (#674):** the tray menu and the native
   application menu render in English, German or French. Every user-visible

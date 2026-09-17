@@ -48,8 +48,17 @@ vi.mock('@tauri-apps/plugin-updater', () => ({
 import { invoke } from '@tauri-apps/api/core';
 import UpdatePrompt from '$lib/components/UpdatePrompt.svelte';
 import { i18n, t } from '$lib/i18n';
+import { configStore, defaultConfig } from '$lib/stores/config';
+import type { AppConfig } from '$lib/types';
 
 const invokeMock = invoke as unknown as Mock;
+
+/** #678: the backend's candidate payload from `check_for_update`. */
+const CANDIDATE = {
+  version: '4.6.0',
+  notes: 'Fixes and polish',
+  pub_date: '2026-09-16T21:07:35Z'
+};
 
 /** Resolvers of the in-flight `stage_deferred_update` calls, in call order. */
 let stageResolvers: ((outcome: unknown) => void)[] = [];
@@ -84,6 +93,13 @@ async function startStage(container: HTMLElement) {
   await waitFor(() => expect(container.querySelector('.update-progress')).not.toBeNull());
 }
 
+/** #678: a config on `channel`, with the backend's default candidate. */
+function configWithChannel(channel: 'stable' | 'beta'): AppConfig {
+  const cfg = structuredClone(defaultConfig);
+  cfg.updates = { channel };
+  return cfg;
+}
+
 beforeEach(() => {
   listeners.length = 0;
   released = 0;
@@ -91,6 +107,9 @@ beforeEach(() => {
   i18n.set('en');
   invokeMock.mockReset();
   invokeMock.mockImplementation((cmd: string) => {
+    if (cmd === 'check_for_update') {
+      return Promise.resolve(CANDIDATE);
+    }
     if (cmd === 'stage_deferred_update') {
       const outcome = Promise.withResolvers<unknown>();
       stageResolvers.push(outcome.resolve);
@@ -98,6 +117,9 @@ beforeEach(() => {
     }
     return Promise.resolve(undefined);
   });
+  // #678: the banner resolves its candidate and its channel through the
+  // backend; start every test on the stable default.
+  configStore.set(configWithChannel('stable'));
 });
 
 afterEach(() => {
@@ -182,5 +204,54 @@ describe('UpdatePrompt deferred staging (#590)', () => {
     pending.unmount();
     await waitFor(() => expect(released).toBe(2));
     expect(listeners).toHaveLength(0);
+  });
+});
+
+/**
+ * #678 (update-channel slice) — the banner's candidate and its actions
+ * follow the configured release channel.
+ *
+ * Fails pre-fix: the banner discovered its candidate through the plugin's JS
+ * `check()`, which cannot take an endpoint list, so a Beta check could only
+ * ever have read the stable manifest; and the immediate download-and-relaunch
+ * action was offered unconditionally, which a beta endpoint list cannot
+ * honour.
+ */
+describe('UpdatePrompt release channel (#678)', () => {
+  it('surfaces the manifest notes and publish date as the banner tooltip', async () => {
+    const { container } = await mountBanner();
+    const tooltip = container.querySelector('.update-banner')?.getAttribute('title') ?? '';
+    expect(tooltip).toContain(CANDIDATE.notes);
+    expect(tooltip).toContain(CANDIDATE.pub_date);
+  });
+
+  it('discovers its candidate through the backend channel-aware check', async () => {
+    await mountBanner();
+    expect(invokeMock.mock.calls.map(([cmd]) => cmd)).toContain('check_for_update');
+  });
+
+  it('offers download-and-relaunch on the stable channel', async () => {
+    const { container } = await mountBanner();
+    expect(
+      within(container).getByRole('button', { name: t('update.downloadAndInstall') })
+    ).toBeTruthy();
+    expect(container.querySelector('.update-beta')).toBeNull();
+  });
+
+  it('offers only install-on-quit on the beta channel, and says so', async () => {
+    configStore.set(configWithChannel('beta'));
+    const { container } = await mountBanner();
+
+    expect(
+      within(container).queryByRole('button', { name: t('update.downloadAndInstall') })
+    ).toBeNull();
+    expect(container.querySelector('.update-beta')?.textContent?.trim()).toBe(
+      t('update.betaOnQuitOnly')
+    );
+
+    // The deferred (Rust) path is still offered, and still stages.
+    await startStage(container);
+    stageResolvers.shift()!({ staged: '4.6.0', current: '4.5.2' });
+    await waitFor(() => expect(container.querySelector('.update-staged')).not.toBeNull());
   });
 });

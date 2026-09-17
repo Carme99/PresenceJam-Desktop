@@ -494,4 +494,13 @@ export const de: Dict = {
     'Ihre Teams-Sitzung ist abgelaufen. Melden Sie sich erneut an, damit Ihr Status synchron bleibt.',
   'notifications.updateStagedTitle': 'Update bereit',
   'notifications.updateStagedBody': 'PresenceJam {version} wird beim Beenden installiert.',
+  // 4.7.0 — update channel (#678)
+  'settings.sectionUpdates': 'Updates',
+  'settings.updateChannelLabel': 'Versionskanal',
+  'settings.updateChannelStable': 'Stabil',
+  'settings.updateChannelBeta': 'Beta',
+  'settings.updateChannelHint':
+    'Es ist noch kein Beta-Build veröffentlicht, daher greift der Beta-Kanal derzeit auf die stabile Version zurück — der Rückfall wird bei jeder Prüfung protokolliert. Beta-Builds werden nur beim Beenden installiert.',
+  'update.betaOnQuitOnly':
+    'Beta-Kanal: Updates werden beim Beenden installiert — auf Beta gibt es keinen Download-und-Neustart-Pfad.',
 };

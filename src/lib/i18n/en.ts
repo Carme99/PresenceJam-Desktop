@@ -481,6 +481,15 @@ export const en = {
     'Your Teams session expired. Sign in again so your status keeps syncing.',
   'notifications.updateStagedTitle': 'Update ready',
   'notifications.updateStagedBody': 'PresenceJam {version} will be installed when you quit.',
+  // 4.7.0 — update channel (#678)
+  'settings.sectionUpdates': 'Updates',
+  'settings.updateChannelLabel': 'Release channel',
+  'settings.updateChannelStable': 'Stable',
+  'settings.updateChannelBeta': 'Beta',
+  'settings.updateChannelHint':
+    'No beta build is published yet, so the Beta channel falls back to the stable release — the app logs the fall-through on every check. Beta builds install on quit only.',
+  'update.betaOnQuitOnly':
+    'Beta channel: updates install when you quit — there is no download-and-relaunch path on Beta.',
 };
 
 export type Dict = { readonly [K in keyof typeof en]: string };

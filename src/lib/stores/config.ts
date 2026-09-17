@@ -71,6 +71,11 @@ export const defaultConfig: AppConfig = {
     max_file_size_mb: BigInt(10),
     keep_files: 3
   },
+  // 4.7.0 (issue #678): release channel the updater reads. Mirrors Rust's
+  // `UpdatesConfig::default` (`stable`) — the backend resolves the channel
+  // from the persisted config on every check, so this is only the pre-load
+  // placeholder.
+  updates: { channel: 'stable' },
   autostart: false,
   // 4.7.0 (#675): one desktop-notification class per toggle, all ON — the
   // Rust `NotificationsConfig` defaults (serde-defaulted, so a pre-4.7
