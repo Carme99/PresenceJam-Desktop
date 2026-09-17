@@ -588,6 +588,43 @@ describe('Settings rule scheduling and priority controls (S4/#672)', () => {
     });
   });
 
+  it('resets the two manual-status editors the rules card renders', async () => {
+    const { container } = await mountSettings();
+
+    const pausedText = container.querySelector(
+      'input[aria-label="' + t('rules.pausedStatusPlaceholder') + '"]'
+    ) as HTMLInputElement;
+    const stoppedText = container.querySelector(
+      'input[aria-label="' + t('rules.stoppedStatusPlaceholder') + '"]'
+    ) as HTMLInputElement;
+    await fireEvent.input(pausedText, { target: { value: 'Back in 5' } });
+    await fireEvent.input(stoppedText, { target: { value: 'Idle' } });
+    await tick();
+
+    // Scope to the rules card: three other cards carry a "reset to default"
+    // control, and the first one in DOM order belongs to the presence card.
+    const rulesCard = [...container.querySelectorAll('section.card')].find(
+      (section) => section.querySelector('h2')?.textContent?.trim() === t('rules.sectionTitle')
+    ) as HTMLElement;
+    const reset = rulesCard.querySelector('button.btn-link') as HTMLButtonElement;
+    await fireEvent.click(reset);
+    await tick();
+
+    // The visible editors are back to the defaults, not left stale.
+    expect(pausedText.value).toBe(defaultConfig.teams.paused_status_format);
+    expect(stoppedText.value).toBe(defaultConfig.teams.stopped_status_format);
+
+    await fireEvent.click(container.querySelector('.actions .btn-full') as HTMLElement);
+    await waitFor(() => {
+      expect(get(configStore).teams.paused_status_format).toBe(
+        defaultConfig.teams.paused_status_format
+      );
+      expect(get(configStore).teams.stopped_status_format).toBe(
+        defaultConfig.teams.stopped_status_format
+      );
+    });
+  });
+
   it('saves the pause-polling toggle and the two manual-status texts', async () => {
     const { container } = await mountSettings();
 

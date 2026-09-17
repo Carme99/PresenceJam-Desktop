@@ -443,7 +443,7 @@ export const de: Dict = {
   'rules.pausePollingHint':
     'Während dieses Zeitraums wird Spotify gar nicht abgefragt — kein Status, kein Teams-Aufruf. Die Abfrage läuft automatisch weiter, sobald der Zeitraum endet.',
   'rules.trackRulesOrderHint':
-    'Regeln werden von oben nach unten geprüft — die erste passende gewinnt. Ohne Wochentage gilt eine Regel jeden Tag; eine Endzeit von 00:00 bedeutet Tagesende.',
+    'Regeln werden von oben nach unten geprüft — die erste passende gewinnt. Ohne Wochentage gilt eine Regel jeden Tag; eine Endzeit von 00:00 bedeutet Tagesende, und gleicher Beginn und Schluss passen nie.',
   'rules.ruleStart': 'Beginn des Regelzeitraums',
   'rules.ruleEnd': 'Ende des Regelzeitraums',
   'rules.ruleDays': 'Aktive Tage dieser Regel (keine Auswahl = jeden Tag)',

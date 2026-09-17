@@ -1370,25 +1370,41 @@ fn matching_quiet_hours(
     now_minutes: u16,
     weekday: u8,
 ) -> Option<&crate::config::QuietHoursEntry> {
+    rules
+        .quiet_hours
+        .iter()
+        .find(|entry| quiet_entry_contains(entry, now_minutes, weekday))
+}
+
+/// Whether ONE quiet-hours entry is active at the given local time: enabled, the
+/// weekday filter passes (empty = every day), and the time falls in
+/// `[start, end)` — with wrap-around (e.g. 22:00→07:00) handled as
+/// `now >= start || now < end`. Minutes are clamped to 0..=1439 so a hand-edited
+/// config cannot wedge the comparison, and a zero-length window (`start == end`)
+/// matches nothing. Extracted (S4, issue #672) so the "pause polling" gate can
+/// ask the question per entry instead of only of the first match.
+fn quiet_entry_contains(
+    entry: &crate::config::QuietHoursEntry,
+    now_minutes: u16,
+    weekday: u8,
+) -> bool {
     let now = now_minutes.min(1439);
-    rules.quiet_hours.iter().find(|entry| {
-        if !entry.enabled {
-            return false;
-        }
-        if !entry.days.is_empty() && !entry.days.contains(&weekday) {
-            return false;
-        }
-        let start = entry.start_minutes.min(1439);
-        let end = entry.end_minutes.min(1439);
-        if start == end {
-            return false;
-        }
-        if start < end {
-            now >= start && now < end
-        } else {
-            now >= start || now < end
-        }
-    })
+    if !entry.enabled {
+        return false;
+    }
+    if !entry.days.is_empty() && !entry.days.contains(&weekday) {
+        return false;
+    }
+    let start = entry.start_minutes.min(1439);
+    let end = entry.end_minutes.min(1439);
+    if start == end {
+        return false;
+    }
+    if start < end {
+        now >= start && now < end
+    } else {
+        now >= start || now < end
+    }
 }
 
 /// Finding PollCore#1 (issue #569): whether the mid-track quiet-hours ENTRY
@@ -1466,10 +1482,15 @@ pub(crate) fn quiet_pause_iteration(config: &Option<AppConfig>) -> Option<u64> {
 /// cannot spin the thread.
 fn quiet_pause_at(config: &Option<AppConfig>, now_minutes: u16, weekday: u8) -> Option<(u64, u16)> {
     let cfg = config.as_ref()?;
-    let entry = matching_quiet_hours(&cfg.status_rules, now_minutes, weekday)?;
-    entry
-        .pause_polling
-        .then(|| (cfg.polling.max_interval_seconds.max(1), entry.end_minutes))
+    // ANY active quiet-hours entry can assert the pause: quiet hours are not an
+    // ordered priority list (that is what the track rules are), so a second
+    // overlapping window that asks for "stop polling" must not be ignored just
+    // because an earlier window matched first for the replacement text.
+    let entry =
+        cfg.status_rules.quiet_hours.iter().find(|entry| {
+            entry.pause_polling && quiet_entry_contains(entry, now_minutes, weekday)
+        })?;
+    Some((cfg.polling.max_interval_seconds.max(1), entry.end_minutes))
 }
 
 /// The log line for a pause/resume transition, or `None` when the state did not
@@ -5284,9 +5305,12 @@ mod tests {
         assert!(!track_rule_schedule_matches(&empty, 600, 3));
     }
 
-    /// S4 (issue #672): array order is PRIORITY. Two overlapping rules both
-    /// match the same track; the first one's action is what reaches Teams, and
-    /// a first rule whose schedule excludes "now" yields to the later one.
+    /// S4 (issue #672): array order is PRIORITY, and this test can OBSERVE it:
+    /// the first two rules overlap on `[600, 1020)`, so at 10:00 both match the
+    /// same track and only the order decides which action reaches Teams (a
+    /// last-match-wins or any-match implementation posts "Evening" instead of
+    /// "Morning"). A first rule whose window excludes "now" yields to the later
+    /// one, and a same-window pair is decided purely by order too.
     #[test]
     fn test_track_rule_first_match_wins_with_overlapping_windows() {
         use crate::config::{AppConfig, StatusRulesConfig, TrackRuleEntry};
@@ -5299,42 +5323,57 @@ mod tests {
             replacement_status: text.to_string(),
             ..TrackRuleEntry::default()
         };
-        let config = Some(AppConfig {
-            status_rules: StatusRulesConfig {
-                quiet_hours: Vec::new(),
-                track_rules: vec![
-                    rule("Morning", Vec::new(), 480, 1020),
-                    rule(
-                        "Evening",
-                        Vec::new(),
-                        1200,
-                        crate::config::TRACK_RULE_DAY_MINUTES,
-                    ),
-                ],
-            },
-            ..AppConfig::default()
-        });
+        let with_rules = |rules: Vec<TrackRuleEntry>| {
+            Some(AppConfig {
+                status_rules: StatusRulesConfig {
+                    quiet_hours: Vec::new(),
+                    track_rules: rules,
+                },
+                ..AppConfig::default()
+            })
+        };
 
-        // Both substrings match, so only the window separates the two rules —
-        // and the first one that covers "now" is the one that posts.
+        let overlapping = with_rules(vec![
+            rule("Morning", Vec::new(), 480, 1020),
+            // Overlaps the first rule on [600, 1020).
+            rule(
+                "Evening",
+                Vec::new(),
+                600,
+                crate::config::TRACK_RULE_DAY_MINUTES,
+            ),
+        ]);
         assert_eq!(
-            rule_gate_at(&config, 600, 3, "Lofi Girl", "Rain Sounds")
+            rule_gate_at(&overlapping, 600, 3, "Lofi Girl", "Rain Sounds")
                 .replacement
                 .as_deref(),
             Some("Morning"),
-            "the first matching rule wins (10:00 is inside its window)"
+            "both rules cover 10:00, so the FIRST one wins"
         );
         assert_eq!(
-            rule_gate_at(&config, 1200, 3, "Lofi Girl", "Rain Sounds")
+            rule_gate_at(&overlapping, 1200, 3, "Lofi Girl", "Rain Sounds")
                 .replacement
                 .as_deref(),
             Some("Evening"),
             "a rule whose window excludes 'now' yields to the next one"
         );
         assert_eq!(
-            rule_gate_at(&config, 60, 3, "Lofi Girl", "Rain Sounds"),
+            rule_gate_at(&overlapping, 60, 3, "Lofi Girl", "Rain Sounds"),
             RuleDecision::default(),
             "outside both windows nothing matches"
+        );
+
+        // Same window, different text: nothing but the order can decide.
+        let identical_windows = with_rules(vec![
+            rule("First", Vec::new(), 600, 1440),
+            rule("Second", Vec::new(), 600, 1440),
+        ]);
+        assert_eq!(
+            rule_gate_at(&identical_windows, 700, 3, "Lofi Girl", "Rain Sounds")
+                .replacement
+                .as_deref(),
+            Some("First"),
+            "with identical windows the first rule in the array wins"
         );
     }
 
@@ -5384,6 +5423,26 @@ mod tests {
             quiet_pause_at(&Some(config(true, false, 1320, 420)), 1380, 3),
             None
         );
+        // Quiet hours are NOT an ordered list for this decision: a window that
+        // starts later can assert the pause even though the first match owns the
+        // replacement text.
+        let mut second_window_pauses = config(false, true, 0, 1439);
+        second_window_pauses
+            .status_rules
+            .quiet_hours
+            .push(QuietHoursEntry {
+                enabled: true,
+                start_minutes: 1200,
+                end_minutes: 1380,
+                pause_polling: true,
+                ..QuietHoursEntry::default()
+            });
+        assert_eq!(
+            quiet_pause_at(&Some(second_window_pauses), 1300, 3),
+            Some((60, 1380)),
+            "an overlapping second window that asks for the pause must stop polling"
+        );
+
         // The sleep follows the user's ceiling.
         let mut slow = paused.clone();
         slow.polling.max_interval_seconds = 300;
@@ -5496,6 +5555,23 @@ mod tests {
             loop_source.matches("quiet_pause_iteration(").count(),
             1,
             "exactly one pause-gate call site is expected in the driver"
+        );
+        // ...and the pause arm itself: the slice between the gate and the clock
+        // load must sleep on the STOP-AWARE receiver (so stop_syncing still
+        // interrupts immediately) and `continue` (so the window is re-evaluated
+        // on the next iteration instead of the thread ending).
+        let skip_arm = &loop_source[gate..clocks];
+        assert!(
+            skip_arm.contains("recv_timeout"),
+            "the paused iteration must sleep on the interruptible receiver (S4)"
+        );
+        assert!(
+            skip_arm.contains("continue"),
+            "the paused iteration must re-evaluate the window next iteration (S4)"
+        );
+        assert!(
+            skip_arm.contains("quiet_pause_seconds"),
+            "the paused arm must sleep the duration the gate returned (S4)"
         );
     }
 

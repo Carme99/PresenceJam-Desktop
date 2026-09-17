@@ -452,7 +452,7 @@ export const fr: Dict = {
   'rules.pausePollingHint':
     "Pendant cette plage, Spotify n'est pas interrogé du tout — aucun statut écrit, aucun appel Teams. L'interrogation reprend d'elle-même à la fin de la plage.",
   'rules.trackRulesOrderHint':
-    "Les règles sont évaluées de haut en bas — la première qui correspond l'emporte. Sans jour sélectionné, une règle s'applique tous les jours ; une heure de fin à 00:00 signifie la fin de la journée.",
+    "Les règles sont évaluées de haut en bas — la première qui correspond l'emporte. Sans jour sélectionné, une règle s'applique tous les jours ; une heure de fin à 00:00 signifie la fin de la journée, et un début égal à la fin ne correspond jamais.",
   'rules.ruleStart': 'Début de la plage de la règle',
   'rules.ruleEnd': 'Fin de la plage de la règle',
   'rules.ruleDays': 'Jours actifs de cette règle (aucun sélectionné = tous les jours)',

@@ -369,7 +369,11 @@ fn clamp_rule_text(text: &mut String) {
 /// (`start > end`, e.g. 22:00→07:00) honoured, and `start == end` matching
 /// nothing.
 fn clamp_track_rule_window(rule: &mut TrackRuleEntry) {
-    rule.start_minutes = rule.start_minutes.min(TRACK_RULE_DAY_MINUTES);
+    // A START of 1440 is unreachable: `now` never exceeds 1439, so such a rule
+    // could never match while the picker happily renders it as 00:00. Clamp the
+    // start to the last minute of the day instead, and the end to the end of
+    // the day (1440), which IS reachable as "until midnight".
+    rule.start_minutes = rule.start_minutes.min(TRACK_RULE_DAY_MINUTES - 1);
     rule.end_minutes = rule.end_minutes.min(TRACK_RULE_DAY_MINUTES);
     rule.days.retain(|day| (1..=7).contains(day));
     rule.days.sort_unstable();
@@ -2517,7 +2521,11 @@ mod tests {
             ],
         };
         clamp_rules(&mut rules);
-        assert_eq!(rules.track_rules[0].start_minutes, TRACK_RULE_DAY_MINUTES);
+        assert_eq!(
+            rules.track_rules[0].start_minutes,
+            TRACK_RULE_DAY_MINUTES - 1,
+            "a start of 1440 is unreachable, so it clamps to the last minute"
+        );
         assert_eq!(rules.track_rules[0].end_minutes, TRACK_RULE_DAY_MINUTES);
         assert_eq!(
             rules.track_rules[0].days,

@@ -73,6 +73,10 @@
   // additive with serde defaults, so a default section is always valid.
   function resetRulesDefaults() {
     localConfig.status_rules = structuredClone(defaultConfig.status_rules);
+    // S4 (issue #672): the card also renders the two manual-status texts, so
+    // Reset must not leave those editors showing a stale value.
+    localConfig.teams.paused_status_format = defaultConfig.teams.paused_status_format;
+    localConfig.teams.stopped_status_format = defaultConfig.teams.stopped_status_format;
   }
   // Issue #432: format minutes-since-midnight as HH:MM for time inputs.
   function minutesToTime(m: number): string {
