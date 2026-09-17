@@ -84,10 +84,11 @@
     let unlistenPlayback: (() => void) | null = null;
     let destroyed = false;
 
-    listen('teams-reconnect-required', async () => {
+    // The reconnect the user just asked for ("Reconnect Teams") is marked
+    // `user_initiated` by Rust; only the poller's dead-session emitters toast.
+    listen<{ user_initiated?: boolean }>('teams-reconnect-required', async (event) => {
       devLog('[LAYOUT] teams-reconnect-required received');
-      // #675: the class the user enabled for "my Teams session expired".
-      void notifyAuthRequired();
+      if (event.payload?.user_initiated !== true) void notifyAuthRequired();
       // #421: fresh entry clears this flow's stale phase only; never the sibling's.
       resetTeamsAuthFlow();
       currentView.set('settings');
@@ -217,13 +218,16 @@
         setSyncing(true);
       })
     );
+    // #675: Rust marks the two `sync-stopped` emitters apart —
+    // `self_terminated: true` is the poller's own exit (polling/state.rs), and
+    // `false` the explicit user stop (commands::sync.rs), which must not be
+    // reported back as a surprise. An unknown/older payload counts as "not
+    // self-terminated", so a user stop can never be mislabelled.
     presenceTeardown.add(
-      listen('sync-stopped', () => {
+      listen<{ self_terminated?: boolean }>('sync-stopped', (event) => {
         devLog('[LAYOUT] sync-stopped received');
         setSyncing(false);
-        // #675: S1 made this fire exactly once per stop on both the explicit
-        // and the self-exit path — one occurrence, one notification.
-        void notifySyncStopped();
+        if (event.payload?.self_terminated === true) void notifySyncStopped();
       })
     );
 

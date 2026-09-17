@@ -160,23 +160,25 @@ function clearLegacyPreference(): void {
 
 /**
  * Pre-4.7 migration (#675): the single `notificationsEnabled` boolean becomes
- * `notifications.track_change`, the one class it ever governed. The legacy key
- * is removed in the same breath, so the value is honoured exactly once and
- * config owns it from then on.
+ * `notifications.track_change`, the one class it ever governed.
  *
- * Never rejects — a failed write leaves the migrated value live in this
- * session (the pre-4.7 store's best-effort rule) and the next launch simply
- * migrates again.
+ * The legacy key is removed ONLY after the value is confirmed on disk. Clearing
+ * it first would make a rejected save (a full disk, a read-only config dir)
+ * destroy a user's opt-OUT for good — the config would stay at the new class
+ * default and there would be nothing left to migrate from. On a rejected save
+ * the key stays put, the value is still live in this session, and the next
+ * launch migrates again.
  */
 export async function migrateLegacyNotificationPreference(cfg: AppConfig): Promise<AppConfig> {
   const legacy = readLegacyPreference();
   if (legacy === null) return cfg;
-  clearLegacyPreference();
   const next: AppConfig = { ...cfg, notifications: { ...cfg.notifications, track_change: legacy } };
   try {
-    return await saveConfig(next);
+    const persisted = await saveConfig(next);
+    clearLegacyPreference();
+    return persisted;
   } catch (e) {
-    console.warn('[NOTIFICATIONS] legacy opt-in could not be persisted:', e);
+    console.warn('[NOTIFICATIONS] legacy opt-in could not be persisted, keeping the key:', e);
     setLocal(next.notifications);
     configStore.set(next);
     return next;
@@ -253,9 +255,10 @@ export async function notifyTrackChange(track: NotificationTrack): Promise<boole
 }
 
 /**
- * The poller stopped on its own (S1 made `sync-stopped` fire exactly once per
- * stop on both the explicit and the self-exit path). One occurrence, one
- * notification — there is no timer in this class.
+ * The poller stopped on its own — the caller has already checked the event's
+ * `self_terminated` flag, which is the only thing that tells this surprise
+ * apart from the stop the user just asked for (#675). One occurrence, one
+ * notification: there is no timer in this class.
  */
 export async function notifySyncStopped(): Promise<boolean> {
   return sendNow(
@@ -265,7 +268,12 @@ export async function notifySyncStopped(): Promise<boolean> {
   );
 }
 
-/** A stored Teams session is no longer usable; a sign-in is required. */
+/**
+ * A stored Teams session is no longer usable; a sign-in is required. Like
+ * [`notifySyncStopped`], the caller has already filtered the event: a reconnect
+ * the user just asked for is marked `user_initiated` by Rust and is not a
+ * surprise to report back.
+ */
 export async function notifyAuthRequired(): Promise<boolean> {
   return sendNow(
     'auth_required',

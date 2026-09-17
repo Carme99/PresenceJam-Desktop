@@ -14,13 +14,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `track_change`, `sync_stopped`, `auth_required`, `update_staged`, all ON by
   default and persisted in `config.json` — with one Settings toggle per class.
   The three new classes are dispatched from the always-mounted layout, off
-  events that were previously silent to the user: `sync-stopped` (including
-  the poller's own self-exit) and `teams-reconnect-required` for the two
-  recovery cases, and `update-stage-complete` ("update will install on quit").
-  Track changes keep their 5 s throttle and replace-in-place notification id,
-  and an install that still carries the old `notificationsEnabled` value has
-  it migrated into `track_change` exactly once, after which the config is the
-  only source of truth.
+  events that were previously silent to the user: `sync-stopped` and
+  `teams-reconnect-required` for the two recovery cases, and
+  `update-stage-complete` ("update will install on quit"). Those two recovery
+  events now carry the discriminator Rust already knows — `self_terminated`
+  on `sync-stopped` (true from the poller's own exit, false from an explicit
+  stop) and `user_initiated` on `teams-reconnect-required` — so a Pause Sync or
+  a Reconnect the user just clicked is never reported back to them as a
+  surprise. Track changes keep their 5 s throttle and replace-in-place
+  notification id, and an install that still carries the old
+  `notificationsEnabled` value has it migrated into `track_change` exactly
+  once (only after the write lands, so a rejected save cannot lose an
+  opt-out), after which the config is the only source of truth.
 
 - **Track rules can be scheduled, and quiet hours can stop polling (#672):** a
   track rule now carries its own weekday set and time window (empty weekdays =

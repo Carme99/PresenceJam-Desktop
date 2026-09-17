@@ -47,6 +47,7 @@ import {
   type NotificationPreferences
 } from '$lib/stores/notifications';
 import { t } from '$lib/i18n';
+import Dashboard from '$lib/components/Dashboard.svelte';
 import Layout from '../src/routes/+layout.svelte';
 
 type Listener = { event: string; fn: (e: { payload: unknown }) => void };
@@ -86,6 +87,7 @@ vi.mock('@tauri-apps/plugin-updater', () => ({ check: vi.fn(async () => null) })
 // reads the pane flags and adopts the window set.
 vi.mock('$lib/stores/detach', async () => {
   const { writable } = await import('svelte/store');
+
   return {
     detachedPanes: writable({ logs: false, settings: false }),
     focusDetached: vi.fn(async () => {}),
@@ -94,6 +96,17 @@ vi.mock('$lib/stores/detach', async () => {
     reconcileDetachedPanes: vi.fn(async () => {})
   };
 });
+
+/**
+ * Settle the fire-and-forget dispatch chain (a mocked async permission check
+ * plus the send) without `waitFor`, which needs real timers and therefore
+ * cannot be used while the clock is pinned.
+ */
+async function flush(): Promise<void> {
+  for (let i = 0; i < 4; i++) await Promise.resolve();
+  await tick();
+  for (let i = 0; i < 4; i++) await Promise.resolve();
+}
 
 let storedConfig: AppConfig;
 
@@ -299,7 +312,8 @@ describe('track-change class: the pre-4.7 behaviour, unchanged (#675)', () => {
 
 describe('legacy opt-in migration (#675)', () => {
   it('folds the pre-4.7 boolean into track_change and removes the key', async () => {
-    seed({ sync_stopped: true });
+    // `track_change` starts ON, so the legacy opt-out is what moves it.
+    seed({ track_change: true, sync_stopped: true });
     window.localStorage.setItem(NOTIFICATIONS_STORAGE_KEY, 'false');
 
     const next = await migrateLegacyNotificationPreference(storedConfig);
@@ -309,6 +323,38 @@ describe('legacy opt-in migration (#675)', () => {
     // and the classes the legacy flag never governed are untouched.
     const saved = saveCalls()[0]?.[1] as { config: AppConfig };
     expect(saved.config.notifications).toMatchObject({ track_change: false, sync_stopped: true });
+    expect(window.localStorage.getItem(NOTIFICATIONS_STORAGE_KEY)).toBeNull();
+  });
+
+  it('keeps the legacy opt-out when the save is rejected, and honours it next launch', async () => {
+    seed({ track_change: true, sync_stopped: true });
+    window.localStorage.setItem(NOTIFICATIONS_STORAGE_KEY, 'false');
+    // A full disk / read-only config dir: the write never lands.
+    const save = invoke.getMockImplementation();
+    invoke.mockImplementation(async (cmd: string, args?: { config?: AppConfig }) => {
+      if (cmd === 'save_config') throw new Error('config.json is read-only');
+      return save?.(cmd, args);
+    });
+
+    const failed = await migrateLegacyNotificationPreference(storedConfig);
+
+    // The opt-out is live for this session…
+    expect(failed.notifications.track_change).toBe(false);
+    // …and the key is still there, because nothing was persisted: clearing it
+    // here would destroy the user's opt-out for good.
+    expect(window.localStorage.getItem(NOTIFICATIONS_STORAGE_KEY)).toBe('false');
+
+    // Next launch: the config never learned about the migration, and the key
+    // migrates again instead of the opt-out having vanished.
+    invoke.mockImplementation(async (cmd: string, args?: { config?: AppConfig }) => {
+      if (cmd === 'save_config') {
+        storedConfig = args?.config ?? storedConfig;
+        return storedConfig;
+      }
+      return save?.(cmd, args);
+    });
+    const relaunch = await migrateLegacyNotificationPreference(storedConfig);
+    expect(relaunch.notifications.track_change).toBe(false);
     expect(window.localStorage.getItem(NOTIFICATIONS_STORAGE_KEY)).toBeNull();
   });
 
@@ -415,33 +461,74 @@ describe('the always-mounted layout dispatches the new classes (#675)', () => {
     return result;
   }
 
-  it('notifies once per stop when the poller stops, and not when the class is off', async () => {
+  it('notifies on the poller ending by itself, and not on a user-requested stop', async () => {
     seed({ sync_stopped: true });
     await mountLayout();
 
-    await emit('sync-stopped');
+    // The user's own Pause Sync (commands::sync::stop_syncing) — reporting that
+    // back as "PresenceJam stopped syncing on its own" would be false, and it
+    // is the one action the user already knows about.
+    await emit('sync-stopped', { self_terminated: false });
+    expect(plugin.sendNotification).not.toHaveBeenCalled();
+
+    // A payload in neither shape (an older backend, which emitted a unit) must
+    // not be mislabelled either.
+    await emit('sync-stopped', null);
+    expect(plugin.sendNotification).not.toHaveBeenCalled();
+
+    // The surprise: the poller gave up on its own (polling/state.rs).
+    await emit('sync-stopped', { self_terminated: true });
     await waitFor(() => expect(plugin.sendNotification).toHaveBeenCalledTimes(1));
     expect(plugin.sendNotification.mock.calls[0][0].title).toBe(t('notifications.syncStoppedTitle'));
 
     // S1's contract: exactly one `sync-stopped` per stop — so this is a
     // second stop, a second replacing notification rather than a duplicate.
-    await emit('sync-stopped');
+    await emit('sync-stopped', { self_terminated: true });
     await waitFor(() => expect(plugin.sendNotification).toHaveBeenCalledTimes(2));
   });
 
-  it('notifies for a Teams reconnect while another view is on screen, with the other classes off', async () => {
+  it('notifies for a dead Teams session while another view is on screen, and no track-change toast', async () => {
+    seed({ auth_required: true });
+    await mountLayout();
+    // The Dashboard owns the `spotify-track-changed` listener, so it has to be
+    // mounted for the "no track-change toast" half to mean anything. The track
+    // class answers the same config the auth class does.
+    const dash = render(Dashboard);
+    await waitFor(() =>
+      expect(listeners.all.filter((l) => l.event === 'spotify-track-changed').length).toBe(1)
+    );
+
+    // The throttle/dedup state is module-wide and shared with the tests above,
+    // so pin the clock an hour past anything else in this file and use a track
+    // no other test names — otherwise a silent track change would be
+    // indistinguishable from a throttled one (which is exactly how the
+    // original version of this assertion passed for the wrong reason).
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 3_600_000));
+    try {
+      // The forced `invalid_grant` path (poll_once's `json!(null)` payload).
+      await emit('teams-reconnect-required', null);
+      await emit('spotify-track-changed', { title: 'Dead Session Track', artist: 'Zed' });
+      await flush();
+      expect(plugin.sendNotification).toHaveBeenCalledTimes(1);
+      const sent = plugin.sendNotification.mock.calls[0][0];
+      expect(sent.title).toBe(t('notifications.authRequiredTitle'));
+      expect(sent.id).toBe(1003);
+    } finally {
+      vi.useRealTimers();
+    }
+    dash.unmount();
+  });
+
+  it('does not notify for a reconnect the user just asked for', async () => {
     seed({ auth_required: true });
     await mountLayout();
 
-    // The forced `invalid_grant` path: only auth_required is enabled, so the
-    // one occurrence produces exactly one toast — and no track-change toast.
-    await emit('teams-reconnect-required');
-    await emit('spotify-track-changed', { title: 'A Track', artist: 'An Artist' });
-
-    await waitFor(() => expect(plugin.sendNotification).toHaveBeenCalledTimes(1));
-    const sent = plugin.sendNotification.mock.calls[0][0];
-    expect(sent.title).toBe(t('notifications.authRequiredTitle'));
-    expect(sent.id).toBe(1003);
+    // Settings' "Reconnect Teams" (commands::onboarding::reconnect_teams) marks
+    // its emit `user_initiated` — the user knows, and the layout navigates them
+    // to the device-code flow anyway.
+    await emit('teams-reconnect-required', { user_initiated: true });
+    expect(plugin.sendNotification).not.toHaveBeenCalled();
   });
 
   it('notifies when an update finishes staging, carrying the staged version', async () => {
@@ -459,8 +546,10 @@ describe('the always-mounted layout dispatches the new classes (#675)', () => {
     seed();
     await mountLayout();
 
-    await emit('sync-stopped');
-    await emit('teams-reconnect-required');
+    // The payloads that WOULD notify, so this can only be silence from the
+    // class flags — not from the payload gate.
+    await emit('sync-stopped', { self_terminated: true });
+    await emit('teams-reconnect-required', null);
     await emit('update-stage-complete', { version: '4.7.0' });
     await emit('spotify-track-changed', { title: 'A Track', artist: 'An Artist' });
 

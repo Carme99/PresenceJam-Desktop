@@ -486,8 +486,16 @@ pub fn reconnect_teams(
     state.onboarding_cache.invalidate();
     log::info!("{CMD} reconnect_teams: onboarding_cache invalidated");
 
-    // Emit event so UI can show re-auth flow
-    if let Err(e) = app.emit("teams-reconnect-required", ()) {
+    // Emit event so UI can show re-auth flow. #675: this is the ONLY
+    // user-initiated emitter of `teams-reconnect-required` ("Reconnect Teams"
+    // in Settings), so it is marked as such — the notification consumer toasts
+    // only the genuinely-dead-session emitters in `poll_once` and stays quiet
+    // for the reconnect the user just asked for. The always-mounted layout
+    // opens the device-code flow here either way.
+    if let Err(e) = app.emit(
+        "teams-reconnect-required",
+        serde_json::json!({ "user_initiated": true }),
+    ) {
         log::error!("{CMD} reconnect_teams: failed to emit event - {}", e);
     } else {
         log::info!("{CMD} reconnect_teams: EMIT teams-reconnect-required event");
