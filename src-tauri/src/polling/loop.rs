@@ -263,6 +263,12 @@ mod tests {
     /// driver immediately instead of after up to one `max_interval` (issue #10
     /// — the 300 s freeze) and what the exit block reads to decide whether
     /// `commands::sync` already owns the `sync-stopped` emit (finding D5).
+    ///
+    /// Companion: `test_every_driver_wait_site_is_stop_aware` below. This test
+    /// exercises the handshake through the real `stop_polling`, but it cannot
+    /// execute `polling_loop` (that needs an `AppHandle<Wry>` and this crate has
+    /// no mock runtime), so the driver's own wait *calls* are pinned at the
+    /// source there rather than left implicitly assumed here.
     #[test]
     fn test_stop_handshake_wakes_the_driver_and_restart_isolates_the_old_thread() {
         let state = AppState::new();
@@ -385,5 +391,67 @@ mod tests {
         // owns only the "do not clear it here" half of that contract, and this
         // file is deliberately free of a `reset_exit_snapshot` call — the D1
         // source guard in `poll_once.rs` reads this file to prove it.
+    }
+
+    /// #681, the driver's wait sites themselves. `polling_loop` cannot be driven
+    /// in a unit test — it takes an `AppHandle<Wry>` and this crate has no mock
+    /// runtime — so a change *inside* the loop (to a wait call, or to how a wait
+    /// decides) would leave the behavioural test above green. Rather than hide
+    /// that gap, this pins the driver's wait contract at the source, in the shape
+    /// this repo already uses for exactly that reason (the #572/D1 and S4 guards
+    /// in `poll_once.rs`): exactly three stop-aware wait sites — the
+    /// non-blocking pre-iteration probe, the quiet-hours pause and the
+    /// between-iteration sleep — no plain `thread::sleep`, and a closed channel
+    /// treated as "break" at every one of them, which is what makes
+    /// `stop_polling` immediate (issue #10).
+    #[test]
+    fn test_every_driver_wait_site_is_stop_aware() {
+        let source = include_str!("loop.rs");
+        // Production half only: this module's own text names these calls in prose
+        // and would otherwise be scanned.
+        let prod = &source[..source
+            .find("#[cfg(test)]")
+            .expect("loop.rs must keep its test module last")];
+
+        assert_eq!(
+            prod.matches("stop_rx.recv_timeout(").count(),
+            3,
+            "the driver must wait on the STOP-AWARE receiver at all three sites: \
+             the pre-iteration probe, the quiet-hours pause and the \
+             between-iteration sleep"
+        );
+        assert!(
+            !prod.contains("thread::sleep("),
+            "no plain sleep in the driver: it cannot be woken by stop_polling, \
+             which is the up-to-30s Pause Sync freeze (issue #10)"
+        );
+        assert_eq!(
+            prod.matches("StdDuration::ZERO").count(),
+            1,
+            "the pre-iteration probe must stay non-blocking, so a stop lands \
+             before the next iteration does any work"
+        );
+        assert_eq!(
+            prod.matches("StdDuration::from_secs(").count(),
+            2,
+            "both waits that can outlive a request (the quiet-hours pause and the \
+             iteration sleep) must be bounded by the returned interval"
+        );
+        for (idx, _) in prod.match_indices("stop_rx.recv_timeout(") {
+            // Wide enough to swallow the longest arm — the quiet-hours pause arm
+            // (~410 bytes, it logs before breaking) — while still being local to
+            // the site, so a matched arm cannot come from the next wait.
+            let arm = &prod[idx..(idx + 700).min(prod.len())];
+            assert!(
+                arm.contains("Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected)"),
+                "every wait site must treat a closed channel as 'break': dropping \
+                 the stored stop_tx is exactly how stop_polling wakes the driver"
+            );
+            assert!(
+                arm.contains("RecvTimeoutError::Timeout"),
+                "every wait site must spell out the timeout arm, so 'no stop yet' \
+                 is an explicit continue rather than a catch-all"
+            );
+        }
     }
 }
