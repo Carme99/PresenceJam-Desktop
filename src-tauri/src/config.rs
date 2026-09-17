@@ -1414,12 +1414,6 @@ pub fn migrate_legacy_client_secret() {
 /// one-time [`SPOTIFY_SECRET_CONFLICT_EVENT`] so Settings can prompt
 /// Settings → Reconnect Spotify (payload carries the manual step).
 /// All other outcomes are silent apart from the usual `[CFG]` logs.
-///
-/// Wiring note (orchestrator): `lib.rs` setup currently calls the log-only
-/// `migrate_legacy_client_secret()`; swap that call site to
-/// `config::migrate_legacy_client_secret_with_app(app.handle())` so the
-/// conflict becomes user-visible. This file is slice-D owned, so the
-/// one-line swap lives outside this change.
 pub fn migrate_legacy_client_secret_with_app(app: &tauri::AppHandle) {
     if run_legacy_secret_migration() == LegacySecretOutcome::ConflictKeychainDiffers {
         emit_spotify_secret_conflict_once(app);

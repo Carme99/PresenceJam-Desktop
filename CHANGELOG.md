@@ -96,11 +96,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the same field through the shared config write path, so the webview and the
   native surfaces cannot disagree. An unknown tag falls back to English and is
   logged.
+- **System theme option (#680):** Settings → Appearance gains a third theme card
+  beside Dark and Light. "System" tracks the OS appearance live — switching the
+  desktop between light and dark repaints the app immediately, with no restart —
+  while an explicit Dark or Light stays pinned and is never overridden by the OS.
+  The pre-paint bootstrap resolves the stored preference too, so a System user
+  never sees a flash of the wrong theme on launch, and a detached Logs/Settings
+  window follows the main window's choice as before.
+- **Compact density toggle (#680):** Settings → Appearance can switch the spacing
+  and type scale to a tighter variant, persisted like the theme and applied
+  before first paint. It is a token-scale override, so every existing component
+  follows it; it is independent of the theme, including the new System option.
 
 ### Changed
 
+- **The declared MSRV is now machine-enforced (#680):** `Cargo.toml` claimed
+  `rust-version = "1.96"`, but a local `cargo fmt` / `cargo check` / `cargo clippy`
+  ran on whatever toolchain happened to be installed. A `rust-toolchain.toml` now
+  pins the channel to that declared release, so the floor cannot be dodged
+  silently. CI keeps its SHA-pinned toolchain action.
+
 ### Fixed
 
+- **Two stale code claims corrected (#697, #698):** the panic hook's comment named
+  the pre-#300 macOS log directory (`~/Library/Logs/PresenceJam/`) instead of the
+  `app_log_dir()` path carrying the bundle id, and a "wiring note" in `config.rs`
+  claimed `lib.rs` still called the log-only secret-migration function when it had
+  long since called the `_with_app` variant. Neither changed behaviour; both told
+  the next maintainer something untrue.
 - **Quit-time Teams cleanup was cancelled by the poller's own exit tail (#684):**
   `polling_loop` resets the write-decision clocks on its way out, and
   `RunEvent::Exit` runs `clear_presence_on_exit` *after* it — so a cleanup that

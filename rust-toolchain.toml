@@ -1,0 +1,13 @@
+# Machine-enforced MSRV (#680).
+#
+# `src-tauri/Cargo.toml` declares `rust-version = "1.96"`, but nothing made a
+# local `cargo fmt` / `cargo check` / `cargo clippy` actually run on it: an
+# older local stable built the crate while silently dodging the declared
+# floor, and a newer one could format with rustfmt rules the MSRV release does
+# not have. Pinning the channel here makes rustup resolve every cargo command
+# run in this repository to the declared MSRV.
+#
+# CI is unaffected: the workflows keep their SHA-pinned toolchain action.
+[toolchain]
+channel = "1.96"
+components = ["rustfmt", "clippy"]
