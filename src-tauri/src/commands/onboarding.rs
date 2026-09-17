@@ -529,6 +529,32 @@ mod tests {
         );
     }
 
+    /// #675: `reconnect_teams` is the ONLY user-initiated emitter of
+    /// `teams-reconnect-required`, and the desktop-notification consumer
+    /// depends on that: it toasts the poller's dead-session emitters and stays
+    /// quiet for the reconnect the user just asked for. The signal is the
+    /// payload, so both halves are pinned here — the marker on this emitter,
+    /// and the poller's emitters *not* carrying it. Structural because the emit
+    /// needs a live `AppHandle`; whitespace is normalised so rustfmt reflowing
+    /// the call cannot break the guard.
+    #[test]
+    fn reconnect_teams_marks_its_emit_user_initiated() {
+        let mark = |src: &str| src.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            mark(include_str!("onboarding.rs")).contains(
+                "app.emit( \"teams-reconnect-required\", serde_json::json!({ \"user_initiated\": true }), )"
+            ),
+            "the user-initiated reconnect must mark its emit, or #675 would report the \
+             reconnect the user just clicked back to them as an expired session"
+        );
+        assert!(
+            !include_str!("../polling/poll_once.rs").contains("user_initiated"),
+            "the poller's `teams-reconnect-required` emitters are the dead-session ones and \
+             must NOT claim to be user-initiated: if one starts doing so, a genuine expiry \
+             would be silently swallowed and the user would never be told to sign in again"
+        );
+    }
+
     /// The refresh is only paid for when it is needed: a locally-fresh access
     /// token must short-circuit without touching the network.
     #[test]

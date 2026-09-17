@@ -113,12 +113,25 @@ function parseMirror(raw: string | null): NotificationPreferences | null {
 /**
  * Apply the mirror a sibling webview just wrote. Exported so the `storage`
  * listener below and the regression test drive the same path.
+ *
+ * It converges BOTH the preferences and the config store. Two Settings views
+ * genuinely coexist (a popped-out pane opens beside the main window's own
+ * Settings), and a Save writes the whole `AppConfig` the saving window holds —
+ * so converging only the preferences would let a Save in the other window
+ * retro-write the class back to its old value on disk. Pre-4.7 the flag lived
+ * in `localStorage`, which no Save touched, which is why that failure mode is
+ * new with the config-backed classes.
  */
 export function convergeFromMirror(mirror: NotificationPreferences | string | null): boolean {
   const next =
     typeof mirror === 'string' || mirror === null ? parseMirror(mirror) : parseMirror(JSON.stringify(mirror));
   if (!next) return false;
   setLocal(next);
+  const cfg = get(configStore);
+  const current = cfg.notifications;
+  if (NOTIFICATION_CLASSES.some((cls) => current[cls] !== next[cls])) {
+    configStore.set({ ...cfg, notifications: next });
+  }
   return true;
 }
 

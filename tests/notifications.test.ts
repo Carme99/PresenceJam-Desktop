@@ -435,6 +435,13 @@ describe('the Settings toggle path (#675)', () => {
       new StorageEvent('storage', { key: NOTIFICATION_PREFS_MIRROR_KEY, newValue: mirror })
     );
     expect(get(notificationPreferences).sync_stopped).toBe(true);
+    // The config store converges too: a Save in the sibling window writes the
+    // whole `AppConfig` it holds, so converging only the preferences would let
+    // that Save write the class back to its old value on disk (#675 round 3).
+    expect(get(configStore).notifications).toMatchObject({
+      sync_stopped: true,
+      track_change: false
+    });
 
     // An unrelated key, or an unparsable payload, changes nothing.
     window.dispatchEvent(
@@ -444,6 +451,7 @@ describe('the Settings toggle path (#675)', () => {
       new StorageEvent('storage', { key: NOTIFICATION_PREFS_MIRROR_KEY, newValue: '{oops' })
     );
     expect(get(notificationPreferences).sync_stopped).toBe(true);
+    expect(get(configStore).notifications.sync_stopped).toBe(true);
     expect(convergeFromMirror('{oops')).toBe(false);
   });
 });

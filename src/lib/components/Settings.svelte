@@ -231,6 +231,19 @@
     auth_required: 'settings.notificationsAuthRequired',
     update_staged: 'settings.notificationsUpdateStaged'
   };
+  // #675: the form's `localConfig` is snapshotted once, but the notification
+  // classes are immediate-apply and shared, so a toggle made in the *other*
+  // Settings view (a popped-out pane runs beside this one) — or in the main
+  // window — must reach this form's copy. Without this, `handleSave` would
+  // write the stale section back over the choice the user just made. Only the
+  // notifications section is followed: every other field here is a pending
+  // edit that Save owns.
+  $effect(() => {
+    const next = $configStore.notifications;
+    if (NOTIFICATION_CLASSES.some((cls) => localConfig.notifications[cls] !== next[cls])) {
+      localConfig.notifications = { ...next };
+    }
+  });
   let spotifyAuthWaiting = $derived(authFlow.spotify.phase === 'waiting');
   let teamsAuthWaiting = $derived(authFlow.teams.phase === 'waiting');
 

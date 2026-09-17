@@ -289,6 +289,39 @@ describe('Settings notification classes (#549, #675)', () => {
     // The pre-4.7 key is not written any more — config.json owns the value.
     expect(localStorage.getItem('notificationsEnabled')).toBeNull();
   });
+
+  /**
+   * #675 regression: two Settings views genuinely coexist (C7 — a popped-out
+   * pane opens beside the main window's own Settings). The form's
+   * `localConfig` is a snapshot, so before the notifications section started
+   * following the shared store, a Save in the *other* view wrote its stale
+   * section back and un-ticked the class the user had just turned on — a
+   * failure mode the pre-4.7 `localStorage` flag could not have, since no Save
+   * touched it.
+   */
+  it('keeps a toggle made in the sibling Settings view when this view saves', async () => {
+    configStore.set(notificationsOffConfig());
+    const main = await mountSettings();
+    const sibling = await mountSettings(true);
+
+    await fireEvent.click(classToggle(sibling.container, 'sync_stopped'));
+    await waitFor(() => expect(get(notificationPreferences).sync_stopped).toBe(true));
+
+    // The main view's form was loaded before that toggle and is not dirty for
+    // the class, so its Save now has to carry the choice the sibling made.
+    const savesBefore = invokeMock.mock.calls.filter(([cmd]) => cmd === 'save_config').length;
+    await fireEvent.click(main.container.querySelector('.actions .btn-full') as HTMLElement);
+    await waitFor(() =>
+      expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'save_config').length).toBeGreaterThan(
+        savesBefore
+      )
+    );
+
+    const saved = invokeMock.mock.calls.filter(([cmd]) => cmd === 'save_config').at(-1)?.[1] as {
+      config: { notifications: Record<string, boolean> };
+    };
+    expect(saved.config.notifications.sync_stopped).toBe(true);
+  });
 });
 
 describe('Settings theme picker semantics (#552)', () => {
