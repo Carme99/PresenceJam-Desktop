@@ -209,6 +209,13 @@ pub(crate) fn load_write_clocks() -> WriteClocks {
 /// through mid-meeting, which is exactly the defect the guard exists for.
 /// Discard it and log: the lost fields are dedup hints the next iteration
 /// re-derives, while a resurrected gate decision is not recoverable.
+///
+/// Residual, accepted and by design: two writers that loaded the SAME
+/// generation are last-writer-wins — the second store lands on the first's
+/// state. That costs dedup precision for at most one iteration (the next
+/// iteration re-derives it from live state and any gate it re-reads is
+/// re-recorded), which is the price of keeping the load/store pair lock-free
+/// across a whole HTTP iteration rather than holding a mutex through it.
 pub(crate) fn store_write_clocks(clocks: &WriteClocks) {
     let mut slot = WRITE_CLOCKS.lock().unwrap_or_else(|e| e.into_inner());
     if slot.generation != clocks.generation {
