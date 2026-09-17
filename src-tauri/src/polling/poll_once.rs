@@ -212,14 +212,24 @@ pub(crate) fn load_write_clocks() -> WriteClocks {
 ///
 /// Residual, accepted and by design: two writers that loaded the SAME
 /// generation are first-publish-wins — the first store lands and moves the
-/// generation on, and the second is then discarded wholesale, so THAT
-/// iteration's own advances (including any gate it just re-read) are lost and
-/// re-derived on the next one. It costs dedup precision for at most one
-/// iteration, which is the price of keeping the load/store pair lock-free across
-/// a whole HTTP iteration instead of holding a mutex through it; the alternative
-/// (letting the loser merge field-by-field) cannot distinguish its own advances
-/// from the winner's and would resurrect exactly the stale decisions the
-/// generation guard exists to drop.
+/// generation on, and the second is then discarded wholesale. For most fields
+/// that costs dedup precision for one iteration, which the next iteration
+/// re-derives; the alternative (letting the loser merge field-by-field) cannot
+/// distinguish its own advances from the winner's and would resurrect exactly
+/// the stale decisions the guard exists to drop.
+///
+/// The cost is NOT always one iteration, and the difference is worth stating
+/// (review round 3, item 4): for a PRESENCE gate the discarded iteration had
+/// just set or cleared, the surviving snapshot may hold the OPPOSITE verdict,
+/// and an unchanged playing track does not re-read presence by itself — the
+/// mid-track re-check only runs for a track the gate already names, so the gate
+/// verdict is otherwise only revisited at the next track change. One status can
+/// therefore go through mid-meeting (or be suppressed until the track ends),
+/// bounded by the track's remaining duration. The guard is still the right
+/// trade: it removes the far more common inversion (a pre-gate snapshot dropping
+/// a FRESH gate, which is unbounded while the track plays), and a RULE gate
+/// always re-derives on the next iteration because its verdict is recomputed
+/// from the clock every time.
 pub(crate) fn store_write_clocks(clocks: &WriteClocks) {
     let mut slot = WRITE_CLOCKS.lock().unwrap_or_else(|e| e.into_inner());
     if slot.generation != clocks.generation {
@@ -2054,6 +2064,31 @@ fn no_track_gate_key(blocked: bool) -> Option<&'static str> {
     blocked.then_some(NO_TRACK_GATE_KEY)
 }
 
+/// Review rounds 2 (item 7) and 3 (item 3): record the manual-status verdict
+/// observed with a presence sample into the [`super::state::ExitSnapshot`], using
+/// the SAME predicate the write gate uses.
+///
+/// The requirement is "no path may OBSERVE a manual status without recording
+/// it", because the exit path has no Graph sample of its own and must not replace
+/// a Teams status the user typed with our "Paused" placeholder. Every read
+/// therefore funnels through here — the shared `gate_verdict` closure for the
+/// change-time and paused-clear reads, and the due mid-track re-check (which
+/// calls `presence_gate_decision` directly) for its own.
+fn observe_presence_sample(
+    respect_manual_status: bool,
+    presence: &crate::teams::PresenceInfo,
+    posted: Option<&str>,
+    placeholder: Option<&str>,
+) {
+    super::state::record_manual_status_blocks(manual_status_blocks_write(
+        respect_manual_status,
+        Some(presence),
+        posted,
+        placeholder,
+        Utc::now(),
+    ));
+}
+
 /// Review round 2 (item 4): whether the paused clear can skip its Graph
 /// `/presence` read entirely.
 ///
@@ -2170,18 +2205,7 @@ pub(crate) fn process_track(
                         posted: Option<&str>,
                         placeholder: Option<&str>|
      -> Option<String> {
-        // Review round 2 (item 7): every gate read doubles as the exit path's
-        // manual-status observation. `manual_status_blocks_write` is the SAME
-        // predicate the verdict uses, so the quit cleanup and the write gate can
-        // never disagree about whose status is on Teams — and the exit path
-        // needs no Graph call of its own to respect it.
-        super::state::record_manual_status_blocks(manual_status_blocks_write(
-            respect_manual_status,
-            Some(presence),
-            posted,
-            placeholder,
-            Utc::now(),
-        ));
+        observe_presence_sample(respect_manual_status, presence, posted, placeholder);
         presence_gate_decision(
             presence,
             presence_gate_enabled,
@@ -2440,6 +2464,18 @@ pub(crate) fn process_track(
                 } else if gate_recheck_due(*last_gate_check, Instant::now()) {
                     match get_teams_presence(&teams_tok.access_token) {
                         Ok(presence) => {
+                            // Review round 3 (item 3): this read does NOT go
+                            // through `gate_verdict`, so it must record the
+                            // manual-status verdict itself — otherwise a *gated*
+                            // track plus a user-typed status left the exit
+                            // snapshot stale and quitting replaced the user's
+                            // own Teams message with our placeholder.
+                            observe_presence_sample(
+                                respect_manual_status,
+                                &presence,
+                                last_posted_status.as_deref(),
+                                last_posted_placeholder.as_deref(),
+                            );
                             // The same verdict as the change-time gate, so a
                             // manual status that lapses mid-track clears the
                             // gate and late-posts exactly like a meeting ending.
@@ -6212,6 +6248,16 @@ mod tests {
              emitted NONE). `stop_polling` clearing the stored stop sender is the requested-\
              stop signal, and commands::sync::stop_syncing owns that path's emit."
         );
+        // Review round 3, item 1: the SIGNAL itself must be pinned, not just its
+        // use — `let stop_requested = false;` (the round-1 double-emit behaviour)
+        // otherwise leaves every test green.
+        assert!(
+            body.contains("let stop_requested = state_for_cleanup.polling.stop_tx().is_none();"),
+            "the requested-stop signal must be the stored stop sender being gone: only \
+             `stop_polling` clears it, so `is_none()` is exactly 'a stop was requested and \
+             commands::sync::stop_syncing owns the emit'. Any other derivation (or a hard-\
+             coded false) re-inverts the polarity (review round 3, item 1)."
+        );
         // The payload shape is the existing emitter's, verbatim.
         let sync_source = include_str!("../commands/sync.rs");
         assert!(
@@ -6595,6 +6641,29 @@ mod tests {
             skip_check < read,
             "the skip decision must precede the Graph read it exists to avoid"
         );
+        // Review round 3, item 2: pin the ARGUMENTS, not just the predicate —
+        // hard-coding `recorded_gate_due` to false at the call site silently
+        // re-breaks the retry (a presence gate's clear is then never retried and
+        // a rule gate stays stuck) while the predicate test stays green.
+        let call_end = paused[skip_check..]
+            .find(") {")
+            .expect("the fast-path call must close")
+            + skip_check;
+        let call = &paused[skip_check..call_end];
+        assert!(
+            call.contains("already_posted")
+                && call.contains("rule_suppression_reason.is_some()")
+                && call.contains("recorded_gate_due"),
+            "the fast-path call must pass the three observations (placeholder posted, rule \
+             suppressing, recorded gate due): {:?}",
+            call
+        );
+        assert!(
+            !call.contains("false"),
+            "no argument of the fast-path call may be a hard-coded literal — a literal \
+             `false` for `recorded_gate_due` disables the due-recheck retry (review round \
+             3, item 2)"
+        );
         let skip_arm_end = paused[skip_check..]
             .find("} else if let Some(reason) = rule_suppression_reason {")
             .expect("the fast path must be the FIRST arm of the verdict chain")
@@ -6698,9 +6767,47 @@ mod tests {
         let prod = prod_source();
         let track_body = prod_fn_body(prod, "pub(crate) fn process_track(");
         assert!(
-            track_body.contains("record_manual_status_blocks(manual_status_blocks_write("),
+            track_body.contains("observe_presence_sample("),
             "every gate read must record the manual-status verdict for the exit path \
-             (review round 2, item 7) — the exit path has no Graph sample of its own"
+             (review rounds 2 item 7 / 3 item 3) — the exit path has no Graph sample of \
+             its own, so a read that does not record leaves the user's own Teams status \
+             exposed on quit"
+        );
+    }
+
+    /// Review round 3, item 3: "no path may observe a manual status without
+    /// recording it". The due mid-track re-check calls `presence_gate_decision`
+    /// directly (it does not go through `gate_verdict`), so removing its
+    /// `observe_presence_sample` call left a gated track + a user-typed status
+    /// with a stale exit snapshot — and quitting then replaced the user's own
+    /// Teams message with our placeholder.
+    #[test]
+    fn test_every_presence_read_records_the_manual_status_verdict() {
+        let prod = prod_source();
+        assert!(
+            prod.contains("fn observe_presence_sample("),
+            "the recording path must exist (review round 3, item 3)"
+        );
+        // The reads that route through `gate_verdict` are covered by its own
+        // call; assert that too, so a future edit cannot drop it quietly.
+        let verdict_start = prod
+            .find("let gate_verdict = |presence:")
+            .expect("process_track must keep the shared gate closure");
+        let verdict = &prod[verdict_start..(verdict_start + 900).min(prod.len())];
+        assert!(
+            verdict.contains("observe_presence_sample("),
+            "the shared gate closure must record the verdict for its reads"
+        );
+        // The direct read (due mid-track re-check) must record before deciding.
+        let direct = prod
+            .find("match presence_gate_decision(")
+            .expect("the due mid-track re-check must still read presence (the #430 late-post)");
+        let window = &prod[direct.saturating_sub(900)..direct];
+        assert!(
+            window.contains("observe_presence_sample("),
+            "the direct presence read must record the manual-status verdict before deciding \
+             (review round 3, item 3) — route it through `gate_verdict`, or call \
+             `observe_presence_sample` at the read"
         );
     }
 

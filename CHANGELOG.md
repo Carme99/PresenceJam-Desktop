@@ -22,10 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   cleanup now reads a process-wide exit snapshot, written by every successful
   status write and presence arm, which neither the session-end reset nor a new
   session clears — Teams keeps showing that status across a stop/start. The
-  snapshot also records the manual-status verdict the poller already observes, so
-  quitting never replaces a status message the *user* typed with the "Paused"
-  placeholder (the shipped 4.6 respect-the-manual-status behaviour) — while the
-  app's own armed availability session is still cleared.
+  snapshot also records the manual-status verdict observed on *every* presence
+  read — the change-time gate, the paused clear and the due mid-track re-check
+  all funnel through one recorder — so quitting never replaces a status message
+  the *user* typed with the "Paused" placeholder (the shipped 4.6
+  respect-the-manual-status behaviour) — while the app's own armed availability
+  session is still cleared.
 - **A gated clear was recorded as posted and could never be retried (#686,
   #687):** on the paused-track and no-track paths the byte-identity check ran
   *before* the gate verdict, and the suppressing branch then recorded the
