@@ -72,6 +72,16 @@ export const defaultConfig: AppConfig = {
     keep_files: 3
   },
   autostart: false,
+  // 4.7.0 (#675): one desktop-notification class per toggle, all ON — the
+  // Rust `NotificationsConfig` defaults (serde-defaulted, so a pre-4.7
+  // config loads unchanged). The pre-4.7 single opt-in is migrated into
+  // `track_change` by `stores/notifications.ts`.
+  notifications: {
+    track_change: true,
+    sync_stopped: true,
+    auth_required: true,
+    update_staged: true
+  },
   // 4.7.0 (issue #674): `AppConfig::locale` — the single source of truth for
   // the UI language (webview, tray and native application menu). `null` reads
   // as English on both sides, the documented default of a pre-4.7 config.

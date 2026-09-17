@@ -320,7 +320,13 @@ pub async fn stop_syncing(
     stop_polling_and_join(state_clone, "stop_syncing").await;
 
     log::info!("{CMD} stop_syncing: EMIT sync-stopped event");
-    let _ = app.emit("sync-stopped", ());
+    // #675: this emitter is the explicit user stop, so the payload says so —
+    // the notification consumer toasts only `self_terminated: true` exits
+    // (polling/state.rs) and must not report the user's own click back to them.
+    let _ = app.emit(
+        "sync-stopped",
+        serde_json::json!({ "self_terminated": false }),
+    );
 
     log::info!("{CMD} stop_syncing: SUCCESS");
     Ok(())

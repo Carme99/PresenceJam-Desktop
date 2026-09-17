@@ -77,7 +77,8 @@ import { sendNotification } from '@tauri-apps/plugin-notification';
 import Dashboard from '$lib/components/Dashboard.svelte';
 import Layout from '../src/routes/+layout.svelte';
 import { presence } from '$lib/stores/presence';
-import { setNotificationsEnabled } from '$lib/stores/notifications';
+import { notificationPreferences, setNotificationPreference } from '$lib/stores/notifications';
+import { configStore, defaultConfig } from '$lib/stores/config';
 import { i18n, t } from '$lib/i18n';
 
 const invokeMock = invoke as unknown as Mock;
@@ -161,13 +162,29 @@ beforeEach(() => {
     authPersistWarning: null,
     revision: 0
   });
-  setNotificationsEnabled(false);
+  // #675: the notification classes come from the config now. The mocked
+  // backend echoes whatever this file seeds, so a test can enable exactly the
+  // class it exercises.
+  configStore.set({
+    ...structuredClone(defaultConfig),
+    notifications: {
+      track_change: false,
+      sync_stopped: false,
+      auth_required: false,
+      update_staged: false
+    }
+  });
   i18n.set('en');
   sendNotificationMock.mockClear();
   invokeMock.mockReset();
   status = syncStatus();
-  invokeMock.mockImplementation(async (cmd: string) => {
+  invokeMock.mockImplementation(async (cmd: string, args?: { config?: unknown }) => {
     if (cmd === 'get_sync_status') return status;
+    // #675: the layout loads the config to feed the notification classes, and
+    // a toggle saves it. Echoing the store keeps the two in lockstep without
+    // this file having to model the backend's clamping.
+    if (cmd === 'load_config') return get(configStore);
+    if (cmd === 'save_config') return args?.config ?? get(configStore);
     return undefined;
   });
 });
@@ -296,24 +313,25 @@ describe('A pause is not a stop (#670)', () => {
   });
 });
 
-describe('Dashboard notification opt-in (#549)', () => {
-  it('honours a toggle flipped after the Dashboard is already mounted', async () => {
+describe('Dashboard track-change notification class (#549, #675)', () => {
+  it('honours a class enabled after the Dashboard is already mounted', async () => {
     const { container } = render(Dashboard);
     await listenerReady('spotify-track-changed');
     await waitFor(() => expect(container.querySelector('.track-card')).not.toBeNull());
 
-    // What the detached Settings window does: flip the shared opt-in.
-    setNotificationsEnabled(true);
+    // What the detached Settings window does: flip the shared class on.
+    await setNotificationPreference('track_change', true);
     await emit('spotify-track-changed', TRACK);
     await waitFor(() => expect(sendNotificationMock).toHaveBeenCalledTimes(1));
     expect(sendNotificationMock.mock.calls[0][0].title).toBe('A Track');
   });
 
-  it('stays silent while the opt-in is off', async () => {
+  it('stays silent while the class is off', async () => {
     render(Dashboard);
     await listenerReady('spotify-track-changed');
     await emit('spotify-track-changed', TRACK);
     expect(sendNotificationMock).not.toHaveBeenCalled();
+    expect(get(notificationPreferences).track_change).toBe(false);
   });
 });
 

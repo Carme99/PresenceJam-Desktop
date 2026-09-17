@@ -13,7 +13,7 @@
   import { currentView } from '$lib/stores/app';
   import { t } from '$lib/i18n';
   import { reconcileDetachedPanes } from '$lib/stores/detach';
-  import { clientSecretStateOf } from '$lib/stores/config';
+  import { clientSecretStateOf, loadConfig } from '$lib/stores/config';
   import { useListenerTeardown } from '$lib/utils/useAuthListeners';
   import {
     markStatusPosted,
@@ -25,6 +25,12 @@
     setSyncing,
     markAuthPersistWarning
   } from '$lib/stores/presence';
+  import {
+    migrateLegacyNotificationPreference,
+    notifyAuthRequired,
+    notifySyncStopped,
+    notifyUpdateStaged
+  } from '$lib/stores/notifications';
 
   // C7: this layout is shared by every webview window (the SPA fallback
   // hydrates it for detached Logs/Settings windows too). Reconnect flows,
@@ -66,13 +72,23 @@
     // survive a main-window reload — adopt the real window set before the
     // Dashboard can offer "navigate" for a pane that is already out.
     void reconcileDetachedPanes();
+    // #675: the pre-4.7 desktop-notification opt-in was a single localStorage
+    // boolean; it becomes `config.notifications.track_change` exactly once,
+    // and the config store then feeds the per-class preferences every
+    // dispatcher below reads. Fire-and-forget: it must never delay boot.
+    void loadConfig()
+      .then(migrateLegacyNotificationPreference)
+      .catch((e) => console.warn('[LAYOUT] notification preference migration failed:', e));
     let unlistenTeams: (() => void) | null = null;
     let unlistenSpotify: (() => void) | null = null;
     let unlistenPlayback: (() => void) | null = null;
     let destroyed = false;
 
-    listen('teams-reconnect-required', async () => {
+    // The reconnect the user just asked for ("Reconnect Teams") is marked
+    // `user_initiated` by Rust; only the poller's dead-session emitters toast.
+    listen<{ user_initiated?: boolean }>('teams-reconnect-required', async (event) => {
       devLog('[LAYOUT] teams-reconnect-required received');
+      if (event.payload?.user_initiated !== true) void notifyAuthRequired();
       // #421: fresh entry clears this flow's stale phase only; never the sibling's.
       resetTeamsAuthFlow();
       currentView.set('settings');
@@ -202,10 +218,16 @@
         setSyncing(true);
       })
     );
+    // #675: Rust marks the two `sync-stopped` emitters apart —
+    // `self_terminated: true` is the poller's own exit (polling/state.rs), and
+    // `false` the explicit user stop (commands::sync.rs), which must not be
+    // reported back as a surprise. An unknown/older payload counts as "not
+    // self-terminated", so a user stop can never be mislabelled.
     presenceTeardown.add(
-      listen('sync-stopped', () => {
+      listen<{ self_terminated?: boolean }>('sync-stopped', (event) => {
         devLog('[LAYOUT] sync-stopped received');
         setSyncing(false);
+        if (event.payload?.self_terminated === true) void notifySyncStopped();
       })
     );
 
@@ -217,6 +239,16 @@
       listen<string>('teams-auth-persist-warning', (event) => {
         devLog('[LAYOUT] teams-auth-persist-warning received');
         markAuthPersistWarning(String(event.payload ?? ''));
+      })
+    );
+
+    // #675: S10's deferred-stage success signal (the only emitter; the
+    // throttled `update-stage-progress` cannot distinguish success). Drives
+    // the fourth notification class from the always-mounted layout.
+    presenceTeardown.add(
+      listen<{ version?: string }>('update-stage-complete', (event) => {
+        devLog('[LAYOUT] update-stage-complete received');
+        void notifyUpdateStaged(String(event.payload?.version ?? ''));
       })
     );
 

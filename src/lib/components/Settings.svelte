@@ -1,7 +1,6 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { onMount, onDestroy } from 'svelte';
-  import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notification';
   import { currentView } from '$lib/stores/app';
   import { emitTo } from '@tauri-apps/api/event';
   // C7 multi-window detach: pop-out/pop-back controls.
@@ -16,9 +15,14 @@
   import { authFlow, setSpotifyPhase, setTeamsPhase, formatCountdownMs, resetSpotifyAuthFlow, resetTeamsAuthFlow, teamsPollMutex, tryAcquireTeamsPoll, releaseTeamsPoll, isSafeHttpUrl } from '$lib/stores/authFlow.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
   import PageHeader from './PageHeader.svelte';
-  import { t, i18n, type Locale } from '$lib/i18n';
+  import { t, i18n, type Locale, type TKey } from '$lib/i18n';
   import { theme } from '$lib/stores/theme';
-  import { notificationsEnabled, setNotificationsEnabled } from '$lib/stores/notifications';
+  import {
+    NOTIFICATION_CLASSES,
+    notificationPreferences,
+    setNotificationPreference,
+    type NotificationClass
+  } from '$lib/stores/notifications';
   import { presence, clearAuthPersistWarning } from '$lib/stores/presence';
   import { devLog } from '$lib/utils/dev';
 
@@ -213,10 +217,33 @@
     (next === 'dark' ? themeDarkButton : themeLightButton)?.focus();
   }
 
-  // 3.1.0 notification opt-in — shared store, default off. #549: this used to
-  // be a private `$state` mirrored straight into localStorage, so a toggle in
-  // a detached Settings window never reached the already-mounted Dashboard.
+  // #675: one toggle per desktop-notification class. The store is the shared
+  // state (persisted to `config.json` through `saveConfig`), so a toggle here
+  // reaches the always-mounted main window. #549 still holds: the OS prompt's
+  // answer decides whether a class may notify, and a denied permission must
+  // not leave a checked toggle behind.
   let notificationsMessage = $state('');
+  // Keys are `TKey`, so a class added on the Rust side cannot be rendered
+  // with a missing dictionary entry.
+  const NOTIFICATION_LABELS: Record<NotificationClass, TKey> = {
+    track_change: 'settings.notificationsTrackChange',
+    sync_stopped: 'settings.notificationsSyncStopped',
+    auth_required: 'settings.notificationsAuthRequired',
+    update_staged: 'settings.notificationsUpdateStaged'
+  };
+  // #675: the form's `localConfig` is snapshotted once, but the notification
+  // classes are immediate-apply and shared, so a toggle made in the *other*
+  // Settings view (a popped-out pane runs beside this one) — or in the main
+  // window — must reach this form's copy. Without this, `handleSave` would
+  // write the stale section back over the choice the user just made. Only the
+  // notifications section is followed: every other field here is a pending
+  // edit that Save owns.
+  $effect(() => {
+    const next = $configStore.notifications;
+    if (NOTIFICATION_CLASSES.some((cls) => localConfig.notifications[cls] !== next[cls])) {
+      localConfig.notifications = { ...next };
+    }
+  });
   let spotifyAuthWaiting = $derived(authFlow.spotify.phase === 'waiting');
   let teamsAuthWaiting = $derived(authFlow.teams.phase === 'waiting');
 
@@ -446,6 +473,14 @@
       // Issue #538: mirror `clamp_teams` before the payload leaves the
       // frontend, so the store/UI never claims an entry the backend dropped.
       localConfig.teams.profanity_extra_words = extraWordsClamp.clamped;
+      // #675: the notification classes live in the shared store and are not
+      // form-edited — the checkboxes read it directly — so the authoritative
+      // value goes into the payload here, next to the clamped-lexicon precedent
+      // above. The `$effect` keeps the form visibly in step, but it cannot cover
+      // the mount race: `onMount`'s `localConfig = <loaded cfg>` can land
+      // *after* a sibling window's mirror convergence, re-staling this section
+      // without `configStore` changing again.
+      localConfig.notifications = { ...$configStore.notifications };
       // `localConfig` is a Svelte 5 `$state` proxy; `structuredClone` in
       // `toSavePayload` rejects proxies with a DataCloneError, aborting the
       // save before IPC (#285). Snapshot to a plain object first.
@@ -657,31 +692,20 @@
     performBack();
   }
 
-  async function toggleNotifications(e: Event) {
+  async function toggleNotificationClass(cls: NotificationClass, e: Event) {
     const target = e.currentTarget as HTMLInputElement;
-    if (!target.checked) {
-      notificationsMessage = '';
-      setNotificationsEnabled(false);
+    const applied = await setNotificationPreference(cls, target.checked);
+    if (!applied) {
+      // The store kept the class off, so reset the DOM property this click
+      // already flipped.
+      target.checked = false;
+      notificationsMessage = t('settings.notificationsDenied');
       return;
     }
-    // #549: the OS prompt's answer decides the flag. It used to be discarded,
-    // so a denied permission left a checked toggle over a localStorage 'true'
-    // that the Dashboard honoured — notifications then silently never came.
-    let granted = false;
-    try {
-      granted = (await isPermissionGranted()) || (await requestPermission()) === 'granted';
-    } catch (err) {
-      console.warn('[SETTINGS] notification permission request failed:', err);
-    }
-    setNotificationsEnabled(granted);
-    if (granted) {
-      notificationsMessage = '';
-      return;
-    }
-    // The input is `checked={$notificationsEnabled}` and the store stays
-    // false, so reset the DOM property this click already flipped.
-    target.checked = false;
-    notificationsMessage = t('settings.notificationsDenied');
+    notificationsMessage = '';
+    // The form owns a full-config copy; a later "Save" must not write a stale
+    // notifications section back over the toggle that was just persisted.
+    localConfig.notifications = { ...$notificationPreferences };
   }
 
   // #403: catch-and-surface — WebviewWindow creation/focus can reject
@@ -1344,10 +1368,17 @@
       <header class="section-header">
         <h2>{t('settings.sectionNotifications')}</h2>
       </header>
-      <div class="toggle-row">
-        <label for="notifications-enabled">{t('settings.notificationsToggle')}</label>
-        <input id="notifications-enabled" type="checkbox" checked={$notificationsEnabled} onchange={toggleNotifications} />
-      </div>
+      {#each NOTIFICATION_CLASSES as cls (cls)}
+        <div class="toggle-row">
+          <label for={`notifications-${cls}`}>{t(NOTIFICATION_LABELS[cls])}</label>
+          <input
+            id={`notifications-${cls}`}
+            type="checkbox"
+            checked={$notificationPreferences[cls]}
+            onchange={(e) => toggleNotificationClass(cls, e)}
+          />
+        </div>
+      {/each}
       <p class="hint">{t('settings.notificationsHint')}</p>
       {#if notificationsMessage}
         <p class="error-message" role="alert">{notificationsMessage}</p>

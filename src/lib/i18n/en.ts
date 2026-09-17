@@ -155,9 +155,8 @@ export const en = {
   'settings.maxIntervalLabel': 'Max interval (s)',
   'settings.clampHint':
     'Min interval exceeds max interval — max will be saved as {max}s.',
-  'settings.notificationsToggle': 'Desktop notification on track change',
   'settings.notificationsHint':
-    'Shows a system notification when the track changes. Disabled by default.',
+    'Each class you enable shows a system notification — the first one may ask your OS for permission.',
   'settings.themeLabel': 'Theme',
   'settings.themeDark': 'Dark',
   'settings.themeLight': 'Light',
@@ -467,6 +466,21 @@ export const en = {
   'settings.backupExported': 'Settings exported to {path}',
   'settings.backupImported': 'Settings imported from {path}',
   'settings.backupError': 'The backup action could not be completed: {error}',
+  // 4.7.0 — S7 notifications (#675): one toggle per desktop-notification
+  // class, plus the copy for the three classes the always-mounted layout
+  // dispatches (track changes keep dispatching from the Dashboard card).
+  'settings.notificationsTrackChange': 'Notify me when the track changes',
+  'settings.notificationsSyncStopped': 'Notify me when syncing stops on its own',
+  'settings.notificationsAuthRequired': 'Notify me when I have to sign in to Teams again',
+  'settings.notificationsUpdateStaged': 'Notify me when an update will install on quit',
+  'notifications.syncStoppedTitle': 'PresenceJam stopped syncing',
+  'notifications.syncStoppedBody':
+    'The status sync stopped on its own. Open PresenceJam to restart it.',
+  'notifications.authRequiredTitle': 'Teams sign-in required',
+  'notifications.authRequiredBody':
+    'Your Teams session expired. Sign in again so your status keeps syncing.',
+  'notifications.updateStagedTitle': 'Update ready',
+  'notifications.updateStagedBody': 'PresenceJam {version} will be installed when you quit.',
 };
 
 export type Dict = { readonly [K in keyof typeof en]: string };

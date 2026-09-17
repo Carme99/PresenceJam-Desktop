@@ -40,7 +40,7 @@ import { popIn } from '$lib/stores/detach';
 import Settings from '$lib/components/Settings.svelte';
 import { currentView } from '$lib/stores/app';
 import { configStore, defaultConfig } from '$lib/stores/config';
-import { notificationsEnabled } from '$lib/stores/notifications';
+import { notificationPreferences } from '$lib/stores/notifications';
 import { resetSpotifyAuthFlow, resetTeamsAuthFlow } from '$lib/stores/authFlow.svelte';
 import { theme } from '$lib/stores/theme';
 import { t } from '$lib/i18n';
@@ -60,6 +60,18 @@ const requestPermissionMock = requestPermission as unknown as Mock;
 function configuredConfig() {
   const cfg = structuredClone(defaultConfig);
   cfg.spotify.client_id = 'test-client-id';
+  return cfg;
+}
+
+/** A configured install with every notification class off; tests opt in. */
+function notificationsOffConfig() {
+  const cfg = configuredConfig();
+  cfg.notifications = {
+    track_change: false,
+    sync_stopped: false,
+    auth_required: false,
+    update_staged: false
+  };
   return cfg;
 }
 
@@ -97,7 +109,9 @@ beforeEach(() => {
   invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
     switch (cmd) {
       case 'load_config':
-        return configuredConfig();
+        // The store's current value, not a fresh default: a test that seeds a
+        // config before mounting must get that config back (#675).
+        return get(configStore);
       case 'save_config':
         // The backend echoes the copy it persisted (#297).
         return args != null && typeof args === 'object' && 'config' in args ? args.config : undefined;
@@ -226,12 +240,31 @@ describe('Settings detached reconnect guard (#550)', () => {
   });
 });
 
-describe('Settings notification opt-in (#549)', () => {
+/**
+ * #549's rule, now one toggle per class (#675): the OS prompt's answer
+ * decides whether a class may notify, a denial leaves the toggle off and
+ * says why, and a granted opt-in is persisted into the config — the
+ * `localStorage` boolean the pre-4.7 card wrote is gone.
+ */
+describe('Settings notification classes (#549, #675)', () => {
+  const classToggle = (container: HTMLElement, cls: string) =>
+    container.querySelector(`#notifications-${cls}`) as HTMLInputElement;
+
+  it('renders one toggle per class', async () => {
+    const { container } = await mountSettings();
+
+    for (const cls of ['track_change', 'sync_stopped', 'auth_required', 'update_staged']) {
+      expect(classToggle(container, cls)).not.toBeNull();
+    }
+    expect(classToggle(container, 'track_change').checked).toBe(true);
+  });
+
   it('leaves the toggle off and explains when permission is denied', async () => {
+    configStore.set(notificationsOffConfig());
     isPermissionGrantedMock.mockResolvedValue(false);
     requestPermissionMock.mockResolvedValue('denied');
     const { container } = await mountSettings();
-    const box = container.querySelector('#notifications-enabled') as HTMLInputElement;
+    const box = classToggle(container, 'sync_stopped');
 
     await fireEvent.click(box);
     await waitFor(() =>
@@ -241,17 +274,53 @@ describe('Settings notification opt-in (#549)', () => {
     );
 
     expect(box.checked).toBe(false);
-    expect(get(notificationsEnabled)).toBe(false);
-    expect(localStorage.getItem('notificationsEnabled')).toBe('false');
+    expect(get(notificationPreferences).sync_stopped).toBe(false);
+    expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'save_config')).toBe(false);
   });
 
-  it('records the opt-in when permission is granted', async () => {
+  it('records the opt-in in the config when permission is granted', async () => {
+    configStore.set(notificationsOffConfig());
     const { container } = await mountSettings();
-    const box = container.querySelector('#notifications-enabled') as HTMLInputElement;
+    const box = classToggle(container, 'sync_stopped');
 
     await fireEvent.click(box);
-    await waitFor(() => expect(get(notificationsEnabled)).toBe(true));
-    expect(localStorage.getItem('notificationsEnabled')).toBe('true');
+    await waitFor(() => expect(get(notificationPreferences).sync_stopped).toBe(true));
+    expect(get(configStore).notifications.sync_stopped).toBe(true);
+    // The pre-4.7 key is not written any more — config.json owns the value.
+    expect(localStorage.getItem('notificationsEnabled')).toBeNull();
+  });
+
+  /**
+   * #675 regression: two Settings views genuinely coexist (C7 — a popped-out
+   * pane opens beside the main window's own Settings). The form's
+   * `localConfig` is a snapshot, so before the notifications section started
+   * following the shared store, a Save in the *other* view wrote its stale
+   * section back and un-ticked the class the user had just turned on — a
+   * failure mode the pre-4.7 `localStorage` flag could not have, since no Save
+   * touched it.
+   */
+  it('keeps a toggle made in the sibling Settings view when this view saves', async () => {
+    configStore.set(notificationsOffConfig());
+    const main = await mountSettings();
+    const sibling = await mountSettings(true);
+
+    await fireEvent.click(classToggle(sibling.container, 'sync_stopped'));
+    await waitFor(() => expect(get(notificationPreferences).sync_stopped).toBe(true));
+
+    // The main view's form was loaded before that toggle and is not dirty for
+    // the class, so its Save now has to carry the choice the sibling made.
+    const savesBefore = invokeMock.mock.calls.filter(([cmd]) => cmd === 'save_config').length;
+    await fireEvent.click(main.container.querySelector('.actions .btn-full') as HTMLElement);
+    await waitFor(() =>
+      expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'save_config').length).toBeGreaterThan(
+        savesBefore
+      )
+    );
+
+    const saved = invokeMock.mock.calls.filter(([cmd]) => cmd === 'save_config').at(-1)?.[1] as {
+      config: { notifications: Record<string, boolean> };
+    };
+    expect(saved.config.notifications.sync_stopped).toBe(true);
   });
 });
 

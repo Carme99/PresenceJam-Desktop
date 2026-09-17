@@ -233,9 +233,12 @@ pub fn start_polling(
                         this_tid,
                         exit_reason
                     );
-                    // Payload shape copied verbatim from the event's only other
-                    // emitter, `commands::sync::stop_syncing`: a unit payload.
-                    let _ = app.emit("sync-stopped", ());
+                    // #675: the payload says WHICH path ended the session. A
+                    // desktop-notification consumer toasts only the surprise —
+                    // a self-termination — and stays quiet for the stop the
+                    // user just asked for, which `commands::sync::stop_syncing`
+                    // (the only other emitter) marks `self_terminated: false`.
+                    let _ = app.emit("sync-stopped", json!({ "self_terminated": true }));
                 }
                 if state_for_cleanup.polling.is_syncing(Ordering::Acquire) {
                     log::warn!(
