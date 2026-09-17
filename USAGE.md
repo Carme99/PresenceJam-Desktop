@@ -18,6 +18,8 @@ PresenceJam lives in your **system tray** (Windows taskbar or macOS menu bar). T
 |--------|-------------|
 | Show Window | Bring the app window to the foreground |
 | Pause / Resume Sync | Stop polling Spotify (Teams status stays as-is) / start it again after a pause |
+| Pause sync for… | Snooze the sync: **30 minutes**, **1 hour**, or **until tomorrow** (the next *local* midnight). While a snooze is active the app makes no Spotify or Teams request at all and leaves your existing Teams status untouched. |
+| Resume sync now | Shown only while a snooze is active — ends it immediately. The Dashboard's snooze chip has the same button. |
 | Play / Pause | Toggle playback on your active Spotify device |
 | Previous | Skip to the previous track |
 | Next | Skip to the next track |
@@ -55,6 +57,8 @@ The main screen showing your current sync status.
 - Shows ⏸️ when nothing is playing, including during adverts, which are never treated as "listening"
 
 **Suppressed chip:** when a write is being held back, the card shows a chip saying why. The wording is reason-specific for the four rules/policies — *quiet hours are active*, *a track rule matched*, *you set a status message by hand*, *you are out of office* — and falls back to a generic *busy, in a call, or presenting* line for a presence-based verdict (busy / Do Not Disturb / focusing / in a meeting / in a call / presenting). The chip reappears after a view switch, but it renders the generic line until the next `presence-gated` event arrives, since only the reason is carried live.
+
+**Snooze chip:** while a tray snooze is active the Dashboard shows a countdown chip — *Snoozed — 12:34 left (until 14:30)* — with a **Resume now** button, so a snooze started from the tray is visible (and cancellable) in the window too. The tray tooltip leads with its status line and states the remaining time for the same reason.
 
 ---
 
@@ -114,7 +118,7 @@ The **live preview** below the field renders against a fixed sample item — dev
 
 Quiet hours and track rules either **suppress** the Teams status write or **replace** it, and each can also move your Teams presence while it applies. They reuse the same presence-gate path as the meeting/call gate, so a rule that stops matching mid-track posts the status without waiting for the next track.
 
-**Quiet hours** — each entry has an on/off checkbox, a start and an end time, and a weekday picker. Times wrap around midnight (a new entry starts at 22:00 → 07:00). **No weekday ticked means every day.**
+**Quiet hours** — each entry has an on/off checkbox, a start and an end time, and a weekday picker. Times wrap around midnight (a new entry starts at 22:00 → 07:00). **No weekday ticked means every day.** Each entry also carries a **Stop polling during this window** checkbox (off by default): while such a window is active the app makes no Spotify or Teams request at all, touches no write clock and leaves your Teams status exactly as it is — the poller re-checks the window every iteration and resumes by itself when it ends, and the thread is never stopped or parked. The log shows one transition pair, `[POLLING] quiet hours: polling paused until …` and the resume line.
 
 Each quiet-hours row also has a **Presence while this rule applies** picker. It offers *Don't change my presence* plus the five `(availability, activity)` pairs Microsoft's `setPresence` accepts — **Available/Available**, **Busy/InACall**, **Busy/InAConferenceCall**, **Away/Away** and **DoNotDisturb/Presenting**. Anything else is rejected at the config boundary and cleared rather than guessed at. The action is **inert while "Show Available while listening" (availability sync) is off**, and it never overrides a call, a meeting, or a status you set by hand.
 **Track rules** — each entry matches case-insensitively on artist and/or track-title substrings, plus an optional replacement status:
@@ -123,10 +127,12 @@ Each quiet-hours row also has a **Presence while this rule applies** picker. It 
 |-------|-----------|
 | Artist contains | Matched against the track's artist. Empty = any artist. |
 | Track title contains | Matched against the track title. Empty = any title. |
+| Active days | The weekdays this rule applies on — none ticked means every day. |
+| Window start / Window end | The rule's own time window, with the same wrap-over-midnight semantics as quiet hours: an end time of `00:00` means the end of the day, and a start equal to the end never matches. The default `00:00 → 24:00` contains every time. |
 | Post this instead | Non-empty — this text is posted instead of the formatted status. **Empty — the status write is suppressed entirely** for the matching track. |
 | Presence while this rule applies | *Don't change my presence* (default), or one of the five supported availability/activity pairs — armed while the rule matches. |
 
-New track rules are added **disabled**, so a half-filled rule can't suppress your status by accident. A suppressed track is re-checked every 240 s (the same clock as the presence gate), so clearing the rule or leaving the quiet-hours window posts the status mid-track.
+New track rules are added **disabled**, so a half-filled rule can't suppress your status by accident. Rules are evaluated **top to bottom and the first matching rule wins**, and the card's move-up / move-down buttons change that order — put the narrow rule above the broad one. A rule whose window does not contain the current time, or whose active-day set does not include today, simply does not match. A suppressed track is re-checked every 240 s (the same clock as the presence gate), so clearing the rule or leaving the window posts the status mid-track.
 
 **A rule with "Post this instead" left empty suppresses the write — but it still moves your presence**: that is the point of pairing them ("while my Focus playlist plays, show me Do Not Disturb" needs no status text at all). A rule with replacement text posts that text instead of the formatted status; it still flows through the identical-write skip, so an unchanged replacement is not re-posted every cycle.
 
@@ -134,7 +140,9 @@ New track rules are added **disabled**, so a half-filled rule can't suppress you
 
 **Replacement text is capped at 160 characters** and your quiet-hours replacement is posted from both the playing path *and* the stop/pause clear, so a rule you set is what ends up in Teams either way.
 
-Both lists live in `config.json` under `status_rules` (`quiet_hours[]`, `track_rules[]`); the section is fully additive, so pre-4.5 config files load unchanged (#432).
+**Pause and stop status text.** The two texts posted when playback pauses (`Paused` by default) and when nothing is playing (`Nothing playing on Spotify`) are editable at the bottom of this card — `teams.paused_status_format` / `teams.stopped_status_format` in `config.json`. The 🎵 prefix is added for you, and clearing a field restores the shipped default, so the rendered text is unchanged unless you change it. A matching rule's replacement status still takes precedence over both.
+
+Both lists live in `config.json` under `status_rules` (`quiet_hours[]`, `track_rules[]`), and the 4.7 schedule fields (`days`, `start_minutes`, `end_minutes`), `quiet_hours[].pause_polling` and the two status texts are additive with serde defaults, so a pre-4.7 (or pre-4.5) config file loads unchanged (#432).
 
 ### Polling
 
@@ -151,15 +159,54 @@ All four are clamped by the backend (`config.rs::clamp_polling`): default 5–30
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| Desktop notification on track change | Off | Shows a system notification when the track changes. Turn it on here; the first enable asks the OS for notification permission. The flag is stored in `localStorage.notificationsEnabled`, **not** in `config.json`. |
+| Notify me when the track changes | On | A system notification when the track changes — throttled to at most one per 5 s, and the same track is never notified twice. Where the platform supports it the newest notification replaces the previous one in place instead of stacking. |
+| Notify me when syncing stops on its own | On | Says when the poller gave up by itself (an auth failure past the retry limit, or the polling thread ending). A **Pause Sync** you clicked yourself is deliberately *not* reported back to you. |
+| Notify me when I have to sign in to Teams again | On | Fires when a Teams session expires and needs a fresh sign-in. A **Reconnect** you just pressed is skipped — only sessions that expire under you notify. |
+| Notify me when an update will install on quit | On | Fires once, when a deferred *Install on quit* update finished downloading and its signature verified. |
 
-Notifications are throttled to at most one per 5 s, and the same track is never notified twice. Where the platform supports it the newest notification replaces the previous one in place instead of stacking. The listener lives in `Dashboard.svelte`, so notifications are driven by the main window.
+All four classes are stored in `config.json` under `notifications` (`track_change`, `sync_stopped`, `auth_required`, `update_staged`); an install that still carries the pre-4.7 `notificationsEnabled` flag migrates it into `track_change` once, on the first save. Track changes keep their 5 s throttle and replace-in-place id; the other three notify at most once per occurrence. The track-change toast is dispatched by the Dashboard, the other three by the always-mounted layout, so they arrive whichever view is on screen — and the first one you enable may ask your OS for notification permission.
 
 ### General
 
 | Launch at login | Start PresenceJam automatically when your OS boots |
-| Language | Interface language: English, Deutsch (German), or Français (French). Defaults to your browser/OS language; the choice persists. Switching it also retags `<html lang>` for screen readers and applies the locale's number and plural rules (French counts `0` as singular). Detached Logs and Settings windows follow the switch. |
+| Language | Interface language: English, Deutsch (German), or Français (French). Defaults to your OS/browser language. The choice is stored in `config.json` (`locale`) and is the single source of truth for the window, the tray menu and the native application menu — an unknown value falls back to English. Switching it also retags `<html lang>` for screen readers and applies the locale's number and plural rules (French counts `0` as singular). Detached Logs and Settings windows follow the switch. |
 | Start minimized | Open the app minimized to the tray (window hidden on launch). There is no Settings toggle — set `teams.start_minimized` to `true` in `config.json` (consumed at `src-tauri/src/lib.rs`). On macOS, it also switches the app's activation policy to `Accessory`, removing the dock icon and menu-bar app menu — the app becomes a pure tray-resident app. The dock icon reappears when you set the field back to `false` (no restart needed). |
+
+### Appearance
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Theme | Dark | **Dark**, **Light** or **System**. *System* follows your operating system's appearance live — switching the desktop between light and dark repaints the app immediately, with no restart — while an explicit Dark or Light stays pinned and is never overridden by the OS. The pre-paint bootstrap resolves the stored preference, so a System user never sees a flash of the wrong theme on launch. |
+| Compact spacing | Off | Tightens the spacing and type scale (a token-scale override applied before first paint, not a set of component variants). It is independent of the theme, including the System option. |
+
+### Logging
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Write a log file | On | Turns the on-disk log off entirely; the in-app Log Viewer still works from the live buffer. Takes effect immediately. |
+| Log level | Info | `Error`, `Warn`, `Info` or `Debug`. Takes effect immediately. |
+| Maximum log file size (MB) | 10 | The live file rotates once it reaches this size. Accepted range 1–500 MB. |
+| Archived log files to keep | 3 | How many rotated files are kept. Accepted range 1–20. The live log is kept **in addition** to the archives, so the folder holds at most `keep_files + 1` files — one more than the number in the field. |
+
+The size and retention fields apply from the next launch (the file already being written is not one of the archives); the level and the on/off switch apply at once. **Open logs folder** opens the same directory as tray → **Open Logs Folder**.
+
+### Backup
+
+| Action | What it does |
+|--------|--------------|
+| Export settings… | Writes a copy of your settings to a file you choose, with a dated, version-stamped name. It **never** contains your Spotify client secret (that lives in the OS keychain; Settings shows only *whether* one is set) or any token material. The resolved path is shown in the card. |
+| Import settings… | Replaces your settings from a chosen file, after a confirmation that names the `config.json.bak` backup it keeps. The document is parsed, refused outright if it carries a plaintext `client_secret`, clamped to the same ranges the Settings form enforces, and the running app reloads the imported values. The resolved path is shown in the card. |
+
+### Global shortcuts
+
+Two app-wide bindings, both editable in this card:
+
+| Slot | Default | What it does |
+|------|---------|--------------|
+| Toggle playback | `CmdOrCtrl+Alt+P` | Play/pause on your active Spotify device — the same refresh-aware path the tray and the Dashboard button use. |
+| Pause or resume sync | `CmdOrCtrl+Alt+S` | Starts or stops the poller, exactly like the tray's Pause / Resume Sync. |
+
+They work while the window is hidden. Click a field and press the combination you want — the field records what you press, and the current grab is released while it records so the key is captured instead of fired. **Clear** empties a slot. A combination that cannot be parsed or collides with the other slot is refused inline; a desktop that refuses the grab (some Wayland compositors, or a combination another app already owns) shows **Registration failed on this desktop** with the reason, and the other binding — and the rest of the app — keeps working.
 
 ---
 
@@ -173,6 +220,8 @@ On startup, PresenceJam checks GitHub Releases for a newer version, then re-chec
 The banner is dismissible, and a failed *check* (offline, unreachable endpoint, mismatched signature key) is silent — it never blocks the UI.
 
 Update payloads are signature-verified against a key baked into the app (minisign), which is independent of OS code signing — so the macOS unsigned/Gatekeeper note in the README applies to updated builds too. Deferred "Install on quit" updates go through the same verification before they're staged, and are held in memory only — cancelling releases them instead of leaving a file behind.
+
+**Release channel.** Settings → Updates chooses between **Stable** and **Beta**, and the backend resolves the update candidate from that choice (`updater_bg::check_for_update`) rather than from the plugin's static JS check. No beta build is published yet, so the Beta channel currently falls back to the stable release — every check logs the fall-through and the picker says so plainly; do not read Beta as "there is a beta build". The choice also decides *how* an update installs: on Stable the banner's **Download & Install** works as described above (it resolves to the same endpoint the app is configured with), while on Beta only **Install on quit** is offered, because the immediate download-and-relaunch path is hard-wired to the stable endpoint.
 
 ---
 
@@ -200,13 +249,15 @@ If `config.json` was ever unreadable, the page opens with an amber **Settings we
 
 ## Log Viewer
 
-PresenceJam writes a single log file, `PresenceJam.log`, managed by the logging plugin:
+PresenceJam writes `PresenceJam.log` — plus the archives it rotates into — managed by the logging plugin:
 
 ```
 %LOCALAPPDATA%\com.presencejam.app\logs\PresenceJam.log   (Windows)
 ~/Library/Logs/com.presencejam.app/PresenceJam.log        (macOS)
 ~/.local/share/com.presencejam.app/logs/PresenceJam.log   (Linux)
 ```
+
+The live file rotates once it reaches **Settings → Logging → Maximum log file size** (`logging.max_file_size_mb`, default 10 MB) and keeps the number of archives set beside it (`logging.keep_files`, default 3). The live log is kept **in addition** to the archives, so the folder holds at most `keep_files + 1` files.
 
 The log directory is the **bundle-identifier folder** (`com.presencejam.app`): Tauri's `app_log_dir()` appends the bundle id to the platform's local data directory, so `PresenceJam.log` does *not* sit next to `config.json` (issue #300). This is the directory tray menu → **Open Logs Folder** opens.
 
@@ -221,7 +272,7 @@ The **Log Viewer** in-app lets you browse these logs without opening the filesys
 | `INFO` | Normal operations (track changed, status updated) |
 | `DEBUG` | Verbose — every polling iteration logged |
 
-The current log level is set in `config.json` under `logging.log_level`.
+The current log level is set in **Settings → Logging** (the same value lives in `config.json` under `logging.log_level`), and that card also turns file logging off entirely and sets the size/retention fields above.
 
 ---
 
@@ -272,7 +323,7 @@ The first recognised flag wins if you pass more than one.
 
 ## Status Expiry
 
-Teams custom status messages automatically expire. PresenceJam sets the message's expiry (`expiryDateTime`) to the **track's end time + a buffer** (default 10 s; `polling.expiry_buffer_seconds` in `config.json`). This is an app-side choice — the Graph API doesn't shorten it. When playback pauses or stops, PresenceJam replaces the message with a `🎵 Paused` / `🎵 Nothing playing on Spotify` placeholder that **expires 60 s after it is posted** (`placeholder_expiry_str()` in `src-tauri/src/polling/poll_once.rs` sets a fixed now + 60 s, on both the paused and the no-track path) — the pause placeholder does *not* inherit the track-end buffer. Graph has no "clear status message" action, so the short-lived placeholder is the documented clear mechanism: it self-removes ~1 min after the last successful post even if the app quits.
+Teams custom status messages automatically expire. PresenceJam sets the message's expiry (`expiryDateTime`) to the **track's end time + a buffer** (default 10 s; `polling.expiry_buffer_seconds` in `config.json`). This is an app-side choice — the Graph API doesn't shorten it. When playback pauses or stops, PresenceJam replaces the message with the pause/stop placeholder — by default `🎵 Paused` and `🎵 Nothing playing on Spotify`, both editable in Settings → Status rules → *Pause and stop status text* (`teams.paused_status_format` / `teams.stopped_status_format`; the 🎵 is added for you, and clearing a field restores these defaults) — and that placeholder **expires 60 s after it is posted** (`placeholder_expiry_str()` in `src-tauri/src/polling/poll_once.rs` sets a fixed now + 60 s, on both the paused and the no-track path). The pause placeholder does *not* inherit the track-end buffer. Graph has no "clear status message" action, so the short-lived placeholder is the documented clear mechanism: it self-removes ~1 min after the last successful post even if the app quits.
 
 ---
 

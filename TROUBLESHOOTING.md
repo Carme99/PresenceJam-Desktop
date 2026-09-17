@@ -198,7 +198,7 @@ The banner names the `.bak` when one is still on disk. When the banner appears *
 | *you are out of office* | **Pause while I am out of office** is on and Teams reports you out of office |
 | *busy, in a call, or presenting* | the meeting/call/DND gate — busy, Do Not Disturb, focusing, in a meeting, in a call, or presenting |
 
-The log records the same verdicts — `[POLLING] process_track: quiet hours active, skipping status write`, `… track rule matched, …`, and `… presence-gated, skipping status write` for the policies. Nothing is paused: the app keeps polling on its normal cadence and the write resumes by itself once the cause clears (a quiet window ending, your presence going available, or the hand-set message expiring). Open **Settings → Status rules** for the first two, **Settings → Presence** for the policies (see [USAGE.md — Status rules](./USAGE.md#status-rules)).
+The log records the same verdicts — `[POLLING] process_track: quiet hours active, skipping status write`, `… track rule matched, …`, and `… presence-gated, skipping status write` for the policies. Nothing is paused *by these rules*: the app keeps polling on its normal cadence and the write resumes by itself once the cause clears (a quiet window ending, your presence going available, or the hand-set message expiring) — the one exception is a quiet-hours row with **Stop polling during this window** ticked, which pauses polling for that window only (see [USAGE.md — Status rules](./USAGE.md#status-rules)). Open **Settings → Status rules** for the first two, **Settings → Presence** for the policies (see [USAGE.md — Status rules](./USAGE.md#status-rules)).
 
 ### Status doesn't clear when Spotify is paused
 
@@ -210,7 +210,7 @@ The log records the same verdicts — `[POLLING] process_track: quiet hours acti
 
 ### Status shows but disappears quickly
 
-**Cause:** PresenceJam sets a playing track's status expiry (`expiryDateTime`) to the track's end time plus a buffer (default 10 s; `polling.expiry_buffer_seconds` in `config.json`). When the track ends, pauses, or stops, the app replaces the status on the next poll with a `🎵 Paused` / `🎵 Nothing playing on Spotify` placeholder that has its **own fixed 60 s expiry** (`placeholder_expiry_str()`), so it self-removes about a minute after posting. There is no server-side 24-hour cap — the Teams client's "Clear status message after" dropdown (which includes 24 h) affects only messages you set in the Teams UI, not Graph-set messages.
+**Cause:** PresenceJam sets a playing track's status expiry (`expiryDateTime`) to the track's end time plus a buffer (default 10 s; `polling.expiry_buffer_seconds` in `config.json`). When the track ends, pauses, or stops, the app replaces the status on the next poll with the pause/stop placeholder — by default `Paused` and `Nothing playing on Spotify`, both posted with the 🎵 prefix — and that placeholder has its **own fixed 60 s expiry** (`placeholder_expiry_str()`), so it self-removes about a minute after posting. Since 4.7 both texts are yours to edit (`teams.paused_status_format` / `teams.stopped_status_format`, Settings → Status rules → *Pause and stop status text*; clearing a field restores the default). There is no server-side 24-hour cap — the Teams client's "Clear status message after" dropdown (which includes 24 h) affects only messages you set in the Teams UI, not Graph-set messages.
 
 **Fix:**
 This is the app's own expiry/clear mechanism, not a Teams limitation. To keep the status visible longer, raise the buffer in `config.json` (`polling.expiry_buffer_seconds`) or set `teams.clear_on_pause` to `false` in `config.json` (there is no Settings toggle for it).
@@ -250,12 +250,14 @@ False positives are prevented via word-boundary checks — words like `class`, `
 
 **In-app:** the **Log Viewer** view (it can be popped out into its own window) lets you scroll through the entries without touching the filesystem. When it opens it is already backfilled with the last 500 lines of the on-disk file, so the history is there before the first new entry is logged; while you are scrolled up it holds your position as new lines arrive.
 
-**Direct filesystem** — a single `PresenceJam.log` file managed by the logging plugin:
+**Direct filesystem** — `PresenceJam.log` plus its rotated archives, managed by the logging plugin:
 ```
 %LOCALAPPDATA%\com.presencejam.app\logs\PresenceJam.log   (Windows)
 ~/Library/Logs/com.presencejam.app/PresenceJam.log        (macOS)
 ~/.local/share/com.presencejam.app/logs/PresenceJam.log   (Linux)
 ```
+
+The live file rotates once it reaches `logging.max_file_size_mb` (1–500 MB, default 10) and keeps `logging.keep_files` archives (1–20, default 3) — plus the live log, so the folder holds up to `keep_files + 1` files. Both are editable in Settings → Logging.
 
 The log directory is the **bundle-identifier folder** (`com.presencejam.app`) — `app_log_dir()` appends the bundle id to the platform's local data directory, so the logs do *not* sit next to `config.json` (issue #300). This is the same folder tray menu → **Open Logs Folder** opens.
 
@@ -273,12 +275,12 @@ Start-Process "$env:LOCALAPPDATA\com.presencejam.app\logs"
 | `INFO` | Normal operations (track changed, status updated) |
 | `DEBUG` | Verbose — every polling iteration logged |
 
-The current log level is set in your `config.json` under `logging.log_level` (default: `Info`).
+The current log level is set in **Settings → Logging** (the same value lives in `config.json` under `logging.log_level`, default `Info`). The card's size/retention fields apply from the next launch.
 
 ### Attaching logs to bug reports
 
 1. Open the log folder: tray menu → **Open Logs Folder** (or `%LOCALAPPDATA%\com.presencejam.app\logs` on Windows)
-2. Attach `PresenceJam.log`
+2. Attach `PresenceJam.log` (and, if the issue spans a longer window, the rotated archives in the same folder)
 3. Note the approximate time the issue occurred
 
 ### High CPU or memory usage

@@ -144,6 +144,7 @@ details and the exact exit conditions.
 
 | Doc | What it's for |
 | --- | --- |
+| [Docs index](./docs/README.md) | What to read for what — every guide, by task |
 | [Setup](./SETUP.md) | Installing the app, Spotify app registration, Teams auth |
 | [Usage](./USAGE.md) | Day-to-day guide — tray, dashboard, settings |
 | [Architecture](./ARCHITECTURE.md) | How it works under the hood |

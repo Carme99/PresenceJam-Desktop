@@ -85,8 +85,13 @@ strongest defense against offline-disk reads of `config.json` and of the
 OS keychain itself (which holds the tokens.json decryption key and the
 Spotify `client_secret`); revocation at the provider (Spotify / Microsoft
 account settings) is the only way to invalidate the credentials once a
-local-user compromise is suspected. See `ARCHITECTURE.md` "Storage"
-section for the implementation reference.
+local-user compromise is suspected. See
+[`docs/architecture/storage-and-config.md`](./docs/architecture/storage-and-config.md)
+for the implementation reference — the file locations, atomic writes and
+config-integrity layers live on that page, and
+[`docs/architecture/overview.md`](./docs/architecture/overview.md) carries the
+storage bullet naming `config.rs::save_config` → `atomic_write_json` and the
+0600 file modes.
 
 #### File permissions (v2.8.x — issue #135 path A)
 
@@ -240,7 +245,7 @@ Logs may contain:
 
 A Spotify token response without `refresh_token` surfaces the precise `token response omitted refresh_token` error (not a generic parse failure) — issue #350.
 
-Logs are written to the `tauri-plugin-log` default log directory. **Log retention/rotation is currently managed by the logging plugin defaults and is not user-configurable.** A previous version of this document claimed logs were "rotated daily and retained for 30 days"; that claim has been removed because no rotation code exists in the application — the v2.5.0 `logging.retention_days` config field was a no-op and has been removed in v2.6.0.
+Logs are written to the `tauri-plugin-log` log directory (`app_log_dir()` + the bundle id — see [`docs/architecture/storage-and-config.md`](./docs/architecture/storage-and-config.md)). Since **4.7.0 (#673)** rotation and retention are real and user-configurable: `lib.rs::log_rotation_strategy` maps `logging.keep_files` (1–20, default 3) to `RotationStrategy::KeepSome(n)` and the file target sets `.max_file_size(max_file_size_mb * 1024 * 1024)` (1–500 MB, default 10), both clamped by `config.rs::clamp_logging` and editable in Settings → Logging. `keep_files` counts **archived** files only, so the folder holds at most `keep_files + 1` files. A previous version of this document claimed logs were "rotated daily and retained for 30 days"; that claim was removed because no rotation code existed at the time — the v2.5.0 `logging.retention_days` config field was a no-op and was removed in v2.6.0.
 
 **Token responses are not written to logs (v2.6.3):** Successful Microsoft Graph token responses — which include `access_token` + `refresh_token` (~3.5 KB total, ~77 min lifetime, issued for the `Presence.ReadWrite Presence.Read openid profile offline_access` scope set from `src-tauri/src/teams.rs`) — are never written to the log file in full. The `poll_teams_auth` debug log, the `start_teams_auth_device_code` info log, and the user-facing error toasts for the `refresh_teams_token` / `start_teams_auth_device_code` parse-error paths all run the body through the `truncate_for_log` helper, which records only the first 256 chars + a `(…NB total)` byte-count suffix. That's enough to recognise the error envelope shape (e.g. `authorization_pending`, JSON parse errors) without exposing the credential — `slow_down` is also handled, though it is RFC 8628 §3.5-only: Microsoft's device-code error table enumerates only `authorization_pending`, `authorization_declined`, `bad_verification_code`, and `expired_token`. The helper is char-boundary-safe (`body.char_indices().nth(256)`) and unit-tested against the multibyte-UTF-8 case. See [issue #62](https://github.com/Carme99/PresenceJam-Desktop/issues/62).
 

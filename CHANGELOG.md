@@ -161,6 +161,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   pins the channel to that declared release, so the floor cannot be dodged
   silently. CI keeps its SHA-pinned toolchain action.
 
+- **The architecture docs are now an index plus six subject pages, and the
+  docs tree has an entry point (#682):** the 1219-line `ARCHITECTURE.md` was
+  split into `docs/architecture/{overview,polling,auth-and-tokens,storage-and-config,tray-and-shell,frontend}.md`,
+  with `ARCHITECTURE.md` left as a short index (including a table mapping every
+  old anchor to the page that now owns it, so inbound links keep resolving).
+  `docs/README.md` indexes every guide by task, `docs/RELEASING.md` documents the
+  release chain and its five version-bearing files, the superseded planning docs
+  moved to `docs/archive/`, and `docs/link-audit.py` audits every relative link
+  and `#anchor` in the tree.
+
 ### Fixed
 
 - **Two stale code claims corrected (#697, #698):** the panic hook's comment named

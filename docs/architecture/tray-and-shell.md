@@ -65,9 +65,16 @@ The UI is localized to **English, German, and French** via the i18n barrel
 - All three dictionaries are typed against `Dict = keyof typeof en`, so a
   key present in `en.ts` but missing from `de.ts`/`fr.ts` is a TypeScript
   compile error — translation parity is enforced, not convention.
-- The locale persists to `localStorage` under `locale`; first run defaults
-  to the browser language (`de`/`fr` prefixes), falling back to English.
-  The picker lives in Settings → General.
+- **4.7.0 (issue #674): `config.locale` is the source of truth.** The picker
+  writes `AppConfig.locale` through the `set_locale` command (which also
+  relabels the tray and the native application menu without a restart).
+  `localStorage` under `locale` survives only as a pre-paint mirror — it is read
+  at module load, because the config arrives over an async IPC round-trip and
+  the first frame must already be in the right language — it still converges
+  detached windows through the `storage` listener below, and a value found
+  there while the config carries none is migrated into the config once. First
+  run still defaults to the browser language (`de`/`fr` prefixes), falling back
+  to English. The picker lives in Settings → General.
 - **Intl formatting (4.6):** the locale's `Intl.NumberFormat` and
   `Intl.PluralRules` are built once per locale and reused (constructing a
   formatter per render would dominate `t()`). Numeric params go through the
@@ -80,18 +87,27 @@ The UI is localized to **English, German, and French** via the i18n barrel
   Detached Logs/Settings windows own independent locale instances, so a `storage`
   listener converges them on the main window's write (the same pattern as the
   `#423` theme listener, with a same-value guard that stops a write loop) (#620).
+- **Native surfaces (4.7.0, #674):** the tray menu (`tray.rs`) and the native
+  application menu (`menu.rs`) render from a Rust string table
+  (`src-tauri/src/i18n.rs`: one `Strings` field per literal, with `EN`/`DE`/`FR`
+  tables). An unknown `locale` falls back to English and is logged, and a Rust
+  parity test fails when the three tables drift apart or a label is hard-coded
+  back into `tray.rs`/`menu.rs`.
 - Known limitation: Rust-side error strings surfaced through `invoke()`
-  rejections and event payloads remain English. Tray menu labels are English
-  literals too — they are built in Rust (`tray.rs`) and never route through `t()`.
+  rejections and event payloads remain English, as does the app name.
 
 ## Auto-Update (v3.0)
 
 Updates are delivered through `tauri-plugin-updater` (registered in
-`lib.rs`; `updater:default` in `capabilities/default.json`). The endpoint
-(`tauri.conf.json`) is
-`https://github.com/Carme99/PresenceJam-Desktop/releases/latest/download/latest.json`
-— a hand-assembled manifest (`release.yml`) mapping each platform to its
-signed artifact on the GitHub Release:
+`lib.rs`; `updater:default` in `capabilities/default.json`). `tauri.conf.json`
+carries the **stable** endpoint,
+`https://github.com/Carme99/PresenceJam-Desktop/releases/latest/download/latest.json`,
+but since 4.7.0 (#678) the endpoints the app actually uses come from
+`updater_bg.rs::update_endpoints(AppConfig.updates.channel)`: Stable is that URL
+and Beta is its `latest-beta.json` sibling **followed by** the stable URL, so a
+missing beta manifest falls through to the stable release. The manifest is
+hand-assembled by `release.yml` and maps each platform to its signed artifact
+on the GitHub Release:
 
 - `darwin-aarch64` → `PresenceJam-<tag>.app.tar.gz` (+ `.sig`)
 - `windows-x86_64` → `PresenceJam-<tag>.msi` (+ `.msi.sig`)
@@ -104,18 +120,22 @@ signed artifact on the GitHub Release:
 pubkey is inlined in `tauri.conf.json`, so the plugin rejects tampered
 payloads.
 
-**Flow:** `UpdatePrompt.svelte` calls `check()` on startup → if a newer
-version exists it shows a dismissible **"Update vX.Y.Z available"** banner
-→ **Download & Install** runs `downloadAndInstall()` with a progress
-readout → `invoke("relaunch_app")` (`commands/misc.rs::relaunch_app`,
-`AppHandle::restart`) restarts the process into the new version. A failed
-check (offline, unreachable endpoint, signature mismatch) is silent —
-never blocks the UI.
+**Flow:** `UpdatePrompt.svelte` invokes the Rust `updater_bg.rs::check_for_update`
+on startup (the plugin's JS `check()` cannot take an endpoint list, so the
+banner's candidate is resolved in Rust from the configured channel) → if a
+newer version exists it shows a dismissible **"Update vX.Y.Z available"**
+banner → **Download & Install** runs the JS `downloadAndInstall()` (offered on
+Stable only, where the plugin's static endpoint and the channel's resolved
+list are the same manifest) with a progress readout → `invoke("relaunch_app")`
+(`commands/misc.rs::relaunch_app`, `AppHandle::restart`) restarts the process
+into the new version. On Beta that button is replaced by install-on-quit
+(`update.betaOnQuitOnly`, issue #678). A failed check (offline, unreachable
+endpoint, signature mismatch) is silent — never blocks the UI.
 
 **Silent background checks + install-on-quit (v4.0):**
 
-- *Background checks:* `UpdatePrompt.svelte` repeats `check()` every ~24h while
-  the app runs (the startup check is unchanged). A failed silent check stays
+- *Background checks:* `UpdatePrompt.svelte` repeats the `check_for_update`
+  round trip every ~24h while the app runs (the startup check is unchanged). A failed silent check stays
   console-only — it never surfaces a banner or toast, so an offline machine is
   never nagged.
 - *Install-on-quit:* the JS-side `downloadAndInstall()` cannot defer (it applies

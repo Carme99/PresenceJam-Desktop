@@ -15,7 +15,10 @@ PresenceJam uses the following open-source projects. We're grateful to all the m
 | [tauri-plugin-single-instance](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Single-instance enforcement + deep-link forwarding |
 | [tauri-plugin-log](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | File-based logging |
 | [tauri-plugin-updater](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Auto-update with minisign-signed payloads |
-| [tauri-plugin-http](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | HTTP client plugin (registered in `lib.rs`; the webview grants no `http:*` permission — Teams/Spotify calls go through Rust `reqwest`) |
+| [tauri-plugin-dialog](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Native save/open dialogs for settings export/import (#673) — **Rust-only**: no npm package and no `dialog:*` capability, because the overwrite confirmation runs in Rust |
+| [tauri-plugin-global-shortcut](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | App-wide hotkeys for playback and sync, registered per binding (#676) |
+| [objc2-core-foundation](https://github.com/madsmtm/objc2) | 0.3 | MIT | `CFString`, used to pass the scheme + bundle id to LaunchServices on macOS (`macos_deeplink.rs`, #628) |
+| [objc2-core-services](https://github.com/madsmtm/objc2) | 0.3 | MIT | `LSSetDefaultHandlerForURLScheme` — the macOS deep-link re-claim (#66, #628) |
 | [reqwest](https://github.com/seanmonstar/reqwest) | 0.12 | Apache-2.0 OR MIT | HTTP client for Spotify/Graph APIs |
 | [serde](https://github.com/serde-rs/serde) | 1.x | Apache-2.0 OR MIT | Serialization framework |
 | [serde_json](https://github.com/serde-rs/json) | 1.x | Apache-2.0 OR MIT | JSON parsing |
@@ -39,13 +42,9 @@ PresenceJam uses the following open-source projects. We're grateful to all the m
 |---------|---------|---------|---------|
 | [@tauri-apps/api](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Tauri JavaScript API |
 | [@tauri-apps/cli](https://github.com/tauri-apps/tauri) | 2.x | Apache-2.0 OR MIT | Tauri CLI — the `tauri` binary behind every `npm run tauri` command |
-| [@tauri-apps/plugin-autostart](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Autostart plugin |
-| [@tauri-apps/plugin-deep-link](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Deep link plugin |
-| [@tauri-apps/plugin-log](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Log plugin |
-| [@tauri-apps/plugin-updater](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Updater plugin |
-| [@tauri-apps/plugin-notification](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Notification plugin |
-| [@tauri-apps/plugin-opener](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Opener plugin |
-| [@tauri-apps/plugin-http](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | HTTP plugin (registered in `lib.rs`; no `http:*` capability is granted) |
+| [@tauri-apps/plugin-global-shortcut](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | JS binding for the global-shortcut crate; declared so the npm package tracks the crate's minor line — the hotkey path itself is driven from Rust |
+| [@tauri-apps/plugin-notification](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Notification plugin (`stores/notifications.ts`) |
+| [@tauri-apps/plugin-updater](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Updater plugin (`UpdatePrompt.svelte`) |
 | [@sveltejs/adapter-static](https://github.com/sveltejs/kit) | 3.x | MIT | Static site adapter |
 | [@sveltejs/kit](https://github.com/sveltejs/kit) | 2.x | MIT | Svelte app framework |
 | [@sveltejs/vite-plugin-svelte](https://github.com/sveltejs/vite-plugin-svelte) | 5.x | MIT | Vite Svelte plugin |
@@ -53,10 +52,13 @@ PresenceJam uses the following open-source projects. We're grateful to all the m
 | [svelte-check](https://github.com/sveltejs/language-tools) | 4.x | MIT | Svelte/TypeScript type checking behind `npm run check` |
 | [typescript](https://github.com/microsoft/TypeScript) | 5.x | Apache-2.0 | TypeScript language |
 | [vite](https://github.com/vitejs/vite) | 6.x | MIT | Build tool |
-| [vitest](https://github.com/vitest-dev/vitest) | 3.x | MIT | Frontend unit-test runner behind `npm test` |
+| [vitest](https://github.com/vitest-dev/vitest) | 4.x | MIT | Frontend unit-test runner behind `npm test` |
+| [@vitest/coverage-v8](https://github.com/vitest-dev/vitest) | 4.x | MIT | v8 coverage provider behind `npm run test:coverage`, the frontend coverage ratchet CI runs |
 | [jsdom](https://github.com/jsdom/jsdom) | 26.x | MIT | DOM implementation for the vitest environment |
 | [@testing-library/svelte](https://github.com/testing-library/svelte-testing-library) | 5.x | MIT | Component-mount helpers for the Svelte test suite |
-| [@types/node](https://github.com/DefinitelyTyped/DefinitelyTyped) | 20.x | MIT | Node.js type declarations for config and tooling files |
+| [@types/node](https://github.com/DefinitelyTyped/DefinitelyTyped) | 24.x | MIT | Node.js type declarations for config and tooling files |
+
+**Rust-only plugins.** Not every Rust plugin has a JS counterpart here, and the absences are deliberate: `tauri-plugin-dialog` (settings export/import, #673) has no `@tauri-apps/plugin-dialog` dependency and no `dialog:*` capability in `capabilities/default.json` because the confirm dialog is built and answered in Rust, and the log, opener, autostart and deep-link plugins are likewise driven from Rust (`lib.rs`) with no frontend import — so no `@tauri-apps/plugin-log` / `-opener` / `-autostart` / `-deep-link` row exists in the Node table.
 
 ## Third-Party Services
 

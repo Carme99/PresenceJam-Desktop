@@ -144,7 +144,7 @@ Your `tokens.json` migrates automatically: on first read, v3.0 detects a ≤2.x 
 └── tokens.json       # Spotify + Teams tokens (AES-256-GCM ciphertext; decryption key in the OS keychain — see SECURITY.md)
 %LOCALAPPDATA%\com.presencejam.app\logs\    (Windows — bundle-id folder)
 ~/Library/Logs/com.presencejam.app/         (macOS — bundle-id folder)
-└── PresenceJam.log   # Single log file — no rotation, no retention pruning
+└── PresenceJam.log   # Live log; rotated by size, with bounded archives (Settings → Logging)
 ```
 (Linux uses `$XDG_CONFIG_HOME` instead of `%APPDATA%` / `~/Library/Application Support` for `config.json` and `tokens.json`, and `~/.local/share` in place of `%LOCALAPPDATA%` for the logs; the layout is otherwise the same.) **`config.json`, `tokens.json` and the logs live in three different folders** — Tauri's config/token path and `app_log_dir()` both append the bundle identifier `com.presencejam.app` (issue #300), so back up or delete all three. A `config.json` that no longer parses as JSON is renamed out of the way as `config.json.bak` in that same folder and the app boots on defaults, so a broken file is never silently overwritten — see [TROUBLESHOOTING.md — The app came up with default settings](./TROUBLESHOOTING.md#the-app-came-up-with-default-settings).
 
