@@ -42,10 +42,13 @@
 //! plugin verifies the signature inside `download()`, so a file-backed
 //! payload would be installable after an unverified post-stage swap.
 
+use crate::config::UpdateChannel;
 use parking_lot::Mutex;
+use std::future::Future;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
-use tauri_plugin_updater::Update;
+use tauri_plugin_updater::{Update, UpdaterExt};
+use url::Url;
 
 /// Log tag prefix for this submodule (mirrors the `[CMD.MISC]` pattern).
 const TAG: &str = "[UPDATER.BG]";
@@ -548,6 +551,215 @@ fn clear_stale_skipped_marker() {
     }
 }
 
+// ---------------------------------------------------------------------
+// Update channel resolution + check (issue #678)
+// ---------------------------------------------------------------------
+
+/// Stable-channel update manifest: the published release's `latest.json`.
+const STABLE_ENDPOINT: &str =
+    "https://github.com/Carme99/PresenceJam-Desktop/releases/latest/download/latest.json";
+
+/// Beta-channel update manifest: the stable URL with `latest-beta.json`.
+///
+/// 4.7.0 ships the channel switch without publishing a beta build, so this
+/// URL answers `404` and the check falls through to [`STABLE_ENDPOINT`].
+const BETA_ENDPOINT: &str =
+    "https://github.com/Carme99/PresenceJam-Desktop/releases/latest/download/latest-beta.json";
+
+/// Ordered update-endpoint list for `channel` (issue #678).
+///
+/// The stable URL is always last: [`walk_endpoints`] keeps the first endpoint
+/// that answers, so a not-yet-published beta manifest falls through to the
+/// stable release instead of failing the whole check.
+pub fn update_endpoints(channel: UpdateChannel) -> Vec<String> {
+    match channel {
+        UpdateChannel::Stable => vec![STABLE_ENDPOINT.to_string()],
+        UpdateChannel::Beta => vec![BETA_ENDPOINT.to_string(), STABLE_ENDPOINT.to_string()],
+    }
+}
+
+/// Parses [`update_endpoints`] into the `Url` list the updater builder takes.
+fn endpoint_urls(channel: UpdateChannel) -> Result<Vec<Url>, String> {
+    update_endpoints(channel)
+        .into_iter()
+        .map(|raw| Url::parse(&raw).map_err(|e| format!("invalid update endpoint {raw}: {e}")))
+        .collect()
+}
+
+/// Runs `attempt` over `urls` in order until one of them answers (issue
+/// #678), logging every endpoint that was skipped.
+///
+/// Mirrors the updater plugin's own multi-endpoint `check()` loop: it stops at
+/// the first endpoint that produced a manifest (including one that is no
+/// newer than the running build, i.e. `Ok(None)`), falls through only when an
+/// endpoint FAILED, and reports the last failure when none of them answered.
+/// The difference is the log line: the plugin does log a non-2XX response
+/// (`log::error!("update endpoint did not respond with a successful status
+/// code")`, `tauri-plugin-updater 2.11.0` `src/updater.rs:554-558`), but that
+/// line names neither the endpoint nor the fall-through — with two endpoints
+/// configured you cannot tell which one was skipped, or that the second one
+/// served the release. This walk logs both.
+async fn walk_endpoints<T, F, Fut>(urls: &[Url], mut attempt: F) -> Result<T, String>
+where
+    F: FnMut(Url) -> Fut,
+    Fut: Future<Output = Result<T, String>>,
+{
+    let mut last_error: Option<String> = None;
+    for (idx, url) in urls.iter().enumerate() {
+        match attempt(url.clone()).await {
+            Ok(found) => {
+                if idx > 0 {
+                    log::info!(
+                        "{TAG} update check: {prev} did not serve a manifest; falling through \
+                         to {url}",
+                        prev = urls[idx - 1]
+                    );
+                }
+                return Ok(found);
+            }
+            Err(e) => {
+                // No "trying the next endpoint" here: this arm also runs for
+                // the LAST endpoint, where there is nothing left to try. The
+                // endpoint that finally answers logs the fall-through above.
+                log::info!("{TAG} update check: {url} failed ({e})");
+                last_error = Some(e);
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "no update endpoints configured".to_string()))
+}
+
+/// Checks for an update on the configured release channel.
+///
+/// The endpoint list comes from `AppConfig.updates.channel`, NOT from the
+/// static `plugins.updater.endpoints` entry in `tauri.conf.json`:
+/// `UpdaterBuilder::endpoints` replaces that config value, so the
+/// channel-driven list governs every Rust-side check ([`check_for_update`] and
+/// [`stage_deferred_update`]). The JS `@tauri-apps/plugin-updater` path
+/// (`check()` / `downloadAndInstall()`) cannot take endpoints, so it keeps
+/// using the static config entry — which is why `UpdatePrompt.svelte` offers
+/// it on the stable channel only.
+async fn check_with_channel(
+    app: &AppHandle,
+    channel: UpdateChannel,
+) -> Result<Option<Update>, String> {
+    let urls = endpoint_urls(channel)?;
+    let listed = urls.iter().map(Url::as_str).collect::<Vec<_>>().join(", ");
+    log::info!("{TAG} update check: channel={channel:?} endpoints=[{listed}]");
+    walk_endpoints(&urls, |url| async move {
+        let updater = app
+            .updater_builder()
+            .endpoints(vec![url])
+            .map_err(|e| format!("invalid update endpoint: {e}"))?
+            .build()
+            .map_err(|e| format!("updater unavailable: {e}"))?;
+        updater.check().await.map_err(|e| e.to_string())
+    })
+    .await
+}
+
+/// Banner payload of [`check_for_update`] (issue #678). No `ts_rs` export:
+/// the shape is mirrored by a local interface in `UpdatePrompt.svelte` (same
+/// convention as [`StageDeferredOutcome`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct UpdateCheckOutcome {
+    /// The version the manifest announces.
+    pub version: String,
+    /// Release notes from the manifest (`body` in the update manifest).
+    /// Deliberately the manifest's `notes` rather than a hand-rendered one.
+    pub notes: Option<String>,
+    /// Publish date exactly as the manifest spells it — RFC 3339, e.g.
+    /// `2026-09-16T21:07:35Z`.
+    pub pub_date: Option<String>,
+}
+
+/// The manifest's own `pub_date` literal.
+///
+/// Read from the release JSON rather than rendered from [`Update::date`]:
+/// `time::OffsetDateTime::to_string()` uses `time`'s `SmartDisplay` human form
+/// (`2026-09-16 21:07:35.0 +00:00:00`), which is neither RFC 3339 nor what the
+/// manifest published. A manifest without the key (or with a non-string value)
+/// reports `None` instead of inventing a date.
+fn manifest_pub_date(raw_json: &serde_json::Value) -> Option<String> {
+    raw_json
+        .get("pub_date")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+}
+
+/// Tauri command: check for an update on the configured channel (issue #678).
+///
+/// The banner uses this instead of the plugin's JS `check()` because the JS
+/// API cannot pass endpoints — it is hard-wired to the static
+/// `plugins.updater.endpoints` entry, which is the stable manifest.
+///
+/// #215 convention: config read and network both happen on a blocking-pool
+/// thread. `Ok(None)` means the running build is already current; `Err` means
+/// every endpoint of the channel failed.
+#[cfg(desktop)]
+#[tauri::command]
+pub async fn check_for_update(app: AppHandle) -> Result<Option<UpdateCheckOutcome>, String> {
+    let found = tauri::async_runtime::spawn_blocking(move || {
+        let channel = crate::config::load_config()
+            .map_err(|e| {
+                // A read failure must never be a silent, permanent
+                // "no update" state: the reason lands in the log file, and the
+                // next check (mount / 24h tick) re-reads the config, so a
+                // transient failure restores itself. Parse failures do not
+                // reach here at all — `load_config` quarantines the file and
+                // boots on defaults (verified in config.rs).
+                log::warn!("{TAG} check_for_update: config unreadable ({e}); update check failed");
+                format!("config load failed: {e}")
+            })?
+            .updates
+            .channel;
+        tauri::async_runtime::block_on(check_with_channel(&app, channel))
+    })
+    .await
+    .map_err(|e| format!("check_for_update spawn_blocking panicked: {e:?}"))??;
+    match &found {
+        Some(update) => log::info!("{TAG} check_for_update: v{} available", update.version),
+        None => log::info!("{TAG} check_for_update: already current"),
+    }
+    Ok(found.map(|update| UpdateCheckOutcome {
+        version: update.version,
+        notes: update.body,
+        pub_date: manifest_pub_date(&update.raw_json),
+    }))
+}
+
+// ---------------------------------------------------------------------
+// Stage completion (issue #678)
+// ---------------------------------------------------------------------
+
+/// Emitted once on `update-stage-complete` after a deferred update has been
+/// staged successfully, so an always-mounted consumer can notify without
+/// being the webview that invoked [`stage_deferred_update`]. No `ts_rs`
+/// export: the shape is mirrored by a local interface where it is consumed.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct StageComplete {
+    /// Version that is now staged for install on quit.
+    pub version: String,
+}
+
+/// Emits for a [`StageDeferredOutcome`]: hands `emit` the STAGED version iff
+/// the stage actually succeeded, and never the running one.
+///
+/// Factored out of [`stage_deferred_update`] so the rules its consumers depend
+/// on are testable without a webview. Three of them:
+/// - the payload carries the staged version, not `current` (announcing the
+///   already-installed version would make the consumer's "update ready" toast
+///   a lie);
+/// - it fires exactly once per call;
+/// - it does NOT fire for an outcome that staged nothing —
+///   `stage_deferred_update` returns `staged: None` both when the app is
+///   already current and when the candidate was declined as stale.
+fn emit_stage_complete<E: FnOnce(&str)>(outcome: &StageDeferredOutcome, emit: E) {
+    if let Some(version) = outcome.staged.as_deref() {
+        emit(version);
+    }
+}
+
 /// Tauri command: check for an update, download it, verify its signature,
 /// and hold it for install-on-quit. Returns a [`StageDeferredOutcome`]:
 /// `staged` is the staged version string, or `None` when the app is
@@ -582,20 +794,26 @@ pub async fn stage_deferred_update(
     // legitimately stage. Guarded via the commands-layer helper.
     crate::commands::require_main_window(&window)?;
     log::info!("{TAG} stage_deferred_update: ENTRY");
+    let emit_app = app.clone();
     let outcome = tauri::async_runtime::spawn_blocking(move || {
         use tauri::Manager;
         tauri::async_runtime::block_on(async move {
-            use tauri_plugin_updater::UpdaterExt;
-
             let current = env!("CARGO_PKG_VERSION").to_string();
-            let updater = app
-                .updater()
-                .map_err(|e| format!("updater unavailable: {e}"))?;
-            let Some(update) = updater
-                .check()
-                .await
-                .map_err(|e| format!("update check failed: {e}"))?
-            else {
+            let channel = crate::config::load_config()
+                .map_err(|e| {
+                    // The channel decides which manifest is staged, so an
+                    // unreadable config is a visible failure for THIS call —
+                    // never a silent guess — with the reason in the log file.
+                    // The next attempt re-reads the config.
+                    log::warn!(
+                        "{TAG} stage_deferred_update: config unreadable ({e}); cannot resolve \
+                         the release channel"
+                    );
+                    format!("config load failed: {e}")
+                })?
+                .updates
+                .channel;
+            let Some(update) = check_with_channel(&app, channel).await? else {
                 log::info!("{TAG} stage_deferred_update: no update available");
                 return Ok::<StageDeferredOutcome, String>(StageDeferredOutcome {
                     staged: None,
@@ -693,6 +911,14 @@ pub async fn stage_deferred_update(
     .await
     .map_err(|e| format!("stage_deferred_update spawn_blocking panicked: {:?}", e))??;
     log::info!("{TAG} stage_deferred_update: SUCCESS");
+    emit_stage_complete(&outcome, |version| {
+        let payload = StageComplete {
+            version: version.to_string(),
+        };
+        if let Err(e) = emit_app.emit("update-stage-complete", payload) {
+            log::warn!("{TAG} stage_deferred_update: update-stage-complete emit failed - {e}");
+        }
+    });
     Ok(outcome)
 }
 
@@ -780,6 +1006,7 @@ pub fn install_pending_on_exit(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     /// Fresh unique temp directory per call. Returns
     /// `(dir, marker_path)`; callers remove `dir` when done.
@@ -1113,6 +1340,173 @@ mod tests {
             percent_of(u64::MAX, Some(u64::MAX)),
             1,
             "a saturating multiply keeps huge payloads from overflowing"
+        );
+    }
+
+    /// Issue #678: the endpoint lists and their order are the contract the
+    /// beta fall-through rests on — the stable manifest must stay last, and
+    /// the beta URL must be the stable URL's `latest-beta.json` sibling.
+    #[test]
+    fn test_update_endpoints_lists_and_order() {
+        assert_eq!(
+            update_endpoints(UpdateChannel::Stable),
+            vec![STABLE_ENDPOINT.to_string()]
+        );
+        assert_eq!(
+            update_endpoints(UpdateChannel::Beta),
+            vec![BETA_ENDPOINT.to_string(), STABLE_ENDPOINT.to_string()],
+            "beta is tried first and the stable manifest stays the fallback"
+        );
+        assert_eq!(
+            BETA_ENDPOINT,
+            STABLE_ENDPOINT.replace("latest.json", "latest-beta.json"),
+            "the beta manifest is the same release path with the beta file name"
+        );
+        assert_eq!(
+            endpoint_urls(UpdateChannel::Beta).map(|urls| urls.len()),
+            Ok(2),
+            "every advertised endpoint must be a parseable URL"
+        );
+    }
+
+    /// Issue #678: a failing endpoint must not abort the check — that is the
+    /// entire point of listing the stable manifest after the (unpublished)
+    /// beta one.
+    #[test]
+    fn test_check_walks_past_a_failing_endpoint() {
+        let urls = vec![
+            Url::parse("https://example.invalid/latest-beta.json").unwrap(),
+            Url::parse("https://example.invalid/latest.json").unwrap(),
+        ];
+        let tried = Arc::new(Mutex::new(Vec::new()));
+        let seen = tried.clone();
+        let found = tauri::async_runtime::block_on(walk_endpoints(&urls, move |url| {
+            let seen = seen.clone();
+            async move {
+                // What the real repo answers today: no beta manifest.
+                let beta = url.path().ends_with("latest-beta.json");
+                seen.lock().push(url.to_string());
+                if beta {
+                    Err("HTTP 404".to_string())
+                } else {
+                    Ok(Some("4.6.0".to_string()))
+                }
+            }
+        }));
+        assert_eq!(found, Ok(Some("4.6.0".to_string())));
+        assert_eq!(
+            tried.lock().as_slice(),
+            [
+                "https://example.invalid/latest-beta.json",
+                "https://example.invalid/latest.json"
+            ],
+            "the fall-through must try the endpoints in list order"
+        );
+    }
+
+    /// The walk stops at the first endpoint that answers, so a published beta
+    /// release costs no second round-trip to the stable manifest.
+    #[test]
+    fn test_check_stops_at_the_first_answering_endpoint() {
+        let urls = vec![
+            Url::parse("https://example.invalid/latest-beta.json").unwrap(),
+            Url::parse("https://example.invalid/latest.json").unwrap(),
+        ];
+        let attempts = Arc::new(Mutex::new(0usize));
+        let seen = attempts.clone();
+        let found = tauri::async_runtime::block_on(walk_endpoints(&urls, move |_url| {
+            let seen = seen.clone();
+            async move {
+                *seen.lock() += 1;
+                Ok(Some("4.7.0-beta.1".to_string()))
+            }
+        }));
+        assert_eq!(found, Ok(Some("4.7.0-beta.1".to_string())));
+        assert_eq!(
+            *attempts.lock(),
+            1,
+            "no fall-through when the first endpoint answers"
+        );
+    }
+
+    /// When every endpoint fails, the LAST failure is reported (mirroring the
+    /// plugin's `last_error` semantics) instead of a swallowed `Ok(None)`,
+    /// which the banner would render as "already current".
+    #[test]
+    fn test_check_reports_the_last_error_when_no_endpoint_answers() {
+        let urls = vec![
+            Url::parse("https://example.invalid/latest-beta.json").unwrap(),
+            Url::parse("https://example.invalid/latest.json").unwrap(),
+        ];
+        let found: Result<Option<String>, String> =
+            tauri::async_runtime::block_on(walk_endpoints(&urls, |url| {
+                let msg = format!("{} unreachable", url.path());
+                async move { Err(msg) }
+            }));
+        assert_eq!(found, Err("/latest.json unreachable".to_string()));
+    }
+
+    /// Issue #678: what S7's `update_staged` notification is built from — the
+    /// STAGED version, once, and nothing at all for a stage that staged
+    /// nothing.
+    ///
+    /// `current` is deliberately a different string from `staged`: an emitter
+    /// that announced `current` — or one that fired for a no-op outcome —
+    /// would tell the user the already-installed version is ready to install.
+    #[test]
+    fn test_stage_complete_announces_the_staged_version_once() {
+        let staged = StageDeferredOutcome {
+            staged: Some("4.7.0".to_string()),
+            current: "4.6.0".to_string(),
+        };
+        let mut fired: Vec<String> = Vec::new();
+        emit_stage_complete(&staged, |version| fired.push(version.to_string()));
+        assert_eq!(fired, ["4.7.0"], "the staged version, exactly once");
+
+        let quiet_outcome = StageDeferredOutcome {
+            staged: None,
+            current: "4.6.0".to_string(),
+        };
+        let mut quiet: Vec<String> = Vec::new();
+        emit_stage_complete(&quiet_outcome, |version| quiet.push(version.to_string()));
+        assert!(
+            quiet.is_empty(),
+            "an outcome with no staged version must not emit update-stage-complete"
+        );
+    }
+
+    /// The wire shape the always-mounted consumer switches on.
+    #[test]
+    fn test_stage_complete_payload_shape() {
+        assert_eq!(
+            serde_json::to_string(&StageComplete {
+                version: "4.7.0".to_string()
+            })
+            .unwrap(),
+            r#"{"version":"4.7.0"}"#
+        );
+    }
+
+    /// The banner shows the manifest's own `pub_date` literal. `Update::date`
+    /// rendered through `time`'s `Display` is not RFC 3339 (it is
+    /// `SmartDisplay`'s human form), and a manifest that omits the key must
+    /// report `None` rather than invent a date.
+    #[test]
+    fn test_manifest_pub_date_reads_the_manifest_literal() {
+        assert_eq!(
+            manifest_pub_date(&serde_json::json!({
+                "version": "4.7.0",
+                "pub_date": "2026-09-16T21:07:35Z",
+            })),
+            Some("2026-09-16T21:07:35Z".to_string())
+        );
+        assert_eq!(
+            manifest_pub_date(&serde_json::json!({ "version": "4.7.0" })),
+            None
+        );
+        assert_eq!(
+            manifest_pub_date(&serde_json::json!({ "pub_date": 42 })),
+            None
         );
     }
 }

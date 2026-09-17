@@ -503,4 +503,13 @@ export const fr: Dict = {
     'Votre session Teams a expiré. Reconnectez-vous pour que votre statut reste synchronisé.',
   'notifications.updateStagedTitle': 'Mise à jour prête',
   'notifications.updateStagedBody': 'PresenceJam {version} sera installé à la fermeture.',
+  // 4.7.0 — update channel (#678)
+  'settings.sectionUpdates': 'Mises à jour',
+  'settings.updateChannelLabel': 'Canal de publication',
+  'settings.updateChannelStable': 'Stable',
+  'settings.updateChannelBeta': 'Bêta',
+  'settings.updateChannelHint':
+    "Aucune version bêta n'est encore publiée : le canal Bêta retombe donc sur la version stable — ce repli est enregistré à chaque vérification. Les versions bêta s'installent uniquement à la fermeture.",
+  'update.betaOnQuitOnly':
+    "Canal Bêta : les mises à jour s'installent à la fermeture — il n'y a pas de téléchargement suivi d'un redémarrage sur ce canal.",
 };

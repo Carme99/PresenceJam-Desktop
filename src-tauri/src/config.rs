@@ -706,6 +706,82 @@ fn default_notification_class() -> bool {
     true
 }
 
+/// Which release manifest the updater consults (4.7.0, issue #678).
+///
+/// Serialized lowercase — `stable`/`beta` is the on-disk and on-the-wire
+/// spelling the Settings picker round-trips, so `rename_all` is part of the
+/// contract, not cosmetics (same convention as [`ClientSecretState`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
+pub enum UpdateChannel {
+    /// Published releases (`releases/latest`): the default, and the only
+    /// channel with a published manifest in 4.7.0.
+    #[default]
+    Stable,
+    /// Pre-release builds. 4.7.0 ships the switch only — no
+    /// `latest-beta.json` is published yet, so a beta check falls through to
+    /// the stable manifest (see `updater_bg::update_endpoints`).
+    Beta,
+}
+
+/// Updater settings (4.7.0, issue #678). Additive on `AppConfig` with
+/// `#[serde(default)]`, so a pre-4.7 config loads as the stable channel.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
+pub struct UpdatesConfig {
+    /// Missing key keeps the serde default (`stable`); an unrecognised value
+    /// is read leniently — see [`deserialize_update_channel`].
+    #[serde(default, deserialize_with = "deserialize_update_channel")]
+    pub channel: UpdateChannel,
+}
+
+/// Lenient read of one `updates.channel` value (4.7.0, issue #678): the
+/// channel, plus the warning to log when the document carried a spelling this
+/// binary does not know.
+///
+/// Why lenient: `UpdateChannel` is new in 4.7.0, and a plain enum field makes
+/// serde reject the WHOLE document — which `load_config` answers by
+/// quarantining `config.json` to `config.json.bak` and booting on defaults, so
+/// one unrecognised spelling would cost the user every setting they have (a
+/// config written by a newer binary, or a hand-edit, would do it). The rest of
+/// the document survives instead.
+///
+/// Deliberately scoped to this field: the pre-existing enums
+/// ([`SpotifyConfig::client_secret_state`] and friends) still reject the whole
+/// document, so that inconsistency stays visible rather than half-fixed here.
+fn lenient_update_channel(raw: &serde_json::Value) -> (UpdateChannel, Option<String>) {
+    // The happy path goes through the enum's own `Deserialize`, so the
+    // lowercase wire spelling keeps living in `#[serde(rename_all)]` alone.
+    match serde_json::from_value::<UpdateChannel>(raw.clone()) {
+        Ok(channel) => (channel, None),
+        Err(_) => (
+            UpdateChannel::Stable,
+            Some(format!(
+                "updates.channel: unrecognised value {raw}; using \"stable\" (the rest of the \
+                 config is kept)"
+            )),
+        ),
+    }
+}
+
+/// `deserialize_with` for [`UpdatesConfig::channel`]: [`lenient_update_channel`]
+/// plus its warning. A MISSING key never reaches here — `#[serde(default)]` on
+/// the field still supplies the default channel.
+fn deserialize_update_channel<'de, D>(deserializer: D) -> Result<UpdateChannel, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = serde_json::Value::deserialize(deserializer)?;
+    let (channel, warning) = lenient_update_channel(&raw);
+    if let Some(warning) = warning {
+        // The `[CFG]` prefix belongs at the log site (`test_config_log_tags_…`
+        // scans for it there, and the message is reused verbatim below).
+        log::warn!("[CFG] {warning}");
+    }
+    Ok(channel)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct AppConfig {
@@ -717,6 +793,9 @@ pub struct AppConfig {
     pub polling: PollingConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
+    /// Release channel the updater reads (issue #678).
+    #[serde(default)]
+    pub updates: UpdatesConfig,
     #[serde(default)]
     pub autostart: bool,
     /// Desktop-notification classes (4.7.0 / issue #675). Additive on
@@ -815,6 +894,7 @@ impl Default for AppConfig {
             teams: TeamsConfig::default(),
             polling: PollingConfig::default(),
             logging: LoggingConfig::default(),
+            updates: UpdatesConfig::default(),
             autostart: false,
             notifications: NotificationsConfig::default(),
             locale: None,
@@ -3661,5 +3741,123 @@ mod tests {
         assert!(!dir.join("config.json.bak").exists());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #678: a `config.json` written before 4.7.0 has no `updates`
+    /// key, and must keep loading on the stable channel (additive serde
+    /// default — the schema version does not move for it).
+    #[test]
+    fn test_updates_channel_defaults_to_stable_for_pre_4_7_configs() {
+        let cfg: AppConfig = serde_json::from_str("{}").expect("empty object must parse");
+        assert_eq!(cfg.updates.channel, UpdateChannel::Stable);
+        assert_eq!(AppConfig::default().updates.channel, UpdateChannel::Stable);
+    }
+
+    /// The persisted spelling is what the Settings picker round-trips across
+    /// a relaunch, so both directions must hold the lowercase wire form.
+    #[test]
+    fn test_update_channel_wire_spelling() {
+        for (channel, wire) in [
+            (UpdateChannel::Stable, "\"stable\""),
+            (UpdateChannel::Beta, "\"beta\""),
+        ] {
+            assert_eq!(serde_json::to_string(&channel).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_str::<UpdateChannel>(wire).unwrap(),
+                channel
+            );
+        }
+        let stored: AppConfig =
+            serde_json::from_str(r#"{"updates": {"channel": "beta"}}"#).expect("must parse");
+        assert_eq!(stored.updates.channel, UpdateChannel::Beta);
+    }
+
+    // The lenient-read tests below assert a `log::warn!`, and no logger is
+    // installed in a unit-test process by default. Capturing is process-wide,
+    // so they serialise on the same lock the quarantine tests use.
+    static LOG_LINES: parking_lot::Mutex<Vec<String>> = parking_lot::Mutex::new(Vec::new());
+    static LOGGER: std::sync::Once = std::sync::Once::new();
+
+    struct CapturingLogger;
+
+    impl log::Log for CapturingLogger {
+        fn enabled(&self, _metadata: &log::Metadata) -> bool {
+            true
+        }
+        fn log(&self, record: &log::Record) {
+            LOG_LINES.lock().push(record.args().to_string());
+        }
+        fn flush(&self) {}
+    }
+
+    /// The channel a value reads as, and the warning to log for it.
+    ///
+    /// Issue #678: an unknown spelling reads as `stable` and names the
+    /// offending value, instead of failing the whole document.
+    #[test]
+    fn test_unknown_update_channel_names_the_offending_value() {
+        let (channel, warning) = lenient_update_channel(&serde_json::json!("nightly"));
+        assert_eq!(channel, UpdateChannel::Stable);
+        let warning = warning.expect("an unrecognised value must warn");
+        assert!(
+            warning.contains("nightly"),
+            "the warning must name the offending value: {warning}"
+        );
+        assert!(
+            !warning.contains("[CFG]"),
+            "the [CFG] tag belongs at the log site, not in the message: {warning}"
+        );
+
+        // The known spellings take no fallback path and never warn.
+        for (raw, expected) in [
+            ("stable", UpdateChannel::Stable),
+            ("beta", UpdateChannel::Beta),
+        ] {
+            let (channel, warning) = lenient_update_channel(&serde_json::json!(raw));
+            assert_eq!(channel, expected);
+            assert!(warning.is_none(), "{raw} must not warn");
+        }
+    }
+
+    /// Issue #678: the point of the lenient read — a document carrying a
+    /// channel spelling this binary does not know still LOADS, with the rest of
+    /// the config intact, and says so in the log.
+    ///
+    /// Fails before the lenient read: serde rejects the whole document, which
+    /// `load_config` answers by quarantining `config.json` to `config.json.bak`
+    /// and booting on defaults — so `from_str` returned `Err`, every other
+    /// setting was lost, and nothing was logged.
+    #[test]
+    fn test_unknown_update_channel_keeps_the_rest_of_the_config_and_warns() {
+        let _guard = QUARANTINE_TEST_LOCK.lock();
+        LOGGER.call_once(|| {
+            // Best-effort: another test may have installed a logger first.
+            let _ = log::set_boxed_logger(Box::new(CapturingLogger));
+            log::set_max_level(log::LevelFilter::Warn);
+        });
+        LOG_LINES.lock().clear();
+
+        let cfg: AppConfig = serde_json::from_str(
+            r#"{"autostart": true, "updates": {"channel": "nightly"},
+                "teams": {"status_format": "🎧 {track}"}}"#,
+        )
+        .expect("an unrecognised channel value must not reject the config document");
+
+        assert_eq!(cfg.updates.channel, UpdateChannel::Stable);
+        assert!(
+            cfg.autostart,
+            "the other settings must survive the fallback"
+        );
+        assert_eq!(cfg.teams.status_format, "🎧 {track}");
+
+        let logged = LOG_LINES.lock().clone();
+        let warned = logged
+            .iter()
+            .find(|line| line.contains("nightly"))
+            .unwrap_or_else(|| panic!("the fallback must be logged: {logged:?}"));
+        assert!(
+            warned.contains("[CFG]"),
+            "the logged line carries the module tag: {warned}"
+        );
     }
 }

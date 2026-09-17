@@ -21,6 +21,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, fireEvent, waitFor, within } from '@testing-library/svelte';
 import { tick } from 'svelte';
+import { get } from 'svelte/store';
 import type { Mock } from 'vitest';
 
 type Listener = { event: string; fn: (e: { payload: unknown }) => void };
@@ -48,8 +49,17 @@ vi.mock('@tauri-apps/plugin-updater', () => ({
 import { invoke } from '@tauri-apps/api/core';
 import UpdatePrompt from '$lib/components/UpdatePrompt.svelte';
 import { i18n, t } from '$lib/i18n';
+import { configHydrated, configStore, defaultConfig } from '$lib/stores/config';
+import type { AppConfig } from '$lib/types';
 
 const invokeMock = invoke as unknown as Mock;
+
+/** #678: the backend's candidate payload from `check_for_update`. */
+const CANDIDATE = {
+  version: '4.6.0',
+  notes: 'Fixes and polish',
+  pub_date: '2026-09-16T21:07:35Z'
+};
 
 /** Resolvers of the in-flight `stage_deferred_update` calls, in call order. */
 let stageResolvers: ((outcome: unknown) => void)[] = [];
@@ -84,6 +94,19 @@ async function startStage(container: HTMLElement) {
   await waitFor(() => expect(container.querySelector('.update-progress')).not.toBeNull());
 }
 
+/**
+ * Point the harness's `load_config` at a config persisted on `channel`,
+ * leaving the store itself untouched — the banner must read the channel from
+ * the backend, not from whoever happened to hydrate the store first.
+ */
+function persistChannel(channel: 'stable' | 'beta') {
+  const base = invokeMock.getMockImplementation()!;
+  const cfg: AppConfig = { ...structuredClone(defaultConfig), updates: { channel } };
+  invokeMock.mockImplementation(async (cmd: string, args?: unknown) =>
+    cmd === 'load_config' ? cfg : base(cmd, args)
+  );
+}
+
 beforeEach(() => {
   listeners.length = 0;
   released = 0;
@@ -91,6 +114,13 @@ beforeEach(() => {
   i18n.set('en');
   invokeMock.mockReset();
   invokeMock.mockImplementation((cmd: string) => {
+    if (cmd === 'load_config') {
+      // The mirror's own default: `updates.channel === 'stable'`.
+      return Promise.resolve(structuredClone(defaultConfig));
+    }
+    if (cmd === 'check_for_update') {
+      return Promise.resolve(CANDIDATE);
+    }
     if (cmd === 'stage_deferred_update') {
       const outcome = Promise.withResolvers<unknown>();
       stageResolvers.push(outcome.resolve);
@@ -98,6 +128,11 @@ beforeEach(() => {
     }
     return Promise.resolve(undefined);
   });
+  // #678: the banner hydrates the store itself when nothing has yet; start
+  // every test from the un-hydrated, default-valued store so the hydration
+  // path is what is under test, not a value a previous test left behind.
+  configStore.set(structuredClone(defaultConfig));
+  configHydrated.set(false);
 });
 
 afterEach(() => {
@@ -182,5 +217,88 @@ describe('UpdatePrompt deferred staging (#590)', () => {
     pending.unmount();
     await waitFor(() => expect(released).toBe(2));
     expect(listeners).toHaveLength(0);
+  });
+});
+
+/**
+ * #678 (update-channel slice) — the banner's candidate, its actions and the
+ * config it reads them from.
+ *
+ * Fails pre-fix: the banner discovered its candidate through the plugin's JS
+ * `check()`, which cannot take an endpoint list, so a Beta check could only
+ * ever have read the stable manifest; the immediate download-and-relaunch
+ * action was offered unconditionally, which a beta endpoint list cannot
+ * honour; and the store it gated that on was never hydrated by the banner, so
+ * a relaunch with a persisted `beta` still offered the stable-only JS path.
+ */
+describe('UpdatePrompt release channel (#678)', () => {
+  it('surfaces the manifest notes and publish date as the banner tooltip', async () => {
+    const { container } = await mountBanner();
+    const tooltip = container.querySelector('.update-banner')?.getAttribute('title') ?? '';
+    expect(tooltip).toContain(CANDIDATE.notes);
+    expect(tooltip).toContain(CANDIDATE.pub_date);
+  });
+
+  it('discovers its candidate through the backend channel-aware check', async () => {
+    await mountBanner();
+    expect(invokeMock.mock.calls.map(([cmd]) => cmd)).toContain('check_for_update');
+  });
+
+  it('keeps the download path for a persisted stable channel', async () => {
+    persistChannel('stable');
+    const { container } = await mountBanner();
+
+    await waitFor(() =>
+      expect(
+        within(container).getByRole('button', { name: t('update.downloadAndInstall') })
+      ).toBeTruthy()
+    );
+    expect(container.querySelector('.update-beta')).toBeNull();
+  });
+
+  it('opens the channel gate on the first paint when the store is already hydrated', async () => {
+    // The other order: boot hydrated `configStore` before this banner mounted
+    // (`+page.svelte` reads through the store and flags `configHydrated`). The
+    // channel is authoritative then, so the gate must already be open once the
+    // banner has a candidate — not held behind a re-read of a value the app
+    // already has.
+    configStore.set({ ...structuredClone(defaultConfig), updates: { channel: 'stable' } });
+    configHydrated.set(true);
+    persistChannel('stable');
+    const { container } = await mountBanner();
+
+    // Deliberately synchronous: waiting would hide exactly the flicker this
+    // pins.
+    expect(
+      within(container).getByRole('button', { name: t('update.downloadAndInstall') })
+    ).toBeTruthy();
+    expect(container.querySelector('.update-beta')).toBeNull();
+    expect(
+      invokeMock.mock.calls.map(([cmd]) => cmd).filter((cmd) => cmd === 'load_config')
+    ).toHaveLength(0);
+  });
+
+  it('hydrates the persisted beta channel itself and offers only install-on-quit', async () => {
+    persistChannel('beta');
+    // The store is deliberately left at the mirror's defaults (stable): the
+    // banner must hydrate the persisted channel at its own point of use, not
+    // assume that boot already did.
+    const { container } = await mountBanner();
+
+    await waitFor(() =>
+      expect(container.querySelector('.update-beta')?.textContent?.trim()).toBe(
+        t('update.betaOnQuitOnly')
+      )
+    );
+    expect(invokeMock.mock.calls.map(([cmd]) => cmd)).toContain('load_config');
+    expect(get(configStore).updates.channel).toBe('beta');
+    expect(
+      within(container).queryByRole('button', { name: t('update.downloadAndInstall') })
+    ).toBeNull();
+
+    // The deferred (Rust) path is still offered, and still stages.
+    await startStage(container);
+    stageResolvers.shift()!({ staged: '4.6.0', current: '4.5.2' });
+    await waitFor(() => expect(container.querySelector('.update-staged')).not.toBeNull());
   });
 });

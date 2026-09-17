@@ -1531,6 +1531,30 @@
       {/if}
     </section>
 
+    <!-- 4.7.0 (issue #678): release channel the updater reads. The saved
+         value is the backend's single source of truth — the banner and the
+         deferred staging path both resolve it on every check. -->
+    <section class="card">
+      <header class="section-header">
+        <h2>{t('settings.sectionUpdates')}</h2>
+      </header>
+      <div class="form-group">
+        <label for="update-channel">{t('settings.updateChannelLabel')}</label>
+        <select
+          id="update-channel"
+          value={localConfig.updates.channel}
+          onchange={(e) => {
+            const value = (e.currentTarget as HTMLSelectElement).value;
+            localConfig.updates.channel = value === 'beta' ? 'beta' : 'stable';
+          }}
+        >
+          <option value="stable">{t('settings.updateChannelStable')}</option>
+          <option value="beta">{t('settings.updateChannelBeta')}</option>
+        </select>
+      </div>
+      <p class="hint">{t('settings.updateChannelHint')}</p>
+    </section>
+
     <section class="actions">
       <button class="btn-full" onclick={handleSave} disabled={isSaving}>
         {isSaving ? t('settings.saving') : t('settings.saveChanges')}
