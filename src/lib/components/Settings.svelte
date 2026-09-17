@@ -1,7 +1,6 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { onMount, onDestroy } from 'svelte';
-  import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notification';
   import { currentView } from '$lib/stores/app';
   import { emitTo } from '@tauri-apps/api/event';
   // C7 multi-window detach: pop-out/pop-back controls.
@@ -16,9 +15,14 @@
   import { authFlow, setSpotifyPhase, setTeamsPhase, formatCountdownMs, resetSpotifyAuthFlow, resetTeamsAuthFlow, teamsPollMutex, tryAcquireTeamsPoll, releaseTeamsPoll, isSafeHttpUrl } from '$lib/stores/authFlow.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
   import PageHeader from './PageHeader.svelte';
-  import { t, i18n, type Locale } from '$lib/i18n';
+  import { t, i18n, type Locale, type TKey } from '$lib/i18n';
   import { theme } from '$lib/stores/theme';
-  import { notificationsEnabled, setNotificationsEnabled } from '$lib/stores/notifications';
+  import {
+    NOTIFICATION_CLASSES,
+    notificationPreferences,
+    setNotificationPreference,
+    type NotificationClass
+  } from '$lib/stores/notifications';
   import { presence, clearAuthPersistWarning } from '$lib/stores/presence';
   import { devLog } from '$lib/utils/dev';
 
@@ -213,10 +217,20 @@
     (next === 'dark' ? themeDarkButton : themeLightButton)?.focus();
   }
 
-  // 3.1.0 notification opt-in — shared store, default off. #549: this used to
-  // be a private `$state` mirrored straight into localStorage, so a toggle in
-  // a detached Settings window never reached the already-mounted Dashboard.
+  // #675: one toggle per desktop-notification class. The store is the shared
+  // state (persisted to `config.json` through `saveConfig`), so a toggle here
+  // reaches the always-mounted main window. #549 still holds: the OS prompt's
+  // answer decides whether a class may notify, and a denied permission must
+  // not leave a checked toggle behind.
   let notificationsMessage = $state('');
+  // Keys are `TKey`, so a class added on the Rust side cannot be rendered
+  // with a missing dictionary entry.
+  const NOTIFICATION_LABELS: Record<NotificationClass, TKey> = {
+    track_change: 'settings.notificationsTrackChange',
+    sync_stopped: 'settings.notificationsSyncStopped',
+    auth_required: 'settings.notificationsAuthRequired',
+    update_staged: 'settings.notificationsUpdateStaged'
+  };
   let spotifyAuthWaiting = $derived(authFlow.spotify.phase === 'waiting');
   let teamsAuthWaiting = $derived(authFlow.teams.phase === 'waiting');
 
@@ -657,31 +671,20 @@
     performBack();
   }
 
-  async function toggleNotifications(e: Event) {
+  async function toggleNotificationClass(cls: NotificationClass, e: Event) {
     const target = e.currentTarget as HTMLInputElement;
-    if (!target.checked) {
-      notificationsMessage = '';
-      setNotificationsEnabled(false);
+    const applied = await setNotificationPreference(cls, target.checked);
+    if (!applied) {
+      // The store kept the class off, so reset the DOM property this click
+      // already flipped.
+      target.checked = false;
+      notificationsMessage = t('settings.notificationsDenied');
       return;
     }
-    // #549: the OS prompt's answer decides the flag. It used to be discarded,
-    // so a denied permission left a checked toggle over a localStorage 'true'
-    // that the Dashboard honoured — notifications then silently never came.
-    let granted = false;
-    try {
-      granted = (await isPermissionGranted()) || (await requestPermission()) === 'granted';
-    } catch (err) {
-      console.warn('[SETTINGS] notification permission request failed:', err);
-    }
-    setNotificationsEnabled(granted);
-    if (granted) {
-      notificationsMessage = '';
-      return;
-    }
-    // The input is `checked={$notificationsEnabled}` and the store stays
-    // false, so reset the DOM property this click already flipped.
-    target.checked = false;
-    notificationsMessage = t('settings.notificationsDenied');
+    notificationsMessage = '';
+    // The form owns a full-config copy; a later "Save" must not write a stale
+    // notifications section back over the toggle that was just persisted.
+    localConfig.notifications = { ...$notificationPreferences };
   }
 
   // #403: catch-and-surface — WebviewWindow creation/focus can reject
@@ -1344,10 +1347,17 @@
       <header class="section-header">
         <h2>{t('settings.sectionNotifications')}</h2>
       </header>
-      <div class="toggle-row">
-        <label for="notifications-enabled">{t('settings.notificationsToggle')}</label>
-        <input id="notifications-enabled" type="checkbox" checked={$notificationsEnabled} onchange={toggleNotifications} />
-      </div>
+      {#each NOTIFICATION_CLASSES as cls (cls)}
+        <div class="toggle-row">
+          <label for={`notifications-${cls}`}>{t(NOTIFICATION_LABELS[cls])}</label>
+          <input
+            id={`notifications-${cls}`}
+            type="checkbox"
+            checked={$notificationPreferences[cls]}
+            onchange={(e) => toggleNotificationClass(cls, e)}
+          />
+        </div>
+      {/each}
       <p class="hint">{t('settings.notificationsHint')}</p>
       {#if notificationsMessage}
         <p class="error-message" role="alert">{notificationsMessage}</p>

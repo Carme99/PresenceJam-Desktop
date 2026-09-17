@@ -154,10 +154,8 @@ export const de: Dict = {
   'settings.maxIntervalLabel': 'Maximalintervall (s)',
   'settings.clampHint':
     'Das Mindestintervall überschreitet das Maximalintervall — das Maximum wird als {max}s gespeichert.',
-  'settings.notificationsToggle':
-    'Desktop-Benachrichtigung bei Titelwechsel',
   'settings.notificationsHint':
-    'Zeigt eine Systembenachrichtigung, wenn der Titel wechselt. Standardmäßig deaktiviert.',
+    'Jede aktivierte Klasse zeigt eine Systembenachrichtigung — beim ersten Mal fragt das System nach der Berechtigung.',
   'settings.themeLabel': 'Design',
   'settings.themeDark': 'Dunkel',
   'settings.themeLight': 'Hell',
@@ -480,4 +478,20 @@ export const de: Dict = {
   'settings.backupExported': 'Einstellungen exportiert nach {path}',
   'settings.backupImported': 'Einstellungen importiert aus {path}',
   'settings.backupError': 'Die Sicherungsaktion konnte nicht abgeschlossen werden: {error}',
+  // 4.7.0 — S7 notifications (#675)
+  'settings.notificationsTrackChange': 'Benachrichtigen, wenn der Titel wechselt',
+  'settings.notificationsSyncStopped':
+    'Benachrichtigen, wenn die Synchronisierung von selbst stoppt',
+  'settings.notificationsAuthRequired':
+    'Benachrichtigen, wenn ich mich erneut bei Teams anmelden muss',
+  'settings.notificationsUpdateStaged':
+    'Benachrichtigen, wenn ein Update beim Beenden installiert wird',
+  'notifications.syncStoppedTitle': 'PresenceJam hat die Synchronisierung beendet',
+  'notifications.syncStoppedBody':
+    'Die Statussynchronisierung wurde von selbst beendet. Öffnen Sie PresenceJam, um sie neu zu starten.',
+  'notifications.authRequiredTitle': 'Teams-Anmeldung erforderlich',
+  'notifications.authRequiredBody':
+    'Ihre Teams-Sitzung ist abgelaufen. Melden Sie sich erneut an, damit Ihr Status synchron bleibt.',
+  'notifications.updateStagedTitle': 'Update bereit',
+  'notifications.updateStagedBody': 'PresenceJam {version} wird beim Beenden installiert.',
 };

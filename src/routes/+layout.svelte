@@ -13,7 +13,7 @@
   import { currentView } from '$lib/stores/app';
   import { t } from '$lib/i18n';
   import { reconcileDetachedPanes } from '$lib/stores/detach';
-  import { clientSecretStateOf } from '$lib/stores/config';
+  import { clientSecretStateOf, loadConfig } from '$lib/stores/config';
   import { useListenerTeardown } from '$lib/utils/useAuthListeners';
   import {
     markStatusPosted,
@@ -25,6 +25,12 @@
     setSyncing,
     markAuthPersistWarning
   } from '$lib/stores/presence';
+  import {
+    migrateLegacyNotificationPreference,
+    notifyAuthRequired,
+    notifySyncStopped,
+    notifyUpdateStaged
+  } from '$lib/stores/notifications';
 
   // C7: this layout is shared by every webview window (the SPA fallback
   // hydrates it for detached Logs/Settings windows too). Reconnect flows,
@@ -66,6 +72,13 @@
     // survive a main-window reload — adopt the real window set before the
     // Dashboard can offer "navigate" for a pane that is already out.
     void reconcileDetachedPanes();
+    // #675: the pre-4.7 desktop-notification opt-in was a single localStorage
+    // boolean; it becomes `config.notifications.track_change` exactly once,
+    // and the config store then feeds the per-class preferences every
+    // dispatcher below reads. Fire-and-forget: it must never delay boot.
+    void loadConfig()
+      .then(migrateLegacyNotificationPreference)
+      .catch((e) => console.warn('[LAYOUT] notification preference migration failed:', e));
     let unlistenTeams: (() => void) | null = null;
     let unlistenSpotify: (() => void) | null = null;
     let unlistenPlayback: (() => void) | null = null;
@@ -73,6 +86,8 @@
 
     listen('teams-reconnect-required', async () => {
       devLog('[LAYOUT] teams-reconnect-required received');
+      // #675: the class the user enabled for "my Teams session expired".
+      void notifyAuthRequired();
       // #421: fresh entry clears this flow's stale phase only; never the sibling's.
       resetTeamsAuthFlow();
       currentView.set('settings');
@@ -206,6 +221,9 @@
       listen('sync-stopped', () => {
         devLog('[LAYOUT] sync-stopped received');
         setSyncing(false);
+        // #675: S1 made this fire exactly once per stop on both the explicit
+        // and the self-exit path — one occurrence, one notification.
+        void notifySyncStopped();
       })
     );
 
@@ -217,6 +235,16 @@
       listen<string>('teams-auth-persist-warning', (event) => {
         devLog('[LAYOUT] teams-auth-persist-warning received');
         markAuthPersistWarning(String(event.payload ?? ''));
+      })
+    );
+
+    // #675: S10's deferred-stage success signal (the only emitter; the
+    // throttled `update-stage-progress` cannot distinguish success). Drives
+    // the fourth notification class from the always-mounted layout.
+    presenceTeardown.add(
+      listen<{ version?: string }>('update-stage-complete', (event) => {
+        devLog('[LAYOUT] update-stage-complete received');
+        void notifyUpdateStaged(String(event.payload?.version ?? ''));
       })
     );
 

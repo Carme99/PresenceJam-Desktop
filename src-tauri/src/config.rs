@@ -660,6 +660,52 @@ pub struct StatusRulesConfig {
     pub track_rules: Vec<TrackRuleEntry>,
 }
 
+/// Which desktop-notification classes the app may show (4.7.0 / issue #675).
+///
+/// Replaces the single `notificationsEnabled` localStorage opt-in, which only
+/// ever governed track changes, with one toggle per class. All four are ON by
+/// default (matching the 4.7.0 schema table); a class is only ever dispatched
+/// when its flag is true *and* the OS granted notification permission.
+/// Additive with serde defaults, so a pre-4.7 config file loads unchanged —
+/// including one that only ever carried the legacy key, which the frontend
+/// migrates into `track_change` on first launch.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
+pub struct NotificationsConfig {
+    /// System notification when the playing track changes (the pre-4.7 class).
+    #[serde(default = "default_notification_class")]
+    pub track_change: bool,
+    /// The poller stopped on its own — an auth failure or a self-terminating
+    /// loop — so the Dashboard mirror can no longer report "Syncing".
+    #[serde(default = "default_notification_class")]
+    pub sync_stopped: bool,
+    /// A stored Teams session is no longer usable and a sign-in is required.
+    #[serde(default = "default_notification_class")]
+    pub auth_required: bool,
+    /// An update finished staging and will install on quit.
+    #[serde(default = "default_notification_class")]
+    pub update_staged: bool,
+}
+
+/// Mirrors the serde defaults field-by-field ([`QuietHoursEntry`]'s pattern):
+/// every class defaults to ON, so a config file missing the section and one
+/// built with `Default::default()` agree.
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        Self {
+            track_change: default_notification_class(),
+            sync_stopped: default_notification_class(),
+            auth_required: default_notification_class(),
+            update_staged: default_notification_class(),
+        }
+    }
+}
+
+/// Shared serde default for every [`NotificationsConfig`] flag.
+fn default_notification_class() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct AppConfig {
@@ -673,6 +719,11 @@ pub struct AppConfig {
     pub logging: LoggingConfig,
     #[serde(default)]
     pub autostart: bool,
+    /// Desktop-notification classes (4.7.0 / issue #675). Additive on
+    /// `AppConfig` with a serde default so pre-4.7 config files load
+    /// unchanged (`schema_version` untouched, `extra` retention untouched).
+    #[serde(default)]
+    pub notifications: NotificationsConfig,
     /// UI locale for the native surfaces (tray + application menu) and the
     /// webview dictionaries (4.7.0, issue #674). `None` — the documented
     /// pre-4.7 state and every config file written before this release —
@@ -765,6 +816,7 @@ impl Default for AppConfig {
             polling: PollingConfig::default(),
             logging: LoggingConfig::default(),
             autostart: false,
+            notifications: NotificationsConfig::default(),
             locale: None,
             status_rules: StatusRulesConfig::default(),
             extra: BTreeMap::new(),
@@ -1826,6 +1878,33 @@ mod tests {
         .expect("a config.json written before #560 must still deserialize");
         assert_eq!(legacy.client_secret_state, ClientSecretState::Absent);
         assert!(legacy.client_secret_set);
+    }
+
+    /// 4.7.0 / issue #675: `notifications` is a new top-level section, so a
+    /// pre-4.7 `config.json` has no such key and every class must come back
+    /// ON (the frontend's per-class dispatch reads these flags — a
+    /// `false` default would silently disable a class the user never turned
+    /// off). The other direction matters too: an explicit `false` is a user
+    /// decision and must survive the round-trip, since `save_config` is how
+    /// the Settings card persists a toggle.
+    #[test]
+    fn notifications_default_on_and_round_trip() {
+        let legacy: NotificationsConfig =
+            serde_json::from_str("{}").expect("a pre-4.7 config must still deserialize");
+        assert!(legacy.track_change);
+        assert!(legacy.sync_stopped);
+        assert!(legacy.auth_required);
+        assert!(legacy.update_staged);
+        assert_eq!(
+            legacy.track_change,
+            NotificationsConfig::default().track_change
+        );
+
+        let off = r#"{"track_change":false,"sync_stopped":true,"auth_required":true,"update_staged":false}"#;
+        let parsed: NotificationsConfig = serde_json::from_str(off).unwrap();
+        assert!(!parsed.track_change);
+        assert!(!parsed.update_staged);
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), off);
     }
 
     /// Regression guard for issue found in PR review: a redundant

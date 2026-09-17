@@ -161,10 +161,8 @@ export const fr: Dict = {
   'settings.maxIntervalLabel': 'Intervalle max (s)',
   'settings.clampHint':
     "L'intervalle min dépasse l'intervalle max — le max sera enregistré comme {max}s.",
-  'settings.notificationsToggle':
-    'Notification bureau au changement de titre',
   'settings.notificationsHint':
-    'Affiche une notification système quand le titre change. Désactivé par défaut.',
+    'Chaque classe activée affiche une notification système — la première peut demander l’autorisation à votre système.',
   'settings.themeLabel': 'Thème',
   'settings.themeDark': 'Sombre',
   'settings.themeLight': 'Clair',
@@ -489,4 +487,20 @@ export const fr: Dict = {
   'settings.backupExported': 'Réglages exportés vers {path}',
   'settings.backupImported': 'Réglages importés depuis {path}',
   'settings.backupError': 'L’action de sauvegarde n’a pas pu aboutir : {error}',
+  // 4.7.0 — S7 notifications (#675)
+  'settings.notificationsTrackChange': 'Me notifier quand le titre change',
+  'settings.notificationsSyncStopped':
+    'Me notifier quand la synchronisation s’arrête d’elle-même',
+  'settings.notificationsAuthRequired':
+    'Me notifier quand je dois me reconnecter à Teams',
+  'settings.notificationsUpdateStaged':
+    'Me notifier quand une mise à jour s’installera à la fermeture',
+  'notifications.syncStoppedTitle': 'PresenceJam a arrêté la synchronisation',
+  'notifications.syncStoppedBody':
+    'La synchronisation du statut s’est arrêtée d’elle-même. Ouvrez PresenceJam pour la relancer.',
+  'notifications.authRequiredTitle': 'Connexion Teams requise',
+  'notifications.authRequiredBody':
+    'Votre session Teams a expiré. Reconnectez-vous pour que votre statut reste synchronisé.',
+  'notifications.updateStagedTitle': 'Mise à jour prête',
+  'notifications.updateStagedBody': 'PresenceJam {version} sera installé à la fermeture.',
 };
