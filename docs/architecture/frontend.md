@@ -104,7 +104,7 @@ sequenceDiagram
 | `presence-cleared` | `{timestamp}` | Teams status cleared |
 | `error` | `{source, message, severity}` | Any API error (Spotify, Teams, or auth); `severity` is `warning` or `error` |
 | `spotify-reconnect-required` | `null` | Spotify token expired or auth failure requiring re-auth |
-| `teams-reconnect-required` | `null` | Teams token expired or auth failure requiring re-auth |
+| `teams-reconnect-required` | `null` (the poller's dead-session emitters) or `{user_initiated: true}` from `commands/onboarding.rs::reconnect_teams` — the only user-initiated emitter | Teams token expired or auth failure requiring re-auth, **or** the user pressed Reconnect Teams in Settings. A listener must treat an **absent** field as `false` (the consumer tests `payload?.user_initiated !== true`): only the deliberate reconnect is marked, so the "session expired" notice stays quiet for the reconnect the user just asked for while every genuine dead-session emit still notifies and still opens the device-code flow (#675) |
 | `reconnect-required` | `null` | Transient failure retry limit exhausted, polling loop exiting (5-strikes exit also emits provider-specific `spotify-reconnect-required` alongside, #389) |
 | `polling-thread-panicked` | `null` | Polling thread panicked and was caught by `catch_unwind` |
 | `tray-click` | — | User clicks tray icon |
@@ -117,13 +117,14 @@ sequenceDiagram
 | `teams-auth-failed` | `string` (error message) | Teams device-code sign-in failed — listener is `listen<string>` |
 | `spotify-auth-failed` | `string` (error message) | Spotify sign-in (deep-link callback) failed — listener is `listen<string>` |
 | `sync-started` | `null` | Polling started (or resumed) |
-| `sync-stopped` | `null` | Polling paused |
+| `sync-stopped` | `{self_terminated}` | Polling stopped. `self_terminated` is `true` when the poller ended on its own (auth 5-strikes exit, closed channel — emitted from the ownership-checked thread-exit point in `polling/state.rs`) and `false` from `commands/sync.rs::stop_syncing`, the user-initiated Pause Sync. Exactly one `sync-stopped` fires per stop on **both** paths, so this field is the only way to tell them apart — **treat an absent field as `false`** (#688, #675) |
 | `navigate` | `"dashboard"` \| `"logs"` \| `"settings"` (bare string; the listener is `listen<string>`) | A tray/menu item or a completed auth flow asks the UI to switch view (C2) |
 | `open-logs-folder` | `null` | User picks "Open Logs Folder" in the tray or app menu |
 | `app-shutdown` | `null` | User picks Quit in the tray or app menu |
 | `spotify-secret-conflict` | `{action: "reconnect-spotify", ...}` (once per process) | Legacy plaintext secret in `config.json` conflicts with a *different* keychain secret — plaintext left untouched, Settings prompts Reconnect Spotify (#376) |
 | `show-about` | `null` | User picks About in the app menu |
 | `update-stage-progress` | `{downloaded, total}` (`total` null without `Content-Length`; not ts-rs-exported — mirrored in `UpdatePrompt.svelte`) | A deferred install-on-quit payload is downloading; throttled to 250 ms / 5 % with the first chunk always emitting (v4.6, #590) |
+| `update-stage-complete` | `{version}` | A deferred install-on-quit payload finished staging successfully — emitted once per successful stage, only when something was actually staged. `version` is the **staged** version, not the current one. Deliberately distinct from the throttled `update-stage-progress`: that fires before the payload is stored and cannot distinguish success, so it must not be used as a completion signal (v4.7.0, #678) |
 
 ### Frontend notification throttle (C8)
 

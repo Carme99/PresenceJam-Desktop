@@ -131,7 +131,7 @@ sequenceDiagram
 | Command | Action |
 |---------|--------|
 | `reconnect_spotify` | Clears Spotify tokens (in-memory + atomic rewrite of tokens.json), emits `spotify-reconnect-required` event |
-| `reconnect_teams` | Clears Teams tokens (in-memory + atomic rewrite of tokens.json), emits `teams-reconnect-required` event |
+| `reconnect_teams` | Clears Teams tokens (in-memory + atomic rewrite of tokens.json), emits `teams-reconnect-required` with `{user_initiated: true}` — this is the only user-initiated emitter, so the frontend can suppress its "session expired" notice for a reconnect the user just asked for (#675) |
 
 ## State Management
 
