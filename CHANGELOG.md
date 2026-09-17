@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Track rules can be scheduled, and quiet hours can stop polling (#672):** a
+  track rule now carries its own weekday set and time window (empty weekdays =
+  every day; the window supports wrap-around like quiet hours, and an end time
+  of 00:00 means the end of the day), and the Settings card can reorder rules
+  because array order is priority — the first matching rule wins. A quiet-hours
+  entry can also carry **Stop polling during this window**: while it is active
+  the app makes no Spotify or Teams request at all and touches no write clock,
+  then resumes by itself when the window ends (the polling thread is never
+  stopped or parked). The paused (`"🎵 Paused"`) and stopped (`"🎵 Nothing
+  playing on Spotify"`) status texts are now user-editable in Settings
+  (`teams.paused_status_format` / `teams.stopped_status_format`); their defaults
+  render exactly as they did in 4.6, and clearing a field restores the default.
+  All new fields are additive with serde defaults, so a pre-4.7 config loads
+  unchanged.
+
 ### Changed
 
 ### Fixed

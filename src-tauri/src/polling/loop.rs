@@ -9,6 +9,10 @@
 //! [`super::poll_once::run`], refreshes the tray, and sleeps for the duration
 //! the iteration returned.
 //!
+//! S4 (issue #672): a quiet-hours entry with `pause_polling` short-circuits the
+//! dispatch — the iteration is skipped before the clocks are loaded, so it
+//! performs no request and moves no clock.
+//!
 //! The actual fetch / 401-retry / no-track / CAS-discard logic lives in
 //! [`super::poll_once`] — the single source of truth for one iteration,
 //! per issue #72. The driver owns state lifetime; `poll_once` mutates
@@ -83,6 +87,35 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
         if !state.polling.is_syncing(Ordering::Acquire) {
             log::info!("[POLLING] polling_loop: is_syncing=false, breaking loop");
             break;
+        }
+
+        // S4 (issue #672): quiet hours may stop polling entirely for the
+        // duration of the window. Decided BEFORE the write clocks are loaded
+        // and before `poll_once::run`, so a skipped iteration issues no
+        // Spotify/Graph request and moves no keepalive/debounce clock. The
+        // window is re-derived from the local clock on every iteration — the
+        // thread is never stopped or parked, because a parked thread could not
+        // notice the window ending — and the pause/resume transition is logged
+        // once each by the gate itself.
+        let quiet_pause_seconds = {
+            // Scoped: the config read guard must not be held across the sleep.
+            let config = state.config.get();
+            super::poll_once::quiet_pause_iteration(&config)
+        };
+        if let Some(seconds) = quiet_pause_seconds {
+            log::debug!(
+                "[POLLING] polling_loop: quiet hours pause, sleeping for {} seconds",
+                seconds
+            );
+            match stop_rx.recv_timeout(StdDuration::from_secs(seconds)) {
+                Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    log::info!(
+                        "[POLLING] polling_loop: stop signal during a quiet-hours pause, breaking loop"
+                    );
+                    break;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            }
         }
 
         // Finding PollCore#4 (issue #572): the write-decision clocks describe
