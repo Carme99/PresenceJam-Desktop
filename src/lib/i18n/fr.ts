@@ -512,4 +512,19 @@ export const fr: Dict = {
     "Aucune version bêta n'est encore publiée : le canal Bêta retombe donc sur la version stable — ce repli est enregistré à chaque vérification. Les versions bêta s'installent uniquement à la fermeture.",
   'update.betaOnQuitOnly':
     "Canal Bêta : les mises à jour s'installent à la fermeture — il n'y a pas de téléchargement suivi d'un redémarrage sur ce canal.",
+  // 4.7.0 — S8 global hotkeys
+  'settings.sectionShortcuts': 'Raccourcis globaux',
+  'settings.shortcutsHint':
+    'Ils fonctionnent même lorsque la fenêtre est masquée. Cliquez dans un champ et appuyez sur la combinaison voulue — le champ enregistre ce que vous appuyez, pas ce que vous tapez.',
+  'settings.shortcutTogglePlayback': 'Basculer la lecture',
+  'settings.shortcutToggleSync': 'Suspendre ou reprendre la synchronisation',
+  'settings.shortcutUnbound': 'Non défini — cliquez et appuyez sur une combinaison',
+  'settings.shortcutClear': 'Effacer',
+  'settings.shortcutRegistered': 'Actif',
+  'settings.shortcutNotRegistered': 'Non enregistré sur ce bureau',
+  'settings.shortcutCaptureReleased':
+    'Libéré pendant l’enregistrement — le raccourci actuel se déclencherait à la place',
+  'settings.shortcutRejected': 'Inutilisable : {reason}',
+  'settings.shortcutRegistrationFailed':
+    'Échec de l’enregistrement sur ce bureau : {reason}',
 };

@@ -75,3 +75,4 @@ aes-gcm = "0.11.0"
 # `chrono-impl` is required because `SpotifyTokens.expires_at` and
 # `TeamsTokens.expires_at` are `chrono::DateTime<Utc>`. See issue #78.
 ts-rs = { version = "12", features = ["chrono-impl"] }
+tauri-plugin-global-shortcut = "~2.3"

@@ -817,6 +817,12 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
+        // Global shortcuts (issue #676): the feature whose whole point is
+        // working while the window is hidden. The grabs themselves are
+        // registered in setup from the persisted config — never here, and
+        // never fatally: a desktop that refuses a grab reports it per slot in
+        // Settings instead of failing startup.
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--minimized"]),
@@ -901,6 +907,21 @@ pub fn run() {
                     let mut config_guard = state.config.get_mut();
                     *config_guard = Some(cfg.clone());
                     log::info!("[APP] setup: config loaded into AppState");
+
+                    // Global shortcuts (issue #676): register the bindings from
+                    // the config just loaded. Deliberately NOT inline: every
+                    // grab goes through the plugin's `run_on_main_thread`,
+                    // which blocks until the event loop runs the task — and the
+                    // event loop starts only once this setup hook returns, so
+                    // registering here would deadlock the app before its first
+                    // paint (observed under Xvfb: startup stopped right after
+                    // `config loaded into AppState`). The worker blocks on that
+                    // hop instead of the main thread; per-slot failures are
+                    // reported to Settings and are never fatal.
+                    let shortcut_handle = app.handle().clone();
+                    tauri::async_runtime::spawn_blocking(move || {
+                        commands::shortcuts::register_from_config(&shortcut_handle);
+                    });
 
                     // Handle start_minimized setting. On macOS, also switch
                     // the app's activation policy to `Accessory` so the
@@ -1181,6 +1202,9 @@ pub fn run() {
             commands::sync::get_sync_status,
             commands::sync::refresh_status,
             commands::sync::app_exit,
+            commands::shortcuts::register_shortcuts,
+            commands::shortcuts::unregister_shortcuts,
+            commands::shortcuts::validate_shortcut,
             commands::window::show_window,
             commands::window::set_autostart_enabled,
             commands::window::open_logs_folder,

@@ -701,6 +701,50 @@ impl Default for NotificationsConfig {
     }
 }
 
+/// Default accelerator for the playback toggle (issue #676).
+///
+/// `CmdOrCtrl` is the plugin parser's platform-portable "primary modifier"
+/// spelling (`global_hotkey::hotkey::CMD_OR_CTRL` — SUPER on macOS, CONTROL
+/// elsewhere), so a `config.json` carried between platforms keeps the user's
+/// intent instead of pinning Command on one machine and Ctrl on another.
+pub const DEFAULT_TOGGLE_PLAYBACK_SHORTCUT: &str = "CmdOrCtrl+Alt+P";
+
+/// Default accelerator for the sync pause/resume toggle (issue #676).
+pub const DEFAULT_TOGGLE_SYNC_SHORTCUT: &str = "CmdOrCtrl+Alt+S";
+
+/// Global-shortcut bindings (issue #676).
+///
+/// `None` — and the blank string a hand-edited file can carry — means
+/// "unbound": the slot registers nothing and never disturbs the other slot.
+/// A key that is *absent* from the file takes the documented default, while an
+/// explicit `null` is a deliberate unbinding, because serde applies
+/// `default = "…"` only when the key is missing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
+pub struct ShortcutsConfig {
+    #[serde(default = "default_toggle_playback_shortcut")]
+    pub toggle_playback: Option<String>,
+    #[serde(default = "default_toggle_sync_shortcut")]
+    pub toggle_sync: Option<String>,
+}
+
+fn default_toggle_playback_shortcut() -> Option<String> {
+    Some(DEFAULT_TOGGLE_PLAYBACK_SHORTCUT.to_string())
+}
+
+fn default_toggle_sync_shortcut() -> Option<String> {
+    Some(DEFAULT_TOGGLE_SYNC_SHORTCUT.to_string())
+}
+
+impl Default for ShortcutsConfig {
+    fn default() -> Self {
+        Self {
+            toggle_playback: default_toggle_playback_shortcut(),
+            toggle_sync: default_toggle_sync_shortcut(),
+        }
+    }
+}
+
 /// Shared serde default for every [`NotificationsConfig`] flag.
 fn default_notification_class() -> bool {
     true
@@ -814,6 +858,11 @@ pub struct AppConfig {
     pub locale: Option<String>,
     #[serde(default)]
     pub status_rules: StatusRulesConfig,
+    /// Global-shortcut bindings (issue #676). Additive with
+    /// `#[serde(default)]`, so a pre-4.7 config file loads with the documented
+    /// default accelerators rather than with no shortcuts at all.
+    #[serde(default)]
+    pub shortcuts: ShortcutsConfig,
     /// Config schema version (issue #379). Files written before 4.3.0 carry
     /// no such key and load as version 1.
     #[serde(default = "default_schema_version")]
@@ -899,6 +948,7 @@ impl Default for AppConfig {
             notifications: NotificationsConfig::default(),
             locale: None,
             status_rules: StatusRulesConfig::default(),
+            shortcuts: ShortcutsConfig::default(),
             extra: BTreeMap::new(),
             schema_version: default_schema_version(),
         }
@@ -3741,6 +3791,60 @@ mod tests {
         assert!(!dir.join("config.json.bak").exists());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #676: every config file written before 4.7.0 lacks the
+    /// `shortcuts` section entirely, and it must load with the documented
+    /// defaults rather than with no global shortcuts at all.
+    #[test]
+    fn pre_4_7_config_json_still_loads_with_default_shortcuts() {
+        let legacy: AppConfig = serde_json::from_str(
+            r#"{"spotify":{"client_id":"abc"},"teams":{"status_format":"x"},"autostart":true}"#,
+        )
+        .expect("a config.json written before #676 must still deserialize");
+        assert_eq!(legacy.shortcuts, ShortcutsConfig::default());
+        assert_eq!(
+            legacy.shortcuts.toggle_playback.as_deref(),
+            Some(DEFAULT_TOGGLE_PLAYBACK_SHORTCUT)
+        );
+        assert_eq!(
+            legacy.shortcuts.toggle_sync.as_deref(),
+            Some(DEFAULT_TOGGLE_SYNC_SHORTCUT)
+        );
+        // The rest of the file is untouched by the additive section.
+        assert_eq!(legacy.spotify.client_id, "abc");
+        assert!(legacy.autostart);
+    }
+
+    /// An *absent* key takes the default, an explicit `null` is the user's
+    /// deliberate unbinding. Collapsing the two would make a user who cleared
+    /// one row find it re-bound at the next launch.
+    #[test]
+    fn absent_shortcut_takes_the_default_and_null_unbinds() {
+        let absent: ShortcutsConfig = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(absent, ShortcutsConfig::default());
+
+        let nulled: ShortcutsConfig = serde_json::from_str(r#"{"toggle_playback":null}"#).unwrap();
+        assert_eq!(nulled.toggle_playback, None);
+        assert_eq!(
+            nulled.toggle_sync.as_deref(),
+            Some(DEFAULT_TOGGLE_SYNC_SHORTCUT),
+            "clearing one row must not clear the other"
+        );
+    }
+
+    /// The bindings round-trip through JSON unchanged, blank string included
+    /// (the registration planner, not the loader, decides that blank means
+    /// "unbound" — a loader that silently rewrote it would make the Settings
+    /// field lie about what is stored).
+    #[test]
+    fn shortcut_bindings_round_trip_through_json() {
+        let cfg = ShortcutsConfig {
+            toggle_playback: Some("CmdOrCtrl+Shift+P".to_string()),
+            toggle_sync: Some("  ".to_string()),
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert_eq!(serde_json::from_str::<ShortcutsConfig>(&json).unwrap(), cfg);
     }
 
     /// Issue #678: a `config.json` written before 4.7.0 has no `updates`

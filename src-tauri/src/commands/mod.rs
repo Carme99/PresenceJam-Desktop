@@ -14,12 +14,14 @@
 //!   - `onboarding` — is_onboarding_complete, complete_onboarding, reconnect_spotify, reconnect_teams
 //!   - `misc` — preview_status, update_tray_menu_state
 //!   - `logs` — get_recent_logs (LogViewer history backfill, issue #595)
+//!   - `shortcuts` — register_shortcuts, unregister_shortcuts, validate_shortcut (global hotkeys, issue #676)
 
 pub mod config;
 pub mod logs;
 pub mod misc;
 pub mod onboarding;
 pub mod playback;
+pub mod shortcuts;
 pub mod spotify_auth;
 pub mod sync;
 pub mod teams_auth;
@@ -98,6 +100,12 @@ pub fn require_main_window(window: &tauri::Window) -> Result<(), String> {
 /// is hosted in either window, and the file it tails is the same local file
 /// `open_logs_folder` already exposes to both, unredacted there and here
 /// alike (only the paste-able snapshot is redacted, #434).
+///
+/// shortcuts: register_shortcuts, unregister_shortcuts, validate_shortcut
+/// (issue #676) — the Settings pane is one of the two detached-hosting views
+/// and hosts the hotkey card, so the pane that captures a combo must also be
+/// able to (re)register it; the commands act on the persisted config and this
+/// process's own OS grabs only.
 #[cfg(test)]
 mod tests {
     /// Regression guard for issue #76: the `commands` module must declare
@@ -117,6 +125,7 @@ mod tests {
             "window",
             "onboarding",
             "misc",
+            "shortcuts",
         ] {
             let needle_pub = format!("pub mod {};", group);
             let needle_priv = format!("mod {};", group);
@@ -162,6 +171,7 @@ mod tests {
         check(include_str!("window.rs"), "window.rs");
         check(include_str!("onboarding.rs"), "onboarding.rs");
         check(include_str!("misc.rs"), "misc.rs");
+        check(include_str!("shortcuts.rs"), "shortcuts.rs");
     }
 
     /// Detached-window guard predicate (issue #241): only exactly `"main"`
