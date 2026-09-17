@@ -442,6 +442,9 @@ export const fr: Dict = {
   'dashboard.presenceGatedManualStatus':
     'Statut en pause — vous avez saisi un statut manuellement',
   'dashboard.presenceGatedOutOfOffice': 'Statut en pause — vous êtes absent',
+  // 4.7.0 — S6 (tray localization)
+  'settings.languageHint':
+    "S'applique aussi au menu de la zone de notification et au menu natif de l'application.",
 
   // 4.7.0 — S3 tray/logs hygiene
   'settings.teamsPersistWarning':

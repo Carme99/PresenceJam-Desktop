@@ -395,4 +395,68 @@ pub async fn import_config(
         path: source_path,
         config: persisted,
     }))
+
+#[tauri::command]
+/// Persist the UI locale and relabel the native surfaces immediately
+/// (4.7.0, issue #674).
+///
+/// `AppConfig::locale` is the single source of truth for the language: the
+/// webview dictionary store reads it at load and writes it here; the tray and
+/// the native application menu read it through [`crate::i18n::set_current`].
+/// The value is canonicalised before it reaches disk — an unknown tag
+/// (`"zz"`, `"pt-BR"`) is stored as `"en"` and the fallback is logged by
+/// `i18n::resolve_tag`, so a stored tag and the rendered tables can never
+/// disagree.
+///
+/// A locale change is cosmetic, so a failure to relabel one of the surfaces is
+/// logged rather than rolled back: the config write is already committed and
+/// the next rebuild (any poll, any tray click) renders the new language.
+pub async fn set_locale(
+    app: AppHandle,
+    locale: String,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<AppConfig, String> {
+    log::info!("{CMD} set_locale: ENTRY");
+
+    // Canonicalise before the write so the persisted tag is exactly what the
+    // tables render (`i18n::LOCALES`).
+    let tag = crate::i18n::resolve_tag(Some(&locale));
+    let state_clone = Arc::clone(state.inner());
+    let persisted = tauri::async_runtime::spawn_blocking(move || {
+        // Same single write guard as `save_config`/`update_config`: the whole
+        // read-modify-write runs on the blocking pool with the lock held
+        // across the fsync (issue #215 pattern).
+        let mut config_guard = state_clone.config.get_mut();
+        let mut merged = match config_guard.as_ref() {
+            Some(current) => current.clone(),
+            None => config::load_config()?,
+        };
+        merged.locale = Some(tag.to_string());
+
+        let mut persisted = config::clamped_config(&merged);
+        config::stamp_schema_version(&mut persisted);
+        match config::save_config(&persisted) {
+            Ok(()) => {
+                *config_guard = Some(persisted.clone());
+                Ok::<AppConfig, String>(persisted)
+            }
+            Err(e) => {
+                log::error!("{CMD} set_locale: FAILED - {}", e);
+                Err(e)
+            }
+        }
+    })
+    .await
+    .map_err(|e| format!("set_locale spawn_blocking panicked: {:?}", e))??;
+
+    // Only relabel once the new locale is on disk: a failed write must leave
+    // the UI in the language the config still claims.
+    crate::i18n::set_current(persisted.locale.as_deref());
+    if let Err(e) = crate::menu::rebuild_app_menu(&app) {
+        log::warn!("{CMD} set_locale: app menu rebuild failed: {}", e);
+    }
+    crate::tray::refresh_tray_for_locale(&app);
+
+    log::info!("{CMD} set_locale: SUCCESS - locale={}", tag);
+    Ok(persisted)
 }

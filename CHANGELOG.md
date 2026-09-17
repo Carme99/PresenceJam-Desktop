@@ -36,6 +36,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   a plaintext `client_secret`, clamping out-of-band values, and keeping the
   previous file as `config.json.bak`.
 
+- **Tray and app-menu localization (#674):** the tray menu and the native
+  application menu render in English, German or French. Every user-visible
+  *label* of both surfaces now comes from a Rust string table
+  (`src-tauri/src/i18n.rs`) — the app name, the playback symbols and the
+  `invoke()`/event error strings stay English, as documented — a parity test
+  fails when the three tables drift apart or when a label is hard-coded back
+  into `tray.rs`/`menu.rs`, and `set_locale` persists the choice and relabels
+  both menus without a restart.
+- **Language lives in the config (#674):** `AppConfig::locale` is the single
+  source of truth for the UI language. The Settings picker writes it, the
+  webview dictionary store reconciles to it as soon as the config has loaded
+  (a legacy `localStorage.locale` value is migrated into the config once — and
+  only for a config that carries no locale), and the tray and app menu read
+  the same field through the shared config write path, so the webview and the
+  native surfaces cannot disagree. An unknown tag falls back to English and is
+  logged.
+
 ### Changed
 
 ### Fixed

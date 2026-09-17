@@ -375,6 +375,7 @@ impl Default for AppState {
 pub mod commands;
 pub mod config;
 pub mod diagnostics;
+pub mod i18n;
 pub mod keychain;
 pub mod macos_deeplink;
 pub mod menu;
@@ -1164,6 +1165,7 @@ pub fn run() {
             commands::config::load_config,
             commands::config::save_config,
             commands::config::update_config,
+            commands::config::set_locale,
             commands::spotify_auth::start_spotify_auth,
             commands::spotify_auth::start_spotify_reconnect,
             commands::spotify_auth::reconnect_spotify_session,

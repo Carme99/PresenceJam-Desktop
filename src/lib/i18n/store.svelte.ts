@@ -5,22 +5,48 @@
  * public surface (`i18n`, `t`) is re-exported from the `src/lib/i18n.ts`
  * barrel so components import from one place.
  *
- * The locale persists to localStorage under `locale` and defaults to
- * the browser language (de/fr prefixes), falling back to English.
- * Switching it also retags `<html lang>`; a `storage` write from another
- * webview converges on the new locale (#620).
+ * 4.7.0 (issue #674): `AppConfig::locale` is the single source of truth.
+ * The tray and the native application menu render from the same field, so the
+ * webview and the native surfaces can never disagree about the language.
+ * `localStorage.locale` survives as a pre-paint mirror only: it is read at
+ * module load (the config load is an async IPC round-trip and the first frame
+ * must already be in the right language), it still converges across webviews
+ * through the #620 `storage` listener below, and a value found there while the
+ * config carries none is migrated into the config exactly once. When both
+ * exist, the config wins and the mirror is rewritten to match.
+ *
+ * Switching also retags `<html lang>`.
  */
+
+import { configStore } from '$lib/stores/config';
+import { invoke } from '@tauri-apps/api/core';
+import type { AppConfig } from '$lib/types';
+import { devLog } from '$lib/utils/dev';
 
 export type Locale = 'en' | 'de' | 'fr';
 
 const STORAGE_KEY = 'locale';
 const KNOWN: readonly Locale[] = ['en', 'de', 'fr'];
+/**
+ * The locale both sides fall back to. Mirrors Rust's `i18n::resolve_tag`,
+ * which resolves an absent/unknown `AppConfig::locale` to `"en"` — so writing
+ * it into the config would be a no-op and the migration skips it.
+ */
+const DEFAULT_LOCALE: Locale = 'en';
 
+function isLocale(value: unknown): value is Locale {
+  return typeof value === 'string' && (KNOWN as readonly string[]).includes(value);
+}
+
+/**
+ * The locale the first frame renders in: the localStorage mirror when present,
+ * otherwise the browser language (de/fr prefixes), otherwise English.
+ */
 function detectInitialLocale(): Locale {
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored && (KNOWN as readonly string[]).includes(stored)) {
-      return stored as Locale;
+    if (isLocale(stored)) {
+      return stored;
     }
   } catch {
     // localStorage unavailable — fall through to browser detection.
@@ -34,7 +60,7 @@ function detectInitialLocale(): Locale {
     if (base.startsWith('de')) return 'de';
     if (base.startsWith('fr')) return 'fr';
   }
-  return 'en';
+  return DEFAULT_LOCALE;
 }
 
 const initialLocale = detectInitialLocale();
@@ -50,21 +76,94 @@ function applyDocumentLang(locale: Locale): void {
 
 applyDocumentLang(initialLocale);
 
+/**
+ * Apply a locale to this webview: reactive state, `<html lang>` and the
+ * pre-paint mirror. Never persists — see [`persistLocale`] for the config
+ * write and the migration note on the subscription below.
+ */
+function applyLocale(next: Locale): void {
+  current = next;
+  applyDocumentLang(next);
+  try {
+    localStorage.setItem(STORAGE_KEY, next);
+  } catch {
+    // Mirroring for the next pre-paint frame is best-effort; the session
+    // keeps the new locale either way.
+  }
+}
+
+/**
+ * Write the locale into the config (the source of truth) through the dedicated
+ * `set_locale` command, which also relabels the tray and the native
+ * application menu without a restart.
+ *
+ * Best-effort: the webview has already switched, so a failed write must not
+ * surface an error for what is a cosmetic change — the next launch simply
+ * falls back to the stored value.
+ */
+async function persistLocale(next: Locale): Promise<void> {
+  try {
+    await invoke('set_locale', { locale: next });
+    // Keep the shared config store in step, so Settings is not left comparing
+    // its own draft against a stale locale.
+    configStore.update((cfg) => ({ ...cfg, locale: next }));
+  } catch (err) {
+    devLog(`[I18N] set_locale failed (locale stays mirror-only): ${String(err)}`);
+  }
+}
+
+/**
+ * 4.7.0 (issue #674): fold a legacy `localStorage.locale` value (or the
+ * browser-detected language) into `config.locale` on first run, so the native
+ * surfaces pick up the user's existing choice instead of defaulting to
+ * English. Runs at most once per session, and never for English — that is
+ * already the documented default of an absent field.
+ */
+let migrationAttempted = false;
+function migrateLegacyLocale(cfg: AppConfig): void {
+  if (migrationAttempted) return;
+  migrationAttempted = true;
+  if (isLocale(cfg.locale)) return; // config is already authoritative
+  const detected = current; // the mirror, or the browser language
+  if (detected === DEFAULT_LOCALE) return;
+  devLog(`[I18N] migrating locale '${detected}' into the config`);
+  void persistLocale(detected);
+}
+
+// The config store is the bridge to the authoritative value: it fires with the
+// frontend defaults at module load and again when the app's own `loadConfig()`
+// resolves, so no extra IPC round-trip is needed here (and a test that never
+// loads a config stays inert). A config carrying a locale becomes the truth;
+// one that does not triggers the one-shot migration above.
+configStore.subscribe((cfg) => {
+  if (isLocale(cfg.locale)) {
+    applyLocale(cfg.locale);
+    return;
+  }
+  if (typeof cfg.locale === 'string' && cfg.locale.length > 0) {
+    // A tag the app does not know (hand-edited config). Rust renders English
+    // for it and logs the fallback, so the webview must not keep painting a
+    // different language.
+    applyLocale(DEFAULT_LOCALE);
+    return;
+  }
+  migrateLegacyLocale(cfg);
+});
+
 export const i18n = {
   /** Reactive current locale — read it inside templates/effects. */
   get locale(): Locale {
     return current;
   },
-  /** Switch locale, persist the choice and retag the document. */
-  set(next: Locale): void {
-    if (!(KNOWN as readonly string[]).includes(next)) return;
-    current = next;
-    applyDocumentLang(next);
-    try {
-      localStorage.setItem(STORAGE_KEY, next);
-    } catch {
-      // Persistence is best-effort; the session keeps the new locale.
-    }
+  /**
+   * Switch locale: applies it to this webview immediately, mirrors it for the
+   * pre-paint frame, and persists it to `AppConfig::locale` (the single source
+   * of truth) via the `set_locale` command. An unknown value is ignored.
+   */
+  async set(next: Locale): Promise<void> {
+    if (!isLocale(next)) return;
+    applyLocale(next);
+    await persistLocale(next);
   }
 };
 
@@ -77,9 +176,11 @@ if (typeof window !== 'undefined') {
   window.addEventListener('storage', (e) => {
     if (e.key !== STORAGE_KEY) return;
     const next = e.newValue;
-    if (next === null || !(KNOWN as readonly string[]).includes(next)) return;
-    // Same-value guard: `set()` would re-persist and re-tag the document.
+    if (next === null || !isLocale(next)) return;
+    // Same-value guard: `applyLocale` would re-tag the document.
     if (next === current) return;
-    i18n.set(next as Locale);
+    // Local only — the window that switched already wrote the config, so
+    // persisting again here would be a redundant round-trip.
+    applyLocale(next);
   });
 }

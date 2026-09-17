@@ -72,6 +72,10 @@ export const defaultConfig: AppConfig = {
     keep_files: 3
   },
   autostart: false,
+  // 4.7.0 (issue #674): `AppConfig::locale` — the single source of truth for
+  // the UI language (webview, tray and native application menu). `null` reads
+  // as English on both sides, the documented default of a pre-4.7 config.
+  locale: null,
   // Issue #432: mirrors Rust StatusRulesConfig::default (empty rule lists).
   status_rules: { quiet_hours: [], track_rules: [] },
   // Mirrors Rust `config::SCHEMA_VERSION` (issues #379 / #536). The backend

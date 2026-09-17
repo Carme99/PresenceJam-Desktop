@@ -673,6 +673,15 @@ pub struct AppConfig {
     pub logging: LoggingConfig,
     #[serde(default)]
     pub autostart: bool,
+    /// UI locale for the native surfaces (tray + application menu) and the
+    /// webview dictionaries (4.7.0, issue #674). `None` — the documented
+    /// pre-4.7 state and every config file written before this release —
+    /// reads as `"en"`. Only `en`/`de`/`fr` (or a `de-AT`-style variant of
+    /// one) are meaningful; an unknown tag falls back to English and is
+    /// logged (see `crate::i18n::resolve_tag`). The frontend mirrors this
+    /// value as the single source of truth for the language picker.
+    #[serde(default)]
+    pub locale: Option<String>,
     #[serde(default)]
     pub status_rules: StatusRulesConfig,
     /// Config schema version (issue #379). Files written before 4.3.0 carry
@@ -756,6 +765,7 @@ impl Default for AppConfig {
             polling: PollingConfig::default(),
             logging: LoggingConfig::default(),
             autostart: false,
+            locale: None,
             status_rules: StatusRulesConfig::default(),
             extra: BTreeMap::new(),
             schema_version: default_schema_version(),
