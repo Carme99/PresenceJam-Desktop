@@ -1,4 +1,5 @@
 # Scope 3.3 — Stratus Follow-on Polish
+> **Superseded** — kept for history; current state is [`docs/STATE-OF-FEATURES.md`](../STATE-OF-FEATURES.md).
 
 > **Superseded (issue #369):** this scope doc is a stale v3.2.0-era draft
 > (base `600074a`, CHANGELOG was 69 KB then). Most S3 candidates shipped in
