@@ -268,6 +268,8 @@ Exit codes:
 
 The first recognised flag wins if you pass more than one.
 
+---
+
 ## Status Expiry
 
 Teams custom status messages automatically expire. PresenceJam sets the message's expiry (`expiryDateTime`) to the **track's end time + a buffer** (default 10 s; `polling.expiry_buffer_seconds` in `config.json`). This is an app-side choice — the Graph API doesn't shorten it. When playback pauses or stops, PresenceJam replaces the message with a `🎵 Paused` / `🎵 Nothing playing on Spotify` placeholder that **expires 60 s after it is posted** (`placeholder_expiry_str()` in `src-tauri/src/polling/poll_once.rs` sets a fixed now + 60 s, on both the paused and the no-track path) — the pause placeholder does *not* inherit the track-end buffer. Graph has no "clear status message" action, so the short-lived placeholder is the documented clear mechanism: it self-removes ~1 min after the last successful post even if the app quits.
