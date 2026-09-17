@@ -1,7 +1,6 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { onMount, onDestroy } from 'svelte';
-  import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notification';
   import { currentView } from '$lib/stores/app';
   import { emitTo } from '@tauri-apps/api/event';
   // C7 multi-window detach: pop-out/pop-back controls.
@@ -11,14 +10,19 @@
   // the pane back into the main window (closes this one); the onboarding
   // redirect forwards the navigation to the main window first.
   let { detached = false }: { detached?: boolean } = $props();
-  import { configStore, saveConfig, loadConfig, defaultConfig, clientSecretStateOf } from '$lib/stores/config';
+  import { configStore, saveConfig, loadConfig, defaultConfig, clientSecretStateOf, SHORTCUT_SLOTS, shortcutBindingsOf, setShortcutBindings, type ShortcutSlot } from '$lib/stores/config';
   import type { AppConfig, SyncStatus } from '$lib/types';
   import { authFlow, setSpotifyPhase, setTeamsPhase, formatCountdownMs, resetSpotifyAuthFlow, resetTeamsAuthFlow, teamsPollMutex, tryAcquireTeamsPoll, releaseTeamsPoll, isSafeHttpUrl } from '$lib/stores/authFlow.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
   import PageHeader from './PageHeader.svelte';
-  import { t, i18n, type Locale } from '$lib/i18n';
-  import { theme } from '$lib/stores/theme';
-  import { notificationsEnabled, setNotificationsEnabled } from '$lib/stores/notifications';
+  import { t, i18n, type Locale, type TKey } from '$lib/i18n';
+  import { theme, density } from '$lib/stores/theme';
+  import {
+    NOTIFICATION_CLASSES,
+    notificationPreferences,
+    setNotificationPreference,
+    type NotificationClass
+  } from '$lib/stores/notifications';
   import { presence, clearAuthPersistWarning } from '$lib/stores/presence';
   import { devLog } from '$lib/utils/dev';
 
@@ -201,22 +205,57 @@
   // which carries no single-selection contract at all.
   let themeDarkButton: HTMLButtonElement | undefined = $state();
   let themeLightButton: HTMLButtonElement | undefined = $state();
+  let themeSystemButton: HTMLButtonElement | undefined = $state();
 
-  function themeRadioKeydown(e: KeyboardEvent, current: 'dark' | 'light') {
+  // #680: `system` joins the radiogroup, so the arrow-key walk has to cycle
+  // through three cards instead of toggling two.
+  const THEME_OPTIONS = ['dark', 'light', 'system'] as const;
+  type ThemeOption = (typeof THEME_OPTIONS)[number];
+
+  function themeRadioKeydown(e: KeyboardEvent, current: ThemeOption) {
     const isNext = e.key === 'ArrowRight' || e.key === 'ArrowDown';
     const isPrev = e.key === 'ArrowLeft' || e.key === 'ArrowUp';
     if (!isNext && !isPrev) return;
     e.preventDefault();
-    const next = current === 'dark' ? 'light' : 'dark';
+    const step = isNext ? 1 : THEME_OPTIONS.length - 1;
+    const next = THEME_OPTIONS[(THEME_OPTIONS.indexOf(current) + step) % THEME_OPTIONS.length];
     theme.set(next);
     // Selection follows focus, and the roving tabindex moves with it.
-    (next === 'dark' ? themeDarkButton : themeLightButton)?.focus();
+    const buttons: Record<ThemeOption, HTMLButtonElement | undefined> = {
+      dark: themeDarkButton,
+      light: themeLightButton,
+      system: themeSystemButton
+    };
+    buttons[next]?.focus();
   }
 
-  // 3.1.0 notification opt-in — shared store, default off. #549: this used to
-  // be a private `$state` mirrored straight into localStorage, so a toggle in
-  // a detached Settings window never reached the already-mounted Dashboard.
+  // #675: one toggle per desktop-notification class. The store is the shared
+  // state (persisted to `config.json` through `saveConfig`), so a toggle here
+  // reaches the always-mounted main window. #549 still holds: the OS prompt's
+  // answer decides whether a class may notify, and a denied permission must
+  // not leave a checked toggle behind.
   let notificationsMessage = $state('');
+  // Keys are `TKey`, so a class added on the Rust side cannot be rendered
+  // with a missing dictionary entry.
+  const NOTIFICATION_LABELS: Record<NotificationClass, TKey> = {
+    track_change: 'settings.notificationsTrackChange',
+    sync_stopped: 'settings.notificationsSyncStopped',
+    auth_required: 'settings.notificationsAuthRequired',
+    update_staged: 'settings.notificationsUpdateStaged'
+  };
+  // #675: the form's `localConfig` is snapshotted once, but the notification
+  // classes are immediate-apply and shared, so a toggle made in the *other*
+  // Settings view (a popped-out pane runs beside this one) — or in the main
+  // window — must reach this form's copy. Without this, `handleSave` would
+  // write the stale section back over the choice the user just made. Only the
+  // notifications section is followed: every other field here is a pending
+  // edit that Save owns.
+  $effect(() => {
+    const next = $configStore.notifications;
+    if (NOTIFICATION_CLASSES.some((cls) => localConfig.notifications[cls] !== next[cls])) {
+      localConfig.notifications = { ...next };
+    }
+  });
   let spotifyAuthWaiting = $derived(authFlow.spotify.phase === 'waiting');
   let teamsAuthWaiting = $derived(authFlow.teams.phase === 'waiting');
 
@@ -336,6 +375,193 @@
   // the unmount-while-registering race internally, so this is just a handle.
   let teardownAuth: (() => Promise<void>) | null = null;
 
+  // ── global shortcuts (issue #676) ───────────────────────────────────────
+  //
+  // The bindings live in the config (the backend's single source of truth) and
+  // this pane edits them like any other field, so `isDirty` and the
+  // unsaved-changes banner cover them too. Registration is a separate step:
+  // only the OS can say whether a grab was accepted.
+
+  /** What the backend reported for one slot's last registration pass. */
+  type SlotRegistration = { accelerator: string | null; registered: boolean; error: string | null };
+  type ShortcutStatus = Record<ShortcutSlot, SlotRegistration>;
+
+  const SHORTCUT_LABEL_KEYS: Record<ShortcutSlot, TKey> = {
+    toggle_playback: 'settings.shortcutTogglePlayback',
+    toggle_sync: 'settings.shortcutToggleSync'
+  };
+
+  const NO_REGISTRATION: SlotRegistration = { accelerator: null, registered: false, error: null };
+  let shortcutStatus = $state<ShortcutStatus>({
+    toggle_playback: { ...NO_REGISTRATION },
+    toggle_sync: { ...NO_REGISTRATION }
+  });
+  /** The backend's reason for the last rejected edit, per slot. */
+  let shortcutErrors = $state<Record<ShortcutSlot, string>>({ toggle_playback: '', toggle_sync: '' });
+  /**
+   * The slot whose field is recording a combination. Its grab is released for
+   * as long as it records: the OS delivers the key to the grab, not to the
+   * input, so re-recording a live binding would fire its action instead of
+   * being captured.
+   */
+  let capturingSlot = $state<ShortcutSlot | null>(null);
+
+  let shortcutBindings = $derived(shortcutBindingsOf(localConfig));
+
+  /**
+   * Key tokens the plugin's parser accepts, keyed by DOM `KeyboardEvent.code`.
+   * Anything neither listed here nor a letter/digit/F-key is not captured at
+   * all, so the field can never store an accelerator the backend cannot parse.
+   */
+  const SHORTCUT_KEY_TOKENS: Record<string, string> = {
+    Space: 'Space', Enter: 'Enter', Tab: 'Tab', Escape: 'Escape',
+    ArrowUp: 'ArrowUp', ArrowDown: 'ArrowDown', ArrowLeft: 'ArrowLeft', ArrowRight: 'ArrowRight',
+    Backspace: 'Backspace', Delete: 'Delete', Insert: 'Insert',
+    Home: 'Home', End: 'End', PageUp: 'PageUp', PageDown: 'PageDown',
+    Minus: 'Minus', Equal: 'Equal', Comma: 'Comma', Period: 'Period',
+    Slash: 'Slash', Semicolon: 'Semicolon', Quote: 'Quote',
+    BracketLeft: 'BracketLeft', BracketRight: 'BracketRight',
+    Backslash: 'Backslash', Backquote: 'Backquote',
+    MediaPlayPause: 'MediaPlayPause', MediaStop: 'MediaStop'
+  };
+
+  /** The plugin accelerator a key press describes, or `null` when unusable. */
+  function acceleratorFromEvent(e: KeyboardEvent): string | null {
+    const code = e.code;
+    let key = SHORTCUT_KEY_TOKENS[code] ?? null;
+    if (key === null && /^Key[A-Z]$/.test(code)) key = code.slice(3);
+    if (key === null && /^Digit[0-9]$/.test(code)) key = code.slice(5);
+    if (key === null && /^F([1-9]|1[0-9]|2[0-4])$/.test(code)) key = code;
+    if (key === null) return null;
+
+    // The platform's primary modifier normalises to `CmdOrCtrl` — the spelling
+    // the defaults use and the plugin resolves per platform — so the binding
+    // still means the same key when the config moves to another machine. The
+    // secondary modifier keeps its own name.
+    const isMac = /mac/i.test(navigator.userAgent ?? '');
+    const modifiers: string[] = [];
+    if (isMac ? e.metaKey : e.ctrlKey) modifiers.push('CmdOrCtrl');
+    if (isMac ? e.ctrlKey : e.metaKey) modifiers.push(isMac ? 'Ctrl' : 'Cmd');
+    if (e.altKey) modifiers.push('Alt');
+    if (e.shiftKey) modifiers.push('Shift');
+    return [...modifiers, key].join('+');
+  }
+
+  /**
+   * Asks the backend whether a combination may bind this slot, so an unparsable
+   * or conflicting one is named inline instead of only failing at registration.
+   *
+   * The other row's *pending* value goes along — the conflict a user creates
+   * here is between the two rows on screen, and neither is saved yet — and a
+   * cleared row is sent as an explicit empty string, never `null`: the backend
+   * reads a present-but-blank value as "that row is unbound now", which is what
+   * makes clearing one row and moving its accelerator to the other row a single
+   * allowed edit.
+   */
+  async function validateShortcut(slot: ShortcutSlot): Promise<boolean> {
+    const accelerator = shortcutBindings[slot];
+    if (accelerator === null || accelerator.trim() === '') {
+      shortcutErrors[slot] = '';
+      return true;
+    }
+    const otherSlot = slot === 'toggle_playback' ? 'toggle_sync' : 'toggle_playback';
+    try {
+      await invoke('validate_shortcut', {
+        accelerator,
+        action: slot,
+        other: shortcutBindings[otherSlot] ?? ''
+      });
+      shortcutErrors[slot] = '';
+      return true;
+    } catch (e) {
+      shortcutErrors[slot] = String(e).slice(0, 180);
+      return false;
+    }
+  }
+
+  /** Writes one binding into the config and re-checks the pair. */
+  function setShortcutBinding(slot: ShortcutSlot, accelerator: string | null) {
+    const bindings = shortcutBindingsOf(localConfig);
+    bindings[slot] = accelerator;
+    setShortcutBindings(localConfig, bindings);
+    const otherSlot = slot === 'toggle_playback' ? 'toggle_sync' : 'toggle_playback';
+    void validateShortcut(slot);
+    void validateShortcut(otherSlot);
+  }
+
+  /** Records the pressed combination, or leaves the field as it was. */
+  function onShortcutKeydown(e: KeyboardEvent, slot: ShortcutSlot) {
+    // A modifier-only press never completes a combination: keep waiting.
+    if (['Control', 'Meta', 'Alt', 'Shift', 'CapsLock'].includes(e.key)) return;
+    e.preventDefault();
+    const accelerator = acceleratorFromEvent(e);
+    if (accelerator === null) return;
+    setShortcutBinding(slot, accelerator);
+  }
+
+  /**
+   * One slot's status from an unvalidated IPC payload.
+   *
+   * `register_shortcuts` / `unregister_shortcuts` are a boundary: the payload
+   * is whatever the backend serialized. A malformed or missing slot becomes
+   * "not registered" — never a claim that a binding is live, and never a crash
+   * while rendering (a stale chunk or a partial payload used to reach
+   * `status[slot].error` unchecked).
+   */
+  function registrationFrom(raw: unknown, slot: ShortcutSlot): SlotRegistration {
+    if (raw === null || typeof raw !== 'object') return { ...NO_REGISTRATION };
+    // Named widening (the value was just proven to be an object) rather than a
+    // cast at the field; every value read below is type-checked before use.
+    const table = raw as Record<string, unknown>;
+    const entry = table[slot];
+    if (entry === undefined || entry === null || typeof entry !== 'object') {
+      return { ...NO_REGISTRATION };
+    }
+    // `in`-narrowing, not a cast: the three fields this card reads are proven
+    // present before any of them is touched.
+    if (!('accelerator' in entry) || !('registered' in entry) || !('error' in entry)) {
+      return { ...NO_REGISTRATION };
+    }
+
+    return {
+      accelerator: typeof entry.accelerator === 'string' ? entry.accelerator : null,
+      registered: entry.registered === true,
+      error: typeof entry.error === 'string' ? entry.error : null
+    };
+  }
+
+  /** Both slots' status from one IPC payload. */
+  function statusFrom(raw: unknown): ShortcutStatus {
+    return {
+      toggle_playback: registrationFrom(raw, 'toggle_playback'),
+      toggle_sync: registrationFrom(raw, 'toggle_sync')
+    };
+  }
+
+  /** Re-registers from the persisted config and adopts the reported status. */
+  async function refreshShortcutStatus() {
+    try {
+      shortcutStatus = statusFrom(await invoke<unknown>('register_shortcuts'));
+    } catch (e) {
+      console.warn('[SETTINGS] register_shortcuts failed:', e);
+    }
+  }
+
+  async function beginShortcutCapture(slot: ShortcutSlot) {
+    capturingSlot = slot;
+    try {
+      shortcutStatus = statusFrom(await invoke<unknown>('unregister_shortcuts'));
+    } catch (e) {
+      console.warn('[SETTINGS] unregister_shortcuts failed:', e);
+    }
+  }
+
+  async function endShortcutCapture(slot: ShortcutSlot) {
+    if (capturingSlot !== slot) return;
+    capturingSlot = null;
+    await refreshShortcutStatus();
+  }
+
   onMount(async () => {
     // #615: registered first, synchronously — before the config/scope IPC
     // below can suspend — so the `onDestroy` teardown always has a handle to
@@ -395,6 +621,13 @@
     // post-save adoption below.
     extraWordsText = localConfig.teams.profanity_extra_words.join('\n');
 
+    // 4.7.0 (issue #676): name any stored binding the backend will not accept,
+    // and re-register from the config that was just loaded — the startup pass
+    // ran before this pane existed, so this makes the status on screen the
+    // status of the config on screen.
+    for (const slot of SHORTCUT_SLOTS) void validateShortcut(slot);
+    await refreshShortcutStatus();
+
     try {
       const syncStatus = await invoke<SyncStatus>('get_sync_status');
       isConnected = syncStatus.spotify_connected ?? false;
@@ -437,6 +670,9 @@
       previewDebounce = null;
     }
     if (teardownAuth) void teardownAuth();
+    // 4.7.0 (issue #676): the grabs are released while a field records a
+    // combination. Navigating away mid-recording must not leave them released.
+    if (capturingSlot) void refreshShortcutStatus();
   });
 
   async function handleSave() {
@@ -445,7 +681,24 @@
     try {
       // Issue #538: mirror `clamp_teams` before the payload leaves the
       // frontend, so the store/UI never claims an entry the backend dropped.
+      // 4.7.0 (issue #676): a combination the backend rejects must neither be
+      // saved nor registered. The card validates on every edit, so the reason
+      // is already recorded — read it here rather than issuing IPC in the save
+      // path, which nothing else in this handler does.
+      const rejectedSlot = SHORTCUT_SLOTS.find((slot) => shortcutErrors[slot] !== '');
+      if (rejectedSlot) {
+        saveMessage = t('settings.shortcutRejected', { reason: shortcutErrors[rejectedSlot] });
+        return;
+      }
       localConfig.teams.profanity_extra_words = extraWordsClamp.clamped;
+      // #675: the notification classes live in the shared store and are not
+      // form-edited — the checkboxes read it directly — so the authoritative
+      // value goes into the payload here, next to the clamped-lexicon precedent
+      // above. The `$effect` keeps the form visibly in step, but it cannot cover
+      // the mount race: `onMount`'s `localConfig = <loaded cfg>` can land
+      // *after* a sibling window's mirror convergence, re-staling this section
+      // without `configStore` changing again.
+      localConfig.notifications = { ...$configStore.notifications };
       // `localConfig` is a Svelte 5 `$state` proxy; `structuredClone` in
       // `toSavePayload` rejects proxies with a DataCloneError, aborting the
       // save before IPC (#285). Snapshot to a plain object first.
@@ -458,6 +711,14 @@
       saveTimeout = setTimeout(() => saveMessage = '', 2000);
     } catch (e) { const msg = String((e as Error)?.message ?? e).slice(0, 180); saveMessage = msg || t('settings.failedToSave'); console.error('[SETTINGS] handleSave failed:', e); }
     finally { isSaving = false; }
+    // 4.7.0 (issue #676): re-register from the config the backend just
+    // persisted — this may be the first save after a capture released the
+    // grabs. Fire-and-forget, and *after* the `finally`: awaiting it here
+    // would hold `isSaving` (and so the Save button's `disabled`) open past
+    // the store write, which is not this card's business. A rejected slot
+    // returned above, so nothing is re-registered for a save that never
+    // happened; both save paths (Save and "Save & leave") go through here.
+    void refreshShortcutStatus();
   }
 
   async function openLogs() {
@@ -657,31 +918,20 @@
     performBack();
   }
 
-  async function toggleNotifications(e: Event) {
+  async function toggleNotificationClass(cls: NotificationClass, e: Event) {
     const target = e.currentTarget as HTMLInputElement;
-    if (!target.checked) {
-      notificationsMessage = '';
-      setNotificationsEnabled(false);
+    const applied = await setNotificationPreference(cls, target.checked);
+    if (!applied) {
+      // The store kept the class off, so reset the DOM property this click
+      // already flipped.
+      target.checked = false;
+      notificationsMessage = t('settings.notificationsDenied');
       return;
     }
-    // #549: the OS prompt's answer decides the flag. It used to be discarded,
-    // so a denied permission left a checked toggle over a localStorage 'true'
-    // that the Dashboard honoured — notifications then silently never came.
-    let granted = false;
-    try {
-      granted = (await isPermissionGranted()) || (await requestPermission()) === 'granted';
-    } catch (err) {
-      console.warn('[SETTINGS] notification permission request failed:', err);
-    }
-    setNotificationsEnabled(granted);
-    if (granted) {
-      notificationsMessage = '';
-      return;
-    }
-    // The input is `checked={$notificationsEnabled}` and the store stays
-    // false, so reset the DOM property this click already flipped.
-    target.checked = false;
-    notificationsMessage = t('settings.notificationsDenied');
+    notificationsMessage = '';
+    // The form owns a full-config copy; a later "Save" must not write a stale
+    // notifications section back over the toggle that was just persisted.
+    localConfig.notifications = { ...$notificationPreferences };
   }
 
   // #403: catch-and-surface — WebviewWindow creation/focus can reject
@@ -1344,10 +1594,17 @@
       <header class="section-header">
         <h2>{t('settings.sectionNotifications')}</h2>
       </header>
-      <div class="toggle-row">
-        <label for="notifications-enabled">{t('settings.notificationsToggle')}</label>
-        <input id="notifications-enabled" type="checkbox" checked={$notificationsEnabled} onchange={toggleNotifications} />
-      </div>
+      {#each NOTIFICATION_CLASSES as cls (cls)}
+        <div class="toggle-row">
+          <label for={`notifications-${cls}`}>{t(NOTIFICATION_LABELS[cls])}</label>
+          <input
+            id={`notifications-${cls}`}
+            type="checkbox"
+            checked={$notificationPreferences[cls]}
+            onchange={(e) => toggleNotificationClass(cls, e)}
+          />
+        </div>
+      {/each}
       <p class="hint">{t('settings.notificationsHint')}</p>
       {#if notificationsMessage}
         <p class="error-message" role="alert">{notificationsMessage}</p>
@@ -1378,8 +1635,30 @@
             <span class="swatch swatch-light"></span>
             <span class="theme-name">{t('settings.themeLight')}</span>
           </button>
+          <button type="button" class="theme-card" role="radio" bind:this={themeSystemButton}
+            aria-checked={$theme === 'system'} tabindex={$theme === 'system' ? 0 : -1}
+            class:is-active={$theme === 'system'}
+            onclick={() => theme.set('system')}
+            onkeydown={(e) => themeRadioKeydown(e, 'system')}>
+            <span class="swatch swatch-system"></span>
+            <span class="theme-name">{t('settings.themeSystem')}</span>
+          </button>
         </div>
+        <p class="hint">{t('settings.themeHint')}</p>
       </div>
+      <!-- #680: spacing/type density. Token-scale override only (app.css
+        `[data-density="compact"]`), independent of the theme picker. -->
+      <div class="toggle-row">
+        <label for="compact-density">{t('settings.densityCompactLabel')}</label>
+        <input
+          id="compact-density"
+          type="checkbox"
+          checked={$density === 'compact'}
+          onchange={(e) =>
+            density.set((e.currentTarget as HTMLInputElement).checked ? 'compact' : 'comfortable')}
+        />
+      </div>
+      <p class="hint">{t('settings.densityHint')}</p>
       <div class="form-group">
         <label for="language">{t('settings.languageLabel')}</label>
         <!-- Language names are endonyms: shown in their own language by convention. -->
@@ -1498,6 +1777,75 @@
       {#if backupMessage}
         <p class="hint" role="status">{backupMessage}</p>
       {/if}
+
+    </section>
+    <!-- 4.7.0 (issue #676): global shortcuts. The field records what is
+         pressed — the grab is released while it records, otherwise the key
+         would fire the binding instead of being captured. -->
+    <section class="card">
+      <header class="section-header">
+        <h2>{t('settings.sectionShortcuts')}</h2>
+      </header>
+      <p class="hint">{t('settings.shortcutsHint')}</p>
+      {#each SHORTCUT_SLOTS as slot (slot)}
+        <div class="form-group">
+          <label for={`shortcut-${slot}`}>{t(SHORTCUT_LABEL_KEYS[slot])}</label>
+          <div class="shortcut-row">
+            <input
+              id={`shortcut-${slot}`}
+              type="text"
+              readonly
+              value={shortcutBindings[slot] ?? ''}
+              placeholder={t('settings.shortcutUnbound')}
+              onfocus={() => beginShortcutCapture(slot)}
+              onblur={() => endShortcutCapture(slot)}
+              onkeydown={(e) => onShortcutKeydown(e, slot)}
+            />
+            <button type="button" class="btn-link" onclick={() => setShortcutBinding(slot, null)}>
+              {t('settings.shortcutClear')}
+            </button>
+          </div>
+          {#if shortcutErrors[slot]}
+            <p class="error-message" role="alert">
+              {t('settings.shortcutRejected', { reason: shortcutErrors[slot] })}
+            </p>
+          {:else if shortcutStatus[slot].error}
+            <p class="error-message" role="alert">
+              {t('settings.shortcutRegistrationFailed', { reason: shortcutStatus[slot].error })}
+            </p>
+          {:else if shortcutStatus[slot].registered}
+            <p class="hint" role="status">{t('settings.shortcutRegistered')}</p>
+          {:else if capturingSlot === slot}
+            <p class="hint" role="status">{t('settings.shortcutCaptureReleased')}</p>
+          {:else}
+            <p class="hint" role="status">{t('settings.shortcutNotRegistered')}</p>
+          {/if}
+        </div>
+      {/each}
+    </section>
+
+    <!-- 4.7.0 (issue #678): release channel the updater reads. The saved
+         value is the backend's single source of truth — the banner and the
+         deferred staging path both resolve it on every check. -->
+    <section class="card">
+      <header class="section-header">
+        <h2>{t('settings.sectionUpdates')}</h2>
+      </header>
+      <div class="form-group">
+        <label for="update-channel">{t('settings.updateChannelLabel')}</label>
+        <select
+          id="update-channel"
+          value={localConfig.updates.channel}
+          onchange={(e) => {
+            const value = (e.currentTarget as HTMLSelectElement).value;
+            localConfig.updates.channel = value === 'beta' ? 'beta' : 'stable';
+          }}
+        >
+          <option value="stable">{t('settings.updateChannelStable')}</option>
+          <option value="beta">{t('settings.updateChannelBeta')}</option>
+        </select>
+      </div>
+      <p class="hint">{t('settings.updateChannelHint')}</p>
     </section>
 
     <section class="actions">
@@ -1755,9 +2103,30 @@
     color: var(--fg);
   }
 
+
+  /* 4.7.0 (issue #676): a shortcut row pairs the capture field with its Clear
+     action. The field is read-only on purpose — a combination is recorded, not
+     typed — so it is rendered monospaced like the other machine-readable
+     values in this pane. */
+  .shortcut-row {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+  }
+  .shortcut-row input[type='text'] {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-family: var(--font-mono);
+    font-size: var(--fs-sm);
+    cursor: pointer;
+  }
+  .shortcut-row .btn-link {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
   .theme-grid {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(3, 1fr);
     gap: var(--sp-3);
   }
   .theme-card {
@@ -1790,6 +2159,7 @@
   }
   .swatch-dark { background: linear-gradient(135deg, #0F1226 0%, #232852 100%); }
   .swatch-light { background: linear-gradient(135deg, #F6F7FB 0%, #FFFFFF 100%); }
+  .swatch-system { background: linear-gradient(100deg, #0F1226 0 48%, #F6F7FB 48% 100%); }
   .theme-name {
     font-size: var(--fs-sm);
     font-weight: 600;

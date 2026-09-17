@@ -7004,8 +7004,11 @@ mod tests {
     fn test_self_terminating_poller_emits_sync_stopped() {
         let state_source = include_str!("state.rs");
         let body = prod_fn_body(state_source, "pub fn start_polling(");
+        // #675: the self-termination marker, pinned once and reused below.
+        let self_terminated_emit =
+            "app.emit(\"sync-stopped\", json!({ \"self_terminated\": true }))";
         assert!(
-            body.contains("app.emit(\"sync-stopped\", ())"),
+            body.contains(self_terminated_emit),
             "the poller's own thread-exit point must emit sync-stopped \
              (finding D5) — otherwise the Dashboard mirror stays on \"Syncing\" \
              and the tray on \"Pause Sync\""
@@ -7020,9 +7023,7 @@ mod tests {
         let gate = body.find("let stop_requested =").expect(
             "the announce decision must hinge on whether a stop was requested (D5/round 2)",
         );
-        let emit = body
-            .find("app.emit(\"sync-stopped\", ())")
-            .expect("sync-stopped emit");
+        let emit = body.find(self_terminated_emit).expect("sync-stopped emit");
         assert!(
             emit > owner,
             "the emit must sit inside the ownership-checked block (finding D5), so a \
@@ -7050,11 +7051,21 @@ mod tests {
              commands::sync::stop_syncing owns the emit'. Any other derivation (or a hard-\
              coded false) re-inverts the polarity (review round 3, item 1)."
         );
-        // The payload shape is the existing emitter's, verbatim.
-        let sync_source = include_str!("../commands/sync.rs");
+        // #675: the two emitters must DIFFER on the payload — that difference
+        // is the only way a notification consumer can tell the surprise (a
+        // self-termination, which toasts) from the stop the user just asked for
+        // (which must not). Both markers are pinned so neither can drift back
+        // to the old unit payload, which made the two indistinguishable.
+        let sync_source: String = include_str!("../commands/sync.rs")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         assert!(
-            sync_source.contains("app.emit(\"sync-stopped\", ())"),
-            "the payload shape is copied from commands::sync::stop_syncing"
+            sync_source.contains(
+                "app.emit( \"sync-stopped\", serde_json::json!({ \"self_terminated\": false }), )"
+            ),
+            "commands::sync::stop_syncing owns the USER-requested stop and must say so \
+             (`self_terminated: false`), so #675's sync_stopped notification stays quiet for it"
         );
     }
 

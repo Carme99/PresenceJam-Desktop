@@ -161,10 +161,8 @@ export const fr: Dict = {
   'settings.maxIntervalLabel': 'Intervalle max (s)',
   'settings.clampHint':
     "L'intervalle min dépasse l'intervalle max — le max sera enregistré comme {max}s.",
-  'settings.notificationsToggle':
-    'Notification bureau au changement de titre',
   'settings.notificationsHint':
-    'Affiche une notification système quand le titre change. Désactivé par défaut.',
+    'Chaque classe activée affiche une notification système — la première peut demander l’autorisation à votre système.',
   'settings.themeLabel': 'Thème',
   'settings.themeDark': 'Sombre',
   'settings.themeLight': 'Clair',
@@ -496,4 +494,51 @@ export const fr: Dict = {
   'dashboard.snoozeResuming': 'Reprise…',
   'dashboard.snoozeResumeFailed':
     'Impossible de reprendre la synchronisation. La pause reste enregistrée — réessayez.',
+
+  // 4.7.0 — S7 notifications (#675)
+  'settings.notificationsTrackChange': 'Me notifier quand le titre change',
+  'settings.notificationsSyncStopped':
+    'Me notifier quand la synchronisation s’arrête d’elle-même',
+  'settings.notificationsAuthRequired':
+    'Me notifier quand je dois me reconnecter à Teams',
+  'settings.notificationsUpdateStaged':
+    'Me notifier quand une mise à jour s’installera à la fermeture',
+  'notifications.syncStoppedTitle': 'PresenceJam a arrêté la synchronisation',
+  'notifications.syncStoppedBody':
+    'La synchronisation du statut s’est arrêtée d’elle-même. Ouvrez PresenceJam pour la relancer.',
+  'notifications.authRequiredTitle': 'Connexion Teams requise',
+  'notifications.authRequiredBody':
+    'Votre session Teams a expiré. Reconnectez-vous pour que votre statut reste synchronisé.',
+  'notifications.updateStagedTitle': 'Mise à jour prête',
+  'notifications.updateStagedBody': 'PresenceJam {version} sera installé à la fermeture.',
+  // 4.7.0 — update channel (#678)
+  'settings.sectionUpdates': 'Mises à jour',
+  'settings.updateChannelLabel': 'Canal de publication',
+  'settings.updateChannelStable': 'Stable',
+  'settings.updateChannelBeta': 'Bêta',
+  'settings.updateChannelHint':
+    "Aucune version bêta n'est encore publiée : le canal Bêta retombe donc sur la version stable — ce repli est enregistré à chaque vérification. Les versions bêta s'installent uniquement à la fermeture.",
+  'update.betaOnQuitOnly':
+    "Canal Bêta : les mises à jour s'installent à la fermeture — il n'y a pas de téléchargement suivi d'un redémarrage sur ce canal.",
+  // 4.7.0 — S8 global hotkeys
+  'settings.sectionShortcuts': 'Raccourcis globaux',
+  'settings.shortcutsHint':
+    'Ils fonctionnent même lorsque la fenêtre est masquée. Cliquez dans un champ et appuyez sur la combinaison voulue — le champ enregistre ce que vous appuyez, pas ce que vous tapez.',
+  'settings.shortcutTogglePlayback': 'Basculer la lecture',
+  'settings.shortcutToggleSync': 'Suspendre ou reprendre la synchronisation',
+  'settings.shortcutUnbound': 'Non défini — cliquez et appuyez sur une combinaison',
+  'settings.shortcutClear': 'Effacer',
+  'settings.shortcutRegistered': 'Actif',
+  'settings.shortcutNotRegistered': 'Non enregistré sur ce bureau',
+  'settings.shortcutCaptureReleased':
+    'Libéré pendant l’enregistrement — le raccourci actuel se déclencherait à la place',
+  'settings.shortcutRejected': 'Inutilisable : {reason}',
+  'settings.shortcutRegistrationFailed':
+    'Échec de l’enregistrement sur ce bureau : {reason}',
+  // 4.7.0 — S12 hygiène (thème/densité)
+  'settings.themeSystem': 'Système',
+  'settings.themeHint':
+    "« Système » suit l'apparence de votre système d'exploitation ; Sombre et Clair restent fixes.",
+  'settings.densityCompactLabel': 'Espacement compact',
+  'settings.densityHint': "Resserre les espacements et l'échelle typographique. Indépendant du thème.",
 };

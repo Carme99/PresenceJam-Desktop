@@ -177,6 +177,38 @@ pub fn tokens_file_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join("tokens.json"))
 }
 
+/// Bundle identifier from `tauri.conf.json` → `identifier`.
+///
+/// Tauri's `app_config_dir()` — the directory [`tokens_file_path`] resolves
+/// under — is `<platform config root>/<identifier>`, so the headless path
+/// below has to name the same id. The test at the bottom of this file pins the
+/// constant against `tauri.conf.json`, so the two cannot silently diverge.
+pub(crate) const BUNDLE_IDENTIFIER: &str = "com.presencejam.app";
+
+/// Resolve `tokens.json` WITHOUT a `tauri::AppHandle` (issue #679).
+///
+/// The CLI flags (`--status`, `--sync-once`) resolve argv before any Tauri app
+/// is built — on a machine with no display no runtime can be created at all —
+/// so they cannot go through [`tokens_file_path`]. This applies the same rule
+/// Tauri's `app_config_dir()` applies (the platform config root plus the bundle
+/// identifier) and then the same `PresenceJam/` segment, i.e. the identical
+/// file, and deliberately does NOT create the directory: a reporting or
+/// one-shot CLI run must not write to disk just to read.
+pub fn tokens_file_path_headless() -> Result<PathBuf, String> {
+    // Mirrors `config::config_dir()`'s use of `directories` (issue #418: the
+    // maintained replacement for the unmaintained `dirs` crate) — the same
+    // roots Tauri's `dirs::config_dir()` resolves on every desktop platform.
+    let base = directories::BaseDirs::new()
+        .map(|b| b.config_dir().to_path_buf())
+        .ok_or_else(|| {
+            "Failed to resolve the tokens path: BaseDirs::new() returned None".to_string()
+        })?;
+    Ok(base
+        .join(BUNDLE_IDENTIFIER)
+        .join("PresenceJam")
+        .join("tokens.json"))
+}
+
 /// Read tokens from disk. Returns a default `TokensFile` if the file
 /// does not exist or is empty. Returns `Err(...)` if the file exists and
 /// is non-empty but cannot be decrypted or deserialised; the caller in
@@ -188,7 +220,16 @@ pub fn tokens_file_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 /// read. A missing keychain key or undecryptable ciphertext surfaces as
 /// `Err`, which drives the same re-auth recovery as a corrupt file.
 pub fn read_tokens_at(app: &tauri::AppHandle) -> Result<TokensFile, String> {
-    let path = tokens_file_path(app)?;
+    read_tokens_at_path(&tokens_file_path(app)?)
+}
+
+/// Read tokens from an explicit path (issue #679).
+///
+/// The body of [`read_tokens_at`], split out so the headless CLI flags read
+/// the file [`tokens_file_path_headless`] resolves through the identical
+/// decryption path — including the #135 mode tightening and the
+/// "missing/empty file reads as default" rule.
+pub fn read_tokens_at_path(path: &Path) -> Result<TokensFile, String> {
     if !path.exists() {
         log::info!(
             "[TOKEN_IO] read_tokens_at: no file at {}, returning default",
@@ -202,7 +243,7 @@ pub fn read_tokens_at(app: &tauri::AppHandle) -> Result<TokensFile, String> {
     // default ACL is user-only, so this is a no-op there.
     #[cfg(unix)]
     {
-        let current = fs::metadata(&path)
+        let current = fs::metadata(path)
             .map_err(|e| format!("Failed to stat tokens file '{}': {}", path.display(), e))?
             .permissions();
         let current_mode = current.mode() & 0o777;
@@ -213,7 +254,7 @@ pub fn read_tokens_at(app: &tauri::AppHandle) -> Result<TokensFile, String> {
             );
             let mut tightened = current;
             tightened.set_mode(0o600);
-            fs::set_permissions(&path, tightened).map_err(|e| {
+            fs::set_permissions(path, tightened).map_err(|e| {
                 format!(
                     "Failed to chmod tokens file '{}' to 0600: {}",
                     path.display(),
@@ -222,13 +263,13 @@ pub fn read_tokens_at(app: &tauri::AppHandle) -> Result<TokensFile, String> {
             })?;
         }
     }
-    let bytes = fs::read(&path)
+    let bytes = fs::read(path)
         .map_err(|e| format!("Failed to read tokens file '{}': {}", path.display(), e))?;
     if bytes.iter().all(|b| b.is_ascii_whitespace()) {
         log::info!("[TOKEN_IO] read_tokens_at: file is empty, returning default");
         return Ok(TokensFile::default());
     }
-    tokens_from_bytes(&path, &bytes)
+    tokens_from_bytes(path, &bytes)
 }
 
 /// Parse legacy ≤ v2.10.0 plaintext tokens JSON (issue #352). Shared by the
@@ -1234,5 +1275,68 @@ mod tests {
             path.parent(),
             "the sidecar must stay in the target directory for an atomic rename"
         );
+    }
+
+    /// Issue #679: the headless path the CLI flags resolve must name the same
+    /// directory Tauri's `app_config_dir()` names, i.e. the platform config
+    /// root plus the bundle identifier in `tauri.conf.json`. Pinned against the
+    /// conf file itself so a renamed identifier cannot silently send the CLI
+    /// looking in a folder the app never writes to.
+    #[test]
+    fn headless_path_uses_the_configured_bundle_identifier() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri.conf.json JSON");
+        assert_eq!(
+            conf["identifier"].as_str(),
+            Some(BUNDLE_IDENTIFIER),
+            "BUNDLE_IDENTIFIER must match tauri.conf.json's identifier"
+        );
+    }
+
+    /// Issue #679: the headless reader resolves `<config>/<bundle id>/
+    /// PresenceJam/tokens.json` — the same file the app-side
+    /// `tokens_file_path` resolves — and reads a missing file as the empty
+    /// default WITHOUT creating anything: a reporting/one-shot CLI run must not
+    /// write to disk just to read.
+    #[test]
+    fn headless_reader_resolves_the_same_file_and_never_creates_it() {
+        let path = tokens_file_path_headless().expect("headless tokens path must resolve");
+        assert_eq!(
+            path.file_name().and_then(|n| n.to_str()),
+            Some("tokens.json"),
+            "the headless path must end at tokens.json"
+        );
+        assert_eq!(
+            path.parent()
+                .and_then(|d| d.file_name())
+                .and_then(|n| n.to_str()),
+            Some("PresenceJam"),
+            "the headless path must use the app's `PresenceJam/` segment"
+        );
+        assert!(
+            path.parent()
+                .and_then(|d| d.parent())
+                .and_then(|d| d.file_name())
+                .and_then(|n| n.to_str())
+                == Some(BUNDLE_IDENTIFIER),
+            "the headless path must be nested under the bundle identifier, like \
+             Tauri's app_config_dir()"
+        );
+
+        // Read from a path shaped like the real one, but inside a directory
+        // this test owns: the file is absent, so the read must return the empty
+        // default and leave the tree untouched.
+        let dir = unique_tmp_dir("headless-read");
+        let absent = dir
+            .join(BUNDLE_IDENTIFIER)
+            .join("PresenceJam")
+            .join("tokens.json");
+        let tokens = read_tokens_at_path(&absent).expect("a missing tokens file must read empty");
+        assert!(tokens.spotify_tokens.is_none() && tokens.teams_tokens.is_none());
+        assert!(
+            !absent.parent().expect("parent dir").exists(),
+            "the headless reader must not create the tokens directory"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }

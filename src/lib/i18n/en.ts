@@ -155,9 +155,8 @@ export const en = {
   'settings.maxIntervalLabel': 'Max interval (s)',
   'settings.clampHint':
     'Min interval exceeds max interval — max will be saved as {max}s.',
-  'settings.notificationsToggle': 'Desktop notification on track change',
   'settings.notificationsHint':
-    'Shows a system notification when the track changes. Disabled by default.',
+    'Each class you enable shows a system notification — the first one may ask your OS for permission.',
   'settings.themeLabel': 'Theme',
   'settings.themeDark': 'Dark',
   'settings.themeLight': 'Light',
@@ -474,6 +473,51 @@ export const en = {
   'dashboard.snoozeResuming': 'Resuming…',
   'dashboard.snoozeResumeFailed':
     'Could not resume syncing. The snooze is still stored — try again.',
+
+  // 4.7.0 — S7 notifications (#675): one toggle per desktop-notification
+  // class, plus the copy for the three classes the always-mounted layout
+  // dispatches (track changes keep dispatching from the Dashboard card).
+  'settings.notificationsTrackChange': 'Notify me when the track changes',
+  'settings.notificationsSyncStopped': 'Notify me when syncing stops on its own',
+  'settings.notificationsAuthRequired': 'Notify me when I have to sign in to Teams again',
+  'settings.notificationsUpdateStaged': 'Notify me when an update will install on quit',
+  'notifications.syncStoppedTitle': 'PresenceJam stopped syncing',
+  'notifications.syncStoppedBody':
+    'The status sync stopped on its own. Open PresenceJam to restart it.',
+  'notifications.authRequiredTitle': 'Teams sign-in required',
+  'notifications.authRequiredBody':
+    'Your Teams session expired. Sign in again so your status keeps syncing.',
+  'notifications.updateStagedTitle': 'Update ready',
+  'notifications.updateStagedBody': 'PresenceJam {version} will be installed when you quit.',
+  // 4.7.0 — update channel (#678)
+  'settings.sectionUpdates': 'Updates',
+  'settings.updateChannelLabel': 'Release channel',
+  'settings.updateChannelStable': 'Stable',
+  'settings.updateChannelBeta': 'Beta',
+  'settings.updateChannelHint':
+    'No beta build is published yet, so the Beta channel falls back to the stable release — the app logs the fall-through on every check. Beta builds install on quit only.',
+  'update.betaOnQuitOnly':
+    'Beta channel: updates install when you quit — there is no download-and-relaunch path on Beta.',
+  // 4.7.0 — S8 global hotkeys
+  'settings.sectionShortcuts': 'Global shortcuts',
+  'settings.shortcutsHint':
+    'These work while the window is hidden. Click a field and press the combination you want — the field records what you press, not what you type.',
+  'settings.shortcutTogglePlayback': 'Toggle playback',
+  'settings.shortcutToggleSync': 'Pause or resume sync',
+  'settings.shortcutUnbound': 'Not set — click and press a combination',
+  'settings.shortcutClear': 'Clear',
+  'settings.shortcutRegistered': 'Active',
+  'settings.shortcutNotRegistered': 'Not registered on this desktop',
+  'settings.shortcutCaptureReleased':
+    'Released while recording — the current binding would fire instead of being recorded',
+  'settings.shortcutRejected': 'Cannot be used: {reason}',
+  'settings.shortcutRegistrationFailed': 'Registration failed on this desktop: {reason}',
+  // 4.7.0 — S12 hygiene (theme/density)
+  'settings.themeSystem': 'System',
+  'settings.themeHint':
+    '“System” follows your operating system’s appearance; Dark and Light stay pinned.',
+  'settings.densityCompactLabel': 'Compact spacing',
+  'settings.densityHint': 'Tightens the spacing and type scale. Independent of the theme.',
 };
 
 export type Dict = { readonly [K in keyof typeof en]: string };

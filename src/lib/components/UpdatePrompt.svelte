@@ -1,10 +1,12 @@
 <script lang="ts">
+  import { get } from 'svelte/store';
   import { onMount } from 'svelte';
-  import { check, type Update } from '@tauri-apps/plugin-updater';
+  import { check } from '@tauri-apps/plugin-updater';
   import { invoke } from '@tauri-apps/api/core';
   import { getVersion } from '@tauri-apps/api/app';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { t } from '$lib/i18n';
+  import { configHydrated, configStore, loadConfig } from '$lib/stores/config';
 
   // Always-mounted update banner (3.0-P5). On mount it asks the updater
   // plugin whether a newer release exists; if it does it shows a small
@@ -17,7 +19,7 @@
   // with an explicit install/skip choice, and the backend refuses stale
   // stages (older than or equal to the running build) unless the user
   // forces them after seeing both versions.
-  let update = $state<Update | null>(null);
+  let update = $state<UpdateInfo | null>(null);
   let dismissed = $state(false);
   let downloading = $state(false);
   let downloadedBytes = $state(0);
@@ -51,6 +53,15 @@
   let currentVersion = $state('');
   let staleSkippedVersion = $state('');
 
+  // Mirrors the backend `UpdateCheckOutcome` returned by `check_for_update`
+  // (kept local, same convention as StageOutcome). `notes` and `pub_date`
+  // are the manifest's release notes and publish date.
+  interface UpdateInfo {
+    version: string;
+    notes: string | null;
+    pub_date: string | null;
+  }
+
   // Mirrors the backend `StageDeferredOutcome` shape (kept local so no
   // generated types need to change for this slice).
   interface StageOutcome {
@@ -66,12 +77,35 @@
     total: number | null;
   }
 
+  // 4.7.0 (issue #678): the candidate comes from the backend, which resolves
+  // `config.updates.channel`; the immediate JS `downloadAndInstall()` below
+  // downloads from the plugin's static `plugins.updater.endpoints` entry
+  // (pinned to the stable manifest), so it is offered on Stable only.
+  //
+  // `configStore` is hydrated HERE rather than assumed: the layout mounts this
+  // banner from the start, while boot loads the config on its own schedule, so
+  // nothing guarantees the store holds the user's persisted channel by the time
+  // this renders. Reading the mirror's default (`stable`) would offer the
+  // stable-only JS path on a Beta install.
+  let channelResolved = $state(false);
+  const isBeta = $derived($configStore.updates.channel === 'beta');
+
   let isStaleSkipped = $derived(
     update !== null && staleSkippedVersion !== '' && staleSkippedVersion === update.version
   );
 
+  // #678: the backend's check also returns the manifest's release notes and
+  // publish date. The banner is a one-line strip, so they surface as its
+  // tooltip instead of as another row.
+  const updateTooltip = $derived(
+    [update?.notes, update?.pub_date].filter((part): part is string => Boolean(part)).join('\n\n')
+  );
+
   function checkForUpdate() {
-    check()
+    // The backend resolves the configured channel into the endpoint list —
+    // the plugin's JS `check()` cannot take endpoints and is hard-wired to
+    // the static stable entry (issue #678).
+    invoke<UpdateInfo | null>('check_for_update')
       .then((u) => {
         if (u) {
           // A new candidate deserves its own verdict — forget a stale
@@ -86,6 +120,10 @@
             dismissed = false;
           }
           update = u;
+        } else {
+          // The running build is current: a banner with no candidate behind
+          // it must go away rather than keep offering the old version.
+          update = null;
         }
       })
       .catch((e) => {
@@ -97,6 +135,16 @@
   }
 
   onMount(() => {
+    // Point-of-use hydration (see above), in the two orders this banner can
+    // find the store:
+    //  - already hydrated (`configHydrated`) — boot went through the store, so
+    //    the channel is authoritative now and the gate opens on the first paint
+    //    instead of behind a redundant re-read;
+    //  - not hydrated — `loadConfig` is the store's own entry point and caches
+    //    an in-flight promise, so this joins boot's read rather than racing it,
+    //    and never rejects (it falls back to the defaults and logs).
+    if (get(configHydrated)) channelResolved = true;
+    else loadConfig().finally(() => (channelResolved = true));
     checkForUpdate();
     const interval = setInterval(checkForUpdate, CHECK_INTERVAL_MS);
     // #590: staging progress. `listen()` resolves asynchronously, so an
@@ -138,7 +186,19 @@
     downloadedBytes = 0;
     totalBytes = 0;
     try {
-      await update.downloadAndInstall((event) => {
+      // The banner's candidate came from the backend; this path needs the
+      // plugin's own update handle, so it re-resolves it here. Offered on the
+      // Stable channel only, where the plugin's static endpoint entry and the
+      // channel's resolved list are the same manifest (issue #678).
+      const candidate = await check();
+      if (!candidate) {
+        // The release vanished between the banner's check and this click:
+        // drop the banner instead of offering an install that cannot run.
+        update = null;
+        downloading = false;
+        return;
+      }
+      await candidate.downloadAndInstall((event) => {
         if (event.event === 'Started' && event.data.contentLength) {
           totalBytes = event.data.contentLength;
         } else if (event.event === 'Progress') {
@@ -265,7 +325,12 @@
 </script>
 
 {#if update && !dismissed}
-  <div class="update-banner" role="region" aria-label={t('update.available', { version: update.version })}>
+  <div
+    class="update-banner"
+    role="region"
+    aria-label={t('update.available', { version: update.version })}
+    title={updateTooltip}
+  >
     <div class="update-info" role="status">
       <span class="update-title">{t('update.available', { version: update.version })}</span>
       {#if staging && !stageAborted}
@@ -301,16 +366,21 @@
       {:else if error}
         <span class="update-error">{t('update.downloadFailed', { error })}</span>
       {/if}
+      {#if isBeta}
+        <span class="update-beta">{t('update.betaOnQuitOnly')}</span>
+      {/if}
     </div>
     <div class="update-actions">
-      <button
-        type="button"
-        class="download-btn"
-        onclick={downloadAndInstall}
-        disabled={downloading || staging}
-      >
-        {downloading ? t('update.downloading') : t('update.downloadAndInstall')}
-      </button>
+      {#if channelResolved && !isBeta}
+        <button
+          type="button"
+          class="download-btn"
+          onclick={downloadAndInstall}
+          disabled={downloading || staging}
+        >
+          {downloading ? t('update.downloading') : t('update.downloadAndInstall')}
+        </button>
+      {/if}
       {#if staging || stagedVersion}
         <button
           type="button"
@@ -408,6 +478,10 @@
     color: var(--fg-muted);
   }
   .update-stale {
+    font-size: var(--fs-xs);
+    color: var(--fg-muted);
+  }
+  .update-beta {
     font-size: var(--fs-xs);
     color: var(--fg-muted);
   }

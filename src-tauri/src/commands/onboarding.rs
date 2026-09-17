@@ -486,8 +486,16 @@ pub fn reconnect_teams(
     state.onboarding_cache.invalidate();
     log::info!("{CMD} reconnect_teams: onboarding_cache invalidated");
 
-    // Emit event so UI can show re-auth flow
-    if let Err(e) = app.emit("teams-reconnect-required", ()) {
+    // Emit event so UI can show re-auth flow. #675: this is the ONLY
+    // user-initiated emitter of `teams-reconnect-required` ("Reconnect Teams"
+    // in Settings), so it is marked as such — the notification consumer toasts
+    // only the genuinely-dead-session emitters in `poll_once` and stays quiet
+    // for the reconnect the user just asked for. The always-mounted layout
+    // opens the device-code flow here either way.
+    if let Err(e) = app.emit(
+        "teams-reconnect-required",
+        serde_json::json!({ "user_initiated": true }),
+    ) {
         log::error!("{CMD} reconnect_teams: failed to emit event - {}", e);
     } else {
         log::info!("{CMD} reconnect_teams: EMIT teams-reconnect-required event");
@@ -518,6 +526,32 @@ mod tests {
             session_verdict(true, || Ok(())),
             SessionVerdict::Valid,
             "a refreshable session must never be reported as needing re-auth"
+        );
+    }
+
+    /// #675: `reconnect_teams` is the ONLY user-initiated emitter of
+    /// `teams-reconnect-required`, and the desktop-notification consumer
+    /// depends on that: it toasts the poller's dead-session emitters and stays
+    /// quiet for the reconnect the user just asked for. The signal is the
+    /// payload, so both halves are pinned here — the marker on this emitter,
+    /// and the poller's emitters *not* carrying it. Structural because the emit
+    /// needs a live `AppHandle`; whitespace is normalised so rustfmt reflowing
+    /// the call cannot break the guard.
+    #[test]
+    fn reconnect_teams_marks_its_emit_user_initiated() {
+        let mark = |src: &str| src.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            mark(include_str!("onboarding.rs")).contains(
+                "app.emit( \"teams-reconnect-required\", serde_json::json!({ \"user_initiated\": true }), )"
+            ),
+            "the user-initiated reconnect must mark its emit, or #675 would report the \
+             reconnect the user just clicked back to them as an expired session"
+        );
+        assert!(
+            !include_str!("../polling/poll_once.rs").contains("user_initiated"),
+            "the poller's `teams-reconnect-required` emitters are the dead-session ones and \
+             must NOT claim to be user-initiated: if one starts doing so, a genuine expiry \
+             would be silently swallowed and the user would never be told to sign in again"
         );
     }
 

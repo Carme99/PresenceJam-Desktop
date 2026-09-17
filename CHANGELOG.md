@@ -8,6 +8,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Four desktop-notification classes, each with its own toggle (#675):** the
+  3.1.0 opt-in was a single `localStorage` boolean that only ever governed
+  track changes. It is now `AppConfig.notifications` —
+  `track_change`, `sync_stopped`, `auth_required`, `update_staged`, all ON by
+  default and persisted in `config.json` — with one Settings toggle per class.
+  The three new classes are dispatched from the always-mounted layout, off
+  events that were previously silent to the user: `sync-stopped` and
+  `teams-reconnect-required` for the two recovery cases, and
+  `update-stage-complete` ("update will install on quit"). Those two recovery
+  events now carry the discriminator Rust already knows — `self_terminated`
+  on `sync-stopped` (true from the poller's own exit, false from an explicit
+  stop) and `user_initiated` on `teams-reconnect-required` — so a Pause Sync or
+  a Reconnect the user just clicked is never reported back to them as a
+  surprise. Track changes keep their 5 s throttle and replace-in-place
+  notification id, and an install that still carries the old
+  `notificationsEnabled` value has it migrated into `track_change` exactly
+  once (only after the write lands, so a rejected save cannot lose an
+  opt-out), after which the config is the only source of truth.
+- **Global shortcuts for playback and sync, with a rebinding UI (#676):** two
+  app-wide bindings — `CmdOrCtrl+Alt+P` toggles playback, `CmdOrCtrl+Alt+S`
+  pauses or resumes sync — that work while the window is hidden, plus a
+  Settings card that records a combination, clears a binding, and names the
+  reason a combination is refused. Registration is per slot and never fatal: a
+  desktop that cannot grab one binding (a Wayland compositor, or a combination
+  another application already owns) reports that failure in the card and leaves
+  the other binding — and the rest of the app — working. The bindings live in
+  `config.json` beside the other settings, so they survive a relaunch, and the
+  card's edits take part in the unsaved-changes gate. Both actions drive paths
+  that already existed: the shortcuts call the same refresh-aware Spotify player
+  policy as the playback commands and the tray, and the same polling lifecycle
+  as `start_syncing` / `stop_syncing`, so there is no second implementation to
+  drift. While a field is recording, the card releases the grabs — a live grab
+  would swallow the key instead of letting it be captured.
 
 - **Track rules can be scheduled, and quiet hours can stop polling (#672):** a
   track rule now carries its own weekday set and time window (empty weekdays =
@@ -35,6 +68,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   stored settings from a file — asking first, refusing any document that carries
   a plaintext `client_secret`, clamping out-of-band values, and keeping the
   previous file as `config.json.bak`.
+- **Release channel for the updater (#678):** Settings → Updates picks between
+  the stable and beta channels, and the banner's candidate is resolved by the
+  backend (`check_for_update`) from that choice instead of the plugin's JS
+  `check()`, which cannot take an endpoint list. No beta manifest
+  (`latest-beta.json`) is published yet, so a beta check falls through to the
+  stable release — the fall-through is logged on every check, and the picker
+  says so. On beta the immediate download-and-relaunch action is replaced by
+  install-on-quit, because the JS path is hard-wired to the static stable
+  endpoint in `tauri.conf.json`. A deferred stage that succeeds now also emits
+  `update-stage-complete { version }`, so an always-mounted listener can
+  notify when an update is ready to install on quit.
 
 - **Tray and app-menu localization (#674):** the tray menu and the native
   application menu render in English, German or French. Every user-visible
@@ -52,6 +96,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the same field through the shared config write path, so the webview and the
   native surfaces cannot disagree. An unknown tag falls back to English and is
   logged.
+- **System theme option (#680):** Settings → Appearance gains a third theme card
+  beside Dark and Light. "System" tracks the OS appearance live — switching the
+  desktop between light and dark repaints the app immediately, with no restart —
+  while an explicit Dark or Light stays pinned and is never overridden by the OS.
+  The pre-paint bootstrap resolves the stored preference too, so a System user
+  never sees a flash of the wrong theme on launch, and a detached Logs/Settings
+  window follows the main window's choice as before.
+- **Compact density toggle (#680):** Settings → Appearance can switch the spacing
+  and type scale to a tighter variant, persisted like the theme and applied
+  before first paint. It is a token-scale override, so every existing component
+  follows it; it is independent of the theme, including the new System option.
+
+- **CLI flags (#679):** the binary now answers `--status` (print the sync
+  status as JSON on stdout, exit 0), `--sync-once` (run exactly one poll
+  iteration — status write included — and exit 0, or 1 with the reason on
+  stderr) and `--help`. `--help` and `--status` are handled before any Tauri
+  app is built, so they work on a machine with no display: no window, no tray
+  icon, no single-instance lock. `--sync-once` gates on a configured Spotify
+  client and a Spotify *and* Teams sign-in before it builds anything, and then
+  runs the app's own poller in CLI mode — no window, no tray, no deep-link
+  registration, no quit-time hooks (it must not clear the status it just
+  wrote); like the GUI, that poller needs a display server on Linux, so a
+  scripted run on a bare machine goes through `xvfb-run`. Unknown arguments
+  keep their previous behaviour — ignored, GUI launches, exactly like
+  `--minimized` and `presencejam://` deep links.
 
 - **Snooze from the tray — "pause sync" for 30 minutes, 1 hour or until
   tomorrow (#677):** the tray menu gains a **Pause sync for…** submenu whose
@@ -72,8 +141,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **The declared MSRV is now machine-enforced (#680):** `Cargo.toml` claimed
+  `rust-version = "1.96"`, but a local `cargo fmt` / `cargo check` / `cargo clippy`
+  ran on whatever toolchain happened to be installed. A `rust-toolchain.toml` now
+  pins the channel to that declared release, so the floor cannot be dodged
+  silently. CI keeps its SHA-pinned toolchain action.
+
 ### Fixed
 
+- **Two stale code claims corrected (#697, #698):** the panic hook's comment named
+  the pre-#300 macOS log directory (`~/Library/Logs/PresenceJam/`) instead of the
+  `app_log_dir()` path carrying the bundle id, and a "wiring note" in `config.rs`
+  claimed `lib.rs` still called the log-only secret-migration function when it had
+  long since called the `_with_app` variant. Neither changed behaviour; both told
+  the next maintainer something untrue.
 - **Quit-time Teams cleanup was cancelled by the poller's own exit tail (#684):**
   `polling_loop` resets the write-decision clocks on its way out, and
   `RunEvent::Exit` runs `clear_presence_on_exit` *after* it — so a cleanup that

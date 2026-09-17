@@ -48,6 +48,16 @@ pub async fn start_syncing(
     // the Rust-side `complete_onboarding` caller, which forwards its own
     // main-window handle). Detached windows never legitimately start sync.
     super::require_main_window(&window)?;
+    start_syncing_with(Arc::clone(state.inner()), &app).await
+}
+
+/// `start_syncing`'s body, callable outside an IPC context (issue #676): the
+/// global-shortcut handler has no `State` to hand a command, and asking the
+/// frontend back over an event would make a shortcut — whose entire point is
+/// working with no visible window — depend on a live webview. The IPC command
+/// is a thin wrapper (window guard + this call), so both paths run exactly one
+/// implementation of the lifecycle.
+pub async fn start_syncing_with(state: Arc<AppState>, app: &AppHandle) -> Result<(), String> {
     log::debug!("{CMD} start_syncing: ENTRY");
 
     // Issue #69: drain any previous polling thread BEFORE claiming the
@@ -72,7 +82,7 @@ pub async fn start_syncing(
         { state.polling.handle().is_some() || state.polling.is_syncing(Ordering::Acquire) };
     if needs_drain {
         log::info!("{CMD} start_syncing: previous thread still considered live (handle present or is_syncing true); draining");
-        let state_clone = Arc::clone(state.inner());
+        let state_clone = Arc::clone(&state);
         stop_polling_and_join(state_clone, "start_syncing_drain").await;
     }
 
@@ -91,7 +101,7 @@ pub async fn start_syncing(
     // #215: start_polling thread creation is offloaded to the blocking pool
     // so the async command does not block the Tauri async runtime. The
     // returned JoinHandle is stored under the polling lock.
-    let state_for_spawn = Arc::clone(state.inner());
+    let state_for_spawn = Arc::clone(&state);
     let app_for_spawn = app.clone();
     let handle = tauri::async_runtime::spawn_blocking(move || {
         polling::start_polling(state_for_spawn, app_for_spawn)
@@ -314,13 +324,25 @@ pub async fn stop_syncing(
     // Issue #241: polling lifecycle is main-window-only (Dashboard/+page are
     // main-window surfaces; detached windows never legitimately stop sync).
     super::require_main_window(&window)?;
+    stop_syncing_with(Arc::clone(state.inner()), &app).await
+}
+
+/// `stop_syncing`'s body, callable outside an IPC context — see
+/// [`start_syncing_with`] for why the global-shortcut handler needs it
+/// (issue #676).
+pub async fn stop_syncing_with(state: Arc<AppState>, app: &AppHandle) -> Result<(), String> {
     log::debug!("{CMD} stop_syncing: ENTRY");
 
-    let state_clone = Arc::clone(state.inner());
-    stop_polling_and_join(state_clone, "stop_syncing").await;
+    stop_polling_and_join(state, "stop_syncing").await;
 
     log::info!("{CMD} stop_syncing: EMIT sync-stopped event");
-    let _ = app.emit("sync-stopped", ());
+    // #675: this emitter is the explicit user stop, so the payload says so —
+    // the notification consumer toasts only `self_terminated: true` exits
+    // (polling/state.rs) and must not report the user's own click back to them.
+    let _ = app.emit(
+        "sync-stopped",
+        serde_json::json!({ "self_terminated": false }),
+    );
 
     log::info!("{CMD} stop_syncing: SUCCESS");
     Ok(())
@@ -370,7 +392,16 @@ pub async fn app_exit(
 #[tauri::command]
 pub fn get_sync_status(state: tauri::State<'_, Arc<AppState>>) -> Result<SyncStatus, String> {
     log::debug!("{CMD} get_sync_status: ENTRY");
+    Ok(sync_status_from_state(state.inner()))
+}
 
+/// Assemble the status snapshot from `state`.
+///
+/// The body of the `get_sync_status` command, split out (issue #679) so the
+/// headless `--status` CLI flag reports exactly the shape and the field
+/// semantics the IPC returns instead of a second, drifting copy of them. See
+/// the doc comment above for the lock-ordering contract this fn implements.
+pub fn sync_status_from_state(state: &AppState) -> SyncStatus {
     // Single critical section: all read guards held at once, clones below
     // cannot observe a writer interleaving between fields.
     let track_guard = state.polling.current_track();
@@ -401,7 +432,7 @@ pub fn get_sync_status(state: tauri::State<'_, Arc<AppState>>) -> Result<SyncSta
     let teams_connected = teams_guard.is_some();
 
     log::info!(
-        "{CMD} get_sync_status: is_syncing={}, spotify_connected={}, teams_connected={}, presence_gated={}, presence_paused={}",
+        "{CMD} sync_status_from_state: is_syncing={}, spotify_connected={}, teams_connected={}, presence_gated={}, presence_paused={}",
         is_syncing,
         spotify_connected,
         teams_connected,
@@ -409,7 +440,7 @@ pub fn get_sync_status(state: tauri::State<'_, Arc<AppState>>) -> Result<SyncSta
         presence_paused
     );
 
-    Ok(SyncStatus {
+    SyncStatus {
         is_syncing,
         current_track,
         spotify_connected,
@@ -417,7 +448,7 @@ pub fn get_sync_status(state: tauri::State<'_, Arc<AppState>>) -> Result<SyncSta
         last_posted_status: clocks.last_posted_status.clone(),
         presence_gated: clocks.gated_track_key.is_some(),
         presence_paused,
-    })
+    }
 }
 #[tauri::command]
 pub async fn refresh_status(
@@ -505,9 +536,14 @@ mod tests {
         );
     }
 
-    /// Issue #398: `get_sync_status` must read under a single critical
-    /// section — all four read guards held at once — so torn snapshots are
-    /// unobservable, with the lock order documented.
+    /// Issue #398: the status snapshot must be assembled under a single
+    /// critical section — all four read guards held at once — so torn snapshots
+    /// are unobservable, with the lock order documented.
+    ///
+    /// Issue #679 moved the assembly out of the `get_sync_status` command into
+    /// `sync_status_from_state` (the command, and the headless `--status` CLI
+    /// flag, both call it) — the invariant follows the code, so the guard names
+    /// the fn that now holds the guards.
     #[test]
     fn test_get_sync_status_reads_under_single_critical_section() {
         let source = include_str!("sync.rs");
@@ -515,7 +551,7 @@ mod tests {
             .split("#[cfg(test)]\nmod tests")
             .next()
             .expect("sync.rs has no #[cfg(test)] mod tests block");
-        let body = fn_body(prod_source, "pub fn get_sync_status(");
+        let body = fn_body(prod_source, "pub fn sync_status_from_state(");
         for marker in [
             "state.polling.current_track()",
             "state.tokens.spotify()",
@@ -524,13 +560,17 @@ mod tests {
         ] {
             assert!(
                 body.contains(marker),
-                "get_sync_status must hold {} inside its critical section (issue #398)",
+                "sync_status_from_state must hold {} inside its critical section (issue #398)",
                 marker
             );
         }
         assert!(
             prod_source.contains("Single critical section"),
-            "the lock-ordering contract must stay documented on get_sync_status (issue #398)"
+            "the lock-ordering contract must stay documented (issue #398)"
+        );
+        assert!(
+            fn_body(prod_source, "pub fn get_sync_status(").contains("sync_status_from_state("),
+            "the command must return the shared derivation, never a second copy of it (issue #679)"
         );
     }
 }

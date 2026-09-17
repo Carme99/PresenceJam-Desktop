@@ -3,6 +3,19 @@ import { invoke } from '@tauri-apps/api/core';
 import type { AppConfig } from '../types';
 
 /**
+ * Frontend mirror of Rust's `ShortcutsConfig::default()` (issue #676).
+ *
+ * Declared before `defaultConfig` (which is built from it) and as its own
+ * value rather than read back out of `defaultConfig`: the `shortcuts` section
+ * is typed by a ts-rs binding a checkout may not have regenerated yet, so a
+ * `defaultConfig.shortcuts` read would be a type error at every use site.
+ */
+export const DEFAULT_SHORTCUTS = {
+  toggle_playback: 'CmdOrCtrl+Alt+P',
+  toggle_sync: 'CmdOrCtrl+Alt+S'
+} as const;
+
+/**
  * Frontend mirror of the Rust `AppConfig` defaults.
  *
  * Typed with an assertion rather than a bare literal because
@@ -71,7 +84,22 @@ export const defaultConfig: AppConfig = {
     max_file_size_mb: BigInt(10),
     keep_files: 3
   },
+  // 4.7.0 (issue #678): release channel the updater reads. Mirrors Rust's
+  // `UpdatesConfig::default` (`stable`) — the backend resolves the channel
+  // from the persisted config on every check, so this is only the pre-load
+  // placeholder.
+  updates: { channel: 'stable' },
   autostart: false,
+  // 4.7.0 (#675): one desktop-notification class per toggle, all ON — the
+  // Rust `NotificationsConfig` defaults (serde-defaulted, so a pre-4.7
+  // config loads unchanged). The pre-4.7 single opt-in is migrated into
+  // `track_change` by `stores/notifications.ts`.
+  notifications: {
+    track_change: true,
+    sync_stopped: true,
+    auth_required: true,
+    update_staged: true
+  },
   // 4.7.0 (issue #674): `AppConfig::locale` — the single source of truth for
   // the UI language (webview, tray and native application menu). `null` reads
   // as English on both sides, the documented default of a pre-4.7 config.
@@ -84,6 +112,10 @@ export const defaultConfig: AppConfig = {
   snooze_until: null,
   // Issue #432: mirrors Rust StatusRulesConfig::default (empty rule lists).
   status_rules: { quiet_hours: [], track_rules: [] },
+  // 4.7.0 (issue #676): mirrors Rust `ShortcutsConfig::default()`. Spread from
+  // `DEFAULT_SHORTCUTS` rather than written as a literal so the values have
+  // exactly one home in this file.
+  shortcuts: { ...DEFAULT_SHORTCUTS },
   // Mirrors Rust `config::SCHEMA_VERSION` (issues #379 / #536). The backend
   // stamps the persisted value itself, so this is only the pre-load
   // placeholder — it is never trusted as an instruction.
@@ -131,6 +163,74 @@ export function clientSecretStateOf(cfg: AppConfig): ClientSecretState {
  * STORED config, so it never seeds a placeholder of its own.
  */
 export const DEFAULT_PROFANITY_PLACEHOLDER = defaultConfig.teams.profanity_placeholder;
+
+
+/** The two bindable actions, in the order the Settings card shows them. */
+export const SHORTCUT_SLOTS = ['toggle_playback', 'toggle_sync'] as const;
+
+/** One bindable action. `null` means the user removed the binding. */
+export type ShortcutSlot = (typeof SHORTCUT_SLOTS)[number];
+
+/** The global-shortcut bindings of a config, as plain strings. */
+export type ShortcutBindings = Record<ShortcutSlot, string | null>;
+
+/**
+ * Read the global-shortcut bindings out of a config.
+ *
+ * A field read, not a magic fallback: `null` is the honest answer for a binding
+ * that is not there (a pre-4.7 backend, or a user who cleared the row), and
+ * inventing a default here would make the card claim a binding the config does
+ * not have. A non-string value is treated as unbound for the same reason — the
+ * backend's serde default is what fills a *missing* key, and it has already run
+ * by the time a config reaches the frontend.
+ */
+export function shortcutBindingsOf(cfg: AppConfig): ShortcutBindings {
+  const section = shortcutsSection(cfg);
+  const read = (slot: ShortcutSlot): string | null => {
+    if (section === null) return null;
+    const value = section[slot];
+    return typeof value === 'string' ? value : null;
+  };
+  return { toggle_playback: read('toggle_playback'), toggle_sync: read('toggle_sync') };
+}
+
+/**
+ * Write bindings back into a config (in place) — the companion of
+ * [`shortcutBindingsOf`].
+ *
+ * No validation here: the backend is the authority on whether a binding can be
+ * registered, and its refusal reason is what the card renders.
+ */
+export function setShortcutBindings(cfg: AppConfig, bindings: ShortcutBindings): AppConfig {
+  // One named assertion instead of a cast at the field: the `shortcuts` section
+  // is described by a ts-rs binding a checkout may not have regenerated yet.
+  const target = cfg as unknown as Record<string, unknown>;
+  target.shortcuts = { ...bindings };
+  return cfg;
+}
+
+/**
+ * The config's `shortcuts` section as an unvalidated keyed map, or `null` when
+ * it is absent or not an object at all.
+ *
+ * The section is described by a ts-rs binding that a checkout may not have
+ * regenerated yet (`types-generated/` is derived), so it is reached through
+ * runtime narrowing rather than an assertion at the field. `null` is the one
+ * value callers must distinguish from an object, and the `typeof` check is what
+ * proves it.
+ */
+function shortcutsSection(cfg: AppConfig): Record<string, unknown> | null {
+  // Same named assertion as `setShortcutBindings`, for the same reason.
+  const target = cfg as unknown as Record<string, unknown>;
+  const section: unknown = target.shortcuts;
+  if (section === null || typeof section !== 'object' || Array.isArray(section)) {
+    return null;
+  }
+  // `typeof === 'object'` is the whole proof available here; it only widens a
+  // value already proven to be an object, and every caller type-checks the
+  // values it reads out of the map.
+  return section as Record<string, unknown>;
+}
 
 export const configStore = writable<AppConfig>(structuredClone(defaultConfig));
 
@@ -224,6 +324,23 @@ function normalizeLoadedConfig(cfg: AppConfig): AppConfig {
   } else {
     if (!Array.isArray(r.status_rules.quiet_hours)) r.status_rules.quiet_hours = [];
     if (!Array.isArray(r.status_rules.track_rules)) r.status_rules.track_rules = [];
+  }
+  // 4.7.0 (issue #676): a pre-4.7 backend omits `shortcuts`, and Rust's serde
+  // default is what supplies the documented accelerators. Mirror that here so
+  // the card and the save payload never carry `undefined`; an explicit `null`
+  // is preserved, because that is the user's deliberate unbinding.
+  const shortcutSection = shortcutsSection(cfg);
+  if (shortcutSection === null) {
+    // Named assertion, same reason as `setShortcutBindings`.
+    const target = cfg as unknown as Record<string, unknown>;
+    target.shortcuts = { ...DEFAULT_SHORTCUTS };
+  } else {
+    for (const slot of SHORTCUT_SLOTS) {
+      const value = shortcutSection[slot];
+      if (value !== null && typeof value !== 'string') {
+        shortcutSection[slot] = DEFAULT_SHORTCUTS[slot];
+      }
+    }
   }
   return cfg;
 }

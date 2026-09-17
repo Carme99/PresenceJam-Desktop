@@ -154,10 +154,8 @@ export const de: Dict = {
   'settings.maxIntervalLabel': 'Maximalintervall (s)',
   'settings.clampHint':
     'Das Mindestintervall überschreitet das Maximalintervall — das Maximum wird als {max}s gespeichert.',
-  'settings.notificationsToggle':
-    'Desktop-Benachrichtigung bei Titelwechsel',
   'settings.notificationsHint':
-    'Zeigt eine Systembenachrichtigung, wenn der Titel wechselt. Standardmäßig deaktiviert.',
+    'Jede aktivierte Klasse zeigt eine Systembenachrichtigung — beim ersten Mal fragt das System nach der Berechtigung.',
   'settings.themeLabel': 'Design',
   'settings.themeDark': 'Dunkel',
   'settings.themeLight': 'Hell',
@@ -487,4 +485,51 @@ export const de: Dict = {
   'dashboard.snoozeResuming': 'Wird fortgesetzt…',
   'dashboard.snoozeResumeFailed':
     'Die Synchronisierung konnte nicht fortgesetzt werden. Die Pause bleibt gespeichert — bitte erneut versuchen.',
+
+  // 4.7.0 — S7 notifications (#675)
+  'settings.notificationsTrackChange': 'Benachrichtigen, wenn der Titel wechselt',
+  'settings.notificationsSyncStopped':
+    'Benachrichtigen, wenn die Synchronisierung von selbst stoppt',
+  'settings.notificationsAuthRequired':
+    'Benachrichtigen, wenn ich mich erneut bei Teams anmelden muss',
+  'settings.notificationsUpdateStaged':
+    'Benachrichtigen, wenn ein Update beim Beenden installiert wird',
+  'notifications.syncStoppedTitle': 'PresenceJam hat die Synchronisierung beendet',
+  'notifications.syncStoppedBody':
+    'Die Statussynchronisierung wurde von selbst beendet. Öffnen Sie PresenceJam, um sie neu zu starten.',
+  'notifications.authRequiredTitle': 'Teams-Anmeldung erforderlich',
+  'notifications.authRequiredBody':
+    'Ihre Teams-Sitzung ist abgelaufen. Melden Sie sich erneut an, damit Ihr Status synchron bleibt.',
+  'notifications.updateStagedTitle': 'Update bereit',
+  'notifications.updateStagedBody': 'PresenceJam {version} wird beim Beenden installiert.',
+  // 4.7.0 — update channel (#678)
+  'settings.sectionUpdates': 'Updates',
+  'settings.updateChannelLabel': 'Versionskanal',
+  'settings.updateChannelStable': 'Stabil',
+  'settings.updateChannelBeta': 'Beta',
+  'settings.updateChannelHint':
+    'Es ist noch kein Beta-Build veröffentlicht, daher greift der Beta-Kanal derzeit auf die stabile Version zurück — der Rückfall wird bei jeder Prüfung protokolliert. Beta-Builds werden nur beim Beenden installiert.',
+  'update.betaOnQuitOnly':
+    'Beta-Kanal: Updates werden beim Beenden installiert — auf Beta gibt es keinen Download-und-Neustart-Pfad.',
+  // 4.7.0 — S8 global hotkeys
+  'settings.sectionShortcuts': 'Globale Tastenkürzel',
+  'settings.shortcutsHint':
+    'Diese funktionieren auch, wenn das Fenster ausgeblendet ist. Klicken Sie in ein Feld und drücken Sie die gewünschte Kombination — das Feld zeichnet auf, was Sie drücken, nicht was Sie tippen.',
+  'settings.shortcutTogglePlayback': 'Wiedergabe umschalten',
+  'settings.shortcutToggleSync': 'Synchronisierung pausieren oder fortsetzen',
+  'settings.shortcutUnbound': 'Nicht belegt — klicken und Kombination drücken',
+  'settings.shortcutClear': 'Löschen',
+  'settings.shortcutRegistered': 'Aktiv',
+  'settings.shortcutNotRegistered': 'Auf diesem Desktop nicht registriert',
+  'settings.shortcutCaptureReleased':
+    'Während der Aufzeichnung freigegeben — die aktuelle Belegung würde sonst ausgelöst',
+  'settings.shortcutRejected': 'Nicht verwendbar: {reason}',
+  'settings.shortcutRegistrationFailed':
+    'Registrierung auf diesem Desktop fehlgeschlagen: {reason}',
+  // 4.7.0 — S12 Hygiene (Design/Dichte)
+  'settings.themeSystem': 'System',
+  'settings.themeHint':
+    '„System“ folgt der Darstellung Ihres Betriebssystems; Dunkel und Hell bleiben fest gewählt.',
+  'settings.densityCompactLabel': 'Kompakte Abstände',
+  'settings.densityHint': 'Verkleinert Abstände und Schriftgrößen. Unabhängig vom Design.',
 };

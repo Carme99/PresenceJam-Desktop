@@ -3,15 +3,14 @@
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
   import { onMount, onDestroy } from 'svelte';
-  import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
   import { currentView } from '$lib/stores/app';
   import { detachedPanes, focusDetached } from '$lib/stores/detach';
   import { configStore, loadConfig, saveConfig, clientSecretStateOf } from '$lib/stores/config';
   import type { ErrorEventPayload, SyncStatus, TrackInfo } from '$lib/types';
   import { devLog } from '$lib/utils/dev';
-  import { theme, toggleTheme } from '$lib/stores/theme';
+  import { appliedTheme, toggleTheme } from '$lib/stores/theme';
   import { presence, hydrate, setSyncing } from '$lib/stores/presence';
-  import { notificationsEnabled } from '$lib/stores/notifications';
+  import { notifyTrackChange } from '$lib/stores/notifications';
   import Logo from './Logo.svelte';
   import { t } from '$lib/i18n';
   import { useListenerTeardown } from '$lib/utils/useAuthListeners';
@@ -132,16 +131,9 @@
   // suspended" race (#287) — a registration that settles after unmount —
   // is handled inside it, so the old `destroyed` flag is gone.
   const teardown = useListenerTeardown();
-  let lastNotifiedId = '';
-  // C8: throttle — at most one track-change notification every 5 s.
-  const NOTIFICATION_THROTTLE_MS = 5000;
-  let lastNotifiedAt = 0;
-  // C8: stable numeric id + group so platforms that support it
-  // (id reuse / Apple threadIdentifier) replace the existing
-  // track-change notification in place instead of stacking a new one
-  // for every track during a session.
-  const TRACK_NOTIFICATION_ID = 1001;
-  const TRACK_NOTIFICATION_GROUP = 'presencejam-track-change';
+  // #675: the track-change class — its 5 s throttle, its never-repeat-twice
+  // rule and its replace-in-place notification id — now lives in
+  // `stores/notifications.ts` with the other three classes.
 
   onDestroy(() => {
     void teardown.dispose();
@@ -243,33 +235,9 @@
       devLog('[DASHBOARD] EVENT: track.artist=', event.payload.artist);
       currentTrack = event.payload;
       await updateMenuState();
-      if ($notificationsEnabled && event.payload?.title) {
-        const id = `${event.payload.title}::${event.payload.artist}`;
-        if (id === lastNotifiedId) return;
-        // C8: timestamp throttle — max one notification per 5 s. A
-        // throttled track does NOT claim lastNotifiedId, so once the
-        // window elapses the genuinely-current track can still notify.
-        const now = Date.now();
-        if (now - lastNotifiedAt < NOTIFICATION_THROTTLE_MS) return;
-        lastNotifiedId = id;
-        lastNotifiedAt = now;
-        let granted = false;
-        try { granted = await isPermissionGranted(); } catch {}
-        if (!granted) { try { granted = (await requestPermission()) === 'granted'; } catch {} }
-        if (granted) {
-          const body = `${event.payload.artist} — ${event.payload.album ?? ''}`.trim();
-          try {
-            sendNotification({
-              title: event.payload.title,
-              body,
-              icon: event.payload.album_art_url || undefined,
-              // C8: replace-in-place per session where supported.
-              id: TRACK_NOTIFICATION_ID,
-              group: TRACK_NOTIFICATION_GROUP
-            });
-          } catch {}
-        }
-      }
+      // #675: class-gated inside the store, which also owns the OS permission
+      // check; the notification is fire-and-forget so the card never waits on it.
+      void notifyTrackChange(event.payload);
     }));
     // #670: presence state is written by +layout.svelte now (always mounted);
     // this component only consumes the shared store — and hydrates it from
@@ -570,7 +538,9 @@
     </div>
     <div class="header-right">
       <button class="icon-btn" onclick={toggleTheme} title={t('common.themeToggle')} aria-label={t('common.themeToggle')}>
-        {$theme === 'dark' ? '☀' : '☾'}
+        <!-- #680: derived from the painted theme — under `system` the preference
+          alone cannot tell the user what the button shows or does. -->
+        {$appliedTheme === 'dark' ? '☀' : '☾'}
       </button>
       <button class="icon-btn" class:detached={$detachedPanes.logs}
         onclick={openLogs}
