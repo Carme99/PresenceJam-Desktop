@@ -19,6 +19,7 @@
   import { t, i18n, type Locale } from '$lib/i18n';
   import { theme } from '$lib/stores/theme';
   import { notificationsEnabled, setNotificationsEnabled } from '$lib/stores/notifications';
+  import { presence, clearAuthPersistWarning } from '$lib/stores/presence';
   import { devLog } from '$lib/utils/dev';
 
   let localConfig = $state<AppConfig>(structuredClone($configStore));
@@ -223,12 +224,12 @@
   // Spotify reconnect; the plaintext is left untouched until then.
   let spotifySecretConflict = $state(false);
 
-  // #693: `poll_teams_auth` keeps a freshly obtained Teams session in memory
-  // when `persist_tokens` fails (locked keychain, full/read-only disk) and
-  // emits `teams-auth-persist-warning` — an event nobody listened to, so the
-  // user was never told the session would not survive a restart. The banner
-  // below names the failure and points at the retry path.
-  let teamsPersistWarning = $state(false);
+  // #693: a Teams sign-in whose tokens could not be persisted (locked
+  // keychain, full/read-only disk) must not be lost silently. The event is
+  // captured in the always-mounted `routes/+layout.svelte` listener — every
+  // sign-in path goes through `poll_teams_auth`, including the ones that do
+  // not have Settings mounted — and the shared `presence` store is what this
+  // pane renders from. Settings only displays the fault and offers the retry.
 
   // #560: the OS keychain's answer about the stored client_secret —
   // `present` / `absent` / `unavailable`. The credential row must branch on
@@ -357,17 +358,6 @@
             devLog('[SETTINGS] spotify-secret-conflict received:', event.payload);
             spotifySecretConflict = true;
           }
-        ],
-        // #693: the sign-in succeeded but the session could not be written
-        // to disk (keychain locked, disk full). The payload is the Rust-side
-        // error (English, documented limitation) and is only dev-logged —
-        // the banner copy below goes through `t()`.
-        [
-          'teams-auth-persist-warning',
-          (event) => {
-            devLog('[SETTINGS] teams-auth-persist-warning received:', event.payload);
-            teamsPersistWarning = true;
-          }
         ]
       ]
     );
@@ -489,6 +479,12 @@
       forwardToMain('settings');
       return;
     }
+    // #693: a reconnect is the retry path this banner offers, so the warning
+    // clears as soon as one is initiated — a persist failure on the new
+    // sign-in re-raises it from the backend event. (The backend emits the
+    // warning *before* `teams-auth-complete`, so the completion handler must
+    // not clear it: that would erase the fault it just reported.)
+    clearAuthPersistWarning();
     // #421: fresh entry clears this flow's stale phase only; never the sibling's.
     resetTeamsAuthFlow();
     setTeamsPhase('waiting');
@@ -779,10 +775,15 @@
           <button type="button" class="btn-link" onclick={reconnectTeams} disabled={teamsAuthWaiting}>{t('common.reconnect')}</button>
         </div>
       {/if}
-      {#if teamsPersistWarning}
+      {#if $presence.authPersistWarning}
+        <!-- #693: dismissible as well as retryable — the cause can be one the
+             user cannot fix in-session (a permanently locked keychain, a
+             read-only disk), and a banner that only clears after a
+             *successful* reconnect would be undismissable there. -->
         <div class="persist-banner" role="alert">
           <span class="hint">{t('settings.teamsPersistWarning')}</span>
           <button type="button" class="btn-link" onclick={reconnectTeams} disabled={teamsAuthWaiting}>{t('common.reconnect')}</button>
+          <button type="button" class="btn-link dismiss" onclick={clearAuthPersistWarning}>{t('common.dismiss')}</button>
         </div>
       {/if}
     </section>

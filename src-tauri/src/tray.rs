@@ -1904,4 +1904,23 @@ mod tests {
             "an unparsable payload must not clobber the last playing state"
         );
     }
+
+    /// Issue #689 (D6): the tray's belief only moves if the poller's
+    /// `playback-state-changed` event is actually subscribed. A mistyped or
+    /// deleted `app.listen` would leave the functional test above green — it
+    /// calls the consumer directly — while the running app ignored the event.
+    /// Guards the registration inside `setup_tray`, like the click-arm scans.
+    #[test]
+    fn setup_tray_subscribes_to_playback_state_changes() {
+        let src = include_str!("tray.rs");
+        let body = body_of(prod_source(src), "pub fn setup_tray(");
+        assert!(
+            body.contains("app.listen(\"playback-state-changed\""),
+            "setup_tray must subscribe to the poller's playback-state-changed event (issue #689)"
+        );
+        assert!(
+            body.contains("consume_playback_state_changed(event.payload())"),
+            "the subscription must hand the payload to the tray's consumer"
+        );
+    }
 }
