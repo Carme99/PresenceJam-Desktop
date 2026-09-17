@@ -12,13 +12,15 @@
  * module load (the config load is an async IPC round-trip and the first frame
  * must already be in the right language), it still converges across webviews
  * through the #620 `storage` listener below, and a value found there while the
- * config carries none is migrated into the config exactly once. When both
- * exist, the config wins and the mirror is rewritten to match.
+ * config carries none is migrated into the config exactly once — after the
+ * config has actually been hydrated from the backend, never on the boot-time
+ * defaults. When both exist, the config wins and the mirror is rewritten to
+ * match.
  *
  * Switching also retags `<html lang>`.
  */
 
-import { configStore } from '$lib/stores/config';
+import { configHydrated, configStore, defaultConfig } from '$lib/stores/config';
 import { invoke } from '@tauri-apps/api/core';
 import type { AppConfig } from '$lib/types';
 import { devLog } from '$lib/utils/dev';
@@ -120,34 +122,52 @@ async function persistLocale(next: Locale): Promise<void> {
  * already the documented default of an absent field.
  */
 let migrationAttempted = false;
-function migrateLegacyLocale(cfg: AppConfig): void {
+function migrateLegacyLocale(): void {
   if (migrationAttempted) return;
   migrationAttempted = true;
-  if (isLocale(cfg.locale)) return; // config is already authoritative
   const detected = current; // the mirror, or the browser language
   if (detected === DEFAULT_LOCALE) return;
   devLog(`[I18N] migrating locale '${detected}' into the config`);
   void persistLocale(detected);
 }
 
-// The config store is the bridge to the authoritative value: it fires with the
-// frontend defaults at module load and again when the app's own `loadConfig()`
-// resolves, so no extra IPC round-trip is needed here (and a test that never
-// loads a config stays inert). A config carrying a locale becomes the truth;
-// one that does not triggers the one-shot migration above.
-configStore.subscribe((cfg) => {
+/**
+ * Reconcile this webview with the authoritative config (issue #674): a locale
+ * the app knows is applied (the config wins over the mirror); a tag it does
+ * not know renders English, exactly as Rust's `resolve_tag` does; an absent
+ * value is the pre-4.7 default and may be filled from the mirror — but only
+ * once the config has actually been hydrated from the backend.
+ *
+ * The hydration gate is load-bearing: the config store emits the frontend
+ * defaults at module load, before `loadConfig()` resolves, and migrating on
+ * that emission would write the mirror's value over a locale that is persisted
+ * on disk.
+ */
+function reconcile(cfg: AppConfig, hydrated: boolean): void {
   if (isLocale(cfg.locale)) {
     applyLocale(cfg.locale);
     return;
   }
   if (typeof cfg.locale === 'string' && cfg.locale.length > 0) {
-    // A tag the app does not know (hand-edited config). Rust renders English
-    // for it and logs the fallback, so the webview must not keep painting a
-    // different language.
     applyLocale(DEFAULT_LOCALE);
     return;
   }
-  migrateLegacyLocale(cfg);
+  if (hydrated) {
+    migrateLegacyLocale();
+  }
+}
+
+// Both stores are needed: the config carries the value, the hydration flag says
+// whether that value came from the backend or is still the frontend default.
+let latestConfig: AppConfig = defaultConfig;
+let configLoaded = false;
+configStore.subscribe((cfg) => {
+  latestConfig = cfg;
+  reconcile(latestConfig, configLoaded);
+});
+configHydrated.subscribe((hydrated) => {
+  configLoaded = hydrated;
+  reconcile(latestConfig, configLoaded);
 });
 
 export const i18n = {

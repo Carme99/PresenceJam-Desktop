@@ -129,6 +129,22 @@ export const DEFAULT_PROFANITY_PLACEHOLDER = defaultConfig.teams.profanity_place
 export const configStore = writable<AppConfig>(structuredClone(defaultConfig));
 
 /**
+ * Whether {@link configStore} currently holds a document that came from the
+ * backend rather than the frontend defaults.
+ *
+ * `false` until the first `load_config` / `save_config` / `update_config`
+ * round-trip resolves, so a consumer that must not act on the defaults can
+ * wait for the real document. The i18n store's one-shot legacy-locale
+ * migration is the first such consumer (4.7.0, issue #674): acting on the
+ * boot-time default emission would write a stale `localStorage` value over a
+ * locale that is persisted on disk.
+ *
+ * A failed `load_config` leaves it `false` — the store then holds defaults,
+ * not truth, and nothing may be written back on their behalf.
+ */
+export const configHydrated = writable(false);
+
+/**
  * Rust `u64` fields are ts-rs `bigint` on the wire, and every one of them
  * needs the same rounding/normalisation on the way in and out; a hand-edited
  * `config.json` that carries a section but omits or nulls one of its fields
@@ -285,6 +301,7 @@ export async function loadConfig(): Promise<AppConfig> {
       const cfg = await invoke<AppConfig>('load_config');
       const normalized = normalizeLoadedConfig(cfg);
       configStore.set(normalized);
+      configHydrated.set(true);
       return normalized;
     } catch (e) {
       console.error('[CONFIG] loadConfig failed:', e);
@@ -311,6 +328,7 @@ export async function saveConfig(cfg: AppConfig): Promise<AppConfig> {
       const persisted = await invoke<AppConfig>('save_config', { config: payload });
       const normalized = normalizeLoadedConfig(persisted);
       configStore.set(normalized);
+      configHydrated.set(true);
       return normalized;
     } finally {
       savePromise = null;
@@ -359,6 +377,7 @@ export async function updateConfig(patch: ConfigPatchPayload): Promise<AppConfig
       const persisted = await invoke<AppConfig>('update_config', { patch: payload });
       const normalized = normalizeLoadedConfig(persisted);
       configStore.set(normalized);
+      configHydrated.set(true);
       return normalized;
     } finally {
       savePromise = null;

@@ -256,6 +256,28 @@ pub fn install_from_app_state(state: &crate::AppState) -> &'static str {
     set_current(locale.as_deref())
 }
 
+/// Installs the locale of a just-persisted config and reports whether that
+/// changed the installed table.
+///
+/// `true` means the native surfaces render different labels from now on and
+/// must be repainted; `false` means the config write did not touch the language
+/// (the common case for every other field), so no rebuild is warranted.
+///
+/// Every config write path converges through this — the `set_locale` command
+/// and `after_persist`, which the generic save/update/import paths share — so a
+/// locale arriving through an imported config cannot leave the tray and the app
+/// menu in the previous language (4.7.0, issue #674).
+pub fn install_from_config(cfg: &crate::config::AppConfig) -> bool {
+    let previous = CURRENT.load(Ordering::Relaxed);
+    set_current(cfg.locale.as_deref());
+    CURRENT.load(Ordering::Relaxed) != previous
+}
+
+/// Serialises the tests that install a process-wide table, so a test asserting
+/// `current()` cannot observe another test's locale.
+#[cfg(test)]
+pub(crate) static LOCALE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 impl Strings {
     /// `(field name, value)` pairs in declaration order. Used by the parity
@@ -420,6 +442,9 @@ mod tests {
     /// mounted config — this is the startup path in one test.
     #[test]
     fn install_from_app_state_selects_the_table() {
+        let _serialised = LOCALE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let state = crate::AppState::new();
         assert_eq!(
             install_from_app_state(&state),
@@ -454,6 +479,40 @@ mod tests {
 
         // Leave the process-wide table on English for the other tests.
         set_current(None);
+    }
+
+    /// Every config write path converges on this helper (4.7.0, issue #674):
+    /// it installs the persisted locale and tells the caller whether the
+    /// visible surfaces actually need relabelling.
+    #[test]
+    fn install_from_config_reports_only_real_locale_changes() {
+        let _serialised = LOCALE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let cfg = |locale: Option<&str>| crate::config::AppConfig {
+            locale: locale.map(str::to_string),
+            ..Default::default()
+        };
+
+        assert!(
+            install_from_config(&cfg(Some("de"))),
+            "switching to a new locale must ask for a repaint"
+        );
+        assert_eq!(current().show_window, DE.show_window);
+        assert!(
+            !install_from_config(&cfg(Some("de"))),
+            "the same locale again must not rebuild the menus"
+        );
+        assert!(install_from_config(&cfg(Some("fr"))));
+        assert!(
+            install_from_config(&cfg(None)),
+            "clearing the field is a change back to the English default"
+        );
+        assert!(
+            !install_from_config(&cfg(None)),
+            "the English default is stable"
+        );
+        assert_eq!(current().show_window, EN.show_window);
     }
 
     /// Issue #674 acceptance: no user-visible literal may stay hard-coded in
