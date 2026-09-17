@@ -5,7 +5,17 @@ All notable changes to PresenceJam are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [4.7.0] - 2026-09-17
+
+The first release built from a fresh audit of the codebase rather than from an issue
+backlog. It opens with eleven correctness defects found by that audit — two of them HIGH, and
+two of them interactions between 4.6 fixes that only surfaced once both shipped — then adds
+the features the same audit identified as missing: a tray snooze, global hotkeys, a localized
+tray and app menu, rule scheduling with priority, log rotation and config export/import, an
+update channel with an honest fallback, four notification classes, a headless CLI, a
+follow-system theme with compact density, and a coverage ratchet that fails on a decrease.
+Every slice was reviewed before merge, and every claim in this file was re-verified against the
+merged tree by a final docs pass.
 
 ### Added
 - **Four desktop-notification classes, each with its own toggle (#675):** the
@@ -1406,7 +1416,7 @@ Closes #60 #61 #62 #63
 ### Removed
 
 - PowerShell script version — this is a full rewrite
-[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.6.0...HEAD
+[4.7.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.6.0...v4.7.0
 [4.6.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.5.2...v4.6.0
 [4.5.2]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.5.1...v4.5.2
 [4.5.1]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.5.0...v4.5.1
