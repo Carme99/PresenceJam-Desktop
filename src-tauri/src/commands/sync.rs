@@ -20,6 +20,22 @@ pub struct SyncStatus {
     pub current_track: Option<TrackInfo>,
     pub spotify_connected: bool,
     pub teams_connected: bool,
+    /// The last status text the poller confirmed written to Teams this
+    /// session (issue #670 / finding D2). Read from the poller's shared
+    /// write-decision clocks, never re-derived from a fresh Spotify or Graph
+    /// call: `presence-updated` fires only on a *change*, so a view that
+    /// mounts mid-session has no other way to seed its status preview.
+    pub last_posted_status: Option<String>,
+    /// True while the poller recorded the current track's status write as
+    /// gate-suppressed (busy / in a call / quiet hours / track rule), so a
+    /// freshly mounted Dashboard can render the gate chip without waiting for
+    /// the next `presence-gated` event (issue #670).
+    pub presence_gated: bool,
+    /// True while the playback the poller last observed for `current_track`
+    /// is paused. A pause is not a stop (issue #670 / finding D2, poller half
+    /// in #669), so a mounting Dashboard shows the paused track card instead
+    /// of "Nothing playing".
+    pub presence_paused: bool,
 }
 
 #[tauri::command]
@@ -362,8 +378,19 @@ pub fn get_sync_status(state: tauri::State<'_, Arc<AppState>>) -> Result<SyncSta
     let config_guard = state.config.get();
     let teams_guard = state.tokens.teams();
     let is_syncing = state.polling.is_syncing(Ordering::Acquire);
+    // #670: the poller's presence bookkeeping, read from the shared
+    // write-decision clocks (finding PollCore#4 / #572). `WRITE_CLOCKS` is a
+    // leaf lock — every production touch clones it in or out and never
+    // acquires another lock while holding it — so it does not participate in
+    // the `current_track -> spotify -> config -> teams` ordering above, and
+    // this read neither mutates nor resets it.
+    let clocks = polling::load_write_clocks();
 
     let current_track = track_guard.clone();
+    // A pause is a state change, not a stop: the poller keeps the observed
+    // `TrackInfo` for a paused track (finding D6, #669), so the stored
+    // playback state is what the Dashboard renders as a paused card.
+    let presence_paused = current_track.as_ref().is_some_and(|t| !t.is_playing);
 
     let spotify_connected = spotify_guard.is_some()
         && config_guard
@@ -374,10 +401,12 @@ pub fn get_sync_status(state: tauri::State<'_, Arc<AppState>>) -> Result<SyncSta
     let teams_connected = teams_guard.is_some();
 
     log::info!(
-        "{CMD} get_sync_status: is_syncing={}, spotify_connected={}, teams_connected={}",
+        "{CMD} get_sync_status: is_syncing={}, spotify_connected={}, teams_connected={}, presence_gated={}, presence_paused={}",
         is_syncing,
         spotify_connected,
-        teams_connected
+        teams_connected,
+        clocks.gated_track_key.is_some(),
+        presence_paused
     );
 
     Ok(SyncStatus {
@@ -385,6 +414,9 @@ pub fn get_sync_status(state: tauri::State<'_, Arc<AppState>>) -> Result<SyncSta
         current_track,
         spotify_connected,
         teams_connected,
+        last_posted_status: clocks.last_posted_status.clone(),
+        presence_gated: clocks.gated_track_key.is_some(),
+        presence_paused,
     })
 }
 #[tauri::command]

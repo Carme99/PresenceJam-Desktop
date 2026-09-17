@@ -14,6 +14,17 @@
   import { t } from '$lib/i18n';
   import { reconcileDetachedPanes } from '$lib/stores/detach';
   import { clientSecretStateOf } from '$lib/stores/config';
+  import { useListenerTeardown } from '$lib/utils/useAuthListeners';
+  import {
+    markStatusPosted,
+    markPresenceGated,
+    markPresencePaused,
+    markPresenceCleared,
+    setAvailabilityListening,
+    setPlaybackState,
+    setSyncing,
+    markAuthPersistWarning
+  } from '$lib/stores/presence';
 
   // C7: this layout is shared by every webview window (the SPA fallback
   // hydrates it for detached Logs/Settings windows too). Reconnect flows,
@@ -141,6 +152,74 @@
       else unlistenPlayback = u;
     });
 
+    // #670 / finding D2: presence and sync lifecycle state is process-wide,
+    // but the Dashboard that renders it is destroyed on every view switch.
+    // These listeners therefore live in the always-mounted main-window
+    // layout and write the shared presence store; Dashboard consumes it (and
+    // hydrates from `get_sync_status` on mount) instead of owning listeners
+    // of its own. `useListenerTeardown` keeps the "unmounted while listen()
+    // was still in flight" race (#287) handled exactly as Dashboard did.
+    const presenceTeardown = useListenerTeardown();
+    presenceTeardown.add(
+      listen<{ status?: string }>('presence-updated', (event) => {
+        devLog('[LAYOUT] presence-updated received');
+        markStatusPosted(String(event.payload?.status ?? ''));
+      })
+    );
+    presenceTeardown.add(
+      listen<{ status?: string }>('presence-paused', (event) => {
+        devLog('[LAYOUT] presence-paused received');
+        markPresencePaused(String(event.payload?.status ?? ''));
+      })
+    );
+    presenceTeardown.add(
+      listen('presence-cleared', () => {
+        devLog('[LAYOUT] presence-cleared received');
+        markPresenceCleared();
+      })
+    );
+    presenceTeardown.add(
+      listen<{ reason?: string }>('presence-gated', (event) => {
+        devLog('[LAYOUT] presence-gated received');
+        markPresenceGated(String(event.payload?.reason ?? ''));
+      })
+    );
+    presenceTeardown.add(
+      listen<{ available?: boolean }>('presence-availability-updated', (event) => {
+        devLog('[LAYOUT] presence-availability-updated received');
+        setAvailabilityListening(event.payload?.available === true);
+      })
+    );
+    presenceTeardown.add(
+      listen<{ is_playing?: boolean }>('playback-state-changed', (event) => {
+        devLog('[LAYOUT] playback-state-changed received');
+        setPlaybackState(event.payload?.is_playing === true);
+      })
+    );
+    presenceTeardown.add(
+      listen('sync-started', () => {
+        devLog('[LAYOUT] sync-started received');
+        setSyncing(true);
+      })
+    );
+    presenceTeardown.add(
+      listen('sync-stopped', () => {
+        devLog('[LAYOUT] sync-stopped received');
+        setSyncing(false);
+      })
+    );
+
+    // #670 / finding D10: `teams-auth-persist-warning` fires while the
+    // sign-in flows own the screen (Onboarding/Reconnect call
+    // `poll_teams_auth`), so a Settings-only listener would drop it. The
+    // always-mounted layout records it and Settings renders the banner.
+    presenceTeardown.add(
+      listen<string>('teams-auth-persist-warning', (event) => {
+        devLog('[LAYOUT] teams-auth-persist-warning received');
+        markAuthPersistWarning(String(event.payload ?? ''));
+      })
+    );
+
     // Polls the backend for device-code completion. The cadence is
     // Rust-side; `interval` comes from the DeviceCodeResponse stored in
     // the authFlow store so the server's requested polling rate is
@@ -173,6 +252,7 @@
       unlistenTeams?.();
       unlistenSpotify?.();
       unlistenPlayback?.();
+      void presenceTeardown.dispose();
       if (playbackErrorTimeout) clearTimeout(playbackErrorTimeout);
     };
   });
