@@ -433,6 +433,9 @@ export const de: Dict = {
   'dashboard.presenceGatedManualStatus':
     'Status pausiert — Sie haben eine Statusmeldung selbst gesetzt',
   'dashboard.presenceGatedOutOfOffice': 'Status pausiert — Sie sind abwesend',
+  // 4.7.0 — S6 (tray localization)
+  'settings.languageHint':
+    'Gilt auch für das Tray-Menü und das native Anwendungsmenü.',
 
   // 4.7.0 — S3 tray/logs hygiene
   'settings.teamsPersistWarning':

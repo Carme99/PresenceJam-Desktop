@@ -148,12 +148,14 @@ pub async fn update_config(
 /// Ordering is load-bearing: the logger is re-armed first (CfgDiag#4, issue
 /// #539 — a `logging.enabled` / `log_level` change takes effect immediately
 /// instead of at the next launch, and the level also governs whether the
-/// OS-side effects below are logged), then the macOS activation policy
+/// OS-side effects below are logged), then the native locale (4.7.0, issue
+/// #674 — see [`sync_native_locale`]), then the macOS activation policy
 /// (which borrows `app`, hence before the by-value `set_autostart_enabled`),
 /// then the OS autostart entry.
 #[cfg_attr(not(desktop), allow(unused_variables))]
 async fn after_persist(app: &AppHandle, persisted: &AppConfig) {
     config::apply_log_level(&persisted.logging);
+    sync_native_locale(app, persisted);
 
     // On macOS, sync the app's activation policy with the saved
     // `start_minimized` preference so the dock icon disappears when the
@@ -395,4 +397,198 @@ pub async fn import_config(
         path: source_path,
         config: persisted,
     }))
+}
+
+/// Installs the persisted locale on the native surfaces and repaints them when
+/// it actually changed (4.7.0, issue #674).
+///
+/// Called from [`after_persist`], so **every** config write path converges —
+/// not just the `set_locale` command: a Settings save carrying a stale draft,
+/// or an imported config (the 4.7.0 export/import commands), would otherwise
+/// move `config.json` and the webview to the new language while the tray and
+/// the app menu kept rendering the old one.
+///
+/// A repaint is skipped when the locale did not change, because it clears the
+/// throttled Spotify caches and re-fetches devices/queue; the language is what
+/// the cache does not hold, so no other save needs to pay for it.
+fn sync_native_locale(app: &AppHandle, persisted: &AppConfig) {
+    if !crate::i18n::install_from_config(persisted) {
+        return;
+    }
+    if let Err(e) = crate::menu::rebuild_app_menu(app) {
+        log::warn!("{CMD} locale change: app menu rebuild failed: {}", e);
+    }
+    crate::tray::refresh_tray_for_locale(app);
+    log::info!(
+        "{CMD} locale change: native surfaces relabelled (locale={:?})",
+        persisted.locale
+    );
+}
+
+#[tauri::command]
+/// Persist the UI locale and relabel the native surfaces immediately
+/// (4.7.0, issue #674).
+///
+/// `AppConfig::locale` is the single source of truth for the language: the
+/// webview dictionary store reads it at load and writes it here; the tray and
+/// the native application menu are relabelled by the shared post-write path
+/// ([`after_persist`] / [`sync_native_locale`]).
+/// The value is canonicalised before it reaches disk — an unknown tag
+/// (`"zz"`, `"pt-BR"`) is stored as `"en"` and the fallback is logged by
+/// `i18n::resolve_tag`, so a stored tag and the rendered tables can never
+/// disagree.
+///
+/// A locale change is cosmetic, so a failure to relabel one of the surfaces is
+/// logged rather than rolled back: the config write is already committed and
+/// the next rebuild (any poll, any tray click) renders the new language.
+pub async fn set_locale(
+    app: AppHandle,
+    locale: String,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<AppConfig, String> {
+    log::info!("{CMD} set_locale: ENTRY");
+
+    // Canonicalise before the write so the persisted tag is exactly what the
+    // tables render (`i18n::LOCALES`).
+    let tag = crate::i18n::resolve_tag(Some(&locale));
+    let state_clone = Arc::clone(state.inner());
+    let persisted = tauri::async_runtime::spawn_blocking(move || {
+        // Same single write guard as `save_config`/`update_config`: the whole
+        // read-modify-write runs on the blocking pool with the lock held
+        // across the fsync (issue #215 pattern).
+        let mut config_guard = state_clone.config.get_mut();
+        let mut merged = match config_guard.as_ref() {
+            Some(current) => current.clone(),
+            None => config::load_config()?,
+        };
+        merged.locale = Some(tag.to_string());
+
+        let mut persisted = config::clamped_config(&merged);
+        config::stamp_schema_version(&mut persisted);
+        match config::save_config(&persisted) {
+            Ok(()) => {
+                *config_guard = Some(persisted.clone());
+                Ok::<AppConfig, String>(persisted)
+            }
+            Err(e) => {
+                log::error!("{CMD} set_locale: FAILED - {}", e);
+                Err(e)
+            }
+        }
+    })
+    .await
+    .map_err(|e| format!("set_locale spawn_blocking panicked: {:?}", e))??;
+
+    // Converge every surface through the shared post-write path, so this
+    // command cannot drift from a generic save (4.7.0, issue #674).
+    after_persist(&app, &persisted).await;
+
+    log::info!("{CMD} set_locale: SUCCESS - locale={}", tag);
+    Ok(persisted)
+}
+
+#[cfg(test)]
+mod tests {
+    /// Production half of this module — everything before the inline test
+    /// module, so a scan can never match the assertions themselves.
+    fn prod_source(src: &str) -> &str {
+        src.split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("config.rs has no #[cfg(test)] mod tests block")
+    }
+
+    /// Drops `//` line comments so prose that quotes a call cannot satisfy a
+    /// scan. String literals are not parsed, so a `//` inside one can only lose
+    /// trailing text on that line, never invent a call.
+    fn strip_line_comments(src: &str) -> String {
+        src.lines()
+            .map(|line| match line.find("//") {
+                Some(i) => &line[..i],
+                None => line,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Comment-stripped, brace-counted body isolation for `sig`'s fn.
+    /// Order-independent: never anchor on the next fn.
+    fn body_of(prod: &str, sig: &str) -> String {
+        let stripped = strip_line_comments(prod);
+        let after_sig = stripped
+            .split(sig)
+            .nth(1)
+            .unwrap_or_else(|| panic!("config.rs has no `{}`", sig));
+        let open = after_sig
+            .find('{')
+            .unwrap_or_else(|| panic!("{} has no opening brace", sig));
+        let mut depth = 0usize;
+        let mut end = None;
+        for (i, ch) in after_sig[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(open + i + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        after_sig[..end.unwrap_or_else(|| panic!("{} body never closed", sig))].to_string()
+    }
+
+    /// 4.7.0 (issue #674): a locale that changes through *any* config write
+    /// must reach the native surfaces. `after_persist` is that shared path, so
+    /// an imported config (S5's `import_config`) or a Settings save carrying a
+    /// stale draft cannot leave the tray and the app menu in the old language
+    /// while `config.json` and the webview move on.
+    ///
+    /// Source-level by necessity: the relabel itself calls into two Tauri
+    /// surfaces that need a live app handle, which no unit test can build. The
+    /// behaviour behind it — which table gets installed, and whether a repaint
+    /// is warranted — is covered by
+    /// `i18n::tests::install_from_config_reports_only_real_locale_changes`.
+    #[test]
+    fn every_config_write_converges_the_native_locale() {
+        let prod = prod_source(include_str!("config.rs"));
+
+        let persisted = body_of(prod, "async fn after_persist(");
+        assert!(
+            persisted.contains("sync_native_locale("),
+            "the shared post-write path must install the persisted locale"
+        );
+
+        let sync = body_of(prod, "fn sync_native_locale(");
+        assert!(
+            sync.contains("i18n::install_from_config("),
+            "the sync helper must install the persisted locale"
+        );
+        assert!(
+            sync.contains("menu::rebuild_app_menu("),
+            "a changed locale must rebuild the native application menu, not just the installed table"
+        );
+        assert!(
+            sync.contains("tray::refresh_tray_for_locale("),
+            "a changed locale must repaint the tray, not just the installed table"
+        );
+    }
+
+    /// The `set_locale` command must converge through the same post-write path
+    /// as every other config write instead of keeping its own copy of the
+    /// relabel sequence.
+    #[test]
+    fn set_locale_routes_through_the_shared_post_write_path() {
+        let prod = prod_source(include_str!("config.rs"));
+        let body = body_of(prod, "pub async fn set_locale(");
+        assert!(
+            body.contains("after_persist(&app, &persisted).await"),
+            "set_locale must run the shared post-write side effects"
+        );
+        assert!(
+            !body.contains("rebuild_app_menu("),
+            "set_locale must not keep a second relabel sequence of its own"
+        );
+    }
 }

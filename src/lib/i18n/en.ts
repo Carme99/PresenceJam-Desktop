@@ -419,6 +419,10 @@ export const en = {
   'dashboard.presenceGatedManualStatus':
     'Status paused — you set a status message by hand',
   'dashboard.presenceGatedOutOfOffice': 'Status paused — you are out of office',
+  // 4.7.0 — S6 (tray localization): `config.locale` is the single source of
+  // truth, so the picker also drives the tray and the native app menu.
+  'settings.languageHint':
+    'Also applies to the tray menu and the native application menu.',
 
   // 4.7.0 — S3 tray/logs hygiene
   'settings.teamsPersistWarning':

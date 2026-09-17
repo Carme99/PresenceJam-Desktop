@@ -1386,12 +1386,22 @@
         <select
           id="language"
           value={i18n.locale}
-          onchange={(e) => i18n.set((e.currentTarget as HTMLSelectElement).value as Locale)}
+          onchange={(e) => {
+            const next = (e.currentTarget as HTMLSelectElement).value as Locale;
+            // 4.7.0 (issue #674): `config.locale` is the single source of
+            // truth. The store applies the locale to this webview, persists
+            // it and relabels the tray + native application menu; the draft is
+            // kept in step so a language change alone never marks the form
+            // dirty.
+            localConfig.locale = next;
+            void i18n.set(next);
+          }}
         >
           <option value="en">English</option>
           <option value="de">Deutsch</option>
           <option value="fr">Français</option>
         </select>
+        <p class="hint">{t('settings.languageHint')}</p>
       </div>
       <div class="toggle-row">
         <label for="autostart">{t('common.launchAtLogin')}</label>

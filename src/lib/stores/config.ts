@@ -72,6 +72,10 @@ export const defaultConfig: AppConfig = {
     keep_files: 3
   },
   autostart: false,
+  // 4.7.0 (issue #674): `AppConfig::locale` — the single source of truth for
+  // the UI language (webview, tray and native application menu). `null` reads
+  // as English on both sides, the documented default of a pre-4.7 config.
+  locale: null,
   // Issue #432: mirrors Rust StatusRulesConfig::default (empty rule lists).
   status_rules: { quiet_hours: [], track_rules: [] },
   // Mirrors Rust `config::SCHEMA_VERSION` (issues #379 / #536). The backend
@@ -123,6 +127,22 @@ export function clientSecretStateOf(cfg: AppConfig): ClientSecretState {
 export const DEFAULT_PROFANITY_PLACEHOLDER = defaultConfig.teams.profanity_placeholder;
 
 export const configStore = writable<AppConfig>(structuredClone(defaultConfig));
+
+/**
+ * Whether {@link configStore} currently holds a document that came from the
+ * backend rather than the frontend defaults.
+ *
+ * `false` until the first `load_config` / `save_config` / `update_config`
+ * round-trip resolves, so a consumer that must not act on the defaults can
+ * wait for the real document. The i18n store's one-shot legacy-locale
+ * migration is the first such consumer (4.7.0, issue #674): acting on the
+ * boot-time default emission would write a stale `localStorage` value over a
+ * locale that is persisted on disk.
+ *
+ * A failed `load_config` leaves it `false` — the store then holds defaults,
+ * not truth, and nothing may be written back on their behalf.
+ */
+export const configHydrated = writable(false);
 
 /**
  * Rust `u64` fields are ts-rs `bigint` on the wire, and every one of them
@@ -281,6 +301,7 @@ export async function loadConfig(): Promise<AppConfig> {
       const cfg = await invoke<AppConfig>('load_config');
       const normalized = normalizeLoadedConfig(cfg);
       configStore.set(normalized);
+      configHydrated.set(true);
       return normalized;
     } catch (e) {
       console.error('[CONFIG] loadConfig failed:', e);
@@ -307,6 +328,7 @@ export async function saveConfig(cfg: AppConfig): Promise<AppConfig> {
       const persisted = await invoke<AppConfig>('save_config', { config: payload });
       const normalized = normalizeLoadedConfig(persisted);
       configStore.set(normalized);
+      configHydrated.set(true);
       return normalized;
     } finally {
       savePromise = null;
@@ -355,6 +377,7 @@ export async function updateConfig(patch: ConfigPatchPayload): Promise<AppConfig
       const persisted = await invoke<AppConfig>('update_config', { patch: payload });
       const normalized = normalizeLoadedConfig(persisted);
       configStore.set(normalized);
+      configHydrated.set(true);
       return normalized;
     } finally {
       savePromise = null;

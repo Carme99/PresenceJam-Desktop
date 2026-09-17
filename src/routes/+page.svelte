@@ -13,8 +13,7 @@
   import About from '$lib/components/About.svelte';
   import Reconnect from '$lib/components/Reconnect.svelte';
   import { bootView } from '$lib/utils/boot';
-  import { clientSecretStateOf } from '$lib/stores/config';
-  import type { AppConfig } from '$lib/types';
+  import { clientSecretStateOf, loadConfig } from '$lib/stores/config';
   import { t } from '$lib/i18n';
 
   // Build info — injected at build time via vite.config.js define
@@ -75,7 +74,7 @@
       // decision so a returning user with stored credentials keeps it.
       //
       // Fail direction: the credential probe fails OPEN to the wizard
-      // (`hasStoredSpotifyCredentials` returns false when its own invoke
+      // (`hasStoredSpotifyCredentials` returns false when its config read
       // fails) — deliberately, because (a) that is the documented contract
       // of the existing probe, (b) a keychain error means Reconnect could
       // not read the stored secret either, so routing there would dead-end,
@@ -99,9 +98,23 @@
   // #530: does this install still hold the Spotify credentials (Client ID in
   // config + secret in the OS keychain) that a reconnect can reuse? Any probe
   // failure falls back to the wizard, which can recreate everything.
+  //
+  // 4.7.0 (issue #674): the read goes through the shared store instead of a raw
+  // `invoke('load_config')`, so this probe — which runs on every boot, on both
+  // the success and the failure path below — is what hydrates `configStore`.
+  // Nothing else does on a Dashboard-first launch (the normal one for an
+  // already-configured user), and the i18n store reads `config.locale` from
+  // that store (and keys its one-shot legacy-locale migration on the store's
+  // hydration flag): without it the webview kept the frontend defaults for the
+  // whole session — a German UI with an English tray.
+  //
+  // `loadConfig()` never rejects: a failed read resolves with the frontend
+  // defaults, whose secret state is `absent`, so this still fails OPEN to the
+  // wizard, and `configHydrated` stays false so nothing is written on the
+  // defaults' behalf.
   async function hasStoredSpotifyCredentials(): Promise<boolean> {
     try {
-      const cfg = await invoke<AppConfig>('load_config');
+      const cfg = await loadConfig();
       if (!cfg.spotify.client_id?.trim()) return false;
       // #560: only a *positively absent* secret means there is nothing to
       // reuse. `is_spotify_client_secret_set` is the `Present`-only projection

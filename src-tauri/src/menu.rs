@@ -1,6 +1,6 @@
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder},
-    AppHandle, Emitter, Manager, WebviewWindow,
+    AppHandle, Emitter, Manager, Runtime, WebviewWindow,
 };
 
 // Menu item IDs — shared between tray and app menu for consistency
@@ -82,57 +82,68 @@ pub fn request_graceful_shutdown(app: &AppHandle) {
     });
 }
 
-/// Builds the application menu bar (macOS/Windows).
-/// This creates native File, Edit, View, and Help menus.
-pub fn setup_app_menu(app: &tauri::App, window: &WebviewWindow) -> Result<(), String> {
+/// Builds the application menu bar (macOS/Windows) from the installed locale.
+///
+/// Generic over the manager so the same builder serves both the startup path
+/// ([`setup_app_menu`], which holds a `&App`) and a live locale change
+/// ([`rebuild_app_menu`], which holds an `&AppHandle`) — issue #674.
+///
+/// Every label comes from [`crate::i18n::current`]; the Edit menu's
+/// Undo/Redo/Cut/Copy/Paste/Select All entries are `PredefinedMenuItem`s built
+/// with no text, so the platform localizes those itself.
+pub fn build_app_menu<R: Runtime, M: Manager<R>>(
+    manager: &M,
+) -> Result<tauri::menu::Menu<R>, String> {
+    let s = crate::i18n::current();
+
     // File menu
-    let file_menu = SubmenuBuilder::new(app, "File")
+    let file_menu = SubmenuBuilder::new(manager, s.menu_file)
         .item(
-            &MenuItemBuilder::with_id(ID_SETTINGS, "Settings...")
+            &MenuItemBuilder::with_id(ID_SETTINGS, s.menu_settings)
                 .accelerator("CmdOrCtrl+,")
-                .build(app)
+                .build(manager)
                 .map_err(|e| e.to_string())?,
         )
         .item(
-            &MenuItemBuilder::with_id(ID_OPEN_LOGS, "Open Logs Folder")
+            &MenuItemBuilder::with_id(ID_OPEN_LOGS, s.open_logs_folder)
                 .accelerator("CmdOrCtrl+Shift+L")
-                .build(app)
+                .build(manager)
                 .map_err(|e| e.to_string())?,
         )
         .separator()
         .item(
-            &MenuItemBuilder::with_id(ID_QUIT, "Quit PresenceJam")
+            &MenuItemBuilder::with_id(ID_QUIT, s.menu_quit)
                 .accelerator("CmdOrCtrl+Q")
-                .build(app)
+                .build(manager)
                 .map_err(|e| e.to_string())?,
         )
         .build()
         .map_err(|e| e.to_string())?;
 
     // Edit menu (standard macOS clipboard shortcuts for text fields)
-    let edit_menu = SubmenuBuilder::new(app, "Edit")
-        .item(&PredefinedMenuItem::undo(app, None).map_err(|e| e.to_string())?)
-        .item(&PredefinedMenuItem::redo(app, None).map_err(|e| e.to_string())?)
+    let edit_menu = SubmenuBuilder::new(manager, s.menu_edit)
+        .item(&PredefinedMenuItem::undo(manager, None).map_err(|e| e.to_string())?)
+        .item(&PredefinedMenuItem::redo(manager, None).map_err(|e| e.to_string())?)
         .separator()
-        .item(&PredefinedMenuItem::cut(app, None).map_err(|e| e.to_string())?)
-        .item(&PredefinedMenuItem::copy(app, None).map_err(|e| e.to_string())?)
-        .item(&PredefinedMenuItem::paste(app, None).map_err(|e| e.to_string())?)
-        .item(&PredefinedMenuItem::select_all(app, None).map_err(|e| e.to_string())?)
+        .item(&PredefinedMenuItem::cut(manager, None).map_err(|e| e.to_string())?)
+        .item(&PredefinedMenuItem::copy(manager, None).map_err(|e| e.to_string())?)
+        .item(&PredefinedMenuItem::paste(manager, None).map_err(|e| e.to_string())?)
+        .item(&PredefinedMenuItem::select_all(manager, None).map_err(|e| e.to_string())?)
         .build()
         .map_err(|e| e.to_string())?;
 
     // View menu
-    let view_menu = SubmenuBuilder::new(app, "View")
+    let view_menu = SubmenuBuilder::new(manager, s.menu_view)
         .item(
-            &MenuItemBuilder::with_id(ID_SHOW_DASHBOARD, "Show Dashboard")
+            &MenuItemBuilder::with_id(ID_SHOW_DASHBOARD, s.menu_show_dashboard)
                 .accelerator("CmdOrCtrl+1")
-                .build(app)
+                .build(manager)
                 .map_err(|e| e.to_string())?,
         )
         .item(
-            &MenuItemBuilder::with_id(ID_SHOW_LOGS, "Show Logs")
+            &MenuItemBuilder::with_id(ID_SHOW_LOGS, s.menu_show_logs)
                 .accelerator("CmdOrCtrl+2")
-                .build(app)
+                .build(manager)
                 .map_err(|e| e.to_string())?,
         )
         .build()
@@ -140,32 +151,62 @@ pub fn setup_app_menu(app: &tauri::App, window: &WebviewWindow) -> Result<(), St
 
     // Help menu
     // No accelerator for About — intentional (no standard macOS convention)
-    let help_menu = SubmenuBuilder::new(app, "Help")
+    let help_menu = SubmenuBuilder::new(manager, s.menu_help)
         .item(
-            &MenuItemBuilder::with_id(ID_ABOUT, "About PresenceJam")
-                .build(app)
+            &MenuItemBuilder::with_id(ID_ABOUT, s.menu_about)
+                .build(manager)
                 .map_err(|e| e.to_string())?,
         )
         .build()
         .map_err(|e| e.to_string())?;
 
     // Build the full menu bar
-    let menu = MenuBuilder::new(app)
+    MenuBuilder::new(manager)
         .item(&file_menu)
         .item(&edit_menu)
         .item(&view_menu)
         .item(&help_menu)
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())
+}
 
-    // Set as the window menu on macOS (appears in menu bar)
-    // Using window.set_menu() instead of app.set_menu() to ensure
-    // click events are properly routed through on_menu_event
+/// Sets a built menu as the window's menu bar.
+///
+/// Using `window.set_menu()` instead of `app.set_menu()` keeps click events
+/// routed through `on_menu_event`. [`Window::set_menu`] marshals the native
+/// call onto the main thread itself, so a caller on a command thread is safe.
+fn apply_app_menu<R: Runtime>(
+    window: &WebviewWindow<R>,
+    menu: tauri::menu::Menu<R>,
+) -> Result<(), String> {
     window
         .set_menu(menu)
         .map_err(|e| format!("Failed to set window menu: {}", e))?;
+    Ok(())
+}
 
+/// Builds and applies the application menu bar for the startup path.
+pub fn setup_app_menu(app: &tauri::App, window: &WebviewWindow) -> Result<(), String> {
+    // 4.7.0 (issue #674): install the locale stored in the config before the
+    // labels are read. `setup_tray` does the same, so the menu stays correct
+    // even when the tray failed to initialise.
+    let state = app.state::<std::sync::Arc<crate::AppState>>();
+    crate::i18n::install_from_app_state(state.inner());
+    let menu = build_app_menu(app)?;
+    apply_app_menu(window, menu)?;
     log::info!("[MENU] setup_app_menu: window menu bar created successfully");
+    Ok(())
+}
+
+/// Rebuilds the application menu bar for the newly installed locale (issue
+/// #674), so switching language relabels the native menu without a restart.
+pub fn rebuild_app_menu(app: &AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window not found".to_string())?;
+    let menu = build_app_menu(app)?;
+    apply_app_menu(&window, menu)?;
+    log::info!("[MENU] rebuild_app_menu: menu bar relabelled for the new locale");
     Ok(())
 }
 

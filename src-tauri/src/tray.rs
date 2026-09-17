@@ -9,6 +9,8 @@ use tauri::{
 
 use crate::spotify::RepeatState;
 
+use crate::i18n::{self, Strings};
+
 // Menu item IDs
 const ID_SHOW_HIDE: &str = "show_hide_window";
 const ID_PAUSE_SYNC: &str = "pause_sync";
@@ -25,18 +27,13 @@ const ID_QUIT: &str = "quit";
 // ids of the form `{ID_DEVICES}|{spotify device id}` so the click handler
 // resolves the stable id instead of racing a list index (issue #388).
 const ID_PLAY_PAUSE: &str = "play_pause";
-/// Static label for the Play/Pause check item — the playing state is
-/// conveyed by the native checked mark instead of a swapped label
-/// (docs/scope-3.3.md C4).
-const PLAY_PAUSE_LABEL: &str = "Play/Pause";
 const ID_PREVIOUS: &str = "previous";
 const ID_NEXT: &str = "next";
 /// Shuffle toggle (issue #582). A check item whose mark comes from the
-/// `shuffle_state` the poll body already carries — no extra request.
+/// `shuffle_state` the poll body already carries — no extra request. The
+/// label is the `shuffle` entry of the i18n table (issue #674): the state
+/// itself stays the native check mark.
 const ID_SHUFFLE: &str = "shuffle";
-/// Static label for the Shuffle check item, mirroring `PLAY_PAUSE_LABEL`:
-/// the state is carried by the native check mark.
-const SHUFFLE_LABEL: &str = "Shuffle";
 /// Repeat toggle (issue #582). Repeat has THREE states (`off`/`context`/
 /// `track`), so the item's label spells the mode out — a check mark alone
 /// cannot tell `context` from `track`.
@@ -56,6 +53,12 @@ pub fn get_tray() -> Option<&'static TrayIcon> {
 }
 
 pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
+    // 4.7.0 (issue #674): the tray renders in the locale stored in the config.
+    // Installed before the first menu build so the initial menu (and the
+    // immediately following `update_tray_menu`) already carry the right
+    // labels; an unknown/absent value installs English.
+    let state = app.state::<std::sync::Arc<crate::AppState>>();
+    crate::i18n::install_from_app_state(state.inner());
     // Build initial menu
     let menu = build_initial_menu(app)?;
 
@@ -340,27 +343,30 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
     Ok(())
 }
 
-/// Builds the initial tray menu.
+/// Builds the initial tray menu. Transient — `setup_tray` calls
+/// `update_tray_menu` with real state immediately after — but every label
+/// still comes from the installed i18n table (issue #674).
 fn build_initial_menu(app: &tauri::App) -> Result<tauri::menu::Menu<tauri::Wry>, String> {
-    let show_hide = MenuItemBuilder::with_id(ID_SHOW_HIDE, "Show Window")
+    let s = i18n::current();
+    let show_hide = MenuItemBuilder::with_id(ID_SHOW_HIDE, s.show_window)
         .build(app)
         .map_err(|e| e.to_string())?;
 
-    let pause_sync = MenuItemBuilder::with_id(ID_PAUSE_SYNC, "Pause Sync")
+    let pause_sync = MenuItemBuilder::with_id(ID_PAUSE_SYNC, s.pause_sync)
         .build(app)
         .map_err(|e| e.to_string())?;
 
     let separator = PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?;
 
-    let open_settings = MenuItemBuilder::with_id(ID_OPEN_SETTINGS, "Open Settings")
+    let open_settings = MenuItemBuilder::with_id(ID_OPEN_SETTINGS, s.open_settings)
         .build(app)
         .map_err(|e| e.to_string())?;
 
-    let open_logs = MenuItemBuilder::with_id(ID_OPEN_LOGS, "Open Logs Folder")
+    let open_logs = MenuItemBuilder::with_id(ID_OPEN_LOGS, s.open_logs_folder)
         .build(app)
         .map_err(|e| e.to_string())?;
 
-    let quit = MenuItemBuilder::with_id(ID_QUIT, "Quit")
+    let quit = MenuItemBuilder::with_id(ID_QUIT, s.quit)
         .build(app)
         .map_err(|e| e.to_string())?;
 
@@ -369,24 +375,24 @@ fn build_initial_menu(app: &tauri::App) -> Result<tauri::menu::Menu<tauri::Wry>,
     // real state — so the Play/Pause toggle starts unchecked and the
     // Devices/Up Next submenus start as placeholders (no network at
     // startup).
-    let play_pause = CheckMenuItemBuilder::with_id(ID_PLAY_PAUSE, PLAY_PAUSE_LABEL)
+    let play_pause = CheckMenuItemBuilder::with_id(ID_PLAY_PAUSE, s.play_pause)
         .checked(false)
         .build(app)
         .map_err(|e| e.to_string())?;
-    let previous = MenuItemBuilder::with_id(ID_PREVIOUS, "Previous")
+    let previous = MenuItemBuilder::with_id(ID_PREVIOUS, s.previous)
         .build(app)
         .map_err(|e| e.to_string())?;
-    let next = MenuItemBuilder::with_id(ID_NEXT, "Next")
+    let next = MenuItemBuilder::with_id(ID_NEXT, s.next)
         .build(app)
         .map_err(|e| e.to_string())?;
     // Issue #582: the two playback-mode toggles. They start off here (this
     // menu is transient — `update_tray_menu` follows immediately) and take
     // their real marks from the poll body thereafter.
-    let shuffle = CheckMenuItemBuilder::with_id(ID_SHUFFLE, SHUFFLE_LABEL)
+    let shuffle = CheckMenuItemBuilder::with_id(ID_SHUFFLE, s.shuffle)
         .checked(false)
         .build(app)
         .map_err(|e| e.to_string())?;
-    let repeat = CheckMenuItemBuilder::with_id(ID_REPEAT, repeat_menu_label(RepeatState::Off))
+    let repeat = CheckMenuItemBuilder::with_id(ID_REPEAT, repeat_menu_label(s, RepeatState::Off))
         .checked(false)
         .build(app)
         .map_err(|e| e.to_string())?;
@@ -583,12 +589,13 @@ fn last_repeat_state() -> RepeatState {
 
 /// Menu label for the Repeat item: the mode is spelled out because the
 /// documented state space has three values and a check mark only carries
-/// on/off. Pure so the label contract is unit-testable.
-fn repeat_menu_label(state: RepeatState) -> &'static str {
+/// on/off. Pure, and localized from the table it is handed (issue #674), so
+/// the label contract is unit-testable in every locale.
+fn repeat_menu_label(strings: &Strings, state: RepeatState) -> &'static str {
     match state {
-        RepeatState::Off => "Repeat: Off",
-        RepeatState::Context => "Repeat: Context",
-        RepeatState::Track => "Repeat: Track",
+        RepeatState::Off => strings.repeat_off,
+        RepeatState::Context => strings.repeat_context,
+        RepeatState::Track => strings.repeat_track,
     }
 }
 
@@ -782,9 +789,10 @@ fn build_devices_submenu_from_devices(
     app: &AppHandle,
     devices: &[crate::spotify::DeviceInfo],
 ) -> Result<Submenu<tauri::Wry>, String> {
-    let submenu = Submenu::with_id(app, ID_DEVICES, "Devices", true).map_err(|e| e.to_string())?;
+    let s = i18n::current();
+    let submenu = Submenu::with_id(app, ID_DEVICES, s.devices, true).map_err(|e| e.to_string())?;
     if devices.is_empty() {
-        let empty = MenuItemBuilder::with_id(format!("{}|none", ID_DEVICES), "(no devices)")
+        let empty = MenuItemBuilder::with_id(format!("{}|none", ID_DEVICES), s.no_devices)
             .enabled(false)
             .build(app)
             .map_err(|e| e.to_string())?;
@@ -833,12 +841,13 @@ fn build_queue_submenu_from_queue(
     app: &AppHandle,
     queue: Option<&crate::spotify::QueueInfo>,
 ) -> Result<Submenu<tauri::Wry>, String> {
-    let submenu = Submenu::with_id(app, ID_QUEUE, "Up Next", true).map_err(|e| e.to_string())?;
+    let s = i18n::current();
+    let submenu = Submenu::with_id(app, ID_QUEUE, s.up_next, true).map_err(|e| e.to_string())?;
     let up_next: Vec<crate::spotify::TrackInfo> = queue
         .map(|q| q.up_next.iter().take(3).cloned().collect())
         .unwrap_or_default();
     if up_next.is_empty() {
-        let empty = MenuItemBuilder::with_id(format!("{}|none", ID_QUEUE), "(queue empty)")
+        let empty = MenuItemBuilder::with_id(format!("{}|none", ID_QUEUE), s.queue_empty)
             .enabled(false)
             .build(app)
             .map_err(|e| e.to_string())?;
@@ -999,6 +1008,18 @@ pub(crate) fn refresh_tray_from_state(app: &AppHandle) {
     std::thread::spawn(move || repaint_tray_from_state(&app_handle, "refresh_tray_from_state"));
 }
 
+/// Repaints the tray after a locale change (issue #674).
+///
+/// A language switch changes only labels, so the dedup snapshot would
+/// otherwise hide it — `force_tray_refresh` nudges that snapshot and rebuilds
+/// from the freshly installed table. It runs on a worker thread for the same
+/// reason as [`refresh_tray_from_state`]: the rebuild may perform blocking
+/// Spotify HTTP, which must never run on a menu/app-event thread.
+pub(crate) fn refresh_tray_for_locale(app: &AppHandle) {
+    let app_handle = app.clone();
+    std::thread::spawn(move || force_tray_refresh(&app_handle));
+}
+
 /// Waits — bounded by [`TOGGLE_SETTLE_TIMEOUT`] — for the frontend's
 /// Pause/Resume toggle to move the running flag away from `before`.
 /// Returns `true` when it moved, `false` when the window elapsed or state
@@ -1050,18 +1071,23 @@ fn force_tray_refresh(app: &AppHandle) {
 /// unstated, and the presence-gated dock badge is macOS-only. `is_playing`
 /// is `LAST_PLAYING_STATE` — the same source as the Play/Pause checkmark —
 /// not the polling loop's copy, which goes stale on a same-track pause.
+///
+/// Localized from the table it is handed (issue #674); the artist/title and
+/// the em-dash separators are locale-neutral, so only the status word and the
+/// track-less line come from the table.
 fn sync_status_line(
+    strings: &Strings,
     is_syncing: bool,
     is_playing: bool,
     track: Option<&crate::spotify::TrackInfo>,
 ) -> String {
     if !is_syncing {
-        return "Not syncing".to_string();
+        return strings.status_not_syncing.to_string();
     }
     match track {
-        None => "Syncing — no track".to_string(),
-        Some(t) if is_playing => format!("Syncing — {} — {}", t.artist, t.title),
-        Some(t) => format!("Paused — {} — {}", t.artist, t.title),
+        None => strings.status_syncing_no_track.to_string(),
+        Some(t) if is_playing => format!("{} — {} — {}", strings.status_syncing, t.artist, t.title),
+        Some(t) => format!("{} — {} — {}", strings.status_paused, t.artist, t.title),
     }
 }
 
@@ -1148,11 +1174,14 @@ pub fn update_tray_menu(
     // Build menu items without holding the tray write lock. Only the final
     // tray.set_menu call needs serialising — everything above is pure data
     // preparation and menu-item construction.
+    // Issue #674: every label below comes from the installed i18n table, so a
+    // language switch only has to rebuild the menu.
+    let s = i18n::current();
     // Determine Show/Hide label based on the precomputed visibility.
     let show_hide_label = if is_window_visible {
-        "Hide Window"
+        s.hide_window
     } else {
-        "Show Window"
+        s.show_window
     };
 
     let show_hide = MenuItemBuilder::with_id(ID_SHOW_HIDE, show_hide_label)
@@ -1172,9 +1201,9 @@ pub fn update_tray_menu(
         ID_RESUME_SYNC
     };
     let pause_resume_label = if is_syncing {
-        "Pause Sync"
+        s.pause_sync
     } else {
-        "Resume Sync"
+        s.resume_sync
     };
     let pause_resume = MenuItemBuilder::with_id(pause_resume_id, pause_resume_label)
         .build(app)
@@ -1196,7 +1225,7 @@ pub fn update_tray_menu(
         e.to_string()
     })?;
 
-    let open_settings = MenuItemBuilder::with_id(ID_OPEN_SETTINGS, "Open Settings")
+    let open_settings = MenuItemBuilder::with_id(ID_OPEN_SETTINGS, s.open_settings)
         .build(app)
         .map_err(|e| {
             log::warn!(
@@ -1206,7 +1235,7 @@ pub fn update_tray_menu(
             e.to_string()
         })?;
 
-    let open_logs = MenuItemBuilder::with_id(ID_OPEN_LOGS, "Open Logs Folder")
+    let open_logs = MenuItemBuilder::with_id(ID_OPEN_LOGS, s.open_logs_folder)
         .build(app)
         .map_err(|e| {
             log::warn!(
@@ -1216,7 +1245,7 @@ pub fn update_tray_menu(
             e.to_string()
         })?;
 
-    let quit = MenuItemBuilder::with_id(ID_QUIT, "Quit")
+    let quit = MenuItemBuilder::with_id(ID_QUIT, s.quit)
         .build(app)
         .map_err(|e| {
             log::warn!(
@@ -1240,7 +1269,7 @@ pub fn update_tray_menu(
     // is actually doing (syncing / paused / not syncing). Everything below
     // is derived from state already in scope for this rebuild, so the line
     // cannot drift from the Show/Hide and Pause/Resume items beside it.
-    let status_line = sync_status_line(is_syncing, is_playing, current_track.as_ref());
+    let status_line = sync_status_line(s, is_syncing, is_playing, current_track.as_ref());
     let sync_status = MenuItemBuilder::with_id(ID_SYNC_STATUS, status_line.clone())
         .enabled(false)
         .build(app)
@@ -1251,7 +1280,7 @@ pub fn update_tray_menu(
             );
             e.to_string()
         })?;
-    let play_pause = CheckMenuItemBuilder::with_id(ID_PLAY_PAUSE, PLAY_PAUSE_LABEL)
+    let play_pause = CheckMenuItemBuilder::with_id(ID_PLAY_PAUSE, s.play_pause)
         .checked(is_playing)
         .build(app)
         .map_err(|e| {
@@ -1261,7 +1290,7 @@ pub fn update_tray_menu(
             );
             e.to_string()
         })?;
-    let previous = MenuItemBuilder::with_id(ID_PREVIOUS, "Previous")
+    let previous = MenuItemBuilder::with_id(ID_PREVIOUS, s.previous)
         .build(app)
         .map_err(|e| {
             log::warn!(
@@ -1270,7 +1299,7 @@ pub fn update_tray_menu(
             );
             e.to_string()
         })?;
-    let next = MenuItemBuilder::with_id(ID_NEXT, "Next")
+    let next = MenuItemBuilder::with_id(ID_NEXT, s.next)
         .build(app)
         .map_err(|e| {
             log::warn!("[TRAY] update_tray_menu: failed to build next item: {}", e);
@@ -1284,7 +1313,7 @@ pub fn update_tray_menu(
     // changed from another client forces the rebuild that repaints the
     // mark; a click on these items rebuilds through `force_tray_refresh`
     // and is reflected immediately.
-    let shuffle = CheckMenuItemBuilder::with_id(ID_SHUFFLE, SHUFFLE_LABEL)
+    let shuffle = CheckMenuItemBuilder::with_id(ID_SHUFFLE, s.shuffle)
         .checked(LAST_SHUFFLE_STATE.load(Ordering::Acquire))
         .build(app)
         .map_err(|e| {
@@ -1295,7 +1324,7 @@ pub fn update_tray_menu(
             e.to_string()
         })?;
     let repeat_state = last_repeat_state();
-    let repeat = CheckMenuItemBuilder::with_id(ID_REPEAT, repeat_menu_label(repeat_state))
+    let repeat = CheckMenuItemBuilder::with_id(ID_REPEAT, repeat_menu_label(s, repeat_state))
         .checked(repeat_state.is_on())
         .build(app)
         .map_err(|e| {
@@ -1446,6 +1475,9 @@ pub fn set_presence_gated_badge(_app: &AppHandle, _gated: bool) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Issue #674: the label helpers are table-driven, so the tests name the
+    // tables directly instead of relying on the process-wide locale.
+    use crate::i18n::{DE, EN, FR};
 
     /// Issue #388: device menu ids must parse to stable Spotify device ids,
     /// never to a list index. Pure helper — no Tauri runtime needed.
@@ -1706,9 +1738,11 @@ mod tests {
     }
 
     /// Issue #591: the tray must state whether the app is syncing instead of
-    /// leaving it to be inferred from the Pause/Resume verb. Pure helper.
+    /// leaving it to be inferred from the Pause/Resume verb. Issue #674: the
+    /// status word comes from the table the caller hands in, so the same
+    /// helper renders German/French without a second code path.
     #[test]
-    fn sync_status_line_reports_backend_state() {
+    fn sync_status_line_reports_backend_state_in_every_locale() {
         let track = crate::spotify::TrackInfo {
             title: "Track".to_string(),
             artist: "Artist".to_string(),
@@ -1719,39 +1753,76 @@ mod tests {
             duration_ms: 0,
         };
         assert_eq!(
-            sync_status_line(false, true, Some(&track)),
+            sync_status_line(&EN, false, true, Some(&track)),
             "Not syncing",
             "a stopped poller outranks any remembered track"
         );
         assert_eq!(
-            sync_status_line(false, false, None),
+            sync_status_line(&EN, false, false, None),
             "Not syncing",
             "no track and no sync is still Not syncing"
         );
         assert_eq!(
-            sync_status_line(true, false, None),
+            sync_status_line(&EN, true, false, None),
             "Syncing — no track",
             "syncing with nothing playing must say so rather than claim a track"
         );
         assert_eq!(
-            sync_status_line(true, true, Some(&track)),
+            sync_status_line(&EN, true, true, Some(&track)),
             "Syncing — Artist — Track"
         );
         assert_eq!(
-            sync_status_line(true, false, Some(&track)),
+            sync_status_line(&EN, true, false, Some(&track)),
             "Paused — Artist — Track",
             "a same-track pause is reported from the live playing state"
+        );
+
+        // Issue #674: the selected table is what the user reads — Deutsch and
+        // Français must not fall back to the English status words.
+        assert_eq!(
+            sync_status_line(&DE, true, true, Some(&track)),
+            format!("{} — Artist — Track", DE.status_syncing)
+        );
+        assert_eq!(
+            sync_status_line(&DE, true, false, Some(&track)),
+            format!("{} — Artist — Track", DE.status_paused)
+        );
+        assert_eq!(
+            sync_status_line(&DE, false, false, None),
+            DE.status_not_syncing
+        );
+        assert_eq!(
+            sync_status_line(&FR, true, false, None),
+            FR.status_syncing_no_track
         );
     }
 
     /// Issue #582: a check mark can only carry on/off, while `repeat_state`
     /// has three documented values — so the label must name the mode, or a
-    /// user cannot tell "repeat one" from "repeat the playlist".
+    /// user cannot tell "repeat one" from "repeat the playlist". Issue #674:
+    /// the label is read from the installed table.
     #[test]
     fn repeat_menu_label_spells_out_the_mode() {
-        assert_eq!(repeat_menu_label(RepeatState::Off), "Repeat: Off");
-        assert_eq!(repeat_menu_label(RepeatState::Context), "Repeat: Context");
-        assert_eq!(repeat_menu_label(RepeatState::Track), "Repeat: Track");
+        assert_eq!(repeat_menu_label(&EN, RepeatState::Off), "Repeat: Off");
+        assert_eq!(
+            repeat_menu_label(&EN, RepeatState::Context),
+            "Repeat: Context"
+        );
+        assert_eq!(repeat_menu_label(&EN, RepeatState::Track), "Repeat: Track");
+
+        assert_eq!(repeat_menu_label(&DE, RepeatState::Off), "Wiederholen: Aus");
+        assert_eq!(
+            repeat_menu_label(&DE, RepeatState::Context),
+            "Wiederholen: Kontext"
+        );
+        assert_eq!(
+            repeat_menu_label(&DE, RepeatState::Track),
+            "Wiederholen: Titel"
+        );
+        assert_eq!(
+            repeat_menu_label(&FR, RepeatState::Track),
+            "Répéter : titre"
+        );
     }
 
     /// Issue #582: the two toggles render the state the poll body reported
@@ -1766,7 +1837,7 @@ mod tests {
         note_playback_modes(true, RepeatState::Track);
         assert!(LAST_SHUFFLE_STATE.load(Ordering::Acquire));
         assert_eq!(last_repeat_state(), RepeatState::Track);
-        assert_eq!(repeat_menu_label(last_repeat_state()), "Repeat: Track");
+        assert_eq!(repeat_menu_label(&EN, last_repeat_state()), "Repeat: Track");
         // The click targets: Repeat advances along the documented cycle,
         // Shuffle flips whatever was last observed.
         assert_eq!(last_repeat_state().next(), RepeatState::Off);
@@ -1870,7 +1941,7 @@ mod tests {
             progress_ms: None,
             duration_ms: 0,
         };
-        let mark = |playing: bool| sync_status_line(true, playing, Some(&track));
+        let mark = |playing: bool| sync_status_line(&EN, true, playing, Some(&track));
 
         note_playing_state(true);
         assert_eq!(
