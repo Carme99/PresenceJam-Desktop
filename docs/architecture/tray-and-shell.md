@@ -99,11 +99,15 @@ The UI is localized to **English, German, and French** via the i18n barrel
 ## Auto-Update (v3.0)
 
 Updates are delivered through `tauri-plugin-updater` (registered in
-`lib.rs`; `updater:default` in `capabilities/default.json`). The endpoint
-(`tauri.conf.json`) is
-`https://github.com/Carme99/PresenceJam-Desktop/releases/latest/download/latest.json`
-— a hand-assembled manifest (`release.yml`) mapping each platform to its
-signed artifact on the GitHub Release:
+`lib.rs`; `updater:default` in `capabilities/default.json`). `tauri.conf.json`
+carries the **stable** endpoint,
+`https://github.com/Carme99/PresenceJam-Desktop/releases/latest/download/latest.json`,
+but since 4.7.0 (#678) the endpoints the app actually uses come from
+`updater_bg.rs::update_endpoints(AppConfig.updates.channel)`: Stable is that URL
+and Beta is its `latest-beta.json` sibling **followed by** the stable URL, so a
+missing beta manifest falls through to the stable release. The manifest is
+hand-assembled by `release.yml` and maps each platform to its signed artifact
+on the GitHub Release:
 
 - `darwin-aarch64` → `PresenceJam-<tag>.app.tar.gz` (+ `.sig`)
 - `windows-x86_64` → `PresenceJam-<tag>.msi` (+ `.msi.sig`)
@@ -116,18 +120,22 @@ signed artifact on the GitHub Release:
 pubkey is inlined in `tauri.conf.json`, so the plugin rejects tampered
 payloads.
 
-**Flow:** `UpdatePrompt.svelte` calls `check()` on startup → if a newer
-version exists it shows a dismissible **"Update vX.Y.Z available"** banner
-→ **Download & Install** runs `downloadAndInstall()` with a progress
-readout → `invoke("relaunch_app")` (`commands/misc.rs::relaunch_app`,
-`AppHandle::restart`) restarts the process into the new version. A failed
-check (offline, unreachable endpoint, signature mismatch) is silent —
-never blocks the UI.
+**Flow:** `UpdatePrompt.svelte` invokes the Rust `updater_bg.rs::check_for_update`
+on startup (the plugin's JS `check()` cannot take an endpoint list, so the
+banner's candidate is resolved in Rust from the configured channel) → if a
+newer version exists it shows a dismissible **"Update vX.Y.Z available"**
+banner → **Download & Install** runs the JS `downloadAndInstall()` (offered on
+Stable only, where the plugin's static endpoint and the channel's resolved
+list are the same manifest) with a progress readout → `invoke("relaunch_app")`
+(`commands/misc.rs::relaunch_app`, `AppHandle::restart`) restarts the process
+into the new version. On Beta that button is replaced by install-on-quit
+(`update.betaOnQuitOnly`, issue #678). A failed check (offline, unreachable
+endpoint, signature mismatch) is silent — never blocks the UI.
 
 **Silent background checks + install-on-quit (v4.0):**
 
-- *Background checks:* `UpdatePrompt.svelte` repeats `check()` every ~24h while
-  the app runs (the startup check is unchanged). A failed silent check stays
+- *Background checks:* `UpdatePrompt.svelte` repeats the `check_for_update`
+  round trip every ~24h while the app runs (the startup check is unchanged). A failed silent check stays
   console-only — it never surfaces a banner or toast, so an offline machine is
   never nagged.
 - *Install-on-quit:* the JS-side `downloadAndInstall()` cannot defer (it applies

@@ -17,6 +17,8 @@ PresenceJam uses the following open-source projects. We're grateful to all the m
 | [tauri-plugin-updater](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Auto-update with minisign-signed payloads |
 | [tauri-plugin-dialog](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | Native save/open dialogs for settings export/import (#673) — **Rust-only**: no npm package and no `dialog:*` capability, because the overwrite confirmation runs in Rust |
 | [tauri-plugin-global-shortcut](https://github.com/tauri-apps/tauri) | 2.x | MIT OR Apache-2.0 | App-wide hotkeys for playback and sync, registered per binding (#676) |
+| [objc2-core-foundation](https://github.com/madsmtm/objc2) | 0.3 | MIT | `CFString`, used to pass the scheme + bundle id to LaunchServices on macOS (`macos_deeplink.rs`, #628) |
+| [objc2-core-services](https://github.com/madsmtm/objc2) | 0.3 | MIT | `LSSetDefaultHandlerForURLScheme` — the macOS deep-link re-claim (#66, #628) |
 | [reqwest](https://github.com/seanmonstar/reqwest) | 0.12 | Apache-2.0 OR MIT | HTTP client for Spotify/Graph APIs |
 | [serde](https://github.com/serde-rs/serde) | 1.x | Apache-2.0 OR MIT | Serialization framework |
 | [serde_json](https://github.com/serde-rs/json) | 1.x | Apache-2.0 OR MIT | JSON parsing |
