@@ -610,6 +610,7 @@ fn run_inner(
                 &config,
                 last_posted_placeholder,
                 suppressed_placeholder,
+                gated_track_key,
                 last_availability_arm,
                 armed_presence,
                 first_iteration,
@@ -768,6 +769,7 @@ fn run_inner(
                                             &config,
                                             last_posted_placeholder,
                                             suppressed_placeholder,
+                                            gated_track_key,
                                             last_availability_arm,
                                             armed_presence,
                                             first_iteration,
@@ -2008,6 +2010,21 @@ fn placeholder_write_decision(
     }
 }
 
+/// The `gated_track_key` value for a suppression with NO track present
+/// (findings D4/D11 follow-up). There is no status key to record, but the gate
+/// is real — quiet hours or a match-all rule suppress the no-track clear — so
+/// the state must stay representable; it must simply never be the finished
+/// track's key. A real status key always carries `" | "` separators
+/// (see [`status_track_key`]), so this sentinel cannot collide with one.
+const NO_TRACK_GATE_KEY: &str = "no-track";
+
+/// The `gated_track_key` transition the no-track path applies: the sentinel
+/// while a suppression holds, `None` once nothing is suppressed. One helper so
+/// the suppress arm and the two retiring arms cannot drift.
+fn no_track_gate_key(blocked: bool) -> Option<&'static str> {
+    blocked.then_some(NO_TRACK_GATE_KEY)
+}
+
 /// Finding D6 (issue #689): whether the observed item represents a playback
 /// STATE change for an otherwise-unchanged track.
 ///
@@ -2890,11 +2907,19 @@ pub(crate) fn handle_no_track(
     config: &Option<crate::config::AppConfig>,
     last_posted_placeholder: &mut Option<String>,
     suppressed_placeholder: &mut Option<String>,
+    gated_track_key: &mut Option<String>,
     last_availability_arm: &mut Option<Instant>,
     armed_presence: &mut Option<PresencePair>,
     first_iteration: &mut bool,
     last_posted_status: &mut Option<String>,
 ) -> u64 {
+    // Findings D4/D11 follow-up: `gated_track_key` must describe the CURRENT
+    // suppression, so the no-track path owns it too — the track's key must not
+    // survive the track (a stale key makes the Dashboard chip claim "you're
+    // busy, in a call, or presenting" over a "Nothing playing" card forever),
+    // while a suppression with no track present (quiet hours / a match-all
+    // rule) IS a real gated state and has to stay representable.
+    // `no_track_gate_key` is the transition, in one place.
     // Issue #373: consume the fresh-thread flag exactly once (see
     // `first_no_track_attempts_clear`). A fresh thread starts with
     // `last_track_key=None`, so the first no-track poll falls through
@@ -2987,11 +3012,18 @@ pub(crate) fn handle_no_track(
                 "[POLLING] handle_no_track: clear suppressed ({}), keeping Teams status untouched (retried once the decision changes)",
                 suppression_reason.unwrap_or(GATE_REASON_QUIET_HOURS)
             );
-            // Findings D4: recorded as SUPPRESSED so the decision can flip back
-            // — the next iteration where the rule no longer suppresses falls
-            // into the POST arm below instead of being deduped. The marker also
-            // keeps the event to one per suppression episode.
+            // Findings D4 (issue #687): recorded as SUPPRESSED so the decision
+            // can flip back — the next iteration where the rule no longer
+            // suppresses falls into the POST arm below instead of being
+            // deduped. The marker also keeps the event to one per suppression
+            // episode.
             *suppressed_placeholder = Some(placeholder.clone());
+            // Findings D4/D11 follow-up: a suppressed clear with nothing
+            // playing IS a real gate (quiet hours / a match-all rule suppress
+            // the write), so `presence_gated` stays true — but the finished
+            // track's key must not survive it, or the Dashboard would keep
+            // naming a track that has ended. Record the no-track sentinel.
+            *gated_track_key = no_track_gate_key(true).map(str::to_string);
             if announce {
                 emit_presence_gated(
                     app,
@@ -3006,6 +3038,9 @@ pub(crate) fn handle_no_track(
             log::debug!(
                 "[POLLING] handle_no_track: no-track placeholder unchanged, skipping clear POST"
             );
+            // A suppressing verdict would have won above, so nothing is gated
+            // now: retire whatever key the finished track left behind.
+            *gated_track_key = no_track_gate_key(false).map(str::to_string);
             return teams_backoff_secs;
         }
         PlaceholderWrite::Post => {
@@ -3115,6 +3150,11 @@ pub(crate) fn handle_no_track(
             // Finding D1 (issue #684): Teams now shows a placeholder, not a
             // playing status — mirror it in the exit snapshot.
             super::state::record_posted_status(None);
+            // Findings D4/D11 follow-up: the clear was posted, so no write is
+            // being suppressed any more — retire the finished track's gate key
+            // (a stale one made `get_sync_status` answer `presence_gated = true`
+            // forever after a gated track ended).
+            *gated_track_key = no_track_gate_key(false).map(str::to_string);
             let _ = app.emit(
                 "presence-cleared",
                 json!({ "timestamp": Utc::now().to_rfc3339() }),
@@ -6302,6 +6342,86 @@ mod tests {
             load_write_clocks().generation,
             dead.generation.wrapping_add(1),
             "the reset's generation must not be overwritten by a pre-reset snapshot"
+        );
+    }
+    /// Review follow-up on #684: the no-track path owns `gated_track_key`, so a
+    /// gate recorded for a track cannot outlive it — while a suppression with
+    /// nothing playing stays representable.
+    #[test]
+    fn test_no_track_path_retires_the_finished_tracks_gate() {
+        // A real status key always carries the kind/fingerprint separators, so
+        // the sentinel can never collide with one.
+        let finished_track_key = status_track_key(&crate::spotify::NowPlaying::default(), &None);
+        assert!(
+            finished_track_key.contains(" | "),
+            "a status key is <title> - <artist> | <kind> | <config fingerprint>"
+        );
+        assert_ne!(finished_track_key, NO_TRACK_GATE_KEY);
+
+        // A gated track ends (the clock still names it) and the no-track clear
+        // is suppressed by quiet hours / a match-all rule.
+        let decision = placeholder_write_decision(true, false, false);
+        assert_eq!(decision, PlaceholderWrite::Suppress { announce: true });
+        let suppressed_gate = no_track_gate_key(true).map(str::to_string);
+        assert_eq!(
+            suppressed_gate.as_deref(),
+            Some(NO_TRACK_GATE_KEY),
+            "a gate with no track present is real and must stay representable, otherwise \
+             the Dashboard chip cannot say why the clear is suppressed"
+        );
+        assert_ne!(
+            suppressed_gate.as_deref(),
+            Some(finished_track_key.as_str()),
+            "the gate must stop naming the track that has ended"
+        );
+
+        // The suppression lifts and the clear is posted: nothing is gated.
+        assert_eq!(
+            no_track_gate_key(false).map(str::to_string),
+            None,
+            "a posted clear must leave get_sync_status answering presence_gated = false"
+        );
+    }
+
+    /// Review follow-up on #684, structural guard (the head of #702 failed
+    /// exactly here): `handle_no_track` must retire the gate when its clear
+    /// succeeds and record the no-track sentinel while a rule suppresses it.
+    /// Pre-fix it never touched `gated_track_key`, so a gated track's key
+    /// survived the track and `get_sync_status` kept reporting
+    /// `presence_gated = true` over a "Nothing playing" card.
+    #[test]
+    fn test_no_track_path_owns_the_gate_state() {
+        let prod = prod_source();
+        let body = prod_fn_body(prod, "pub(crate) fn handle_no_track(");
+        assert!(
+            body.contains("*gated_track_key = "),
+            "handle_no_track must write clocks.gated_track_key: it is the only owner of \
+             that state once no track is playing (review follow-up on #684)"
+        );
+        let suppress_start = body
+            .find("PlaceholderWrite::Suppress")
+            .expect("the no-track clear must use the shared decision");
+        let skip_start = body
+            .find("PlaceholderWrite::SkipDuplicate")
+            .expect("the no-track clear must keep the dedup arm");
+        let suppress_arm = &body[suppress_start..skip_start];
+        assert!(
+            suppress_arm.contains("no_track_gate_key(true)"),
+            "a suppressed no-track clear IS gated: record the no-track sentinel, not the \
+             finished track's key (review follow-up on #684)"
+        );
+        let post_start = body
+            .find("PlaceholderWrite::Post")
+            .expect("the no-track clear must keep the POST arm");
+        let skip_arm = &body[skip_start..post_start];
+        assert!(
+            skip_arm.contains("no_track_gate_key(false)"),
+            "an already-correct placeholder leaves nothing gated: retire the key"
+        );
+        assert!(
+            body.matches("no_track_gate_key(false)").count() >= 2,
+            "both non-suppressing outcomes (dedup and the posted clear) must retire the \
+             gate, so no path leaves a stale one behind"
         );
     }
 }

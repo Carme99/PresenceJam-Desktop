@@ -29,7 +29,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   meeting ending while the track stayed paused — re-ran the same dedup and
   skipped the clear for good. The verdict now comes first, a suppression is
   recorded as a suppression (never as a post), and the paused clear re-evaluates
-  its recorded gate on the same re-check clock the playing branch uses.
+  its recorded gate on the same re-check clock the playing branch uses. The
+  no-track path also owns the gate state now: a gate recorded for a track is
+  retired when that track ends (or when the clear is already showing), so
+  `presence_gated` can no longer stay true — and the Dashboard chip keep saying
+  "you're busy, in a call, or presenting" — above a "Nothing playing" card. A
+  suppression with nothing playing is still reported as gated; it just carries
+  the no-track marker instead of the finished track's key.
 - **A poller that stopped itself never announced it (#688):** the five-strike
   auth exit (and every other thread exit that is not a `stop_syncing`) emitted
   nothing, so the Dashboard mirror stayed on "Syncing" and the tray on "Pause
