@@ -3791,7 +3791,6 @@ mod tests {
         assert!(!dir.join("config.json.bak").exists());
 
         let _ = std::fs::remove_dir_all(&dir);
-
     }
 
     /// Issue #676: every config file written before 4.7.0 lacks the
