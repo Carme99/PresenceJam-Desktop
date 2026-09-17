@@ -92,17 +92,17 @@ define together, or not at all.
 ## 3. CI gates a release PR must pass
 
 `ci.yml` triggers on pull requests into `main` and pushes to `main`. Failable
-jobs:
+jobs (the Name column is the check context shown on the PR's checks list):
 
 | Job | Name | What it does |
 | --- | --- | --- |
 | `rust-platform-check` | Rust check (macOS + Windows) | `cargo check` on macOS + Windows (platform-gated code compiles) |
-| `frontend` | — | `npm run build`, `npm run check`, frontend tests |
-| `rust` | — | fmt, `cargo check`, `cargo test` on Linux |
-| `rust-clippy` | — | `cargo clippy -- -D warnings` |
+| `frontend` | Frontend (npm build + ts-rs codegen) | `npm run build`, `npm run check`, frontend tests |
+| `rust` | Rust (cargo check) | fmt, `cargo check`, `cargo test` on Linux |
+| `rust-clippy` | Rust clippy | `cargo clippy -- -D warnings` |
 | `changelog-links` | CHANGELOG link definitions | every `## [X]` header needs a `[X]:` definition |
 | `version-consistency` | Version consistency | `tauri.conf.json` vs `package.json` vs `Cargo.toml` |
-| `secret-scan` | — | gitleaks over the history |
+| `secret-scan` | Secret scan (gitleaks) | gitleaks over the history |
 | `dep-audit` | Dependency audit (cargo + npm) | **advisory only** — `continue-on-error: true` |
 
 ## 4. The tag → publish chain (`release.yml`)
