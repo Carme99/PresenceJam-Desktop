@@ -14,7 +14,7 @@ end-to-end; the few rows that can't be sourced inline are explicitly flagged
 | Feature                                               | Status | Where it's wired / verified                                                                                             |
 |-------------------------------------------------------|--------|--------------------------------------------------------------------------------------------------------------------------|
 | Spotify Premium ↔ Teams status (work/school)            | ✅     | Spotify calls hit `accounts.spotify.com/api/token` (Authorization Code + PKCE, confidential client) + `/v1/me/player/currently-playing`; Teams calls hit `graph.microsoft.com/v1.0/me/presence/setStatusMessage`. The OAuth rounds are wired in `src-tauri/src/spotify.rs` and `src-tauri/src/teams.rs`. |
-| Sign-in survives a long idle period (Dashboard, not the wizard) | ⚠ Partial | `src-tauri/src/commands/onboarding.rs::session_verdict` + `spotify_session_verdict` / `teams_session_verdict` — the launch gate refreshes a locally-expired access token (CAS + persist) instead of probing the API with the stale bearer, and only `invalid_grant` / missing credentials ask for a sign-in again (#530); `src/lib/utils/boot.ts::bootView` routes an incomplete-but-configured install to Reconnect. Decision table + routing are unit-tested; the refresh leg needs one real relaunch after > 1 h with the app closed to be confirmed end to end. Reconnect only auto-starts the Spotify flow when `SyncStatus.spotify_connected` is false (`src/lib/utils/reconnect.ts::shouldAutoStartSpotifyReconnect`, #530 follow-up), so a Teams-only re-auth no longer opens an unrequested Spotify window. |
+| Sign-in survives a long idle period (Dashboard, not the wizard) | ⚠ Partial | `src-tauri/src/commands/onboarding.rs::session_verdict` + `spotify_session_verdict` / `teams_session_verdict` — the launch gate refreshes a locally-expired access token (CAS + persist) instead of probing the API with the stale bearer, and only `invalid_grant` / missing credentials ask for a sign-in again (#530); `src/lib/utils/boot.ts::bootView` routes an incomplete-but-configured install to Reconnect. Decision table + routing are unit-tested; the refresh leg needs one real relaunch after > 1 h with the app closed to be confirmed end to end. Reconnect only auto-starts the Spotify flow when `SyncStatus.spotify_connected` is false (`src/lib/utils/reconnect.ts::shouldAutoStartSpotifyReconnect`, #530 follow-up), so a Teams-only re-auth no longer opens an unrequested Spotify window.  **4.7.0 smoke: not run** — it needs a signed-in install and a > 1 h wall-clock relaunch; the machine used for this release has no desktop session and no Spotify/Teams credentials. The published 4.7.0 artifacts were exercised instead (startup, `--status`, `--sync-once` exit codes) and the decision table is unit-tested; this row stays ⚠ until a maintainer runs the two steps above on a signed-in machine. |
 | Smart sleep between polls                              | ✅     | `src-tauri/src/polling/poll_once.rs` — sleeps until `track.duration_ms − track.progress_ms − 5000ms`, clamped to user-configured `min/max_interval_seconds`. ~240 s of silence per 4-min song. |
 | Pause-aware backoff (Spotify idle)                     | ✅     | `src-tauri/src/polling/poll_once.rs::pause_backoff(consecutive_pauses, default_secs, ceiling_secs)` — 30 → 60 → 120 s → ceiling after consecutive non-playing responses (`Ok(None)` or `is_playing == false`); resets to 30 s on the next playing track, and also on any tracked 304 Not Modified (an unchanged track — see `not_modified_iteration`). The ceiling is `polling.pause_backoff_max_seconds` (default 300 s, clamped 60–3600 s by `config::clamp_polling`, and floored at the base interval so the ladder cannot invert). At the 30 s default cadence a full day is ~2880 calls; paused it settles at 1/ceiling → ~288-291 calls/24 h at the 300 s default (~72-75 per 6 h) — a ~10× reduction. |
 | Profanity filter on outgoing Teams status              | ✅     | `src-tauri/src/profanity.rs` — curated word list + compounds (`asshole`, `tits`, `twat`); extended leetspeak (`2→i, 6/8→b, 9→g, +→t, (→c, \//→v`, plus `ph→f` pre-fold, `x→ck` expansion, dropped-`c` `uk→uck`, terminal `z→s` #377/#470); separator skipping gated on word boundaries; Unicode fold (zero-width/format strip, fullwidth→ASCII, diacritic table, no new dependency); boundary safety for `class`, `assassin`, `cocktail bar`, `cockpit`, `Spice Girls`, `Push It`; glued compounds (`bullshit`, `dickhead`, `sonofabitch` #411) still flag; placeholder re-scanned with case-insensitive `{emoji}`; track titles log at debug level only (v4.1.1, #328–#344). |
@@ -39,7 +39,7 @@ end-to-end; the few rows that can't be sourced inline are explicitly flagged
 | WCAG 2.2 AA accessibility pass (C12)                    | ✅     | Skip link, focus-ring alpha fixes (dark 0.75 / light 0.90), `prefers-reduced-motion` guards, darkened status/accent tokens in both themes; contrast validator parses pairs straight from `src/app.css` — 0 failures across both themes. |
 | OAuth single-use state binding (C1)                     | ✅     | `pkce::LaunchBinding` binds the SHA-256 of the in-flight verifier at authorize time; `validate_and_consume` take()s the slot after validation so replayed callbacks fail closed (RFC 6749 §10.12 analogue); constant-time compares via `pkce::ct_eq`. Unit tests cover replay/wrong/truncated/malformed states. |
 | Silent background update checks (C3a)                   | ✅     | `UpdatePrompt.svelte` re-checks every ~24h; failed silent checks stay console-only. |
-| Install-on-quit updates (C3c)                           | ⚠ Partial | `updater_bg.rs::stage_deferred_update` downloads + signature-verifies into managed `PendingUpdate`; `lib.rs` applies it in the `RunEvent::Exit` arm. 4.6 adds throttled `update-stage-progress` events (250 ms / 5 %, first chunk always emits) and `cancel_deferred_update`, which drops the staged payload and frees its in-memory bytes (#590). Code path + tests verified; end-to-end behaviour against a *published* `latest.json` still needs one live release cycle before promising it to users. Windows auto-relaunches; macOS/Linux pick up on next launch. |
+| Install-on-quit updates (C3c)                           | ⚠ Partial | `updater_bg.rs::stage_deferred_update` downloads + signature-verifies into managed `PendingUpdate`; `lib.rs` applies it in the `RunEvent::Exit` arm. 4.6 adds throttled `update-stage-progress` events (250 ms / 5 %, first chunk always emits) and `cancel_deferred_update`, which drops the staged payload and frees its in-memory bytes (#590). Code path + tests verified; end-to-end behaviour against a *published* `latest.json` still needs one live release cycle before promising it to users. Windows auto-relaunches; macOS/Linux pick up on next launch.  **4.7.0 smoke: partially run** — against the *published* `latest.json` the release serves a valid 4.7.0 manifest with three platform entries and live minisign signatures, and the published 4.7.0 binary boots and self-reports `PresenceJam 4.7.0 started successfully`. The click-to-stage leg (banner → Install on quit → quit → relaunch) was **not** run: it needs a desktop session, and a headless 4.6.0 run produces no staging log because the banner requires a click. This row stays ⚠ until a maintainer completes that leg. |
 | Release build-provenance attestations (C10)             | ✅ Verified | `release.yml` attests artifacts via SHA-pinned `actions/attest-build-provenance`; exercised live on the v4.0.0 and v4.1.0 tag runs (attest step green both times). `workflow_dispatch` with a `tag` input allows re-cutting an existing `v*` tag. |
 | Dependency prune: shell/store plugins gone (C13)        | ✅     | `package.json`/`package-lock.json` and Cargo lock pruned of `tauri-plugin-shell`/`tauri-plugin-store` + npm shell plugin; ACKNOWLEDGEMENTS rows removed. No imports or capability grants existed. |
 | h2 0.4.18                                               | ✅     | RUSTSEC-2026-0258 cleared via lockfile bump (`ed88008`). |
@@ -163,6 +163,41 @@ end-to-end relaunch smoke pending" rather than promoting it on a unit test.
 > CoreServices path (issue #66, #628), so macOS re-claims the scheme on every
 > launch like Windows and Linux. The residual risk is an attacker that registers
 > *between* our launch and the callback, which PKCE + `state` covers.
+
+### 4.7.0 smoke record (2026-09-17)
+
+Run against the **published** `v4.7.0` release, on a headless Linux host
+(`XDG_SESSION_TYPE=tty`, no Secret Service, no Spotify/Teams credentials). Both
+rows above therefore stay ⚠, per the rule stated above them.
+
+**Verified from the published artifacts:**
+
+- `releases/latest/download/latest.json` serves `version: 4.7.0` with the three
+  platform keys (`darwin-aarch64`, `windows-x86_64`, `linux-x86_64`) and
+  non-empty minisign signature bodies.
+- All three platform asset URLs return **200**, and `SHA256SUMS.txt` is present
+  with eight entries.
+- The published Linux AppImage boots and logs
+  `[APP] setup: PresenceJam 4.7.0 started successfully`, with the tray and the
+  application menu initialized — so the shipped binary self-reports the version
+  the manifest advertises (the mismatch that would re-offer an update forever).
+- `presencejam --status` on the shipped binary prints the seven-field
+  `SyncStatus` JSON — including 4.7.0's new `last_posted_status`,
+  `presence_gated` and `presence_paused` — and exits 0.
+- `presencejam --sync-once` on the shipped binary exits **1** with the reason on
+  stderr (`no Spotify client_id configured …`), confirming the 4.7.0 exit-code
+  fix in the released build.
+
+**Not run (needs a desktop session with real credentials):**
+
+- the click-to-stage leg of smoke 1 (banner → *Install on quit* → quit →
+  relaunch). A headless 4.6.0 run cannot produce it: the staging is driven by a
+  click on the banner, and a 4.6.0 startup log contains no check outcome.
+- all of smoke 2, which requires signing in to both providers and leaving the
+  app closed for more than an hour.
+
+Both rows are to be flipped by a maintainer who runs those steps; the wording
+added to each row records exactly what remains.
 
 ## Documented gaps (do work; deliberately out of scope for the version tested)
 
