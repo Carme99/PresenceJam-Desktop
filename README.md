@@ -115,16 +115,27 @@ npm run tauri build
 
 ## Command-line flags
 
-PresenceJam is a tray app, but the binary also answers three **headless flags** — useful from a
-script, a cron job or a support session. None of them opens the app window, and any *other*
-argument is ignored, so the app starts normally exactly as it always has.
+PresenceJam is a tray app, but the binary also answers three CLI flags — useful from a script,
+a cron job or a support session. None of them opens the app window, and any *other* argument is
+ignored, so the app starts normally exactly as it always has.
 
 | Command | What it does |
 | --- | --- |
-| `presencejam --status` | Prints the sync status as **JSON on stdout** and exits `0` — the same fields the app's `get_sync_status` command returns. Builds no window and no tray icon and takes no single-instance lock, so it works headless; `spotify_connected` / `teams_connected` come from the same `config.json` and `tokens.json` the app reads. |
-| `presencejam --sync-once` | Runs **exactly one poll iteration** (including the Teams status write) and exits `0` on success, or `1` with the reason on stderr. Needs a configured Spotify `client_id` and a sign-in to both Spotify and Teams; logs go to the normal log file. |
-| `presencejam --help` | Prints the usage text — these three flags plus `--minimized` — and exits `0`. |
+| `presencejam --status` | Prints the sync status as **JSON on stdout** and exits `0` — the same fields the app's `get_sync_status` command returns. Fully headless: builds no window and no tray icon and takes no single-instance lock. `spotify_connected` / `teams_connected` come from the same `config.json` and `tokens.json` the app reads. |
+| `presencejam --sync-once` | Runs **exactly one poll iteration** (including the Teams status write) and exits `0` on success, or `1` with the reason on **stderr**. Needs a configured Spotify `client_id` and a sign-in to both Spotify and Teams; logs go to the normal log file. |
+| `presencejam --help` | Prints the usage text — these three flags plus `--minimized` — and exits `0`. Fully headless. |
 | `presencejam --minimized` | Starts with the window hidden (what the autostart plugin passes at login). This is a normal GUI launch. |
+
+**Platform requirement.** `--status` and `--help` need no desktop at all. `--sync-once` does on
+Linux: it drives the **same poller as the app**, and that poller works through the app's Tauri
+runtime, which needs a display server. On a bare machine run it under `xvfb-run` (wrapped by
+`cron` or a CI step); without one it aborts at startup with an abnormal exit instead of the exit
+codes below, because the runtime itself cannot be created.
+
+Exit codes for `--sync-once`: `0` — the iteration completed (no track playing, a deduplicated
+write and a suppressed gate are all completions); `1` — a transient or auth failure, with the
+poller's own reason on stderr (`spotify: Failed to get currently playing: …`,
+`reconnect-required: …`); an abnormal exit (101) when no display is available.
 
 See [USAGE.md — Command-line flags](./USAGE.md#command-line-flags) for the field-by-field
 details and the exact exit conditions.

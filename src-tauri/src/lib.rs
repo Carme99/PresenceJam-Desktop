@@ -838,7 +838,9 @@ FLAGS:
                 write) and exit 0 on success, or exit 1 with the reason on
                 stderr. Logs go to the normal log file. Requires the app to be
                 signed in to Spotify and Teams; without credentials it exits 1
-                before anything else happens.
+                before anything else happens, and on Linux it needs a display
+                server (it drives the app's own poller) — use xvfb-run on a
+                bare machine.
   --help        Print this help and exit 0.
   --minimized   Start with the window hidden. The autostart plugin passes
                 this, and it still launches the GUI.
@@ -1038,15 +1040,40 @@ fn cli_sync_once_iteration(
     match failure.lock().clone() {
         None => {
             log::info!("[CLI] {SYNC_ONCE_FLAG}: iteration completed");
-            handle.exit(0);
+            // Graceful teardown: the runtime flushes the log plugin in
+            // `cleanup_before_exit`, and 0 is the code it exits with anyway.
+            handle.exit(cli_sync_once_exit_code(None));
         }
         Some(reason) => {
+            let code = cli_sync_once_exit_code(Some(&reason));
             eprintln!("presencejam: {SYNC_ONCE_FLAG}: {reason}");
             log::warn!("[CLI] {SYNC_ONCE_FLAG}: iteration failed: {reason}");
-            handle.exit(1);
+            // Issue #679 review round 2: `AppHandle::exit(code)` cannot report a
+            // non-zero code — tauri-runtime-wry turns `RequestExit(code)` into
+            // `ControlFlow::Exit`, which tao maps to `process::exit(0)` (the
+            // string `ExitWithCode` appears nowhere in the runtime) — so a
+            // scripted caller would read a failed iteration as success. Exit the
+            // process here instead, after flushing the logger (the plugin's file
+            // target buffers, so an unflushed exit would lose this very line).
+            log::logger().flush();
+            std::process::exit(code);
         }
     }
     Ok(())
+}
+
+/// The process exit code for one `--sync-once` iteration: a completed
+/// iteration is success, a captured failure signal is not.
+///
+/// Split out so the mapping is pinned by a test (issue #679 review round 2:
+/// the failure branch used to hand its code to `AppHandle::exit`, which drops
+/// it — the flag printed a reason and then exited 0).
+fn cli_sync_once_exit_code(failure: Option<&str>) -> i32 {
+    if failure.is_some() {
+        1
+    } else {
+        0
+    }
 }
 
 /// Clear `create` on every window `tauri.conf.json` declares (issue #679):
@@ -2308,6 +2335,33 @@ mod tests {
         assert!(
             context.config().app.windows.iter().all(|w| !w.create),
             "no config-declared window may be created in CLI mode (issue #679)"
+        );
+    }
+
+    /// Issue #679 review round 2: a failed `--sync-once` iteration must report
+    /// failure to the shell. The verdict used to be handed to
+    /// `AppHandle::exit`, whose code the runtime drops (`RequestExit` →
+    /// `ControlFlow::Exit` → `process::exit(0)`), so this pins the mapping the
+    /// flag now exits with itself: no captured failure signal is success,
+    /// anything the poller announced is 1.
+    #[test]
+    fn test_sync_once_exit_code_maps_the_verdict() {
+        assert_eq!(
+            cli_sync_once_exit_code(None),
+            0,
+            "a completed iteration (no failure signal) must exit 0"
+        );
+        assert_eq!(
+            cli_sync_once_exit_code(Some("spotify: Failed to get currently playing: boom")),
+            1,
+            "a captured poller failure must exit 1, not report success"
+        );
+        assert_eq!(
+            cli_sync_once_exit_code(Some(
+                "reconnect-required: a provider needs to be reconnected"
+            )),
+            1,
+            "a reconnect signal is a failure too"
         );
     }
 }
