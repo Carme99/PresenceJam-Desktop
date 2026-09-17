@@ -27,10 +27,6 @@ vi.mock('@tauri-apps/plugin-notification', () => ({
   isPermissionGranted: vi.fn(async () => true),
   requestPermission: vi.fn(async () => 'granted')
 }));
-// 4.7.0 (S5): the Backup card's overwrite confirmation is the native
-// `ask()` dialog from the dialog plugin; the file open/save dialogs live in
-// the Rust `export_config`/`import_config` commands.
-vi.mock('@tauri-apps/plugin-dialog', () => ({ ask: vi.fn(async () => true) }));
 vi.mock('$lib/stores/detach', () => ({
   popOut: vi.fn(async () => {}),
   popIn: vi.fn(async () => {}),
@@ -41,7 +37,6 @@ import { invoke } from '@tauri-apps/api/core';
 import { emitTo } from '@tauri-apps/api/event';
 import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notification';
 import { popIn } from '$lib/stores/detach';
-import { ask } from '@tauri-apps/plugin-dialog';
 import Settings from '$lib/components/Settings.svelte';
 import { currentView } from '$lib/stores/app';
 import { configStore, defaultConfig } from '$lib/stores/config';
@@ -60,7 +55,6 @@ const emitToMock = emitTo as unknown as Mock;
 const popInMock = popIn as unknown as Mock;
 const isPermissionGrantedMock = isPermissionGranted as unknown as Mock;
 const requestPermissionMock = requestPermission as unknown as Mock;
-const askMock = ask as unknown as Mock;
 
 /** A configured install: the Spotify reconnect button needs a stored Client ID. */
 function configuredConfig() {
@@ -99,8 +93,6 @@ beforeEach(() => {
   requestPermissionMock.mockResolvedValue('granted');
   emitToMock.mockClear();
   popInMock.mockClear();
-  askMock.mockReset();
-  askMock.mockResolvedValue(true);
   invokeMock.mockReset();
   invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
     switch (cmd) {
@@ -778,38 +770,55 @@ describe('Settings logging and backup cards (#673)', () => {
     });
   });
 
-  it('cancelling the overwrite confirmation never opens a picker', async () => {
+  // The overwrite confirmation is the Rust command's native message dialog (so
+  // it behaves the same in the main window and a popped-out pane); the card's
+  // only job is to hand it the localized copy and honour a decline.
+  const importArgs = (container: HTMLElement) => {
+    const call = invokeMock.mock.calls.find(([cmd]) => cmd === 'import_config');
+    expect(call).toBeTruthy();
+    return call![1];
+  };
+
+  it('passes the localized confirm copy, and a decline changes nothing', async () => {
     const { container } = await mountSettings();
+    // `null` is the command's "declined or dismissed" answer.
     armBackupCommands(null, '/tmp/imported.json');
-    askMock.mockResolvedValue(false);
 
     await fireEvent.click(buttonByText(container, t('settings.backupImport')));
 
     await waitFor(() => {
-      expect(askMock).toHaveBeenCalledWith(t('settings.backupConfirmOverwrite'), {
+      // Rust has no dictionary: every user-visible string of the confirmation
+      // travels with the call, including both button labels (the plugin's own
+      // defaults are English).
+      expect(importArgs(container)).toEqual({
         title: t('settings.backupImportDialogTitle'),
-        kind: 'warning',
-        // The plugin's own button labels are English; a de/fr user must not
-        // meet "Yes"/"No" in an otherwise translated card.
-        okLabel: t('common.yes'),
-        cancelLabel: t('common.no')
+        confirmBody: t('settings.backupConfirmOverwrite'),
+        confirmOk: t('common.yes'),
+        confirmCancel: t('common.no')
       });
     });
-    expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'import_config')).toBe(false);
+    // A decline is a clean no-op in the card: no status message (neither the
+    // imported path nor an error) and exactly one command call. That the file
+    // itself was not touched is `declined_import_touches_nothing`'s business on
+    // the Rust side, where the real files are.
+    expect(container.querySelector('[role="status"]')).toBeNull();
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'import_config')).toHaveLength(1);
   });
 
   it('imports after confirmation and adopts the reloaded config', async () => {
     const { container } = await mountSettings();
     armBackupCommands(null, '/tmp/imported.json');
-    askMock.mockResolvedValue(true);
     const loadsBefore = invokeMock.mock.calls.filter(([cmd]) => cmd === 'load_config').length;
 
     await fireEvent.click(buttonByText(container, t('settings.backupImport')));
 
     await waitFor(() => {
-      const call = invokeMock.mock.calls.find(([cmd]) => cmd === 'import_config');
-      expect(call).toBeTruthy();
-      expect(call![1]).toEqual({ title: t('settings.backupImportDialogTitle') });
+      expect(importArgs(container)).toEqual({
+        title: t('settings.backupImportDialogTitle'),
+        confirmBody: t('settings.backupConfirmOverwrite'),
+        confirmOk: t('common.yes'),
+        confirmCancel: t('common.no')
+      });
     });
     // The UI reloads from the file the import wrote rather than trusting a
     // pre-import copy — the store must come from `load_config`, not the

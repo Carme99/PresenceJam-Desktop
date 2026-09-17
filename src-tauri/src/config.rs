@@ -1693,14 +1693,32 @@ pub fn prepare_import(raw: &str) -> Result<PreparedImport, String> {
 
 /// Replace the config at `path` with an imported document (4.7.0, S5).
 ///
+/// `confirm_overwrite` is the user's decision, asked **after** the document has
+/// been validated and only when there is a current file to replace: a decline is
+/// a clean no-op that leaves the live file byte-identical and writes no `.bak`.
+/// The dialog itself lives in the command (it needs an `AppHandle`); this shape
+/// keeps the decision itself testable against real files.
+///
 /// The outgoing file is moved to `<path>.bak` first (the same backup path the
 /// corrupt-file quarantine uses), so an import is never a one-way door; a
-/// missing current file is not an error (a fresh install has nothing to back
-/// up). Refuses before touching disk, so a rejected import leaves both the
-/// live config and the previous `.bak` untouched.
-pub fn import_config_document(raw: &str, path: &std::path::Path) -> Result<AppConfig, String> {
+/// missing current file is not an error (a fresh install has nothing to back up)
+/// and does not prompt. Refuses before touching disk, so a rejected import
+/// leaves both the live config and the previous `.bak` untouched. `Ok(None)`
+/// means the user declined.
+pub fn import_config_document(
+    raw: &str,
+    path: &std::path::Path,
+    confirm_overwrite: impl FnOnce() -> bool,
+) -> Result<Option<AppConfig>, String> {
     let prepared = prepare_import(raw)?;
 
+    if path.exists() && !confirm_overwrite() {
+        log::info!(
+            "[CFG] import: DECLINED by the user; '{}' left untouched",
+            path.display()
+        );
+        return Ok(None);
+    }
     if path.exists() {
         let backup = quarantine_backup_path(path);
         fs::rename(path, &backup).map_err(|e| {
@@ -1721,7 +1739,7 @@ pub fn import_config_document(raw: &str, path: &std::path::Path) -> Result<AppCo
         "[CFG] import: configuration imported into '{}'",
         path.display()
     );
-    Ok(prepared.config)
+    Ok(Some(prepared.config))
 }
 
 #[cfg(test)]
@@ -3391,8 +3409,10 @@ mod tests {
         let exported = std::fs::read_to_string(&export_path).unwrap();
         assert!(!exported.contains("SEKRIT"));
 
-        // import_config: read the chosen file, validate, replace.
-        let imported = import_config_document(&exported, &live_path).unwrap();
+        // import_config: read the chosen file, validate, confirm, replace.
+        let imported = import_config_document(&exported, &live_path, || true)
+            .unwrap()
+            .expect("the overwrite was confirmed");
 
         assert_eq!(imported.spotify.client_id, "abc123");
         assert_eq!(imported.teams.status_format, "🎧 {track}");
@@ -3406,6 +3426,43 @@ mod tests {
         assert!(!std::fs::read_to_string(&live_path)
             .unwrap()
             .contains("SEKRIT"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Declining the overwrite confirmation is a clean no-op: the live file is
+    /// left byte-identical and no `.bak` appears. This is the cancel path of the
+    /// import confirmation, and it is the reason the prompt is a parameter
+    /// rather than a dialog buried inside the command — the decision is
+    /// testable against real files without a desktop.
+    #[test]
+    fn declined_import_touches_nothing() {
+        let dir = std::env::temp_dir().join(format!(
+            "pj-test-import-decline-{}-{}",
+            std::process::id(),
+            chrono_like_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let previous = r#"{"spotify":{"client_id":"LIVE"},"logging":{"keep_files":7}}"#;
+        std::fs::write(&path, previous).unwrap();
+
+        let outcome =
+            import_config_document(r#"{"spotify":{"client_id":"NEW"}}"#, &path, || false).unwrap();
+
+        assert!(
+            outcome.is_none(),
+            "declining must report 'nothing happened'"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            previous,
+            "the live config must be byte-identical after a decline"
+        );
+        assert!(
+            !dir.join("config.json.bak").exists(),
+            "a decline must not quarantine the file it did not replace"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3428,8 +3485,10 @@ mod tests {
         let imported = import_config_document(
             r#"{"spotify":{"client_id":"NEW"},"logging":{"keep_files":900}}"#,
             &path,
+            || true,
         )
-        .unwrap();
+        .unwrap()
+        .expect("the overwrite was confirmed");
 
         assert_eq!(
             std::fs::read_to_string(dir.join("config.json.bak")).unwrap(),
@@ -3462,11 +3521,20 @@ mod tests {
         let previous = r#"{"spotify":{"client_id":"LIVE"}}"#;
         std::fs::write(&path, previous).unwrap();
 
+        let asked = std::cell::Cell::new(false);
         assert!(import_config_document(
             r#"{"spotify":{"client_id":"NEW","client_secret":"SEKRIT"}}"#,
-            &path
+            &path,
+            || {
+                asked.set(true);
+                true
+            }
         )
         .is_err());
+        assert!(
+            !asked.get(),
+            "a refused document must be rejected before the user is asked anything"
+        );
 
         assert_eq!(std::fs::read_to_string(&path).unwrap(), previous);
         assert!(!dir.join("config.json.bak").exists());
@@ -3486,7 +3554,17 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.json");
 
-        import_config_document(r#"{"spotify":{"client_id":"FRESH"}}"#, &path).unwrap();
+        let asked = std::cell::Cell::new(false);
+        import_config_document(r#"{"spotify":{"client_id":"FRESH"}}"#, &path, || {
+            asked.set(true);
+            true
+        })
+        .unwrap()
+        .expect("a fresh install has nothing to decline");
+        assert!(
+            !asked.get(),
+            "with no current file there is nothing to overwrite, so nothing to confirm"
+        );
 
         let written: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();

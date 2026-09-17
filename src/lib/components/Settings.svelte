@@ -2,10 +2,6 @@
   import { invoke } from '@tauri-apps/api/core';
   import { onMount, onDestroy } from 'svelte';
   import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notification';
-  // 4.7.0 (S5): the native confirm dialog in the Backup card. The file
-  // open/save dialogs live in the Rust commands (`export_config` /
-  // `import_config`), which own the resolved path.
-  import { ask } from '@tauri-apps/plugin-dialog';
   import { currentView } from '$lib/stores/app';
   import { emitTo } from '@tauri-apps/api/event';
   // C7 multi-window detach: pop-out/pop-back controls.
@@ -518,20 +514,18 @@
     backupBusy = true;
     backupMessage = '';
     try {
-      // Confirm BEFORE the picker: an import replaces the whole settings file,
-      // and the outgoing copy survives only as `config.json.bak`. Button labels
-      // come from the dictionary — the plugin's own defaults are English. The
-      // whole confirm is inside the try so a refused dialog surfaces in the
-      // card instead of vanishing as an unhandled rejection.
-      const confirmed = await ask(t('settings.backupConfirmOverwrite'), {
-        title: t('settings.backupImportDialogTitle'),
-        kind: 'warning',
-        okLabel: t('common.yes'),
-        cancelLabel: t('common.no')
-      });
-      if (!confirmed) return;
+      // Both the picker and the overwrite confirmation live in the
+      // `import_config` command (Rust), so the same dialog appears in the main
+      // window and in a popped-out Settings pane — the JS dialog plugin is
+      // ACL-gated per window, and granting it to detached panes would hand them
+      // the file dialogs too. Only the *copy* is localized here: Rust has no
+      // dictionary, so the title, the body and both button labels arrive as
+      // arguments and every one of them goes through `t()`.
       const outcome = await invoke<ImportOutcome | null>('import_config', {
-        title: t('settings.backupImportDialogTitle')
+        title: t('settings.backupImportDialogTitle'),
+        confirmBody: t('settings.backupConfirmOverwrite'),
+        confirmOk: t('common.yes'),
+        confirmCancel: t('common.no')
       });
       if (!outcome) return;
       // Adopt what is now on disk (the #297 invariant) — including the

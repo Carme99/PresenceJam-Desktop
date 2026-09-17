@@ -271,16 +271,57 @@ pub struct ImportOutcome {
     pub config: AppConfig,
 }
 
+/// The overwrite confirmation, shown as the plugin's native message dialog.
+///
+/// It runs here rather than in the webview because the ACL gates JS dialog
+/// calls per window: granting `dialog:default` to the popped-out panes would
+/// hand them the whole dialog surface (save/open included) just to show one
+/// message box. A Rust-side call needs no capability and behaves identically in
+/// the main window and a detached pane.
+///
+/// Every label is passed in already localized — the plugin's own defaults are
+/// English. `OkCancelCustom` is used (not `YesNo`) because the frontend
+/// dictionary's `common.yes` / `common.no` are the strings users have seen in
+/// every other confirm in the app; the return value is "the custom OK was
+/// pressed".
+///
+/// Blocking on purpose: this is called from the blocking pool (never the main
+/// thread), which is the same pattern the file picker above uses.
+fn ask_overwrite(
+    app: &AppHandle,
+    title: &str,
+    body: &str,
+    ok_label: &str,
+    cancel_label: &str,
+) -> bool {
+    let confirmed = app
+        .dialog()
+        .message(body)
+        .title(title)
+        .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancelCustom(
+            ok_label.to_string(),
+            cancel_label.to_string(),
+        ))
+        .kind(tauri_plugin_dialog::MessageDialogKind::Warning)
+        .blocking_show();
+    log::info!("{CMD} import_config: overwrite confirmation answered: {confirmed}");
+    confirmed
+}
+
 /// Replace the stored config with a document the user picks.
 ///
 /// Validation happens in `config::import_config_document` before anything is
-/// written: a document carrying a plaintext `client_secret` is refused, the
-/// rest is migrated and clamped, and the outgoing file is kept as
-/// `config.json.bak`. Returns `None` when the dialog was dismissed.
+/// written — a document carrying a plaintext `client_secret` is refused — and
+/// the user is asked before the current file is replaced, with the outgoing
+/// copy kept as `config.json.bak`. Returns `None` when the picker was dismissed
+/// or the overwrite was declined (both are clean no-ops).
 #[tauri::command]
 pub async fn import_config(
     app: AppHandle,
     title: String,
+    confirm_body: String,
+    confirm_ok: String,
+    confirm_cancel: String,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<Option<ImportOutcome>, String> {
     log::info!("{CMD} import_config: ENTRY");
@@ -288,7 +329,7 @@ pub async fn import_config(
     let chosen = app
         .dialog()
         .file()
-        .set_title(title)
+        .set_title(title.clone())
         .add_filter("JSON", &["json"])
         .blocking_pick_file();
     let Some(chosen) = chosen else {
@@ -305,14 +346,37 @@ pub async fn import_config(
             e
         )
     })?;
-
-    // #215 pattern: the read-modify-write runs on the blocking pool under the
-    // config write guard, so a concurrent write cannot interleave with it.
-    let state_clone = Arc::clone(state.inner());
     let source_path = source.to_string_lossy().into_owned();
+    let destination = config::get_config_path()?;
+
+    // The validate → ask → replace sequence runs on the blocking pool, and
+    // deliberately *without* the config write guard: the confirmation is a
+    // user-driven wait, and holding the guard across it would stall the polling
+    // loop's config reads for as long as the dialog is on screen.
+    let dialog_app = app.clone();
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        config::import_config_document(&raw, &destination, || {
+            ask_overwrite(
+                &dialog_app,
+                &title,
+                &confirm_body,
+                &confirm_ok,
+                &confirm_cancel,
+            )
+        })
+    })
+    .await
+    .map_err(|e| format!("import_config spawn_blocking panicked: {:?}", e))??;
+    let Some(_written) = outcome else {
+        log::info!("{CMD} import_config: DECLINED - configuration left untouched");
+        return Ok(None);
+    };
+
+    // #215 pattern for the adoption only: the file write is done, and this guard
+    // covers the load-then-store pair so a concurrent write cannot interleave.
+    let state_clone = Arc::clone(state.inner());
     let persisted = tauri::async_runtime::spawn_blocking(move || {
         let mut config_guard = state_clone.config.get_mut();
-        config::import_config_document(&raw, &config::get_config_path()?)?;
         // The authoritative view of what is now on disk: a real load re-derives
         // the keychain display fields, which never come from an imported file.
         let persisted = config::load_config()?;
