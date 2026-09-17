@@ -1231,7 +1231,9 @@ pub fn run() {
                 log::error!("[PANIC] {} at {}", msg, location);
                 // Belt-and-braces fallback removed: `eprintln!` writes to stderr, which on
                 // macOS release builds is not connected to the parent's log file
-                // (`~/Library/Logs/PresenceJam/`). The `log::error!` above routes through
+                // (`~/Library/Logs/com.presencejam.app/` — `app_log_dir()`, which carries
+                // the bundle-id segment since #300, which the pre-#300 path did not have).
+                // The `log::error!` above routes through
                 // `tauri-plugin-log`, which is the canonical destination for user-visible
                 // log lines and the file the `open_logs_folder` command points at. The
                 // previous dual-write left a silent failure mode where the panic appeared

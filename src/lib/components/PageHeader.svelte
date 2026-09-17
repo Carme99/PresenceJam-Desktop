@@ -1,6 +1,6 @@
 <script lang="ts">
   import Logo from './Logo.svelte';
-  import { theme, toggleTheme } from '$lib/stores/theme';
+  import { appliedTheme, toggleTheme } from '$lib/stores/theme';
   import { t } from '$lib/i18n';
 
   /**
@@ -57,7 +57,10 @@
   {#if showThemeToggle}
     <button type="button" class="icon-btn theme-btn" onclick={toggleTheme}
       aria-label={t('common.themeToggle')} title={t('common.themeToggle')}>
-      {$theme === 'dark' ? '☀' : '☾'}
+      <!-- #680: the glyph describes the *painted* theme, so a `system` user on a
+        dark desktop sees the light-toggle icon, not the one meaning "already
+        light" — and it follows an OS change live. -->
+      {$appliedTheme === 'dark' ? '☀' : '☾'}
     </button>
   {:else}
     <span class="theme-slot" aria-hidden="true"></span>

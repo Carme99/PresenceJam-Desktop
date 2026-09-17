@@ -8,7 +8,7 @@
   import { configStore, loadConfig, clientSecretStateOf } from '$lib/stores/config';
   import type { ErrorEventPayload, SyncStatus, TrackInfo } from '$lib/types';
   import { devLog } from '$lib/utils/dev';
-  import { theme, toggleTheme } from '$lib/stores/theme';
+  import { appliedTheme, toggleTheme } from '$lib/stores/theme';
   import { presence, hydrate, setSyncing } from '$lib/stores/presence';
   import { notifyTrackChange } from '$lib/stores/notifications';
   import Logo from './Logo.svelte';
@@ -431,7 +431,9 @@
     </div>
     <div class="header-right">
       <button class="icon-btn" onclick={toggleTheme} title={t('common.themeToggle')} aria-label={t('common.themeToggle')}>
-        {$theme === 'dark' ? '☀' : '☾'}
+        <!-- #680: derived from the painted theme — under `system` the preference
+          alone cannot tell the user what the button shows or does. -->
+        {$appliedTheme === 'dark' ? '☀' : '☾'}
       </button>
       <button class="icon-btn" class:detached={$detachedPanes.logs}
         onclick={openLogs}

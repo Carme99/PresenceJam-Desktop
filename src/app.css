@@ -59,6 +59,35 @@
   --z-tooltip: 100;
 }
 
+/* ---------- Density: compact (#680) ----------
+ * Token-only override: components keep consuming var(--sp-*) / var(--fs-*),
+ * so the whole shell tightens without a per-component variant. Chosen via
+ * [data-density="compact"] on <html>; "comfortable" is the :root scale above
+ * and needs no rule. Independent of [data-theme], so the OS-appearance path
+ * and this toggle compose. Same specificity as :root (0,1,0) — later wins. */
+[data-density='compact'] {
+  --sp-1: 3px;
+  --sp-2: 6px;
+  --sp-3: 9px;
+  --sp-4: 12px;
+  --sp-5: 15px;
+  --sp-6: 18px;
+  --sp-7: 24px;
+  --sp-8: 30px;
+  --sp-9: 42px;
+  --sp-10: 54px;
+  --fs-xs: 10px;
+  --fs-sm: 11px;
+  --fs-base: 13px;
+  --fs-md: 14px;
+  --fs-lg: 15px;
+  --fs-xl: 18px;
+  --fs-2xl: 23px;
+  --fs-3xl: 28px;
+  --lh-tight: 1.2;
+  --lh-normal: 1.4;
+}
+
 /* ---------- Theme: dark (default) ---------- */
 :root,
 [data-theme='dark'] {

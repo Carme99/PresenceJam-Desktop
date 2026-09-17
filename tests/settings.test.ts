@@ -324,15 +324,16 @@ describe('Settings notification classes (#549, #675)', () => {
   });
 });
 
-describe('Settings theme picker semantics (#552)', () => {
-  it('exposes two radios with aria-checked, a roving tabindex and arrow keys', async () => {
+describe('Settings theme picker semantics (#552, #680)', () => {
+  it('exposes three radios with aria-checked, a roving tabindex and arrow keys', async () => {
     const { container } = await mountSettings();
-    await waitFor(() => expect(container.querySelectorAll('[role="radio"]').length).toBe(2));
+    await waitFor(() => expect(container.querySelectorAll('[role="radio"]').length).toBe(3));
 
     const radios = [...container.querySelectorAll<HTMLElement>('[role="radio"]')];
-    const [dark, light] = radios;
+    const [dark, light, system] = radios;
     expect(dark.getAttribute('aria-checked')).toBe('true');
     expect(light.getAttribute('aria-checked')).toBe('false');
+    expect(system.getAttribute('aria-checked')).toBe('false');
     expect(dark.getAttribute('aria-pressed')).toBeNull();
     expect(radios.filter((r) => r.getAttribute('tabindex') === '0').length).toBe(1);
 
@@ -342,6 +343,45 @@ describe('Settings theme picker semantics (#552)', () => {
     expect(light.getAttribute('aria-checked')).toBe('true');
     expect(dark.getAttribute('aria-checked')).toBe('false');
     expect(document.activeElement).toBe(light);
+
+    // #680: the third card is reachable by the same walk, and wraps around.
+    await fireEvent.keyDown(light, { key: 'ArrowRight' });
+    await tick();
+    expect(get(theme)).toBe('system');
+    expect(system.getAttribute('aria-checked')).toBe('true');
+    expect(document.activeElement).toBe(system);
+
+    await fireEvent.keyDown(system, { key: 'ArrowLeft' });
+    await tick();
+    expect(get(theme)).toBe('light');
+    await fireEvent.keyDown(light, { key: 'ArrowLeft' });
+    await tick();
+    expect(get(theme)).toBe('dark');
+  });
+
+  it('selects the system preference and toggles compact density (#680)', async () => {
+    const { container } = await mountSettings();
+    await waitFor(() => expect(container.querySelectorAll('[role="radio"]').length).toBe(3));
+
+    const radios = [...container.querySelectorAll<HTMLElement>('[role="radio"]')];
+    await fireEvent.click(radios[2]);
+    await tick();
+    expect(get(theme)).toBe('system');
+    // jsdom has no matchMedia here, so `system` resolves to the dark default.
+    expect(document.documentElement.getAttribute('data-theme')).toBe('dark');
+
+    const compact = container.querySelector('#compact-density') as HTMLInputElement;
+    expect(compact).not.toBeNull();
+    expect(compact.checked).toBe(false);
+
+    await fireEvent.click(compact);
+    await tick();
+    expect(document.documentElement.getAttribute('data-density')).toBe('compact');
+    expect(localStorage.getItem('presencejam:density')).toBe('compact');
+
+    await fireEvent.click(compact);
+    await tick();
+    expect(document.documentElement.getAttribute('data-density')).toBe('comfortable');
   });
 });
 

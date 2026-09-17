@@ -80,6 +80,7 @@ import { presence } from '$lib/stores/presence';
 import { notificationPreferences, setNotificationPreference } from '$lib/stores/notifications';
 import { configStore, defaultConfig } from '$lib/stores/config';
 import { i18n, t } from '$lib/i18n';
+import { theme } from '$lib/stores/theme';
 
 const invokeMock = invoke as unknown as Mock;
 const sendNotificationMock = sendNotification as unknown as Mock;
@@ -466,5 +467,31 @@ describe('Dashboard tray refresh is not refired by unrelated presence updates (#
         invokeMock.mock.calls.filter((c) => c[0] === 'update_tray_menu_state').length
       ).toBe(trayCallsBefore + 1)
     );
+  });
+});
+
+/**
+ * #680: the header toggle's glyph must describe the *painted* theme. Derived
+ * from the preference alone, `system` on a dark desktop renders the moon — the
+ * same glyph as an explicit-light preference — while the app is painted dark and
+ * the click yields light, so the button lies about both state and outcome.
+ */
+describe('Dashboard theme toggle glyph (#680)', () => {
+  const glyph = (container: HTMLElement) =>
+    container.querySelector('.header-right .icon-btn')?.textContent?.trim() ?? '';
+
+  it('follows the painted theme under system, not the preference', async () => {
+    theme.set('system');
+    const { container } = render(Dashboard);
+    await tick();
+
+    // jsdom ships no matchMedia, so `system` resolves to dark here.
+    expect(document.documentElement.getAttribute('data-theme')).toBe('dark');
+    expect(glyph(container)).toBe('☀');
+
+    theme.set('light');
+    await tick();
+    expect(document.documentElement.getAttribute('data-theme')).toBe('light');
+    expect(glyph(container)).toBe('☾');
   });
 });
