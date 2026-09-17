@@ -87,8 +87,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   "Nothing playing".
 - **Tray and log-pane hygiene (#671):** the tray's dedup key now includes the
   shuffle/repeat state, so a mode changed in another Spotify client repaints
-  the check marks at the next poll instead of leaving them stale (and the next
-  click toggling from a stale belief); the tray consumes the poller's
+  the check marks at the next poll instead of showing the wrong mode until an
+  unrelated rebuild; the tray consumes the poller's
   `playback-state-changed` event, so a same-track pause moves the Play/Pause
   mark and the status line off "playing" without waiting for the next track;
   the Logs pane releases a `log://log` subscription that settles after it

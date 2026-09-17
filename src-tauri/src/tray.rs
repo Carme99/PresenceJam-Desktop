@@ -425,8 +425,8 @@ fn build_initial_menu(app: &tauri::App) -> Result<tauri::menu::Menu<tauri::Wry>,
 ///
 /// The two playback modes are part of the key (issue #691): their atoms
 /// drive the Shuffle/Repeat check marks, so an external mode change has to
-/// force a rebuild — otherwise the marks stayed stale and the next click
-/// derived its toggle target from a stale belief (`shuffle_toggle_target`).
+/// force a rebuild — otherwise the marks stayed on the previous mode. The
+/// click target is unaffected: `shuffle_toggle_target` reads the live atom.
 #[derive(Clone, PartialEq, Eq)]
 struct TrayStateSnapshot {
     is_syncing: bool,
