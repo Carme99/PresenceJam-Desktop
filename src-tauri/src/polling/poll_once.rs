@@ -1472,25 +1472,29 @@ pub(crate) fn quiet_pause_iteration(config: &Option<AppConfig>) -> Option<u64> {
 }
 
 /// [`quiet_pause_iteration`] with an explicit clock:
-/// `Some((sleep_seconds, window_end_minutes))` when the active quiet-hours entry
-/// stops polling.
+/// `Some((sleep_seconds, window_end_minutes))` when polling must be skipped.
 ///
-/// Only the entry that governs this window can pause polling — a later entry
-/// never overrides the active one, exactly like first-match-wins rule order.
+/// ANY active quiet-hours entry that sets `pause_polling` can assert the pause —
+/// quiet hours are not an ordered list for this decision (first-match-wins is
+/// the TRACK rules' contract), so a second overlapping window that asks for
+/// "stop polling" is not ignored just because an earlier window owns the
+/// replacement text. When more than one pausing window is active the reported
+/// end is the LATEST of them, so the "paused until …" log line describes the
+/// union of the windows instead of understating it.
+///
 /// The sleep is the configured ceiling (`polling.max_interval_seconds`, clamped
 /// to 5..=300 by `config::clamp_polling`), floored at 1 s so a hand-edited 0
 /// cannot spin the thread.
 fn quiet_pause_at(config: &Option<AppConfig>, now_minutes: u16, weekday: u8) -> Option<(u64, u16)> {
     let cfg = config.as_ref()?;
-    // ANY active quiet-hours entry can assert the pause: quiet hours are not an
-    // ordered priority list (that is what the track rules are), so a second
-    // overlapping window that asks for "stop polling" must not be ignored just
-    // because an earlier window matched first for the replacement text.
-    let entry =
-        cfg.status_rules.quiet_hours.iter().find(|entry| {
-            entry.pause_polling && quiet_entry_contains(entry, now_minutes, weekday)
-        })?;
-    Some((cfg.polling.max_interval_seconds.max(1), entry.end_minutes))
+    let until = cfg
+        .status_rules
+        .quiet_hours
+        .iter()
+        .filter(|entry| entry.pause_polling && quiet_entry_contains(entry, now_minutes, weekday))
+        .map(|entry| entry.end_minutes)
+        .max()?;
+    Some((cfg.polling.max_interval_seconds.max(1), until))
 }
 
 /// The log line for a pause/resume transition, or `None` when the state did not
@@ -5441,6 +5445,22 @@ mod tests {
             quiet_pause_at(&Some(second_window_pauses), 1300, 3),
             Some((60, 1380)),
             "an overlapping second window that asks for the pause must stop polling"
+        );
+
+        // Two pausing windows: the reported end is the latest one, so the log
+        // describes the union of the windows.
+        let mut two_pausing = config(true, true, 1320, 420);
+        two_pausing.status_rules.quiet_hours.push(QuietHoursEntry {
+            enabled: true,
+            start_minutes: 1200,
+            end_minutes: 1380,
+            pause_polling: true,
+            ..QuietHoursEntry::default()
+        });
+        assert_eq!(
+            quiet_pause_at(&Some(two_pausing), 1300, 3),
+            Some((60, 1380)),
+            "with two pausing windows the log reports the latest end"
         );
 
         // The sleep follows the user's ceiling.
