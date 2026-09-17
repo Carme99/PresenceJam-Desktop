@@ -136,12 +136,18 @@ jobs:
       - name: Svelte/TS type check (npm run check)
         run: npm run check
 
-      # Frontend unit tests via vitest (issue #443). Runs after the type
-      # check. Deliberately not `--if-present` (issue #607): a missing or
-      # renamed `test` script must fail this leg, not let it report green
-      # with zero tests executed.
-      - name: Frontend unit tests (npm test)
-        run: npm test
+      # Frontend unit tests + the coverage RATCHET via vitest (issues #443,
+      # #681). Runs after the type check. Deliberately not `--if-present`
+      # (issue #607): a missing or renamed script must fail this leg, not let
+      # it report green with zero tests executed.
+      #
+      # The coverage variant is the gate, not `npm test`: the four thresholds
+      # in vitest.config.js are the values measured on the merged tree, and
+      # vitest exits non-zero when any of them is missed, so a change that
+      # drops coverage fails this job exactly like a failing test does. No
+      # `continue-on-error` — a ratchet that cannot fail the job is not one.
+      - name: Frontend unit tests + coverage ratchet (npm run test:coverage)
+        run: npm run test:coverage
 
   # Rust: cargo check + cargo test on all targets (lib + bins + tests + benches) catches
   # type errors, borrow errors, missing imports, and broken test code.

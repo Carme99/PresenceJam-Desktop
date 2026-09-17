@@ -363,4 +363,99 @@ mod tests {
             "a fresh snapshot starts with no manual-status verdict on record"
         );
     }
+
+    /// #681: the write-decision clocks are ONE process-wide slot. The driver
+    /// loads it once per iteration and publishes its `&mut` view back; the
+    /// manual `Refresh status` one-shot loads the same slot. If they were
+    /// per-thread, that refresh could re-arm the availability session on a
+    /// fresh clock or re-POST a status the #384 guard would skip (issue #572).
+    /// Observed across threads on purpose: the sharing is the contract.
+    #[test]
+    fn test_write_clocks_are_one_process_wide_slot() {
+        let _guard = global_state_lock();
+        crate::polling::poll_once::reset_write_clocks();
+
+        let mut mine = crate::polling::poll_once::load_write_clocks();
+        mine.last_track_key = Some("cross-thread-key".to_string());
+        crate::polling::poll_once::store_write_clocks(&mine);
+
+        let other = std::thread::spawn(crate::polling::poll_once::load_write_clocks)
+            .join()
+            .expect("the clock-reading thread must not panic");
+        assert_eq!(
+            other.last_track_key.as_deref(),
+            Some("cross-thread-key"),
+            "a snapshot published by one thread must be the one another thread \
+             loads — the driver and the manual refresh share a single slot (#572)"
+        );
+
+        crate::polling::poll_once::reset_write_clocks();
+        assert!(
+            crate::polling::poll_once::load_write_clocks()
+                .last_track_key
+                .is_none(),
+            "resetting the shared slot is what a session boundary does, so the \
+             next load must be cold (#572)"
+        );
+    }
+
+    /// Findings D1/D5 (issues #684/#688): the snapshot's three fields are
+    /// written and retired independently, and the exit cleanup tells them apart
+    /// ("Teams shows our music status" vs "we armed an Available session" vs
+    /// "the user's own status is in force"). A writer that cleared the whole
+    /// snapshot would silently lose one of those and skip the quit cleanup #636
+    /// exists for, so each transition is observed on its own.
+    #[test]
+    fn test_snapshot_fields_record_and_retire_independently() {
+        let _guard = global_state_lock();
+        reset_exit_snapshot();
+        record_posted_status(Some("\u{1F3B5} A - T \u{1F3A7}"));
+        record_armed_presence(Some(("Available", "Available", "Listening (Available)")));
+        record_manual_status_blocks(true);
+
+        // A placeholder clear retires the posted status only.
+        record_posted_status(None);
+        let after_status_clear = load_exit_snapshot();
+        assert!(
+            after_status_clear.last_posted_status.is_none(),
+            "a placeholder clear must retire the posted status"
+        );
+        assert_eq!(
+            after_status_clear
+                .armed_presence
+                .as_ref()
+                .map(|(availability, _, _)| availability.as_str()),
+            Some("Available"),
+            "clearing the posted status must not erase the armed session: both \
+             are needed to decide the quit cleanup (finding D1)"
+        );
+        assert!(
+            after_status_clear.manual_status_blocks,
+            "clearing the posted status must not erase the manual-status verdict \
+             (review round 2, item 7)"
+        );
+
+        // ...and a session clear retires the presence arm only.
+        record_posted_status(Some("\u{1F3B5} A - T \u{1F3A7}"));
+        record_armed_presence(None);
+        let after_presence_clear = load_exit_snapshot();
+        assert!(
+            after_presence_clear.armed_presence.is_none(),
+            "clearing the presence session must retire the arm"
+        );
+        assert_eq!(
+            after_presence_clear.last_posted_status.as_deref(),
+            Some("\u{1F3B5} A - T \u{1F3A7}"),
+            "clearing the presence session must not erase the posted status"
+        );
+
+        // A completed cleanup retires all three, so a repeated
+        // `RunEvent::Exit` is a no-op (finding D1).
+        reset_exit_snapshot();
+        assert_eq!(
+            load_exit_snapshot(),
+            ExitSnapshot::default(),
+            "a completed exit cleanup must retire the whole snapshot"
+        );
+    }
 }
