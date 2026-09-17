@@ -13,7 +13,7 @@
   import About from '$lib/components/About.svelte';
   import Reconnect from '$lib/components/Reconnect.svelte';
   import { bootView } from '$lib/utils/boot';
-  import { clientSecretStateOf } from '$lib/stores/config';
+  import { clientSecretStateOf, loadConfig } from '$lib/stores/config';
   import type { AppConfig } from '$lib/types';
   import { t } from '$lib/i18n';
 
@@ -58,6 +58,19 @@
       // the same timeout so a stalled keychain read cannot strand the spinner.
       const view = await withBootTimeout(
         (async () => {
+          // 4.7.0 (issue #674): hydrate the shared config store on every
+          // launch. Nothing else does it on the Dashboard-first path — the
+          // normal one for an already-configured user — and the i18n store
+          // reads `config.locale` from this store (and keys its one-shot
+          // legacy-locale migration on the store's hydration flag), so without
+          // this the webview stayed on the frontend defaults for the whole
+          // session: a German UI with an English tray.
+          //
+          // It runs inside the boot timeout with the other probes, so a
+          // stalled `load_config` IPC is bounded by the same 8 s policy
+          // (#405); `loadConfig` itself never rejects — a failed read falls
+          // back to the frontend defaults and leaves the store un-hydrated.
+          await loadConfig();
           const complete = await invoke<boolean>('is_onboarding_complete');
           devLog('[PAGE] boot: is_onboarding_complete SUCCESS, complete=', complete);
           return bootView(complete, await hasStoredSpotifyCredentials());

@@ -84,7 +84,25 @@ describe('locale source of truth (#674)', () => {
   it('does not migrate English — it is already the default of an absent field', async () => {
     localStorage.setItem('locale', 'en');
     const { config, setLocaleCalls } = await loadStores();
+
     config.configHydrated.set(true);
+    expect(setLocaleCalls()).toEqual([]);
+  });
+
+  it('an imported config converges the webview without a write-back', async () => {
+    // Reverse direction: anything that replaces the config document — the
+    // 4.7.0 export/import path, a config reload — must move the UI too, not
+    // just the native surfaces. The store is the subscriber, so the import
+    // only has to land there; the webview then follows and must NOT echo the
+    // value back through `set_locale` (that would fight the writer).
+    const { config, i18n, setLocaleCalls } = await loadStores();
+    config.configHydrated.set(true);
+    expect(i18n.locale).toBe('en');
+
+    config.configStore.set({ ...defaultConfig, locale: 'fr' });
+    expect(i18n.locale).toBe('fr');
+    expect(document.documentElement.lang).toBe('fr');
+    expect(localStorage.getItem('locale')).toBe('fr');
     expect(setLocaleCalls()).toEqual([]);
   });
 

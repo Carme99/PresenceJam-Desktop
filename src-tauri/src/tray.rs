@@ -1941,7 +1941,7 @@ mod tests {
             progress_ms: None,
             duration_ms: 0,
         };
-        let mark = |playing: bool| sync_status_line(true, playing, Some(&track));
+        let mark = |playing: bool| sync_status_line(&EN, true, playing, Some(&track));
 
         note_playing_state(true);
         assert_eq!(
