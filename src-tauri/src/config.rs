@@ -393,8 +393,9 @@ pub struct LoggingConfig {
     /// [`clamp_logging`].
     #[serde(default = "default_max_file_size_mb")]
     pub max_file_size_mb: u64,
-    /// How many *archived* log files to retain (4.7.0); the active log is
-    /// not counted. Clamped to 1..=20 by [`clamp_logging`].
+    /// How many *archived* log files to retain (4.7.0). The active
+    /// `PresenceJam.log` is not counted, so the directory holds at most
+    /// `keep_files + 1` log files. Clamped to 1..=20 by [`clamp_logging`].
     #[serde(default = "default_keep_files")]
     pub keep_files: u32,
 }
@@ -421,7 +422,8 @@ fn default_keep_files() -> u32 {
 /// else, so this is the only normalizer — it runs on load and on every save.
 ///
 /// `keep_files >= 1` matters beyond taste: the rotating target is built as
-/// `KeepSome(keep_files)`, and its archive pass computes `keep_count - 1`.
+/// `KeepSome(keep_files)` (see `lib.rs::log_rotation_strategy`) and the
+/// plugin's archive pass computes `keep_count - 1`.
 fn clamp_logging(cfg: &mut LoggingConfig) {
     cfg.max_file_size_mb = cfg.max_file_size_mb.clamp(1, 500);
     cfg.keep_files = cfg.keep_files.clamp(1, 20);
@@ -1639,7 +1641,7 @@ pub struct PreparedImport {
 /// route a file read off disk takes — the version migration and all the
 /// clamps — so an import cannot introduce a value the UI could not have saved.
 pub fn prepare_import(raw: &str) -> Result<PreparedImport, String> {
-    let mut value: serde_json::Value =
+    let value: serde_json::Value =
         serde_json::from_str(raw).map_err(|e| format!("Imported file is not valid JSON: {}", e))?;
     if !value.is_object() {
         return Err(
@@ -1654,9 +1656,9 @@ pub fn prepare_import(raw: &str) -> Result<PreparedImport, String> {
             secrets.join(", ")
         ));
     }
-    // Refused above when present; removed here so no shape of the key can
-    // survive into the written document (e.g. an explicit `null`).
-    strip_client_secret_keys(&mut value);
+    // No strip pass here: `client_secret_paths` matches the *key* regardless of
+    // value, so every shape of it — a string, an explicit null, a nested object
+    // — was already refused above. Nothing can reach the document below.
 
     let mut config: AppConfig = serde_json::from_value(value).map_err(|e| {
         format!(

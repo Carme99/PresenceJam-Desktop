@@ -788,7 +788,11 @@ describe('Settings logging and backup cards (#673)', () => {
     await waitFor(() => {
       expect(askMock).toHaveBeenCalledWith(t('settings.backupConfirmOverwrite'), {
         title: t('settings.backupImportDialogTitle'),
-        kind: 'warning'
+        kind: 'warning',
+        // The plugin's own button labels are English; a de/fr user must not
+        // meet "Yes"/"No" in an otherwise translated card.
+        okLabel: t('common.yes'),
+        cancelLabel: t('common.no')
       });
     });
     expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'import_config')).toBe(false);

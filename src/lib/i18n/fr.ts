@@ -471,9 +471,9 @@ export const fr: Dict = {
   'settings.loggingEnabledLabel': 'Écrire un fichier journal',
   'settings.logLevelLabel': 'Niveau de journalisation',
   'settings.logMaxSizeLabel': 'Taille maximale du fichier journal (Mo)',
-  'settings.logKeepFilesLabel': 'Fichiers journaux à conserver',
+  'settings.logKeepFilesLabel': 'Fichiers journaux archivés à conserver',
   'settings.logRotationHint':
-    'La taille limite et le nombre de fichiers conservés s’appliquent au prochain démarrage de PresenceJam ; désactiver la journalisation ou changer de niveau prend effet immédiatement.',
+    'La taille limite et le nombre de fichiers archivés conservés s’appliquent au prochain démarrage de PresenceJam ; le fichier journal actif est conservé en plus. Désactiver la journalisation ou changer de niveau prend effet immédiatement.',
   'settings.sectionBackup': 'Sauvegarde',
   'settings.backupHint':
     'L’export écrit une copie de ces réglages que vous pouvez conserver ou transférer sur une autre machine. Votre secret client Spotify reste dans le trousseau du système et n’est jamais inclus — et un fichier qui en contient un est refusé à l’import.',

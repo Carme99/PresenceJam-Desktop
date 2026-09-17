@@ -515,16 +515,21 @@
 
   async function importConfig() {
     if (backupBusy) return;
-    // Confirm BEFORE the picker: an import replaces the whole settings file,
-    // and the outgoing copy survives only as `config.json.bak`.
-    const confirmed = await ask(t('settings.backupConfirmOverwrite'), {
-      title: t('settings.backupImportDialogTitle'),
-      kind: 'warning'
-    });
-    if (!confirmed) return;
     backupBusy = true;
     backupMessage = '';
     try {
+      // Confirm BEFORE the picker: an import replaces the whole settings file,
+      // and the outgoing copy survives only as `config.json.bak`. Button labels
+      // come from the dictionary — the plugin's own defaults are English. The
+      // whole confirm is inside the try so a refused dialog surfaces in the
+      // card instead of vanishing as an unhandled rejection.
+      const confirmed = await ask(t('settings.backupConfirmOverwrite'), {
+        title: t('settings.backupImportDialogTitle'),
+        kind: 'warning',
+        okLabel: t('common.yes'),
+        cancelLabel: t('common.no')
+      });
+      if (!confirmed) return;
       const outcome = await invoke<ImportOutcome | null>('import_config', {
         title: t('settings.backupImportDialogTitle')
       });

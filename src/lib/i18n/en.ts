@@ -448,9 +448,9 @@ export const en = {
   'settings.loggingEnabledLabel': 'Write a log file',
   'settings.logLevelLabel': 'Log level',
   'settings.logMaxSizeLabel': 'Maximum log file size (MB)',
-  'settings.logKeepFilesLabel': 'Log files to keep',
+  'settings.logKeepFilesLabel': 'Archived log files to keep',
   'settings.logRotationHint':
-    'The size limit and the number of files to keep apply the next time PresenceJam starts; turning logging off or changing the level takes effect immediately.',
+    'The size limit and the number of archived files to keep apply the next time PresenceJam starts; the active log file is kept in addition to those. Turning logging off or changing the level takes effect immediately.',
   'settings.sectionBackup': 'Backup',
   'settings.backupHint':
     'Export writes a copy of these settings that you can keep or move to another machine. Your Spotify client secret stays in the system keychain and is never included — and a file that carries one is refused on import.',
