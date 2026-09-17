@@ -670,12 +670,13 @@
       // Issue #538: mirror `clamp_teams` before the payload leaves the
       // frontend, so the store/UI never claims an entry the backend dropped.
       // 4.7.0 (issue #676): a combination the backend rejects must neither be
-      // saved nor registered — name the reason instead.
-      for (const slot of SHORTCUT_SLOTS) {
-        if (!(await validateShortcut(slot))) {
-          saveMessage = t('settings.shortcutRejected', { reason: shortcutErrors[slot] });
-          return;
-        }
+      // saved nor registered. The card validates on every edit, so the reason
+      // is already recorded — read it here rather than issuing IPC in the save
+      // path, which nothing else in this handler does.
+      const rejectedSlot = SHORTCUT_SLOTS.find((slot) => shortcutErrors[slot] !== '');
+      if (rejectedSlot) {
+        saveMessage = t('settings.shortcutRejected', { reason: shortcutErrors[rejectedSlot] });
+        return;
       }
       localConfig.teams.profanity_extra_words = extraWordsClamp.clamped;
       // #675: the notification classes live in the shared store and are not
@@ -693,9 +694,6 @@
       // form shows the clamped numbers rather than the raw input.
       localConfig = await saveConfig($state.snapshot(localConfig));
       extraWordsText = localConfig.teams.profanity_extra_words.join('\n');
-      // The persisted config is what the grabs are registered from, and this
-      // may be the first save after a capture released them.
-      await refreshShortcutStatus();
       saveMessage = t('settings.saved');
       if (saveTimeout) clearTimeout(saveTimeout);
       saveTimeout = setTimeout(() => saveMessage = '', 2000);
@@ -970,6 +968,19 @@
     const target = pendingNav;
     pendingNav = null;
     if (target) leaveSettings(target);
+  }
+
+  /**
+   * The Save button: persist, then re-register the grabs from the config the
+   * backend just persisted.
+   *
+   * Registration is deliberately *after* `handleSave` rather than inside it:
+   * the save path is where every other field in this pane is persisted, and
+   * this card must not add IPC round trips to it.
+   */
+  async function saveAndSyncShortcuts() {
+    await handleSave();
+    await refreshShortcutStatus();
   }
 
   function discardAndLeave() {
@@ -1807,7 +1818,7 @@
     </section>
 
     <section class="actions">
-      <button class="btn-full" onclick={handleSave} disabled={isSaving}>
+      <button class="btn-full" onclick={saveAndSyncShortcuts} disabled={isSaving}>
         {isSaving ? t('settings.saving') : t('settings.saveChanges')}
       </button>
       {#if saveMessage}
