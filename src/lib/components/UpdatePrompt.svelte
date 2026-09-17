@@ -5,7 +5,7 @@
   import { getVersion } from '@tauri-apps/api/app';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { t } from '$lib/i18n';
-  import { configStore } from '$lib/stores/config';
+  import { configStore, loadConfig } from '$lib/stores/config';
 
   // Always-mounted update banner (3.0-P5). On mount it asks the updater
   // plugin whether a newer release exists; if it does it shows a small
@@ -80,6 +80,13 @@
   // `config.updates.channel`; the immediate JS `downloadAndInstall()` below
   // downloads from the plugin's static `plugins.updater.endpoints` entry
   // (pinned to the stable manifest), so it is offered on Stable only.
+  //
+  // `configStore` is hydrated HERE rather than assumed: the banner is mounted
+  // unconditionally by the layout, and the boot path loads the config through
+  // its own raw invoke, so nothing guarantees the store holds the user's
+  // persisted channel by the time this renders. Reading the mirror's default
+  // (`stable`) would offer the stable-only JS path on a Beta install.
+  let channelResolved = $state(false);
   const isBeta = $derived($configStore.updates.channel === 'beta');
 
   let isStaleSkipped = $derived(
@@ -127,6 +134,10 @@
   }
 
   onMount(() => {
+    // Point-of-use hydration (see above). `loadConfig` is the store's own
+    // cached entry point and never rejects — it falls back to the defaults and
+    // logs — so the gate below resolves on either outcome.
+    loadConfig().finally(() => (channelResolved = true));
     checkForUpdate();
     const interval = setInterval(checkForUpdate, CHECK_INTERVAL_MS);
     // #590: staging progress. `listen()` resolves asynchronously, so an
@@ -353,7 +364,7 @@
       {/if}
     </div>
     <div class="update-actions">
-      {#if !isBeta}
+      {#if channelResolved && !isBeta}
         <button
           type="button"
           class="download-btn"

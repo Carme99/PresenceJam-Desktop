@@ -593,9 +593,12 @@ fn endpoint_urls(channel: UpdateChannel) -> Result<Vec<Url>, String> {
 /// the first endpoint that produced a manifest (including one that is no
 /// newer than the running build, i.e. `Ok(None)`), falls through only when an
 /// endpoint FAILED, and reports the last failure when none of them answered.
-/// The difference is the log line — the plugin's fall-through is silent at the
-/// default log level, so a beta check quietly serving the stable release would
-/// otherwise be indistinguishable from a beta release having shipped.
+/// The difference is the log line: the plugin does log a non-2XX response
+/// (`log::error!("update endpoint did not respond with a successful status
+/// code")`, `tauri-plugin-updater 2.11.0` `src/updater.rs:554-558`), but that
+/// line names neither the endpoint nor the fall-through — with two endpoints
+/// configured you cannot tell which one was skipped, or that the second one
+/// served the release. This walk logs both.
 async fn walk_endpoints<T, F, Fut>(urls: &[Url], mut attempt: F) -> Result<T, String>
 where
     F: FnMut(Url) -> Fut,
@@ -615,7 +618,10 @@ where
                 return Ok(found);
             }
             Err(e) => {
-                log::info!("{TAG} update check: {url} failed ({e}); trying the next endpoint");
+                // No "trying the next endpoint" here: this arm also runs for
+                // the LAST endpoint, where there is nothing left to try. The
+                // endpoint that finally answers logs the fall-through above.
+                log::info!("{TAG} update check: {url} failed ({e})");
                 last_error = Some(e);
             }
         }
@@ -736,16 +742,20 @@ pub struct StageComplete {
     pub version: String,
 }
 
-/// Hands `emit` the staged version iff a deferred stage actually succeeded.
+/// Emits for a [`StageDeferredOutcome`]: hands `emit` the STAGED version iff
+/// the stage actually succeeded, and never the running one.
 ///
-/// Factored out of [`stage_deferred_update`] so the two rules its consumers
-/// depend on are testable without a webview: the event carries the staged
-/// version, and it does NOT fire for an outcome that staged nothing.
-/// `stage_deferred_update` returns `staged: None` both when the app is already
-/// current and when the candidate was declined as stale, and announcing either
-/// as "ready to install" would be a false notification.
-fn emit_stage_complete<E: FnOnce(&str)>(staged: Option<&str>, emit: E) {
-    if let Some(version) = staged {
+/// Factored out of [`stage_deferred_update`] so the rules its consumers depend
+/// on are testable without a webview. Three of them:
+/// - the payload carries the staged version, not `current` (announcing the
+///   already-installed version would make the consumer's "update ready" toast
+///   a lie);
+/// - it fires exactly once per call;
+/// - it does NOT fire for an outcome that staged nothing —
+///   `stage_deferred_update` returns `staged: None` both when the app is
+///   already current and when the candidate was declined as stale.
+fn emit_stage_complete<E: FnOnce(&str)>(outcome: &StageDeferredOutcome, emit: E) {
+    if let Some(version) = outcome.staged.as_deref() {
         emit(version);
     }
 }
@@ -901,7 +911,7 @@ pub async fn stage_deferred_update(
     .await
     .map_err(|e| format!("stage_deferred_update spawn_blocking panicked: {:?}", e))??;
     log::info!("{TAG} stage_deferred_update: SUCCESS");
-    emit_stage_complete(outcome.staged.as_deref(), |version| {
+    emit_stage_complete(&outcome, |version| {
         let payload = StageComplete {
             version: version.to_string(),
         };
@@ -1436,17 +1446,29 @@ mod tests {
         assert_eq!(found, Err("/latest.json unreachable".to_string()));
     }
 
-    /// Issue #678: the payload S7's `update_staged` notification is built
-    /// from, and the rule that a stage which staged nothing (already current,
-    /// or declined as stale) must not announce itself as staged.
+    /// Issue #678: what S7's `update_staged` notification is built from — the
+    /// STAGED version, once, and nothing at all for a stage that staged
+    /// nothing.
+    ///
+    /// `current` is deliberately a different string from `staged`: an emitter
+    /// that announced `current` — or one that fired for a no-op outcome —
+    /// would tell the user the already-installed version is ready to install.
     #[test]
-    fn test_stage_complete_fires_only_for_a_staged_version() {
+    fn test_stage_complete_announces_the_staged_version_once() {
+        let staged = StageDeferredOutcome {
+            staged: Some("4.7.0".to_string()),
+            current: "4.6.0".to_string(),
+        };
         let mut fired: Vec<String> = Vec::new();
-        emit_stage_complete(Some("4.7.0"), |version| fired.push(version.to_string()));
-        assert_eq!(fired, ["4.7.0"]);
+        emit_stage_complete(&staged, |version| fired.push(version.to_string()));
+        assert_eq!(fired, ["4.7.0"], "the staged version, exactly once");
 
+        let quiet_outcome = StageDeferredOutcome {
+            staged: None,
+            current: "4.6.0".to_string(),
+        };
         let mut quiet: Vec<String> = Vec::new();
-        emit_stage_complete(None, |version| quiet.push(version.to_string()));
+        emit_stage_complete(&quiet_outcome, |version| quiet.push(version.to_string()));
         assert!(
             quiet.is_empty(),
             "an outcome with no staged version must not emit update-stage-complete"
