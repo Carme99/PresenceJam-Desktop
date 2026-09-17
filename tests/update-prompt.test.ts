@@ -255,6 +255,23 @@ describe('UpdatePrompt release channel (#678)', () => {
     expect(container.querySelector('.update-beta')).toBeNull();
   });
 
+  it('opens the channel gate on the first paint when the store is already hydrated', async () => {
+    // The other order: boot (S6's `+page.svelte`) hydrated `configStore`
+    // before this banner mounted. The gate must then already be open once the
+    // banner has a candidate, i.e. it must not hold the stable action behind a
+    // second round-trip after the channel is known.
+    configStore.set({ ...structuredClone(defaultConfig), updates: { channel: 'stable' } });
+    persistChannel('stable');
+    const { container } = await mountBanner();
+
+    // Deliberately synchronous: waiting would hide exactly the flicker this
+    // pins.
+    expect(
+      within(container).getByRole('button', { name: t('update.downloadAndInstall') })
+    ).toBeTruthy();
+    expect(container.querySelector('.update-beta')).toBeNull();
+  });
+
   it('hydrates the persisted beta channel itself and offers only install-on-quit', async () => {
     persistChannel('beta');
     // The store is deliberately left at the mirror's defaults (stable): the
