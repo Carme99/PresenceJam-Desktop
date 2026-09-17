@@ -104,6 +104,12 @@ export const defaultConfig: AppConfig = {
   // the UI language (webview, tray and native application menu). `null` reads
   // as English on both sides, the documented default of a pre-4.7 config.
   locale: null,
+  // 4.7.0 (S9, issue #677): the persisted tray-snooze deadline, RFC3339 in
+  // UTC. `null` means polling runs normally, which is both the documented
+  // default and what a pre-4.7 config loads as. The Dashboard chip derives
+  // "snoozed" from the instant being in the future, so a stale value left in
+  // this store can never render a snooze that has already ended.
+  snooze_until: null,
   // Issue #432: mirrors Rust StatusRulesConfig::default (empty rule lists).
   status_rules: { quiet_hours: [], track_rules: [] },
   // 4.7.0 (issue #676): mirrors Rust `ShortcutsConfig::default()`. Spread from

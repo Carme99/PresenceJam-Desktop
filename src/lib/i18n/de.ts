@@ -478,6 +478,14 @@ export const de: Dict = {
   'settings.backupExported': 'Einstellungen exportiert nach {path}',
   'settings.backupImported': 'Einstellungen importiert aus {path}',
   'settings.backupError': 'Die Sicherungsaktion konnte nicht abgeschlossen werden: {error}',
+
+  // 4.7.0 — S9 (issue #677: die Tray-Pause, „Sync pausieren für …“)
+  'dashboard.snoozeChip': 'Pausiert — noch {remaining} (bis {time})',
+  'dashboard.snoozeResume': 'Jetzt fortsetzen',
+  'dashboard.snoozeResuming': 'Wird fortgesetzt…',
+  'dashboard.snoozeResumeFailed':
+    'Die Synchronisierung konnte nicht fortgesetzt werden. Die Pause bleibt gespeichert — bitte erneut versuchen.',
+
   // 4.7.0 — S7 notifications (#675)
   'settings.notificationsTrackChange': 'Benachrichtigen, wenn der Titel wechselt',
   'settings.notificationsSyncStopped':

@@ -122,6 +122,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   keep their previous behaviour — ignored, GUI launches, exactly like
   `--minimized` and `presencejam://` deep links.
 
+- **Snooze from the tray — "pause sync" for 30 minutes, 1 hour or until
+  tomorrow (#677):** the tray menu gains a **Pause sync for…** submenu whose
+  third preset means the next *local* midnight (never `now + 24 h`, so a snooze
+  does not stretch or shrink by the machine's UTC offset), plus **Resume sync
+  now** while one is active. The chosen deadline is persisted in UTC
+  (`AppConfig::snooze_until`) so a relaunch keeps the snooze. While it is
+  active the poller performs **no Spotify or Graph work at all** — it skips the
+  iteration before the write clocks are loaded, sleeps at the configured
+  maximum interval, leaves the existing Teams status untouched, and resumes by
+  itself when the deadline passes (the thread is never stopped or parked); the
+  tray's own countdown repaints are cache-only for the same reason. A deadline
+  that passed while the app was closed is cleared and logged on the next
+  launch. The Dashboard shows a countdown chip with a **Resume now** button, and
+  the tray tooltip/status line states the remaining time. `snooze_until` is
+  additive with a serde default, so a pre-4.7 config loads unchanged.
+
 - **Frontend coverage ratchet, and tests for the polling driver (#681):** CI's
   `frontend` job now runs `npm run test:coverage` in place of `npm test` — the
   same vitest suite through the v8 provider, over the whole `src/**` source set,
