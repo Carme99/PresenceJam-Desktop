@@ -393,7 +393,6 @@ export const en = {
   // 4.6 additions (presence rules #634/#635/#636/#637 + #538 consumption sites)
   'rules.replacementClampHint':
     'Replacement status is capped at {max} characters — {kept} will be posted.',
-  'rules.quietReplacementPlaceholder': 'Post this instead (empty = suppress)',
   'rules.presenceLabel': 'Presence while this rule applies',
   'rules.presenceNone': "Don't change my presence",
   'rules.presenceHint':

@@ -207,9 +207,13 @@ describe('i18n key coverage (#488)', () => {
     expect(missing).toEqual([]);
   });
 
-  it('no dictionary carries the duplicated reconnect status key (#619)', () => {
+  it('no dictionary carries a duplicated status key (#619, #905)', () => {
     for (const source of [enSrc, deSrc, frSrc]) {
+      // #619: one key for the reconnect status message.
       expect(dictKeys(source)).not.toContain('reconnect.needsReconnect');
+      // #905: both rule cards post the same replacement, so they read the
+      // same key — the quiet-hours copy had already drifted in French.
+      expect(dictKeys(source)).not.toContain('rules.quietReplacementPlaceholder');
     }
   });
 });

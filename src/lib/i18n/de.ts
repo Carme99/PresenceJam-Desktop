@@ -406,7 +406,6 @@ export const de: Dict = {
   // 4.6 additions (presence rules #634/#635/#636/#637 + #538 consumption sites)
   'rules.replacementClampHint':
     'Der Ersatzstatus ist auf {max} Zeichen begrenzt — {kept} werden gepostet.',
-  'rules.quietReplacementPlaceholder': 'Stattdessen posten (leer = unterdrücken)',
   'rules.presenceLabel': 'Präsenz, solange diese Regel gilt',
   'rules.presenceNone': 'Präsenz nicht ändern',
   'rules.presenceHint':

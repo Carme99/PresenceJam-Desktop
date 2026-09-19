@@ -372,7 +372,7 @@ export const fr: Dict = {
   'rules.noTrackRules': 'Aucune règle de piste définie — toutes les pistes se synchronisent normalement.',
   'rules.artistPlaceholder': 'Artiste contient…',
   'rules.trackPlaceholder': 'Titre contient…',
-  'rules.replacementPlaceholder': 'Publier ceci à la place (vide = supprimer)',
+  'rules.replacementPlaceholder': 'Publier ceci à la place (vide = masquer)',
   'rules.addTrackRule': 'Ajouter une règle de piste',
   'rules.removeRule': 'Supprimer',
   'rules.ruleEnabled': 'Activé',
@@ -415,7 +415,6 @@ export const fr: Dict = {
   // 4.6 additions (presence rules #634/#635/#636/#637 + #538 consumption sites)
   'rules.replacementClampHint':
     'Le statut de remplacement est limité à {max} caractères — {kept} seront publiés.',
-  'rules.quietReplacementPlaceholder': 'Publier ceci à la place (vide = masquer)',
   'rules.presenceLabel': 'Présence pendant cette règle',
   'rules.presenceNone': 'Ne pas modifier ma présence',
   'rules.presenceHint':
