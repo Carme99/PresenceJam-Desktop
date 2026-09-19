@@ -590,13 +590,17 @@ fn write_tokens_atomic_with_key(
 pub fn persist_tokens(state: &Arc<crate::AppState>, app: &tauri::AppHandle) -> Result<(), String> {
     let path = tokens_file_path(app)?;
     with_tokens_write_lock(|| {
-        let contents = {
-            let spotify_tokens = state.tokens.spotify().clone();
-            let teams_tokens = state.tokens.teams().clone();
-            TokensFile {
-                spotify_tokens,
-                teams_tokens,
-            }
+        // Issue #800: bind BOTH slot guards before either clone. Cloning one
+        // slot guard at a time left a window in which a commit landing on the
+        // second slot stayed in memory while the older value was written to
+        // disk — a torn pair (stale access token + fresh refresh token) on the
+        // next launch. `Tokens` holds two independent `RwLock`s and nothing
+        // takes them in the opposite order, so holding both cannot deadlock.
+        let spotify = state.tokens.spotify();
+        let teams = state.tokens.teams();
+        let contents = TokensFile {
+            spotify_tokens: spotify.clone(),
+            teams_tokens: teams.clone(),
         };
         write_tokens_atomic(&path, &contents)
     })
@@ -1338,5 +1342,36 @@ mod tests {
             "the headless reader must not create the tokens directory"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // Issue #800 (wiring guard): `persist_tokens` must bind BOTH slot guards
+    // before cloning either slot, so the pair written to disk is a consistent
+    // cut. A behavioral test cannot deterministically interleave a Teams commit
+    // between the two clones without test-only plumbing inside the production
+    // function, so the ordering is pinned by a source scan of the isolated body
+    // (the shared literal-aware scanner `test_scan`, which isolates a body by
+    // depth-counting instead of a next-function anchor — this body holds a
+    // closure and a `TokensFile { .. }` literal). Pre-fix the body cloned the
+    // Spotify slot before the Teams guard was even bound, and this assertion
+    // fails on that shape.
+    #[test]
+    fn persist_binds_both_slot_guards_before_cloning() {
+        let src = include_str!("token_io.rs");
+        let body = test_scan::fn_body(src, "fn persist_tokens(");
+        let spotify_guard = body
+            .find("state.tokens.spotify()")
+            .expect("persist_tokens must bind the Spotify slot guard");
+        let teams_guard = body
+            .find("state.tokens.teams()")
+            .expect("persist_tokens must bind the Teams slot guard");
+        let first_clone = body
+            .find(".clone()")
+            .expect("persist_tokens must clone at least one slot");
+        assert!(
+            spotify_guard < first_clone && teams_guard < first_clone,
+            "both slot guards must be bound before either slot is cloned, so a \
+             commit landing on the second slot cannot be dropped from the file \
+             (issue #800)"
+        );
     }
 }
