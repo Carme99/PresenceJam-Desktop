@@ -419,7 +419,76 @@ fn parse_exchange_token_response(body: &str) -> Result<SpotifyTokens, String> {
     })
 }
 
+/// Process-wide serialization for the Spotify token refresh (issue #930).
+///
+/// The poll thread and every tray/playback command refresh independently, so a
+/// tray click landing while the poller refreshes the same expired token put two
+/// POSTs carrying the same refresh token in flight at once: duplicated load on
+/// the endpoint that rate-limits, plus a second failure path (`invalid_grant`,
+/// HTTP 429) that can still reach the user even though the other caller
+/// succeeded. This mutex allows one refresh POST at a time; the cache behind it
+/// lets the callers that waited on the lock reuse the fresh token the winner
+/// just obtained instead of POSTing again.
+static REFRESH_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+/// The last successful refresh, keyed by the refresh token it was performed
+/// with — both the token that went in and the one that came back, since Spotify
+/// may rotate the refresh token. See [`REFRESH_LOCK`].
+static REFRESHED: LazyLock<parking_lot::Mutex<Option<(String, SpotifyTokens)>>> =
+    LazyLock::new(|| parking_lot::Mutex::new(None));
+
+/// The cached token pair for `refresh_token`, when a previous refresh used the
+/// same credential and the cached access token is still fresh.
+///
+/// Callers hold [`REFRESH_LOCK`] for the whole read-modify-write, so the only
+/// lock order in the process is `REFRESH_LOCK` → `REFRESHED`.
+fn cached_refresh(refresh_token: &str, now: DateTime<Utc>) -> Option<SpotifyTokens> {
+    let guard = REFRESHED.lock();
+    let (key, tokens) = guard.as_ref()?;
+    if key != refresh_token && tokens.refresh_token != refresh_token {
+        return None;
+    }
+    (tokens.expires_at > now).then(|| tokens.clone())
+}
+
+/// Runs `fetch` under [`REFRESH_LOCK`], returning the cached token pair for
+/// `refresh_token` when another caller already refreshed it while this caller
+/// waited for the lock. Exactly one `fetch` runs per burst of concurrent
+/// refreshes of the same credential (issue #930).
+///
+/// Split out of [`refresh_spotify_token`] so the one-POST-per-burst contract is
+/// unit-testable without a live token endpoint.
+fn refresh_serialized<F>(
+    refresh_token: &str,
+    now: DateTime<Utc>,
+    fetch: F,
+) -> Result<SpotifyTokens, SpotifyApiError>
+where
+    F: FnOnce() -> Result<SpotifyTokens, SpotifyApiError>,
+{
+    let _guard = REFRESH_LOCK.lock();
+    if let Some(tokens) = cached_refresh(refresh_token, now) {
+        log::debug!("[SPOTIFY] refresh_spotify_token: reusing the token another caller just refreshed");
+        return Ok(tokens);
+    }
+    let tokens = fetch()?;
+    *REFRESHED.lock() = Some((refresh_token.to_string(), tokens.clone()));
+    Ok(tokens)
+}
+
 pub fn refresh_spotify_token(
+    tokens: &SpotifyTokens,
+    client_id: &str,
+    client_secret: &str,
+) -> Result<SpotifyTokens, SpotifyApiError> {
+    refresh_serialized(&tokens.refresh_token, Utc::now(), || {
+        request_refreshed_token(tokens, client_id, client_secret)
+    })
+}
+
+/// The single refresh POST behind [`refresh_spotify_token`]. Never call this
+/// directly: it has no serialization and is not idempotent for the caller.
+fn request_refreshed_token(
     tokens: &SpotifyTokens,
     client_id: &str,
     client_secret: &str,
@@ -2056,5 +2125,115 @@ mod tests {
             body.contains(".map(|c| c.clone())"),
             "callers must receive a refcount-bumped clone of the one cached client (issue #576)"
         );
+    }
+
+    // Issue #930: the poll thread and every tray/playback command refreshed
+    // independently, so a tray click landing during a poller refresh put two
+    // token POSTs carrying the same refresh token in flight at once.
+    // `refresh_serialized` is the lock + cache core of `refresh_spotify_token`
+    // with the POST injected, so the contract — one request per burst, and the
+    // callers that waited get the fresh token — is asserted without a live
+    // token endpoint. The count is interleaving-independent: whichever thread
+    // takes the lock first does the one fetch and the other reads the cache.
+    #[test]
+    fn concurrent_refreshes_of_the_same_token_make_exactly_one_request() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Barrier};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let start = Arc::new(Barrier::new(2));
+        let now = Utc::now();
+
+        let spawn = |n: usize| {
+            let calls = Arc::clone(&calls);
+            let start = Arc::clone(&start);
+            std::thread::spawn(move || {
+                start.wait();
+                refresh_serialized("refresh-930-concurrent", Utc::now(), || {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(SpotifyTokens {
+                        access_token: format!("access-930-{}", n),
+                        refresh_token: "refresh-930-concurrent".to_string(),
+                        expires_at: now + chrono::Duration::hours(1),
+                    })
+                })
+                .expect("the stub fetch cannot fail")
+            })
+        };
+
+        let a = spawn(1);
+        let b = spawn(2);
+        let a = a.join().expect("refresh thread a must not panic");
+        let b = b.join().expect("refresh thread b must not panic");
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "two concurrent refreshes of the same token must produce one token request (issue #930)"
+        );
+        assert_eq!(
+            a.access_token, b.access_token,
+            "the caller that waited on the lock must receive the token the winner fetched"
+        );
+    }
+
+    // The cache is keyed by the refresh token: a *different* credential must
+    // never be served the cached pair, or a re-auth (or account switch) would
+    // hand the caller the previous session's access token.
+    #[test]
+    fn refresh_cache_does_not_serve_a_different_refresh_token() {
+        let now = Utc::now();
+        let mut calls = 0usize;
+        for (key, expected) in [("refresh-930-a", "access-930-a"), ("refresh-930-b", "access-930-b")]
+        {
+            let tokens = refresh_serialized(key, now, || {
+                calls += 1;
+                Ok(SpotifyTokens {
+                    access_token: expected.to_string(),
+                    refresh_token: key.to_string(),
+                    expires_at: now + chrono::Duration::hours(1),
+                })
+            })
+            .expect("the stub fetch cannot fail");
+            assert_eq!(tokens.access_token, expected);
+        }
+        assert_eq!(
+            calls, 2,
+            "a second refresh token must not be served the first one's cached access token (issue #930)"
+        );
+    }
+
+    // The cache is a convenience, not a source of truth: once the stored access
+    // token has expired the next caller must POST again.
+    #[test]
+    fn refresh_cache_is_not_used_once_the_stored_token_expires() {
+        let now = Utc::now();
+        let mut calls = 0usize;
+        let stale = refresh_serialized("refresh-930-stale", now, || {
+            calls += 1;
+            Ok(SpotifyTokens {
+                access_token: "stale-930".to_string(),
+                refresh_token: "refresh-930-stale".to_string(),
+                expires_at: now - chrono::Duration::seconds(5),
+            })
+        })
+        .expect("the stub fetch cannot fail");
+        assert_eq!(stale.access_token, "stale-930");
+
+        let fresh = refresh_serialized("refresh-930-stale", now, || {
+            calls += 1;
+            Ok(SpotifyTokens {
+                access_token: "fresh-930".to_string(),
+                refresh_token: "refresh-930-stale".to_string(),
+                expires_at: now + chrono::Duration::hours(1),
+            })
+        })
+        .expect("the stub fetch cannot fail");
+
+        assert_eq!(
+            fresh.access_token, "fresh-930",
+            "an expired cached token must not be handed to a later caller"
+        );
+        assert_eq!(calls, 2, "the expired entry must not suppress the request");
     }
 }
