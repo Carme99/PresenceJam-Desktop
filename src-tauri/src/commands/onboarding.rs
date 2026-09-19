@@ -227,19 +227,17 @@ fn spotify_session_verdict(
             );
             return Err(RefreshFailure::Unavailable);
         }
-        let client_secret = boot_gate_client_secret(
-            keychain::peek_spotify_client_secret(),
-            || {
-                let presence = keychain::spotify_client_secret_presence();
-                // Issue #560: this is the only probe the boot gate makes, and
-                // it runs before any frontend config surface has loaded. Leave
-                // its answer in the in-memory config so a later save cannot
-                // hand the UI a `client_secret_state` that contradicts it.
-                record_client_secret_state(state, &presence);
-                presence
-            },
-            keychain::get_spotify_client_secret,
-        )?;
+        // Issue #760: one typed read instead of a presence probe plus a fetch.
+        // The two keychain operations had a TOCTOU window between them, and
+        // the flattened `Result<String, String>` threw away the difference
+        // between "no secret stored" and "the keychain cannot answer".
+        let read = keychain::read_spotify_client_secret();
+        // Issue #560: this is the only keychain read the boot gate makes, and
+        // it runs before any frontend config surface has loaded. Leave its
+        // answer in the in-memory config so a later save cannot hand the UI a
+        // `client_secret_state` that contradicts it.
+        record_client_secret_state(state, &presence_from_read(&read));
+        let client_secret = boot_gate_client_secret(read)?;
 
         let pre_refresh_access_token = tokens.access_token.clone();
         // Shared CAS guard (ARCHITECTURE.md § Token-refresh concurrency): a
@@ -293,57 +291,71 @@ fn record_client_secret_state(state: &Arc<AppState>, presence: &KeychainPresence
     config.spotify.client_secret_set = matches!(presence, KeychainPresence::Present);
 }
 
-/// Resolve the Spotify `client_secret` for the boot gate.
+/// Project one typed keychain read onto the tri-state the config surface
+/// renders (issue #560), so the boot gate's observation still reaches the
+/// in-memory config from the single read (issue #760).
 ///
-/// Issue #561: the keychain is a *tri-state* — present, absent, or
-/// unavailable (no Secret Service daemon, a locked keyring, denied storage
-/// access). Only a positively absent entry justifies sending the user to
-/// reconnect; an unavailable keychain is transient by construction (the
-/// secret is still there) and must keep the session, exactly like a flaky
-/// network does. Pre-fix this collapsed every keychain error into an empty
-/// string via `unwrap_or_default()`, which the gate read as "not
-/// configured" — so a locked keyring at launch bounced a fully credentialed
-/// user into the setup wizard, contradicting this module's own
-/// transient-failure policy.
-fn boot_gate_client_secret(
-    peeked: Option<String>,
-    presence: impl FnOnce() -> KeychainPresence,
-    fetch: impl FnOnce() -> Result<String, String>,
-) -> Result<String, RefreshFailure> {
-    // The polling thread primes the cache; a hit costs no keychain call.
-    if let Some(secret) = peeked.filter(|s| !s.is_empty()) {
-        return Ok(secret);
+/// A corrupt entry is reported as unavailable rather than absent: the item is
+/// in the keychain, so "nothing is stored" — the answer that sends the user
+/// through re-onboarding — would be wrong.
+fn presence_from_read(read: &Result<String, keychain::KeychainReadError>) -> KeychainPresence {
+    match read {
+        Ok(_) => KeychainPresence::Present,
+        Err(keychain::KeychainReadError::Absent) => KeychainPresence::Absent,
+        Err(keychain::KeychainReadError::Unavailable(help)) => {
+            KeychainPresence::Unavailable(help.clone())
+        }
+        Err(keychain::KeychainReadError::Corrupt(detail)) => {
+            KeychainPresence::Unavailable(detail.clone())
+        }
     }
-    match presence() {
-        KeychainPresence::Present => match fetch() {
-            Ok(secret) if !secret.is_empty() => Ok(secret),
-            Ok(_) => {
-                log::warn!(
-                    "{CMD} is_onboarding_complete: keychain holds an empty Spotify client_secret; re-auth required"
-                );
-                Err(RefreshFailure::Unavailable)
-            }
-            Err(e) => {
-                // Readable a moment ago, failed now (the entry was deleted
-                // from the OS UI mid-call, or the keyring just locked):
-                // retryable, not re-auth.
-                log::warn!(
-                    "{CMD} is_onboarding_complete: keychain reported the Spotify client_secret present but the read failed: {}",
-                    e
-                );
-                Err(RefreshFailure::Transient)
-            }
-        },
-        KeychainPresence::Absent => {
+}
+
+/// Resolve the Spotify `client_secret` for the boot gate from one typed
+/// keychain read (issue #760).
+///
+/// Issue #561: the keychain is a *tri-state* — present, absent, or unavailable
+/// (no Secret Service daemon, a locked keyring, denied storage access). Only a
+/// positively absent entry justifies sending the user to reconnect; an
+/// unavailable keychain is transient by construction (the secret is still
+/// there) and must keep the session, exactly like a flaky network does.
+/// Pre-#561 this collapsed every keychain error into an empty string via
+/// `unwrap_or_default()`, which the gate read as "not configured" — so a
+/// locked keyring at launch bounced a fully credentialed user into the setup
+/// wizard, contradicting this module's own transient-failure policy.
+///
+/// Issue #760: the caller hands over the result of the one read, so the
+/// classification needs no second keychain probe and cannot disagree with the
+/// read it is classifying.
+fn boot_gate_client_secret(
+    read: Result<String, keychain::KeychainReadError>,
+) -> Result<String, RefreshFailure> {
+    match read {
+        Ok(secret) if !secret.is_empty() => Ok(secret),
+        Ok(_) => {
+            log::warn!(
+                "{CMD} is_onboarding_complete: keychain holds an empty Spotify client_secret; re-auth required"
+            );
+            Err(RefreshFailure::Unavailable)
+        }
+        Err(keychain::KeychainReadError::Absent) => {
             log::warn!(
                 "{CMD} is_onboarding_complete: Spotify access token expired but no client_secret is stored; re-auth required"
             );
             Err(RefreshFailure::Unavailable)
         }
-        KeychainPresence::Unavailable(help) => {
+        Err(keychain::KeychainReadError::Unavailable(help)) => {
             log::warn!(
-                "{CMD} is_onboarding_complete: OS keychain unavailable, keeping the session and retrying later: {}",
-                help
+                "{CMD} is_onboarding_complete: OS keychain unavailable, keeping the session and retrying later: {help}"
+            );
+            Err(RefreshFailure::Transient)
+        }
+        Err(keychain::KeychainReadError::Corrupt(detail)) => {
+            // The client-secret read does not produce this today; it is
+            // transient so a future corrupt item can never send a fully
+            // credentialed user back through onboarding.
+            log::warn!(
+                "{CMD} is_onboarding_complete: stored Spotify client_secret is unreadable, keeping the session and retrying later: {detail}"
             );
             Err(RefreshFailure::Transient)
         }
@@ -605,11 +617,12 @@ fn reconnect_teams_impl(state: &Arc<AppState>, app: &AppHandle) -> Result<(), St
 #[cfg(test)]
 mod tests {
     use super::{
-        boot_gate_client_secret, cached_verdict, missing_tokens_error, record_client_secret_state,
-        session_verdict, single_flight, RefreshFailure, SessionVerdict, ONBOARDING_CACHE_TTL,
+        boot_gate_client_secret, cached_verdict, missing_tokens_error, presence_from_read,
+        record_client_secret_state, session_verdict, single_flight, RefreshFailure, SessionVerdict,
+        ONBOARDING_CACHE_TTL,
     };
     use crate::config::{AppConfig, ClientSecretState};
-    use crate::keychain::KeychainPresence;
+    use crate::keychain::{KeychainPresence, KeychainReadError};
     use crate::AppState;
     use parking_lot::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -711,91 +724,95 @@ mod tests {
         }
     }
 
-    /// The priming cache hit must not touch the keychain at all: the polling
-    /// thread fills it, and a boot check runs on every onboarding remount.
+    /// Issue #760: the gate classifies the *one* typed read it is handed, so
+    /// the three keychain answers keep three different verdicts. A positively
+    /// absent entry is the only one that can mean "re-onboard"; anything the
+    /// keychain cannot answer must keep the session, because the secret is
+    /// still stored and retrying is free (issue #561).
     #[test]
-    fn cached_client_secret_short_circuits_the_keychain() {
-        let secret = boot_gate_client_secret(
-            Some("cached-secret".to_string()),
-            || panic!("a cache hit must not probe the keychain"),
-            || panic!("a cache hit must not read the keychain"),
-        )
-        .expect("a primed cache is a usable credential");
-        assert_eq!(secret, "cached-secret");
-    }
-
-    /// Issue #561: present, absent and unavailable are three different
-    /// answers. A positively *absent* entry is the only one that can mean
-    /// "re-onboard"; anything the keychain cannot answer must keep the
-    /// session, because the secret is still stored and retrying is free.
-    #[test]
-    fn keychain_error_is_transient_not_unavailable() {
-        let absent = boot_gate_client_secret(
-            None,
-            || KeychainPresence::Absent,
-            || panic!("an absent entry must not be read"),
-        )
-        .expect_err("an absent secret cannot refresh");
+    fn absent_credentials_require_reauth_and_unreadable_ones_do_not() {
+        let absent = boot_gate_client_secret(Err(KeychainReadError::Absent))
+            .expect_err("an absent secret cannot refresh");
         assert_eq!(absent, RefreshFailure::Unavailable);
 
-        let locked = boot_gate_client_secret(
-            None,
-            || KeychainPresence::Unavailable("Secret Service locked".to_string()),
-            || panic!("an unavailable keychain must not be read"),
-        )
+        let locked = boot_gate_client_secret(Err(KeychainReadError::Unavailable(
+            "Secret Service locked".to_string(),
+        )))
         .expect_err("a locked keychain cannot refresh");
         assert_eq!(
             locked,
             RefreshFailure::Transient,
             "a locked keychain is recoverable; the secret is still stored"
         );
+
+        let corrupt = boot_gate_client_secret(Err(KeychainReadError::Corrupt(
+            "undecodable ciphertext".to_string(),
+        )))
+        .expect_err("a corrupt entry cannot refresh");
+        assert_eq!(
+            corrupt,
+            RefreshFailure::Transient,
+            "an unreadable item is not an absent one: re-onboarding would not fix it"
+        );
     }
 
-    /// The end-to-end boot-gate consequence: a keychain error must leave a
-    /// fully credentialed returning user out of the setup wizard, while an
+    /// The end-to-end boot-gate consequence: an unreadable keychain must leave
+    /// a fully credentialed returning user out of the setup wizard, while an
     /// actually absent secret still routes them to reconnect.
     #[test]
     fn boot_gate_keeps_the_session_when_the_keychain_is_locked() {
-        let verdict_for = |presence: KeychainPresence| {
-            session_verdict(true, || {
-                boot_gate_client_secret(None, || presence, || panic!("must not read")).map(|_| ())
-            })
+        let verdict_for = |read: Result<String, KeychainReadError>| {
+            session_verdict(true, || boot_gate_client_secret(read).map(|_| ()))
         };
 
         assert_eq!(
-            verdict_for(KeychainPresence::Unavailable("locked".to_string())),
+            verdict_for(Err(KeychainReadError::Unavailable("locked".to_string()))),
             SessionVerdict::Valid
         );
         assert_eq!(
-            verdict_for(KeychainPresence::Absent),
+            verdict_for(Err(KeychainReadError::Absent)),
             SessionVerdict::ReauthRequired
         );
     }
 
-    /// A keychain that reports the entry present and then fails the read
-    /// (deleted from the OS UI mid-call, or locked between the two calls)
-    /// must not be treated as a missing credential either.
+    /// The success path: a readable secret is returned verbatim, while an entry
+    /// the keychain stores as empty is a missing credential, not a usable one.
     #[test]
-    fn present_then_failing_read_is_transient() {
-        let failure = boot_gate_client_secret(
-            None,
-            || KeychainPresence::Present,
-            || Err("Failed to read Spotify client secret from keychain".to_string()),
-        )
-        .expect_err("a failing read cannot refresh");
-        assert_eq!(failure, RefreshFailure::Transient);
+    fn a_readable_secret_is_returned_and_an_empty_one_is_not() {
+        let secret = boot_gate_client_secret(Ok("live-secret".to_string()))
+            .expect("a readable secret must refresh");
+        assert_eq!(secret, "live-secret");
+
+        let empty =
+            boot_gate_client_secret(Ok(String::new())).expect_err("an empty secret cannot refresh");
+        assert_eq!(empty, RefreshFailure::Unavailable);
     }
 
-    /// The success path: a present, readable secret is returned verbatim.
+    /// Issue #560 has to keep working through the typed read: the single read's
+    /// answer is what `update_config` hands back to the UI, so a keyring that
+    /// locked must not be laundered into `absent`.
     #[test]
-    fn present_readable_secret_is_returned() {
-        let secret = boot_gate_client_secret(
-            None,
-            || KeychainPresence::Present,
-            || Ok("live-secret".to_string()),
-        )
-        .expect("a readable secret must refresh");
-        assert_eq!(secret, "live-secret");
+    fn the_reads_observation_maps_onto_the_config_tri_state() {
+        assert!(matches!(
+            presence_from_read(&Ok("secret".to_string())),
+            KeychainPresence::Present
+        ));
+        assert!(matches!(
+            presence_from_read(&Err(KeychainReadError::Absent)),
+            KeychainPresence::Absent
+        ));
+        assert!(matches!(
+            presence_from_read(&Err(KeychainReadError::Unavailable("locked".into()))),
+            KeychainPresence::Unavailable(help) if help == "locked"
+        ));
+        assert!(
+            matches!(
+                presence_from_read(&Err(KeychainReadError::Corrupt("undecodable".into()))),
+                KeychainPresence::Unavailable(_)
+            ),
+            "an item that is stored but unreadable is not absent: reporting it as \
+             absent would send the user through re-onboarding"
+        );
     }
 
     /// Issue #560: the boot gate's observation has to reach the in-memory
