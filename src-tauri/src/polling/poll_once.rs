@@ -1601,9 +1601,15 @@ fn local_minutes_and_weekday() -> (u16, u8) {
 /// track to match a rule against and no hoisted decision to consult.
 fn quiet_hours_active_now(config: &Option<crate::config::AppConfig>) -> bool {
     let (now_minutes, weekday) = local_minutes_and_weekday();
-    config
-        .as_ref()
-        .is_some_and(|c| quiet_hours_active(&c.status_rules, now_minutes, weekday))
+    // Issue #869: the active profile's `track_rules` overlay does NOT
+    // touch `quiet_hours`, so quiet-hours resolution still reads the
+    // base config here — but we route through `effective_config` so a
+    // future profile overlay that does touch quiet hours lands on the
+    // same code path without a second migration step.
+    config.as_ref().is_some_and(|c| {
+        let effective = crate::config::effective_config(c);
+        quiet_hours_active(&effective.status_rules, now_minutes, weekday)
+    })
 }
 
 /// Whether the previous iteration was skipped by [`quiet_pause_iteration`], so
@@ -1652,7 +1658,10 @@ pub(crate) fn quiet_pause_iteration(config: &Option<AppConfig>) -> Option<u64> {
 /// to 5..=300 by `config::clamp_polling`), floored at 1 s so a hand-edited 0
 /// cannot spin the thread.
 fn quiet_pause_at(config: &Option<AppConfig>, now_minutes: u16, weekday: u8) -> Option<(u64, u16)> {
-    let cfg = config.as_ref()?;
+    // Issue #869: route through `effective_config` so a profile
+    // overlay that touches quiet hours (or the polling interval)
+    // lands on the same code path without a second migration step.
+    let cfg = config.as_ref().map(crate::config::effective_config)?;
     let until = cfg
         .status_rules
         .quiet_hours
@@ -1925,6 +1934,13 @@ fn rule_gate_at_with_ctx(
     let Some(cfg) = config.as_ref() else {
         return RuleDecision::default();
     };
+    // Issue #869: the rule walker reads the EFFECTIVE config — the
+    // active profile's `track_rules` overlay REPLACES the base list,
+    // and its `preferred_presence` overlay feeds the same
+    // preferred-presence gate the base config does. A profile switch
+    // is a config-shaped change with the same contract as editing the
+    // base values mid-track.
+    let effective = crate::config::effective_config(cfg);
     // Issue #866: the preferred-presence pair rides the rule decision so the
     // matching tail can route it to `setUserPreferredPresence`. Disabled when
     // the user opted out, the user is in a manual-status window, or the
@@ -1936,9 +1952,11 @@ fn rule_gate_at_with_ctx(
     // listening session is the only `setPresence` arm). The empty-decision
     // branch intentionally drops `preferred`, mirroring the spec's
     // "rule-gate + snooze" scope.
-    let preferred =
-        crate::config::preferred_presence_pair(&cfg.teams, cfg.teams.respect_manual_status);
-    if let Some(entry) = matching_quiet_hours(&cfg.status_rules, now_minutes, weekday) {
+    let preferred = crate::config::preferred_presence_pair(
+        &effective.teams,
+        effective.teams.respect_manual_status,
+    );
+    if let Some(entry) = matching_quiet_hours(&effective.status_rules, now_minutes, weekday) {
         return decision_from(
             GATE_REASON_QUIET_HOURS,
             &entry.replacement_status,
@@ -1947,7 +1965,7 @@ fn rule_gate_at_with_ctx(
             preferred,
         );
     }
-    match matching_track_rule_at_with_ctx(&cfg.status_rules, now_minutes, weekday, ctx) {
+    match matching_track_rule_at_with_ctx(&effective.status_rules, now_minutes, weekday, ctx) {
         Some(rule) => decision_from_rule(rule, preferred),
         // No rule match: preferred presence is scoped to rules and snoozes.
         // The default listening session is the only `setPresence` arm that
@@ -2927,15 +2945,21 @@ fn stopped_status_placeholder(config: &Option<AppConfig>) -> String {
 ///
 /// The `None`-config fallbacks mirror `process_track`'s exactly — a
 fn status_config_fingerprint(config: &Option<crate::config::AppConfig>) -> String {
-    let filter = config
+    // Issue #869: the live fingerprint reads the EFFECTIVE config
+    // (active profile overlay applied). A profile change must force a
+    // status rewrite on the next poll, exactly like any other config
+    // flip — the contract is "any config-shaped change mid-track gets
+    // one fresh write".
+    let effective = config.as_ref().map(crate::config::effective_config);
+    let filter = effective
         .as_ref()
         .map(|c| c.teams.profanity_filter)
         .unwrap_or(true);
-    let placeholder = config
+    let placeholder = effective
         .as_ref()
         .map(|c| c.teams.profanity_placeholder.as_str())
         .unwrap_or(profanity::safe_placeholder_default());
-    let format = config
+    let format = effective
         .as_ref()
         .map(|c| c.teams.status_format.as_str())
         .unwrap_or("🎵 {artist} - {track} 🎧");
@@ -2955,7 +2979,10 @@ fn status_config_fingerprint(config: &Option<crate::config::AppConfig>) -> Strin
     // (User content in a change key is safe: it stays in-process, is only
     // compared, and never leaves via log/snapshot — ConfigSummary carries
     // counts only.)
-    let rules = config.as_ref().map(|c| {
+    // Issue #869: the rule list reads from the EFFECTIVE config so a
+    // profile's rules overlay flips the key (a profile switch is a
+    // config-shaped change).
+    let rules = effective.as_ref().map(|c| {
         let q: Vec<String> = c
             .status_rules
             .quiet_hours

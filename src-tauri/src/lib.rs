@@ -882,6 +882,13 @@ const SET_STATUS_FLAG: &str = "--set-status";
 const SET_STATUS_EXPIRY_FLAG: &str = "--set-status-expiry";
 /// `--clear-status`: clear the user's manual Teams status and exit.
 const CLEAR_STATUS_FLAG: &str = "--clear-status";
+/// `--profile <id>`: switch the active presence profile to `<id>` (or
+/// to "base" — `None` — when the id is missing or unknown) and exit
+/// 0. Issue #869: the same switch path the tray profile submenu and
+/// the `toggle_profile` hotkey use, so the CLI is the third surface
+/// the runtime state machine exposes without writing the on-disk base
+/// values.
+const PROFILE_FLAG: &str = "--profile";
 
 /// What the argv asked for. A CLI flag is an *alternative* to launching the
 /// GUI, never a modifier of it — which is why an unrecognised argument still
@@ -901,6 +908,13 @@ enum CliCommand {
     },
     /// Issue #870: clear the user's manual Teams status, no arguments.
     ClearManualStatus,
+    /// Issue #869: switch the active presence profile. `name` is
+    /// `None` when the user passed `--profile base` (or `--profile`
+    /// with no argument), the documented way to clear the active
+    /// profile and fall back to the base configuration.
+    SetActiveProfile {
+        name: Option<String>,
+    },
 }
 
 /// Parse the CLI intent out of argv; `None` means "launch the GUI".
@@ -965,6 +979,21 @@ where
                 message,
                 expiry_minutes,
             });
+        }
+        if arg == std::ffi::OsStr::new(PROFILE_FLAG) {
+            // The next token — if any — is the profile id. `--profile` with
+            // no argument (or `--profile base`) clears the active profile;
+            // any other id attempts a switch and the dispatcher validates
+            // against the on-disk list (unknown → "base", with a warning).
+            let name = args_iter.next().and_then(|s| {
+                let s = s.as_ref().to_string_lossy().into_owned();
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s)
+                }
+            });
+            return Some(CliCommand::SetActiveProfile { name });
         }
     }
     None
@@ -1148,6 +1177,74 @@ fn cli_clear_manual_status_from_disk() -> Result<(), String> {
     crate::commands::status::clear_manual_status_record_cli();
     log::info!("[CLI] clear_manual_status: manual status cleared");
     Ok(())
+}
+
+/// Issue #869: `--profile <id>` body. Switches the active presence
+/// profile through the same `clamped_config` write path every other
+/// config change uses; returns the (clamped) new value so the
+/// dispatcher prints a single-line confirmation. `--profile base`
+/// (or no argument) clears the active profile back to the base
+/// configuration; an unknown id is treated as "base" with a warning
+/// — `clamped_config` already does the same thing, so the dispatcher's
+/// only job here is to validate the input shape.
+fn cli_set_active_profile_from_disk(name: Option<String>) -> Result<Option<String>, String> {
+    let (state, failures) = cli_headless_state();
+    for failure in &failures {
+        eprintln!("presencejam: {PROFILE_FLAG}: {failure}");
+    }
+    let mut cfg = state
+        .config
+        .get()
+        .clone()
+        .ok_or_else(|| "no config loaded".to_string())?;
+    let target: Option<String> = match name {
+        None => None,
+        Some(raw) if raw.eq_ignore_ascii_case("base") || raw.eq_ignore_ascii_case("none") => None,
+        Some(raw) => {
+            // Match against the clamped list (the same names the tray /
+            // hotkey use). The clamp trims + truncates + dedupes so a
+            // raw CLI id can only match a clamped id, never a phantom.
+            let exists = cfg.presence_profiles.iter().any(|p| p.name == raw);
+            if !exists {
+                log::warn!(
+                    "[CLI] set_active_profile: profile {:?} not found — falling back to base",
+                    raw
+                );
+                None
+            } else {
+                Some(raw)
+            }
+        }
+    };
+    cfg.active_profile = target.clone();
+    let clamped = crate::config::clamped_config(&cfg);
+    // Persist + republish the active-profile change so the running
+    // app picks it up on the next poll. The CLI flag is
+    // deliberately NOT a process restart — the doc says it just
+    // rewrites `active_profile`.
+    let path = crate::config::get_config_path()
+        .map_err(|e| format!("failed to resolve config path: {}", e))?;
+    let serialized = serde_json::to_string_pretty(&clamped)
+        .map_err(|e| format!("failed to serialize: {}", e))?;
+    std::fs::write(&path, serialized)
+        .map_err(|e| format!("failed to persist to {}: {}", path.display(), e))?;
+    log::info!("[CLI] set_active_profile: {:?}", clamped.active_profile);
+    Ok(clamped.active_profile)
+}
+
+/// `--profile <id>`: localised confirmation strings for the CLI
+/// dispatcher. The keys live in `en` / `de` / `fr`; the CLI never
+/// reads the i18n table directly because it is built before the i18n
+/// module is reachable. Inline copies are intentional — the CLI is
+/// the only surface that prints these messages and keeping them out
+/// of the i18n table means a CLI run never has to load the
+/// dictionaries.
+fn t_cli_profile_active(name: &str) -> String {
+    format!("Active profile is now \"{name}\".")
+}
+
+fn t_cli_profile_active_base() -> String {
+    "Active profile cleared — using base configuration.".to_string()
 }
 
 /// `--status`: print the status JSON and return the process exit code.
@@ -1435,6 +1532,20 @@ pub fn run() {
             Ok(()) => std::process::exit(0),
             Err(reason) => {
                 eprintln!("presencejam: {CLEAR_STATUS_FLAG}: {reason}");
+                std::process::exit(1);
+            }
+        },
+        Some(CliCommand::SetActiveProfile { name }) => match cli_set_active_profile_from_disk(name)
+        {
+            Ok(active) => {
+                match active {
+                    Some(name) => println!("{}", t_cli_profile_active(&name)),
+                    None => println!("{}", t_cli_profile_active_base()),
+                }
+                std::process::exit(0);
+            }
+            Err(reason) => {
+                eprintln!("presencejam: {PROFILE_FLAG}: {reason}");
                 std::process::exit(1);
             }
         },

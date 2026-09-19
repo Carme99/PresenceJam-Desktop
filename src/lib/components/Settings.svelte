@@ -149,6 +149,14 @@
     rules.splice(target, 0, moved);
     markDirty();
   }
+  // Issue #869: name for a freshly-added profile. The Rust side dedupes
+  // again on load, so a concurrent edit cannot wedge the form — this is
+  // only the prefix the new-row picker suggests. `Profile` is the prefix
+  // the user can rename, and the trailing number is just a uniqueness
+  // hint until they do.
+  function defaultProfileName(n: number): string {
+    return `Profile ${n}`;
+  }
   function resetPollingDefaults() {
     localConfig.polling = structuredClone(defaultConfig.polling);
     markDirty();
@@ -164,6 +172,13 @@
   const EXTRA_WORDS_MAX_CHARS = 32;
   const PAUSE_BACKOFF_MIN_SECONDS = 60;
   const PAUSE_BACKOFF_MAX_SECONDS = 3600;
+  // Issue #869: presence-profile bounds mirror `clamp_presence_profiles`.
+  // The Rust side is the source of truth, so these constants exist only to
+  // give the input its `maxlength` / `max` attribute. A user typing past
+  // either is still accepted by Rust, but the form lets them see the
+  // effective value the backend stored rather than the raw keystrokes.
+  const MAX_PROFILE_ID_CHARS = 32;
+  const MAX_PROFILE_IDLE_SECONDS = 86400;
 
   /**
    * The five availability/activity pairs Graph `presence: setPresence`
@@ -2143,6 +2158,188 @@
         </div>
       </div>
       {/if}
+    </section>
+    <!-- Issue #869: presence-profile card. The Settings UI is the canonical
+         place to author profiles; the tray / hotkey / CLI only flip the
+         active id. Mirrors `clamp_presence_profiles`: names are deduped +
+         trimmed to 32 chars and the active pointer clears on a missing id. -->
+    <section class="card pane-card">
+      <header class="section-header">
+        <h2>{t('profiles.sectionTitle')}</h2>
+      </header>
+      <p class="hint">{t('profiles.sectionHint')}</p>
+      <div class="form-group">
+        <label for="active-profile">{t('profiles.activeProfileLabel')}</label>
+        <select
+          id="active-profile"
+          value={localConfig.active_profile ?? ''}
+          onchange={(e) => {
+            const value = (e.currentTarget as HTMLSelectElement).value;
+            localConfig.active_profile = value === '' ? null : value;
+            markDirty();
+          }}
+        >
+          <option value="">{t('profiles.activeProfileNone')}</option>
+          {#each localConfig.presence_profiles as profile}
+            <option value={profile.name}>{profile.name}</option>
+          {/each}
+        </select>
+        <!-- Issue #869: the picker's options are derived from
+             `localConfig.presence_profiles`, so a name the user just deleted
+             cannot appear; the spec's "unknown id clears to base" safety net
+             is the Rust-side `clamp_presence_profiles`. -->
+      </div>
+      {#if localConfig.presence_profiles.length === 0}
+        <p class="hint">{t('profiles.empty')}</p>
+      {/if}
+      {#each localConfig.presence_profiles as profile, i}
+        <div class="rule-row rule-col" role="group" aria-label={`${t('profiles.sectionTitle')} ${i + 1}`}>
+          <div class="rule-row">
+            <input
+              type="text"
+              value={profile.name}
+              placeholder={t('profiles.profileNamePlaceholder')}
+              aria-label={t('profiles.profileNameLabel')}
+              oninput={(e) => {
+                const next = (e.currentTarget as HTMLInputElement).value;
+                const trimmed = next.slice(0, MAX_PROFILE_ID_CHARS);
+                // Reject duplicates (case-sensitive, ignores self).
+                const clash = localConfig.presence_profiles.some(
+                  (other, idx) => idx !== i && other.name === trimmed
+                );
+                if (clash) {
+                  saveMessage = t('profiles.profileNameDuplicate');
+                  return;
+                }
+                if (trimmed.length === 0) {
+                  saveMessage = t('profiles.profileNameMissing');
+                  return;
+                }
+                saveMessage = '';
+                profile.name = trimmed;
+                markDirty();
+              }}
+            />
+            <button
+              type="button"
+              class="btn-link"
+              onclick={() => {
+                localConfig.presence_profiles.splice(i, 1);
+                // If the active profile was the deleted one, reset to base.
+                if (localConfig.active_profile === profile.name) {
+                  localConfig.active_profile = null;
+                }
+                markDirty();
+              }}
+            >{t('profiles.removeProfile')}</button>
+          </div>
+          <div class="form-group">
+            <label for={`profile-status-${i}`}>{t('profiles.overlayStatusFormatLabel')}</label>
+            <input
+              id={`profile-status-${i}`}
+              type="text"
+              value={profile.status_format ?? ''}
+              placeholder={localConfig.teams.status_format}
+              oninput={(e) => {
+                const v = (e.currentTarget as HTMLInputElement).value;
+                profile.status_format = v.length === 0 ? null : v;
+                markDirty();
+              }}
+            />
+          </div>
+          <div class="form-group">
+            <label class="rule-check">
+              <input
+                type="checkbox"
+                checked={profile.clear_on_pause ?? localConfig.teams.clear_on_pause}
+                onchange={(e) => {
+                  profile.clear_on_pause = (e.currentTarget as HTMLInputElement).checked;
+                  markDirty();
+                }}
+              />
+              <span>{t('profiles.overlayClearOnPauseLabel')}</span>
+            </label>
+          </div>
+          <div class="form-group">
+            <label class="rule-check">
+              <input
+                type="checkbox"
+                checked={profile.availability_sync ?? localConfig.teams.availability_sync}
+                onchange={(e) => {
+                  profile.availability_sync = (e.currentTarget as HTMLInputElement).checked;
+                  markDirty();
+                }}
+              />
+              <span>{t('profiles.overlayAvailabilitySyncLabel')}</span>
+            </label>
+          </div>
+          <div class="form-group">
+            <label class="rule-check">
+              <input
+                type="checkbox"
+                checked={profile.gate_when_out_of_office ?? localConfig.teams.gate_when_out_of_office}
+                onchange={(e) => {
+                  profile.gate_when_out_of_office = (e.currentTarget as HTMLInputElement).checked;
+                  markDirty();
+                }}
+              />
+              <span>{t('profiles.overlayGateOutOfOfficeLabel')}</span>
+            </label>
+          </div>
+          <div class="form-group">
+            <label class="rule-check">
+              <input
+                type="checkbox"
+                checked={profile.gate_when_presenting ?? localConfig.teams.gate_when_presenting}
+                onchange={(e) => {
+                  profile.gate_when_presenting = (e.currentTarget as HTMLInputElement).checked;
+                  markDirty();
+                }}
+              />
+              <span>{t('profiles.overlayGatePresentingLabel')}</span>
+            </label>
+          </div>
+          <div class="form-group">
+            <label for={`profile-idle-${i}`}>{t('profiles.overlayIdleAwayLabel')}</label>
+            <input
+              id={`profile-idle-${i}`}
+              type="number"
+              min="0"
+              max={MAX_PROFILE_IDLE_SECONDS}
+              value={profile.idle_away_after_seconds === null || profile.idle_away_after_seconds === undefined
+                ? ''
+                : Number(profile.idle_away_after_seconds)}
+              placeholder={String(Number(localConfig.teams.idle_away_after_seconds))}
+              oninput={(e) => {
+                const raw = (e.currentTarget as HTMLInputElement).value;
+                if (raw === '') {
+                  profile.idle_away_after_seconds = null;
+                } else {
+                  const n = Math.min(MAX_PROFILE_IDLE_SECONDS, Math.max(0, Number(raw)));
+                  profile.idle_away_after_seconds = BigInt(n);
+                }
+                markDirty();
+              }}
+            />
+          </div>
+        </div>
+      {/each}
+      <button
+        type="button"
+        class="btn-secondary"
+        onclick={() => {
+          // Generate a unique default name like "Profile 1", "Profile 2", ...
+          // by finding the lowest positive integer suffix that does not
+          // collide with an existing name. The Rust side will dedupe again
+          // on load, so a concurrent edit cannot wedge the form.
+          let n = 1;
+          while (localConfig.presence_profiles.some((p) => p.name === defaultProfileName(n))) {
+            n += 1;
+          }
+          localConfig.presence_profiles.push({ name: defaultProfileName(n) });
+          markDirty();
+        }}
+      >{t('profiles.addProfile')}</button>
     </section>
     <section class="card pane-card">
       <header class="section-header">
