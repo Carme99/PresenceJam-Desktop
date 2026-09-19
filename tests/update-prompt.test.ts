@@ -602,3 +602,54 @@ describe('UpdatePrompt banner layout (#950, #951)', () => {
     expect(css).toMatch(/\.update-title,[\s\S]{0,260}?white-space:\s*nowrap/);
   });
 });
+
+/**
+ * #977 (review) — a staged payload outlives the candidate it came from.
+ *
+ * The channel switch defers while a stage is in flight (the strip owns the
+ * only "Cancel stage" affordance), and the deferred check can then find that
+ * the new channel offers nothing at all. The staged bytes still install at
+ * quit, so the banner — and its cancel action — must survive both halves of
+ * that sequence.
+ *
+ * Fails pre-fix: the switch nulled the candidate, the `{#if update}` guard
+ * took the banner with it, and the payload had no way back.
+ */
+describe('UpdatePrompt channel switch with a staged payload (#977)', () => {
+  it('keeps the staged payload cancellable through the deferred re-check', async () => {
+    const { container } = await mountBanner();
+    await startStage(container);
+
+    // The channel the user switches to offers nothing at all.
+    const base = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) =>
+      cmd === 'check_for_update' ? null : base(cmd, args)
+    );
+
+    configStore.set({ ...get(configStore), updates: { channel: 'beta' } });
+    await tick();
+
+    const cancel = () =>
+      within(container).getByRole('button', { name: t('update.cancelStage') });
+    // Deferred while the stage is in flight: banner and cancel action intact.
+    expect(container.querySelector('.update-banner')).not.toBeNull();
+    expect(cancel()).toBeTruthy();
+
+    // The stage lands, so the deferred switch re-checks and finds no
+    // candidate — the staged payload must still be cancellable.
+    stageResolvers.shift()!({ staged: '4.6.0', current: '4.5.2' });
+    await waitFor(() =>
+      expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'check_for_update')).toHaveLength(2)
+    );
+    await waitFor(() => expect(container.querySelector('.update-staged')).not.toBeNull());
+    expect(container.querySelector('.update-banner')).not.toBeNull();
+    expect(cancel()).toBeTruthy();
+
+    // And the action still reaches the backend, dropping the payload.
+    await fireEvent.click(cancel());
+    await waitFor(() => expect(container.querySelector('.update-staged')).toBeNull());
+    expect(
+      invokeMock.mock.calls.filter(([cmd]) => cmd === 'cancel_deferred_update')
+    ).toHaveLength(1);
+  });
+});
