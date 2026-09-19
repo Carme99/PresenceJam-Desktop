@@ -331,7 +331,8 @@ mod tests {
     fn offloaded_work_runs_off_the_awaiting_thread() {
         let awaiting = std::thread::current().id();
         let worker = tauri::async_runtime::block_on(offload_blocking("test", std::thread::current))
-            .expect("the offloaded work must not panic");
+            .expect("the offloaded work must not panic")
+            .id();
         assert_ne!(
             worker, awaiting,
             "the device-code request must not run on the thread that awaits it: \

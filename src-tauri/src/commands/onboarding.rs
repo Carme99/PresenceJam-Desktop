@@ -928,19 +928,19 @@ mod tests {
     #[test]
     fn a_fresh_verdict_is_shared_without_running_the_check() {
         let flight = Mutex::new(());
-        let verdict = single_flight(
+        // `T` is `bool` here: the cached closure supplies `Option<bool>` and
+        // the run closure supplies the verdict itself.
+        let shared = single_flight(
             &flight,
             || Some(false),
             || panic!("a fresh verdict must not start another gate run"),
         );
-        assert_eq!(
-            verdict,
-            Some(false),
-            "the shared verdict is returned verbatim"
+        assert!(
+            !shared,
+            "the shared verdict is returned verbatim, not re-derived"
         );
-        assert_eq!(
+        assert!(
             single_flight(&flight, || None, || true),
-            true,
             "the flight lock must be released, or the next boot check would block forever"
         );
     }
