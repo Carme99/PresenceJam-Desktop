@@ -149,9 +149,14 @@
             dismissed = false;
           }
           update = u;
-        } else {
+        } else if (!staging && !stagedVersion) {
           // The running build is current: a banner with no candidate behind
-          // it must go away rather than keep offering the old version.
+          // it must go away rather than keep offering the old version. A
+          // stage in flight, or a payload already staged, keeps it instead:
+          // the strip owns the only "Cancel stage" affordance, and the
+          // payload installs at quit whether or not the candidate is still
+          // offered — a channel switch can take the candidate away while the
+          // staged bytes stay, so they have to stay cancellable.
           update = null;
         }
       })
@@ -183,11 +188,12 @@
     }
     if (channel === checkedChannel || busy) return;
     // A candidate from the channel the user just left must not survive the
-    // switch (nor a dismissal scoped to it).
-    update = null;
+    // switch (nor a dismissal scoped to it) — but a staged payload does
+    // outlive it, and the re-check below decides what to offer afterwards.
     staleSkippedVersion = '';
     confirming = false;
     dismissed = false;
+    if (!stagedVersion) update = null;
     checkForUpdate();
   });
 
@@ -395,6 +401,12 @@
       stageDownloaded = 0;
       stageTotal = null;
       confirming = false;
+      // #977 review: a staged payload keeps the banner (and its candidate)
+      // alive across a channel switch, so the payload can be the only reason
+      // a candidate from the channel the user left is still on screen. With
+      // the payload gone, the offer is re-resolved against the current
+      // channel.
+      checkForUpdate();
     } catch (e) {
       // The payload is still held Rust-side, so the banner must keep
       // saying so rather than claiming the stage is gone.
@@ -566,14 +578,17 @@
      follows the `.playback-toast` convention in `+layout.svelte` — no layout
      space reserved, no chrome covered — and the z-index stays below that
      toast so a playback error still wins.
-     The inset is one step above the band the app's own bottom-centre
-     controls occupy: `LogViewer`'s `.jump-latest` sits at `bottom: 12px` and
-     is 33px tall (26px in compact density), so docking at `--sp-3` put the
-     banner straight over its hit target. Measured in a browser at 600x750
-     and 400x500, en and de, default and compact density: the banner clears
-     the jump-latest by 11px (default) / 4px (compact), and the centre of
-     that button hit-tests to the button itself in all four window/density
-     combinations. */
+    The inset is coupled to the two bottom-centre surfaces this app owns, so
+    moving either one means revisiting it: `LogViewer`'s `.jump-latest`
+    (`bottom: 12px`, 33px tall — 26px in compact density) and
+    `+layout.svelte`'s `.playback-toast` (`bottom: 24px`, ~44px tall, whose
+    padding is literal px rather than tokens). Docking at `--sp-3` put the
+    banner straight over the jump-latest's hit target. Measured in a browser
+    at 600x750 and 400x500, en and de, default and compact density: the
+    banner clears the jump-latest by 11px (default) / 4px (compact), touches
+    the toast only in compact density (where the toast still paints above
+    it), and the centre of the jump-latest button hit-tests to the button
+    itself in all four window/density combinations. */
   .update-banner--docked {
     position: fixed;
     bottom: calc(var(--sp-10) + var(--sp-1));
