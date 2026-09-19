@@ -1581,6 +1581,53 @@ fn config_from_sections(root: serde_json::Map<String, serde_json::Value>) -> App
     config
 }
 
+/// Tighten a loose `config.json` to 0600 (issue #135 path A), best-effort
+/// since issue #802.
+///
+/// Idempotent on a file that is already 0600. Unix-only: Windows' default ACL
+/// is already user-only, so there is nothing to tighten there.
+///
+/// Best-effort, NOT a precondition: a mode that cannot be READ (EROFS on a
+/// read-only or ostree mount, EPERM on a file owned by another user, an
+/// ACL-managed path) or cannot be CHANGED is logged and ignored. Both used to
+/// be `?`-propagated, so `load_config` failed outright on a perfectly readable
+/// file — startup logged "no config found", `AppState.config` stayed `None`,
+/// the Settings and Dashboard stores fell back to built-in defaults, and
+/// because a Settings save posts the whole document, the next save persisted
+/// those defaults over the user's real file. Hardening a file we can already
+/// read is a courtesy; refusing to read it is a data-loss path.
+#[cfg(unix)]
+fn tighten_config_permissions(path: &std::path::Path) {
+    let current = match fs::metadata(path) {
+        Ok(metadata) => metadata.permissions(),
+        Err(e) => {
+            log::warn!(
+                "[CFG] Could not read the mode of config file '{}': {} — loading it anyway",
+                path.display(),
+                e
+            );
+            return;
+        }
+    };
+    let current_mode = current.mode() & 0o777;
+    if current_mode == 0o600 {
+        return;
+    }
+    log::warn!(
+        "[CFG] Tightening config.json mode from {:o} to 0600 (issue #135)",
+        current_mode
+    );
+    let mut tightened = current;
+    tightened.set_mode(0o600);
+    if let Err(e) = fs::set_permissions(path, tightened) {
+        log::warn!(
+            "[CFG] Could not chmod config file '{}' to 0600: {} — loading it anyway",
+            path.display(),
+            e
+        );
+    }
+}
+
 pub fn load_config() -> Result<AppConfig, String> {
     load_config_from(&get_config_path()?).map(with_keychain_flags)
 }
@@ -1598,34 +1645,13 @@ fn load_config_from(path: &std::path::Path) -> Result<AppConfig, String> {
         return Ok(AppConfig::default());
     }
 
-    // Issue #135 path A: tighten mode of any pre-existing config.json that
-    // was created loose by an older PresenceJam version (default umask 022
-    // → 0644). Idempotent on a file that is already 0600. Windows default
-    // ACL is user-only, so this is a no-op there.
+    // Issue #135 path A: tighten the mode of any pre-existing config.json that
+    // was created loose by an older PresenceJam version (default umask 022 →
+    // 0644). Best-effort since issue #802 — see `tighten_config_permissions`.
     #[cfg(unix)]
-    {
-        let current = fs::metadata(&path)
-            .map_err(|e| format!("Failed to stat config file '{}': {}", path.display(), e))?
-            .permissions();
-        let current_mode = current.mode() & 0o777;
-        if current_mode != 0o600 {
-            log::warn!(
-                "[CFG] Tightening config.json mode from {:o} to 0600 (issue #135)",
-                current_mode
-            );
-            let mut tightened = current;
-            tightened.set_mode(0o600);
-            fs::set_permissions(&path, tightened).map_err(|e| {
-                format!(
-                    "Failed to chmod config file '{}' to 0600: {}",
-                    path.display(),
-                    e
-                )
-            })?;
-        }
-    }
+    tighten_config_permissions(path);
 
-    let mut file = fs::File::open(&path)
+    let mut file = fs::File::open(path)
         .map_err(|e| format!("Failed to open config file '{}': {}", path.display(), e))?;
 
     let mut contents = String::new();
@@ -4945,8 +4971,15 @@ mod tests {
             let (dir, path) = temp_config_file("client-id", contents);
             let cfg = load_config_from(&path).expect("must load");
             assert_eq!(cfg.spotify.client_id, "", "{contents}");
-            assert_eq!(cfg.spotify.redirect_uri, default_redirect_uri(), "{contents}");
-            assert!(cfg.autostart, "the rest of the document is kept: {contents}");
+            assert_eq!(
+                cfg.spotify.redirect_uri,
+                default_redirect_uri(),
+                "{contents}"
+            );
+            assert!(
+                cfg.autostart,
+                "the rest of the document is kept: {contents}"
+            );
             assert!(!quarantine_backup_path(&path).exists(), "{contents}");
             assert!(!config_was_quarantined(), "{contents}");
             let _ = std::fs::remove_dir_all(&dir);
@@ -4977,5 +5010,83 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir);
         }
         CONFIG_QUARANTINED.store(prev, Ordering::SeqCst);
+    }
+
+    // -----------------------------------------------------------------
+    // Issue #802: the 0600 hardening is best-effort.
+    // -----------------------------------------------------------------
+
+    /// The body of the function `signature` starts — from its opening `{` to
+    /// the matching `}` — found by brace counting, so a guard over it survives
+    /// reordering / splitting / renaming of the code around it. Panics when the
+    /// function itself is gone, which is a failure of the guard's premise.
+    fn fn_body<'a>(src: &'a str, signature: &str) -> &'a str {
+        let sig_idx = src
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} must exist"));
+        let brace_open_rel = src[sig_idx..]
+            .find('{')
+            .unwrap_or_else(|| panic!("{signature} must have an opening brace"));
+        let body_start = sig_idx + brace_open_rel;
+        let mut depth: u32 = 0;
+        let mut i = body_start;
+        let body_end = loop {
+            match src.as_bytes()[i] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break i;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+            if i >= src.len() {
+                panic!("{signature} has unbalanced braces");
+            }
+        };
+        &src[body_start + 1..body_end]
+    }
+
+    /// Issue #802: tightening the mode is a courtesy, never a precondition for
+    /// reading a config the user's account can open. Both errors on that path
+    /// were `?`-propagated, so an unreadable or unwritable mode failed the whole
+    /// load — startup logged "no config found", `AppState.config` stayed `None`,
+    /// the stores fell back to built-in defaults, and the next whole-document
+    /// save persisted those defaults over the real file.
+    ///
+    /// A `?` cannot appear in a function that has no `Result` to return, so the
+    /// guard is exact rather than stylistic. It cannot be replaced by a real
+    /// failing `chmod`: that needs a file the test does not own (or an immutable
+    /// / read-only mount), and `chmod` is gated on ownership of the file, not on
+    /// write access to its directory — so the "0o555 temp dir" shape suggested
+    /// in the issue does not deny it, for an unprivileged user or for root.
+    #[test]
+    fn test_config_mode_tightening_cannot_abort_the_load() {
+        let body = fn_body(include_str!("config.rs"), "fn tighten_config_permissions(");
+        assert!(
+            !body.contains('?'),
+            "tighten_config_permissions must not propagate an error: a mode that \
+             cannot be read or set must not stop load_config from reading a file it \
+             can open (issue #802)"
+        );
+    }
+
+    /// Issue #802, the happy path: a loose `config.json` is still tightened to
+    /// 0600 while it loads, and its stored values come back.
+    #[cfg(unix)]
+    #[test]
+    fn test_loose_config_is_still_tightened_on_load() {
+        let (dir, path) = temp_config_file("tighten", r#"{"autostart": true}"#);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let cfg = load_config_from(&path).expect("a readable config must load");
+        assert!(cfg.autostart);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "the #135 tightening must still run"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
