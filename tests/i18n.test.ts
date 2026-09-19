@@ -310,14 +310,16 @@ describe('<html lang> and cross-webview convergence (#620)', () => {
     document.documentElement.lang = 'en';
     vi.resetModules();
 
-    await import('$lib/i18n/store.svelte');
+    const reloaded = await import('$lib/i18n/store.svelte');
     // A returning user keeps the language the bare key carried…
     expect(document.documentElement.lang).toBe('de');
     expect(localStorage.getItem('presencejam:locale')).toBe('de');
     // …and the bare key is gone, so nothing reads it again.
     expect(localStorage.getItem('locale')).toBeNull();
 
-    i18n.set('en');
+    // The reloaded instance owns the document now: #892's guard means the
+    // statically imported store (already English) would not retag it.
+    await reloaded.i18n.set('en');
     expect(document.documentElement.lang).toBe('en');
   });
 });

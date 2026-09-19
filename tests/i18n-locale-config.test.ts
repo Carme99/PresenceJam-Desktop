@@ -141,4 +141,40 @@ describe('locale source of truth (#674)', () => {
     config.configHydrated.set(true);
     expect(setLocaleCalls()).toEqual([]);
   });
+
+  /**
+   * #892 — the store subscribes to `configStore` at module level and every
+   * emission used to re-write the mirror and the document language, even when
+   * the locale was the one already installed.
+   */
+  it('an unrelated config write performs no locale work (#892)', async () => {
+    localStorage.setItem('presencejam:locale', 'fr');
+    const { config, i18n } = await loadStores();
+    expect(i18n.locale).toBe('fr');
+
+    // Only this store's writes are under test: other mirrors on the same
+    // origin write their own keys on unrelated emissions.
+    const setItem = vi.spyOn(Storage.prototype, 'setItem');
+    const langBefore = document.documentElement.lang;
+    try {
+      // A notification toggle: the locale field is unchanged.
+      config.configStore.set({
+        ...defaultConfig,
+        locale: 'fr',
+        notifications: { ...defaultConfig.notifications, track_change: true }
+      });
+      expect(setItem.mock.calls.filter(([key]) => key === 'presencejam:locale')).toEqual([]);
+      expect(document.documentElement.lang).toBe(langBefore);
+
+      // A real change still persists the mirror exactly once.
+      setItem.mockClear();
+      config.configStore.set({ ...defaultConfig, locale: 'de' });
+      expect(setItem.mock.calls.filter(([key]) => key === 'presencejam:locale')).toEqual([
+        ['presencejam:locale', 'de']
+      ]);
+      expect(document.documentElement.lang).toBe('de');
+    } finally {
+      setItem.mockRestore();
+    }
+  });
 });

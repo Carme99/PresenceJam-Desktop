@@ -113,6 +113,10 @@ applyDocumentLang(initialLocale);
  * write and the migration note on the subscription below.
  */
 function applyLocale(next: Locale): void {
+  // #892: every config emission lands here, and an unchanged locale must cost
+  // nothing — the mirror write is synchronous and the `lang` write can force
+  // style/layout work. Mirrors the same-value guard on the listener below.
+  if (next === current) return;
   current = next;
   applyDocumentLang(next);
   try {
@@ -174,7 +178,9 @@ function migrateLegacyLocale(): void {
  */
 function reconcile(cfg: AppConfig, hydrated: boolean): void {
   if (isLocale(cfg.locale)) {
-    applyLocale(cfg.locale);
+    // #892: an unrelated config write (a Settings save, a toggle, a snooze)
+    // carries the same locale — no locale work at all for it.
+    if (cfg.locale !== current) applyLocale(cfg.locale);
     return;
   }
   if (typeof cfg.locale === 'string' && cfg.locale.length > 0) {
