@@ -204,6 +204,114 @@
     target.presence_activity = activity ?? '';
   }
 
+  // -----------------------------------------------------------------
+  // Issue #876: Outlook "Work hours" import. The Rust command
+  // `import_working_hours` calls Graph `mailboxSettings/workingHours`,
+  // returns a preview list of `QuietHoursEntry` candidates, and the
+  // Settings UI renders them in a banner before the user applies. The
+  // IPC payload does NOT persist — the apply button rewrites
+  // `localConfig.status_rules.quiet_hours` in place and `Save` (the
+  // normal `update_config` round-trip) writes the result to disk, so
+  // the import is gated by the same dirty-flag plumbing the rest of
+  // the card already uses.
+  // -----------------------------------------------------------------
+
+  interface WorkingHoursImportEntry {
+    enabled: boolean;
+    start_minutes: number;
+    end_minutes: number;
+    days: number[];
+    replacement_status: string;
+    presence_availability: string;
+    presence_activity: string;
+    pause_polling: boolean;
+  }
+
+  interface WorkingHoursImportWorking {
+    start_minutes: number;
+    end_minutes: number;
+    days: number[];
+    time_zone_offset_minutes: number;
+  }
+
+  interface WorkingHoursImportPreview {
+    entries: WorkingHoursImportEntry[];
+    working: WorkingHoursImportWorking | null;
+    message: string | null;
+  }
+
+  let workingHoursPreview = $state<WorkingHoursImportPreview | null>(null);
+  let workingHoursReplaceExisting = $state(true);
+  let workingHoursBusy = $state(false);
+  let workingHoursError = $state('');
+
+  async function requestWorkingHoursPreview() {
+    workingHoursError = '';
+    workingHoursBusy = true;
+    try {
+      const preview = (await invoke('import_working_hours')) as WorkingHoursImportPreview;
+      workingHoursPreview = preview;
+      if (preview.message) {
+        workingHoursError = preview.message;
+      }
+    } catch (e) {
+      workingHoursError =
+        typeof e === 'string' ? e : t('common.retry');
+    } finally {
+      workingHoursBusy = false;
+    }
+  }
+
+  function cancelWorkingHoursPreview() {
+    workingHoursPreview = null;
+    workingHoursError = '';
+    workingHoursReplaceExisting = true;
+  }
+
+  function applyWorkingHoursPreview() {
+    const preview = workingHoursPreview;
+    if (!preview) return;
+    const existing = localConfig.status_rules.quiet_hours;
+    const incoming = preview.entries.map((entry) => ({
+      enabled: entry.enabled,
+      start_minutes: entry.start_minutes,
+      end_minutes: entry.end_minutes,
+      days: [...entry.days].sort((a, b) => a - b),
+      replacement_status: entry.replacement_status ?? '',
+      presence_availability: entry.presence_availability ?? '',
+      presence_activity: entry.presence_activity ?? '',
+      pause_polling: entry.pause_polling ?? false
+    }));
+    localConfig.status_rules.quiet_hours = workingHoursReplaceExisting
+      ? incoming
+      : [...existing, ...incoming];
+    workingHoursPreview = null;
+    workingHoursReplaceExisting = true;
+    markDirty();
+  }
+
+  /** Issue #876: one short, translated line per preview entry so the user
+   *  can scan the proposed rules without opening a detail row. */
+  function previewEntryLine(entry: WorkingHoursImportEntry, _idx: number): string {
+    const days = entry.days.length === 0
+      ? t('rules.dayEveryDay')
+      : entry.days.map((d) => t(`rules.day${d}` as 'rules.day1')).join(', ');
+    return `${days} · ${minutesToTime(entry.start_minutes)}–${minutesToTime(entry.end_minutes)}`;
+  }
+
+  /** Issue #876: the "Outlook reports ..." hint line above the entry list. */
+  function formatWorkingHoursSummary(working: WorkingHoursImportWorking): string {
+    if (working.days.length === 0) return t('rules.importWorkingHoursDaysAllOff');
+    const days = working.days
+      .map((d) => t(`rules.day${d}` as 'rules.day1'))
+      .join(', ');
+    return t('rules.importWorkingHoursDaysLabel', {
+      days,
+      start: minutesToTime(working.start_minutes),
+      end: minutesToTime(working.end_minutes)
+    });
+  }
+
   /**
    * Rust bounds the lexicon to 64 entries of 32 chars at the IPC boundary
    * (issue #538). Counted here so the hint can say what will actually be
@@ -1411,6 +1519,57 @@
           class="btn-secondary"
           onclick={() => { localConfig.status_rules.quiet_hours.push({ enabled: true, start_minutes: 1320, end_minutes: 420, days: [], replacement_status: '', presence_availability: '', presence_activity: '', pause_polling: false }); markDirty(); }}
         >{t('rules.addQuietHours')}</button>
+        <!-- Issue #876: Outlook "Work hours" import. The button fires a
+             `preview_working_hours` IPC call (issue #876 reads Graph
+             `mailboxSettings.workingHours`, returns a list of
+             `QuietHoursEntry` candidates). The preview renders below so
+             the user can see and reject the new rules before they
+             overwrite the existing quiet_hours table. -->
+        <button
+          type="button"
+          class="btn-link"
+          onclick={requestWorkingHoursPreview}
+          disabled={workingHoursBusy}
+        >{t('rules.importWorkingHours')}</button>
+        <p class="hint">{t('rules.importWorkingHoursHint')}</p>
+        {#if workingHoursError}
+          <p class="hint error" role="status">{workingHoursError}</p>
+        {/if}
+        {#if workingHoursPreview && workingHoursPreview.entries.length > 0}
+          <div class="rule-col import-preview" role="group" aria-label={t('rules.importWorkingHoursPreviewTitle')}>
+            <span class="form-label">{t('rules.importWorkingHoursPreviewTitle')}</span>
+            {#if workingHoursPreview.working}
+              <p class="hint">{formatWorkingHoursSummary(workingHoursPreview.working)}</p>
+            {/if}
+            <ol class="hint preview-list">
+              {#each workingHoursPreview.entries as entry, idx}
+                <li>
+                  {previewEntryLine(entry, idx)}
+                </li>
+              {/each}
+            </ol>
+            <label class="rule-check">
+              <input
+                type="checkbox"
+                bind:checked={workingHoursReplaceExisting}
+              />
+              <span>{t('rules.importWorkingHoursReplace')}</span>
+            </label>
+            <p class="hint">{t('rules.importWorkingHoursReplaceHint')}</p>
+            <div class="rule-row">
+              <button
+                type="button"
+                class="btn-secondary"
+                onclick={applyWorkingHoursPreview}
+              >{t('rules.importWorkingHoursApply')}</button>
+              <button
+                type="button"
+                class="btn-link"
+                onclick={cancelWorkingHoursPreview}
+              >{t('rules.importWorkingHoursCancel')}</button>
+            </div>
+          </div>
+        {/if}
       </div>
       <div class="form-group">
         <span class="form-label">{t('rules.trackRulesLabel')}</span>

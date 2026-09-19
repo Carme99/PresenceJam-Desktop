@@ -1310,6 +1310,193 @@ pub fn get_teams_presence(access_token: &str) -> Result<PresenceInfo, TeamsApiEr
         .map_err(|e| TeamsApiError::Other(200, format!("Failed to parse presence: {}", e)))
 }
 
+/// Issue #876: the user's mailbox working hours, as defined by Outlook /
+/// Graph `mailboxSettings.workingHours`. The Outlook client surfaces this
+/// as the "Work hours" tab of File → Options → Calendar.
+///
+/// Returns a [`WorkingHours`] the import command inverts into quiet-hours
+/// rules. The mailbox timezone (`timeZone.offset`) is informational: the
+/// hours are local-clock by definition, so we keep them as minutes-since-
+/// local-midnight and surface the offset only for the diagnostics
+/// snapshot.
+///
+/// Requires `MailboxSettings.Read`. Existing sessions must re-consent once
+/// (the scope is in `MICROSOFT_GRAPH_SCOPES` from 5.0 onward); a tenant that
+/// refuses the scope fails with a [`TeamsApiError::Forbidden`] which the
+/// import command translates into the "try reconnecting Teams" message
+/// rather than a panic.
+pub fn get_working_hours(access_token: &str) -> Result<WorkingHours, TeamsApiError> {
+    let client = build_teams_client().map_err(TeamsApiError::Transient)?;
+
+    let response = client
+        .get("https://graph.microsoft.com/v1.0/me/mailboxSettings/workingHours")
+        .header("Authorization", format!("Bearer {}", access_token))
+        .send()
+        .map_err(|e| TeamsApiError::Transient(format!("Failed to get working hours: {}", e)))?;
+
+    let status = response.status();
+    let status_code = status.as_u16();
+    let body_text = response
+        .text()
+        .unwrap_or_else(|_| "Unknown error".to_string());
+
+    if !status.is_success() {
+        log::error!(
+            "{TAG} Failed to get working hours: {} - {}",
+            status,
+            body_text
+        );
+        // The 403 case is the common one for the new scope: an existing
+        // session that has not yet re-consented gets `insufficient_scope`
+        // for `MailboxSettings.Read`. The import command maps it to a
+        // user-visible reconnect prompt; we keep the typed error here.
+        return Err(classify_teams_status(status_code, None, &body_text));
+    }
+
+    parse_working_hours_body(&body_text)
+        .map_err(|e| TeamsApiError::Other(200, format!("Failed to parse working hours: {}", e)))
+}
+
+/// Issue #876: the parsed `mailboxSettings.workingHours` payload. Only the
+/// fields the inverter reads are kept. `days` is normalised to ISO weekday
+/// numbers 1..=7 (Mon=1, Sun=7) so the inverter can index them without
+/// re-doing the day-name lookup on every entry.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
+pub struct WorkingHours {
+    /// Minutes since local midnight at which the working day starts.
+    pub start_minutes: u16,
+    /// Minutes since local midnight at which the working day ends.
+    pub end_minutes: u16,
+    /// ISO weekday numbers 1..=7; empty means "every day" (an Outlook user
+    /// who has cleared the Work hours tab — the inverter treats that as
+    /// no off-hours at all).
+    pub days: Vec<u8>,
+    /// The mailbox timezone offset in minutes east of UTC (e.g., `-480`
+    /// for Pacific Standard Time). Kept for the diagnostics snapshot; the
+    /// inverter treats `start_time` and `end_time` as local-clock.
+    pub time_zone_offset_minutes: i32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkingHoursRaw {
+    #[serde(default)]
+    days_of_week: Vec<String>,
+    #[serde(default)]
+    start_time: Option<String>,
+    #[serde(default)]
+    end_time: Option<String>,
+    #[serde(default)]
+    time_zone: Option<WorkingHoursTimeZoneRaw>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkingHoursTimeZoneRaw {
+    /// Windows-style timezone name (e.g. "Pacific Standard Time"). Held
+    /// for the diagnostics snapshot; the inverter reads only `offset`.
+    #[serde(default)]
+    #[allow(dead_code)]
+    name: Option<String>,
+    /// ISO-8601 offset string in `+HH:MM` form. `Z` collapses to 0.
+    #[serde(default)]
+    offset: Option<String>,
+}
+
+fn parse_working_hours_body(body: &str) -> Result<WorkingHours, String> {
+    let raw: WorkingHoursRaw =
+        serde_json::from_str(body).map_err(|e| format!("invalid working hours payload: {}", e))?;
+    let start_minutes = parse_hhmm_to_minutes(raw.start_time.as_deref().unwrap_or(""))
+        .ok_or_else(|| "missing or malformed start_time".to_string())?;
+    let end_minutes = parse_hhmm_to_minutes(raw.end_time.as_deref().unwrap_or(""))
+        .ok_or_else(|| "missing or malformed end_time".to_string())?;
+    let days = raw
+        .days_of_week
+        .iter()
+        .filter_map(|name| day_name_to_iso(name.as_str()))
+        .collect::<Vec<_>>();
+    let (time_zone_offset_minutes, _time_zone_name) = raw
+        .time_zone
+        .as_ref()
+        .map(|tz| {
+            (
+                tz.offset
+                    .as_deref()
+                    .and_then(parse_offset_to_minutes)
+                    .unwrap_or(0),
+                tz.name.clone().unwrap_or_default(),
+            )
+        })
+        .unwrap_or((0, String::new()));
+    Ok(WorkingHours {
+        start_minutes,
+        end_minutes,
+        days,
+        time_zone_offset_minutes,
+    })
+}
+
+/// Parses an `HH:MM[:SS[.fff]]` time string (the Graph `workingHours`
+/// schema emits fractional seconds, e.g. `08:00:00.0000000`). Returns
+/// minutes-since-midnight, clamped into `0..=1439` (a 24:00:00 read
+/// collapses to 0).
+pub fn parse_hhmm_to_minutes(value: &str) -> Option<u16> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Strip the optional fractional seconds so the colon split is enough.
+    let head = trimmed.split('.').next().unwrap_or(trimmed);
+    let mut parts = head.split(':');
+    let hh: u32 = parts.next()?.parse().ok()?;
+    let mm: u32 = parts.next()?.parse().ok()?;
+    if hh > 23 || mm > 59 {
+        return None;
+    }
+    let total = hh * 60 + mm;
+    Some(total.min(1439) as u16)
+}
+
+/// Parses a Graph-style timezone offset (`+HH:MM`, `-HH:MM`, or `Z`).
+/// Returns minutes east of UTC. `Z` and empty input collapse to 0.
+pub fn parse_offset_to_minutes(value: &str) -> Option<i32> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed == "Z" || trimmed.eq_ignore_ascii_case("UTC") {
+        return Some(0);
+    }
+    let (sign, body) = if let Some(rest) = trimmed.strip_prefix('-') {
+        (-1, rest)
+    } else if let Some(rest) = trimmed.strip_prefix('+') {
+        (1, rest)
+    } else {
+        (1, trimmed)
+    };
+    let mut parts = body.split(':');
+    let hh: i32 = parts.next()?.parse().ok()?;
+    let mm: i32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    if !(0..=14).contains(&hh) || !(0..=59).contains(&mm) {
+        return None;
+    }
+    Some(sign * (hh * 60 + mm))
+}
+
+/// Converts an Outlook day name (lowercase, as Graph emits) to its ISO
+/// weekday number 1..=7. Returns `None` for anything Graph does not
+/// document — the inverter treats unknown days as a no-op rather than a
+/// hard error.
+pub fn day_name_to_iso(name: &str) -> Option<u8> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "monday" => Some(1),
+        "tuesday" => Some(2),
+        "wednesday" => Some(3),
+        "thursday" => Some(4),
+        "friday" => Some(5),
+        "saturday" => Some(6),
+        "sunday" => Some(7),
+        _ => None,
+    }
+}
+
 /// Issue #866: drives the documented Busy / DND / BeRightBack / Away pair on
 /// the user's Teams presence via the Graph `setUserPreferredPresence` POST.
 ///
@@ -2485,6 +2672,166 @@ mod tests {
             src.matches(exit_call).count(),
             3,
             "the 3 s client must stay confined to the three exit-path calls"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Issue #876: Outlook `mailboxSettings.workingHours` payload parsing.
+    // The accepted-shape test is the recorded response from a real
+    // tenant (Pacific Standard Time, Mon-Fri 09:00-17:00) — a regression
+    // here would mean the importer turns 17:00 into 17:00:00 (no
+    // minutes), drops the offset, or mis-maps "monday" / "sunday"
+    // to ISO weekday numbers — all of which would push the inverter off
+    // by a day.
+    // -------------------------------------------------------------------
+
+    /// Issue #876: parse a recorded Graph response that uses an offset
+    /// timezone and the documented `startTime` / `endTime` shape with
+    /// fractional seconds (the `.0000000` suffix is what Graph emits on
+    /// the wire — a hand-edit to drop it would 4xx in production but a
+    /// silent parse failure in tests).
+    #[test]
+    fn parse_working_hours_body_reads_recorded_response_with_offset_timezone() {
+        // Recorded response from a Pacific Standard Time tenant
+        // (offset -08:00 = -480 minutes).
+        let body = r#"{
+            "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#users('8a1f...')/mailboxSettings/workingHours",
+            "daysOfWeek": [
+                "monday",
+                "tuesday",
+                "wednesday",
+                "thursday",
+                "friday"
+            ],
+            "startTime": "09:00:00.0000000",
+            "endTime": "17:00:00.0000000",
+            "timeZone": {
+                "name": "Pacific Standard Time",
+                "offset": "-08:00"
+            }
+        }"#;
+        let parsed = super::parse_working_hours_body(body).expect("must parse");
+        assert_eq!(parsed.start_minutes, 9 * 60);
+        assert_eq!(parsed.end_minutes, 17 * 60);
+        assert_eq!(parsed.days, vec![1, 2, 3, 4, 5]);
+        assert_eq!(parsed.time_zone_offset_minutes, -480);
+    }
+
+    /// Issue #876: the Graph payload schema sometimes omits the timezone
+    /// block (an admin-cleared Outlook Work hours tab leaves the body
+    /// intact but the timezone defaulted). The parser must NOT panic;
+    /// it returns `time_zone_offset_minutes = 0` and the inverter keeps
+    /// working in local-clock.
+    #[test]
+    fn parse_working_hours_body_tolerates_missing_timezone() {
+        let body = r#"{
+            "daysOfWeek": ["monday", "tuesday", "wednesday", "thursday", "friday"],
+            "startTime": "08:00:00.0000000",
+            "endTime": "17:00:00.0000000"
+        }"#;
+        let parsed = super::parse_working_hours_body(body).expect("must parse");
+        assert_eq!(parsed.time_zone_offset_minutes, 0);
+        assert_eq!(parsed.start_minutes, 8 * 60);
+        assert_eq!(parsed.end_minutes, 17 * 60);
+    }
+
+    /// Issue #876: all-day `daysOfWeek` (an Outlook user who selected
+    /// "every day" in the Work hours tab) emits `["sunday", "monday",
+    /// ...]` — every day of the week. The parser must round-trip the
+    /// full set through the ISO weekday mapping.
+    #[test]
+    fn parse_working_hours_body_handles_all_day_days_of_week() {
+        let body = r#"{
+            "daysOfWeek": [
+                "sunday", "monday", "tuesday", "wednesday",
+                "thursday", "friday", "saturday"
+            ],
+            "startTime": "08:00:00.0000000",
+            "endTime": "17:00:00.0000000",
+            "timeZone": {"name": "UTC", "offset": "Z"}
+        }"#;
+        let parsed = super::parse_working_hours_body(body).expect("must parse");
+        assert_eq!(parsed.days, vec![7, 1, 2, 3, 4, 5, 6]);
+        assert_eq!(parsed.time_zone_offset_minutes, 0);
+    }
+
+    /// Issue #876: end-to-end — a recorded Mon-Fri 09:00-17:00
+    /// response, parsed then inverted, must produce the exact expected
+    /// seven-entry set. Mirrors the canonical case from
+    /// `commands::config::tests::invert_working_hours_produces_expected_set_for_mon_fri_9_to_5`
+    /// but exercises the parser, not just the inverter.
+    #[test]
+    fn parse_then_invert_recorded_response_matches_expected_windows() {
+        use crate::commands::config::invert_working_hours;
+        let body = r#"{
+            "daysOfWeek": [
+                "monday", "tuesday", "wednesday", "thursday", "friday"
+            ],
+            "startTime": "09:00:00.0000000",
+            "endTime": "17:00:00.0000000",
+            "timeZone": {"name": "Pacific Standard Time", "offset": "-08:00"}
+        }"#;
+        let working = super::parse_working_hours_body(body).expect("must parse");
+        let entries = invert_working_hours(&working);
+        // Seven entries: 5 wrap-around (Mon-Fri) + 2 full-day (Sat/Sun).
+        assert_eq!(
+            entries.len(),
+            7,
+            "Mon-Fri working + Sat/Sun off → 7 entries"
+        );
+        // Mon-Fri: start=1020 (17:00), end=540 (09:00) — wrap.
+        for (i, entry) in entries.iter().enumerate().take(5) {
+            assert_eq!(entry.start_minutes, 17 * 60, "weekday {} start", i);
+            assert_eq!(entry.end_minutes, 9 * 60, "weekday {} end", i);
+            assert_eq!(entry.days, vec![(i as u8) + 1]);
+            assert!(entry.enabled);
+        }
+        // Sat/Sun: full day.
+        assert_eq!(entries[5].start_minutes, 0);
+        assert_eq!(entries[5].end_minutes, 1440);
+        assert_eq!(entries[5].days, vec![6]);
+        assert_eq!(entries[6].start_minutes, 0);
+        assert_eq!(entries[6].end_minutes, 1440);
+        assert_eq!(entries[6].days, vec![7]);
+    }
+
+    /// Issue #876: `parse_hhmm_to_minutes` rejects out-of-range values
+    /// so a malformed payload surfaces as an error rather than a
+    /// silent 24:00 collapse.
+    #[test]
+    fn parse_hhmm_to_minutes_rejects_invalid_values() {
+        assert_eq!(super::parse_hhmm_to_minutes("09:00"), Some(540));
+        assert_eq!(super::parse_hhmm_to_minutes("09:00:00.0000000"), Some(540));
+        assert_eq!(super::parse_hhmm_to_minutes("23:59"), Some(23 * 60 + 59));
+        assert_eq!(
+            super::parse_hhmm_to_minutes("24:00"),
+            None,
+            "hour 24 invalid"
+        );
+        assert_eq!(
+            super::parse_hhmm_to_minutes("09:60"),
+            None,
+            "minute 60 invalid"
+        );
+        assert_eq!(super::parse_hhmm_to_minutes(""), None, "empty string");
+        assert_eq!(super::parse_hhmm_to_minutes("garbage"), None);
+    }
+
+    /// Issue #876: `parse_offset_to_minutes` accepts the documented
+    /// `+HH:MM`, `-HH:MM` and `Z` forms and rejects everything else.
+    /// A bad offset would leave the importer pointing at the wrong
+    /// minute-of-day for the user's workday.
+    #[test]
+    fn parse_offset_to_minutes_handles_documented_forms() {
+        assert_eq!(super::parse_offset_to_minutes("+00:00"), Some(0));
+        assert_eq!(super::parse_offset_to_minutes("Z"), Some(0));
+        assert_eq!(super::parse_offset_to_minutes(""), Some(0));
+        assert_eq!(super::parse_offset_to_minutes("-08:00"), Some(-480));
+        assert_eq!(super::parse_offset_to_minutes("+05:30"), Some(330));
+        assert_eq!(
+            super::parse_offset_to_minutes("-99:00"),
+            None,
+            "hour 99 invalid"
         );
     }
 }
