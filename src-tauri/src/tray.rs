@@ -106,8 +106,12 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
                 if let Some(window) = app.get_webview_window("main") {
                     if window.is_visible().unwrap_or(false) {
                         let _ = window.hide();
+                        // Issue #886: the dedup key reads the visibility mirror,
+                        // so the tray's own window changes must report it.
+                        note_window_visibility(false);
                     } else {
                         let _ = window.show();
+                        note_window_visibility(true);
                         // Issue #483: a minimized window stays minimized
                         // after show() -- unminimize first (mirrors the
                         // single-instance raise in lib.rs and show_window).
@@ -161,6 +165,7 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
                 let _ = app.emit("navigate", "settings");
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.show();
+                note_window_visibility(true);
                     // Issue #483: mirror the unminimize in the Show arm.
                     let _ = window.unminimize();
                     let _ = window.set_focus();
@@ -581,6 +586,52 @@ static TRAY_WRITE_LOCK: std::sync::OnceLock<parking_lot::Mutex<()>> = std::sync:
 
 fn tray_write_lock() -> &'static parking_lot::Mutex<()> {
     TRAY_WRITE_LOCK.get_or_init(|| parking_lot::Mutex::new(()))
+}
+
+/// Last known main-window visibility, which is what the dedup key carries
+/// (issue #886).
+///
+/// The rebuild used to ask the window directly, and `is_visible()` blocks the
+/// calling thread on an event-loop reply — a hop paid by every poll, including
+/// the ones the dedup key discards a few lines later. [`note_window_visibility`]
+/// keeps the mirror honest, and the rebuild re-reads the real window whenever it
+/// paints anyway (see the self-heal in `rebuild_tray_menu`).
+static WINDOW_VISIBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Records the main window's visibility (issue #886). Every path that shows or
+/// hides the window should report it — the tray's own Show/Hide and Open
+/// Settings arms do, and the window commands / close-to-tray paths are expected
+/// to; the poll loop then never has to ask the event loop for it.
+pub fn note_window_visibility(visible: bool) {
+    WINDOW_VISIBLE.store(visible, Ordering::Release);
+}
+
+/// The visibility the dedup key is built from (issue #886) — the mirror, so the
+/// discarded path performs no event-loop hop.
+fn window_visible() -> bool {
+    WINDOW_VISIBLE.load(Ordering::Acquire)
+}
+
+/// The real main-window visibility, queried once per paint (issue #886). Only
+/// the paths that are already off the hot path may call this: the startup paint
+/// (on the main thread) and the rebuild that passed the dedup guard.
+fn live_window_visible(app: &AppHandle) -> bool {
+    app.get_webview_window("main")
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false)
+}
+
+/// The snooze a rebuild must render, read out of the mounted config under a
+/// scoped guard (issue #886).
+///
+/// Only `snooze_until` (plus the clock) is needed, so that one field is copied
+/// out instead of cloning the whole `AppConfig` — which allocates its status
+/// rules on every poll, including the ones the dedup key discards. The guard
+/// lives only for this call, so none survives into the blocking Spotify HTTP
+/// below.
+fn snooze_from_app_state(state: &crate::AppState) -> Option<TraySnooze> {
+    let config = state.config.get();
+    resolve_snooze(config.as_ref())
 }
 
 /// Which entry point a rebuild came through (issue #882).
@@ -1432,8 +1483,7 @@ fn force_tray_refresh(app: &AppHandle) {
     // instead of fetching (`TrayFetch::CacheOnly`) and an action cannot override
     // that. The nudge below still forces the repaint, which is all a snooze-time
     // repaint needs.
-    let config = state.config.get().clone();
-    let snooze = resolve_snooze(config.as_ref());
+    let snooze = snooze_from_app_state(state.inner());
     // Issue #883: the caches stay. Emptying them was how this helper asked for
     // fresh Devices/Up Next lists, and it bypassed `TRAY_SPOTIFY_FETCH_THROTTLE`
     // on every player action; the action is recorded instead, and the rebuild
@@ -1564,19 +1614,18 @@ fn rebuild_tray_menu(
     // Window visibility is computed up front so the dedup key includes
     // it — otherwise a hide/show click would early-return and the label
     // would go stale.
-    let is_window_visible = app
-        .get_webview_window("main")
-        .and_then(|w| w.is_visible().ok())
-        .unwrap_or(false);
-    // 4.7.0 (S9 / issue #677): the snooze is resolved once, up front, because
-    // it feeds three separate decisions below — the dedup key, the fetch mode
-    // and the rendered status line. The config is CLONED so no read guard
-    // survives into the blocking Spotify HTTP below (and into the write lock
-    // this function takes at the end). `state` is the same handle the rest of
-    // the rebuild uses.
+    // Issue #886: the key reads the visibility mirror, so this path performs no
+    // event-loop hop — `live_window_visible` below re-reads the real window on
+    // the way to a paint, which is where the label is built.
+    let key_visible = window_visible();
+    // 4.7.0 (S9 / issue #677): the snooze is resolved once, up front, because it
+    // feeds three separate decisions below — the dedup key, the fetch mode and
+    // the rendered status line. Issue #886: it comes from a scoped read of the
+    // mounted config, so no whole-`AppConfig` clone is allocated per poll and no
+    // read guard survives into the blocking Spotify HTTP below. `state` is the
+    // same handle the rest of the rebuild uses.
     let state = app.state::<std::sync::Arc<crate::AppState>>();
-    let config: Option<crate::config::AppConfig> = state.config.get().clone();
-    let snooze = resolve_snooze(config.as_ref());
+    let snooze = snooze_from_app_state(state.inner());
     let snooze_key = snooze.as_ref().map(|sn| snooze_dedup_key(&sn.status));
     // Issue #883: a player action asks for fresh Devices/Up Next lists, but only
     // when it is not already covered by a fetch in flight (`action_fetch_due`),
@@ -1594,7 +1643,7 @@ fn rebuild_tray_menu(
     let (devices_bucket, queue_bucket) = cache_buckets();
     let snapshot = tray_snapshot_for(
         is_syncing,
-        is_window_visible,
+        key_visible,
         current_track,
         snooze_key,
         devices_bucket,
@@ -1627,6 +1676,14 @@ fn rebuild_tray_menu(
         // (e.g., set_menu returns Err), we want the next call with the
         // same state to retry rather than no-op on a stale snapshot.
     }
+
+    // Issue #886: the key was built from the mirror; the label below is built
+    // from the real window — one query, paid only on this path, which is about
+    // to perform Spotify HTTP anyway. A show/hide that did not report itself
+    // therefore cannot leave the Show/Hide label wrong, and the mirror self-heals
+    // for the polls that follow.
+    let is_window_visible = live_window_visible(app);
+    note_window_visibility(is_window_visible);
 
     // Fetch Spotify data OUTSIDE the tray write lock, and only when the fetch
     // mode allows it. The throttled caches are snapshotted and fetched without
@@ -2723,8 +2780,10 @@ mod tests {
     fn snooze_is_resolved_before_the_dedup_guard() {
         let prod = prod_source(include_str!("tray.rs"));
         let body = body_of(prod, "fn rebuild_tray_menu(");
+        // Issue #886: the snooze comes from a scoped read of the mounted config
+        // (`snooze_from_app_state`) instead of a whole-`AppConfig` clone.
         let resolve = body
-            .find("resolve_snooze(")
+            .find("snooze_from_app_state(")
             .expect("update_tray_menu must resolve the snooze");
         let snapshot = body
             .find("tray_snapshot_for(")
@@ -3170,6 +3229,63 @@ mod tests {
         assert!(
             mark < devices,
             "the in-flight mark must be recorded before the requests run (issue #883)"
+        );
+    }
+
+    /// Issue #886: the poll loop calls the rebuild on every iteration and the
+    /// dedup key discards most of those calls — but only after a window query
+    /// that blocks the calling thread on an event-loop reply and a clone of the
+    /// whole `AppConfig`. The key now reads a visibility mirror and a scoped
+    /// snooze read, and the real query sits below the early return.
+    #[test]
+    fn discarded_rebuilds_query_neither_the_window_nor_a_config_clone() {
+        // The mirror is the key's source and round-trips.
+        note_window_visibility(true);
+        assert!(window_visible(), "the mirror must report what was recorded");
+        note_window_visibility(false);
+        assert!(!window_visible());
+
+        let prod = prod_source(include_str!("tray.rs"));
+        let body = body_of(prod, "fn rebuild_tray_menu(");
+        let guard = body
+            .find("tray_state_changed(")
+            .expect("the rebuild must keep the dedup guard");
+        let mirror = body
+            .find("window_visible()")
+            .expect("the dedup key must read the visibility mirror (issue #886)");
+        assert!(
+            mirror < guard,
+            "the key must be built from the mirror, so a discarded rebuild costs no hop"
+        );
+        // The real query, and anything else that can block, sits below it.
+        let live = body
+            .find("live_window_visible(")
+            .expect("a repaint must still render the real window state (issue #886)");
+        assert!(
+            live > guard,
+            "the visibility query belongs below the dedup early-return (issue #886)"
+        );
+        assert!(
+            !body.contains("is_visible()"),
+            "the rebuild itself must not query the event loop (issue #886)"
+        );
+        assert!(
+            !body.contains("config.get().clone()"),
+            "the snooze must not cost a whole-AppConfig clone per poll (issue #886)"
+        );
+        assert!(
+            body.contains("snooze_from_app_state("),
+            "the snooze must come from the scoped read (issue #886)"
+        );
+        // The same scoped read replaces the clone on the forced path.
+        let force = body_of(prod, "fn force_tray_refresh(");
+        assert!(
+            !force.contains("config.get().clone()"),
+            "force_tray_refresh must not clone the config either (issue #886)"
+        );
+        assert!(
+            force.contains("snooze_from_app_state("),
+            "force_tray_refresh must use the scoped snooze read (issue #886)"
         );
     }
 }
