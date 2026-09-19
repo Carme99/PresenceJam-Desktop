@@ -90,7 +90,7 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
     // tray can only be empty; it is reachable for the first moments of
     // startup, while the window is not yet interactive.
 
-    let tray = TrayIconBuilder::new()
+    let builder = TrayIconBuilder::new()
         .tooltip("PresenceJam")
         .icon(
             app.default_window_icon()
@@ -386,8 +386,19 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
                 let _ = app.emit("tray-click", ());
             }
         })
-        .build(app)
-        .map_err(|e| e.to_string())?;
+        ;
+    // Issue #927: the tray build is the one call here that panics instead of
+    // returning `Err`. On Linux it dlopens libayatana-appindicator3.so.1 /
+    // libappindicator3.so.1 through `libappindicator-sys`, whose `Lazy<Library>`
+    // panics when neither soname resolves — and this runs inline on the setup
+    // thread, so the panic would unwind across the event-loop callback instead of
+    // becoming the error `lib.rs` already handles by running without a tray.
+    // The panic is raised on this thread, above the FFI boundary, so it is
+    // catchable.
+    let tray = guard_tray_panic(
+        "tray icon",
+        std::panic::AssertUnwindSafe(|| builder.build(app).map_err(|e| e.to_string())),
+    )?;
 
     // Store the TrayIcon globally (idempotent)
     if TRAY.get().is_some() {
@@ -2050,6 +2061,43 @@ pub fn set_presence_gated_badge(app: &AppHandle, gated: bool) {
 #[cfg(not(target_os = "macos"))]
 pub fn set_presence_gated_badge(_app: &AppHandle, _gated: bool) {}
 
+/// Runs a tray-library call, turning the panic a missing native tray library
+/// raises into the `Err` this module's contract promises (issue #927).
+///
+/// The reason is logged once, at error level, together with what failed: an
+/// AppImage whose bundler could not see a dlopen-only dependency is the likely
+/// host, and the log line is the only thing that says so.
+fn guard_tray_panic<T>(
+    what: &str,
+    f: impl FnOnce() -> Result<T, String> + std::panic::UnwindSafe,
+) -> Result<T, String> {
+    match std::panic::catch_unwind(f) {
+        Ok(result) => result,
+        Err(payload) => {
+            let reason = payload
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".to_string());
+            log::error!(
+                "[TRAY] {}: the tray library is unavailable ({}); running without a tray",
+                what,
+                reason
+            );
+            Err(format!("{} unavailable: {}", what, reason))
+        }
+    }
+}
+
+/// Whether a tray icon actually exists (issue #927).
+///
+/// `setup_tray` can now fail without panicking, and a session with no tray has
+/// no reachable way back to a window that close-to-tray has hidden — so the
+/// caller that hides it (lib.rs) has to gate on this.
+pub fn tray_available() -> bool {
+    get_tray().is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3286,6 +3334,53 @@ mod tests {
         assert!(
             force.contains("snooze_from_app_state("),
             "force_tray_refresh must use the scoped snooze read (issue #886)"
+        );
+    }
+
+    /// Issue #927: on a host where neither appindicator soname resolves, the tray
+    /// build panics inside `libappindicator-sys` (its `Lazy<Library>` dlopens
+    /// both and panics when neither is there). `setup_tray` is written to fail as
+    /// `Result` — lib.rs logs the error and carries on without a tray — so the
+    /// panic has to arrive as that error, and `tray_available()` is what the
+    /// close-to-tray guard reads.
+    ///
+    /// The panic message this test provokes is expected output.
+    #[test]
+    fn a_missing_tray_library_is_an_error_not_a_panic() {
+        let err = guard_tray_panic("tray icon", || -> Result<(), String> {
+            panic!("libayatana-appindicator3.so.1: cannot open shared object file")
+        })
+        .expect_err("a panicking tray build must be reported as an error");
+        assert!(
+            err.contains("libayatana-appindicator3.so.1"),
+            "the error must name the reason, got: {}",
+            err
+        );
+        assert!(err.contains("tray icon"), "the error must name what failed");
+
+        // A normal failure passes through untouched, and a success returns its
+        // value — the guard must not swallow either.
+        assert_eq!(
+            guard_tray_panic("tray icon", || Err::<(), String>("nope".to_string())),
+            Err("nope".to_string())
+        );
+        assert_eq!(guard_tray_panic("tray icon", || Ok(7)), Ok(7));
+
+        // The wiring: the build is the guarded call, and the close-to-tray guard
+        // has an accessor to gate on (lib.rs owns that call site).
+        let prod = prod_source(include_str!("tray.rs"));
+        let setup = body_of(prod, "pub fn setup_tray(");
+        assert!(
+            setup.contains("guard_tray_panic(\"tray icon\""),
+            "the tray build must be guarded (issue #927)"
+        );
+        assert!(
+            setup.contains("builder.build(app)"),
+            "the guarded call must be the tray build itself"
+        );
+        assert!(
+            prod.contains("pub fn tray_available()"),
+            "close-to-tray needs an accessor for whether a tray exists (issue #927)"
         );
     }
 }
