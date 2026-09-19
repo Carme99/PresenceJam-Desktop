@@ -277,6 +277,7 @@ jobs:
             artifact_name: PresenceJam-${{ needs.resolve-tag.outputs.tag }}-linux-amd64
             bundle_path: |
               PresenceJam-linux-amd64.deb
+              PresenceJam-linux-amd64.rpm
               PresenceJam-linux-amd64.AppImage
               PresenceJam-${{ needs.resolve-tag.outputs.tag }}.AppImage.sig
 
@@ -336,7 +337,7 @@ jobs:
       # Tauri on Linux pulls in glib-sys/webkit2gtk-sys/etc. via FFI
       # bindings, so the Ubuntu runner needs the GTK + webkit2gtk system
       # headers and pkg-config. Mirrors the pr-time ci.yml setup. The
-      # Linux build produces both .deb (Debian package) and .AppImage
+      # Linux build produces the .deb, the .rpm and the .AppImage
       # (universal single-file binary) in one `tauri build` invocation.
       - name: Install Linux system dependencies
         if: matrix.os == 'ubuntu-latest'
@@ -350,6 +351,34 @@ jobs:
             libsoup-3.0-dev \
             pkg-config \
             build-essential
+
+      # AppStream gate (issue #900): the metainfo is shipped inside the .deb
+      # and the .rpm through bundle.linux.deb.files / bundle.linux.rpm.files,
+      # and a package without it is invisible to GNOME Software and KDE
+      # Discover. Validate the source file before the compile so a broken one
+      # fails in seconds, and require its newest <release> entry to name the
+      # version being cut — otherwise the package advertises a release that is
+      # several versions old. appstreamcli's network checks are off so the gate
+      # is hermetic.
+      - name: Verify AppStream metainfo
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends appstream rpm cpio
+          METAINFO="src-tauri/linux/com.presencejam.app.metainfo.xml"
+          if [ ! -f "$METAINFO" ]; then
+            echo "::error::$METAINFO is missing — the deb and rpm would ship without AppStream data"
+            exit 1
+          fi
+          appstreamcli validate --no-net "$METAINFO"
+          BLOCK_VERSION="${RELEASE_TAG#v}"
+          BLOCK_VERSION="${BLOCK_VERSION%%-*}"
+          TOP_RELEASE=$(grep -oE '<release version="[^"]+"' "$METAINFO" | head -1 | sed -E 's/.*"(.*)"/\1/')
+          if [ "$TOP_RELEASE" != "$BLOCK_VERSION" ]; then
+            echo "::error::$METAINFO's newest release entry says '${TOP_RELEASE}' but this tag builds '${BLOCK_VERSION}' — add the release entry"
+            exit 1
+          fi
+          echo "AppStream metainfo validates; newest release ${TOP_RELEASE}"
 
       - name: Build Tauri (Linux)
         if: matrix.os == 'ubuntu-latest'
@@ -442,23 +471,27 @@ jobs:
 
       # Linux artifacts are named like `presence-jam_2.7.2_amd64.deb` by
       # Tauri's bundler. Rename to the project-standard format used by
-      # the macOS and Windows steps (PresenceJam-<version>-<os>.ext) and
-      # drop the .AppImage alongside.
+      # the macOS and Windows steps (PresenceJam-<version>-<os>.ext), drop
+      # the .AppImage alongside and pick up the .rpm (issue #900: Fedora,
+      # RHEL and openSUSE users had no native install path — only the deb and
+      # the AppImage were packaged).
       - name: Package Linux artifacts
         if: matrix.os == 'ubuntu-latest'
         run: |
           set -euo pipefail
           DEB=$(find src-tauri/target/release/bundle/deb -name "*.deb" | head -1)
+          RPM=$(find src-tauri/target/release/bundle/rpm -name "*.rpm" | head -1)
           APPIMAGE=$(find src-tauri/target/release/bundle/appimage -name "*.AppImage" | head -1)
-          if [ -z "$DEB" ] || [ -z "$APPIMAGE" ]; then
-            echo "::error::Expected one .deb in bundle/deb/ and one .AppImage in bundle/appimage/"
-            echo "bundle/deb/:"
-            ls -la src-tauri/target/release/bundle/deb/ 2>&1 || echo "(missing)"
-            echo "bundle/appimage/:"
-            ls -la src-tauri/target/release/bundle/appimage/ 2>&1 || echo "(missing)"
+          if [ -z "$DEB" ] || [ -z "$RPM" ] || [ -z "$APPIMAGE" ]; then
+            echo "::error::Expected one .deb in bundle/deb/, one .rpm in bundle/rpm/ and one .AppImage in bundle/appimage/"
+            for d in deb rpm appimage; do
+              echo "bundle/$d/:"
+              ls -la "src-tauri/target/release/bundle/$d/" 2>&1 || echo "(missing)"
+            done
             exit 1
           fi
           cp "$DEB" "PresenceJam-linux-amd64.deb"
+          cp "$RPM" "PresenceJam-linux-amd64.rpm"
           cp "$APPIMAGE" "PresenceJam-linux-amd64.AppImage"
           APPIMAGE_SIG="${APPIMAGE}.sig"
           if [ ! -f "$APPIMAGE_SIG" ]; then
@@ -467,6 +500,20 @@ jobs:
             exit 1
           fi
           cp "$APPIMAGE_SIG" "PresenceJam-$RELEASE_TAG.AppImage.sig"
+
+          # The metainfo has to be INSIDE the packages: the files map in
+          # tauri.conf.json is what puts it there, and a typo in that map is
+          # invisible until a software centre refuses to index the package.
+          # Assert the packaged payload, not the source file.
+          METAINFO_PATH="usr/share/metainfo/com.presencejam.app.metainfo.xml"
+          if ! dpkg-deb --fsys-tarfile "PresenceJam-linux-amd64.deb" | tar -t | grep -Fqx "./${METAINFO_PATH}"; then
+            echo "::error::${METAINFO_PATH} is not in PresenceJam-linux-amd64.deb — check bundle.linux.deb.files"
+            exit 1
+          fi
+          if ! rpm2cpio "PresenceJam-linux-amd64.rpm" | cpio -t --quiet | grep -Fqx "./${METAINFO_PATH}"; then
+            echo "::error::${METAINFO_PATH} is not in PresenceJam-linux-amd64.rpm — check bundle.linux.rpm.files"
+            exit 1
+          fi
           echo "Packaged:"
           ls -la PresenceJam-linux-amd64.* PresenceJam-$RELEASE_TAG.AppImage.sig
 
@@ -658,10 +705,15 @@ jobs:
             echo "Found manifest asset: ${asset}"
           done
           # (b) the payload each platform must be shipping, independent of
-          # whatever the manifest currently says.
+          # whatever the manifest currently says. The .deb and the .rpm are
+          # not updater payloads, but a run that quietly stopped producing
+          # them (issue #900 added the rpm to bundle.targets) would leave
+          # Fedora/RHEL/openSUSE users with nothing to install.
           for expected in \
             "PresenceJam-${RELEASE_TAG}.app.tar.gz" \
             "PresenceJam-${RELEASE_TAG}-setup.exe" \
+            "PresenceJam-linux-amd64.deb" \
+            "PresenceJam-linux-amd64.rpm" \
             "PresenceJam-linux-amd64.AppImage"; do
             if ! grep -Fxq "$expected" /tmp/assets.txt; then
               echo "::error::Missing expected asset $expected in release ${RELEASE_TAG} — latest.json URL would 404"

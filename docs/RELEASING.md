@@ -160,20 +160,31 @@ behind the tag-push run.
    on PRs and `main`, so without this job the exact commit that produces
    user-facing binaries would never be tested — worst case on a re-cut of a
    commit that never saw CI.
-3. **`build`** (`needs: [resolve-tag, verify]`, ~lines 180-400) — three-OS
-   matrix:
+3. **`build`** (`needs: [resolve-tag, verify]`) — three-OS matrix:
 
    | OS | Target | Artifact (upload) | Packaged files |
    | --- | --- | --- | --- |
    | `macos-latest` | `aarch64-apple-darwin` | `PresenceJam-<tag>-macos.dmg` | `PresenceJam-macos.dmg`, `PresenceJam-<tag>.app.tar.gz`, `PresenceJam-<tag>.app.tar.gz.sig` |
-   | `windows-latest` | default | `PresenceJam-<tag>.msi` | `PresenceJam-<tag>.msi`, `PresenceJam-<tag>.msi.sig` |
-   | `ubuntu-latest` | default | `PresenceJam-<tag>-linux-amd64` | `PresenceJam-linux-amd64.deb`, `PresenceJam-linux-amd64.AppImage`, `PresenceJam-<tag>.AppImage.sig` |
+   | `windows-latest` | default | `PresenceJam-<tag>-windows` | `PresenceJam-<tag>-setup.exe`, `PresenceJam-<tag>-setup.exe.sig`, `PresenceJam-<tag>.msi`, `PresenceJam-<tag>.msi.sig` |
+   | `ubuntu-latest` | default | `PresenceJam-<tag>-linux-amd64` | `PresenceJam-linux-amd64.deb`, `PresenceJam-linux-amd64.rpm`, `PresenceJam-linux-amd64.AppImage`, `PresenceJam-<tag>.AppImage.sig` |
 
    The macOS leg builds **aarch64 only** (Intel Macs never receive updates).
-   Uploads fail on missing files (`if-no-files-found: error`), and each packaged
-   artifact also gets a SLSA attestation (`actions/attest-build-provenance`,
-   `subject-path: matrix.bundle_path`) — supplementary to, not a replacement
-   for, the minisign `.sig` files the updater verifies.
+   The Windows leg ships both installers: the per-user NSIS `setup.exe` (what
+   `latest.json` points at, no elevation needed) and the per-machine MSI for
+   managed machines. Uploads fail on missing files (`if-no-files-found: error`),
+   the build job prints every packaged file with its byte count, and each
+   packaged artifact also gets a SLSA attestation
+   (`actions/attest-build-provenance`, `subject-path: matrix.bundle_path`) —
+   supplementary to, not a replacement for, the minisign `.sig` files the
+   updater verifies.
+
+   The Linux leg also runs `appstreamcli validate` over
+   `src-tauri/linux/com.presencejam.app.metainfo.xml` before the compile,
+   requires that file's newest `<release>` entry to name the version being cut,
+   and asserts afterwards that the metainfo is inside both the `.deb` and the
+   `.rpm` — a package without it never appears in GNOME Software or KDE
+   Discover.
+
 4. **`release`** (`needs: [resolve-tag, build]`) — checks the tag out (it needs
    `CHANGELOG.md`), downloads all artifacts (`digest-mismatch: error`), writes
    `SHA256SUMS.txt` (one `"<sha256>  <filename>"` line per file; unsigned, and
@@ -218,6 +229,29 @@ behind the tag-push run.
    unsupported; the fork must be synced with upstream before the manifest branch
    is created). Rotate it on a ~90-day cadence.
 
+### Linux install channels
+
+One `tauri build` produces three x86_64 formats: `.deb` (Debian, Ubuntu, Mint,
+popOS), `.rpm` (Fedora, RHEL, openSUSE) and `.AppImage` (everything else). Only
+the AppImage is an updater payload — `latest.json`'s `linux-x86_64` points at it
+— because tauri-plugin-updater replaces the running AppImage in place. A
+`.deb`/`.rpm` install has no AppImage to replace, so those users update through
+their package manager.
+
+Policy for adding a channel:
+
+- Flatpak, Snap and AUR are follow-ups (issue #900). Each must land together
+  with the package-manager-aware update notice: without it, a package-managed
+  install is offered the AppImage payload and the updater has nothing to
+  replace — it either no-ops or leaves a stray AppImage behind.
+- The arm64 Linux leg (`ubuntu-24.04-arm` plus a `linux-aarch64` key in
+  `latest.json`) is deliberately **not** in the matrix yet, for that same
+  reason: shipping it before the notice exists would repeat the
+  AppImage-payload problem on a new architecture. It is a small matrix change
+  once the notice is in.
+- Every published format is asserted in the release job's asset check, so a run
+  that silently stops producing one fails instead of shipping.
+
 ## 5. Cutting a release — checklist
 
 1. `main` is green, and every slice PR for the release is merged.
@@ -226,6 +260,12 @@ behind the tag-push run.
    `[Unreleased]`, all in the same commit. If the release changes shipped behaviour, update
    [`STATE-OF-FEATURES.md`](./STATE-OF-FEATURES.md) too (including its version
    header).
+
+   The AppStream metainfo carries a `<release>` entry per cut: add the new
+   version and its date to `src-tauri/linux/com.presencejam.app.metainfo.xml`
+   in the same commit. The Linux leg of `release.yml` requires the newest
+   entry to name the version being built, so a forgotten one fails the tag
+   instead of shipping a package that advertises an older release.
 
    Both are enforced at tag time as well: `resolve-tag` fails the run
    before any build when the `## [X.Y.Z]` section or the

@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AppStream metainfo for PresenceJam (issue #900).
+
+  Shipped inside the .deb and the .rpm at
+  /usr/share/metainfo/com.presencejam.app.metainfo.xml through the
+  bundle.linux.deb.files / bundle.linux.rpm.files maps in
+  src-tauri/tauri.conf.json — without it GNOME Software and KDE Discover
+  cannot index the package, so a software-centre user never sees the app.
+
+  Two things keep this file honest:
+    - The Linux leg of release.yml runs appstreamcli validate (network checks
+      switched off) on this file before the build, so a broken file fails the
+      tag rather than shipping.
+    - The same step requires the newest release entry below to name the version
+      being built, so a cut that forgets to add an entry fails loudly instead
+      of advertising a release that is several versions old. Add the new entry
+      and its date when the version literals in docs/RELEASING.md section 1
+      move.
+-->
+<component type="desktop-application">
+  <id>com.presencejam.app</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>PresenceJam</name>
+  <summary>Syncs Spotify playback to your Microsoft Teams status</summary>
+  <description>
+    <p>
+      PresenceJam keeps your Microsoft Teams status message in step with what
+      you are playing on Spotify. Connect both accounts once and the status
+      updates on its own: artist, track, album and a per-track emoji, with
+      quiet hours and per-track rules when you want the status left alone.
+    </p>
+    <p>
+      It runs in the system tray, needs no admin rights, keeps Spotify and
+      Microsoft credentials in your desktop keychain, and updates itself from
+      signed release artefacts.
+    </p>
+  </description>
+  <launchable type="desktop-id">PresenceJam.desktop</launchable>
+  <url type="homepage">https://github.com/Carme99/PresenceJam-Desktop</url>
+  <url type="bugtracker">https://github.com/Carme99/PresenceJam-Desktop/issues</url>
+  <developer id="io.github.carme99">
+    <name>Jack Lee</name>
+  </developer>
+  <categories>
+    <category>AudioVideo</category>
+    <category>Audio</category>
+    <category>Music</category>
+  </categories>
+  <keywords>
+    <keyword>Spotify</keyword>
+    <keyword>Microsoft Teams</keyword>
+    <keyword>status</keyword>
+    <keyword>now playing</keyword>
+  </keywords>
+  <screenshots>
+    <screenshot type="default">
+      <caption>The dashboard: current track, sync state and the status being published</caption>
+      <image>https://raw.githubusercontent.com/Carme99/PresenceJam-Desktop/main/docs/screenshots/dashboard.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>The tray menu</caption>
+      <image>https://raw.githubusercontent.com/Carme99/PresenceJam-Desktop/main/docs/screenshots/tray-menu.png</image>
+    </screenshot>
+  </screenshots>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <!-- Newest first. release.yml asserts the top entry matches the tag. -->
+    <release version="4.7.0" date="2026-09-17">
+      <description>
+        <p>
+          Spotify-to-Teams status sync, quiet hours, per-track status rules,
+          the deferred install-on-quit update path and a redacted diagnostics
+          snapshot for support.
+        </p>
+      </description>
+    </release>
+  </releases>
+</component>
