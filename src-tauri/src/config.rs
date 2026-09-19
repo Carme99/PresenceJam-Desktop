@@ -54,6 +54,12 @@ impl From<&crate::keychain::KeychainPresence> for ClientSecretState {
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct SpotifyConfig {
+    /// Spotify app client id. `#[serde(default)]` since issue #926: this was
+    /// the only persisted field without one, so a spotify section that omitted
+    /// it — or spelled it `null` — failed the whole document, which
+    /// `load_config` answered by quarantining the file and booting on
+    /// defaults, costing the user every other setting too.
+    #[serde(default)]
     pub client_id: String,
     /// True iff the Spotify `client_secret` is currently stored in the OS
     /// keychain. This is a derived/display field — it is populated by
@@ -1472,15 +1478,124 @@ fn quarantine_corrupt_config(path: &std::path::Path, parse_err: impl std::fmt::D
     backup
 }
 
-pub fn load_config() -> Result<AppConfig, String> {
-    let path = get_config_path()?;
+/// Every top-level key [`AppConfig`] has a typed field for (issue #926).
+///
+/// [`config_from_sections`] reads these one at a time and everything else lands
+/// in [`AppConfig::extra`] — the same partition `#[serde(flatten)]` performs
+/// when serde parses the document in one call, written out so that one bad
+/// section can be replaced by its default without rejecting the rest.
+/// `typed_config_keys_match_the_serialized_schema` fails if this list and the
+/// struct ever disagree.
+const TYPED_CONFIG_KEYS: [&str; 12] = [
+    "spotify",
+    "teams",
+    "polling",
+    "logging",
+    "updates",
+    "autostart",
+    "notifications",
+    "locale",
+    "snooze_until",
+    "status_rules",
+    "shortcuts",
+    "schema_version",
+];
 
+/// The JSON type of `value`, for a log line that names the shape of a bad root
+/// without echoing a whole (possibly multi-megabyte) document.
+fn json_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "an object",
+    }
+}
+
+/// Deserialize ONE typed field out of a config document, falling back to
+/// `fallback` when that field alone does not match the schema (issue #926).
+///
+/// Per-field, not per-document. A key the file omits takes `fallback`
+/// silently — what `#[serde(default)]` has always done — while a key that is
+/// PRESENT but invalid takes it with a `[CFG]` warning naming the key, which is
+/// the observable replacement for the old all-or-nothing parse. A `null` value
+/// is "present but invalid" for every non-`Option` field and a value for an
+/// `Option` one, so the field's own type decides, not a special case here.
+fn field_or_fallback<T: serde::de::DeserializeOwned>(
+    root: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    fallback: T,
+) -> T {
+    let Some(raw) = root.get(key) else {
+        return fallback;
+    };
+    match serde_json::from_value::<T>(raw.clone()) {
+        Ok(value) => value,
+        Err(e) => {
+            log::warn!(
+                "[CFG] config field '{}' is invalid ({}) — using its default, the rest of the config is kept",
+                key,
+                e
+            );
+            fallback
+        }
+    }
+}
+
+/// Build an [`AppConfig`] from a config document's root object, one typed field
+/// at a time (issue #926).
+///
+/// A section that no longer matches the schema costs exactly that section — its
+/// default, warned about by [`field_or_fallback`] — instead of the whole
+/// document, which is what one wrong-typed, out-of-range or misspelled value
+/// used to cost (the file was quarantined and the app booted on defaults). The
+/// document's scalar fields take the same route, so `"autostart": "yes"` cannot
+/// take quiet hours down with it either.
+///
+/// Unknown top-level keys are still retained in [`AppConfig::extra`] (issue
+/// #379), exactly as the `#[serde(flatten)]` field collected them under the
+/// single-pass parse.
+fn config_from_sections(root: serde_json::Map<String, serde_json::Value>) -> AppConfig {
+    let mut config = AppConfig {
+        spotify: field_or_fallback(&root, "spotify", Default::default()),
+        teams: field_or_fallback(&root, "teams", Default::default()),
+        polling: field_or_fallback(&root, "polling", Default::default()),
+        logging: field_or_fallback(&root, "logging", Default::default()),
+        updates: field_or_fallback(&root, "updates", Default::default()),
+        autostart: field_or_fallback(&root, "autostart", Default::default()),
+        notifications: field_or_fallback(&root, "notifications", Default::default()),
+        locale: field_or_fallback(&root, "locale", Default::default()),
+        snooze_until: field_or_fallback(&root, "snooze_until", Default::default()),
+        status_rules: field_or_fallback(&root, "status_rules", Default::default()),
+        shortcuts: field_or_fallback(&root, "shortcuts", Default::default()),
+        schema_version: field_or_fallback(&root, "schema_version", default_schema_version()),
+        extra: BTreeMap::new(),
+    };
+    for (key, value) in root {
+        if !TYPED_CONFIG_KEYS.contains(&key.as_str()) {
+            config.extra.insert(key, value);
+        }
+    }
+    config
+}
+
+pub fn load_config() -> Result<AppConfig, String> {
+    load_config_from(&get_config_path()?).map(with_keychain_flags)
+}
+
+/// Path-taking core of [`load_config`]: the file I/O, the section-by-section
+/// parse and the normalization, with the keychain stamping left to the public
+/// entry point — so this half is testable against real files with no keychain
+/// probe, the same shape [`import_config_document`] uses.
+fn load_config_from(path: &std::path::Path) -> Result<AppConfig, String> {
     if !path.exists() {
         log::info!(
             "[CFG] Config file not found at '{}', using defaults",
             path.display()
         );
-        return Ok(with_keychain_flags(AppConfig::default()));
+        return Ok(AppConfig::default());
     }
 
     // Issue #135 path A: tighten mode of any pre-existing config.json that
@@ -1517,14 +1632,27 @@ pub fn load_config() -> Result<AppConfig, String> {
     file.read_to_string(&mut contents)
         .map_err(|e| format!("Failed to read config file '{}': {}", path.display(), e))?;
 
-    let mut config: AppConfig = match serde_json::from_str(&contents) {
-        Ok(cfg) => cfg,
+    let mut config = match serde_json::from_str::<serde_json::Value>(&contents) {
+        // Issue #926: the document IS an object — load it field by field, so a
+        // section that no longer matches the schema costs exactly that
+        // section's default and nothing else.
+        Ok(serde_json::Value::Object(root)) => config_from_sections(root),
+        // Anything else is not a config: a bare array/string/number/null
+        // root, or text that is not JSON at all. Quarantine, exactly as the
+        // single-pass parse answered those two shapes before.
+        Ok(other) => {
+            quarantine_corrupt_config(
+                path,
+                format!("expected a JSON object, found {}", json_kind(&other)),
+            );
+            return Ok(AppConfig::default());
+        }
         Err(e) => {
             // Issue #379: never lose the evidence — quarantine the corrupt
             // file to `<config>.bak` alongside the original and boot on
             // defaults. Observable via `config_was_quarantined()`.
-            quarantine_corrupt_config(&path, &e);
-            return Ok(with_keychain_flags(AppConfig::default()));
+            quarantine_corrupt_config(path, &e);
+            return Ok(AppConfig::default());
         }
     };
     // CfgDiag#1 (#536): the version dispatcher runs BEFORE the clamps, so a
@@ -1555,7 +1683,7 @@ pub fn load_config() -> Result<AppConfig, String> {
     }
 
     log::info!("[CFG] Loaded configuration from '{}'", path.display());
-    Ok(with_keychain_flags(config))
+    Ok(config)
 }
 
 /// The persisted `logging` section, read without a full config load
@@ -4687,5 +4815,167 @@ mod tests {
             warned.contains("[CFG]"),
             "the logged line carries the module tag: {warned}"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Issue #926: the config document loads field by field, so one bad
+    // section cannot take the rest of the document down with it.
+    // -----------------------------------------------------------------
+
+    /// Create a unique temp config directory holding a `config.json` with
+    /// `contents`; returns `(dir, path)`. The caller removes the dir.
+    fn temp_config_file(tag: &str, contents: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "pj-test-{tag}-{}-{}",
+            std::process::id(),
+            chrono_like_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(&path, contents).unwrap();
+        (dir, path)
+    }
+
+    /// The list `config_from_sections` partitions on has to match the schema:
+    /// a key missing from it would be read BOTH as its typed field and into
+    /// `extra`, so a save would write the file's own value back twice.
+    #[test]
+    fn typed_config_keys_match_the_serialized_schema() {
+        let serialized = serde_json::to_value(AppConfig::default()).expect("must serialize");
+        let mut keys: Vec<&str> = serialized
+            .as_object()
+            .expect("the schema serializes to an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        let mut known = TYPED_CONFIG_KEYS.to_vec();
+        known.sort_unstable();
+        assert_eq!(
+            keys, known,
+            "TYPED_CONFIG_KEYS must list exactly the top-level keys AppConfig owns"
+        );
+    }
+
+    /// Issue #926: sections are independent. One wrong-typed field used to fail
+    /// the single `serde_json::from_str::<AppConfig>` call, which `load_config`
+    /// answered by quarantining the file and booting on defaults — so a
+    /// hand-edited `teams` value cost the user their client id, quiet hours,
+    /// polling tuning and everything else too.
+    #[test]
+    fn test_one_bad_section_keeps_every_other_section() {
+        let _guard = QUARANTINE_TEST_LOCK.lock();
+        LOGGER.call_once(|| {
+            // Best-effort: another test may have installed a logger first.
+            let _ = log::set_boxed_logger(Box::new(CapturingLogger));
+            log::set_max_level(log::LevelFilter::Warn);
+        });
+        LOG_LINES.lock().clear();
+        let prev = CONFIG_QUARANTINED.load(Ordering::SeqCst);
+        CONFIG_QUARANTINED.store(false, Ordering::SeqCst);
+
+        let (dir, path) = temp_config_file(
+            "sections",
+            r#"{
+                "spotify": {"client_id": "abc"},
+                "teams": {"status_format": 5},
+                "polling": {"default_interval_seconds": 42, "max_interval_seconds": 55},
+                "logging": {"log_level": "Debug", "max_file_size_mb": 7},
+                "updates": {"channel": "beta"},
+                "autostart": true,
+                "notifications": {"track_change": false},
+                "status_rules": {"quiet_hours": [{"enabled": true, "start_minutes": 1320, "end_minutes": 420, "days": [2]}]},
+                "future_top_level": {"kept": true}
+            }"#,
+        );
+
+        let cfg = load_config_from(&path).expect("a partially invalid document must still load");
+
+        assert_eq!(
+            cfg.teams.status_format,
+            default_status_format(),
+            "the invalid section takes its default"
+        );
+        assert_eq!(cfg.spotify.client_id, "abc", "a sibling section is kept");
+        assert_eq!(cfg.polling.default_interval_seconds, 42);
+        assert_eq!(cfg.polling.max_interval_seconds, 55);
+        assert_eq!(cfg.logging.log_level, "Debug");
+        assert_eq!(cfg.logging.max_file_size_mb, 7);
+        assert_eq!(cfg.updates.channel, UpdateChannel::Beta);
+        assert!(cfg.autostart);
+        assert!(!cfg.notifications.track_change);
+        assert_eq!(cfg.status_rules.quiet_hours.len(), 1);
+        assert_eq!(cfg.status_rules.quiet_hours[0].start_minutes, 1320);
+        assert_eq!(
+            cfg.extra.get("future_top_level"),
+            Some(&serde_json::json!({"kept": true})),
+            "unknown top-level keys still land in `extra`"
+        );
+
+        assert!(
+            !quarantine_backup_path(&path).exists(),
+            "one bad section must not quarantine the whole file"
+        );
+        assert!(!config_was_quarantined());
+        let logged = LOG_LINES.lock().clone();
+        assert!(
+            logged
+                .iter()
+                .any(|line| line.contains("[CFG]") && line.contains("teams")),
+            "the fallback must name the field it replaced: {logged:?}"
+        );
+
+        CONFIG_QUARANTINED.store(prev, Ordering::SeqCst);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #926: `client_id` was the only persisted field without a serde
+    /// default, so `{"spotify": {}}` — and equally `"client_id": null` — failed
+    /// the whole document. Neither quarantines the file now: the first loads as
+    /// the section's defaults, the second as those defaults plus a warning.
+    #[test]
+    fn test_empty_or_null_client_id_loads_without_quarantining() {
+        let _guard = QUARANTINE_TEST_LOCK.lock();
+        let prev = CONFIG_QUARANTINED.load(Ordering::SeqCst);
+        CONFIG_QUARANTINED.store(false, Ordering::SeqCst);
+        for contents in [
+            r#"{"spotify": {}, "autostart": true}"#,
+            r#"{"spotify": {"client_id": null}, "autostart": true}"#,
+        ] {
+            let (dir, path) = temp_config_file("client-id", contents);
+            let cfg = load_config_from(&path).expect("must load");
+            assert_eq!(cfg.spotify.client_id, "", "{contents}");
+            assert_eq!(cfg.spotify.redirect_uri, default_redirect_uri(), "{contents}");
+            assert!(cfg.autostart, "the rest of the document is kept: {contents}");
+            assert!(!quarantine_backup_path(&path).exists(), "{contents}");
+            assert!(!config_was_quarantined(), "{contents}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        CONFIG_QUARANTINED.store(prev, Ordering::SeqCst);
+    }
+
+    /// Issue #926: the field-by-field loader is for documents that ARE an
+    /// object. Anything else is not a config — a bare array/string/null root,
+    /// or text that is not JSON — and is still quarantined to `config.json.bak`
+    /// with the app booting on defaults.
+    #[test]
+    fn test_non_object_root_is_still_quarantined() {
+        let _guard = QUARANTINE_TEST_LOCK.lock();
+        let prev = CONFIG_QUARANTINED.load(Ordering::SeqCst);
+        for contents in ["[1, 2, 3]", "\"spotify\"", "null", "{ NOT VALID JSON !!!"] {
+            CONFIG_QUARANTINED.store(false, Ordering::SeqCst);
+            let (dir, path) = temp_config_file("non-object", contents);
+            let cfg = load_config_from(&path).expect("quarantine still yields defaults");
+            assert_eq!(cfg.schema_version, default_schema_version());
+            assert!(cfg.spotify.client_id.is_empty());
+            assert!(
+                quarantine_backup_path(&path).exists(),
+                "{contents} must be quarantined"
+            );
+            assert!(!path.exists(), "{contents}");
+            assert!(config_was_quarantined(), "{contents}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        CONFIG_QUARANTINED.store(prev, Ordering::SeqCst);
     }
 }
