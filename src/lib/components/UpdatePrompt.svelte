@@ -90,6 +90,14 @@
   let channelResolved = $state(false);
   const isBeta = $derived($configStore.updates.channel === 'beta');
 
+  // #977: the channel the banner's current candidate was resolved with.
+  // `check_for_update` reads `config.updates.channel` from disk on every
+  // call, so a switch in Settings has to be followed by a fresh check:
+  // otherwise the previous channel's candidate stays on offer for up to a
+  // day, and the version staged at quit time can differ from the one the
+  // quit-time confirm row showed.
+  let checkedChannel = $state('');
+
   let isStaleSkipped = $derived(
     update !== null && staleSkippedVersion !== '' && staleSkippedVersion === update.version
   );
@@ -102,6 +110,13 @@
   );
 
   function checkForUpdate() {
+    // #977: remember the channel this check runs against so the effect below
+    // can tell a Settings switch apart from the hydration flip. Before
+    // hydration the store still holds the mirror's default, so recording
+    // that would make the hydrated value look like a user change — and the
+    // backend reads the channel from disk, so this check's candidate already
+    // belongs to the persisted channel.
+    if (channelResolved) checkedChannel = $configStore.updates.channel;
     // The backend resolves the configured channel into the endpoint list —
     // the plugin's JS `check()` cannot take endpoints and is hard-wired to
     // the static stable entry (issue #678).
@@ -133,6 +148,34 @@
         console.error('[UPDATER] check failed:', e);
       });
   }
+
+  // #977: a channel switch in Settings republishes the persisted document
+  // into `configStore` (`saveConfig`/`updateConfig`), and that is the signal
+  // this banner needs — the backend re-reads the channel per command, so no
+  // new backend event is required.
+  $effect(() => {
+    const channel = $configStore.updates.channel;
+    // A stage or a download in flight owns the banner: its cancel
+    // affordance lives in it, so the switch is picked up as soon as they
+    // settle rather than tearing the banner out from under the user.
+    const busy = staging || downloading;
+    if (!channelResolved) return;
+    if (checkedChannel === '') {
+      // The first check ran before hydration: adopt the hydrated channel as
+      // the baseline instead of re-checking against a value that only just
+      // arrived from disk.
+      checkedChannel = channel;
+      return;
+    }
+    if (channel === checkedChannel || busy) return;
+    // A candidate from the channel the user just left must not survive the
+    // switch (nor a dismissal scoped to it).
+    update = null;
+    staleSkippedVersion = '';
+    confirming = false;
+    dismissed = false;
+    checkForUpdate();
+  });
 
   onMount(() => {
     // Point-of-use hydration (see above), in the two orders this banner can
