@@ -81,7 +81,12 @@ export const defaultConfig: AppConfig = {
       availability: '',
       activity: '',
       expiry_minutes: 60
-    }
+    },
+    // Issue #867: minutes before a busy Outlook calendar event that the
+    // gate should pre-empt. `0` disables (the previous behaviour, which
+    // also matches the documented default); any other value is clamped
+    // 0..=60 by Rust's `clamp_teams`. OFF by default.
+    pre_meeting_suppress_minutes: 0
   },
   polling: {
     default_interval_seconds: BigInt(30),
