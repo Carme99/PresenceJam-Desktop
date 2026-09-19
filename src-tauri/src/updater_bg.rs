@@ -70,17 +70,34 @@ struct StagedUpdate {
     forced: bool,
 }
 
+/// Why a [`StageDeferredOutcome`] staged nothing (issue #957). The banner
+/// branches on these strings, so they are named here instead of being spelled
+/// inline at each return.
+///
+/// `"current"` is the "nothing to do" answer — the manifest no longer offers
+/// the version the banner cached, e.g. after a re-cut or rolled-back release —
+/// and must NOT render the stale-skip copy with its "Install anyway" button,
+/// which would only repeat the same no-op. The two stale reasons are the ones
+/// that button can still change (`"stale"`), or that a forced retry bypasses
+/// (`"already-skipped"`).
+const SKIP_REASON_CURRENT: &str = "current";
+const SKIP_REASON_STALE: &str = "stale";
+const SKIP_REASON_ALREADY_SKIPPED: &str = "already-skipped";
+
 /// Outcome of a `stage_deferred_update` call (issue #431): the staged
-/// version — `None` when the app is already current or the available
-/// version was declined as stale — plus the running version from backend
-/// truth (`CARGO_PKG_VERSION`), so the quit-time confirmation surface
-/// can show staged-vs-current without an extra round-trip or new
-/// frontend permissions. No `ts_rs` export: the shape is mirrored by a
+/// version — `None` when there was nothing to stage — plus the running
+/// version from backend truth (`CARGO_PKG_VERSION`), so the quit-time
+/// confirmation surface can show staged-vs-current without an extra
+/// round-trip or new frontend permissions. `skipped` says WHICH nothing-to-do
+/// this was (issue #957), and is absent on the staged case so that payload's
+/// wire shape is unchanged. No `ts_rs` export: the shape is mirrored by a
 /// local interface in `UpdatePrompt.svelte`.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct StageDeferredOutcome {
     pub staged: Option<String>,
     pub current: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<String>,
 }
 
 /// Managed state holding at most one staged deferred update.
@@ -330,22 +347,57 @@ pub fn clear_failed_update_install() -> Result<(), String> {
     log::info!("{TAG} clear_failed_update_install: SUCCESS");
     Ok(())
 }
+/// Empties an update slot, handing back whatever was staged in it — the
+/// verified payload bytes are released with it.
+///
+/// This is the take-and-report rule shared by [`cancel_deferred_update`]
+/// (issue #590: the user pressed Cancel) and [`discard_staged_update`]
+/// (issue #806: the app is about to restart into a version it just
+/// installed, so a payload staged for the deferred "Install on quit" flow
+/// must not be applied on the way out). Generic over the slot payload
+/// because `tauri_plugin_updater::Update` has no public constructor, so the
+/// rule is unit-tested on the slot rather than through an `AppHandle`.
+#[cfg(desktop)]
+fn take_staged<T>(slot: &Mutex<Option<T>>) -> Option<T> {
+    slot.lock().take()
+}
+
+/// Discards any staged deferred update, releasing the verified payload bytes
+/// (issue #806).
+///
+/// The immediate "Download & Install" path restarts the process
+/// (`commands::misc::relaunch_app`), and that restart fires `RunEvent::Exit`
+/// — i.e. [`install_pending_on_exit`]. A payload still staged for the
+/// deferred flow would then be applied on top of the version the user has
+/// just installed, leaving the app on the staged (older) build and still
+/// offering the newer one; the staleness guard inside
+/// [`install_pending_on_exit`] cannot catch that, because it compares the
+/// staged version against the pre-install `CARGO_PKG_VERSION`. The immediate
+/// path therefore calls this before restarting.
+#[cfg(desktop)]
+pub fn discard_staged_update(app: &AppHandle) {
+    use tauri::Manager;
+
+    let state = app.state::<PendingUpdate>();
+    if take_staged(&state.0).is_some() {
+        log::info!("{TAG} discard_staged_update: staged update discarded");
+    } else {
+        log::debug!("{TAG} discard_staged_update: nothing staged");
+    }
+}
+
 /// Tauri command: discards a staged deferred update (issue #590). Before
 /// this existed, staging was one-way — the only exit was applying the
 /// payload at the next quit, so an accidental click could not be undone and
 /// the verified bytes stayed resident for the rest of the session. Dropping
 /// the [`StagedUpdate`] releases that payload immediately.
+///
+/// Shares [`discard_staged_update`]'s body: the command and the immediate
+/// install path must be the same operation, or one of them will drift.
 #[cfg(desktop)]
 #[tauri::command]
 pub fn cancel_deferred_update(app: AppHandle) -> Result<(), String> {
-    use tauri::Manager;
-
-    let state = app.state::<PendingUpdate>();
-    if state.0.lock().take().is_some() {
-        log::info!("{TAG} cancel_deferred_update: staged update discarded");
-    } else {
-        log::debug!("{TAG} cancel_deferred_update: nothing staged");
-    }
+    discard_staged_update(&app);
     Ok(())
 }
 
@@ -375,8 +427,10 @@ struct StaleSkippedUpdate {
 /// `+build` metadata (ignored in ordering per semver §10). Returns
 /// `(major, minor, patch, prerelease)`, or `None` when the string is not
 /// a well-formed triple. Deliberately dependency-free (`Cargo.toml` is
-/// outside this slice's ownership): ordering only needs the numeric
-/// core plus the release-vs-prerelease rule.
+/// outside this slice's ownership): the caller can rely on the shape (a real
+/// triple, no trailing fields, a non-empty prerelease when one is present)
+/// rather than on a third-party parser that would accept shapes the updater
+/// feed never publishes.
 fn parse_semver_core(v: &str) -> Option<(u64, u64, u64, Option<String>)> {
     let s = v.trim();
     let s = s
@@ -403,11 +457,16 @@ fn parse_semver_core(v: &str) -> Option<(u64, u64, u64, Option<String>)> {
     Some((major, minor, patch, prerelease))
 }
 
-/// Semver ordering for two version strings. A plain release outranks its
-/// own prereleases; two prereleases compare lexically (a documented
-/// simplification — updater feed versions are plain numeric triples, so
-/// the prerelease arm only needs to be deterministic, not dot-separated
-/// aware). Returns `None` when either side is unparseable.
+/// Semver ordering for two version strings: the numeric core, then a plain
+/// release outranking its own prereleases, then semver §11 precedence between
+/// two prereleases. Returns `None` when either side is unparseable.
+///
+/// Issue #808: the prerelease arm used to compare the two strings with
+/// `String::cmp`, which inverts numeric identifiers — `beta.9` sorted above
+/// `beta.10`, so a newer beta was refused as stale. The comparison is
+/// hand-rolled rather than delegated to the `semver` crate because that
+/// means a new direct dependency in `src-tauri/Cargo.toml`, which is outside
+/// this module's ownership.
 fn compare_semver(a: &str, b: &str) -> Option<std::cmp::Ordering> {
     use std::cmp::Ordering;
     let (major_a, minor_a, patch_a, pre_a) = parse_semver_core(a)?;
@@ -417,10 +476,63 @@ fn compare_semver(a: &str, b: &str) -> Option<std::cmp::Ordering> {
             (None, None) => Some(Ordering::Equal),
             (None, Some(_)) => Some(Ordering::Greater),
             (Some(_), None) => Some(Ordering::Less),
-            (Some(x), Some(y)) => Some(x.cmp(&y)),
+            (Some(x), Some(y)) => Some(compare_prerelease(&x, &y)),
         },
         ord => Some(ord),
     }
+}
+
+/// Semver §11 precedence between two prereleases (issue #808).
+///
+/// Dot-separated identifiers, compared left to right: a numeric identifier
+/// ranks below an alphanumeric one and compares by value; two alphanumeric
+/// identifiers compare in ASCII order; and when every shared identifier is
+/// equal the shorter list ranks lower, so `1.0.0-beta` < `1.0.0-beta.1`.
+fn compare_prerelease(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    let mut left = a.split('.');
+    let mut right = b.split('.');
+    loop {
+        match (left.next(), right.next()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(x), Some(y)) => {
+                let ord = match (numeric_identifier(x), numeric_identifier(y)) {
+                    (Some(nx), Some(ny)) => compare_numeric_identifiers(nx, ny),
+                    (Some(_), None) => Ordering::Less,
+                    (None, Some(_)) => Ordering::Greater,
+                    (None, None) => x.cmp(y),
+                };
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+            }
+        }
+    }
+}
+
+/// A prerelease identifier as a numeric one, or `None` for an alphanumeric
+/// one. Semver §9 allows only digits, with no leading zeroes — a zero-padded
+/// identifier is not a valid numeric one, so it ranks as alphanumeric, as does
+/// an empty field from a malformed `a..b` prerelease.
+fn numeric_identifier(id: &str) -> Option<&str> {
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    if id.len() > 1 && id.starts_with('0') {
+        return None;
+    }
+    Some(id)
+}
+
+/// Value comparison of two numeric prerelease identifiers. Both are
+/// digit-only and zero-free, so a longer one is the larger number and equal
+/// lengths compare lexically — no integer parse, hence no overflow on an
+/// identifier longer than `u64` can hold.
+fn compare_numeric_identifiers(a: &str, b: &str) -> std::cmp::Ordering {
+    a.len().cmp(&b.len()).then_with(|| a.cmp(b))
 }
 
 /// True when `staged` is older than or equal to `current` under semver
@@ -569,8 +681,9 @@ const BETA_ENDPOINT: &str =
 /// Ordered update-endpoint list for `channel` (issue #678).
 ///
 /// The stable URL is always last: [`walk_endpoints`] keeps the first endpoint
-/// that answers, so a not-yet-published beta manifest falls through to the
-/// stable release instead of failing the whole check.
+/// that offers a newer version (issue #807), so both a not-yet-published beta
+/// manifest and one that carries no newer release fall through to the stable
+/// release instead of ending the check.
 pub fn update_endpoints(channel: UpdateChannel) -> Vec<String> {
     match channel {
         UpdateChannel::Stable => vec![STABLE_ENDPOINT.to_string()],
@@ -586,36 +699,74 @@ fn endpoint_urls(channel: UpdateChannel) -> Result<Vec<Url>, String> {
         .collect()
 }
 
-/// Runs `attempt` over `urls` in order until one of them answers (issue
-/// #678), logging every endpoint that was skipped.
+/// Runs `attempt` over `urls` in order until one of them answers with a
+/// CANDIDATE (issue #678, corrected by issue #807), logging every endpoint
+/// that was skipped.
 ///
-/// Mirrors the updater plugin's own multi-endpoint `check()` loop: it stops at
-/// the first endpoint that produced a manifest (including one that is no
-/// newer than the running build, i.e. `Ok(None)`), falls through only when an
-/// endpoint FAILED, and reports the last failure when none of them answered.
-/// The difference is the log line: the plugin does log a non-2XX response
-/// (`log::error!("update endpoint did not respond with a successful status
-/// code")`, `tauri-plugin-updater 2.11.0` `src/updater.rs:554-558`), but that
-/// line names neither the endpoint nor the fall-through — with two endpoints
-/// configured you cannot tell which one was skipped, or that the second one
-/// served the release. This walk logs both.
-async fn walk_endpoints<T, F, Fut>(urls: &[Url], mut attempt: F) -> Result<T, String>
+/// A candidate is a version newer than the running build. An endpoint that
+/// answers without one — the plugin's `check()` returns `Ok(None)` for a
+/// manifest that parses and is not newer — does NOT end the walk: a beta
+/// manifest that lags the stable release (a re-cut or rolled-back beta, or a
+/// publication path that publishes them separately) must never shadow the
+/// newer release waiting behind the next endpoint.
+///
+/// Errors fall through as well. When no endpoint offers a candidate the
+/// result is `Ok(None)` if at least one endpoint answered at all — the app is
+/// current whatever the other endpoints said — and the LAST failure only when
+/// none of them answered, which mirrors the plugin's `last_error` semantics
+/// and keeps an all-failed check from rendering as "already current".
+///
+/// The difference from the plugin's loop is the log line: the plugin does log
+/// a non-2XX response (`log::error!("update endpoint did not respond with a
+/// successful status code")`, `tauri-plugin-updater 2.11.0`
+/// `src/updater.rs:554-558`), but that line names neither the endpoint nor
+/// the fall-through — with two endpoints configured you cannot tell which one
+/// was skipped, or that the second one served the release. This walk logs
+/// both.
+///
+/// The attempt yields only the announced version: `tauri_plugin_updater::Update`
+/// has no public constructor, so keeping it out of the walk's payload is what
+/// makes this unit-testable. [`check_with_channel`] re-runs the winning
+/// endpoint to obtain the `Update` itself.
+#[derive(Debug, PartialEq, Eq)]
+struct EndpointCandidate {
+    /// The endpoint that offered the candidate.
+    url: Url,
+    /// The version it announced, newer than the running build.
+    version: String,
+}
+
+async fn walk_endpoints<F, Fut>(
+    urls: &[Url],
+    mut attempt: F,
+) -> Result<Option<EndpointCandidate>, String>
 where
     F: FnMut(Url) -> Fut,
-    Fut: Future<Output = Result<T, String>>,
+    Fut: Future<Output = Result<Option<String>, String>>,
 {
+    let mut answered = false;
     let mut last_error: Option<String> = None;
     for (idx, url) in urls.iter().enumerate() {
         match attempt(url.clone()).await {
-            Ok(found) => {
+            Ok(Some(version)) => {
                 if idx > 0 {
                     log::info!(
-                        "{TAG} update check: {prev} did not serve a manifest; falling through \
-                         to {url}",
-                        prev = urls[idx - 1]
+                        "{TAG} update check: {skipped} earlier endpoint(s) offered no newer \
+                         release; {url} offers v{version}",
+                        skipped = idx
                     );
                 }
-                return Ok(found);
+                return Ok(Some(EndpointCandidate {
+                    url: url.clone(),
+                    version,
+                }));
+            }
+            Ok(None) => {
+                answered = true;
+                log::info!(
+                    "{TAG} update check: {url} answered without a newer release than the \
+                     running build"
+                );
             }
             Err(e) => {
                 // No "trying the next endpoint" here: this arm also runs for
@@ -626,7 +777,25 @@ where
             }
         }
     }
+    if answered {
+        return Ok(None);
+    }
     Err(last_error.unwrap_or_else(|| "no update endpoints configured".to_string()))
+}
+
+/// Runs one endpoint's updater `check()` (issue #807).
+///
+/// Split out of [`check_with_channel`] so the same endpoint can be consulted
+/// twice — once for its announced version, once for the plugin's `Update` —
+/// without repeating the builder setup.
+async fn check_endpoint(app: &AppHandle, url: Url) -> Result<Option<Update>, String> {
+    let updater = app
+        .updater_builder()
+        .endpoints(vec![url])
+        .map_err(|e| format!("invalid update endpoint: {e}"))?
+        .build()
+        .map_err(|e| format!("updater unavailable: {e}"))?;
+    updater.check().await.map_err(|e| e.to_string())
 }
 
 /// Checks for an update on the configured release channel.
@@ -639,6 +808,10 @@ where
 /// (`check()` / `downloadAndInstall()`) cannot take endpoints, so it keeps
 /// using the static config entry — which is why `UpdatePrompt.svelte` offers
 /// it on the stable channel only.
+///
+/// Two passes since issue #807: [`walk_endpoints`] finds the endpoint that
+/// offers a version (a manifest that is merely not newer no longer ends the
+/// search), and only that endpoint is re-consulted for the plugin's `Update`.
 async fn check_with_channel(
     app: &AppHandle,
     channel: UpdateChannel,
@@ -646,16 +819,30 @@ async fn check_with_channel(
     let urls = endpoint_urls(channel)?;
     let listed = urls.iter().map(Url::as_str).collect::<Vec<_>>().join(", ");
     log::info!("{TAG} update check: channel={channel:?} endpoints=[{listed}]");
-    walk_endpoints(&urls, |url| async move {
-        let updater = app
-            .updater_builder()
-            .endpoints(vec![url])
-            .map_err(|e| format!("invalid update endpoint: {e}"))?
-            .build()
-            .map_err(|e| format!("updater unavailable: {e}"))?;
-        updater.check().await.map_err(|e| e.to_string())
+    let Some(candidate) = walk_endpoints(&urls, |url| async move {
+        check_endpoint(app, url)
+            .await
+            .map(|found| found.map(|update| update.version))
     })
-    .await
+    .await?
+    else {
+        return Ok(None);
+    };
+    let EndpointCandidate { url, version } = candidate;
+    match check_endpoint(app, url.clone()).await? {
+        Some(update) => {
+            log::info!("{TAG} update check: {url} offers v{version}");
+            Ok(Some(update))
+        }
+        // The endpoint answered moments ago; an empty second answer means the
+        // release moved under us, which is "nothing to offer", not a failure.
+        None => {
+            log::info!(
+                "{TAG} update check: {url} no longer offers v{version}; treating as current"
+            );
+            Ok(None)
+        }
+    }
 }
 
 /// Banner payload of [`check_for_update`] (issue #678). No `ts_rs` export:
@@ -751,9 +938,11 @@ pub struct StageComplete {
 ///   already-installed version would make the consumer's "update ready" toast
 ///   a lie);
 /// - it fires exactly once per call;
-/// - it does NOT fire for an outcome that staged nothing —
-///   `stage_deferred_update` returns `staged: None` both when the app is
-///   already current and when the candidate was declined as stale.
+/// - it does NOT fire for an outcome that staged nothing, whichever kind of
+///   nothing it was — `stage_deferred_update` returns `staged: None` when the
+///   app is already current, when the candidate was declined as stale, and
+///   when the persisted skip marker short-circuited it (the `skipped` reason
+///   tells those apart, issue #957).
 fn emit_stage_complete<E: FnOnce(&str)>(outcome: &StageDeferredOutcome, emit: E) {
     if let Some(version) = outcome.staged.as_deref() {
         emit(version);
@@ -818,6 +1007,7 @@ pub async fn stage_deferred_update(
                 return Ok::<StageDeferredOutcome, String>(StageDeferredOutcome {
                     staged: None,
                     current,
+                    skipped: Some(SKIP_REASON_CURRENT.to_string()),
                 });
             };
             let version = update.version.clone();
@@ -837,6 +1027,7 @@ pub async fn stage_deferred_update(
                         return Ok::<StageDeferredOutcome, String>(StageDeferredOutcome {
                             staged: None,
                             current,
+                            skipped: Some(SKIP_REASON_ALREADY_SKIPPED.to_string()),
                         });
                     }
                 }
@@ -854,6 +1045,7 @@ pub async fn stage_deferred_update(
                     return Ok::<StageDeferredOutcome, String>(StageDeferredOutcome {
                         staged: None,
                         current,
+                        skipped: Some(SKIP_REASON_STALE.to_string()),
                     });
                 }
             }
@@ -905,6 +1097,7 @@ pub async fn stage_deferred_update(
             Ok(StageDeferredOutcome {
                 staged: Some(version),
                 current,
+                skipped: None,
             })
         })
     })
@@ -933,6 +1126,14 @@ pub async fn stage_deferred_update(
 /// `Ok` arm — but that arm is unreachable on Windows, where the updater
 /// plugin's `install_inner` runs the installer and then calls
 /// `std::process::exit(0)` without returning.
+///
+/// Restart interaction (issue #806): the immediate "Download & Install"
+/// path restarts the process (`commands::misc::relaunch_app`), which fires
+/// this same `RunEvent::Exit` arm. That caller discards the staged payload
+/// first ([`discard_staged_update`]) so a deferred stage cannot be applied
+/// on top of the version the user just installed — the staleness guard
+/// below cannot catch that, since it compares against the pre-install
+/// `CARGO_PKG_VERSION`.
 ///
 /// Stale-stage guard (issue #431): a staged version older than or equal
 /// to the running version is never installed — it is skipped with a log
@@ -1188,6 +1389,65 @@ mod tests {
         assert_eq!(compare_semver("4.1.1", "nope"), None);
     }
 
+    /// Issue #808: semver §11 precedence between prereleases. The lexical
+    /// comparison this replaced ranked `beta.9` above `beta.10` — precisely
+    /// the shape a beta channel publishes — so a newer beta was refused as
+    /// stale. Also covers the numeric-vs-alphanumeric rule and the
+    /// shorter-list rule, both of which a lexical compare got wrong.
+    #[test]
+    fn test_compare_semver_orders_prereleases_by_semver_precedence() {
+        use std::cmp::Ordering;
+        assert_eq!(
+            compare_semver("4.8.0-beta.9", "4.8.0-beta.10"),
+            Some(Ordering::Less),
+            "beta.10 is newer than beta.9 (issue #808)"
+        );
+        assert_eq!(compare_semver("1.0.0-1", "1.0.0-2"), Some(Ordering::Less));
+        assert_eq!(
+            compare_semver("1.0.0-beta.10", "1.0.0-beta.10"),
+            Some(Ordering::Equal)
+        );
+        // Numeric identifiers rank below alphanumeric ones.
+        assert_eq!(
+            compare_semver("1.0.0-1", "1.0.0-alpha"),
+            Some(Ordering::Less)
+        );
+        // Equal identifiers: the shorter list ranks lower.
+        assert_eq!(
+            compare_semver("1.0.0-beta", "1.0.0-beta.1"),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            compare_semver("1.0.0-alpha.1", "1.0.0-alpha"),
+            Some(Ordering::Greater)
+        );
+        // Identifiers too long for u64 still order by value, not by width.
+        assert_eq!(
+            compare_semver("1.0.0-99999999999999999999", "1.0.0-100000000000000000000"),
+            Some(Ordering::Less),
+            "20 nines is smaller than 1 followed by 20 zeroes"
+        );
+        // A zero-padded identifier is not a valid numeric one (semver §9), so
+        // it ranks as alphanumeric — above the numeric `1`.
+        assert_eq!(
+            compare_semver("1.0.0-01", "1.0.0-1"),
+            Some(Ordering::Greater)
+        );
+    }
+
+    /// Issue #808, end to end at the level the updater actually asks: a
+    /// newer numeric prerelease must not be declined as a downgrade. This is
+    /// the predicate `stage_deferred_update` uses to refuse a payload.
+    #[test]
+    fn test_is_stale_version_accepts_a_higher_prerelease() {
+        assert!(
+            !is_stale_version("4.8.0-beta.10", "4.8.0-beta.9"),
+            "a newer beta must be staged, not refused as stale (issue #808)"
+        );
+        assert!(is_stale_version("4.8.0-beta.9", "4.8.0-beta.10"));
+        assert!(!is_stale_version("4.8.0-rc.1", "4.8.0-beta.10"));
+    }
+
     #[test]
     fn test_is_stale_version_guards_downgrades_and_equal() {
         // Older staged versions are stale, and so is an equal version
@@ -1369,15 +1629,21 @@ mod tests {
         );
     }
 
+    /// The beta/stable endpoint pair the walk tests run against: the shape
+    /// `UpdateChannel::Beta` builds, without the real URLs.
+    fn test_endpoints() -> Vec<Url> {
+        vec![
+            Url::parse("https://example.invalid/latest-beta.json").unwrap(),
+            Url::parse("https://example.invalid/latest.json").unwrap(),
+        ]
+    }
+
     /// Issue #678: a failing endpoint must not abort the check — that is the
     /// entire point of listing the stable manifest after the (unpublished)
     /// beta one.
     #[test]
     fn test_check_walks_past_a_failing_endpoint() {
-        let urls = vec![
-            Url::parse("https://example.invalid/latest-beta.json").unwrap(),
-            Url::parse("https://example.invalid/latest.json").unwrap(),
-        ];
+        let urls = test_endpoints();
         let tried = Arc::new(Mutex::new(Vec::new()));
         let seen = tried.clone();
         let found = tauri::async_runtime::block_on(walk_endpoints(&urls, move |url| {
@@ -1393,25 +1659,27 @@ mod tests {
                 }
             }
         }));
-        assert_eq!(found, Ok(Some("4.6.0".to_string())));
+        assert_eq!(
+            found,
+            Ok(Some(EndpointCandidate {
+                url: urls[1].clone(),
+                version: "4.6.0".to_string(),
+            })),
+            "the endpoint that failed must not be the one reported"
+        );
         assert_eq!(
             tried.lock().as_slice(),
-            [
-                "https://example.invalid/latest-beta.json",
-                "https://example.invalid/latest.json"
-            ],
+            [urls[0].as_str(), urls[1].as_str()],
             "the fall-through must try the endpoints in list order"
         );
     }
 
-    /// The walk stops at the first endpoint that answers, so a published beta
-    /// release costs no second round-trip to the stable manifest.
+    /// The walk stops at the first endpoint that offers a version, so a
+    /// published beta release costs no second round-trip to the stable
+    /// manifest (issue #807: a newer beta still wins in one attempt).
     #[test]
-    fn test_check_stops_at_the_first_answering_endpoint() {
-        let urls = vec![
-            Url::parse("https://example.invalid/latest-beta.json").unwrap(),
-            Url::parse("https://example.invalid/latest.json").unwrap(),
-        ];
+    fn test_check_stops_at_the_first_offered_version() {
+        let urls = test_endpoints();
         let attempts = Arc::new(Mutex::new(0usize));
         let seen = attempts.clone();
         let found = tauri::async_runtime::block_on(walk_endpoints(&urls, move |_url| {
@@ -1421,12 +1689,81 @@ mod tests {
                 Ok(Some("4.7.0-beta.1".to_string()))
             }
         }));
-        assert_eq!(found, Ok(Some("4.7.0-beta.1".to_string())));
+        assert_eq!(
+            found,
+            Ok(Some(EndpointCandidate {
+                url: urls[0].clone(),
+                version: "4.7.0-beta.1".to_string(),
+            }))
+        );
         assert_eq!(
             *attempts.lock(),
             1,
-            "no fall-through when the first endpoint answers"
+            "no fall-through once an endpoint offers a version"
         );
+    }
+
+    /// Issue #807: an endpoint answering with nothing newer than the running
+    /// build must not end the walk. A beta manifest that lags the stable
+    /// release would otherwise leave a beta-channel user on the running build
+    /// while a newer stable release waits behind the second endpoint.
+    #[test]
+    fn test_check_walks_past_an_endpoint_with_no_newer_release() {
+        let urls = test_endpoints();
+        let tried = Arc::new(Mutex::new(0usize));
+        let seen = tried.clone();
+        let found = tauri::async_runtime::block_on(walk_endpoints(&urls, move |url| {
+            let seen = seen.clone();
+            async move {
+                *seen.lock() += 1;
+                if url.path().ends_with("latest-beta.json") {
+                    // Parsed, but not newer than the running build.
+                    Ok(None)
+                } else {
+                    Ok(Some("4.8.0".to_string()))
+                }
+            }
+        }));
+        assert_eq!(
+            found,
+            Ok(Some(EndpointCandidate {
+                url: urls[1].clone(),
+                version: "4.8.0".to_string(),
+            })),
+            "the newer release behind the second endpoint must win"
+        );
+        assert_eq!(
+            *tried.lock(),
+            2,
+            "the walk must consult the stable endpoint"
+        );
+    }
+
+    /// Every endpoint answering without a newer release is "already current",
+    /// not an error — the single-endpoint case with the fallback present.
+    #[test]
+    fn test_check_is_current_when_no_endpoint_offers_a_version() {
+        let urls = test_endpoints();
+        let found: Result<Option<EndpointCandidate>, String> =
+            tauri::async_runtime::block_on(walk_endpoints(&urls, |_url| async move { Ok(None) }));
+        assert_eq!(found, Ok(None));
+    }
+
+    /// An answer settles the walk even when a later endpoint fails: the
+    /// channel has told us the running build is current, so a failed fallback
+    /// must not become a check error the banner renders as "could not check".
+    #[test]
+    fn test_check_prefers_an_answer_over_a_later_failure() {
+        let urls = test_endpoints();
+        let found: Result<Option<EndpointCandidate>, String> =
+            tauri::async_runtime::block_on(walk_endpoints(&urls, |url| async move {
+                if url.path().ends_with("latest.json") {
+                    Err("HTTP 500".to_string())
+                } else {
+                    Ok(None)
+                }
+            }));
+        assert_eq!(found, Ok(None));
     }
 
     /// When every endpoint fails, the LAST failure is reported (mirroring the
@@ -1434,11 +1771,8 @@ mod tests {
     /// which the banner would render as "already current".
     #[test]
     fn test_check_reports_the_last_error_when_no_endpoint_answers() {
-        let urls = vec![
-            Url::parse("https://example.invalid/latest-beta.json").unwrap(),
-            Url::parse("https://example.invalid/latest.json").unwrap(),
-        ];
-        let found: Result<Option<String>, String> =
+        let urls = test_endpoints();
+        let found: Result<Option<EndpointCandidate>, String> =
             tauri::async_runtime::block_on(walk_endpoints(&urls, |url| {
                 let msg = format!("{} unreachable", url.path());
                 async move { Err(msg) }
@@ -1458,6 +1792,7 @@ mod tests {
         let staged = StageDeferredOutcome {
             staged: Some("4.7.0".to_string()),
             current: "4.6.0".to_string(),
+            skipped: None,
         };
         let mut fired: Vec<String> = Vec::new();
         emit_stage_complete(&staged, |version| fired.push(version.to_string()));
@@ -1466,6 +1801,7 @@ mod tests {
         let quiet_outcome = StageDeferredOutcome {
             staged: None,
             current: "4.6.0".to_string(),
+            skipped: Some(SKIP_REASON_STALE.to_string()),
         };
         let mut quiet: Vec<String> = Vec::new();
         emit_stage_complete(&quiet_outcome, |version| quiet.push(version.to_string()));
@@ -1485,6 +1821,52 @@ mod tests {
             .unwrap(),
             r#"{"version":"4.7.0"}"#
         );
+    }
+
+    /// Issue #957: the stage outcome must say WHICH nothing-to-do it returned,
+    /// because the banner's stale-skip copy and its "Install anyway" button are
+    /// only correct for the stale reasons. The staged case keeps issue #431's
+    /// wire shape — no `skipped` key at all — so the banner's existing
+    /// `staged` handling cannot be disturbed by this addition.
+    #[test]
+    fn test_stage_outcome_reports_the_skip_reason() {
+        let staged = StageDeferredOutcome {
+            staged: Some("4.8.0".to_string()),
+            current: "4.7.0".to_string(),
+            skipped: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&staged).unwrap(),
+            r#"{"staged":"4.8.0","current":"4.7.0"}"#,
+            "the staged payload must not gain a skipped key"
+        );
+
+        for reason in [
+            SKIP_REASON_CURRENT,
+            SKIP_REASON_STALE,
+            SKIP_REASON_ALREADY_SKIPPED,
+        ] {
+            let outcome = StageDeferredOutcome {
+                staged: None,
+                current: "4.7.0".to_string(),
+                skipped: Some(reason.to_string()),
+            };
+            assert_eq!(
+                serde_json::to_string(&outcome).unwrap(),
+                format!(r#"{{"staged":null,"current":"4.7.0","skipped":"{reason}"}}"#)
+            );
+            // Nothing staged means no stage-complete event, whatever the
+            // reason — the reason only changes what the banner says.
+            let mut fired: Vec<String> = Vec::new();
+            emit_stage_complete(&outcome, |version| fired.push(version.to_string()));
+            assert!(fired.is_empty());
+        }
+
+        assert_ne!(
+            SKIP_REASON_CURRENT, SKIP_REASON_STALE,
+            "the already-current case must be distinguishable from the stale one"
+        );
+        assert_ne!(SKIP_REASON_STALE, SKIP_REASON_ALREADY_SKIPPED);
     }
 
     /// The banner shows the manifest's own `pub_date` literal. `Update::date`
@@ -1507,6 +1889,36 @@ mod tests {
         assert_eq!(
             manifest_pub_date(&serde_json::json!({ "pub_date": 42 })),
             None
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Immediate-install discard (issue #806)
+    // -----------------------------------------------------------------
+
+    /// The take-and-report rule behind both discard paths. A populated slot
+    /// must be emptied — that emptiness is exactly what stops
+    /// `install_pending_on_exit` from reinstalling a payload the user has
+    /// already installed — and a second discard (the restart path can run
+    /// more than once) must find nothing rather than re-report a payload it
+    /// no longer holds.
+    #[test]
+    fn test_take_staged_empties_the_slot() {
+        let slot: Mutex<Option<Vec<u8>>> = Mutex::new(Some(vec![1, 2, 3]));
+
+        assert_eq!(
+            take_staged(&slot),
+            Some(vec![1, 2, 3]),
+            "the staged payload must be handed back so it can be released"
+        );
+        assert!(
+            slot.lock().is_none(),
+            "PendingUpdate must be left empty so the exit-time install has nothing to apply"
+        );
+        assert_eq!(take_staged(&slot), None, "a second discard is a no-op");
+        assert!(
+            take_staged(&PendingUpdate::new().0).is_none(),
+            "a freshly managed PendingUpdate starts empty"
         );
     }
 }
