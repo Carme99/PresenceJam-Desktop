@@ -381,4 +381,33 @@ mod tests {
             );
         }
     }
+
+    /// Issue #806: `relaunch_app` must discard a payload staged for "install
+    /// on quit" BEFORE `app.restart()`. The restart fires `RunEvent::Exit`,
+    /// which runs `install_pending_on_exit` — without the discard, an
+    /// immediate relaunch installs the staged version on top of the one just
+    /// installed. The ordering is the whole fix and the command needs a live
+    /// `AppHandle` to drive (this crate has no mock runtime), so the guard is
+    /// a source-order assertion over the command's own body.
+    #[test]
+    fn test_relaunch_app_discards_a_staged_update_before_restart() {
+        let body = commands_in(include_str!("misc.rs"))
+            .into_iter()
+            .find(|(name, _, _)| name == "relaunch_app")
+            .expect("misc.rs must define the relaunch_app command (issue #806)")
+            .2;
+
+        let discard = body
+            .find("discard_staged_update(&app)")
+            .expect("relaunch_app must discard a staged update (issue #806)");
+        let restart = body
+            .find("app.restart();")
+            .expect("relaunch_app must restart the app");
+        assert!(
+            discard < restart,
+            "the staged-update discard must run before app.restart(), or the \
+             restart's install_pending_on_exit reinstalls the staged payload \
+             over the version just installed (issue #806)"
+        );
+    }
 }
