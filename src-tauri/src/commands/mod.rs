@@ -7,7 +7,10 @@
 //! Submodule map (each lists every `#[tauri::command]` it owns):
 //!   - `config` — load_config, save_config, update_config, export_config, import_config
 //!   - `spotify_auth` — start_spotify_auth, start_spotify_reconnect, complete_spotify_auth_manual, refresh_spotify, is_spotify_client_secret_set, reconnect_spotify_session
-//!   - `playback` — playback_play, playback_pause, playback_next, playback_previous, playback_transfer, get_playback_devices, get_playback_queue, get_spotify_granted_scopes
+//!   - `playback` — get_spotify_granted_scopes (issue #770 deleted the seven
+//!     callerless playback_* / get_playback_* commands; the tray and the global
+//!     hotkeys call `playback::player_with_refresh_typed` / `player_with_refresh`
+//!     directly, with no IPC hop)
 //!   - `teams_auth` — start_teams_auth_device_code, poll_teams_auth, refresh_teams, cancel_teams_auth_poll, get_teams_granted_scopes
 //!   - `sync` — start_syncing, stop_syncing, get_sync_status, app_exit
 //!   - `window` — show_window, set_autostart_enabled, open_logs_folder, open_external_url
@@ -77,15 +80,15 @@ pub fn require_main_window(window: &tauri::Window) -> Result<(), String> {
 /// relaunch_app (misc.rs), stage_deferred_update (updater_bg.rs).
 ///
 /// INTENTIONALLY UNGUARDED -- main-only by caller location (no Window param):
-/// playback_play/pause/next/previous/transfer, get_playback_devices/queue
-/// (Dashboard tray-adjacent controls + tray worker; Dashboard is main-only),
 /// show_window (+page main route), update_tray_menu_state (Dashboard),
 /// get_diagnostics_snapshot (Diagnostics-as-main-route), preview_status
 /// (Settings preview but read-only pure computation), get_sync_status
 /// (Dashboard/Settings status read), get_spotify/teams_granted_scopes
 /// (Settings scope readers, no side effect), is_spotify_client_secret_set
 /// (Settings/Reconnect presence read), clear_failed_update_install
-/// (Diagnostics dismiss; deletes only the marker file).
+/// (Diagnostics dismiss; deletes only the marker file),
+/// is_onboarding_complete (issue #770: the boot gate in
+/// `src/routes/+page.svelte`, a main-window route).
 ///
 /// INTENTIONALLY UNGUARDED -- detached-legit (invoked from popped-out
 /// Settings/LogViewer by design): reconnect_spotify, reconnect_teams,
@@ -99,7 +102,9 @@ pub fn require_main_window(window: &tauri::Window) -> Result<(), String> {
 /// get_recent_logs (LogViewer history backfill, issue #595) — the Logs pane
 /// is hosted in either window, and the file it tails is the same local file
 /// `open_logs_folder` already exposes to both, unredacted there and here
-/// alike (only the paste-able snapshot is redacted, #434).
+/// alike (only the paste-able snapshot is redacted, #434); set_locale
+/// (issue #770) — the language picker lives in Settings, one of the two
+/// detached-hosting views (`src/lib/i18n/store.svelte.ts`).
 ///
 /// shortcuts: register_shortcuts, unregister_shortcuts, validate_shortcut
 /// (issue #676) — the Settings pane is one of the two detached-hosting views
