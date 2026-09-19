@@ -384,8 +384,7 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
                 let app = tray.app_handle();
                 let _ = app.emit("tray-click", ());
             }
-        })
-        ;
+        });
     // Issue #927: the tray build is the one call here that panics instead of
     // returning `Err`. On Linux it dlopens libayatana-appindicator3.so.1 /
     // libappindicator3.so.1 through `libappindicator-sys`, whose `Lazy<Library>`
