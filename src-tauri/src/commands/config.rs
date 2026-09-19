@@ -438,13 +438,68 @@ fn ask_overwrite(
     confirmed
 }
 
+/// Top-level keys a genuine PresenceJam export always carries. A document with
+/// none of them is not one of ours (issue #963).
+const IMPORT_SECTION_KEYS: [&str; 9] = [
+    "schema_version",
+    "spotify",
+    "teams",
+    "polling",
+    "logging",
+    "updates",
+    "notifications",
+    "shortcuts",
+    "status_rules",
+];
+
+/// Whether `value` is recognisably a PresenceJam configuration (issue #963).
+///
+/// `AppConfig`'s fields all carry `#[serde(default)]`, so *any* JSON object
+/// deserializes — that is what makes this check necessary rather than implied
+/// by the schema parse.
+fn is_presencejam_document(value: &serde_json::Value) -> bool {
+    value.is_object()
+        && IMPORT_SECTION_KEYS
+            .iter()
+            .any(|key| value.get(*key).is_some())
+}
+
+/// Read the file the user picked, refusing anything that is not a PresenceJam
+/// configuration at all (issue #963).
+///
+/// Without this check a mis-picked `.json` that shares none of the
+/// application's sections still deserializes into a complete, all-defaults
+/// config, and the import reports success while the user's Spotify client id,
+/// status format, quiet hours, track rules, notification classes, shortcuts and
+/// locale are replaced by defaults. A real export always carries the full
+/// section set, so a genuine backup is never refused here.
+///
+/// A malformed file is deliberately left to `config::prepare_import`'s own
+/// error, so the "not valid JSON" wording keeps one home.
+fn read_import_source(path: &Path) -> Result<String, String> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| format!("import_config: failed to read '{}': {}", path.display(), e))?;
+    match serde_json::from_str::<serde_json::Value>(&raw) {
+        Ok(value) if !is_presencejam_document(&value) => {
+            log::warn!("{CMD} import_config: REFUSED - not a PresenceJam configuration");
+            Err(
+                "Imported file is not a PresenceJam configuration (no recognisable section: expected schema_version, spotify, teams, polling, logging, updates, notifications, shortcuts or status_rules)"
+                    .to_string(),
+            )
+        }
+        _ => Ok(raw),
+    }
+}
+
 /// Replace the stored config with a document the user picks.
 ///
-/// Validation happens in `config::import_config_document` before anything is
-/// written — a document carrying a plaintext `client_secret` is refused — and
-/// the user is asked before the current file is replaced, with the outgoing
-/// copy kept as `config.json.bak`. Returns `None` when the picker was dismissed
-/// or the overwrite was declined (both are clean no-ops).
+/// Validation happens before anything is written: a file that is not a
+/// PresenceJam configuration is refused by [`read_import_source`] (issue #963),
+/// and a document carrying a plaintext `client_secret` by
+/// `config::import_config_document`. The user is asked before the current file
+/// is replaced, with the outgoing copy kept as `config.json.bak`. Returns
+/// `None` when the picker was dismissed or the overwrite was declined (both are
+/// clean no-ops).
 #[tauri::command]
 pub async fn import_config(
     app: AppHandle,
@@ -473,13 +528,10 @@ pub async fn import_config(
     let source = chosen
         .into_path()
         .map_err(|e| format!("import_config: unusable source: {}", e))?;
-    let raw = std::fs::read_to_string(&source).map_err(|e| {
-        format!(
-            "import_config: failed to read '{}': {}",
-            source.display(),
-            e
-        )
-    })?;
+    // Issue #963: read and identity-check the picked file before the
+    // destination is even resolved — a file that is not a PresenceJam
+    // configuration is refused with nothing on disk touched.
+    let raw = read_import_source(&source)?;
     let source_path = source.to_string_lossy().into_owned();
     let destination = config::get_config_path()?;
 
@@ -730,13 +782,7 @@ mod tests {
     /// pre-cleared.
     #[test]
     fn export_leaves_a_tmp_sibling_and_a_sibling_directory_alone() {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let dir =
-            std::env::temp_dir().join(format!("pj-test-export-{}-{}", std::process::id(), nanos));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = temp_dir("pj-test-export");
         let json = "{\"schema_version\":1}";
 
         // Sibling file with unrelated bytes: it must survive the export.
@@ -826,5 +872,80 @@ mod tests {
                 "{sig} must await the picker task, or the command returns before the user answers"
             );
         }
+    }
+
+    /// A fresh temp directory for one test, unique per process and per call.
+    fn temp_dir(prefix: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("{prefix}-{}-{}", std::process::id(), nanos));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    /// Issue #963: `AppConfig` is `#[serde(default)]` throughout, so any JSON
+    /// object deserializes — including one carrying none of the application's
+    /// sections, which would replace the user's settings with defaults while
+    /// the import reported success.
+    #[test]
+    fn import_refuses_a_file_that_is_not_a_presencejam_config() {
+        assert!(!is_presencejam_document(&serde_json::json!({})));
+        assert!(!is_presencejam_document(&serde_json::json!({"foo": 1})));
+        assert!(!is_presencejam_document(&serde_json::json!([1, 2, 3])));
+        // One recognisable section is enough, whatever else the file carries.
+        assert!(is_presencejam_document(&serde_json::json!({"spotify": {}})));
+        assert!(is_presencejam_document(
+            &serde_json::json!({"schema_version": 0})
+        ));
+    }
+
+    /// The refusal runs on the command path and touches nothing: the live
+    /// `config.json` stays byte-identical and no `.bak` appears (issue #963).
+    #[test]
+    fn refused_import_leaves_the_live_config_byte_identical() {
+        let dir = temp_dir("pj-test-import-refuse");
+        let live = dir.join("config.json");
+        let previous = "{\n  \"spotify\": {\"client_id\": \"KEEP\"}\n}";
+        std::fs::write(&live, previous).expect("live config");
+
+        let picked = dir.join("picked.json");
+        for document in ["{}", "{\"foo\":1}"] {
+            std::fs::write(&picked, document).expect("picked file");
+            let err = read_import_source(&picked)
+                .expect_err("a file that is not a PresenceJam config must be refused");
+            assert!(
+                err.contains("not a PresenceJam configuration"),
+                "the refusal must say what the file is not: {err}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&live).expect("live config"),
+                previous,
+                "a refused import must leave the live config byte-identical"
+            );
+            assert!(
+                !dir.join("config.json.bak").exists(),
+                "a refused import must not quarantine the live config"
+            );
+        }
+
+        // A genuine export is never refused — the export/import round trip.
+        let exported = config::export_document(&config::AppConfig::default()).expect("export");
+        std::fs::write(&picked, &exported).expect("picked export");
+        assert_eq!(
+            read_import_source(&picked).expect("export must import"),
+            exported
+        );
+
+        // ...and `import_config` is what runs this check.
+        let prod = prod_source(include_str!("config.rs"));
+        let body = body_of(prod, "pub async fn import_config(");
+        assert!(
+            body.contains("read_import_source("),
+            "import_config must refuse a non-PresenceJam file on its own path"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
