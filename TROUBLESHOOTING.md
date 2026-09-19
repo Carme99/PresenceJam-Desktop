@@ -137,7 +137,9 @@ Settings shows the same state on the credential row ("System keychain unavailabl
 
 **To fully quit:**
 - Right-click the tray icon → **Quit**
-- Or right-click → **Show Window** → close from within the app
+
+Closing the window is not an exit: the close button only hides the app to the
+tray, where it keeps polling Spotify and keeps writing your Teams status.
 
 **To prevent it from starting with Windows:**
 - Settings → disable **Launch at Login**
@@ -322,18 +324,30 @@ To fully remove PresenceJam:
 
 1. **Quit the app** (right-click tray → Quit)
 2. **Delete the app:**
-   - Windows Settings → Apps → PresenceJam → Uninstall
+   - Windows: Settings → Apps → PresenceJam → Uninstall
+   - macOS: Drag PresenceJam from Applications to Trash
+   - Linux (deb): `sudo apt remove presence-jam` (or `sudo dpkg -r presence-jam`)
+   - Linux (AppImage): delete the AppImage file
 3. **Delete user data** (optional — removes all tokens and config).
-   `config.json` and `tokens.json` are NOT in the same folder (issue #300),
-   so delete both directories:
+   `config.json`, `tokens.json` and the logs are NOT in the same folder (issue #300),
+   so delete all three:
    ```
-   %APPDATA%\PresenceJam\
-   %APPDATA%\com.presencejam.app\PresenceJam\
+   %APPDATA%\PresenceJam\                          (Windows — config.json)
+   %APPDATA%\com.presencejam.app\PresenceJam\      (Windows — tokens.json)
+   %LOCALAPPDATA%\com.presencejam.app\logs\        (Windows — logs)
+   ~/Library/Application Support/PresenceJam/                    (macOS — config.json)
+   ~/Library/Application Support/com.presencejam.app/PresenceJam/ (macOS — tokens.json)
+   ~/Library/Logs/com.presencejam.app/                            (macOS — logs)
+   ${XDG_CONFIG_HOME:-$HOME/.config}/PresenceJam/                 (Linux — config.json)
+   ${XDG_CONFIG_HOME:-$HOME/.config}/com.presencejam.app/PresenceJam/ (Linux — tokens.json)
+   ~/.local/share/com.presencejam.app/logs/                       (Linux — logs)
    ```
    You can also use PowerShell:
    ```powershell
    Remove-Item -Recurse -Force "$env:APPDATA\PresenceJam"
    Remove-Item -Recurse -Force "$env:APPDATA\com.presencejam.app\PresenceJam"
+   Remove-Item -Recurse -Force "$env:LOCALAPPDATA\com.presencejam.app\logs"
    ```
+4. **Remove the login entry** if **Launch at Login** was on — delete `~/.config/autostart/PresenceJam.desktop` on Linux; Windows and macOS remove it with the app. `~/.local/share/applications/presencejam.desktop` exists only if you created one for an AppImage install.
 
 Note: Your Spotify app credentials in the Spotify Developer Dashboard are unaffected.

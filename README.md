@@ -90,7 +90,32 @@ chmod +x PresenceJam-linux-amd64.AppImage
 ./PresenceJam-linux-amd64.AppImage
 ```
 
-For autostart with an AppImage, see the [Tauri Linux docs](https://v2.tauri.app/distribute/) — a `.desktop` file in `~/.local/share/applications/` plus the binary in `~/.local/bin/` is the standard pattern.
+To get a launcher entry and an icon for the AppImage — without one, a hidden
+window is only reachable by re-running the file from a terminal — copy it into
+place and write a desktop entry:
+
+```bash
+mkdir -p ~/.local/bin ~/.local/share/applications ~/.local/share/icons
+install -m755 PresenceJam-linux-amd64.AppImage ~/.local/bin/PresenceJam-linux-amd64.AppImage
+cat > ~/.local/share/applications/presencejam.desktop <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=PresenceJam
+Exec=/home/<you>/.local/bin/PresenceJam-linux-amd64.AppImage
+Icon=presencejam
+Terminal=false
+Categories=Utility;
+StartupWMClass=presencejam
+EOF
+update-desktop-database ~/.local/share/applications
+```
+
+Replace `/home/<you>` in `Exec=` with your real home path — desktop entries do not
+expand `~` or `$HOME`. Name an icon at `~/.local/share/icons/presencejam.png` (or a
+stock icon name in `Icon=`) so the launcher has artwork. Launch at Login does not
+depend on this: the autostart plugin writes its own
+`~/.config/autostart/PresenceJam.desktop` pointing at the AppImage. The recipe
+copies the file, so the "no install required" description still holds.
 
 ### macOS first-run note
 
