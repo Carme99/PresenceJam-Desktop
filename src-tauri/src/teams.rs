@@ -630,6 +630,22 @@ fn post_status_message_with(
     Ok(())
 }
 
+/// The info-level record for a successful Teams status write: the byte count,
+/// never the text.
+///
+/// The text is the user's artist/track, and the shipping log level keeps
+/// info-level records in `PresenceJam.log`, which the Diagnostics page and
+/// LogViewer hand out as a support snapshot — so the text itself is logged at
+/// `debug!` only and this line replaces it. Length plus the `[POLLING]` /
+/// `[TEAMS]` lines already logged is enough to diagnose a rejected or
+/// oversized status. Issue #912 (the status-write half of #344).
+fn status_set_log_line(message: &str) -> String {
+    format!(
+        "Successfully set Teams status message ({} bytes)",
+        message.len()
+    )
+}
+
 pub fn set_teams_status_message(
     access_token: &str,
     message: &str,
@@ -643,7 +659,13 @@ pub fn set_teams_status_message(
         "set",
     )?;
 
-    log::info!("{TAG} Successfully set Teams status message: {}", message);
+    // Issue #912: the posted text is user content (artist + track). The
+    // rotating file target keeps info-level records by default, and the
+    // Diagnostics / LogViewer snapshots hand the log tail to the user as
+    // "safe to publish", so the text goes to `debug!` (the `poll_once.rs`
+    // #344 convention) and the info-level record carries the byte count.
+    log::debug!("{TAG} Successfully set Teams status message: {}", message);
+    log::info!("{TAG} {}", status_set_log_line(message));
     Ok(())
 }
 
@@ -1780,5 +1802,68 @@ mod tests {
             checked >= 20,
             "the scan found only {checked} log macros — the needles are wrong"
         );
+    }
+
+    // Issue #912: the info-level status-write line carries the byte count and
+    // never the posted text. The text is the user's artist/track, and the
+    // rotating file target keeps info by default, so it would ride into the
+    // Diagnostics / LogViewer support snapshots as "safe to publish".
+    #[test]
+    fn status_set_log_line_carries_only_the_byte_count() {
+        let marker = "\u{1F3B5} Artist Name - Track Title \u{1F3A7}";
+        let line = super::status_set_log_line(marker);
+        assert!(
+            line.contains(&format!("{} bytes", marker.len())),
+            "the size must be reported, got: {line}"
+        );
+        assert!(!line.contains("Artist Name"), "artist leaked: {line}");
+        assert!(!line.contains("Track Title"), "track leaked: {line}");
+        assert!(!line.contains(marker), "posted text leaked: {line}");
+    }
+
+    /// Issue #912, structural half: the info-level record in
+    /// `set_teams_status_message` must be the byte-count helper's output, so
+    /// re-inlining the posted text into an info-or-above macro fails here even
+    /// if someone deletes the content test above.
+    #[test]
+    fn set_teams_status_message_info_line_uses_the_byte_count_helper() {
+        let src = include_str!("teams.rs");
+        let body = fn_body(src, "pub fn set_teams_status_message(");
+        let at = body
+            .find("log::info!(")
+            .expect("the success line must stay at info level");
+        let region = macro_arg_region(body, at + "log::info!(".len() - 1)
+            .expect("the info macro arguments must be balanced");
+        assert!(
+            region.contains("status_set_log_line("),
+            "the info line must log the byte-count helper, got: {region}"
+        );
+    }
+
+    /// The body of the function whose signature contains `needle`, isolated by
+    /// brace counting from its opening `{` (order-independent — do not anchor
+    /// on the next `fn`). Format-string braces are always paired, so counting
+    /// stays exact for these bodies.
+    fn fn_body<'a>(src: &'a str, needle: &str) -> &'a str {
+        let sig = src
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle} must exist"));
+        let open = sig + src[sig..].find('{').expect("the body must open");
+        let mut depth: u32 = 0;
+        let mut i = open;
+        loop {
+            assert!(i < src.len(), "unbalanced braces in {needle}");
+            match src.as_bytes()[i] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &src[open + 1..i];
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
     }
 }
