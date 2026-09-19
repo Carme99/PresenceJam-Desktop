@@ -225,8 +225,10 @@ fn export_sidecar_path(dest: &Path, pid: u32, attempt: u32) -> PathBuf {
 }
 
 /// Create `path` exclusively — no pre-clear, mode 0600 on Unix (the #135
-/// pattern `atomic_write_json` uses). `AlreadyExists` is reported to the
-/// caller rather than cleared away: the name belongs to whoever has it.
+/// pattern `atomic_write_json` uses). `AlreadyExists` is reported to the caller
+/// rather than cleared away: the name belongs to whoever has it. That includes
+/// a *directory* at the name — `O_CREAT|O_EXCL` reports `EEXIST` for any
+/// existing entry — so the caller decides whether to try another name.
 fn open_exclusive(path: &Path) -> std::io::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -273,10 +275,11 @@ fn write_export_file(dest: &Path, json: &str) -> Result<(), String> {
         let staged = export_sidecar_path(dest, pid, attempt);
         let mut file = match open_exclusive(&staged) {
             Ok(file) => file,
-            // Somebody else holds this exact name — theirs, not ours: try the
-            // next suffix. A directory at that name is not an `AlreadyExists`
-            // error on Unix; it surfaces on write as the plain write error it
-            // is, naming this call's own sidecar.
+            // Somebody (or something) else holds this exact name — theirs, not
+            // ours: try the next suffix rather than clearing it away. A
+            // directory at the name lands here too, since `O_CREAT|O_EXCL`
+            // reports `EEXIST` for it; the export then fails naming this call's
+            // own sidecar, never a path the user chose.
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => {
                 return Err(format!(
@@ -491,15 +494,123 @@ fn read_import_source(path: &Path) -> Result<String, String> {
     }
 }
 
+/// The sidecar an imported document is staged in before it replaces the live
+/// config: `<config.json>.import.tmp`. Beside the live file, so the final
+/// rename stays on one volume and is atomic (issue #939).
+fn staged_config_path(path: &Path) -> PathBuf {
+    let mut staged = path.as_os_str().to_owned();
+    staged.push(".import.tmp");
+    PathBuf::from(staged)
+}
+
+/// Stage `json` beside `path`, move the live file to the quarantine backup, then
+/// install the staged copy over `path` (issue #939).
+///
+/// `config::import_config_document` moves the live file to `config.json.bak`
+/// first and writes the imported document only afterwards: a write that fails —
+/// disk full, quota, permission denied, an antivirus lock — or a process death
+/// between the two steps returns an error with **no live config at all**. The
+/// next launch then logs "Config file not found", boots on defaults, and the
+/// user's settings exist only in a `.bak` nothing restores. Staging first means
+/// a replacement that cannot be written fails before the live file moves; if
+/// the final rename fails, the previous document is moved back before the error
+/// returns.
+///
+/// The staged sidecar is app-owned, so a leftover from an import that died
+/// mid-flight is pre-cleared exactly as `atomic_write_json` does for
+/// `config.json.tmp` (#135 path A) — one crash must not become a permanent
+/// import failure.
+fn replace_config_file(path: &Path, json: &str) -> Result<(), String> {
+    let staged = staged_config_path(path);
+
+    if let Err(e) = std::fs::remove_file(&staged) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return Err(format!(
+                "Failed to remove stale import temp file '{}': {}",
+                staged.display(),
+                e
+            ));
+        }
+    }
+
+    let mut file = open_exclusive(&staged).map_err(|e| {
+        format!(
+            "Failed to create import temp file '{}': {}",
+            staged.display(),
+            e
+        )
+    })?;
+    if let Err(e) = file.write_all(json.as_bytes()) {
+        let _ = std::fs::remove_file(&staged);
+        return Err(format!(
+            "Failed to write import temp file '{}': {}",
+            staged.display(),
+            e
+        ));
+    }
+    if let Err(e) = file.sync_all() {
+        let _ = std::fs::remove_file(&staged);
+        return Err(format!(
+            "Failed to sync import temp file '{}': {}",
+            staged.display(),
+            e
+        ));
+    }
+    drop(file);
+
+    // The outgoing file goes to the same backup path the corrupt-file
+    // quarantine uses, so an import is never a one-way door. A missing current
+    // file is not an error: a fresh install has nothing to back up.
+    let backup = config::quarantine_backup_path(path);
+    let had_live = path.exists();
+    if had_live {
+        if let Err(e) = std::fs::rename(path, &backup) {
+            let _ = std::fs::remove_file(&staged);
+            return Err(format!(
+                "Failed to move the current config to '{}': {}",
+                backup.display(),
+                e
+            ));
+        }
+        log::info!(
+            "{CMD} import: previous config moved to '{}'",
+            backup.display()
+        );
+    }
+
+    if let Err(e) = std::fs::rename(&staged, path) {
+        log::error!("{CMD} import: FAILED to install the imported config: {}", e);
+        let _ = std::fs::remove_file(&staged);
+        if had_live {
+            match std::fs::rename(&backup, path) {
+                Ok(()) => log::warn!("{CMD} import: the previous config was moved back into place"),
+                Err(rollback) => log::error!(
+                    "{CMD} import: rollback FAILED - the previous config is at '{}': {}",
+                    backup.display(),
+                    rollback
+                ),
+            }
+        }
+        return Err(format!(
+            "Failed to install the imported config at '{}': {}",
+            path.display(),
+            e
+        ));
+    }
+
+    sync_parent_dir(path);
+    Ok(())
+}
+
 /// Replace the stored config with a document the user picks.
 ///
 /// Validation happens before anything is written: a file that is not a
 /// PresenceJam configuration is refused by [`read_import_source`] (issue #963),
 /// and a document carrying a plaintext `client_secret` by
-/// `config::import_config_document`. The user is asked before the current file
-/// is replaced, with the outgoing copy kept as `config.json.bak`. Returns
-/// `None` when the picker was dismissed or the overwrite was declined (both are
-/// clean no-ops).
+/// `config::prepare_import`. The user is asked before the current file is
+/// replaced — a fresh install, having nothing to replace, is not asked — and the
+/// outgoing copy is kept as `config.json.bak`. Returns `None` when the picker
+/// was dismissed or the overwrite was declined (both are clean no-ops).
 #[tauri::command]
 pub async fn import_config(
     app: AppHandle,
@@ -535,13 +646,19 @@ pub async fn import_config(
     let source_path = source.to_string_lossy().into_owned();
     let destination = config::get_config_path()?;
 
-    // The validate → ask → replace sequence runs on the blocking pool, and
-    // deliberately *without* the config write guard: the confirmation is a
-    // user-driven wait, and holding the guard across it would stall the polling
-    // loop's config reads for as long as the dialog is on screen.
-    let dialog_app = app.clone();
-    let outcome = tauri::async_runtime::spawn_blocking(move || {
-        config::import_config_document(&raw, &destination, || {
+    // Validation before anything is written: `prepare_import` refuses a
+    // document carrying a plaintext client_secret and clamps everything it
+    // accepts, so the replace below cannot introduce a value the UI could not
+    // have saved.
+    let prepared = config::prepare_import(&raw)?;
+
+    // The overwrite question is a user-driven wait, so it runs on the blocking
+    // pool and *outside* the config write guard: holding the guard across it
+    // would stall the polling loop's config reads for as long as the dialog is
+    // on screen. A fresh install has nothing to replace and is not asked.
+    if destination.exists() {
+        let dialog_app = app.clone();
+        let confirmed = tauri::async_runtime::spawn_blocking(move || {
             ask_overwrite(
                 &dialog_app,
                 &title,
@@ -550,13 +667,23 @@ pub async fn import_config(
                 &confirm_cancel,
             )
         })
+        .await
+        .map_err(|e| format!("import_config spawn_blocking panicked: {:?}", e))?;
+        if !confirmed {
+            log::info!("{CMD} import_config: DECLINED - configuration left untouched");
+            return Ok(None);
+        }
+    }
+
+    // Issue #939: the imported document is staged beside the live file and only
+    // then installed, so a replace that cannot be written leaves the previous
+    // `config.json` in place instead of wiping the user's settings.
+    let write_destination = destination.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        replace_config_file(&write_destination, &prepared.document)
     })
     .await
     .map_err(|e| format!("import_config spawn_blocking panicked: {:?}", e))??;
-    let Some(_written) = outcome else {
-        log::info!("{CMD} import_config: DECLINED - configuration left untouched");
-        return Ok(None);
-    };
 
     // #215 pattern for the adoption only: the file write is done, and this guard
     // covers the load-then-store pair so a concurrent write cannot interleave.
@@ -673,6 +800,8 @@ pub async fn set_locale(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     /// Production half of this module — everything before the inline test
     /// module, so a scan can never match the assertions themselves.
     fn prod_source(src: &str) -> &str {
@@ -945,6 +1074,108 @@ mod tests {
             body.contains("read_import_source("),
             "import_config must refuse a non-PresenceJam file on its own path"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #939: a replace that cannot be written must leave the previous
+    /// `config.json` in place. Staging first is what makes that true — the
+    /// rename-then-write sequence this replaced moved the live file aside and
+    /// only then failed, leaving the app with no config at all.
+    #[test]
+    fn failed_replace_leaves_the_previous_config_in_place() {
+        let dir = temp_dir("pj-test-import-failed-replace");
+        let live = dir.join("config.json");
+        let previous = "{\"spotify\":{\"client_id\":\"KEEP\"}}";
+        std::fs::write(&live, previous).expect("live config");
+        // An obstruction at the staged sidecar name fails the stage step —
+        // which is the point: it happens before the live file is touched.
+        let staged = staged_config_path(&live);
+        std::fs::create_dir(&staged).expect("obstruction");
+
+        let err = replace_config_file(&live, "{\"spotify\":{\"client_id\":\"NEW\"}}")
+            .expect_err("the replace cannot be staged");
+        assert!(err.contains("import temp file"), "unexpected error: {err}");
+        assert_eq!(
+            std::fs::read_to_string(&live).expect("live config"),
+            previous,
+            "a failed replace must leave the previous config.json in place"
+        );
+        assert!(
+            !dir.join("config.json.bak").exists(),
+            "the live config must not have been moved aside before the write"
+        );
+        assert!(staged.is_dir(), "the obstruction must not be removed");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #939 (unix): the real-world version of the same contract — a
+    /// directory the app cannot write to yields an error while the previous
+    /// config stays on disk, byte-identical.
+    #[cfg(unix)]
+    #[test]
+    fn replace_in_an_unwritable_directory_keeps_the_previous_config() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir("pj-test-import-unwritable");
+        let inner = dir.join("cfg");
+        std::fs::create_dir(&inner).expect("inner dir");
+        let live = inner.join("config.json");
+        let previous = "{\"spotify\":{\"client_id\":\"KEEP\"}}";
+        std::fs::write(&live, previous).expect("live config");
+        std::fs::set_permissions(&inner, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+
+        // Root (or a filesystem that ignores the mode bits) would not be denied
+        // here, and the contract can only be asserted where the write really
+        // fails.
+        let denied = std::fs::write(inner.join("probe"), b"x").is_err();
+        if denied {
+            let err = replace_config_file(&live, "{\"spotify\":{\"client_id\":\"NEW\"}}")
+                .expect_err("an unwritable directory must fail the replace");
+            assert!(err.contains("import temp file"), "unexpected error: {err}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(&live).expect("live config"),
+            previous,
+            "the previous config must survive a replace that could not be staged"
+        );
+        assert!(
+            denied,
+            "expected the 0o555 directory to deny this test's write"
+        );
+
+        let _ = std::fs::set_permissions(&inner, std::fs::Permissions::from_mode(0o755));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A replace that can be written lands the new document exactly once and
+    /// keeps the outgoing one as `config.json.bak`.
+    #[test]
+    fn replace_installs_the_document_once_and_quarantines_the_previous_one() {
+        let dir = temp_dir("pj-test-import-replace");
+        let live = dir.join("config.json");
+        let previous = "{\"spotify\":{\"client_id\":\"OLD\"}}";
+        let next = "{\n  \"spotify\": {\"client_id\": \"NEW\"}\n}";
+        std::fs::write(&live, previous).expect("live config");
+
+        replace_config_file(&live, next).expect("the replace must land");
+
+        assert_eq!(std::fs::read_to_string(&live).expect("live config"), next);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("config.json.bak")).expect("backup"),
+            previous
+        );
+        assert!(
+            !staged_config_path(&live).exists(),
+            "the staged sidecar must not survive a successful replace"
+        );
+
+        // A fresh install has nothing to back up and is still replaced.
+        let fresh = dir.join("fresh.json");
+        replace_config_file(&fresh, next).expect("a replace into a missing file must succeed");
+        assert_eq!(std::fs::read_to_string(&fresh).expect("fresh"), next);
+        assert!(!staged_config_path(&fresh).exists());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
