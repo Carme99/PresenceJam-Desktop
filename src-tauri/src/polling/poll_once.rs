@@ -37,7 +37,8 @@ use crate::teams::{
     clear_user_preferred_presence_quick, get_teams_presence,
     is_token_expired as is_teams_token_expired, presence_gate_reason, refresh_teams_token,
     set_teams_presence, set_teams_status_message, set_user_preferred_presence, TeamsApiError,
-    TeamsTokens, GATE_REASON_IDLE, GATE_REASON_MANUAL_STATUS, GATE_REASON_QUIET_HOURS, GATE_REASON_TRACK_RULE,
+    TeamsTokens, GATE_REASON_IDLE, GATE_REASON_MANUAL_STATUS, GATE_REASON_QUIET_HOURS,
+    GATE_REASON_TRACK_RULE,
 };
 use crate::token_io;
 use crate::AppState;

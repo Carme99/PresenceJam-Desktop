@@ -375,7 +375,7 @@ fn clamp_teams(cfg: &mut TeamsConfig) {
     // alone — `poll_once` reads it as "use the default".
     clamp_rule_text(&mut cfg.paused_status_format);
     clamp_rule_text(&mut cfg.stopped_status_format);
-// Issue #866: the preferred-presence pair rides the same
+    // Issue #866: the preferred-presence pair rides the same
     // normalizer — `normalize_presence_pair` already clears both
     // fields when they fail to match `PRESENCE_COMBINATIONS`, so
     // disabling an unsupported config is automatic.

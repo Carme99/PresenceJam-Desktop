@@ -315,9 +315,9 @@ mod tests {
     /// `set_probe_for_tests`).
     #[test]
     fn test_probe_focus_returns_unknown_on_errored_probe() {
-        let _guard = set_probe_for_tests(Arc::new(FakeProbe::new(Err(
-            FocusProbeError::Native(0x1234_5678),
-        ))));
+        let _guard = set_probe_for_tests(Arc::new(FakeProbe::new(Err(FocusProbeError::Native(
+            0x1234_5678,
+        )))));
         assert_eq!(probe_focus(), PresentationState::Unknown);
     }
 
