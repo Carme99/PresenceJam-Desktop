@@ -46,16 +46,28 @@ jq -r '.version, .packages[""].version' package-lock.json   # both must be the n
 jq -r .version package.json                                 # and must match this
 ```
 
-### Why the two lockfiles are manual
+### How the six literals are gated
 
-Nothing checks them. `ci.yml`'s `version-consistency` job (`ci.yml`, job
-`version-consistency`, ~lines 311-339) reads `jq -r .version` from
-`src-tauri/tauri.conf.json`, `package.json` and `sed`'s `src-tauri/Cargo.toml` —
-and compares those three with each other. The tag-time check in `release.yml`
-("Verify version consistency", ~lines 78-100) compares the **same three** against
-the resolved tag. Neither one opens `package-lock.json` or `Cargo.lock`, so a
-forgotten lockfile bump passes CI and only surfaces as a `cargo`/`npm`
-discrepancy later. Bump all six literals, every time.
+Two jobs read **all six** — the three manifests and both lockfiles — and fail
+on the first disagreement:
+
+- `ci.yml`, job `version-consistency` — the PR-time gate. `jq -r .version`
+  from `src-tauri/tauri.conf.json`, `package.json` and `package-lock.json`,
+  `jq -r '.packages[""].version'` for the lockfile's own root entry, `sed` for
+  `src-tauri/Cargo.toml`, and an `awk` over the `presence-jam` block of
+  `src-tauri/Cargo.lock`; every one of the six is compared with
+  `tauri.conf.json`.
+- `release.yml`, step "Verify version consistency" in the `resolve-tag`
+  job (~lines 86-125) — the same six compared against the tag, before the
+  build matrix starts, so a tag cannot publish a lock that disagrees with the
+  binary it ships.
+
+The cargo steps also run with `--locked` (fmt takes no such flag), so a
+`Cargo.lock` that has drifted from `Cargo.toml` fails the run instead of being
+quietly rewritten on the runner. A legitimate dependency update therefore lands
+in the PR that changes the lock, never in a release build.
+
+Bump all six literals, every time.
 
 ## 2. CHANGELOG rules
 
@@ -101,7 +113,7 @@ jobs (the Name column is the check context shown on the PR's checks list):
 | `rust` | Rust (cargo check) | fmt, `cargo check`, `cargo test` on Linux |
 | `rust-clippy` | Rust clippy | `cargo clippy -- -D warnings` |
 | `changelog-links` | CHANGELOG link definitions | every `## [X]` header needs a `[X]:` definition |
-| `version-consistency` | Version consistency | `tauri.conf.json` vs `package.json` vs `Cargo.toml` |
+| `version-consistency` | Version consistency | all six version literals in §1 agree, both lockfiles included |
 | `secret-scan` | Secret scan (gitleaks) | gitleaks over the history |
 | `dep-audit` | Dependency audit (cargo + npm) | **advisory only** — `continue-on-error: true` |
 
@@ -116,11 +128,13 @@ behind the tag-push run.
    dispatch, else `GITHUB_REF_NAME`), rejects anything that is not `v*`,
    verifies the tag exists with `git ls-remote --exit-code --tags`, checks the
    repository out **at that tag**, then runs the tag/version check: `EXPECTED` =
-   the tag without its leading `v`, compared against `tauri.conf.json`,
-   `package.json` and `Cargo.toml`. Drift fails the run here — before any
-   compile — because a mismatch means the shipped binary self-reports a
-   different version than `latest.json` advertises, which makes the updater
-   re-offer the same update forever (issue #605). The resolved `tag` output is
+   the tag without its leading `v`, compared against all six literals in §1 —
+   `tauri.conf.json`, `package.json`, both `package-lock.json` literals,
+   `Cargo.toml` and `Cargo.lock`'s `presence-jam` entry. Drift fails the run
+   here — before any compile — because a mismatch means the shipped binary
+   self-reports a different version than `latest.json` advertises, which makes
+   the updater re-offer the same update forever (issue #605). The resolved `tag`
+   output is
    consumed by every downstream job instead of `github.ref_name`.
 2. **`verify`** (`needs: resolve-tag`, ~lines 111-178) — checks out the same tag
    and reruns the `ci.yml` gate set there (fmt, clippy, `cargo test`,

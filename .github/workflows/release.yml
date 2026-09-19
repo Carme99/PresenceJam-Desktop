@@ -83,6 +83,11 @@ jobs:
           persist-credentials: false
           ref: ${{ steps.resolve.outputs.tag }}
 
+      # All six version literals (issue #832): the three manifests plus
+      # package-lock.json's two literals and Cargo.lock's `presence-jam`
+      # entry. A partial bump that skips a lockfile shipped a release whose
+      # npm/cargo metadata disagreed with the binary it published; the
+      # manifests alone cannot catch that.
       - name: Verify version consistency
         env:
           RELEASE_TAG: ${{ steps.resolve.outputs.tag }}
@@ -91,13 +96,28 @@ jobs:
           EXPECTED="${RELEASE_TAG#v}"
           CONFIG_VERSION=$(jq -r .version src-tauri/tauri.conf.json)
           PKG_VERSION=$(jq -r .version package.json)
+          PKG_LOCK_VERSION=$(jq -r .version package-lock.json)
+          PKG_LOCK_ROOT_VERSION=$(jq -r '.packages[""].version' package-lock.json)
           CARGO_VERSION=$(sed -nE 's/^version = "(.*)"/\1/p' src-tauri/Cargo.toml | head -1)
+          # The `presence-jam` [[package]] block in the lock: match the name
+          # line exactly (a dependency edge reads `"presence-jam",`, never
+          # `name = ...`) and take the version line that follows it.
+          CARGO_LOCK_VERSION=$(awk -F'"' '$0 == "name = \"presence-jam\"" {found=1} found && /^version = / {print $2; exit}' src-tauri/Cargo.lock)
           echo "Tag ${RELEASE_TAG} implies version ${EXPECTED}"
           echo "src-tauri/tauri.conf.json : ${CONFIG_VERSION}"
           echo "package.json              : ${PKG_VERSION}"
+          echo "package-lock.json         : ${PKG_LOCK_VERSION}"
+          echo "package-lock.json (root)  : ${PKG_LOCK_ROOT_VERSION}"
           echo "src-tauri/Cargo.toml      : ${CARGO_VERSION}"
+          echo "src-tauri/Cargo.lock      : ${CARGO_LOCK_VERSION}"
           drift=0
-          for entry in "src-tauri/tauri.conf.json:${CONFIG_VERSION}" "package.json:${PKG_VERSION}" "src-tauri/Cargo.toml:${CARGO_VERSION}"; do
+          for entry in \
+            "src-tauri/tauri.conf.json:${CONFIG_VERSION}" \
+            "package.json:${PKG_VERSION}" \
+            "package-lock.json:${PKG_LOCK_VERSION}" \
+            "package-lock.json packages[\"\"]:${PKG_LOCK_ROOT_VERSION}" \
+            "src-tauri/Cargo.toml:${CARGO_VERSION}" \
+            "src-tauri/Cargo.lock presence-jam:${CARGO_LOCK_VERSION}"; do
             file="${entry%:*}"
             version="${entry##*:}"
             if [ "$version" != "$EXPECTED" ]; then
@@ -169,7 +189,7 @@ jobs:
       - name: Cargo clippy (deny warnings)
         env:
           CARGO_INCREMENTAL: 0
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+        run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
       # Runs before the type check on purpose: the ts-rs `#[ts(export)]`
       # tests materialise src/lib/types-generated/, which src/lib/types.ts
@@ -177,7 +197,7 @@ jobs:
       - name: Cargo test (all targets)
         env:
           CARGO_INCREMENTAL: 0
-        run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --all-targets
 
       - name: Svelte/TS type check (npm run check)
         run: npm run check
