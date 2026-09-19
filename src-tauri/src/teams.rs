@@ -1,7 +1,14 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
 use std::thread;
 use std::time::Duration as StdDuration;
+
+/// Log tag prefix for this module (mirrors the `[CFG]` / `[CMD.*]` /
+/// `[UPDATER.BG]` pattern). `CLAUDE.md` requires a square-bracket module
+/// tag on every log line; `teams::fn_name:` prefixes are kept where they
+/// aid diagnosis, but never in place of the tag. Issue #777.
+const TAG: &str = "[TEAMS]";
 
 pub const MICROSOFT_GRAPH_CLIENT_ID: &str = "14d82eec-204b-4c2f-b7e8-296a70dab67e";
 pub const MICROSOFT_GRAPH_SCOPES: &str =
@@ -71,6 +78,39 @@ impl std::fmt::Display for TeamsApiError {
     }
 }
 
+impl TeamsApiError {
+    /// One actionable sentence for the UI (issue #974).
+    ///
+    /// `Display` stays the raw form for LOGS — bodies included, which is what
+    /// makes a rejected Graph call diagnosable — while this is what the
+    /// Dashboard banner, Onboarding, Reconnect and Settings show. Each variant
+    /// names what the user can do about it: a Graph 403 in particular is a
+    /// permission/licence problem that re-authenticating cannot fix, so the
+    /// generic "try again" text would send the user round a loop.
+    pub fn user_message(&self) -> String {
+        match self {
+            TeamsApiError::ExpiredToken(_) | TeamsApiError::InvalidGrant => {
+                "Your Microsoft Teams sign-in has expired. Reconnect Teams in Settings.".to_string()
+            }
+            TeamsApiError::Forbidden(_, _) => "Microsoft Teams refused the request: the account may be missing the Teams presence permission (Presence.ReadWrite) or a Microsoft 365 licence that includes Teams. Reconnecting will not fix this — check the account's licence and admin consent.".to_string(),
+            TeamsApiError::RateLimited(Some(secs)) => format!(
+                "Microsoft Teams is temporarily limiting requests. Retrying in {} seconds.",
+                secs
+            ),
+            TeamsApiError::RateLimited(None) => {
+                "Microsoft Teams is temporarily limiting requests. Retrying shortly.".to_string()
+            }
+            TeamsApiError::Transient(_) => {
+                "Microsoft Teams is temporarily unavailable. Retrying shortly.".to_string()
+            }
+            TeamsApiError::Other(status, _) => format!(
+                "Microsoft Teams returned an unexpected error (HTTP {}).",
+                status
+            ),
+        }
+    }
+}
+
 /// Creates a reqwest blocking client with standard config (user agent +
 /// `timeout`). Ensures consistent HTTP client settings across all Teams API
 /// calls.
@@ -79,6 +119,10 @@ impl std::fmt::Display for TeamsApiError {
 /// (which mirrors `tauri.conf.json` → `version`) automatically on every
 /// release. Never hardcode the version — see CONTRIBUTING.md. See audit
 /// Q8.
+///
+/// Only the exit-path cleanup still calls this (issue #884): it is the one
+/// caller that needs a timeout other than the shared 10 s, and caching a
+/// client per timeout value would defeat the point of the cache.
 fn build_teams_client_with_timeout(
     timeout: std::time::Duration,
 ) -> Result<reqwest::blocking::Client, String> {
@@ -89,8 +133,28 @@ fn build_teams_client_with_timeout(
         .map_err(|e| format!("Failed to create HTTP client: {}", e))
 }
 
+/// The shared Graph client: built once per process and cached (issue #884).
+///
+/// `reqwest::blocking::Client` is `Arc`-backed, so every later call is a
+/// refcount bump over the SAME connection pool instead of a fresh pool per
+/// call — the memoization `spotify.rs::build_spotify_client` already has
+/// (#576). Eight Teams call sites used to open and discard a pool each: a
+/// presence read plus a status POST every poll, i.e. a new TCP+TLS handshake
+/// per iteration with no keep-alive reuse.
+///
+/// The cache memoizes a failed build too: the builder fails only on
+/// environmental TLS/runtime init, where a retry would fail identically. The
+/// signature is `Result<Client, String>` as before, so the call sites and
+/// their error mapping are untouched.
 fn build_teams_client() -> Result<reqwest::blocking::Client, String> {
-    build_teams_client_with_timeout(std::time::Duration::from_secs(10))
+    static CLIENT: LazyLock<Result<reqwest::blocking::Client, String>> = LazyLock::new(|| {
+        reqwest::blocking::Client::builder()
+            .user_agent(format!("PresenceJam/{}", env!("CARGO_PKG_VERSION")))
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|e| format!("Failed to create HTTP client: {}", e))
+    });
+    CLIENT.as_ref().map(|c| c.clone()).map_err(|e| e.clone())
 }
 
 /// Binding budget for the exit-path cleanup (finding #636, issue #636).
@@ -151,10 +215,10 @@ struct TokenErrorResponse {
 }
 
 pub fn start_teams_auth_device_code() -> Result<DeviceCodeResponse, String> {
-    log::info!("teams::start_teams_auth_device_code: starting");
+    log::info!("{TAG} start_teams_auth_device_code: starting");
 
     let client = build_teams_client()?;
-    log::info!("teams::start_teams_auth_device_code: client created");
+    log::info!("{TAG} start_teams_auth_device_code: client created");
 
     let params = [
         ("client_id", MICROSOFT_GRAPH_CLIENT_ID),
@@ -168,7 +232,7 @@ pub fn start_teams_auth_device_code() -> Result<DeviceCodeResponse, String> {
         // stays dropped: no Graph call uses it (least privilege, #151).
         ("scope", MICROSOFT_GRAPH_SCOPES),
     ];
-    log::info!("teams::start_teams_auth_device_code: calling devicecode endpoint");
+    log::info!("{TAG} start_teams_auth_device_code: calling devicecode endpoint");
 
     let response = client
         .post("https://login.microsoftonline.com/common/oauth2/v2.0/devicecode")
@@ -176,20 +240,20 @@ pub fn start_teams_auth_device_code() -> Result<DeviceCodeResponse, String> {
         .form(&params)
         .send()
         .map_err(|e| {
-            log::error!("teams::start_teams_auth_device_code: send failed: {}", e);
+            log::error!("{TAG} start_teams_auth_device_code: send failed: {}", e);
             format!("Failed to send device code request: {}", e)
         })?;
-    log::info!("teams::start_teams_auth_device_code: send succeeded");
+    log::info!("{TAG} start_teams_auth_device_code: send succeeded");
 
     let status = response.status();
     log::info!(
-        "teams::start_teams_auth_device_code: response status: {}",
+        "{TAG} start_teams_auth_device_code: response status: {}",
         status
     );
 
     let raw_body = response.text().map_err(|e| {
         log::error!(
-            "teams::start_teams_auth_device_code: failed to read body: {}",
+            "{TAG} start_teams_auth_device_code: failed to read body: {}",
             e
         );
         format!("Failed to read response body: {}", e)
@@ -214,7 +278,7 @@ pub fn start_teams_auth_device_code() -> Result<DeviceCodeResponse, String> {
         )
     })?;
     log::info!(
-        "teams::start_teams_auth_device_code: received (expires_in={}s, interval={}s)",
+        "{TAG} start_teams_auth_device_code: received (expires_in={}s, interval={}s)",
         raw.expires_in,
         raw.interval
     );
@@ -228,7 +292,7 @@ pub fn start_teams_auth_device_code() -> Result<DeviceCodeResponse, String> {
     };
 
     log::info!(
-        "Device code flow started. User code: {}, verification URL: {}",
+        "{TAG} Device code flow started. User code: {}, verification URL: {}",
         result.user_code,
         result.verification_url
     );
@@ -284,6 +348,99 @@ fn parse_retry_after(response: &reqwest::blocking::Response) -> Option<u64> {
         .and_then(parse_retry_after_value)
 }
 
+/// Failure message for the overall device-code deadline.
+const AUTH_TIMEOUT_MSG: &str = "Authentication timed out";
+
+/// What [`poll_teams_auth`] does with one token-endpoint response.
+#[derive(Debug, PartialEq, Eq)]
+enum PollAction {
+    /// Poll again — after `server_wait` seconds when the server sent a
+    /// `Retry-After`, else after the loop's current interval.
+    Retry {
+        server_wait: Option<u64>,
+        slow_down: bool,
+    },
+    /// Stop polling; the string is the user-facing sentence.
+    Fail(String),
+}
+
+/// Pure decision for one device-code token response (issue #797).
+///
+/// The poll used to parse every non-success body as the OAuth error envelope
+/// with `?`, so a gateway 502 HTML page — or a 429 without the JSON error
+/// object — ended sign-in on a serde error the user could not act on, and the
+/// whole multi-minute consent step had to be redone. HTTP-level blips (5xx,
+/// 429, 408) and any body that is not the OAuth error envelope are now
+/// retries, bounded by the caller's overall deadline; only a real verdict on
+/// the device code ends the flow. Split out from the network loop so the whole
+/// matrix is unit-testable without HTTP.
+fn classify_device_code_response(status: u16, retry_after: Option<u64>, body: &str) -> PollAction {
+    if (500..=599).contains(&status) || status == 429 || status == 408 {
+        return PollAction::Retry {
+            server_wait: retry_after,
+            slow_down: false,
+        };
+    }
+    let Ok(error_resp) = serde_json::from_str::<TokenErrorResponse>(body) else {
+        // An interposed proxy page, an HTML error page or an empty body is not
+        // a verdict on the device code: keep the code usable and retry.
+        return PollAction::Retry {
+            server_wait: retry_after,
+            slow_down: false,
+        };
+    };
+    match error_resp.error.as_str() {
+        "authorization_pending" => PollAction::Retry {
+            server_wait: None,
+            slow_down: false,
+        },
+        "slow_down" => PollAction::Retry {
+            server_wait: None,
+            slow_down: true,
+        },
+        "authorization_declined" => {
+            PollAction::Fail("Microsoft sign-in was declined in the browser.".to_string())
+        }
+        "expired_token" => PollAction::Fail(
+            "The Microsoft sign-in code expired. Please start sign-in again.".to_string(),
+        ),
+        // Every other OAuth error code (bad_verification_code,
+        // unauthorized_client, …) is terminal for this code. The server's own
+        // description is the best actionable text; the raw body is logged by
+        // the caller and never shown (issue #974).
+        _ => {
+            let detail = error_resp
+                .error_description
+                .as_deref()
+                .map(str::trim)
+                .filter(|d| !d.is_empty())
+                .unwrap_or(error_resp.error.as_str());
+            PollAction::Fail(format!("Microsoft sign-in failed: {}", detail))
+        }
+    }
+}
+
+/// Sleeps up to `secs` seconds in 30-second chunks, giving up as soon as the
+/// overall device-code deadline passes — so a server-directed `Retry-After`
+/// (already clamped to 300 s by [`parse_retry_after_value`]) or a ramped
+/// `slow_down` interval can never block the thread past the deadline.
+fn sleep_within_deadline(
+    start_time: std::time::Instant,
+    timeout: StdDuration,
+    secs: u64,
+) -> Result<(), String> {
+    let mut remaining = secs;
+    while remaining > 0 {
+        if start_time.elapsed() > timeout {
+            return Err(AUTH_TIMEOUT_MSG.to_string());
+        }
+        let chunk = remaining.min(30);
+        thread::sleep(StdDuration::from_secs(chunk));
+        remaining -= chunk;
+    }
+    Ok(())
+}
+
 pub fn poll_teams_auth(device_code: &str, interval: u64) -> Result<TeamsTokens, String> {
     let client = build_teams_client()?;
     let start_time = std::time::Instant::now();
@@ -297,7 +454,7 @@ pub fn poll_teams_auth(device_code: &str, interval: u64) -> Result<TeamsTokens, 
 
     loop {
         if start_time.elapsed() > timeout {
-            return Err("Authentication timed out".to_string());
+            return Err(AUTH_TIMEOUT_MSG.to_string());
         }
 
         let params = [
@@ -314,29 +471,41 @@ pub fn poll_teams_auth(device_code: &str, interval: u64) -> Result<TeamsTokens, 
             .map_err(|e| format!("Failed to send token request: {}", e))?;
 
         let status = response.status();
+        // Read the server's directive before `text()` consumes the response
+        // (issue #797): on a throttle it wins over the loop's current interval.
+        let retry_after = parse_retry_after(&response);
 
         let raw_body = response
             .text()
             .map_err(|e| format!("Failed to read response body: {}", e))?;
         log::debug!(
-            "poll_teams_auth: status={}, body={}",
+            "{TAG} poll_teams_auth: status={}, body={}",
             status,
             truncate_for_log(&raw_body)
         );
 
         if status.is_success() {
-            let token_resp: TokenResponse = serde_json::from_str(&raw_body).map_err(|e| {
-                format!(
-                    "Failed to parse token response: {} (body was: {})",
-                    e,
-                    truncate_for_log(&raw_body)
-                )
-            })?;
+            let token_resp: TokenResponse = match serde_json::from_str(&raw_body) {
+                Ok(parsed) => parsed,
+                Err(e) => {
+                    // A 2xx body that is not the token envelope is an
+                    // interposed proxy/captive-portal page rather than a
+                    // verdict on the device code (issue #797): retry within
+                    // the deadline instead of ending sign-in on a serde error.
+                    log::error!(
+                        "{TAG} poll_teams_auth: unparseable 2xx body: {} ({}-byte body)",
+                        e,
+                        raw_body.len()
+                    );
+                    sleep_within_deadline(start_time, timeout, wait)?;
+                    continue;
+                }
+            };
 
             let expires_at =
                 chrono::Utc::now() + chrono::Duration::seconds(token_resp.expires_in as i64);
 
-            log::info!("Successfully authenticated with Microsoft Teams");
+            log::info!("{TAG} Successfully authenticated with Microsoft Teams");
 
             return Ok(TeamsTokens {
                 access_token: token_resp.access_token,
@@ -345,79 +514,36 @@ pub fn poll_teams_auth(device_code: &str, interval: u64) -> Result<TeamsTokens, 
             });
         }
 
-        let error_resp: TokenErrorResponse = serde_json::from_str(&raw_body).map_err(|e| {
-            format!(
-                "Failed to parse error response: {} (body was: {})",
-                e,
-                truncate_for_log(&raw_body)
-            )
-        })?;
-
-        match error_resp.error.as_str() {
-            "authorization_pending" => {
-                log::debug!("Authorization pending, waiting {} seconds", wait);
-                // Cap each sleep chunk at 30s and re-check timeout between chunks
-                // so an inflated interval (even after slow_down ramps) cannot
-                // block the thread past the 900s overall deadline.
-                let mut remaining = wait;
-                while remaining > 0 {
-                    if start_time.elapsed() > timeout {
-                        return Err("Authentication timed out".to_string());
-                    }
-                    let chunk = remaining.min(30);
-                    thread::sleep(StdDuration::from_secs(chunk));
-                    remaining -= chunk;
+        match classify_device_code_response(status.as_u16(), retry_after, &raw_body) {
+            PollAction::Fail(message) => {
+                // The response body is already logged, truncated, by the
+                // `status={}, body={}` debug line above; the user gets the
+                // sentence only — never the raw JSON (issues #797/#974).
+                log::error!("{TAG} poll_teams_auth: {}", message);
+                return Err(message);
+            }
+            PollAction::Retry {
+                server_wait,
+                slow_down,
+            } => {
+                if slow_down {
+                    // RFC 8628 §3.5: slow_down carries no interval of its own;
+                    // the client must increase its polling interval by 5s for
+                    // this and all subsequent requests.
+                    wait = next_poll_wait(wait, "slow_down");
+                    log::warn!("{TAG} Server requested slow down, waiting {} seconds", wait);
+                } else if server_wait.is_none() {
+                    log::debug!("{TAG} Authorization pending, waiting {} seconds", wait);
+                } else {
+                    log::warn!(
+                        "{TAG} poll_teams_auth: status {} throttled, waiting up to {} seconds",
+                        status,
+                        server_wait.unwrap_or_default()
+                    );
                 }
+                let sleep_secs = server_wait.unwrap_or(wait).max(1);
+                sleep_within_deadline(start_time, timeout, sleep_secs)?;
                 continue;
-            }
-            "slow_down" => {
-                // RFC 8628 §3.5: slow_down carries no interval; the
-                // client must increase its polling interval by 5s for
-                // this and all subsequent requests.
-                wait = next_poll_wait(wait, error_resp.error.as_str());
-                log::warn!("Server requested slow down, waiting {} seconds", wait);
-                let mut remaining = wait;
-                while remaining > 0 {
-                    if start_time.elapsed() > timeout {
-                        return Err("Authentication timed out".to_string());
-                    }
-                    let chunk = remaining.min(30);
-                    thread::sleep(StdDuration::from_secs(chunk));
-                    remaining -= chunk;
-                }
-                continue;
-            }
-            "authorization_declined" => {
-                return Err("Authorization was declined by the user".to_string());
-            }
-            "expired_token" => {
-                return Err(
-                    "The device code has expired. Please start authentication again.".to_string(),
-                );
-            }
-            "bad_verification_code" => {
-                return Err(format!(
-                    "Authentication failed: {} - {} (raw body: {})",
-                    error_resp.error,
-                    error_resp.error_description.unwrap_or_default(),
-                    truncate_for_log(&raw_body)
-                ));
-            }
-            "unauthorized_client" => {
-                return Err(format!(
-                    "Authentication failed: {} - {} (raw body: {})",
-                    error_resp.error,
-                    error_resp.error_description.unwrap_or_default(),
-                    truncate_for_log(&raw_body)
-                ));
-            }
-            _ => {
-                return Err(format!(
-                    "Authentication failed: {} - {} (raw body: {})",
-                    error_resp.error,
-                    error_resp.error_description.unwrap_or_default(),
-                    truncate_for_log(&raw_body)
-                ));
             }
         }
     }
@@ -455,7 +581,7 @@ pub fn refresh_teams_token(tokens: &TeamsTokens) -> Result<TeamsTokens, TeamsApi
 
     if !status.is_success() {
         log::error!(
-            "refresh_teams_token: refresh request failed with status {}: {}",
+            "{TAG} refresh_teams_token: refresh request failed with status {}: {}",
             status,
             truncate_for_log(&raw_body)
         );
@@ -509,7 +635,7 @@ pub fn refresh_teams_token(tokens: &TeamsTokens) -> Result<TeamsTokens, TeamsApi
 
     let expires_at = chrono::Utc::now() + chrono::Duration::seconds(token_resp.expires_in as i64);
 
-    log::info!("Successfully refreshed Microsoft Teams token");
+    log::info!("{TAG} Successfully refreshed Microsoft Teams token");
 
     Ok(TeamsTokens {
         access_token: token_resp.access_token,
@@ -555,7 +681,7 @@ struct ExpiryDateTime {
 /// call site funnels through this so the 401/403/429/5xx discrimination
 /// lives in one unit-testable place. Shared by the set and clear paths so
 /// both get identical status-code discrimination and `Retry-After`
-/// parsing (see issues #153/#154). Takes the already-parsed Retry-After
+/// parsing (see issues #153/#154/#820). Takes the already-parsed Retry-After
 /// value and the response body text. Callers truncate bodies for log
 /// safety before display; the stored body here stays raw for diagnosis.
 fn classify_teams_status(status_code: u16, retry_after: Option<u64>, body: &str) -> TeamsApiError {
@@ -563,7 +689,17 @@ fn classify_teams_status(status_code: u16, retry_after: Option<u64>, body: &str)
         401 => TeamsApiError::ExpiredToken(status_code),
         403 => TeamsApiError::Forbidden(status_code, body.to_string()),
         429 => TeamsApiError::RateLimited(retry_after),
-        500..=599 => TeamsApiError::Transient(format!("server error {}: {}", status_code, body)),
+        // Issue #820: a throttled 5xx (Graph answers 503 with `Retry-After`
+        // when a backend is unavailable) is still a server DIRECTIVE, not a
+        // bare transient — `poll_once::rate_limit_sleep_secs` turns
+        // `RateLimited(Some(secs))` into exactly that sleep, the way it
+        // already does for a 429 (#154). Collapsing the header away made the
+        // app re-poll and re-POST sooner than the server asked and sustained
+        // the outage the header exists to ride out.
+        500..=599 => match retry_after {
+            Some(secs) => TeamsApiError::RateLimited(Some(secs)),
+            None => TeamsApiError::Transient(format!("server error {}: {}", status_code, body)),
+        },
         _ => TeamsApiError::Other(status_code, body.to_string()),
     }
 }
@@ -613,7 +749,7 @@ fn post_status_message_with(
 
     if !status.is_success() {
         log::error!(
-            "Failed to {} Teams status message: {} - {}",
+            "{TAG} Failed to {} Teams status message: {} - {}",
             action,
             status,
             body_text
@@ -622,6 +758,22 @@ fn post_status_message_with(
     }
 
     Ok(())
+}
+
+/// The info-level record for a successful Teams status write: the byte count,
+/// never the text.
+///
+/// The text is the user's artist/track, and the shipping log level keeps
+/// info-level records in `PresenceJam.log`, which the Diagnostics page and
+/// LogViewer hand out as a support snapshot — so the text itself is logged at
+/// `debug!` only and this line replaces it. Length plus the `[POLLING]` /
+/// `[TEAMS]` lines already logged is enough to diagnose a rejected or
+/// oversized status. Issue #912 (the status-write half of #344).
+fn status_set_log_line(message: &str) -> String {
+    format!(
+        "Successfully set Teams status message ({} bytes)",
+        message.len()
+    )
 }
 
 pub fn set_teams_status_message(
@@ -637,7 +789,13 @@ pub fn set_teams_status_message(
         "set",
     )?;
 
-    log::info!("Successfully set Teams status message: {}", message);
+    // Issue #912: the posted text is user content (artist + track). The
+    // rotating file target keeps info-level records by default, and the
+    // Diagnostics / LogViewer snapshots hand the log tail to the user as
+    // "safe to publish", so the text goes to `debug!` (the `poll_once.rs`
+    // #344 convention) and the info-level record carries the byte count.
+    log::debug!("{TAG} Successfully set Teams status message: {}", message);
+    log::info!("{TAG} {}", status_set_log_line(message));
     Ok(())
 }
 
@@ -680,7 +838,7 @@ fn clear_teams_status_message_with(
         "clear",
     )?;
 
-    log::info!("Successfully cleared Teams status message");
+    log::info!("{TAG} Successfully cleared Teams status message");
     Ok(())
 }
 
@@ -953,7 +1111,7 @@ fn post_presence<T: Serialize>(
 
     if !status.is_success() {
         log::error!(
-            "Failed to {} Teams presence: {} - {}",
+            "{TAG} Failed to {} Teams presence: {} - {}",
             action,
             status,
             body_text
@@ -1096,7 +1254,11 @@ pub fn get_teams_presence(access_token: &str) -> Result<PresenceInfo, TeamsApiEr
         .unwrap_or_else(|_| "Unknown error".to_string());
 
     if !status.is_success() {
-        log::error!("Failed to get Teams presence: {} - {}", status, body_text);
+        log::error!(
+            "{TAG} Failed to get Teams presence: {} - {}",
+            status,
+            body_text
+        );
         return Err(classify_teams_status(status_code, retry_after, &body_text));
     }
 
@@ -1148,6 +1310,18 @@ mod tests {
         assert!(matches!(
             classify_teams_status(503, None, "boom"),
             TeamsApiError::Transient(_)
+        ));
+        // Issue #820: a throttled 5xx keeps the server's directive — the
+        // poller reads it back through `rate_limit_sleep_secs`, so a
+        // `Retry-After` that reaches this arm must not be dropped (this row
+        // fails while the 5xx arm collapses everything to Transient).
+        assert!(matches!(
+            classify_teams_status(503, Some(120), "service unavailable"),
+            TeamsApiError::RateLimited(Some(120))
+        ));
+        assert!(matches!(
+            classify_teams_status(502, Some(30), ""),
+            TeamsApiError::RateLimited(Some(30))
         ));
         assert!(matches!(
             classify_teams_status(418, None, "teapot"),
@@ -1672,6 +1846,447 @@ mod tests {
         assert!(
             body.contains("User code"),
             "user-code line must stay: the user reads it to sign in"
+        );
+    }
+
+    /// Extract the argument region of the macro call whose opening `(` is
+    /// at `open`, i.e. everything up to the matching `)`. String literals,
+    /// char literals and `//` comments are skipped, so a `)` inside a format
+    /// string cannot end the region early (mirrors `config.rs::macro_arg_region`).
+    fn macro_arg_region(src: &str, open: usize) -> Option<&str> {
+        let bytes = src.as_bytes();
+        if bytes.get(open) != Some(&b'(') {
+            return None;
+        }
+        let mut depth: i32 = 0;
+        let mut i = open;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(&src[open + 1..i]);
+                    }
+                }
+                b'"' => {
+                    i += 1;
+                    while i < bytes.len() {
+                        match bytes[i] {
+                            b'\\' => i += 1,
+                            b'"' => break,
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                }
+                b'\'' => {
+                    // A char literal (`'x'`, `'\n'`) — a lifetime never
+                    // appears in a log macro argument.
+                    let mut j = i + 1;
+                    if bytes.get(j) == Some(&b'\\') {
+                        j += 2;
+                    } else {
+                        j += 1;
+                    }
+                    if bytes.get(j) == Some(&b'\'') {
+                        i = j;
+                    }
+                }
+                b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                    while i < bytes.len() && bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        None
+    }
+
+    /// Issue #777: every `log::` macro in this module must carry the
+    /// `[TEAMS]` module tag, the discipline `config.rs` (`[CFG]`) and
+    /// `updater_bg.rs` (`[UPDATER.BG]`) already enforce — a bare
+    /// `teams::fn_name:` prefix or no prefix at all makes a Graph line
+    /// invisible to a tag grep of `PresenceJam.log`.
+    ///
+    /// Macro-aware on purpose (region-based, not per-line): eight of the
+    /// call sites put the format string on the line AFTER the `log::…!`
+    /// opener. The needles are assembled with `concat!` so this test's own
+    /// source never contains the literal it searches for — otherwise the
+    /// `include_str!` scan would match the test itself and pass vacuously.
+    #[test]
+    fn teams_log_tags_use_teams_prefix() {
+        assert_eq!(super::TAG, "[TEAMS]", "the module tag constant drifted");
+        let src = include_str!("teams.rs");
+        let needles = [
+            concat!("log::", "info!("),
+            concat!("log::", "warn!("),
+            concat!("log::", "error!("),
+            concat!("log::", "debug!("),
+            concat!("log::", "trace!("),
+        ];
+        let mut checked = 0usize;
+        for needle in needles {
+            let mut from = 0usize;
+            while let Some(rel) = src[from..].find(needle) {
+                let i = from + rel;
+                let open = i + needle.len() - 1;
+                let region = macro_arg_region(src, open)
+                    .unwrap_or_else(|| panic!("unbalanced macro arguments at byte {i}"));
+                assert!(
+                    region.contains("{TAG}"),
+                    "teams.rs log at byte {i} lacks the [TEAMS] tag: {}",
+                    region.replace('\n', " ")
+                );
+                checked += 1;
+                from = open;
+            }
+        }
+        assert!(
+            checked >= 20,
+            "the scan found only {checked} log macros — the needles are wrong"
+        );
+    }
+
+    // Issue #912: the info-level status-write line carries the byte count and
+    // never the posted text. The text is the user's artist/track, and the
+    // rotating file target keeps info by default, so it would ride into the
+    // Diagnostics / LogViewer support snapshots as "safe to publish".
+    #[test]
+    fn status_set_log_line_carries_only_the_byte_count() {
+        let marker = "\u{1F3B5} Artist Name - Track Title \u{1F3A7}";
+        let line = super::status_set_log_line(marker);
+        assert!(
+            line.contains(&format!("{} bytes", marker.len())),
+            "the size must be reported, got: {line}"
+        );
+        assert!(!line.contains("Artist Name"), "artist leaked: {line}");
+        assert!(!line.contains("Track Title"), "track leaked: {line}");
+        assert!(!line.contains(marker), "posted text leaked: {line}");
+    }
+
+    /// Issue #912, structural half: the info-level record in
+    /// `set_teams_status_message` must be the byte-count helper's output, so
+    /// re-inlining the posted text into an info-or-above macro fails here even
+    /// if someone deletes the content test above.
+    #[test]
+    fn set_teams_status_message_info_line_uses_the_byte_count_helper() {
+        let src = include_str!("teams.rs");
+        let body = fn_body(src, "pub fn set_teams_status_message(");
+        // Assembled with `concat!` so this test's own source never contains
+        // the macro-opener literal the #777 tag guard scans for — an inline
+        // copy of it here leaves that guard's region scan unbalanced.
+        let macro_name = concat!("log::", "info!(");
+        let at = body
+            .find(macro_name)
+            .expect("the success line must stay at info level");
+        let region = macro_arg_region(body, at + macro_name.len() - 1)
+            .expect("the info macro arguments must be balanced");
+        assert!(
+            region.contains("status_set_log_line("),
+            "the info line must log the byte-count helper, got: {region}"
+        );
+    }
+
+    /// The body of the function whose signature contains `needle`, isolated by
+    /// brace counting from its opening `{` (order-independent — do not anchor
+    /// on the next `fn`). Format-string braces are always paired, so counting
+    /// stays exact for these bodies.
+    fn fn_body<'a>(src: &'a str, needle: &str) -> &'a str {
+        let sig = src
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle} must exist"));
+        let open = sig + src[sig..].find('{').expect("the body must open");
+        let mut depth: u32 = 0;
+        let mut i = open;
+        loop {
+            assert!(i < src.len(), "unbalanced braces in {needle}");
+            match src.as_bytes()[i] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &src[open + 1..i];
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+    }
+
+    // Issue #797: a transient HTTP failure during the multi-minute device-code
+    // poll must not end sign-in. The classifier is pure, so the whole matrix is
+    // unit-tested without a network.
+    #[test]
+    fn classify_device_code_response_retries_http_blips() {
+        use super::{classify_device_code_response as classify, PollAction};
+        // A gateway 502 HTML page — not the OAuth error envelope.
+        assert_eq!(
+            classify(502, None, "<html><body>502 Bad Gateway</body></html>"),
+            PollAction::Retry {
+                server_wait: None,
+                slow_down: false
+            }
+        );
+        // A 429 without the JSON error object keeps the server's directive.
+        assert_eq!(
+            classify(429, Some(120), "<html>Too Many Requests</html>"),
+            PollAction::Retry {
+                server_wait: Some(120),
+                slow_down: false
+            }
+        );
+        assert_eq!(
+            classify(503, Some(7), ""),
+            PollAction::Retry {
+                server_wait: Some(7),
+                slow_down: false
+            }
+        );
+        assert_eq!(
+            classify(408, None, "not json"),
+            PollAction::Retry {
+                server_wait: None,
+                slow_down: false
+            }
+        );
+        // An unparseable 400 is a blip, not a verdict on the device code.
+        assert_eq!(
+            classify(400, None, "<html>Bad Request</html>"),
+            PollAction::Retry {
+                server_wait: None,
+                slow_down: false
+            }
+        );
+    }
+
+    #[test]
+    fn classify_device_code_response_keeps_the_real_verdicts() {
+        use super::{classify_device_code_response as classify, PollAction};
+        assert_eq!(
+            classify(400, None, r#"{"error":"authorization_pending"}"#),
+            PollAction::Retry {
+                server_wait: None,
+                slow_down: false
+            }
+        );
+        assert_eq!(
+            classify(400, None, r#"{"error":"slow_down"}"#),
+            PollAction::Retry {
+                server_wait: None,
+                slow_down: true
+            }
+        );
+        // `expired_token` still ends the flow — with a sentence, not a body.
+        match classify(
+            400,
+            None,
+            r#"{"error":"expired_token","error_description":"the code expired"}"#,
+        ) {
+            PollAction::Fail(message) => {
+                assert!(
+                    message.contains("expired"),
+                    "must name the cause: {message}"
+                );
+                assert!(
+                    !message.contains('{'),
+                    "a raw JSON body must never reach the user: {message}"
+                );
+                assert!(
+                    !message.contains("raw body"),
+                    "the old (raw body: …) suffix must be gone: {message}"
+                );
+            }
+            other => panic!("expired_token must end the flow, got {other:?}"),
+        }
+        match classify(400, None, r#"{"error":"authorization_declined"}"#) {
+            PollAction::Fail(message) => {
+                assert!(message.contains("declined"), "got: {message}");
+                assert!(!message.contains('{'), "got: {message}");
+            }
+            other => panic!("authorization_declined must end the flow, got {other:?}"),
+        }
+        // An unknown code carries the server's description, never the JSON.
+        match classify(
+            400,
+            None,
+            r#"{"error":"bad_verification_code","error_description":"The device code is invalid"}"#,
+        ) {
+            PollAction::Fail(message) => {
+                assert!(
+                    message.contains("The device code is invalid"),
+                    "got: {message}"
+                );
+                assert!(
+                    !message.contains('{'),
+                    "a raw JSON body must never reach the user: {message}"
+                );
+                assert!(
+                    !message.contains("raw body"),
+                    "the old (raw body: …) suffix must be gone: {message}"
+                );
+            }
+            other => panic!("bad_verification_code must end the flow, got {other:?}"),
+        }
+        // …and falls back to the code itself when it carries no description.
+        match classify(400, None, r#"{"error":"unauthorized_client"}"#) {
+            PollAction::Fail(message) => {
+                assert!(message.contains("unauthorized_client"), "got: {message}")
+            }
+            other => panic!("unauthorized_client must end the flow, got {other:?}"),
+        }
+    }
+
+    /// Issue #797: the retry path is bounded. A server `Retry-After` (clamped
+    /// to 300 s) or a ramped `slow_down` interval must never block the thread
+    /// past the 900 s deadline, so the sleep gives up as soon as it passes.
+    #[test]
+    fn sleep_within_deadline_gives_up_after_the_overall_deadline() {
+        use std::time::{Duration, Instant};
+        // Zero seconds never sleeps and never expires.
+        assert_eq!(
+            super::sleep_within_deadline(Instant::now(), Duration::from_secs(900), 0),
+            Ok(())
+        );
+        // A deadline already passed: no sleep at all, straight to the error.
+        let start = Instant::now();
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(
+            super::sleep_within_deadline(start, Duration::from_millis(1), 300),
+            Err(super::AUTH_TIMEOUT_MSG.to_string())
+        );
+    }
+
+    // Issue #974: the UI shows `user_message()`, never `Display`. Display keeps
+    // the raw Graph body for logs, but a 403 must reach the user as a sentence
+    // naming the permission/licence cause — re-auth cannot fix that one — and
+    // no body may leak into a Dashboard banner, an Onboarding error or a
+    // Reconnect/Settings message. This test fails while the UI-facing text is
+    // the body-printing `Display`.
+    #[test]
+    fn user_message_is_a_sentence_and_never_a_raw_body() {
+        use super::TeamsApiError;
+        let body = r#"{"error":{"code":"Forbidden","message":"Insufficient privileges"}}"#;
+        let variants = [
+            TeamsApiError::ExpiredToken(401),
+            TeamsApiError::Forbidden(403, body.to_string()),
+            TeamsApiError::RateLimited(Some(120)),
+            TeamsApiError::RateLimited(None),
+            TeamsApiError::InvalidGrant,
+            TeamsApiError::Transient("server error 503: <html>".to_string()),
+            TeamsApiError::Other(418, body.to_string()),
+        ];
+        for variant in &variants {
+            let message = variant.user_message();
+            assert!(
+                !message.contains('{'),
+                "raw JSON must never reach the UI ({variant:?}): {message}"
+            );
+            assert!(
+                !message.contains('}'),
+                "raw JSON must never reach the UI ({variant:?}): {message}"
+            );
+            assert!(
+                message.ends_with('.'),
+                "must read as a sentence ({variant:?}): {message}"
+            );
+        }
+
+        // The contrast with Display is the point: the body survives for logs…
+        for variant in [
+            TeamsApiError::Forbidden(403, body.to_string()),
+            TeamsApiError::Other(418, body.to_string()),
+        ] {
+            assert!(
+                format!("{variant}").contains("Insufficient privileges"),
+                "Display must stay the raw log form: {variant}"
+            );
+        }
+        // …and is absent from what the user reads.
+        assert!(!TeamsApiError::Forbidden(403, body.to_string())
+            .user_message()
+            .contains("Insufficient privileges"));
+        assert!(!TeamsApiError::Other(418, body.to_string())
+            .user_message()
+            .contains("Insufficient privileges"));
+
+        // The 403 remedy names the permission AND the licence, and says why
+        // re-authenticating is not the answer.
+        let forbidden = TeamsApiError::Forbidden(403, body.to_string()).user_message();
+        assert!(
+            forbidden.contains("Presence.ReadWrite"),
+            "the permission must be named: {forbidden}"
+        );
+        assert!(
+            forbidden.to_lowercase().contains("licen"),
+            "the licence must be named: {forbidden}"
+        );
+        assert!(
+            forbidden.contains("Reconnecting will not fix this"),
+            "the 403 must rule out re-auth: {forbidden}"
+        );
+
+        // Both dead-token variants share the re-auth sentence, and `Other`
+        // keeps the status code for diagnosis.
+        assert_eq!(
+            TeamsApiError::ExpiredToken(401).user_message(),
+            TeamsApiError::InvalidGrant.user_message()
+        );
+        assert!(TeamsApiError::Other(418, body.to_string())
+            .user_message()
+            .contains("418"));
+    }
+
+    /// Issue #884: the shared Graph client must stay memoized. Reintroducing a
+    /// builder call in `build_teams_client` would silently restore a fresh
+    /// connection pool per Graph call — exactly what the `LazyLock` removed —
+    /// and the exit path must keep its own bounded client (3 s, #636).
+    #[test]
+    fn build_teams_client_uses_one_cached_pool() {
+        let src = include_str!("teams.rs");
+        // Both needles are assembled with `concat!` so this test's own source
+        // never inflates the counts it asserts.
+        let builder = concat!("Client::", "builder()");
+        let exit_call = concat!("build_teams_client_with_timeout(", "EXIT_CLEANUP_TIMEOUT)");
+        assert_eq!(
+            src.matches(builder).count(),
+            2,
+            "exactly two client builders: the cache initializer and the bounded exit-path one"
+        );
+        let shared = fn_body(src, "fn build_teams_client()");
+        // The shared client is built exactly once, and that one builder call
+        // must sit inside the process-wide cache: reverting to a per-call
+        // client drops this to 0, and adding a second per-call builder beside
+        // the cache raises it to 2.
+        assert_eq!(
+            shared.matches(builder).count(),
+            1,
+            "the shared client must build once, inside its cache initializer: {shared}"
+        );
+        assert!(
+            shared.contains("static CLIENT: LazyLock"),
+            "…and that builder must sit in a process-wide cache: {shared}"
+        );
+        // The exit path (its own 3 s budget, #636) is the one deliberate
+        // exception — a cache keyed by timeout value would defeat the cache.
+        let exit_path = fn_body(src, "fn build_teams_client_with_timeout(");
+        assert!(
+            exit_path.contains(builder),
+            "the exit path builds its own bounded client: {exit_path}"
+        );
+        assert!(
+            exit_path.contains(".timeout("),
+            "…with an explicit timeout: {exit_path}"
+        );
+        // Two call sites keep the exit budget, and no other call site may
+        // reintroduce a per-call client.
+        assert_eq!(
+            src.matches(exit_call).count(),
+            2,
+            "the 3 s client must stay confined to the two exit-path calls"
         );
     }
 }
