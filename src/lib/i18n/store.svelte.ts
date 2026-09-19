@@ -8,14 +8,15 @@
  * 4.7.0 (issue #674): `AppConfig::locale` is the single source of truth.
  * The tray and the native application menu render from the same field, so the
  * webview and the native surfaces can never disagree about the language.
- * `localStorage.locale` survives as a pre-paint mirror only: it is read at
- * module load (the config load is an async IPC round-trip and the first frame
- * must already be in the right language), it still converges across webviews
- * through the #620 `storage` listener below, and a value found there while the
- * config carries none is migrated into the config exactly once — after the
- * config has actually been hydrated from the backend, never on the boot-time
- * defaults. When both exist, the config wins and the mirror is rewritten to
- * match.
+ * `localStorage['presencejam:locale']` survives as a pre-paint mirror only: it
+ * is read at module load (the config load is an async IPC round-trip and the
+ * first frame must already be in the right language), it still converges across
+ * webviews through the #620 `storage` listener below, and a value found there
+ * while the config carries none is migrated into the config exactly once —
+ * after the config has actually been hydrated from the backend, never on the
+ * boot-time defaults. The pre-4.7 bare `locale` key is folded into it once, at
+ * module load (#909). When both exist, the config wins and the mirror is
+ * rewritten to match.
  *
  * Switching also retags `<html lang>`.
  */

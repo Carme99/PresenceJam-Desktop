@@ -541,7 +541,7 @@ export const fr: Dict = {
   'settings.densityCompactLabel': 'Espacement compact',
   'settings.densityHint': 'Resserre les espacements et l’échelle typographique. Indépendant du thème.',
   // --- 5.0 wave1 i18n-lib ---
-  // Key requests routed through this slice's dictionaries (see W1-NOTES.md).
+  // Key requests routed through this slice's dictionaries.
   'onboarding.pollIntervalClamped':
     'Votre intervalle enregistré est de {stored}s, hors de la plage {min}–{max}s de cette étape — {seconds}s seront utilisées.',
   'update.stagingProgressLabel': 'Préparation de la mise à jour',

@@ -519,7 +519,7 @@ export const en = {
   'settings.densityHint': 'Tightens the spacing and type scale. Independent of the theme.',
   // --- 5.0 wave1 i18n-lib ---
   // Key requests routed through this slice's dictionaries (the owning slice
-  // cannot edit them — see W1-NOTES.md).
+  // cannot edit them).
   'onboarding.pollIntervalClamped':
     'Your saved interval is {stored}s, outside this step’s {min}–{max}s range — {seconds}s will be used.',
   'update.stagingProgressLabel': 'Update preparing',

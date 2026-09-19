@@ -532,7 +532,7 @@ export const de: Dict = {
   'settings.densityCompactLabel': 'Kompakte Abstände',
   'settings.densityHint': 'Verkleinert Abstände und Schriftgrößen. Unabhängig vom Design.',
   // --- 5.0 wave1 i18n-lib ---
-  // Key requests routed through this slice's dictionaries (see W1-NOTES.md).
+  // Key requests routed through this slice's dictionaries.
   'onboarding.pollIntervalClamped':
     'Dein gespeichertes Intervall beträgt {stored}s und liegt außerhalb des Bereichs {min}–{max}s dieses Schritts — es werden {seconds}s verwendet.',
   'update.stagingProgressLabel': 'Update wird vorbereitet',
