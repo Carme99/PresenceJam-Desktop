@@ -414,7 +414,7 @@ export const fr: Dict = {
     'Les deux fichiers se trouvent dans le dossier PresenceJam de votre dossier de configuration utilisateur — la sauvegarde à côté de config.json.',
   // 4.6 additions (presence rules #634/#635/#636/#637 + #538 consumption sites)
   'rules.replacementClampHint':
-    'Le statut de remplacement est limité à {max} caractères — {kept} seront publiés.',
+    'Le statut de remplacement est limité à {max} caractères ; le reste n’est pas publié.',
   'rules.presenceLabel': 'Présence pendant cette règle',
   'rules.presenceNone': 'Ne pas modifier ma présence',
   'rules.presenceHint':
