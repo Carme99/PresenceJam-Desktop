@@ -11,8 +11,13 @@ use std::time::Duration as StdDuration;
 const TAG: &str = "[TEAMS]";
 
 pub const MICROSOFT_GRAPH_CLIENT_ID: &str = "14d82eec-204b-4c2f-b7e8-296a70dab67e";
-pub const MICROSOFT_GRAPH_SCOPES: &str =
-    "Presence.ReadWrite Presence.Read openid profile offline_access";
+/// OAuth scopes requested during the Teams device-code flow. The
+/// `Calendars.ReadBasic` (issue #867) and `MailboxSettings.Read` (issue #876)
+/// scopes are added on top of the presence set; both force a one-time Teams
+/// re-consent. Both are *fail-open* in this app — a denied grant reproduces
+/// the pre-feature behaviour exactly (no calendar pre-gate, no working-hours
+/// import) so a tenant that refuses them never sees an error.
+pub const MICROSOFT_GRAPH_SCOPES: &str = "Presence.ReadWrite Presence.Read Calendars.ReadBasic MailboxSettings.Read openid profile offline_access";
 
 /// Truncates a string for safe logging. Returns the body unchanged if it
 /// fits in 256 chars; otherwise returns the first 256 chars (cut at a
@@ -146,7 +151,11 @@ fn build_teams_client_with_timeout(
 /// environmental TLS/runtime init, where a retry would fail identically. The
 /// signature is `Result<Client, String>` as before, so the call sites and
 /// their error mapping are untouched.
-fn build_teams_client() -> Result<reqwest::blocking::Client, String> {
+///
+/// `pub` for the calendar integration (issue #867) — the calendar's
+/// `list_upcoming` shares the same TLS pool so a long-running polling
+/// thread doesn't open a fresh connection every fetch.
+pub fn build_teams_client() -> Result<reqwest::blocking::Client, String> {
     static CLIENT: LazyLock<Result<reqwest::blocking::Client, String>> = LazyLock::new(|| {
         reqwest::blocking::Client::builder()
             .user_agent(format!("PresenceJam/{}", env!("CARGO_PKG_VERSION")))
@@ -898,6 +907,11 @@ pub fn graph_oid_from_access_token(access_token: &str) -> Result<String, String>
 pub const GATE_REASON_QUIET_HOURS: &str = "quiet-hours";
 pub const GATE_REASON_TRACK_RULE: &str = "track-rule";
 pub const GATE_REASON_MANUAL_STATUS: &str = "manual-status";
+/// Issue #867: the Outlook-calendar busy-meeting gate. Distinct from the
+/// track-rule gate so the Dashboard chip and the snapshot can label the
+/// reason precisely — a user that sees "calendar" knows to look at the
+/// meeting, not at their status_rules.
+pub const GATE_REASON_CALENDAR: &str = "calendar";
 /// The out-of-office reason (finding #637) — the only gate reason that is
 pub const GATE_REASON_OUT_OF_OFFICE: &str = "out of office";
 
