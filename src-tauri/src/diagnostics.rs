@@ -1041,6 +1041,9 @@ fn windows_release() -> String {
 }
 
 /// One `<name>  <type>  <value>` row of `reg query` output.
+///
+/// Compiled for tests on every host so the parser is covered off-Windows.
+#[cfg(any(target_os = "windows", test))]
 fn reg_value(text: &str, name: &str) -> Option<String> {
     text.lines().find_map(|line| {
         let mut fields = line.split_whitespace();
@@ -1054,7 +1057,9 @@ fn reg_value(text: &str, name: &str) -> Option<String> {
 
 /// Windows release token from the registry values. The build number decides
 /// 10 versus 11 (Microsoft's own rule: 22000 and up is Windows 11) because
-/// `ProductName` still says "Windows 10" on Windows 11.
+/// `ProductName` still says "Windows 10" on Windows 11. Compiled for tests on
+/// every host, like [`reg_value`].
+#[cfg(any(target_os = "windows", test))]
 fn windows_release_token(
     build: Option<&str>,
     display_version: Option<&str>,
