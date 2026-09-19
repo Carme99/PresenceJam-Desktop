@@ -108,22 +108,34 @@ describe('useAuthListeners (#615)', () => {
 
   it('stops calling handlers once torn down', async () => {
     const handlers = noopListeners();
-    const teardown = useAuthListeners(handlers);
+    // #772: the extras path went through the same teardown as the auth four
+    // but registered the caller's handler verbatim, so a late event still ran
+    // against a destroyed component. Pin both ends: live before the teardown
+    // (otherwise the post-teardown assertion could pass for the wrong reason),
+    // silent after it.
+    const extra = vi.fn();
+    const teardown = useAuthListeners(handlers, [
+      ['spotify-secret-conflict', extra]
+    ]);
     for (const d of deferreds) d.resolve();
     await drain();
 
     deferreds[0].handler({ payload: null });
     deferreds[1].handler({ payload: 'spotify blew up' });
+    deferreds[4].handler({ payload: 'conflict' });
     expect(handlers.onSpotifyComplete).toHaveBeenCalledTimes(1);
     expect(handlers.onSpotifyFailed).toHaveBeenCalledWith('spotify blew up');
+    expect(extra).toHaveBeenCalledWith({ payload: 'conflict' });
 
     await teardown();
     // The unlisten round-trip is async: an event delivered in that window
     // must not reach a handler whose component is gone.
     deferreds[2].handler({ payload: null });
     deferreds[3].handler({ payload: 'teams blew up' });
+    deferreds[4].handler({ payload: 'late conflict' });
     expect(handlers.onTeamsComplete).not.toHaveBeenCalled();
     expect(handlers.onTeamsFailed).not.toHaveBeenCalled();
+    expect(extra).toHaveBeenCalledTimes(1);
   });
 
   it('neither rejects nor waits on in-flight siblings when one listen() fails', async () => {

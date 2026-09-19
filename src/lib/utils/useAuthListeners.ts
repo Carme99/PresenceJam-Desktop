@@ -131,8 +131,18 @@ export function useAuthListeners(
       handlers.onTeamsFailed(e.payload);
     })
   );
+  // #772: the extras go through the same guard as the four auth events. The
+  // teardown is async, so an event delivered between `dispose()` and the
+  // unlisten round-trip would otherwise reach a handler whose component is
+  // already destroyed — the contract this helper documents covers every
+  // subscription it registers, not just the auth four.
   for (const [event, handler] of extraListeners) {
-    teardown.add(listen(event, handler));
+    teardown.add(
+      listen(event, (e) => {
+        if (disposed) return;
+        handler(e);
+      })
+    );
   }
 
   return () => {
