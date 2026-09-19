@@ -994,7 +994,7 @@ fn migrate_config(cfg: &mut AppConfig, from: u32) {
 /// day. All fields `#[serde(default)]` individually so a hand-edited
 /// config missing one still loads, and load-time normalization of `days` and
 /// the two minutes lives in one place: [`clamp_quiet_hours_window`].
-#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct QuietHoursEntry {
     #[serde(default)]

@@ -2,7 +2,8 @@
 //!
 //! See issue #76.
 
-use crate::config::{self, AppConfig, ConfigPatch};
+use crate::config::{self, AppConfig, ConfigPatch, QuietHoursEntry};
+use crate::teams::{self, TeamsApiError};
 use crate::AppState;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -145,6 +146,233 @@ pub async fn update_config(
     after_persist(&app, &persisted).await;
     log::info!("{CMD} update_config: SUCCESS");
     Ok(persisted)
+}
+
+/// Issue #876: imports the user's Outlook "Work hours" tab as a preview
+/// list of [`QuietHoursEntry`] candidates. **Does NOT persist** — the
+/// caller (Settings.svelte) shows the preview and, on confirm, applies
+/// the new list through [`update_config`] so the same read-merge-write
+/// lock every other config edit uses is honoured.
+///
+/// The scope `MailboxSettings.Read` is required. Existing sessions must
+/// re-consent once (the scope is in `MICROSOFT_GRAPH_SCOPES` from 5.0
+/// onward); a tenant that refuses the scope fails with a typed
+/// [`TeamsApiError::Forbidden`] which the command translates into a
+/// user-visible reconnect prompt. A missing token or a missing scope
+/// returns an empty preview + a message — the Settings button stays
+/// enabled so the user can fix the auth state and retry.
+#[tauri::command]
+pub async fn import_working_hours(
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<ImportWorkingHoursPreview, String> {
+    log::info!("{CMD} import_working_hours: ENTRY");
+
+    // Issue #876: gate on the granted scopes (mirrors the
+    // `get_teams_granted_scopes` use in `Settings.svelte` for the
+    // one-time reconnect banner). A token without `MailboxSettings.Read`
+    // would 403 the GET, so check first and return a typed message
+    // instead of a network round-trip + cryptic body.
+    let access_token = {
+        let guard = state.tokens.teams();
+        match guard.as_ref() {
+            Some(tokens) => tokens.access_token.clone(),
+            None => {
+                return Ok(ImportWorkingHoursPreview::missing_token());
+            }
+        }
+    };
+    let granted = teams::decode_teams_granted_scopes(&access_token);
+    if !granted.iter().any(|s| s == "MailboxSettings.Read") {
+        log::warn!(
+            "{CMD} import_working_hours: MailboxSettings.Read not in granted scopes; \
+             tenant has not yet consented to the new scope"
+        );
+        return Ok(ImportWorkingHoursPreview::missing_scope());
+    }
+
+    // The HTTP round-trip is blocking; offload so the IPC thread is
+    // not frozen. `spawn_blocking` is the same offload the other
+    // Graph-touching commands use.
+    let working =
+        tauri::async_runtime::spawn_blocking(move || teams::get_working_hours(&access_token))
+            .await
+            .map_err(|e| format!("import_working_hours spawn_blocking panicked: {:?}", e))?;
+
+    match working {
+        Ok(working) => {
+            let entries = invert_working_hours(&working);
+            log::info!(
+                "{CMD} import_working_hours: produced {} candidate quiet-hours entries \
+                 (work_start={}, work_end={}, work_days={:?}, tz_offset_min={})",
+                entries.len(),
+                working.start_minutes,
+                working.end_minutes,
+                working.days,
+                working.time_zone_offset_minutes,
+            );
+            Ok(ImportWorkingHoursPreview::preview(entries, working))
+        }
+        Err(TeamsApiError::Forbidden(_, body)) => {
+            log::warn!(
+                "{CMD} import_working_hours: forbidden by Graph (tenant refused the scope): {}",
+                truncate_for_preview(&body)
+            );
+            Ok(ImportWorkingHoursPreview::forbidden())
+        }
+        Err(e) => Err(e.user_message()),
+    }
+}
+
+/// The preview payload the Settings UI renders before the user
+/// confirms. `entries` is the list of [`QuietHoursEntry`] the Settings
+/// component will splice into the user's `quiet_hours` table on apply;
+/// `working` is the raw `WorkingHours` (start/end minutes + days +
+/// offset) for the "this is what Outlook returned" hint. `message` is
+/// a non-empty string for the four non-preview variants — the UI shows
+/// it in the same banner the Settings page uses for `update_config`
+/// errors, so the tone and the action (reconnect / try again / etc.)
+/// are documented in one place.
+///
+/// `Serialize` is required because the command returns this struct
+/// across the IPC bridge (`tauri::command` derives the response
+/// codec); `ts_rs::TS` exports the matching TypeScript shape so the
+/// frontend can render the entries without re-implementing the
+/// per-field mapping. The `WorkingHours` shape is opaque on the
+/// wire — the UI reads only its `start_minutes`, `end_minutes` and
+/// `days` for the hint line, and `extra` is the documented
+/// unknown-future-keys overflow (mirroring `AppConfig::extra`).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
+pub struct ImportWorkingHoursPreview {
+    pub entries: Vec<QuietHoursEntry>,
+    #[ts(skip)]
+    pub working: Option<crate::teams::WorkingHours>,
+    pub message: Option<String>,
+}
+
+impl ImportWorkingHoursPreview {
+    fn preview(entries: Vec<QuietHoursEntry>, working: crate::teams::WorkingHours) -> Self {
+        Self {
+            entries,
+            working: Some(working),
+            message: None,
+        }
+    }
+    fn missing_token() -> Self {
+        Self {
+            entries: Vec::new(),
+            working: None,
+            message: Some(
+                "Connect Microsoft Teams in Settings before importing working hours.".to_string(),
+            ),
+        }
+    }
+    fn missing_scope() -> Self {
+        Self {
+            entries: Vec::new(),
+            working: None,
+            message: Some(
+                "Microsoft Teams has not granted the MailboxSettings.Read permission. \
+                 Reconnect Teams in Settings to add it."
+                    .to_string(),
+            ),
+        }
+    }
+    fn forbidden() -> Self {
+        Self {
+            entries: Vec::new(),
+            working: None,
+            message: Some(
+                "Microsoft Teams refused the request: the account or tenant does not \
+                 allow reading mailbox settings. Reconnect Teams in Settings."
+                    .to_string(),
+            ),
+        }
+    }
+}
+
+/// Truncates a Graph error body for the `forbidden` log line so a long
+/// `insufficient_claims` payload does not flood the diagnostic snapshot.
+fn truncate_for_preview(body: &str) -> String {
+    const LIMIT: usize = 240;
+    if body.len() <= LIMIT {
+        body.to_string()
+    } else {
+        format!("{}…", &body[..LIMIT])
+    }
+}
+
+/// Issue #876: inverts a [`crate::teams::WorkingHours`] into a list of
+/// [`QuietHoursEntry`] preview entries. One inverted entry per contiguous
+/// off-block, with over-midnight blocks split into a single wrap-around
+/// entry per working day (the entry model treats a wrap as "on this day,
+/// `start..end` OR `0..start`" — two off-blocks bracket the working hours
+/// this way without a per-bridge cross-day entry). Days the user did not
+/// declare as working become full-day entries (`0..=1440`).
+///
+/// Pure: no I/O, no `AppState`. The unit tests in this module drive
+/// Mon-Fri 09:00-17:00 through every day of the week and assert the
+/// exact expected set.
+pub fn invert_working_hours(working: &crate::teams::WorkingHours) -> Vec<QuietHoursEntry> {
+    use std::collections::BTreeSet;
+    let working_days: BTreeSet<u8> = working.days.iter().copied().collect();
+    let mut entries = Vec::with_capacity(7);
+
+    // All-day working is treated as "no off-hours". An empty `days`
+    // array (an Outlook user who cleared the Work hours tab) is the
+    // same case — neither declares a working day, so we emit no
+    // entries rather than marking every minute as off.
+    if working_days.is_empty() {
+        return entries;
+    }
+
+    let work_start = working.start_minutes;
+    let work_end = working.end_minutes;
+
+    for day in 1..=7u8 {
+        if !working_days.contains(&day) {
+            // Full day off: start=0, end=1440. The clamp normalises
+            // both fields into the documented range (`clamp_quiet_hours_window`
+            // runs at config-load time too).
+            entries.push(make_off_entry(day, 0, 1440));
+            continue;
+        }
+        if work_start == 0 && work_end == 1440 {
+            // Working 24h: no off-hours. Unreachable from a sane
+            // Outlook config, but `start >= end` would otherwise produce
+            // a wrap that marks part of the day as off.
+            continue;
+        }
+        if work_end > work_start {
+            // Day-time working window. Off = [0, start_min] + [end_min, 1440]
+            // which collapses into a single wrap entry.
+            entries.push(make_off_entry(day, work_end, work_start));
+        } else if work_end < work_start {
+            // Overnight working window (e.g. 22:00-06:00). Off = [end_min,
+            // start_min] during the day (no wrap).
+            entries.push(make_off_entry(day, work_end, work_start));
+        }
+        // work_start == work_end: a zero-width window — emit no entry.
+    }
+    entries
+}
+
+fn make_off_entry(day: u8, start_minutes: u16, end_minutes: u16) -> QuietHoursEntry {
+    // `clamp_quiet_hours_window` re-clamps on config load, but
+    // pre-clamping here keeps the preview the Settings UI renders the
+    // exact values that will be written to disk.
+    let start = start_minutes.min(1439);
+    let end = end_minutes.min(1440);
+    QuietHoursEntry {
+        enabled: true,
+        start_minutes: start,
+        end_minutes: end,
+        days: vec![day],
+        replacement_status: String::new(),
+        presence_availability: String::new(),
+        presence_activity: String::new(),
+        pause_polling: false,
+    }
 }
 
 /// Side effects that must follow a successful config write, shared by every
@@ -1178,5 +1406,139 @@ mod tests {
         assert!(!staged_config_path(&fresh).exists());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -------------------------------------------------------------------
+    // Issue #876: Outlook `mailboxSettings.workingHours` → QuietHoursEntry.
+    // The inverter is pure; the assertions below drive a recorded payload
+    // through the parser (`parse_working_hours_body` is exercised in
+    // `teams.rs`) and a `WorkingHours` fixture through the inverter, then
+    // check the produced entries cover exactly the off-block set the user
+    // would expect to see in the Settings preview.
+    // -------------------------------------------------------------------
+
+    /// Helper: builds a `QuietHoursEntry` for the assertions below so the
+    /// field list lives in one place. Mirrors the production `make_off_entry`
+    /// shape; assert-side helper only.
+    fn off(day: u8, start_minutes: u16, end_minutes: u16) -> QuietHoursEntry {
+        QuietHoursEntry {
+            enabled: true,
+            start_minutes,
+            end_minutes,
+            days: vec![day],
+            replacement_status: String::new(),
+            presence_availability: String::new(),
+            presence_activity: String::new(),
+            pause_polling: false,
+        }
+    }
+
+    /// Issue #876: the canonical case from the issue text — Mon-Fri
+    /// 09:00-17:00 working hours invert to exactly five wrap-around
+    /// entries (one per working day) plus two full-day entries (Sat/Sun).
+    /// 17:00 = 1020 minutes, 09:00 = 540 minutes.
+    #[test]
+    fn invert_working_hours_produces_expected_set_for_mon_fri_9_to_5() {
+        use crate::teams::WorkingHours;
+        let working = WorkingHours {
+            start_minutes: 540,
+            end_minutes: 1020,
+            days: vec![1, 2, 3, 4, 5],
+            time_zone_offset_minutes: -480,
+        };
+        let entries = invert_working_hours(&working);
+        let expected = vec![
+            off(1, 1020, 540), // Mon: 17:00 wrap-around (off 17:00-midnight + 00:00-09:00)
+            off(2, 1020, 540), // Tue
+            off(3, 1020, 540), // Wed
+            off(4, 1020, 540), // Thu
+            off(5, 1020, 540), // Fri
+            off(6, 0, 1440),   // Sat full day
+            off(7, 0, 1440),   // Sun full day
+        ];
+        assert_eq!(entries, expected);
+    }
+
+    /// Issue #876: when the user has cleared Outlook's Work hours tab
+    /// (`daysOfWeek: []`), the inverter must produce no entries. Silent
+    /// import with empty preview is the safe failure mode — overwriting
+    /// the user's existing quiet_hours with seven empty days would
+    /// disable suppression entirely.
+    #[test]
+    fn invert_working_hours_with_no_working_days_emits_nothing() {
+        use crate::teams::WorkingHours;
+        let working = WorkingHours {
+            start_minutes: 540,
+            end_minutes: 1020,
+            days: Vec::new(),
+            time_zone_offset_minutes: 0,
+        };
+        assert!(invert_working_hours(&working).is_empty());
+    }
+
+    /// Issue #876: overnight working hours (e.g. night-shift 22:00-06:00)
+    /// produce a non-wrap entry on each working day — off = [06:00, 22:00]
+    /// in the middle of the day.
+    #[test]
+    fn invert_working_hours_handles_overnight_window() {
+        use crate::teams::WorkingHours;
+        let working = WorkingHours {
+            start_minutes: 22 * 60, // 22:00
+            end_minutes: 6 * 60,    // 06:00 next day
+            days: vec![1, 2, 3, 4, 5],
+            time_zone_offset_minutes: 0,
+        };
+        let entries = invert_working_hours(&working);
+        // Mon-Fri each get a single non-wrap entry off = [06:00, 22:00].
+        assert_eq!(entries.len(), 7);
+        for (i, entry) in entries.iter().enumerate().take(5) {
+            assert_eq!(entry.start_minutes, 6 * 60, "entry {} start", i);
+            assert_eq!(entry.end_minutes, 22 * 60, "entry {} end", i);
+            assert_eq!(entry.days, vec![(i as u8) + 1]);
+        }
+        // Sat/Sun still full off.
+        assert_eq!(entries[5], off(6, 0, 1440));
+        assert_eq!(entries[6], off(7, 0, 1440));
+    }
+
+    /// Issue #876: a 24-hour working window collapses to no entries (no
+    /// off-hours exist). Catches the off-by-one in the `work_end ==
+    /// work_start` early-return below.
+    #[test]
+    fn invert_working_hours_24h_window_emits_nothing() {
+        use crate::teams::WorkingHours;
+        let working = WorkingHours {
+            start_minutes: 0,
+            end_minutes: 1440,
+            days: vec![1, 2, 3, 4, 5, 6, 7],
+            time_zone_offset_minutes: 0,
+        };
+        assert!(invert_working_hours(&working).is_empty());
+    }
+
+    /// Issue #876: a partial-week working schedule (alternating days)
+    /// produces a mix of wrap and full-day entries that exactly covers
+    /// the off-blocks the user expects.
+    #[test]
+    fn invert_working_hours_partial_week_alternates_wrap_and_full_day() {
+        use crate::teams::WorkingHours;
+        let working = WorkingHours {
+            start_minutes: 540,
+            end_minutes: 1020,
+            days: vec![1, 3, 5], // Mon, Wed, Fri
+            time_zone_offset_minutes: 0,
+        };
+        let entries = invert_working_hours(&working);
+        assert_eq!(entries.len(), 7);
+        let expected = vec![
+            off(1, 1020, 540), // Mon: wrap
+            off(2, 0, 1440),   // Tue: full off
+            off(3, 1020, 540), // Wed: wrap
+            off(4, 0, 1440),   // Thu: full off
+            off(5, 1020, 540), // Fri: wrap
+            off(6, 0, 1440),   // Sat: full off
+            off(7, 0, 1440),   // Sun: full off
+        ];
+        assert_eq!(entries, expected);
     }
 }
