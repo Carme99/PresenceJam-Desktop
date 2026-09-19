@@ -1797,6 +1797,23 @@ fn load_config_from(path: &std::path::Path) -> Result<AppConfig, String> {
             return Ok(AppConfig::default());
         }
     };
+    // Issue #916: an unknown-key bucket is `#[serde(flatten)]` with no
+    // entry-level filter, so a `client_secret` a hand-edit or another tool left
+    // at any level was deserialized, handed to the webview by the `load_config`
+    // command and re-serialized on the next save — a credential crossing the
+    // IPC boundary in plaintext, in a file SECURITY.md promises is
+    // keychain-only. The legacy migration owns the DISK copy (it moves the
+    // value into the keychain, or deliberately leaves it on a conflict); this
+    // keeps the value out of the document the webview receives. Every load path
+    // funnels through here — the startup load and the `load_config` command
+    // alike — so there is no second place to remember.
+    let stripped_secrets = strip_client_secret_from_extras(&mut config);
+    if stripped_secrets > 0 {
+        log::warn!(
+            "[CFG] config: stripped {} client_secret key(s) from unknown keys — the Spotify client secret is keychain-only (issue #9)",
+            stripped_secrets
+        );
+    }
     // CfgDiag#1 (#536): the version dispatcher runs BEFORE the clamps, so a
     // migration can never have its rewritten values re-clamped away, and
     // `schema_version` is raised even for a file that was never saved by
@@ -2001,12 +2018,11 @@ fn run_legacy_secret_migration() -> LegacySecretOutcome {
             return LegacySecretOutcome::NoLegacyField;
         }
     };
-    // Parse as raw Value so we can inspect the pre-v2.6.0 nested
-    // `spotify.client_secret` field. (`SpotifyConfig` declares no such
-    // field, so `serde_json::from_str::<AppConfig>` would discard it
-    // before we got a chance to migrate. Top-level unknown keys are
-    // retained in `AppConfig::extra` since issue #379, but nested unknown
-    // keys are still dropped — hence the raw `Value` here.)
+    // Parse as raw Value so the pre-v2.6.0 nested `spotify.client_secret` field
+    // can be inspected and removed BEFORE the typed parse. (`SpotifyConfig`
+    // declares no such field, so `serde_json::from_str::<AppConfig>` would drop
+    // the value into the section's unknown-key bucket — see issue #938 — and
+    // leave it in the file the migration is supposed to clean.)
     let mut root: serde_json::Value = match serde_json::from_str(&contents) {
         Ok(v) => v,
         Err(e) => {
@@ -2014,11 +2030,7 @@ fn run_legacy_secret_migration() -> LegacySecretOutcome {
             return LegacySecretOutcome::NoLegacyField;
         }
     };
-    let plaintext = root
-        .get("spotify")
-        .and_then(|s| s.get("client_secret"))
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
+    let plaintext = legacy_client_secret(&root);
     let keychain_read = crate::keychain::get_spotify_client_secret();
     let outcome = decide_legacy_secret_outcome(plaintext.as_deref(), &keychain_read);
     match (&outcome, &keychain_read) {
@@ -2065,10 +2077,11 @@ fn run_legacy_secret_migration() -> LegacySecretOutcome {
             }
         }
     }
-    // Strip the plaintext field and re-serialise.
-    if let Some(spotify_obj) = root.get_mut("spotify").and_then(|v| v.as_object_mut()) {
-        spotify_obj.remove("client_secret");
-    }
+    // Strip EVERY `client_secret` key, not only the documented pre-v2.6.0
+    // `spotify.client_secret`: a hand-edited or third-party file can nest the
+    // same credential under any path, and the migration has just taken
+    // responsibility for the value it read (issue #916).
+    strip_client_secret_keys(&mut root);
     let new_contents = match serde_json::to_string_pretty(&root) {
         Ok(s) => s,
         Err(e) => {
@@ -2182,6 +2195,10 @@ pub fn clamped_config(config: &AppConfig) -> AppConfig {
     // its own deadline) normalizes it away, so the in-memory copy, the file on
     // disk and the tray can never disagree about a snooze being active.
     clamp_snooze(&mut cfg, chrono::Utc::now());
+    // Issue #916: the write path strips too, so a payload that carries a
+    // `client_secret` in an unknown-key bucket cannot put a credential back
+    // into `config.json` (or into an export) on the way out.
+    strip_client_secret_from_extras(&mut cfg);
     cfg
 }
 
@@ -2264,14 +2281,24 @@ pub fn export_file_name(version: &str, at: chrono::DateTime<chrono::Utc>) -> Str
     )
 }
 
-/// Collect the dotted paths of every `client_secret` key anywhere in `value`.
+/// Walk every `client_secret` key in `value`, calling `visit(dotted_path, value)`
+/// for each (issue #916).
 ///
-/// Walks nested objects and arrays: a secret cannot hide inside `extra`
-/// (the unknown-top-level-key retention map) or a hand-written nested object
-/// just because the typed schema has no such field. Only keys are matched —
-/// values are irrelevant to the decision.
-fn client_secret_paths(value: &serde_json::Value) -> Vec<String> {
-    fn walk(value: &serde_json::Value, prefix: &str, out: &mut Vec<String>) {
+/// The ONE traversal behind [`client_secret_paths`] (export/import refusal) and
+/// [`legacy_client_secret`] (the legacy-plaintext migration), so the two cannot
+/// disagree about where a credential may hide. Nested objects AND arrays are
+/// walked: a secret cannot escape by sitting inside the unknown-key retention
+/// map, or inside a hand-written nested object, merely because the typed schema
+/// has no such field.
+fn walk_client_secret_keys(
+    value: &serde_json::Value,
+    visit: &mut impl FnMut(&str, &serde_json::Value),
+) {
+    fn walk(
+        value: &serde_json::Value,
+        prefix: &str,
+        visit: &mut impl FnMut(&str, &serde_json::Value),
+    ) {
         match value {
             serde_json::Value::Object(map) => {
                 for (key, child) in map {
@@ -2281,22 +2308,52 @@ fn client_secret_paths(value: &serde_json::Value) -> Vec<String> {
                         format!("{}.{}", prefix, key)
                     };
                     if key == "client_secret" {
-                        out.push(path.clone());
+                        visit(&path, child);
                     }
-                    walk(child, &path, out);
+                    walk(child, &path, visit);
                 }
             }
             serde_json::Value::Array(items) => {
                 for (index, child) in items.iter().enumerate() {
-                    walk(child, &format!("{}[{}]", prefix, index), out);
+                    walk(child, &format!("{}[{}]", prefix, index), visit);
                 }
             }
             _ => {}
         }
     }
+    walk(value, "", visit);
+}
+
+/// Collect the dotted paths of every `client_secret` key anywhere in `value`.
+///
+/// Only keys are matched — values are irrelevant to the decision, which is why
+/// an explicit `null` or a nested object counts here (the import refusal wants
+/// every shape) while [`legacy_client_secret`] wants a string.
+fn client_secret_paths(value: &serde_json::Value) -> Vec<String> {
     let mut out = Vec::new();
-    walk(value, "", &mut out);
+    walk_client_secret_keys(value, &mut |path, _| out.push(path.to_string()));
     out
+}
+
+/// The plaintext credential the legacy migration acts on (issue #916): the
+/// documented pre-v2.6.0 `spotify.client_secret` when the document has one,
+/// otherwise the first `client_secret` key anywhere that holds a non-empty
+/// string.
+///
+/// Before this, only `spotify.client_secret` was read, so a credential at any
+/// other path was neither migrated to the keychain nor removed from disk — it
+/// was silently dropped. `None` means there is genuinely nothing to migrate.
+fn legacy_client_secret(root: &serde_json::Value) -> Option<String> {
+    let mut found: Vec<(String, String)> = Vec::new();
+    walk_client_secret_keys(root, &mut |path, value| {
+        if let Some(text) = value.as_str().filter(|text| !text.is_empty()) {
+            found.push((path.to_string(), text.to_string()));
+        }
+    });
+    let documented = found
+        .iter()
+        .find(|(path, _)| path == "spotify.client_secret");
+    documented.or(found.first()).map(|(_, text)| text.clone())
 }
 
 /// Remove every `client_secret` key anywhere in the tree; returns how many
@@ -2318,6 +2375,47 @@ fn strip_client_secret_keys(value: &mut serde_json::Value) -> usize {
             }
         }
         _ => {}
+    }
+    removed
+}
+
+/// Remove `client_secret` keys from ONE unknown-key map (issue #916): the
+/// top-level entry, plus any nested inside a retained unknown value. Returns how
+/// many keys were removed, so the caller logs a single line.
+///
+/// An unknown-key bucket is `#[serde(flatten)]` with no entry-level filter, so a
+/// key the codebase treats as a credential everywhere else would otherwise be
+/// deserialized, handed to the webview by the `load_config` command and
+/// re-serialized on the next save.
+fn strip_client_secret_from_extra(extra: &mut BTreeMap<String, serde_json::Value>) -> usize {
+    let mut removed = if extra.remove("client_secret").is_some() {
+        1
+    } else {
+        0
+    };
+    for value in extra.values_mut() {
+        removed += strip_client_secret_keys(value);
+    }
+    removed
+}
+
+/// [`strip_client_secret_from_extra`] over every unknown-key bucket a config
+/// carries: the document's own top-level map and each section's (issue #916;
+/// the section maps are themselves issue #938).
+///
+/// Status rules and shortcuts have no such map yet, which is the whole reason
+/// they cannot be stripped here — see W1-NOTES.md.
+fn strip_client_secret_from_extras(config: &mut AppConfig) -> usize {
+    let mut removed = strip_client_secret_from_extra(&mut config.extra);
+    for extra in [
+        &mut config.spotify.extra,
+        &mut config.teams.extra,
+        &mut config.polling.extra,
+        &mut config.logging.extra,
+        &mut config.updates.extra,
+        &mut config.notifications.extra,
+    ] {
+        removed += strip_client_secret_from_extra(extra);
     }
     removed
 }
@@ -5418,5 +5516,145 @@ mod tests {
         };
         stamp_schema_version(&mut stale);
         assert_eq!(stale.schema_version, SCHEMA_VERSION);
+    }
+
+    // -----------------------------------------------------------------
+    // Issue #916: a `client_secret` in an unknown-key bucket never crosses
+    // the IPC boundary and leaves the file on the next save.
+    // -----------------------------------------------------------------
+
+    /// Issue #916: a `client_secret` an outside writer left at the top level —
+    /// or nested inside a section, which #938's retention map would otherwise
+    /// carry — must not appear anywhere in the `AppConfig` a load returns (that
+    /// document goes straight to the webview), and must be gone from the file
+    /// after the next save.
+    #[test]
+    fn test_client_secret_keys_never_reach_ipc_and_leave_the_file() {
+        let (dir, path) = temp_config_file(
+            "top-level-secret",
+            r#"{"autostart": true,
+                "client_secret": "TOP-LEVEL-SENTINEL",
+                "future": {"client_secret": "NESTED-SENTINEL", "kept": 1},
+                "spotify": {"client_id": "abc", "client_secret": "SPOTIFY-SENTINEL"}}"#,
+        );
+        let cfg = load_config_from(&path).expect("must load");
+
+        let serialized = serde_json::to_string(&cfg).expect("must serialize");
+        assert!(
+            !serialized.contains("SENTINEL"),
+            "no client_secret may reach the webview: {serialized}"
+        );
+        assert_eq!(
+            cfg.extra.get("future"),
+            Some(&serde_json::json!({"kept": 1})),
+            "a sibling key of a stripped secret is kept"
+        );
+        assert_eq!(cfg.spotify.client_id, "abc");
+        assert!(cfg.autostart);
+
+        save_config_to(&path, &cfg).expect("save must succeed");
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !written.contains("SENTINEL"),
+            "the next save must not write a credential back: {written}"
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&written).unwrap()["autostart"],
+            true
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #916, write side: a payload POSTed back by a script in the webview
+    /// can carry whatever it likes in an unknown-key bucket, so the write path
+    /// strips as well — nothing a caller hands `save_config` can put a
+    /// credential into `config.json`.
+    #[test]
+    fn test_save_strips_a_client_secret_a_payload_carries() {
+        let (dir, path) = temp_config_file("save-secret", r#"{"autostart": true}"#);
+        let mut cfg = AppConfig {
+            autostart: true,
+            ..AppConfig::default()
+        };
+        cfg.extra.insert(
+            "client_secret".to_string(),
+            serde_json::json!("PAYLOAD-SENTINEL"),
+        );
+        cfg.teams.extra.insert(
+            "client_secret".to_string(),
+            serde_json::json!("SECTION-SENTINEL"),
+        );
+
+        save_config_to(&path, &cfg).expect("save must succeed");
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !written.contains("SENTINEL"),
+            "a save must never write a caller-supplied credential: {written}"
+        );
+        assert!(written.contains("\"autostart\": true"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #916: the migration reads the documented pre-2.6.0 path when the
+    /// document has one, and any other `client_secret` path otherwise. Reading
+    /// only `spotify.client_secret` meant a credential at another path was
+    /// neither migrated nor stripped, just dropped.
+    #[test]
+    fn test_legacy_client_secret_reads_every_path() {
+        assert_eq!(
+            legacy_client_secret(&serde_json::json!({"spotify": {"client_secret": "A"}}))
+                .as_deref(),
+            Some("A")
+        );
+        assert_eq!(
+            legacy_client_secret(&serde_json::json!({"future": {"client_secret": "B"}})).as_deref(),
+            Some("B")
+        );
+        assert_eq!(
+            legacy_client_secret(&serde_json::json!({"items": [{"client_secret": "C"}]}))
+                .as_deref(),
+            Some("C")
+        );
+        // The documented path wins when several are present (`serde_json`'s map
+        // order is what makes this a preference rather than an accident).
+        assert_eq!(
+            legacy_client_secret(&serde_json::json!({
+                "spotify": {"client_secret": "A"}, "other": {"client_secret": "B"}
+            }))
+            .as_deref(),
+            Some("A")
+        );
+        // Not a credential: an empty string, a null, a non-string, or no key.
+        for absent in [
+            serde_json::json!({"spotify": {"client_secret": ""}}),
+            serde_json::json!({"client_secret": null, "spotify": {}}),
+            serde_json::json!({"future": {"client_secret": {"nested": 1}}}),
+            serde_json::json!({"spotify": {}}),
+        ] {
+            assert_eq!(legacy_client_secret(&absent), None, "{absent}");
+        }
+    }
+
+    /// Issue #916 (the traversal both readers share): every `client_secret` key
+    /// is found, at any depth, including one inside an array element — the
+    /// import refusal and the migration must never disagree about where a
+    /// credential can hide.
+    #[test]
+    fn test_client_secret_paths_walks_objects_and_arrays() {
+        let paths = |value: &serde_json::Value| {
+            let mut sorted = client_secret_paths(value);
+            sorted.sort();
+            sorted
+        };
+        assert_eq!(
+            paths(&serde_json::json!({"a": {"client_secret": 1}, "client_secret": 2})),
+            vec!["a.client_secret".to_string(), "client_secret".to_string()]
+        );
+        assert_eq!(
+            paths(&serde_json::json!({"list": [{"client_secret": 1}]})),
+            vec!["list[0].client_secret".to_string()]
+        );
+        assert!(paths(&serde_json::json!({"spotify": {"client_id": "abc"}})).is_empty());
     }
 }
