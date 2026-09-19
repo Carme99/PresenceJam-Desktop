@@ -604,8 +604,9 @@ const BETA_ENDPOINT: &str =
 /// Ordered update-endpoint list for `channel` (issue #678).
 ///
 /// The stable URL is always last: [`walk_endpoints`] keeps the first endpoint
-/// that answers, so a not-yet-published beta manifest falls through to the
-/// stable release instead of failing the whole check.
+/// that offers a newer version (issue #807), so both a not-yet-published beta
+/// manifest and one that carries no newer release fall through to the stable
+/// release instead of ending the check.
 pub fn update_endpoints(channel: UpdateChannel) -> Vec<String> {
     match channel {
         UpdateChannel::Stable => vec![STABLE_ENDPOINT.to_string()],
@@ -621,36 +622,74 @@ fn endpoint_urls(channel: UpdateChannel) -> Result<Vec<Url>, String> {
         .collect()
 }
 
-/// Runs `attempt` over `urls` in order until one of them answers (issue
-/// #678), logging every endpoint that was skipped.
+/// Runs `attempt` over `urls` in order until one of them answers with a
+/// CANDIDATE (issue #678, corrected by issue #807), logging every endpoint
+/// that was skipped.
 ///
-/// Mirrors the updater plugin's own multi-endpoint `check()` loop: it stops at
-/// the first endpoint that produced a manifest (including one that is no
-/// newer than the running build, i.e. `Ok(None)`), falls through only when an
-/// endpoint FAILED, and reports the last failure when none of them answered.
-/// The difference is the log line: the plugin does log a non-2XX response
-/// (`log::error!("update endpoint did not respond with a successful status
-/// code")`, `tauri-plugin-updater 2.11.0` `src/updater.rs:554-558`), but that
-/// line names neither the endpoint nor the fall-through — with two endpoints
-/// configured you cannot tell which one was skipped, or that the second one
-/// served the release. This walk logs both.
-async fn walk_endpoints<T, F, Fut>(urls: &[Url], mut attempt: F) -> Result<T, String>
+/// A candidate is a version newer than the running build. An endpoint that
+/// answers without one — the plugin's `check()` returns `Ok(None)` for a
+/// manifest that parses and is not newer — does NOT end the walk: a beta
+/// manifest that lags the stable release (a re-cut or rolled-back beta, or a
+/// publication path that publishes them separately) must never shadow the
+/// newer release waiting behind the next endpoint.
+///
+/// Errors fall through as well. When no endpoint offers a candidate the
+/// result is `Ok(None)` if at least one endpoint answered at all — the app is
+/// current whatever the other endpoints said — and the LAST failure only when
+/// none of them answered, which mirrors the plugin's `last_error` semantics
+/// and keeps an all-failed check from rendering as "already current".
+///
+/// The difference from the plugin's loop is the log line: the plugin does log
+/// a non-2XX response (`log::error!("update endpoint did not respond with a
+/// successful status code")`, `tauri-plugin-updater 2.11.0`
+/// `src/updater.rs:554-558`), but that line names neither the endpoint nor
+/// the fall-through — with two endpoints configured you cannot tell which one
+/// was skipped, or that the second one served the release. This walk logs
+/// both.
+///
+/// The attempt yields only the announced version: `tauri_plugin_updater::Update`
+/// has no public constructor, so keeping it out of the walk's payload is what
+/// makes this unit-testable. [`check_with_channel`] re-runs the winning
+/// endpoint to obtain the `Update` itself.
+#[derive(Debug, PartialEq, Eq)]
+struct EndpointCandidate {
+    /// The endpoint that offered the candidate.
+    url: Url,
+    /// The version it announced, newer than the running build.
+    version: String,
+}
+
+async fn walk_endpoints<F, Fut>(
+    urls: &[Url],
+    mut attempt: F,
+) -> Result<Option<EndpointCandidate>, String>
 where
     F: FnMut(Url) -> Fut,
-    Fut: Future<Output = Result<T, String>>,
+    Fut: Future<Output = Result<Option<String>, String>>,
 {
+    let mut answered = false;
     let mut last_error: Option<String> = None;
     for (idx, url) in urls.iter().enumerate() {
         match attempt(url.clone()).await {
-            Ok(found) => {
+            Ok(Some(version)) => {
                 if idx > 0 {
                     log::info!(
-                        "{TAG} update check: {prev} did not serve a manifest; falling through \
-                         to {url}",
-                        prev = urls[idx - 1]
+                        "{TAG} update check: {skipped} earlier endpoint(s) offered no newer \
+                         release; {url} offers v{version}",
+                        skipped = idx
                     );
                 }
-                return Ok(found);
+                return Ok(Some(EndpointCandidate {
+                    url: url.clone(),
+                    version,
+                }));
+            }
+            Ok(None) => {
+                answered = true;
+                log::info!(
+                    "{TAG} update check: {url} answered without a newer release than the \
+                     running build"
+                );
             }
             Err(e) => {
                 // No "trying the next endpoint" here: this arm also runs for
@@ -661,7 +700,25 @@ where
             }
         }
     }
+    if answered {
+        return Ok(None);
+    }
     Err(last_error.unwrap_or_else(|| "no update endpoints configured".to_string()))
+}
+
+/// Runs one endpoint's updater `check()` (issue #807).
+///
+/// Split out of [`check_with_channel`] so the same endpoint can be consulted
+/// twice — once for its announced version, once for the plugin's `Update` —
+/// without repeating the builder setup.
+async fn check_endpoint(app: &AppHandle, url: Url) -> Result<Option<Update>, String> {
+    let updater = app
+        .updater_builder()
+        .endpoints(vec![url])
+        .map_err(|e| format!("invalid update endpoint: {e}"))?
+        .build()
+        .map_err(|e| format!("updater unavailable: {e}"))?;
+    updater.check().await.map_err(|e| e.to_string())
 }
 
 /// Checks for an update on the configured release channel.
@@ -674,6 +731,10 @@ where
 /// (`check()` / `downloadAndInstall()`) cannot take endpoints, so it keeps
 /// using the static config entry — which is why `UpdatePrompt.svelte` offers
 /// it on the stable channel only.
+///
+/// Two passes since issue #807: [`walk_endpoints`] finds the endpoint that
+/// offers a version (a manifest that is merely not newer no longer ends the
+/// search), and only that endpoint is re-consulted for the plugin's `Update`.
 async fn check_with_channel(
     app: &AppHandle,
     channel: UpdateChannel,
@@ -681,16 +742,30 @@ async fn check_with_channel(
     let urls = endpoint_urls(channel)?;
     let listed = urls.iter().map(Url::as_str).collect::<Vec<_>>().join(", ");
     log::info!("{TAG} update check: channel={channel:?} endpoints=[{listed}]");
-    walk_endpoints(&urls, |url| async move {
-        let updater = app
-            .updater_builder()
-            .endpoints(vec![url])
-            .map_err(|e| format!("invalid update endpoint: {e}"))?
-            .build()
-            .map_err(|e| format!("updater unavailable: {e}"))?;
-        updater.check().await.map_err(|e| e.to_string())
+    let Some(candidate) = walk_endpoints(&urls, |url| async move {
+        check_endpoint(app, url)
+            .await
+            .map(|found| found.map(|update| update.version))
     })
-    .await
+    .await?
+    else {
+        return Ok(None);
+    };
+    let EndpointCandidate { url, version } = candidate;
+    match check_endpoint(app, url.clone()).await? {
+        Some(update) => {
+            log::info!("{TAG} update check: {url} offers v{version}");
+            Ok(Some(update))
+        }
+        // The endpoint answered moments ago; an empty second answer means the
+        // release moved under us, which is "nothing to offer", not a failure.
+        None => {
+            log::info!(
+                "{TAG} update check: {url} no longer offers v{version}; treating as current"
+            );
+            Ok(None)
+        }
+    }
 }
 
 /// Banner payload of [`check_for_update`] (issue #678). No `ts_rs` export:
@@ -1412,15 +1487,21 @@ mod tests {
         );
     }
 
+    /// The beta/stable endpoint pair the walk tests run against: the shape
+    /// `UpdateChannel::Beta` builds, without the real URLs.
+    fn test_endpoints() -> Vec<Url> {
+        vec![
+            Url::parse("https://example.invalid/latest-beta.json").unwrap(),
+            Url::parse("https://example.invalid/latest.json").unwrap(),
+        ]
+    }
+
     /// Issue #678: a failing endpoint must not abort the check — that is the
     /// entire point of listing the stable manifest after the (unpublished)
     /// beta one.
     #[test]
     fn test_check_walks_past_a_failing_endpoint() {
-        let urls = vec![
-            Url::parse("https://example.invalid/latest-beta.json").unwrap(),
-            Url::parse("https://example.invalid/latest.json").unwrap(),
-        ];
+        let urls = test_endpoints();
         let tried = Arc::new(Mutex::new(Vec::new()));
         let seen = tried.clone();
         let found = tauri::async_runtime::block_on(walk_endpoints(&urls, move |url| {
@@ -1436,25 +1517,27 @@ mod tests {
                 }
             }
         }));
-        assert_eq!(found, Ok(Some("4.6.0".to_string())));
+        assert_eq!(
+            found,
+            Ok(Some(EndpointCandidate {
+                url: urls[1].clone(),
+                version: "4.6.0".to_string(),
+            })),
+            "the endpoint that failed must not be the one reported"
+        );
         assert_eq!(
             tried.lock().as_slice(),
-            [
-                "https://example.invalid/latest-beta.json",
-                "https://example.invalid/latest.json"
-            ],
+            [urls[0].as_str(), urls[1].as_str()],
             "the fall-through must try the endpoints in list order"
         );
     }
 
-    /// The walk stops at the first endpoint that answers, so a published beta
-    /// release costs no second round-trip to the stable manifest.
+    /// The walk stops at the first endpoint that offers a version, so a
+    /// published beta release costs no second round-trip to the stable
+    /// manifest (issue #807: a newer beta still wins in one attempt).
     #[test]
-    fn test_check_stops_at_the_first_answering_endpoint() {
-        let urls = vec![
-            Url::parse("https://example.invalid/latest-beta.json").unwrap(),
-            Url::parse("https://example.invalid/latest.json").unwrap(),
-        ];
+    fn test_check_stops_at_the_first_offered_version() {
+        let urls = test_endpoints();
         let attempts = Arc::new(Mutex::new(0usize));
         let seen = attempts.clone();
         let found = tauri::async_runtime::block_on(walk_endpoints(&urls, move |_url| {
@@ -1464,12 +1547,81 @@ mod tests {
                 Ok(Some("4.7.0-beta.1".to_string()))
             }
         }));
-        assert_eq!(found, Ok(Some("4.7.0-beta.1".to_string())));
+        assert_eq!(
+            found,
+            Ok(Some(EndpointCandidate {
+                url: urls[0].clone(),
+                version: "4.7.0-beta.1".to_string(),
+            }))
+        );
         assert_eq!(
             *attempts.lock(),
             1,
-            "no fall-through when the first endpoint answers"
+            "no fall-through once an endpoint offers a version"
         );
+    }
+
+    /// Issue #807: an endpoint answering with nothing newer than the running
+    /// build must not end the walk. A beta manifest that lags the stable
+    /// release would otherwise leave a beta-channel user on the running build
+    /// while a newer stable release waits behind the second endpoint.
+    #[test]
+    fn test_check_walks_past_an_endpoint_with_no_newer_release() {
+        let urls = test_endpoints();
+        let tried = Arc::new(Mutex::new(0usize));
+        let seen = tried.clone();
+        let found = tauri::async_runtime::block_on(walk_endpoints(&urls, move |url| {
+            let seen = seen.clone();
+            async move {
+                *seen.lock() += 1;
+                if url.path().ends_with("latest-beta.json") {
+                    // Parsed, but not newer than the running build.
+                    Ok(None)
+                } else {
+                    Ok(Some("4.8.0".to_string()))
+                }
+            }
+        }));
+        assert_eq!(
+            found,
+            Ok(Some(EndpointCandidate {
+                url: urls[1].clone(),
+                version: "4.8.0".to_string(),
+            })),
+            "the newer release behind the second endpoint must win"
+        );
+        assert_eq!(
+            *tried.lock(),
+            2,
+            "the walk must consult the stable endpoint"
+        );
+    }
+
+    /// Every endpoint answering without a newer release is "already current",
+    /// not an error — the single-endpoint case with the fallback present.
+    #[test]
+    fn test_check_is_current_when_no_endpoint_offers_a_version() {
+        let urls = test_endpoints();
+        let found: Result<Option<EndpointCandidate>, String> =
+            tauri::async_runtime::block_on(walk_endpoints(&urls, |_url| async move { Ok(None) }));
+        assert_eq!(found, Ok(None));
+    }
+
+    /// An answer settles the walk even when a later endpoint fails: the
+    /// channel has told us the running build is current, so a failed fallback
+    /// must not become a check error the banner renders as "could not check".
+    #[test]
+    fn test_check_prefers_an_answer_over_a_later_failure() {
+        let urls = test_endpoints();
+        let found: Result<Option<EndpointCandidate>, String> =
+            tauri::async_runtime::block_on(walk_endpoints(&urls, |url| async move {
+                if url.path().ends_with("latest.json") {
+                    Err("HTTP 500".to_string())
+                } else {
+                    Ok(None)
+                }
+            }));
+        assert_eq!(found, Ok(None));
     }
 
     /// When every endpoint fails, the LAST failure is reported (mirroring the
@@ -1477,11 +1629,8 @@ mod tests {
     /// which the banner would render as "already current".
     #[test]
     fn test_check_reports_the_last_error_when_no_endpoint_answers() {
-        let urls = vec![
-            Url::parse("https://example.invalid/latest-beta.json").unwrap(),
-            Url::parse("https://example.invalid/latest.json").unwrap(),
-        ];
-        let found: Result<Option<String>, String> =
+        let urls = test_endpoints();
+        let found: Result<Option<EndpointCandidate>, String> =
             tauri::async_runtime::block_on(walk_endpoints(&urls, |url| {
                 let msg = format!("{} unreachable", url.path());
                 async move { Err(msg) }
