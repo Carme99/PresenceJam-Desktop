@@ -63,10 +63,14 @@
   }
 
   // Mirrors the backend `StageDeferredOutcome` shape (kept local so no
-  // generated types need to change for this slice).
+  // generated types need to change for this slice). `skipped` (#957) says
+  // WHICH nothing-to-do a `staged: null` outcome was — the reason names are
+  // the backend's `SKIP_REASON_*` constants — and is absent on the staged
+  // case (`skip_serializing_if`), hence optional.
   interface StageOutcome {
     staged: string | null;
     current: string;
+    skipped?: 'current' | 'stale' | 'already-skipped' | null;
   }
 
   // Mirrors the backend `StageProgress` shape emitted on
@@ -90,6 +94,14 @@
   let channelResolved = $state(false);
   const isBeta = $derived($configStore.updates.channel === 'beta');
 
+  // #977: the channel the banner's current candidate was resolved with.
+  // `check_for_update` reads `config.updates.channel` from disk on every
+  // call, so a switch in Settings has to be followed by a fresh check:
+  // otherwise the previous channel's candidate stays on offer for up to a
+  // day, and the version staged at quit time can differ from the one the
+  // quit-time confirm row showed.
+  let checkedChannel = $state('');
+
   let isStaleSkipped = $derived(
     update !== null && staleSkippedVersion !== '' && staleSkippedVersion === update.version
   );
@@ -101,12 +113,29 @@
     [update?.notes, update?.pub_date].filter((part): part is string => Boolean(part)).join('\n\n')
   );
 
+  // Generation of the newest update check (see `checkForUpdate`): a response
+  // that arrives after a newer check started belongs to a candidate the
+  // banner has already moved on from.
+  let checkGen = 0;
+
   function checkForUpdate() {
+    // #977: remember the channel this check runs against so the effect below
+    // can tell a Settings switch apart from the hydration flip. Before
+    // hydration the store still holds the mirror's default, so recording
+    // that would make the hydrated value look like a user change — and the
+    // backend reads the channel from disk, so this check's candidate already
+    // belongs to the persisted channel.
+    if (channelResolved) checkedChannel = $configStore.updates.channel;
+    // The channel switch starts a second check while the first is still in
+    // flight, and the older response can land last — it must not overwrite
+    // the candidate that replaced it (#977 review).
+    const gen = ++checkGen;
     // The backend resolves the configured channel into the endpoint list —
     // the plugin's JS `check()` cannot take endpoints and is hard-wired to
     // the static stable entry (issue #678).
     invoke<UpdateInfo | null>('check_for_update')
       .then((u) => {
+        if (gen !== checkGen) return;
         if (u) {
           // A new candidate deserves its own verdict — forget a stale
           // skip recorded for a previous version.
@@ -120,9 +149,14 @@
             dismissed = false;
           }
           update = u;
-        } else {
+        } else if (!staging && !stagedVersion) {
           // The running build is current: a banner with no candidate behind
-          // it must go away rather than keep offering the old version.
+          // it must go away rather than keep offering the old version. A
+          // stage in flight, or a payload already staged, keeps it instead:
+          // the strip owns the only "Cancel stage" affordance, and the
+          // payload installs at quit whether or not the candidate is still
+          // offered — a channel switch can take the candidate away while the
+          // staged bytes stay, so they have to stay cancellable.
           update = null;
         }
       })
@@ -133,6 +167,35 @@
         console.error('[UPDATER] check failed:', e);
       });
   }
+
+  // #977: a channel switch in Settings republishes the persisted document
+  // into `configStore` (`saveConfig`/`updateConfig`), and that is the signal
+  // this banner needs — the backend re-reads the channel per command, so no
+  // new backend event is required.
+  $effect(() => {
+    const channel = $configStore.updates.channel;
+    // A stage or a download in flight owns the banner: its cancel
+    // affordance lives in it, so the switch is picked up as soon as they
+    // settle rather than tearing the banner out from under the user.
+    const busy = staging || downloading;
+    if (!channelResolved) return;
+    if (checkedChannel === '') {
+      // The first check ran before hydration: adopt the hydrated channel as
+      // the baseline instead of re-checking against a value that only just
+      // arrived from disk.
+      checkedChannel = channel;
+      return;
+    }
+    if (channel === checkedChannel || busy) return;
+    // A candidate from the channel the user just left must not survive the
+    // switch (nor a dismissal scoped to it) — but a staged payload does
+    // outlive it, and the re-check below decides what to offer afterwards.
+    staleSkippedVersion = '';
+    confirming = false;
+    dismissed = false;
+    if (!stagedVersion) update = null;
+    checkForUpdate();
+  });
 
   onMount(() => {
     // Point-of-use hydration (see above), in the two orders this banner can
@@ -177,6 +240,22 @@
     stageTotal !== null && stageTotal > 0
       ? Math.min(Math.round((stageDownloaded / stageTotal) * 100), 100)
       : null
+  );
+
+  // #737: which byte-level position is on screen, if any. The deferred stage
+  // keeps the precedence the banner's single status chain gave it, and the
+  // rows those branches used to shadow stay suppressed so the strip never
+  // shows two conflicting lines.
+  const stageProgress = $derived(staging && !stageAborted);
+  const downloadProgress = $derived(
+    downloading && !stageProgress && !stagedVersion && !confirming && !isStaleSkipped
+  );
+
+  // #737: the progressbar's accessible name — the update it belongs to.
+  // Deliberately independent of the percentage so assistive tech reads the
+  // position on demand instead of being told on every emitted tick.
+  const progressLabel = $derived(
+    update ? t('update.available', { version: update.version }) : ''
   );
 
   async function downloadAndInstall() {
@@ -270,6 +349,16 @@
         stagedVersion = outcome.staged;
         confirming = false;
         staleSkippedVersion = '';
+      } else if (outcome.skipped === 'current') {
+        // #957: nothing to do — the manifest no longer offers the version
+        // this banner cached (a re-cut or rolled-back release), so there is
+        // no update to install and no stale decline to report. Drop the
+        // candidate (the banner goes with it) instead of rendering the
+        // stale-skip copy with an "Install anyway" button that would only
+        // repeat the same no-op.
+        staleSkippedVersion = '';
+        confirming = false;
+        update = null;
       } else {
         // Declined as stale (backend recorded a skip marker, so a retry
         // short-circuits without re-downloading): show the skipped
@@ -312,6 +401,12 @@
       stageDownloaded = 0;
       stageTotal = null;
       confirming = false;
+      // #977 review: a staged payload keeps the banner (and its candidate)
+      // alive across a channel switch, so the payload can be the only reason
+      // a candidate from the channel the user left is still on screen. With
+      // the payload gone, the offer is re-resolved against the current
+      // channel.
+      checkForUpdate();
     } catch (e) {
       // The payload is still held Rust-side, so the banner must keep
       // saying so rather than claiming the stage is gone.
@@ -326,50 +421,74 @@
 
 {#if update && !dismissed}
   <div
-    class="update-banner"
+    class="update-banner update-banner--docked"
     role="region"
     aria-label={t('update.available', { version: update.version })}
     title={updateTooltip}
   >
     <div class="update-info" role="status">
       <span class="update-title">{t('update.available', { version: update.version })}</span>
-      {#if staging && !stageAborted}
-        <span class="update-progress">
-          {stagePercent === null
-            ? t('update.preparing')
-            : t('update.stagingProgress', { percent: stagePercent })}
-        </span>
-      {:else if stagedVersion}
+      <!-- #737: only the discrete stage transitions live here — staged,
+           declined as stale, failed. The per-tick byte position is the
+           progressbar below, outside this live region, so the polite queue
+           is not rewritten on every emitted tick; the discrete rows stay
+           suppressed while a position is on screen. -->
+      {#if stagedVersion && !stageProgress}
         <span class="update-staged">
           {currentVersion
             ? t('update.stagedVsCurrent', { staged: stagedVersion, current: currentVersion })
             : t('update.stagedQuit', { version: stagedVersion })}
         </span>
-      {:else if confirming}
+      {:else if confirming && !stageProgress}
         <span class="update-confirm">
           {currentVersion
             ? t('update.confirmQuitInstall', { staged: update.version, current: currentVersion })
             : t('update.confirmQuitInstallUnknown', { staged: update.version })}
         </span>
-      {:else if isStaleSkipped}
+      {:else if isStaleSkipped && !stageProgress}
         <span class="update-stale">
           {currentVersion
             ? t('update.staleSkipped', { staged: staleSkippedVersion, current: currentVersion })
             : t('update.staleSkippedUnknown', { staged: staleSkippedVersion })}
         </span>
-      {:else if downloading}
-        <span class="update-progress">
-          {Math.round(progress * 100)}%{totalBytes > 0
-            ? ` (${Math.round(downloadedBytes / 1024 / 1024)}/${Math.round(totalBytes / 1024 / 1024)} MB)`
-            : ''}
-        </span>
-      {:else if error}
+      {:else if error && !stageProgress && !downloadProgress}
         <span class="update-error">{t('update.downloadFailed', { error })}</span>
       {/if}
       {#if isBeta}
         <span class="update-beta">{t('update.betaOnQuitOnly')}</span>
       {/if}
     </div>
+    {#if stageProgress}
+      <span
+        class="update-progress"
+        role="progressbar"
+        aria-label={progressLabel}
+        aria-valuemin="0"
+        aria-valuemax="100"
+        aria-valuenow={stagePercent ?? undefined}
+      >
+        {stagePercent === null
+          ? t('update.preparing')
+          : t('update.stagingProgress', { percent: stagePercent })}
+      </span>
+    {:else if downloadProgress}
+      <!-- #982: without a `Content-Length` there is no position to report, so
+           the row says so instead of holding a frozen "0%" for the whole
+           download — the rule `stagePercent` already follows for the
+           deferred path. -->
+      <span
+        class="update-progress"
+        role="progressbar"
+        aria-label={progressLabel}
+        aria-valuemin="0"
+        aria-valuemax="100"
+        aria-valuenow={totalBytes > 0 ? Math.round(progress * 100) : undefined}
+      >
+        {totalBytes > 0
+          ? `${Math.round(progress * 100)}% (${Math.round(downloadedBytes / 1024 / 1024)}/${Math.round(totalBytes / 1024 / 1024)} MB)`
+          : t('update.preparing')}
+      </span>
+    {/if}
     <div class="update-actions">
       {#if channelResolved && !isBeta}
         <button
@@ -442,11 +561,6 @@
 
 <style>
   .update-banner {
-    position: fixed;
-    top: var(--sp-3);
-    left: 50%;
-    transform: translateX(-50%);
-    z-index: 1000;
     display: flex;
     align-items: center;
     gap: var(--sp-4);
@@ -457,16 +571,59 @@
     border-radius: var(--r-md);
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
   }
+  /* #951: the banner is docked, never floating over the top chrome. Centred
+     at `top: var(--sp-3)` it sat on the Dashboard header's icon row at the
+     default window, so the theme, logs, diagnostics, settings and about
+     buttons were unclickable while an update was offered. The bottom edge
+     follows the `.playback-toast` convention in `+layout.svelte` — no layout
+     space reserved, no chrome covered — and the z-index stays below that
+     toast so a playback error still wins.
+    The inset is coupled to the two bottom-centre surfaces this app owns, so
+    moving either one means revisiting it: `LogViewer`'s `.jump-latest`
+    (`bottom: 12px`, 33px tall — 26px in compact density) and
+    `+layout.svelte`'s `.playback-toast` (`bottom: 24px`, ~44px tall, whose
+    padding is literal px rather than tokens). Docking at `--sp-3` put the
+    banner straight over the jump-latest's hit target. Measured in a browser
+    at 600x750 and 400x500, en and de, default and compact density: the
+    banner clears the jump-latest by 11px (default) / 4px (compact), touches
+    the toast only in compact density (where the toast still paints above
+    it), and the centre of the jump-latest button hit-tests to the button
+    itself in all four window/density combinations. */
+  .update-banner--docked {
+    position: fixed;
+    bottom: calc(var(--sp-10) + var(--sp-1));
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 1000;
+  }
   .update-info {
     display: flex;
     flex-direction: column;
     gap: var(--sp-1);
+    /* #950: the column owns the free space in the strip, and `min-width: 0`
+       is what lets the ellipsis rules below cut a long title instead of
+       letting it paint underneath the buttons. */
+    flex: 1 1 auto;
     min-width: 0;
   }
   .update-title {
     font-size: var(--fs-sm);
     font-weight: 700;
     color: var(--fg);
+  }
+  /* #950: every info row is one line in the strip — a long release title or
+     beta note is cut with an ellipsis rather than wrapping the banner into a
+     tall block or spilling past its rounded border. The error row is
+     deliberately left wrapping: its message is diagnostic and has to stay
+     readable. */
+  .update-title,
+  .update-progress,
+  .update-confirm,
+  .update-stale,
+  .update-beta,
+  .update-staged {
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
   }
   .update-progress {
@@ -491,9 +648,13 @@
   }
   .update-actions {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: var(--sp-2);
-    flex-shrink: 0;
+    row-gap: var(--sp-1);
+    /* #950: the group yields to the strip instead of pushing the flex line
+       past its border — its automatic minimum size keeps every button whole
+       and wraps them onto a second row when the window is too narrow. */
   }
   .download-btn {
     padding: var(--sp-2) var(--sp-4);
