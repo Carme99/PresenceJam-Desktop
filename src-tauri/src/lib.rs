@@ -381,6 +381,7 @@ pub mod keychain;
 pub mod macos_deeplink;
 pub mod menu;
 pub mod pkce;
+pub mod platform;
 pub mod polling;
 pub mod profanity;
 pub mod spotify;

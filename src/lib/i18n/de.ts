@@ -416,6 +416,18 @@ export const de: Dict = {
   'settings.gateOutOfOfficeLabel': 'Pausieren, wenn ich abwesend bin',
   'settings.gateOutOfOfficeHint':
     'Überspringt die Statusaktualisierung, solange Ihre Teams-Abwesenheit aktiv ist. Eine Titelregel mit eigener Präsenzaktion hat Vorrang.',
+  // Issue #872: das Gate auf Betriebssystem-Ebene (Vollbild-App,
+  // Präsentation, Windows-Fokus-Assistent „Ruhezeit“). Standardmäßig
+  // AUS — das 4.7-Verhalten bleibt unverändert, bis der Nutzer es
+  // aktiviert.
+  'settings.gateWhenPresentingLabel': 'Pausieren, wenn ich präsentiere',
+  'settings.gateWhenPresentingHint':
+    'Überspringt die Statusaktualisierung, wenn das Betriebssystem eine Vollbild-App, eine Präsentation oder die Ruhezeit meldet. Linux/macOS melden dieses Signal nicht — der Schalter bleibt dort wirkungslos.',
+  // Issue #873: das Idle-Gate. `0` (Standard) entspricht dem 4.7-Verhalten
+  // — die App bewirbt weiterhin das Hören, bis der Nutzer es aktiviert.
+  'settings.idleAwayLabel': 'Pausieren, wenn der Schreibtisch inaktiv ist',
+  'settings.idleAwayHint':
+    'Bewirbt den Spotify-Status nicht mehr, sobald der Schreibtisch für diese Anzahl Sekunden keine Tastatur- oder Maus-Eingaben hatte. 60–3600; 0 deaktiviert. Linux/macOS melden dieses Signal nicht.',
   'settings.extraWordsLabel': 'Eigene Wörter für den Filter',
   'settings.extraWordsHint':
     'Ein Wort oder Ausdruck pro Zeile. Es gelten dieselben Wortgrenzen wie für die eingebaute Liste.',
@@ -430,6 +442,10 @@ export const de: Dict = {
   'dashboard.presenceGatedManualStatus':
     'Status pausiert — Sie haben eine Statusmeldung selbst gesetzt',
   'dashboard.presenceGatedOutOfOffice': 'Status pausiert — Sie sind abwesend',
+  'dashboard.presenceGatedPresenting':
+    'Status pausiert — Sie präsentieren oder sind in einer Vollbild-App',
+  'dashboard.presenceGatedQuietTime': 'Status pausiert — der Fokus-Assistent ist aktiv',
+  'dashboard.presenceGatedIdle': 'Status pausiert — Schreibtisch ist inaktiv',
   // 4.7.0 — S6 (tray localization)
   'settings.languageHint':
     'Gilt auch für das Tray-Menü und das native Anwendungsmenü.',
@@ -562,4 +578,7 @@ export const de: Dict = {
   'dashboard.volumeAria': 'Spotify-Lautstärkeregler',
   'dashboard.seekAria': 'Zum Springen klicken',
   'dashboard.seekUnavailableAria': 'Dieses Gerät unterstützt kein Springen',
+
+  // --- 5.0 wave3 features-gating ---
+
 };

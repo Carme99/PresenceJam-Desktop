@@ -133,6 +133,24 @@ pub struct TeamsConfig {
     /// user opts in.
     #[serde(default = "default_gate_when_out_of_office")]
     pub gate_when_out_of_office: bool,
+    /// Issue #872: also gate the status write while the OS reports a
+    /// full-screen app, presentation mode, or Quiet Time. OFF by default
+    /// — a hand-edited config flips it on; the GUI does too. Linux/macOS
+    /// always report `Unknown` (`platform::focus`), so the toggle is a
+    /// no-op on those targets. Fails open on a Windows probe error so a
+    /// transient shell-API failure cannot lock the gate.
+    #[serde(default = "default_gate_when_presenting")]
+    pub gate_when_presenting: bool,
+    /// Issue #873: stop advertising listening once the OS reports no
+    /// keyboard/mouse input for this many seconds. `0` (the default)
+    /// disables the feature — 4.7 behaviour is unchanged until the user
+    /// opts in. Clamped to 60..=3600 by `clamp_teams` so a hand-edited
+    /// config cannot put the gate in a state that surprises the user
+    /// (a 1 s threshold would fire on every typing pause). Linux/macOS
+    /// always report `None` (`platform::idle`), so the toggle is a no-op
+    /// on those targets.
+    #[serde(default)]
+    pub idle_away_after_seconds: u64,
     /// S4 (issue #672): the text posted as the Teams status message while
     /// playback is paused — the user-templatable form of the literal the
     /// paused clear used to hardcode (`"🎵 Paused"`, emoji included by
@@ -206,6 +224,10 @@ fn default_respect_manual_status() -> bool {
 }
 
 fn default_gate_when_out_of_office() -> bool {
+    false
+}
+
+fn default_gate_when_presenting() -> bool {
     false
 }
 
@@ -358,6 +380,14 @@ fn clamp_teams(cfg: &mut TeamsConfig) {
     // fields when they fail to match `PRESENCE_COMBINATIONS`, so
     // disabling an unsupported config is automatic.
     clamp_preferred_presence(&mut cfg.preferred_presence);
+
+    // Issue #873: the idle-away threshold. `0` disables (no clamp), any
+    // other value is clamped into 60..=3600 so a hand-edited config
+    // cannot put the gate in a state that surprises the user (a 1 s
+    // threshold would have every normal typing pause fire the gate).
+    if cfg.idle_away_after_seconds != 0 {
+        cfg.idle_away_after_seconds = cfg.idle_away_after_seconds.clamp(60, 3600);
+    }
 }
 
 /// Issue #866: bound the preferred-presence config the same way `clamp_rules`
@@ -1417,6 +1447,11 @@ impl Default for TeamsConfig {
             profanity_extra_words: Vec::new(),
             respect_manual_status: default_respect_manual_status(),
             gate_when_out_of_office: default_gate_when_out_of_office(),
+            gate_when_presenting: default_gate_when_presenting(),
+            // Issue #873: `0` = off (the default; an untouched config
+            // behaves exactly as today). The clamp runs through
+            // `clamp_teams` so any non-zero value lands in 60..=3600.
+            idle_away_after_seconds: 0,
             paused_status_format: default_paused_status_format(),
             stopped_status_format: default_stopped_status_format(),
             preferred_presence: PreferredPresenceConfig::default(),

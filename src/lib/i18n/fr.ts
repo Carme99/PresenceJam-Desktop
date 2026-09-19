@@ -425,6 +425,19 @@ export const fr: Dict = {
   'settings.gateOutOfOfficeLabel': 'Mettre en pause quand je suis absent',
   'settings.gateOutOfOfficeHint':
     'Ignore la mise à jour du statut tant que votre absence Teams est active. Une règle de piste avec sa propre action de présence est prioritaire.',
+  // Issue #872 : la porte au niveau de l’OS (application plein écran,
+  // présentation, mode « Heures calmes » de l’Assistance de concentration
+  // Windows). Désactivée par défaut — le comportement 4.7 reste inchangé
+  // tant que l’utilisateur ne l’active pas.
+  'settings.gateWhenPresentingLabel': 'Mettre en pause quand je présente',
+  'settings.gateWhenPresentingHint':
+    'Ignore la mise à jour du statut quand l’OS signale une application plein écran, une présentation ou les Heures calmes. Linux/macOS ne signalent pas cet état — le bouton reste sans effet sur ces plateformes.',
+  // Issue #873 : la porte d’inactivité. `0` (par défaut) correspond au
+  // comportement 4.7 — l’application continue d’annoncer l’écoute tant
+  // que l’utilisateur ne l’active pas.
+  'settings.idleAwayLabel': 'Mettre en pause quand mon bureau est inactif',
+  'settings.idleAwayHint':
+    'N’annonce plus le statut Spotify une fois que le bureau n’a reçu aucune entrée clavier/souris pendant ce nombre de secondes. 60–3600 ; 0 désactive. Linux/macOS ne signalent pas cet état.',
   'settings.extraWordsLabel': 'Mots à filtrer personnalisés',
   'settings.extraWordsHint':
     'Un mot ou une expression par ligne. Les mêmes limites de mot que la liste intégrée s’appliquent.',
@@ -439,6 +452,11 @@ export const fr: Dict = {
   'dashboard.presenceGatedManualStatus':
     'Statut en pause — vous avez saisi un statut manuellement',
   'dashboard.presenceGatedOutOfOffice': 'Statut en pause — vous êtes absent',
+  'dashboard.presenceGatedPresenting':
+    'Statut en pause — vous présentez ou êtes dans une application plein écran',
+  'dashboard.presenceGatedQuietTime':
+    'Statut en pause — l’Assistance de concentration est active',
+  'dashboard.presenceGatedIdle': 'Statut en pause — bureau inactif',
   // 4.7.0 — S6 (tray localization)
   'settings.languageHint':
     'S’applique aussi au menu de la zone de notification et au menu natif de l’application.',
@@ -572,4 +590,7 @@ export const fr: Dict = {
   'dashboard.volumeAria': 'Curseur de volume Spotify',
   'dashboard.seekAria': 'Cliquer pour chercher',
   'dashboard.seekUnavailableAria': 'Cet appareil ne prend pas en charge la recherche',
+
+  // --- 5.0 wave3 features-gating ---
+
 };
