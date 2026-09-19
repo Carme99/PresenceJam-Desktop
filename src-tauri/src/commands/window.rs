@@ -43,16 +43,27 @@ fn validate_http_url(url: &str) -> Result<Url, String> {
 pub fn show_window(app: AppHandle) -> Result<(), String> {
     log::debug!("{CMD} show_window: ENTRY");
 
-    if let Some(window) = app.get_webview_window("main") {
-        log::info!("{CMD} show_window: window found, showing and focusing");
-        let _ = window.show();
-        // Issue #391: a minimized window stays minimized after show() —
-        // unminimize first (mirrors the single-instance raise in lib.rs).
-        let _ = window.unminimize();
-        let _ = window.set_focus();
-    } else {
+    // Issue #826: the raise either happens or it does not. This used to log
+    // SUCCESS on every exit path — including the not-found one, where the
+    // warn immediately above it described the opposite outcome — so a tray
+    // click that raised no window was recorded as a success and the one log
+    // line a post-mortem would use to confirm "the raise fired but the
+    // window was gone" said the raise worked. Failing here also lets the
+    // frontend's `invoke('show_window')` catch and the tray arm see it.
+    let Some(window) = app.get_webview_window("main") else {
         log::warn!("{CMD} show_window: main window not found");
-    }
+        return Err("main window not found".to_string());
+    };
+
+    log::info!("{CMD} show_window: window found, showing and focusing");
+    // Issue #826: a refused raise or focus on an existing window is not
+    // fatal — the deliberate discards tray.rs uses for the same raise —
+    // so keep `let _ =` here; do not turn them into errors later.
+    let _ = window.show();
+    // Issue #391: a minimized window stays minimized after show() —
+    // unminimize first (mirrors the single-instance raise in lib.rs).
+    let _ = window.unminimize();
+    let _ = window.set_focus();
 
     log::info!("{CMD} show_window: SUCCESS");
     Ok(())
@@ -211,6 +222,56 @@ mod tests {
         assert!(
             body.contains("window.set_focus()"),
             "show_window must still focus the window"
+        );
+    }
+
+    /// Issue #826: the not-found arm must fail instead of falling through to
+    /// a SUCCESS line that describes the opposite outcome.
+    #[test]
+    fn show_window_fails_and_logs_no_success_when_the_main_window_is_missing() {
+        let src = include_str!("window.rs");
+        let sig_idx = src
+            .find("pub fn show_window(")
+            .expect("show_window must exist");
+        let brace_open_rel = src[sig_idx..]
+            .find('{')
+            .expect("function body must have an opening brace");
+        let body_start = sig_idx + brace_open_rel;
+        let mut depth: u32 = 0;
+        let mut i = body_start;
+        let body_end = loop {
+            match src.as_bytes()[i] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break i;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+            if i >= src.len() {
+                panic!("unbalanced braces in show_window");
+            }
+        };
+        let body = &src[body_start + 1..body_end];
+
+        let not_found = body
+            .find("main window not found")
+            .expect("show_window must name the missing-window condition (issue #826)");
+        let success = body
+            .find("SUCCESS")
+            .expect("show_window must still report success on the raise path (issue #826)");
+
+        assert!(
+            body[not_found..].contains("return Err("),
+            "the not-found arm must return Err, not fall through to Ok (issue #826)"
+        );
+        assert!(
+            not_found < success,
+            "SUCCESS must sit on the raise path after the missing-window arm, \
+             never on the exit path (issue #826)"
         );
     }
 }
