@@ -974,13 +974,15 @@ describe('Settings logging and backup cards (#673)', () => {
  */
 describe('Settings update channel (#678)', () => {
   it('saves the chosen channel into the config payload', async () => {
-    const { container, getByRole } = await mountSettings();
+    const { container } = await mountSettings();
     const select = container.querySelector('#update-channel') as HTMLSelectElement;
     expect(select.value).toBe('stable');
 
     await fireEvent.change(select, { target: { value: 'beta' } });
     await tick();
-    await fireEvent.click(getByRole('button', { name: t('settings.saveChanges') }));
+    // #966: the banner now carries its own Save as well — the end-of-form one
+    // is what this test is about.
+    await fireEvent.click(container.querySelector('.actions .btn-full') as HTMLElement);
 
     // The harness's `save_config` echo returns exactly the payload it was
     // given (#297), so a store that settled on `beta` can only have received
@@ -1405,12 +1407,12 @@ describe('Settings dirty flag (#890)', () => {
   });
 
   it('clears the flag once the draft is saved, and keeps it when the save fails', async () => {
-    const { container, getByRole } = await mountSettings();
+    const { container } = await mountSettings();
     await fireEvent.input(formatInput(container), { target: { value: '🎧 {track}' } });
     await tick();
     expect(container.querySelector('.dirty-banner')).not.toBeNull();
 
-    await fireEvent.click(getByRole('button', { name: t('settings.saveChanges') }));
+    await fireEvent.click(container.querySelector('.actions .btn-full') as HTMLElement);
     await waitFor(() => expect(container.querySelector('.dirty-banner')).toBeNull());
 
     const base = invokeMock.getMockImplementation()!;
@@ -1421,7 +1423,7 @@ describe('Settings dirty flag (#890)', () => {
 
     await fireEvent.input(formatInput(container), { target: { value: '🎧 {track} — {artist}' } });
     await tick();
-    await fireEvent.click(getByRole('button', { name: t('settings.saveChanges') }));
+    await fireEvent.click(container.querySelector('.actions .btn-full') as HTMLElement);
     await waitFor(() => expect(container.querySelector('.settings')?.textContent).toContain('disk full'));
     // A save that never happened must not clear the flag: Back still asks.
     expect(container.querySelector('.dirty-banner')).not.toBeNull();
@@ -1437,5 +1439,51 @@ describe('Settings dirty flag (#890)', () => {
     // Spacing is applied and stored by its own store — there is nothing for
     // Save to commit, so the banner must not claim otherwise.
     expect(container.querySelector('.dirty-banner')).toBeNull();
+  });
+});
+
+/**
+ * #966 — the banner was a status line: its actions appeared only when a
+ * navigation was blocked, so the only Save button sat at the end of the
+ * twelve-card form and nothing anywhere restored the last saved values.
+ *
+ * Fails pre-fix: the banner holds no control while the form is merely dirty,
+ * and no revert action exists.
+ */
+describe('Settings unsaved-changes banner actions (#966)', () => {
+  it('saves from the banner without scrolling to the end of the form', async () => {
+    const { container } = await mountSettings();
+    await fireEvent.input(formatInput(container), { target: { value: '🎧 {track}' } });
+    await tick();
+
+    const banner = container.querySelector('.dirty-banner') as HTMLElement;
+    const save = banner.querySelector('.btn-secondary') as HTMLButtonElement;
+    expect(save?.textContent?.trim()).toBe(t('settings.saveChanges'));
+
+    await fireEvent.click(save);
+    await waitFor(() => expect(get(configStore).teams.status_format).toBe('🎧 {track}'));
+    expect(container.querySelector('.dirty-banner')).toBeNull();
+  });
+
+  it('reverts the draft to the last saved values', async () => {
+    const { container } = await mountSettings();
+    const input = formatInput(container);
+    const stored = get(configStore).teams.status_format;
+
+    await fireEvent.input(input, { target: { value: '🎧 changed' } });
+    await tick();
+    expect(input.value).toBe('🎧 changed');
+
+    const banner = container.querySelector('.dirty-banner') as HTMLElement;
+    const revert = [...banner.querySelectorAll('button')].find(
+      (button) => button.textContent?.trim() === t('settings.revertChanges')
+    ) as HTMLButtonElement;
+    await fireEvent.click(revert);
+    await tick();
+
+    expect(input.value).toBe(stored);
+    expect(container.querySelector('.dirty-banner')).toBeNull();
+    // Reverting is not a save: nothing is written back.
+    expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'save_config')).toBe(false);
   });
 });

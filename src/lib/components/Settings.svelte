@@ -1095,6 +1095,22 @@
     pendingNav = null;
     if (target) leaveSettings(target);
   }
+
+  /**
+   * #966: put the draft back to the last saved configuration, the way the
+   * initial load snapshots it. The per-card "Reset to default" buttons restore
+   * the shipped defaults, not the stored values, so without this the only way
+   * to abandon a draft was to leave the pane — and a blocked navigation
+   * (`pendingNav`) is dropped with it, since the choice it asked for is moot
+   * once there is nothing unsaved.
+   */
+  function revertChanges() {
+    localConfig = structuredClone($configStore);
+    extraWordsText = localConfig.teams.profanity_extra_words.join('\n');
+    pendingNav = null;
+    saveMessage = '';
+    isDirty = false;
+  }
 </script>
 
 <div class="settings" oninput={onDraftEdit} onchange={onDraftEdit}>
@@ -1105,15 +1121,24 @@
   {#if isDirty}
     <div class="dirty-banner" role="status">
       <span>{t('settings.unsavedChanges')}</span>
-      {#if pendingNav}
-        <div class="dirty-actions">
+      <div class="dirty-actions">
+        <!-- #966: the commit control belongs here as well as at the end of the
+             form — a card near the top must not require scrolling past eleven
+             others to save — and Revert is the only way to abandon the draft
+             without leaving the pane. -->
+        <button type="button" class="btn-secondary" onclick={handleSave} disabled={isSaving}>
+          {isSaving ? t('settings.saving') : t('settings.saveChanges')}
+        </button>
+        <button type="button" class="btn-link" onclick={revertChanges} disabled={isSaving}>{t('settings.revertChanges')}</button>
+        {#if pendingNav}
+          <!-- #548: these three also navigate, which is why their labels differ. -->
           <button type="button" class="btn-secondary" onclick={saveAndLeave} disabled={isSaving}>
             {isSaving ? t('settings.saving') : t('settings.saveAndLeave')}
           </button>
           <button type="button" class="btn-link" onclick={discardAndLeave}>{t('settings.discardChanges')}</button>
           <button type="button" class="btn-link" onclick={() => (pendingNav = null)}>{t('settings.stayHere')}</button>
-        </div>
-      {/if}
+        {/if}
+      </div>
     </div>
   {/if}
 

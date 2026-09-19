@@ -524,6 +524,7 @@ export const en = {
   'rules.presenceBusyConference': 'Busy — In a conference call',
   'rules.presenceAway': 'Away',
   'rules.presenceDndPresenting': 'Do not disturb — Presenting',
+  'settings.revertChanges': 'Revert changes',
 };
 
 export type Dict = { readonly [K in keyof typeof en]: string };

@@ -538,4 +538,5 @@ export const de: Dict = {
   'rules.presenceBusyConference': 'Beschäftigt — In einer Telefonkonferenz',
   'rules.presenceAway': 'Abwesend',
   'rules.presenceDndPresenting': 'Nicht stören — Präsentiert',
+  'settings.revertChanges': 'Änderungen zurücksetzen',
 };
