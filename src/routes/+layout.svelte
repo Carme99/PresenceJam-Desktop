@@ -1,6 +1,6 @@
 <script lang="ts">
   import '../app.css';
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, type Snippet } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
   // Side-effect import — installs the module-level subscribe that
@@ -50,6 +50,10 @@
   import type { DeviceCodeResponse, AppConfig } from '$lib/types';
   devLog(`[LAYOUT] PresenceJam build: ${import.meta.env.VITE_APP_BUILD ?? 'dev build'}`);
 
+  // #779: the shell renders the page body through the `children` snippet.
+  // The legacy slot outlet is deprecated in Svelte 5 and removed in 6, so
+  // keeping it would blank every route on the next framework bump.
+  let { children }: { children: Snippet } = $props();
   let playbackError = $state('');
   let playbackErrorTimeout: ReturnType<typeof setTimeout> | null = null;
 
@@ -289,7 +293,7 @@
     <p>{t('dashboard.setupHint')}</p>
   </main>
 {:else}
-<slot />
+  {@render children()}
 {/if}
 {#if playbackError}
   <div class="playback-toast" role="alert">
