@@ -87,8 +87,10 @@ pub struct DiagnosticsSnapshot {
     pub failed_update_install: Option<crate::updater_bg::FailedUpdateInstall>,
 }
 
-/// Coarse OS identity from `std::env::consts` (no new deps; the
-/// `tauri-plugin-os` plugin is deliberately not added for this).
+/// OS identity for the snapshot: compile-time constants from
+/// `std::env::consts` plus the runtime release probed with platform APIs
+/// (no new deps; the `tauri-plugin-os` plugin is deliberately not added
+/// for this).
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct OsInfo {
@@ -98,6 +100,11 @@ pub struct OsInfo {
     pub arch: String,
     /// `std::env::consts::FAMILY` (e.g. `"unix"` / `"windows"`).
     pub family: String,
+    /// Release of the running OS (issue #875), e.g.
+    /// `Ubuntu 24.04.1 LTS (7.0.0-31-generic)`, `macOS 14.5` or
+    /// `Windows 11 (24H2, build 26100)`. `unknown` when the probe fails;
+    /// never the hostname, machine name or a user path.
+    pub os_version: String,
 }
 
 /// Non-secret projection of `AppConfig`, flattened field-for-field so a
@@ -714,6 +721,7 @@ fn build_snapshot(
             platform: std::env::consts::OS.to_string(),
             arch: std::env::consts::ARCH.to_string(),
             family: std::env::consts::FAMILY.to_string(),
+            os_version: os_release(),
         },
         config: config_summary(state, keychain.spotify_client_secret_present, &quarantine),
         tokens: token_metadata(state),
@@ -740,6 +748,146 @@ fn probe_keychain() -> KeychainStatus {
     KeychainStatus {
         spotify_client_secret_present: crate::keychain::has_spotify_client_secret(),
         tokens_encryption_key_present: crate::keychain::get_tokens_aes_key().is_ok(),
+    }
+}
+
+/// Human-readable release of the running OS for `OsInfo::os_version`
+/// (issue #875). Whatever the platform probe cannot answer is folded to
+/// `unknown` rather than failing the snapshot.
+///
+/// Kept dependency-free on purpose: see the `OsInfo` doc comment.
+fn os_release() -> String {
+    #[cfg(target_os = "linux")]
+    {
+        let pretty = fs::read_to_string("/etc/os-release")
+            .ok()
+            .and_then(|raw| os_release_pretty_name(&raw));
+        let kernel = fs::read_to_string("/proc/sys/kernel/osrelease").ok();
+        compose_linux_release(pretty.as_deref(), kernel.as_deref().map(str::trim))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos_release()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        windows_release()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        "unknown".to_string()
+    }
+}
+
+/// `PRETTY_NAME` out of an `/etc/os-release` body, unquoted; a distribution
+/// that omits it falls back to `NAME VERSION_ID`, then to `NAME`.
+fn os_release_pretty_name(contents: &str) -> Option<String> {
+    let value = |key: &str| {
+        contents.lines().find_map(|line| {
+            let (k, v) = line.split_once('=')?;
+            if k.trim() != key {
+                return None;
+            }
+            let v = v.trim().trim_matches('"');
+            (!v.is_empty()).then(|| v.to_string())
+        })
+    };
+    value("PRETTY_NAME").or_else(|| {
+        let name = value("NAME")?;
+        Some(match value("VERSION_ID") {
+            Some(id) => format!("{name} {id}"),
+            None => name,
+        })
+    })
+}
+
+/// `Ubuntu 24.04.1 LTS (7.0.0-31-generic)`; the kernel alone when
+/// `/etc/os-release` had nothing usable, `unknown` when neither did.
+fn compose_linux_release(pretty_name: Option<&str>, kernel: Option<&str>) -> String {
+    let kernel = kernel.filter(|k| !k.is_empty());
+    match (pretty_name, kernel) {
+        (Some(name), Some(kernel)) => format!("{name} ({kernel})"),
+        (Some(name), None) => name.to_string(),
+        (None, Some(kernel)) => format!("Linux {kernel}"),
+        (None, None) => "unknown".to_string(),
+    }
+}
+
+/// `macOS 14.5` from `sw_vers -productVersion` — the one release query macOS
+/// exposes without a crate (`std::env::consts::OS` is just `"macos"`).
+#[cfg(target_os = "macos")]
+fn macos_release() -> String {
+    let version = std::process::Command::new("sw_vers")
+        .arg("-productVersion")
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .filter(|v| !v.is_empty());
+    match version {
+        Some(v) => format!("macOS {v}"),
+        None => "unknown".to_string(),
+    }
+}
+
+/// `Windows 11 (24H2, build 26100)` from the `CurrentVersion` registry key,
+/// which `reg` reads on every supported Windows and — unlike `ver` — without
+/// a localised value name.
+#[cfg(target_os = "windows")]
+fn windows_release() -> String {
+    let output = std::process::Command::new("reg")
+        .args([
+            "query",
+            r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion",
+        ])
+        .output()
+        .ok()
+        .filter(|out| out.status.success());
+    let Some(output) = output else {
+        return "unknown".to_string();
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    windows_release_token(
+        reg_value(&text, "CurrentBuildNumber").as_deref(),
+        reg_value(&text, "DisplayVersion").as_deref(),
+        reg_value(&text, "ProductName").as_deref(),
+    )
+}
+
+/// One `<name>  <type>  <value>` row of `reg query` output.
+fn reg_value(text: &str, name: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        if fields.next()? != name {
+            return None;
+        }
+        let value = fields.nth(1)?;
+        Some(value.to_string())
+    })
+}
+
+/// Windows release token from the registry values. The build number decides
+/// 10 versus 11 (Microsoft's own rule: 22000 and up is Windows 11) because
+/// `ProductName` still says "Windows 10" on Windows 11.
+fn windows_release_token(
+    build: Option<&str>,
+    display_version: Option<&str>,
+    product_name: Option<&str>,
+) -> String {
+    let Some(build) = build else {
+        return match product_name {
+            Some(name) => name.to_string(),
+            None => "unknown".to_string(),
+        };
+    };
+    let generation = match build.parse::<u32>() {
+        Ok(b) if b >= 22_000 => "11",
+        Ok(_) => "10",
+        Err(_) => "?",
+    };
+    match display_version {
+        Some(dv) => format!("Windows {generation} ({dv}, build {build})"),
+        None => format!("Windows {generation} (build {build})"),
     }
 }
 
@@ -1370,5 +1518,121 @@ mod tests {
             "snapshot leaked a config path: {json}"
         );
         assert!(!json.contains("pj/config.json.bak"), "{json}");
+    }
+
+    // ---------------------------------------------------------------
+    // U10 (#875): the snapshot names the OS *release*, not just the
+    // platform token.
+    // ---------------------------------------------------------------
+
+    /// Keychain state for snapshot tests — the probes are irrelevant to the
+    /// assembly contract and must not touch the real OS keychain.
+    fn inert_keychain() -> KeychainStatus {
+        KeychainStatus {
+            spotify_client_secret_present: false,
+            tokens_encryption_key_present: false,
+        }
+    }
+
+    #[test]
+    fn test_os_release_pretty_name_reads_os_release() {
+        let body = "NAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nPRETTY_NAME=\"Ubuntu 24.04.1 LTS\"\n";
+        assert_eq!(
+            os_release_pretty_name(body).as_deref(),
+            Some("Ubuntu 24.04.1 LTS")
+        );
+        // Older/minimal distributions may carry only NAME and VERSION_ID.
+        assert_eq!(
+            os_release_pretty_name("NAME=Alpine\nVERSION_ID=3.20\n").as_deref(),
+            Some("Alpine 3.20")
+        );
+        assert_eq!(
+            os_release_pretty_name("NAME=Alpine\n").as_deref(),
+            Some("Alpine")
+        );
+        // An empty PRETTY_NAME is not a name: the fallback still applies.
+        assert_eq!(
+            os_release_pretty_name("PRETTY_NAME=\"\"\nNAME=Debian\n").as_deref(),
+            Some("Debian")
+        );
+        assert_eq!(os_release_pretty_name("ID=linux\n"), None);
+    }
+
+    #[test]
+    fn test_compose_linux_release_names_the_kernel_alongside_the_distro() {
+        assert_eq!(
+            compose_linux_release(Some("Ubuntu 24.04.1 LTS"), Some("6.8.0-45-generic")),
+            "Ubuntu 24.04.1 LTS (6.8.0-45-generic)"
+        );
+        assert_eq!(
+            compose_linux_release(Some("Ubuntu 24.04"), None),
+            "Ubuntu 24.04"
+        );
+        // A kernel-only read still beats `unknown`.
+        assert_eq!(compose_linux_release(None, Some("6.8.0")), "Linux 6.8.0");
+        assert_eq!(compose_linux_release(None, None), "unknown");
+    }
+
+    #[test]
+    fn test_reg_value_reads_a_reg_query_row() {
+        let out = "\r\nHKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\r\n    CurrentBuildNumber    REG_SZ    26100\r\n    DisplayVersion    REG_SZ    24H2\r\n\r\n";
+        assert_eq!(
+            reg_value(out, "CurrentBuildNumber").as_deref(),
+            Some("26100")
+        );
+        assert_eq!(reg_value(out, "DisplayVersion").as_deref(), Some("24H2"));
+        assert_eq!(reg_value(out, "ProductName"), None);
+    }
+
+    #[test]
+    fn test_windows_release_token_distinguishes_ten_from_eleven() {
+        // Microsoft's own rule — build 22000 and up is Windows 11 — because
+        // `ProductName` still says "Windows 10" on Windows 11.
+        assert_eq!(
+            windows_release_token(Some("26100"), Some("24H2"), Some("Windows 10 Pro")),
+            "Windows 11 (24H2, build 26100)"
+        );
+        assert_eq!(
+            windows_release_token(Some("19045"), Some("22H2"), Some("Windows 10 Pro")),
+            "Windows 10 (22H2, build 19045)"
+        );
+        assert_eq!(
+            windows_release_token(Some("22631"), None, None),
+            "Windows 11 (build 22631)"
+        );
+        // An unreadable build leaves the product name rather than a guess.
+        assert_eq!(
+            windows_release_token(None, None, Some("Windows Server 2022")),
+            "Windows Server 2022"
+        );
+        assert_eq!(windows_release_token(None, None, None), "unknown");
+    }
+
+    #[test]
+    fn test_snapshot_os_version_is_populated_on_this_platform() {
+        let snapshot = build_snapshot(
+            &crate::AppState::default(),
+            None,
+            inert_keychain(),
+            None,
+            ConfigQuarantine::default(),
+        );
+        assert!(
+            !snapshot.os.os_version.is_empty(),
+            "the snapshot must name an OS release, not an empty string"
+        );
+        #[cfg(target_os = "linux")]
+        {
+            // The probe reads the host, so the release must match the file it
+            // reads it from — a stubbed field would not.
+            assert_ne!(snapshot.os.os_version, "unknown");
+            let kernel =
+                fs::read_to_string("/proc/sys/kernel/osrelease").expect("read the kernel release");
+            assert!(
+                snapshot.os.os_version.contains(kernel.trim()),
+                "the kernel release travels with the distro name: {}",
+                snapshot.os.os_version
+            );
+        }
     }
 }
