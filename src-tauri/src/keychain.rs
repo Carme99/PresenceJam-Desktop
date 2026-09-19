@@ -474,9 +474,11 @@ static TOKENS_KEY_CREATE_LOCK: LazyLock<parking_lot::Mutex<()>> =
     LazyLock::new(|| parking_lot::Mutex::new(()));
 
 /// Process-wide cache of the tokens AES key, mirroring the client-secret
-/// [`CACHE`]. The key is immutable for the life of an install, so the cache
-/// cannot go stale except through [`delete_tokens_aes_key`] (the corrupt-key
-/// recovery path), which clears it.
+/// [`CACHE`]. It is a *hint* for the write path rather than the truth: the
+/// keychain slot can be deleted or replaced while the app runs — including by
+/// the recovery step this module's own corrupt-key error text recommends — so
+/// [`get_or_create_tokens_aes_key`] revalidates the cached key against the slot
+/// before using it (issue #936), and [`delete_tokens_aes_key`] clears it.
 static TOKENS_KEY_CACHE: LazyLock<parking_lot::Mutex<Option<[u8; 32]>>> =
     LazyLock::new(|| parking_lot::Mutex::new(None));
 
@@ -524,7 +526,9 @@ fn corrupt_tokens_aes_key_help(detail: String) -> String {
 ///
 /// The key is stored base64-encoded under
 /// `(KEYRING_SERVICE, TOKENS_AES_KEY_USER)`. The in-process cache is consulted
-/// first.
+/// first: this is the *read* path, whose callers only decrypt. A stale cached
+/// key is caught on the write path ([`get_or_create_tokens_aes_key`]), which
+/// revalidates the cache before encrypting (issue #936).
 ///
 /// The categories are what let the token store tell a *locked keychain* apart
 /// from *corrupt ciphertext* at launch: `Absent`/`Unavailable` mean the file on
@@ -572,18 +576,70 @@ const TOKENS_AES_KEY_NOT_FOUND_MSG: &str =
 /// ([`create_or_adopt_tokens_key`], issue #563), and a present-but-corrupt
 /// entry is reported through [`corrupt_tokens_aes_key_help`] instead of
 /// dead-ending the user (issue #566).
+///
+/// The cached key is revalidated against the keychain slot before it is used
+/// (issue #936): a slot deleted or replaced while the app runs — including by
+/// the recovery step [`corrupt_tokens_aes_key_help`] recommends, or an OS
+/// keychain UI — would otherwise make every later persist encrypt with a key
+/// the keychain no longer holds, so tokens.json fails GCM authentication at the
+/// next launch and the user is pushed through onboarding with no explanation.
 pub fn get_or_create_tokens_aes_key() -> Result<[u8; 32], String> {
-    if let Some(key) = cached_tokens_aes_key() {
-        return Ok(key);
-    }
-    let entry = map_keychain_err(keyring::Entry::new(KEYRING_SERVICE, TOKENS_AES_KEY_USER))?;
-    let key = create_or_adopt_tokens_key(
-        || entry.get_password(),
-        |b64| entry.set_password(b64),
+    // The slot is opened lazily, inside the closures: a keychain that cannot be
+    // opened at all must not defeat the revalidation below, which deliberately
+    // keeps a cached key when the keychain does not answer.
+    let key = get_or_create_tokens_aes_key_with(
+        cached_tokens_aes_key(),
+        || probe_keychain_entry(TOKENS_AES_KEY_USER),
+        |b64| {
+            let entry = keyring::Entry::new(KEYRING_SERVICE, TOKENS_AES_KEY_USER)?;
+            entry.set_password(b64)
+        },
         generate_tokens_aes_key,
     )?;
     *tokens_key_cache().lock() = Some(key);
     Ok(key)
+}
+
+/// Core of [`get_or_create_tokens_aes_key`]: cached-key revalidation (issue
+/// #936) followed by one locked read-or-create
+/// ([`create_or_adopt_tokens_key`]). The keychain access is injected so the
+/// decision table is unit-testable without an OS keychain.
+///
+/// The cache is a hint here, not the truth. A cached key is used only while the
+/// slot still holds it; persists happen at token-refresh frequency rather than
+/// on the polling hot path, so the extra read is affordable. When the slot is
+/// gone, replaced or undecodable the decision is delegated to
+/// [`create_or_adopt_tokens_key`], which regenerates on `NoEntry`, adopts a
+/// different stored key, and hard-errors on a corrupt one.
+///
+/// When the keychain merely cannot *answer* (locked vault, no Secret Service
+/// daemon, denied access prompt) the cached key is kept: that is not a
+/// deletion, the cached key is still this install's key, and failing a persist
+/// the keychain cannot answer for would lose the session on disk.
+fn get_or_create_tokens_aes_key_with(
+    cached: Option<[u8; 32]>,
+    read: impl Fn() -> Result<String, keyring::Error>,
+    store: impl Fn(&str) -> Result<(), keyring::Error>,
+    generate: impl FnOnce() -> Result<[u8; 32], String>,
+) -> Result<[u8; 32], String> {
+    if let Some(cached) = cached {
+        match read() {
+            Ok(b64) if decode_tokens_aes_key(&b64) == Ok(cached) => return Ok(cached),
+            Ok(_) | Err(keyring::Error::NoEntry) => log::warn!(
+                "[KEYCHAIN] cached tokens AES key is no longer the keychain's; \
+                 re-resolving from the keychain"
+            ),
+            Err(e) => {
+                log::warn!(
+                    "[KEYCHAIN] could not revalidate the cached tokens AES key ({}); \
+                     using the cached key",
+                    e
+                );
+                return Ok(cached);
+            }
+        }
+    }
+    create_or_adopt_tokens_key(read, store, generate)
 }
 
 /// Core of [`get_or_create_tokens_aes_key`]: one locked read-or-create.
@@ -942,5 +998,82 @@ mod tests {
             || -> Result<(), String> { Err("locked".to_string()) },
         )
         .expect("a failed legacy delete must not fail the store");
+    }
+
+    /// Issue #936: the cached tokens AES key is a hint, not the truth — it must
+    /// be revalidated against the keychain slot before it is used to encrypt a
+    /// write. Deleting the slot at runtime (exactly the recovery step the
+    /// corrupt-key error text recommends, and what an OS keychain UI can do) has
+    /// to regenerate and store a fresh key; otherwise tokens.json is written
+    /// under a key the keychain no longer holds and fails GCM authentication at
+    /// the next launch. Pre-fix the cached key was returned without consulting
+    /// the keychain at all.
+    #[test]
+    fn cached_tokens_key_is_revalidated_against_the_slot() {
+        let slot = parking_lot::Mutex::new(None::<String>);
+        let store_calls = parking_lot::Mutex::new(0u32);
+        let read = || -> Result<String, keyring::Error> {
+            match slot.lock().clone() {
+                Some(b64) => Ok(b64),
+                None => Err(keyring::Error::NoEntry),
+            }
+        };
+        let store = |b64: &str| -> Result<(), keyring::Error> {
+            *store_calls.lock() += 1;
+            *slot.lock() = Some(b64.to_string());
+            Ok(())
+        };
+        let stale = [0xAAu8; 32];
+        let fresh = [0xBBu8; 32];
+
+        // The slot is gone: the stale cached key must be replaced by a fresh one
+        // that the keychain really holds, i.e. the key the next write uses.
+        let regenerated = get_or_create_tokens_aes_key_with(Some(stale), &read, &store, || Ok(fresh))
+            .expect("a deleted slot must be regenerated, not reused");
+        assert_eq!(regenerated, fresh, "the stale cached key must not be reused");
+        assert_eq!(*store_calls.lock(), 1, "the fresh key must be stored");
+        let stored_b64 = slot.lock().clone().expect("the fresh key must be stored");
+        assert_eq!(
+            decode_tokens_aes_key(&stored_b64).unwrap(),
+            fresh,
+            "the keychain must hold the key the write will encrypt with"
+        );
+
+        // The slot still holds the cached key: no keychain write, no
+        // regeneration.
+        *slot.lock() = Some(STANDARD.encode(fresh));
+        let confirmed =
+            get_or_create_tokens_aes_key_with(Some(fresh), &read, &store, || {
+                panic!("a key the slot still holds must never be regenerated")
+            })
+            .expect("a confirmed cached key must be used");
+        assert_eq!(confirmed, fresh);
+        assert_eq!(
+            *store_calls.lock(),
+            1,
+            "a confirmed cached key must not write to the keychain"
+        );
+
+        // The slot holds a *different* key: the keychain's key wins, because the
+        // ciphertext written by whoever installed it must stay decryptable.
+        let replaced = [0xCCu8; 32];
+        *slot.lock() = Some(STANDARD.encode(replaced));
+        let adopted =
+            get_or_create_tokens_aes_key_with(Some(fresh), &read, &store, || {
+                panic!("a replaced slot must be adopted, not overwritten")
+            })
+            .expect("a replaced slot must be adopted");
+        assert_eq!(adopted, replaced);
+        assert_eq!(*store_calls.lock(), 1);
+
+        // The keychain cannot answer at all: a locked vault is not a deletion,
+        // so the cached key is kept rather than failing the persist.
+        let unavailable =
+            || -> Result<String, keyring::Error> { Err(platform_failure("no secret service")) };
+        let kept = get_or_create_tokens_aes_key_with(Some(fresh), &unavailable, &store, || {
+            panic!("an unreadable slot must not trigger a regeneration")
+        })
+        .expect("an unreadable keychain must not discard a confirmed key");
+        assert_eq!(kept, fresh);
     }
 }
