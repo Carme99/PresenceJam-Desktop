@@ -109,7 +109,7 @@ jobs (the Name column is the check context shown on the PR's checks list):
 | Job | Name | What it does |
 | --- | --- | --- |
 | `rust-platform-check` | Rust check (macOS + Windows) | `cargo check` on macOS + Windows (platform-gated code compiles) |
-| `frontend` | Frontend (npm build + ts-rs codegen) | `npm run build`, `npm run check`, frontend tests |
+| `frontend` | Frontend (npm build + ts-rs codegen) | `npm run build`, `npm run check`, frontend tests + coverage ratchet (`npm run test:coverage`) |
 | `rust` | Rust (cargo check) | fmt, `cargo check`, `cargo test` on Linux |
 | `rust-clippy` | Rust clippy | `cargo clippy -- -D warnings` |
 | `changelog-links` | CHANGELOG link definitions | every `## [X]` header needs a `[X]:` definition |
@@ -136,9 +136,10 @@ behind the tag-push run.
    the updater re-offer the same update forever (issue #605). The resolved `tag`
    output is
    consumed by every downstream job instead of `github.ref_name`.
-2. **`verify`** (`needs: resolve-tag`, ~lines 111-178) — checks out the same tag
+2. **`verify`** (`needs: resolve-tag`, ~lines 139-213) — checks out the same tag
    and reruns the `ci.yml` gate set there (fmt, clippy, `cargo test`,
-   `npm run check`, frontend tests, with Linux system deps). `ci.yml` only runs
+   `npm run check`, `npm run test:coverage` — the coverage ratchet, not bare
+   `npm test`, with Linux system deps). `ci.yml` only runs
    on PRs and `main`, so without this job the exact commit that produces
    user-facing binaries would never be tested — worst case on a re-cut of a
    commit that never saw CI.

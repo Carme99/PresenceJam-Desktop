@@ -202,8 +202,15 @@ jobs:
       - name: Svelte/TS type check (npm run check)
         run: npm run check
 
-      - name: Frontend unit tests (npm test)
-        run: npm test
+      # The coverage variant, not bare `npm test` (issue #833): this job
+      # exists to rerun the ci.yml gate set on the exact commit that produces
+      # the shipped binaries, and ci.yml's frontend job gates on the four
+      # thresholds in vitest.config.js. Running the fast variant here applied
+      # one gate fewer than the PR path — a tag cut on a re-cut commit that
+      # never saw CI would publish a coverage regression. Same command, same
+      # step name and same position (after the type check) as ci.yml.
+      - name: Frontend unit tests + coverage ratchet (npm run test:coverage)
+        run: npm run test:coverage
 
   build:
     needs: [resolve-tag, verify]
