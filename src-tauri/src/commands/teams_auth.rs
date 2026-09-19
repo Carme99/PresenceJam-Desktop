@@ -13,8 +13,26 @@ use tauri::{AppHandle, Emitter};
 /// Log tag prefix for this submodule (issue #79 item 3).
 const CMD: &str = "[CMD.TEAMS_AUTH]";
 
+/// Run one blocking round-trip on the async runtime's blocking pool.
+///
+/// Issue #878: Tauri executes a plain `#[tauri::command]` body inline on the
+/// IPC thread, so a synchronous HTTPS request freezes the webview for its
+/// whole duration — normally a few hundred ms, up to the client timeout
+/// behind a captive portal, a dead network or a blackholed DNS. A join
+/// failure is mapped to the same `String` error the flow reports everywhere
+/// else.
+async fn offload_blocking<T, F>(label: &'static str, work: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|e| format!("{CMD} {label} task panicked: {e}"))
+}
+
 #[tauri::command]
-pub fn start_teams_auth_device_code(
+pub async fn start_teams_auth_device_code(
     window: tauri::Window,
     app: AppHandle,
 ) -> Result<DeviceCodeResponse, String> {
@@ -24,7 +42,11 @@ pub fn start_teams_auth_device_code(
     super::require_main_window(&window)?;
     log::debug!("{CMD} start_teams_auth_device_code: ENTRY");
 
-    let response = match crate::teams::start_teams_auth_device_code() {
+    // Issue #878: fetching the device code is a blocking HTTPS POST plus a
+    // JSON parse; a synchronous command body would run it on the IPC thread
+    // and freeze the window before the code and verification URL appear.
+    let request = crate::teams::start_teams_auth_device_code;
+    let response = match offload_blocking("start_teams_auth_device_code", request).await {
         Ok(r) => r,
         Err(e) => {
             log::error!("{CMD} start_teams_auth_device_code: failed: {}", e);
@@ -227,5 +249,70 @@ pub fn get_teams_granted_scopes(state: tauri::State<'_, Arc<AppState>>) -> Vec<S
     match state.tokens.teams().as_ref() {
         Some(tokens) => decode_teams_granted_scopes(&tokens.access_token),
         None => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::offload_blocking;
+
+    /// Issue #878: the point of the offload is that the thread which *awaits*
+    /// the request is not the thread which *runs* it. `block_on` parks the
+    /// calling thread, so work that ran inline would report the caller's own
+    /// thread id — exactly the freeze the issue describes.
+    #[test]
+    fn offloaded_work_runs_off_the_awaiting_thread() {
+        let awaiting = std::thread::current().id();
+        let worker = tauri::async_runtime::block_on(offload_blocking("test", std::thread::current))
+            .expect("the offloaded work must not panic");
+        assert_ne!(
+            worker, awaiting,
+            "the device-code request must not run on the thread that awaits it: \
+             that thread is the IPC thread, and the HTTPS round-trip would \
+             freeze the window until the request answered"
+        );
+    }
+
+    /// Normalised source of the `start_teams_auth_device_code` command: from
+    /// its (async) signature to the brace that closes its body. The
+    /// assertions below cannot read the whole file, because this test module
+    /// contains the very patterns they look for and a whole-file grep would
+    /// pass vacuously. Panics when the command is not async — that is the
+    /// pre-#878 shape.
+    fn device_code_command_source() -> String {
+        let src = include_str!("teams_auth.rs");
+        let start = src
+            .find("pub async fn start_teams_auth_device_code(")
+            .expect("the device-code command must be an async `#[tauri::command]`");
+        let open = start + src[start..].find('{').expect("a command body opener");
+        let mut depth = 0usize;
+        for (offset, ch) in src[open..].char_indices() {
+            if ch == '{' {
+                depth += 1;
+            } else if ch == '}' {
+                depth -= 1;
+                if depth == 0 {
+                    let body = &src[start..=open + offset];
+                    return body.split_whitespace().collect::<Vec<_>>().join(" ");
+                }
+            }
+        }
+        panic!("the device-code command body is unterminated");
+    }
+
+    /// A synchronous call left in the command body is the pre-#878
+    /// regression: it runs the HTTPS round-trip on the IPC thread.
+    #[test]
+    fn device_code_command_offloads_its_request() {
+        let body = device_code_command_source();
+        assert!(
+            body.contains("let request = crate::teams::start_teams_auth_device_code;"),
+            "the command must take the blocking request as its offload payload"
+        );
+        assert!(
+            body.contains("match offload_blocking(\"start_teams_auth_device_code\", request).await"),
+            "the request must be awaited through `offload_blocking`, or the window \
+             freezes for the round trip"
+        );
     }
 }
