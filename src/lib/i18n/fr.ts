@@ -682,8 +682,8 @@ export const fr: Dict = {
   'tray.profilesMenuNone': 'Aucun profil défini',
   'tray.profilesMenuActivateBase': 'Utiliser la configuration de base',
   'cli.profileFlag': 'Basculer vers un profil de présence nommé et quitter.',
-  'cli.profileActive': 'Le profil actif est désormais « {name} ».',
-  'cli.profileUnknown': 'Aucun profil nommé « {name} » — la configuration de base reste active.',
+  'cli.profileActive': 'Le profil actif est désormais « {name} ».',
+  'cli.profileUnknown': 'Aucun profil nommé « {name} » — la configuration de base reste active.',
   'settings.shortcutToggleProfile': 'Faire défiler les profils de présence',
 
   // --- 5.0 wave3 playback-source ---
