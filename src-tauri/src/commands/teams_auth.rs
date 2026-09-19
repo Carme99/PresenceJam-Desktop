@@ -47,8 +47,10 @@ pub async fn start_teams_auth_device_code(
     // and freeze the window before the code and verification URL appear.
     let request = crate::teams::start_teams_auth_device_code;
     let response = match offload_blocking("start_teams_auth_device_code", request).await {
-        Ok(r) => r,
-        Err(e) => {
+        // `offload_blocking` maps a join failure to the same `String`, so the
+        // request's own `Result` is the only one left to classify here.
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) | Err(e) => {
             log::error!("{CMD} start_teams_auth_device_code: failed: {}", e);
             let _ = app.emit("teams-auth-failed", e.clone());
             return Err(e);
@@ -310,7 +312,9 @@ mod tests {
             "the command must take the blocking request as its offload payload"
         );
         assert!(
-            body.contains("match offload_blocking(\"start_teams_auth_device_code\", request).await"),
+            body.contains(
+                "match offload_blocking(\"start_teams_auth_device_code\", request).await"
+            ),
             "the request must be awaited through `offload_blocking`, or the window \
              freezes for the round trip"
         );
