@@ -110,13 +110,13 @@ impl FocusProbe for WindowsFocusProbe {
         let result = unsafe { SHQueryUserNotificationState() };
         match result {
             Ok(state) => Ok(match state {
-                    QUNS_BUSY | QUNS_RUNNING_D3D_FULL_SCREEN => PresentationState::FullScreen,
-                    QUNS_PRESENTATION_MODE => PresentationState::Presentation,
-                    QUNS_QUIET_TIME => PresentationState::QuietTime,
-                    // `QUNS_NOT_PRESENT` (no flag) and `QUNS_APP` (an app is
-                    // foreground) are both "OS isn't presenting".
-                    _ => PresentationState::None,
-                }),
+                QUNS_BUSY | QUNS_RUNNING_D3D_FULL_SCREEN => PresentationState::FullScreen,
+                QUNS_PRESENTATION_MODE => PresentationState::Presentation,
+                QUNS_QUIET_TIME => PresentationState::QuietTime,
+                // `QUNS_NOT_PRESENT` (no flag) and `QUNS_APP` (an app is
+                // foreground) are both "OS isn't presenting".
+                _ => PresentationState::None,
+            }),
             Err(e) => {
                 // Preserve the bit pattern in `u32` so the log line stays
                 // greppable across 32/64-bit builds.
