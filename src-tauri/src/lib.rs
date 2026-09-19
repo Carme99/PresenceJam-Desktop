@@ -793,7 +793,11 @@ fn detach_pane(app: AppHandle, pane: String, theme: Option<String>) -> Result<()
             .set_focus()
             .map_err(|e| format!("failed to focus the {} window: {e}", spec.label));
     }
-    log::info!("[DETACH] detach_pane: opening {} at {}", spec.label, spec.url);
+    log::info!(
+        "[DETACH] detach_pane: opening {} at {}",
+        spec.label,
+        spec.url
+    );
     tauri::WebviewWindowBuilder::new(
         &app,
         spec.label,
@@ -2501,8 +2505,7 @@ mod tests {
         assert!(logs.title.contains("Logs"), "the title must name the pane");
         assert_eq!((logs.width, logs.height), (720.0, 520.0));
 
-        let settings =
-            detached_pane_spec("settings", None).expect("settings is a configured pane");
+        let settings = detached_pane_spec("settings", None).expect("settings is a configured pane");
         assert_eq!(settings.label, "settings-detached");
         assert_eq!(settings.url, "/detached/settings");
         assert_eq!((settings.width, settings.height), (620.0, 720.0));
@@ -2527,7 +2530,14 @@ mod tests {
 
         // Nothing outside the two configured panes may open a window, and the
         // labels the store already knows are not pane names either.
-        for pane in ["", "main", "logs-detached", "../logs", "LOGS", "settings/../logs"] {
+        for pane in [
+            "",
+            "main",
+            "logs-detached",
+            "../logs",
+            "LOGS",
+            "settings/../logs",
+        ] {
             assert!(
                 detached_pane_spec(pane, None).is_err(),
                 "`{pane}` is not a detached pane and must be refused"
