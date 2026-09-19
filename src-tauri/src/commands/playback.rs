@@ -16,7 +16,7 @@
 //! unreachable commands are gone.
 
 use crate::spotify::{
-    decode_spotify_granted_scopes, is_token_expired, refresh_spotify_token, SpotifyApiError,
+    self, decode_spotify_granted_scopes, is_token_expired, refresh_spotify_token, SpotifyApiError,
     SpotifyTokens,
 };
 use std::sync::Arc;
@@ -24,6 +24,52 @@ use tauri::{AppHandle, State};
 
 /// Log tag prefix for this submodule (issue #79 item 3).
 const CMD: &str = "[CMD.PLAYBACK]";
+
+/// Issue #871: drive the active device's volume from the Dashboard slider
+/// or the tray's Volume submenu. The call goes through the same
+/// `player_with_refresh_typed` policy every other playback command uses,
+/// so a token refresh retries once automatically and the Dashboard /
+/// tray / global-shortcut callers share one round-trip behaviour.
+#[tauri::command]
+pub async fn set_volume(
+    window: tauri::Window,
+    state: State<'_, Arc<crate::AppState>>,
+    app: AppHandle,
+    percent: u32,
+) -> Result<(), String> {
+    super::require_main_window(&window)?;
+    let state_inner = Arc::clone(state.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        player_with_refresh(&state_inner, &app, "set volume", |token| {
+            spotify::player_set_volume(token, percent, None)
+        })
+    })
+    .await
+    .map_err(|e| format!("set_volume spawn_blocking panicked: {:?}", e))?
+}
+
+/// Issue #871: seek the active track from the Dashboard's click-to-seek
+/// progress bar or the tray's +/- 30 s submenu. Negative seeks (e.g. the
+/// "go back 30 s" tray entry) are passed through to the Spotify API
+/// unchanged — Spotify clamps the position to the current track's
+/// duration on its side.
+#[tauri::command]
+pub async fn seek(
+    window: tauri::Window,
+    state: State<'_, Arc<crate::AppState>>,
+    app: AppHandle,
+    position_ms: i64,
+) -> Result<(), String> {
+    super::require_main_window(&window)?;
+    let state_inner = Arc::clone(state.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        player_with_refresh(&state_inner, &app, "seek", |token| {
+            spotify::player_seek(token, position_ms, None)
+        })
+    })
+    .await
+    .map_err(|e| format!("seek spawn_blocking panicked: {:?}", e))?
+}
 
 /// Never-re-auth token getter (issues #375/#428): return the stored Spotify
 /// access token when it is still fresh; otherwise attempt one

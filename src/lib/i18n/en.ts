@@ -528,6 +528,27 @@ export const en = {
   'rules.presenceBusyConference': 'Busy — In a conference call',
   'rules.presenceAway': 'Away',
   'rules.presenceDndPresenting': 'Do not disturb — Presenting',
+  // --- 5.0 wave3 features-presence ---
+  'dashboard.manualStatusTitle': 'Manual status',
+  'dashboard.manualStatusPlaceholder': 'Set a status your team can see for a while',
+  'dashboard.manualStatusExpiryLabel': 'Expires after',
+  'dashboard.manualStatusExpiry15': '15 minutes',
+  'dashboard.manualStatusExpiry30': '30 minutes',
+  'dashboard.manualStatusExpiry60': '1 hour',
+  'dashboard.manualStatusExpiry120': '2 hours',
+  'dashboard.manualStatusSet': 'Set status',
+  'dashboard.manualStatusClear': 'Clear status',
+  'dashboard.manualStatusActive': 'Active until {expiry}',
+  'dashboard.manualStatusActiveEmpty': 'Active (expires soon)',
+  'dashboard.manualStatusRecentTitle': 'Recent statuses',
+  'dashboard.manualStatusRecentEmpty': 'No recent statuses yet',
+  'dashboard.manualStatusFiltered': 'Status was rewritten by your profanity filter',
+  'dashboard.activityTitle': 'Activity',
+  'dashboard.activityEmpty': 'No decisions yet — start sync to see what your app chose',
+  'dashboard.volumeLabel': 'Volume',
+  'dashboard.volumeAria': 'Spotify volume slider',
+  'dashboard.seekAria': 'Click to seek',
+  'dashboard.seekUnavailableAria': 'This device does not support seeking',
 };
 
 export type Dict = { readonly [K in keyof typeof en]: string };

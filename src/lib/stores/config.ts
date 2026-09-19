@@ -63,7 +63,17 @@ export const defaultConfig: AppConfig = {
     // texts. Rust keeps the emoji prefix out of the field, so these mirror
     // the serde defaults verbatim.
     paused_status_format: 'Paused',
-    stopped_status_format: 'Nothing playing on Spotify'
+    stopped_status_format: 'Nothing playing on Spotify',
+    // Issue #866: the user-opt-in preferred-presence feature. OFF by
+    // default — the user opts in through Settings — and the pair is the
+    // empty string (the Rust clamp normalizes an unsupported pair to the
+    // empty form). Expiry defaults to 60 minutes on the Rust side.
+    preferred_presence: {
+      enabled: false,
+      availability: '',
+      activity: '',
+      expiry_minutes: 60
+    }
   },
   polling: {
     default_interval_seconds: BigInt(30),
@@ -82,7 +92,11 @@ export const defaultConfig: AppConfig = {
     // (`number`). Both mirror `config.rs`'s serde defaults and its
     // `clamp_logging` band (1..=500 MB, 1..=20 files).
     max_file_size_mb: BigInt(10),
-    keep_files: 3
+    keep_files: 3,
+    // Issue #877: opt-in JSONL mirror of the bounded decision history.
+    // OFF by default so a noisy rule set does not grow the log
+    // without bound.
+    presence_history: false
   },
   // 4.7.0 (issue #678): release channel the updater reads. Mirrors Rust's
   // `UpdatesConfig::default` (`stable`) — the backend resolves the channel

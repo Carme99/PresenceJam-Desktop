@@ -375,6 +375,7 @@ impl Default for AppState {
 pub mod commands;
 pub mod config;
 pub mod diagnostics;
+pub mod history;
 pub mod i18n;
 pub mod keychain;
 pub mod macos_deeplink;
@@ -865,15 +866,33 @@ const STATUS_FLAG: &str = "--status";
 const SYNC_ONCE_FLAG: &str = "--sync-once";
 /// `--help`: print usage text and exit 0.
 const HELP_FLAG: &str = "--help";
+/// `--set-status <message>`: post a manual Teams status with the default
+/// expiry and exit. Pairs with `--clear-status` (issue #870).
+const SET_STATUS_FLAG: &str = "--set-status";
+/// `--set-status-expiry <minutes>`: the expiry override for `--set-status`.
+/// Defaults to 60; clamped to the documented `5..=720` window.
+const SET_STATUS_EXPIRY_FLAG: &str = "--set-status-expiry";
+/// `--clear-status`: clear the user's manual Teams status and exit.
+const CLEAR_STATUS_FLAG: &str = "--clear-status";
 
 /// What the argv asked for. A CLI flag is an *alternative* to launching the
 /// GUI, never a modifier of it — which is why an unrecognised argument still
 /// launches normally.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum CliCommand {
     Help,
     Status,
     SyncOnce,
+    /// Issue #870: post a manual Teams status with the supplied message
+    /// and (optionally) expiry. Both are required for the dispatcher to
+    /// produce a useful command; an `--set-status` without a message is
+    /// treated like `--help` (usage + exit 1) for ergonomic CLI behaviour.
+    SetManualStatus {
+        message: String,
+        expiry_minutes: u32,
+    },
+    /// Issue #870: clear the user's manual Teams status, no arguments.
+    ClearManualStatus,
 }
 
 /// Parse the CLI intent out of argv; `None` means "launch the GUI".
@@ -882,23 +901,65 @@ enum CliCommand {
 /// every unrecognised argument is ignored. Generic over the argv element type
 /// so the parser is unit-testable without touching the real process argv
 /// (mirroring `has_minimized_flag`).
+///
+/// Issue #870: `--set-status <message>` + the optional
+/// `--set-status-expiry <minutes>` are parsed together, so a CLI invocation
+/// is a single atomic decision — the partial-flag case (`--set-status`
+/// without a message) is treated as "argument missing", not as a
+/// separate CliCommand variant.
 fn cli_command<I, S>(args: I) -> Option<CliCommand>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
-    args.into_iter().find_map(|arg| {
+    let mut args_iter = args.into_iter();
+    while let Some(arg) = args_iter.next() {
         let arg = arg.as_ref();
         if arg == std::ffi::OsStr::new(HELP_FLAG) {
-            Some(CliCommand::Help)
-        } else if arg == std::ffi::OsStr::new(STATUS_FLAG) {
-            Some(CliCommand::Status)
-        } else if arg == std::ffi::OsStr::new(SYNC_ONCE_FLAG) {
-            Some(CliCommand::SyncOnce)
-        } else {
-            None
+            return Some(CliCommand::Help);
         }
-    })
+        if arg == std::ffi::OsStr::new(STATUS_FLAG) {
+            return Some(CliCommand::Status);
+        }
+        if arg == std::ffi::OsStr::new(SYNC_ONCE_FLAG) {
+            return Some(CliCommand::SyncOnce);
+        }
+        if arg == std::ffi::OsStr::new(CLEAR_STATUS_FLAG) {
+            return Some(CliCommand::ClearManualStatus);
+        }
+        if arg == std::ffi::OsStr::new(SET_STATUS_FLAG) {
+            // Collect the rest of argv as owned strings; the manual status
+            // parse is a flat two-pair shape (`--set-status <message>` plus
+            // an optional `--set-status-expiry <minutes>`), so a single
+            // vector is simpler than juggling iterator clones (issue #928
+            // — `args_iter.clone()` does not exist for owned iterators).
+            let rest: Vec<String> = args_iter
+                .map(|m| m.as_ref().to_string_lossy().into_owned())
+                .collect();
+            let mut message = String::new();
+            let mut expiry_minutes: u32 = 60;
+            let mut i = 0;
+            if let Some(first) = rest.first() {
+                message = first.clone();
+                i = 1;
+            }
+            while i + 1 < rest.len() {
+                if rest[i] == SET_STATUS_EXPIRY_FLAG {
+                    if let Ok(parsed) = rest[i + 1].parse::<u32>() {
+                        expiry_minutes = parsed;
+                    }
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            return Some(CliCommand::SetManualStatus {
+                message,
+                expiry_minutes,
+            });
+        }
+    }
+    None
 }
 
 /// Usage text for `--help`.
@@ -924,6 +985,19 @@ FLAGS:
                 before anything else happens, and on Linux it needs a display
                 server (it drives the app's own poller) — use xvfb-run on a
                 bare machine.
+  --set-status <message>            Post a manual Teams status (issue #870) and
+                exit 0 on success, or exit 1 on stderr. The message is
+                profanity-filtered (using teams.profanity_extra_words) and
+                bounded to 128 characters, exactly like a rule's replacement
+                text. A pair of `--set-status` + `--set-status-expiry` is
+                the documented way to script a \"Right back in 30\" button
+                from CI; the expiry defaults to 60 minutes and is clamped to
+                the documented 5..=720 minute window.
+  --set-status-expiry <minutes>     The expiry override for `--set-status`.
+                Clamped to 5..=720; the Dashboard composer reads the same
+                bounds.
+  --clear-status                    Clear any manual Teams status (issue #870)
+                and exit 0 on success, or exit 1 on stderr.
   --help        Print this help and exit 0.
   --minimized   Start with the window hidden. The autostart plugin passes
                 this, and it still launches the GUI.
@@ -969,6 +1043,103 @@ fn cli_headless_state() -> (Arc<AppState>, Vec<String>) {
         )),
     }
     (state, failures)
+}
+
+/// Issue #870: `--set-status <message>` body. Same filter + clamp + Graph
+/// POST pipeline the Dashboard composer runs, with the same error strings,
+/// just without an `AppHandle` (the emit is a no-op on this path — there is
+/// no Dashboard listening for the event). Builds the `AppState` from disk
+/// the same way `cli_headless_state` does, so the CLI flag and the GUI
+/// share the profanity lexicon and the placeholder text.
+fn cli_set_manual_status_from_disk(message: &str, expiry_minutes: u32) -> Result<(), String> {
+    use crate::commands::status as status_cmd;
+    let (state, failures) = cli_headless_state();
+    for failure in &failures {
+        eprintln!("presencejam: {SET_STATUS_FLAG}: {failure}");
+    }
+    // Issue #870: the preflight mirrors `cli_sync_once_preflight`. The Teams
+    // token must be live; the Spotify token is irrelevant for the manual
+    // status POST (no Spotify data is read).
+    let tokens = state.tokens.teams().clone();
+    let Some(tokens) = tokens else {
+        return Err("Teams is not connected; cannot set a manual status".to_string());
+    };
+    if tokens.expires_at <= chrono::Utc::now() {
+        return Err(
+            "Teams token is expired; sign in again from the app before using this flag".to_string(),
+        );
+    }
+
+    // Step 1: trim + clamp + profanity filter (issue #538). Mirror the
+    // Dashboard composer exactly: empty text is a clear, oversized text
+    // is truncated to `MAX_RULE_STATUS_CHARS`.
+    let mut text = message.trim().to_string();
+    crate::config::clamp_rule_text(&mut text);
+    let expiry_minutes = status_cmd::clamp_expiry_public(expiry_minutes);
+    if text.is_empty() {
+        // Same UX as the Dashboard: blank submit clears.
+        return cli_clear_manual_status_from_disk();
+    }
+    let placeholder = state
+        .config
+        .get()
+        .as_ref()
+        .map(|c| c.teams.profanity_placeholder.clone())
+        .unwrap_or_default();
+    let cfg_guard = state.config.get();
+    let extra_words = crate::config::profanity_extra_words_for_filter(cfg_guard.as_ref());
+    let posted_text = crate::profanity::filter_status(&text, &placeholder, true, extra_words);
+
+    let now = chrono::Utc::now();
+    let expires_at = now + chrono::Duration::minutes(expiry_minutes as i64);
+    let expiry_str = crate::teams::manual_status_expiry_rfc3339(expires_at);
+    crate::teams::set_teams_status_message(&tokens.access_token, &posted_text, Some(&expiry_str))
+        .map_err(|e| format!("failed to post manual status to Teams: {}", e))?;
+    let manual = status_cmd::ManualStatus {
+        message: posted_text.clone(),
+        expires_at,
+        set_at: now,
+    };
+    status_cmd::record_manual_status_cli(
+        manual,
+        status_cmd::RecentManualStatus {
+            message: text.clone(),
+            used_at: now,
+        },
+    );
+    log::info!(
+        "[CLI] set_manual_status: posted {} chars (filtered={}), expires in {} min",
+        posted_text.chars().count(),
+        posted_text != text,
+        expiry_minutes
+    );
+    Ok(())
+}
+
+/// Issue #870: `--clear-status` body. Same Teams clear path the Dashboard
+/// composer's Clear button runs. No Spotify data is read.
+fn cli_clear_manual_status_from_disk() -> Result<(), String> {
+    let (state, failures) = cli_headless_state();
+    for failure in &failures {
+        eprintln!("presencejam: {CLEAR_STATUS_FLAG}: {failure}");
+    }
+    let tokens = state.tokens.teams().clone();
+    let Some(tokens) = tokens else {
+        // No Teams session — clear the local record and report success
+        // (the next sign-in starts from a clean slate).
+        crate::commands::status::clear_manual_status_record_cli();
+        return Ok(());
+    };
+    let placeholder = crate::commands::sync::safe_placeholder_text(&state);
+    crate::teams::clear_teams_status_message(
+        &tokens.access_token,
+        &placeholder,
+        Some(&crate::teams::placeholder_expiry_rfc3339()),
+    )
+    .map_err(|e| format!("failed to clear manual status on Teams: {}", e))?;
+    crate::commands::status::clear_manual_status_record_cli();
+    log::info!("[CLI] clear_manual_status: manual status cleared");
+    Ok(())
 }
 
 /// `--status`: print the status JSON and return the process exit code.
@@ -1215,6 +1386,12 @@ pub fn run() {
     // `--help` / `--status` / a credential-less `--sync-once` never reach the
     // builder at all. `sync_once` carries the only case that continues into
     // the GUI builder — and then in CLI mode.
+    //
+    // Issue #870: `--set-status <message> [--set-status-expiry <minutes>]`
+    // and `--clear-status` join the same exit-fast path. They need the
+    // token I/O to read the Teams access token (the message is POSTed
+    // directly to Graph), but otherwise behave like `--status` — no
+    // window, no tray, no single-instance lock.
     let sync_once = match cli_command(std::env::args_os()) {
         Some(CliCommand::Help) => {
             println!("{}", cli_help_text());
@@ -1225,6 +1402,31 @@ pub fn run() {
             Ok(()) => true,
             Err(reason) => {
                 eprintln!("presencejam: {SYNC_ONCE_FLAG}: {reason}");
+                std::process::exit(1);
+            }
+        },
+        Some(CliCommand::SetManualStatus {
+            message,
+            expiry_minutes,
+        }) => {
+            if message.trim().is_empty() {
+                eprintln!(
+                    "presencejam: {SET_STATUS_FLAG}: missing message (pass it as the next argument)"
+                );
+                std::process::exit(1);
+            }
+            match cli_set_manual_status_from_disk(&message, expiry_minutes) {
+                Ok(()) => std::process::exit(0),
+                Err(reason) => {
+                    eprintln!("presencejam: {SET_STATUS_FLAG}: {reason}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Some(CliCommand::ClearManualStatus) => match cli_clear_manual_status_from_disk() {
+            Ok(()) => std::process::exit(0),
+            Err(reason) => {
+                eprintln!("presencejam: {CLEAR_STATUS_FLAG}: {reason}");
                 std::process::exit(1);
             }
         },
@@ -1715,6 +1917,12 @@ pub fn run() {
             commands::playback::get_spotify_granted_scopes,
             diagnostics::get_diagnostics_snapshot,
             diagnostics::save_diagnostics_snapshot,
+            commands::status::set_manual_status,
+            commands::status::clear_manual_status_command,
+            commands::status::load_manual_status_command,
+            commands::playback::set_volume,
+            commands::playback::seek,
+            history::get_presence_history,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

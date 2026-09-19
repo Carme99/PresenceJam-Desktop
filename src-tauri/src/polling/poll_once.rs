@@ -33,10 +33,11 @@ use crate::spotify::{
 };
 use crate::teams::{
     clear_teams_presence, clear_teams_presence_quick, clear_teams_status_message,
-    clear_teams_status_message_quick, get_teams_presence,
+    clear_teams_status_message_quick, clear_user_preferred_presence,
+    clear_user_preferred_presence_quick, get_teams_presence,
     is_token_expired as is_teams_token_expired, presence_gate_reason, refresh_teams_token,
-    set_teams_presence, set_teams_status_message, TeamsApiError, TeamsTokens,
-    GATE_REASON_MANUAL_STATUS, GATE_REASON_QUIET_HOURS, GATE_REASON_TRACK_RULE,
+    set_teams_presence, set_teams_status_message, set_user_preferred_presence, TeamsApiError,
+    TeamsTokens, GATE_REASON_MANUAL_STATUS, GATE_REASON_QUIET_HOURS, GATE_REASON_TRACK_RULE,
 };
 use crate::token_io;
 use crate::AppState;
@@ -427,6 +428,25 @@ fn run_inner(
 
     let config = state.config.get().clone();
     log::debug!("[POLLING] poll_once: config loaded");
+
+    // Issue #866: the iteration-head expiry tick for the preferred-presence
+    // session. Runs BEFORE any Spotify/Graph round-trip, so a session whose
+    // `expires_at` has lapsed is cleared before a rule or snooze transition
+    // can resurrect it. The Teams token read here is the same source the
+    // rest of the iteration uses; on a missing/expired token the helper is a
+    // no-op (the session record is reset regardless so a stale arm does not
+    // outlive the run).
+    if let Some(teams_tokens) = state.tokens.teams().clone() {
+        if !is_teams_token_expired(&teams_tokens) {
+            let _ = clear_expired_preferred_presence(app, &teams_tokens.access_token, Utc::now());
+        }
+    }
+    // Issue #870: the iteration-head expiry tick for the manual status.
+    // Mirrors the preferred-presence tick above: the local record clears
+    // when the user-picked expiry lapses, so the Dashboard composer stops
+    // claiming a manual status is armed. The Graph side already cleared
+    // itself via the expiry we POSTed in `set_manual_status_inner`.
+    crate::commands::status::tick_manual_status_expiry(app, Utc::now());
 
     let spotify_tokens = state.tokens.spotify().clone();
     log::debug!(
@@ -1755,6 +1775,14 @@ pub(crate) fn clear_snooze_if_expired(state: &AppState) {
 /// gated the write exactly like a busy/meeting presence gate. Finding #634
 /// widens the same decision into an ACTION: a non-empty replacement posts that
 /// text instead, and a validated presence pair moves the user's Teams bubble.
+///
+/// Issue #866 extends the action with a `preferred_presence` pair: when a
+/// matched rule carries no presence pair of its own but the user opted into
+/// the preferred-presence feature, that pair rides through the same tail and
+/// drives the `setUserPreferredPresence` endpoint instead of the ephemeral
+/// `setPresence` session. The two endpoints have different Graph contracts
+/// (no `sessionId`, different rate limit, different documented pairs), so the
+/// caller routes on which field is `Some`.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct RuleDecision {
     /// The `presence-gated` reason of the matched rule
@@ -1766,6 +1794,12 @@ struct RuleDecision {
     /// The `setPresence` pair the matched rule wants armed (finding #634).
     /// `None` = the rule does not touch presence.
     presence: Option<PresencePair>,
+    /// Issue #866: the `setUserPreferredPresence` pair to arm in lieu of
+    /// `presence` when the rule does not carry its own pair. `None` when the
+    /// feature is off, the user's manual status is in force, or the rule
+    /// already names a pair (rule presence wins). The two fields cannot both
+    /// be `Some` — `decision_from` keeps the invariant.
+    preferred_presence: Option<PresencePair>,
 }
 
 impl RuleDecision {
@@ -1801,12 +1835,26 @@ fn rule_gate_at(
     let Some(cfg) = config.as_ref() else {
         return RuleDecision::default();
     };
+    // Issue #866: the preferred-presence pair rides the rule decision so the
+    // matching tail can route it to `setUserPreferredPresence`. Disabled when
+    // the user opted out, the user is in a manual-status window, or the
+    // config stored an unsupported pair (clamp clears both fields and turns
+    // the feature off; `preferred_presence_pair` mirrors the same logic).
+    //
+    // The pair is only meaningful when a rule matches — outside the rule and
+    // snooze paths the app leaves the user's Teams bubble alone (the default
+    // listening session is the only `setPresence` arm). The empty-decision
+    // branch intentionally drops `preferred`, mirroring the spec's
+    // "rule-gate + snooze" scope.
+    let preferred =
+        crate::config::preferred_presence_pair(&cfg.teams, cfg.teams.respect_manual_status);
     if let Some(entry) = matching_quiet_hours(&cfg.status_rules, now_minutes, weekday) {
         return decision_from(
             GATE_REASON_QUIET_HOURS,
             &entry.replacement_status,
             &entry.presence_availability,
             &entry.presence_activity,
+            preferred,
         );
     }
     match matching_track_rule_at(&cfg.status_rules, now_minutes, weekday, artist, title) {
@@ -1815,7 +1863,12 @@ fn rule_gate_at(
             &rule.replacement_status,
             &rule.presence_availability,
             &rule.presence_activity,
+            preferred,
         ),
+        // No rule match: preferred presence is scoped to rules and snoozes.
+        // The default listening session is the only `setPresence` arm that
+        // runs when no rule fires; preferred presence would be a regression
+        // outside that scope (issue #866 acceptance criteria).
         None => RuleDecision::default(),
     }
 }
@@ -1825,16 +1878,29 @@ fn rule_gate_at(
 /// normalization `config::clamp_rules` applies at the IPC boundary, repeated
 /// here so an in-memory config that skipped the clamp can never send an
 /// unsupported pair to Graph).
+///
+/// Issue #866: `preferred` is the fallback used when the matched rule carries
+/// no presence pair of its own AND the user opted into the preferred-presence
+/// feature. The rule's own pair wins (rule presence IS the user's instruction
+/// for this track/window); the preferred pair is the user's standing
+/// instruction otherwise.
 fn decision_from(
     reason: &'static str,
     replacement_status: &str,
     presence_availability: &str,
     presence_activity: &str,
+    preferred: Option<PresencePair>,
 ) -> RuleDecision {
     RuleDecision {
         reason: Some(reason),
         replacement: (!replacement_status.is_empty()).then(|| replacement_status.to_string()),
         presence: crate::config::normalize_presence_pair(presence_availability, presence_activity),
+        preferred_presence: preferred.filter(|_| {
+            // Rule presence wins — `decision_from` is the only place the two
+            // fields share a call site, so the invariant is local.
+            crate::config::normalize_presence_pair(presence_availability, presence_activity)
+                .is_none()
+        }),
     }
 }
 
@@ -1870,6 +1936,36 @@ fn emit_presence_gated(app: &AppHandle, reason: &str, availability: &str, activi
             "activity": activity,
             "timestamp": Utc::now().to_rfc3339()
         }),
+    );
+    // Issue #877: append to the bounded decision history. The gate
+    // reason is the documented wire shape; the track fingerprint is
+    // pulled off the `state.polling.current_track()` snapshot so an
+    // Activity card entry can pin the gate to the track it targeted.
+    let track_fingerprint = super::state::current_track_fingerprint();
+    crate::history::append(
+        crate::history::PresenceHistoryEntry {
+            at: Utc::now(),
+            kind: "presence-gated".to_string(),
+            note: format!(
+                "gated ({} {}/{})",
+                reason,
+                if availability.is_empty() {
+                    "-"
+                } else {
+                    availability
+                },
+                if activity.is_empty() { "-" } else { activity }
+            ),
+            track_fingerprint,
+            posted_status: None,
+            gate_reason: Some(reason.to_string()),
+        },
+        // The poller hands the AppConfig through the call chain; the
+        // helper lives at the call site that owns the snapshot, so the
+        // helper does not have it. `None` is the documented OFF mirror
+        // path — the helper's `Option<&AppConfig>` parameter already
+        // handles it.
+        None,
     );
 }
 
@@ -1966,6 +2062,188 @@ fn clear_presence_session(
     }
 }
 
+/// Issue #866: the app's preferred-presence session. Distinct from the
+/// ephemeral `setPresence` session — `setUserPreferredPresence` has its own
+/// per-user rate limit and its own document-mandated pairs. The exit
+/// snapshot can carry BOTH at once, so the cleanup arm stays simple.
+#[derive(Debug, Clone)]
+pub(crate) struct PreferredPresenceSession {
+    pub pair: PresencePair,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+    pub label: &'static str,
+}
+
+static PREFERRED_PRESENCE_SESSION: std::sync::Mutex<Option<PreferredPresenceSession>> =
+    std::sync::Mutex::new(None);
+
+pub(crate) fn load_preferred_presence_session() -> Option<PreferredPresenceSession> {
+    PREFERRED_PRESENCE_SESSION
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+}
+
+pub(crate) fn record_preferred_presence_session(session: Option<PreferredPresenceSession>) {
+    if let Ok(mut guard) = PREFERRED_PRESENCE_SESSION.lock() {
+        *guard = session;
+    }
+}
+
+/// Issue #866: drive the `setUserPreferredPresence` Graph endpoint with the
+/// supplied pair and expiration, recording the session locally so the
+/// poll-loop expiry check can `clearUserPreferredPresence` it back to the
+/// user's natural bubble. Distinct from [`arm_presence_session`] — different
+/// endpoint, no `sessionId`, no `should_arm_presence` debouncing (each POST
+/// IS the debounce, see [`PREFERRED_PRESENCE_REARM_SECONDS`]).
+///
+/// Returns extra backoff seconds (0 unless Graph throttled the call).
+pub(crate) fn arm_preferred_presence_session(
+    app: &AppHandle,
+    access_token: &str,
+    pair: &PresencePair,
+    expiration_duration: &str,
+    label: &str,
+) -> u64 {
+    let now = chrono::Utc::now();
+    // Issue #866: parse the configured `PT<minutes>M` so the in-process
+    // session expiry matches what we POST. The clamp guarantees the bound.
+    let minutes = expiration_duration
+        .trim_start_matches("PT")
+        .trim_end_matches('M')
+        .parse::<i64>()
+        .unwrap_or(60)
+        .max(5);
+    let expires_at = now + chrono::Duration::minutes(minutes);
+    let last = load_preferred_presence_session();
+    if let Some(prev) = last.as_ref() {
+        if prev.pair == *pair && prev.expires_at > now && prev.label == label {
+            // Same pair, still inside the original expiry window — no need
+            // to POST again. The poll loop will clear us when the window
+            // lapses.
+            return 0;
+        }
+    }
+    match set_user_preferred_presence(
+        access_token,
+        &pair.availability,
+        &pair.activity,
+        expiration_duration,
+    ) {
+        Ok(_) => {
+            // The label is the rule reason or `"Snooze preferred presence"`
+            // — both stable for the lifetime of the arm, so it lives in a
+            // `&'static str` and matches the `Eq` arm above.
+            let label_static: &'static str = Box::leak(Box::from(label));
+            record_preferred_presence_session(Some(PreferredPresenceSession {
+                pair: pair.clone(),
+                expires_at,
+                label: label_static,
+            }));
+            let _ = app.emit(
+                "preferred-presence-updated",
+                json!({
+                    "available": true,
+                    "label": label,
+                    "availability": pair.availability,
+                    "activity": pair.activity,
+                    "expires_at": expires_at.to_rfc3339(),
+                    "timestamp": now.to_rfc3339()
+                }),
+            );
+            // Issue #877: append a "preferred-presence-armed" entry so
+            // the Dashboard's Activity card can correlate a rule-driven
+            // preferred-presence arm with the same track the rule
+            // matched.
+            crate::history::append(
+                crate::history::PresenceHistoryEntry {
+                    at: now,
+                    kind: "preferred-presence-armed".to_string(),
+                    note: format!("armed ({}/{}, {})", pair.availability, pair.activity, label),
+                    track_fingerprint: super::state::current_track_fingerprint(),
+                    posted_status: None,
+                    gate_reason: None,
+                },
+                None,
+            );
+            0
+        }
+        Err(e) => {
+            log::error!(
+                "[POLLING] failed to set Teams preferred presence ({}): {}",
+                label,
+                e
+            );
+            rate_limit_sleep_secs(&e)
+        }
+    }
+}
+
+/// Issue #866: clear the app's preferred-presence session. Mirrors the
+/// 404-as-success contract [`clear_presence_session`] uses — Graph answers
+/// 404 when no preferred presence is set, which IS the success case. No-op
+/// when nothing of ours is armed.
+pub(crate) fn clear_preferred_presence_session(
+    app: &AppHandle,
+    access_token: &str,
+    label: &str,
+) -> u64 {
+    if load_preferred_presence_session().is_none() {
+        return 0;
+    }
+    match clear_user_preferred_presence(access_token) {
+        Ok(_) => {
+            record_preferred_presence_session(None);
+            let _ = app.emit(
+                "preferred-presence-updated",
+                json!({
+                    "available": false,
+                    "label": label,
+                    "timestamp": Utc::now().to_rfc3339()
+                }),
+            );
+            // Issue #877: append a "preferred-presence-cleared" entry so
+            // the Activity card can pair each armed entry with its clear.
+            crate::history::append(
+                crate::history::PresenceHistoryEntry {
+                    at: Utc::now(),
+                    kind: "preferred-presence-cleared".to_string(),
+                    note: format!("cleared ({label})"),
+                    track_fingerprint: super::state::current_track_fingerprint(),
+                    posted_status: None,
+                    gate_reason: None,
+                },
+                None,
+            );
+            0
+        }
+        Err(e) => {
+            log::error!("[POLLING] failed to clear Teams preferred presence: {}", e);
+            rate_limit_sleep_secs(&e)
+        }
+    }
+}
+
+/// Issue #866: the per-iteration expiry tick. Runs at the head of the poll
+/// loop, BEFORE the rule/snooze paths can re-arm — so an expired window
+/// always clears before a re-arm can resurrect it.
+fn clear_expired_preferred_presence(
+    app: &AppHandle,
+    access_token: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> u64 {
+    let Some(session) = load_preferred_presence_session() else {
+        return 0;
+    };
+    if session.expires_at > now {
+        return 0;
+    }
+    log::info!(
+        "[POLLING] preferred presence expired (label={}), clearing",
+        session.label
+    );
+    clear_preferred_presence_session(app, access_token, "Preferred presence expired")
+}
+
 /// Finding #634 (issue #634): apply a matched rule's presence action on the
 /// paths that return BEFORE the shared availability block (a playing write
 /// suppressed by quiet hours or a track rule). Without this a suppression-only
@@ -1974,6 +2252,12 @@ fn clear_presence_session(
 ///
 /// `Some(0)` when the rule carries no presence action or `availability_sync` is
 /// off (the rule action is inert then, mirroring the documented hint text).
+///
+/// Issue #866: a rule decision that carries a `preferred_presence` (no
+/// rule-side pair of its own, but the user opted into the feature) drives the
+/// `setUserPreferredPresence` arm here. The rule-side path still wins when
+/// the rule names a pair of its own (`decision.presence.is_some()`) — that is
+/// the user's explicit per-track instruction.
 #[allow(clippy::too_many_arguments)]
 fn rule_presence_backoff(
     app: &AppHandle,
@@ -1984,6 +2268,29 @@ fn rule_presence_backoff(
     armed: &mut Option<PresencePair>,
     last_availability_arm: &mut Option<Instant>,
 ) -> u64 {
+    // Issue #866: preferred presence rides here even when `availability_sync`
+    // is off — the user opted into a feature that is independent of the
+    // per-track listening session, and the Graph endpoints do not share an
+    // "off" switch. The decision is still subject to the manual-status gate
+    // (resolved at the call site), so a busy/DND/meeting user is never
+    // overridden.
+    if let Some(preferred) = decision.preferred_presence.as_ref() {
+        return arm_preferred_presence_session(
+            app,
+            access_token,
+            preferred,
+            &crate::config::preferred_presence_expiry_duration(
+                config
+                    .as_ref()
+                    .map(|c| &c.teams)
+                    .unwrap_or(&crate::config::TeamsConfig::default()),
+            ),
+            &format!(
+                "Rule preferred presence ({}/{})",
+                preferred.availability, preferred.activity
+            ),
+        );
+    }
     let Some(pair) = decision.presence.as_ref() else {
         return 0;
     };
@@ -2045,6 +2352,29 @@ fn sync_availability(
     armed_presence: &mut Option<PresencePair>,
     last_availability_arm: &mut Option<Instant>,
 ) -> u64 {
+    // Issue #866: preferred presence is a different Graph endpoint and a
+    // different cadence from the per-track `setPresence` session. Route the
+    // decision here, return early, and let `arm_preferred_presence_session`
+    // own the 4-minute re-arm clock. The user's manual-status window is the
+    // only off-switch (already folded into `RuleDecision::preferred_presence`
+    // at the `rule_gate_at` site, so by the time we get here it is `None`).
+    if let Some(preferred) = rule.preferred_presence.as_ref() {
+        return arm_preferred_presence_session(
+            app,
+            access_token,
+            preferred,
+            &crate::config::preferred_presence_expiry_duration(
+                config
+                    .as_ref()
+                    .map(|c| &c.teams)
+                    .unwrap_or(&crate::config::TeamsConfig::default()),
+            ),
+            &format!(
+                "Rule preferred presence ({}/{})",
+                preferred.availability, preferred.activity
+            ),
+        );
+    }
     if !availability_sync_enabled(config) || presence_blocked {
         return 0;
     }
@@ -2234,7 +2564,11 @@ fn matching_track_rule_at<'a>(
 /// The music-note prefix on both placeholder clears. Kept out of the config
 /// fields so their defaults stay plain text (`"Paused"`), which is what the
 /// fixed schema in the release contract specifies.
-const MUSIC_EMOJI: &str = "\u{1F3B5}";
+/// The standard music-emoji prefix (`🎵`) the polling path prefixes every
+/// status with. Exported `pub(crate)` so the manual-status clear path
+/// (issue #870) can mirror it without copying the literal — a future
+/// "make the prefix configurable" change should land in one place.
+pub(crate) const MUSIC_EMOJI: &str = "\u{1F3B5}";
 /// S4 (issue #672): fallbacks used when no config is loaded — the same literals
 /// `config.rs` defaults to, so a config-less iteration renders exactly what a
 /// default config renders.
@@ -2812,6 +3146,14 @@ pub(crate) fn process_track(
         // comparison (issue #3.0-P2).
         *last_track_key = Some(track_key.clone());
         *state.polling.current_track_mut() = Some(track.clone());
+        // Issue #877: mirror the `(title, artist)` pair onto the static
+        // the gate emitter reads. Updated on every track change so a
+        // subsequent gate entry anchors to the track it targeted, not to
+        // the one before it.
+        super::state::record_current_track_fingerprint(Some(crate::history::TrackFingerprint {
+            title: track.title.clone(),
+            artist: track.artist.clone(),
+        }));
         // Issue #581: the config-flip rewrite path (#343) has no body to
         // re-parse, so the full item — episode metadata and playback context
         // included — is kept alongside the stored `TrackInfo`, which carries
@@ -2842,6 +3184,13 @@ pub(crate) fn process_track(
             track.is_playing
         );
         *state.polling.current_track_mut() = Some(track.clone());
+        // Issue #877: same-track pause / resume also re-seeds the
+        // fingerprint mirror so the gate emitter anchors to the track it
+        // targeted even when the gate fires mid-pause.
+        super::state::record_current_track_fingerprint(Some(crate::history::TrackFingerprint {
+            title: track.title.clone(),
+            artist: track.artist.clone(),
+        }));
         *LAST_NOW_PLAYING.lock() = Some(now.clone());
         let _ = app.emit(
             "playback-state-changed",
@@ -3210,6 +3559,29 @@ pub(crate) fn process_track(
                             "status": final_status,
                             "timestamp": Utc::now().to_rfc3339()
                         }),
+                    );
+                    // Issue #877: append to the bounded decision history.
+                    // The track fingerprint pins the entry to the same
+                    // (title, artist) pair the status write key uses, so a
+                    // follow-up rewrite on the same track collapses cleanly
+                    // when the Dashboard renders the Activity card.
+                    crate::history::append(
+                        crate::history::PresenceHistoryEntry {
+                            at: Utc::now(),
+                            kind: "presence-updated".to_string(),
+                            note: if rule.reason.is_some() {
+                                "posted (rule)".to_string()
+                            } else {
+                                "posted".to_string()
+                            },
+                            track_fingerprint: Some(crate::history::TrackFingerprint {
+                                title: track.title.clone(),
+                                artist: track.artist.clone(),
+                            }),
+                            posted_status: Some(final_status.clone()),
+                            gate_reason: rule.reason.map(|s| s.to_string()),
+                        },
+                        config.as_ref(),
                     );
                 }
                 Err(e) => {
@@ -3607,6 +3979,10 @@ pub(crate) fn handle_no_track(
     if first_no_track_attempts_clear(last_track_key, is_first) {
         *last_track_key = None;
         *state.polling.current_track_mut() = None;
+        // Issue #877: clear the fingerprint mirror alongside the live
+        // track — a gate that fires on a "no track" decision must not
+        // anchor to the track the poller just stopped observing.
+        super::state::record_current_track_fingerprint(None);
         // Cleared in lockstep with `current_track` — the #343 rewrite path
         // reads this cache and must not resurrect a cleared track.
         *LAST_NOW_PLAYING.lock() = None;
@@ -3960,6 +4336,20 @@ pub(crate) fn clear_presence_on_exit(app: &AppHandle) {
                     e
                 );
             }
+        }
+    }
+    // Issue #866: the preferred-presence session is independent of the
+    // ephemeral `setPresence` session above — `availability_sync` being off
+    // does not mean the user did not opt into preferred presence, and
+    // Graph accepts both. Clear unconditionally when present, using the
+    // quick variant so the exit arm cannot hold the close open.
+    if load_preferred_presence_session().is_some() {
+        match clear_user_preferred_presence_quick(&tokens.access_token) {
+            Ok(_) => log::info!("[POLLING] clear_presence_on_exit: preferred presence cleared"),
+            Err(e) => log::warn!(
+                "[POLLING] clear_presence_on_exit: failed to clear preferred presence: {}",
+                e
+            ),
         }
     }
     if cleared && plan.post_placeholder {
@@ -5389,6 +5779,9 @@ mod tests {
                 is_playing: true,
                 progress_ms: Some(0),
                 duration_ms: 0,
+                volume_percent: None,
+                supports_volume: None,
+                actions: None,
             },
             episode: None,
             context: crate::spotify::PlaybackContext {
@@ -5446,6 +5839,9 @@ mod tests {
             is_playing: true,
             progress_ms: Some(0),
             duration_ms: 0,
+            volume_percent: None,
+            supports_volume: None,
+            actions: None,
         };
         let as_track = status_track_key(
             &crate::spotify::NowPlaying {
@@ -5479,6 +5875,9 @@ mod tests {
                     is_playing: true,
                     progress_ms: Some(0),
                     duration_ms: 0,
+                    volume_percent: None,
+                    supports_volume: None,
+                    actions: None,
                 },
                 episode: Some(crate::spotify::EpisodeInfo {
                     show_name: "The Deep Work Show".to_string(),
