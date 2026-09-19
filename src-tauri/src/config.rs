@@ -141,6 +141,16 @@ pub struct TeamsConfig {
     /// transient shell-API failure cannot lock the gate.
     #[serde(default = "default_gate_when_presenting")]
     pub gate_when_presenting: bool,
+    /// Issue #873: stop advertising listening once the OS reports no
+    /// keyboard/mouse input for this many seconds. `0` (the default)
+    /// disables the feature — 4.7 behaviour is unchanged until the user
+    /// opts in. Clamped to 60..=3600 by `clamp_teams` so a hand-edited
+    /// config cannot put the gate in a state that surprises the user
+    /// (a 1 s threshold would fire on every typing pause). Linux/macOS
+    /// always report `None` (`platform::idle`), so the toggle is a no-op
+    /// on those targets.
+    #[serde(default)]
+    pub idle_away_after_seconds: u64,
     /// S4 (issue #672): the text posted as the Teams status message while
     /// playback is paused — the user-templatable form of the literal the
     /// paused clear used to hardcode (`"🎵 Paused"`, emoji included by
@@ -365,11 +375,19 @@ fn clamp_teams(cfg: &mut TeamsConfig) {
     // alone — `poll_once` reads it as "use the default".
     clamp_rule_text(&mut cfg.paused_status_format);
     clamp_rule_text(&mut cfg.stopped_status_format);
-    // Issue #866: the preferred-presence pair rides the same
+// Issue #866: the preferred-presence pair rides the same
     // normalizer — `normalize_presence_pair` already clears both
     // fields when they fail to match `PRESENCE_COMBINATIONS`, so
     // disabling an unsupported config is automatic.
     clamp_preferred_presence(&mut cfg.preferred_presence);
+
+    // Issue #873: the idle-away threshold. `0` disables (no clamp), any
+    // other value is clamped into 60..=3600 so a hand-edited config
+    // cannot put the gate in a state that surprises the user (a 1 s
+    // threshold would have every normal typing pause fire the gate).
+    if cfg.idle_away_after_seconds != 0 {
+        cfg.idle_away_after_seconds = cfg.idle_away_after_seconds.clamp(60, 3600);
+    }
 }
 
 /// Issue #866: bound the preferred-presence config the same way `clamp_rules`
@@ -426,6 +444,15 @@ pub fn profanity_extra_words_for_filter(config: Option<&AppConfig>) -> &[String]
     config
         .map(|c| c.teams.profanity_extra_words.as_slice())
         .unwrap_or(&[])
+=======
+    // Issue #873: the idle-away threshold. `0` disables (no clamp), any
+    // other value is clamped into 60..=3600 so a hand-edited config
+    // cannot put the gate in a state that surprises the user (a 1 s
+    // threshold would have every normal typing pause fire the gate).
+    if cfg.idle_away_after_seconds != 0 {
+        cfg.idle_away_after_seconds = cfg.idle_away_after_seconds.clamp(60, 3600);
+    }
+>>>>>>> 821779e (feat: stop advertising listening while the desktop has been idle)
 }
 
 /// The closed set of `availability`/`activity` pairs the Graph
@@ -1430,6 +1457,10 @@ impl Default for TeamsConfig {
             respect_manual_status: default_respect_manual_status(),
             gate_when_out_of_office: default_gate_when_out_of_office(),
             gate_when_presenting: default_gate_when_presenting(),
+            // Issue #873: `0` = off (the default; an untouched config
+            // behaves exactly as today). The clamp runs through
+            // `clamp_teams` so any non-zero value lands in 60..=3600.
+            idle_away_after_seconds: 0,
             paused_status_format: default_paused_status_format(),
             stopped_status_format: default_stopped_status_format(),
             preferred_presence: PreferredPresenceConfig::default(),

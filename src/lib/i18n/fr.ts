@@ -432,6 +432,12 @@ export const fr: Dict = {
   'settings.gateWhenPresentingLabel': 'Mettre en pause quand je présente',
   'settings.gateWhenPresentingHint':
     'Ignore la mise à jour du statut quand l’OS signale une application plein écran, une présentation ou les Heures calmes. Linux/macOS ne signalent pas cet état — le bouton reste sans effet sur ces plateformes.',
+  // Issue #873 : la porte d’inactivité. `0` (par défaut) correspond au
+  // comportement 4.7 — l’application continue d’annoncer l’écoute tant
+  // que l’utilisateur ne l’active pas.
+  'settings.idleAwayLabel': 'Mettre en pause quand mon bureau est inactif',
+  'settings.idleAwayHint':
+    'N’annonce plus le statut Spotify une fois que le bureau n’a reçu aucune entrée clavier/souris pendant ce nombre de secondes. 60–3600 ; 0 désactive. Linux/macOS ne signalent pas cet état.',
   'settings.extraWordsLabel': 'Mots à filtrer personnalisés',
   'settings.extraWordsHint':
     'Un mot ou une expression par ligne. Les mêmes limites de mot que la liste intégrée s’appliquent.',
@@ -450,6 +456,7 @@ export const fr: Dict = {
     'Statut en pause — vous présentez ou êtes dans une application plein écran',
   'dashboard.presenceGatedQuietTime':
     'Statut en pause — l’Assistance de concentration est active',
+  'dashboard.presenceGatedIdle': 'Statut en pause — bureau inactif',
   // 4.7.0 — S6 (tray localization)
   'settings.languageHint':
     'S’applique aussi au menu de la zone de notification et au menu natif de l’application.',

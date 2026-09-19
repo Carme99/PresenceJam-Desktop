@@ -36,8 +36,13 @@ use crate::teams::{
     clear_teams_status_message_quick, clear_user_preferred_presence,
     clear_user_preferred_presence_quick, get_teams_presence,
     is_token_expired as is_teams_token_expired, presence_gate_reason, refresh_teams_token,
+<<<<<<< HEAD
     set_teams_presence, set_teams_status_message, set_user_preferred_presence, TeamsApiError,
-    TeamsTokens, GATE_REASON_MANUAL_STATUS, GATE_REASON_QUIET_HOURS, GATE_REASON_TRACK_RULE,
+    TeamsTokens, GATE_REASON_IDLE, GATE_REASON_MANUAL_STATUS, GATE_REASON_QUIET_HOURS, GATE_REASON_TRACK_RULE,
+=======
+    set_teams_presence, set_teams_status_message, TeamsApiError, TeamsTokens, GATE_REASON_IDLE,
+    GATE_REASON_MANUAL_STATUS, GATE_REASON_QUIET_HOURS, GATE_REASON_TRACK_RULE,
+>>>>>>> 821779e (feat: stop advertising listening while the desktop has been idle)
 };
 use crate::token_io;
 use crate::AppState;
@@ -170,6 +175,21 @@ pub(crate) struct WriteClocks {
     /// Generation of the slot this snapshot was loaded at (finding D11, issue
     /// #694). See the struct docs and [`store_write_clocks`].
     pub(crate) generation: u64,
+    /// Issue #873: the desktop-idle gate cleared between this iteration
+    /// and the last, so the next status write must happen even when the
+    /// text is byte-identical to what Teams already shows — the user
+    /// came back, and a stale "listening" status must re-appear exactly
+    /// once. Set by the mid-track re-check (or the change-time gate) when
+    /// the idle verdict flips from `true` to `false`; consumed by the
+    /// write path, which clears it after the forced POST. Distinct from
+    /// `gated_track_key` because that one tracks the suppression; this
+    /// one tracks the resume.
+    pub(crate) force_resume_write: bool,
+    /// Issue #873: the previous iteration's idle verdict. Used to detect
+    /// the `true`→`false` transition that arms `force_resume_write`.
+    /// `None` on the very first iteration of a session (the change from
+    /// "unknown" to any verdict is never a "resume").
+    pub(crate) last_idle_verdict: Option<bool>,
 }
 
 /// Process-wide slot for [`WriteClocks`]. See the struct docs for why these
@@ -185,6 +205,8 @@ static WRITE_CLOCKS: Mutex<WriteClocks> = Mutex::new(WriteClocks {
     armed_presence: None,
     suppressed_placeholder: None,
     generation: 0,
+    force_resume_write: false,
+    last_idle_verdict: None,
 });
 
 /// Snapshot the shared write-decision clocks. A poisoned lock is recovered
@@ -287,6 +309,9 @@ pub(crate) fn run(
     first_iteration: &mut bool,
     last_posted_status: &mut Option<String>,
     last_gate_check: &mut Option<Instant>,
+    // Issue #873: see `WriteClocks` for the resume invariant.
+    last_idle_verdict: &mut Option<bool>,
+    force_resume_write: &mut bool,
 ) -> PollIteration {
     run_inner(
         state,
@@ -306,6 +331,8 @@ pub(crate) fn run(
         first_iteration,
         last_posted_status,
         last_gate_check,
+        last_idle_verdict,
+        force_resume_write,
         RunMode::Loop,
     )
 }
@@ -388,6 +415,8 @@ pub(crate) fn run_oneshot(state: &Arc<AppState>, app: &AppHandle) {
         &mut first_iteration,
         &mut clocks.last_posted_status,
         &mut clocks.last_gate_check,
+        &mut clocks.last_idle_verdict,
+        &mut clocks.force_resume_write,
         RunMode::OneShot,
     );
     store_write_clocks(&clocks);
@@ -414,6 +443,9 @@ fn run_inner(
     first_iteration: &mut bool,
     last_posted_status: &mut Option<String>,
     last_gate_check: &mut Option<Instant>,
+    // Issue #873: see `WriteClocks` for the resume invariant.
+    last_idle_verdict: &mut Option<bool>,
+    force_resume_write: &mut bool,
     mode: RunMode,
 ) -> PollIteration {
     log::debug!("[POLLING] poll_once: iteration start");
@@ -666,6 +698,8 @@ fn run_inner(
                 armed_presence,
                 last_posted_status,
                 last_gate_check,
+                last_idle_verdict,
+                force_resume_write,
             );
             record_success(transient_failure_count, consecutive_network_failures);
             PollIteration::Sleep {
@@ -729,6 +763,8 @@ fn run_inner(
                     armed_presence,
                     last_posted_status,
                     last_gate_check,
+                    last_idle_verdict,
+                    force_resume_write,
                 );
                 record_success(transient_failure_count, consecutive_network_failures);
                 return PollIteration::Sleep { seconds: sleep };
@@ -848,6 +884,8 @@ fn run_inner(
                                             armed_presence,
                                             last_posted_status,
                                             last_gate_check,
+                                            last_idle_verdict,
+                                            force_resume_write,
                                         );
                                         record_success(
                                             transient_failure_count,
@@ -911,6 +949,8 @@ fn run_inner(
                                                 armed_presence,
                                                 last_posted_status,
                                                 last_gate_check,
+                                                last_idle_verdict,
+                                                force_resume_write,
                                             );
                                             record_success(
                                                 transient_failure_count,
@@ -1389,7 +1429,9 @@ fn manual_status_blocks_write(
 /// busy/meeting/out-of-office presence first (the more specific real-world
 /// state), then the OS-level presentation signal (issue #872, lowest of the
 /// presence-class reasons but never outranking busy or in-a-call), then a
-/// status message the user wrote by hand.
+/// status message the user wrote by hand, then the desktop-idle reading
+/// (issue #873, lowest of all — only ever blocks a write that nothing else
+/// has already blocked).
 #[allow(clippy::too_many_arguments)]
 fn presence_gate_decision(
     presence: &crate::teams::PresenceInfo,
@@ -1404,6 +1446,11 @@ fn presence_gate_decision(
     // — the gate stays off and the rest of the decision runs unchanged.
     presentation_state: crate::platform::focus::PresentationState,
     gate_when_presenting: bool,
+    // Issue #873: desktop-idle reading. `None` (Linux/macOS, or a
+    // Windows probe error) keeps the idle gate off. The threshold is
+    // checked in `process_track`; this function only sees the resolved
+    // "the threshold was crossed" boolean.
+    idle: bool,
 ) -> Option<String> {
     if presence_gate_enabled {
         let reason = presence_gate_reason(presence, gate_when_out_of_office);
@@ -1432,6 +1479,15 @@ fn presence_gate_decision(
         now,
     ) {
         return Some(GATE_REASON_MANUAL_STATUS.to_string());
+    }
+    // Issue #873: the idle gate is the LOWEST precedence of all —
+    // only ever blocks a write nothing else already blocked. The
+    // probe is checked in `process_track`; `idle` here is just the
+    // resolved "threshold crossed" boolean. When the threshold is
+    // `0` the caller passes `false` and the feature stays off, so
+    // an untouched config behaves exactly as today.
+    if idle {
+        return Some(GATE_REASON_IDLE.to_string());
     }
     None
 }
@@ -2911,15 +2967,20 @@ fn gate_recheck_due(last_gate_check: Option<Instant>, now: Instant) -> bool {
 /// Issue #384: skip a byte-identical playing-status write while the last
 /// write is still inside the keepalive window. A track/config-fingerprint
 /// change (`changed`) always force-writes, as does a lapsed keepalive (so
-/// the Graph expiry never lapses with no refresh in flight).
+/// the Graph expiry never lapses with no refresh in flight). Issue #873:
+/// `force_resume_write` overrides the dedup exactly once — the first
+/// iteration after the idle gate cleared must POST the status even when
+/// the text is byte-identical to what Teams already shows, so the resume
+/// surfaces to the user.
 fn should_skip_identical_write(
     changed: bool,
     last_posted_status: Option<&str>,
     final_status: &str,
     last_write: Option<Instant>,
     now: Instant,
+    force_resume_write: bool,
 ) -> bool {
-    if changed {
+    if changed || force_resume_write {
         return false;
     }
     if last_posted_status != Some(final_status) {
@@ -3072,6 +3133,11 @@ pub(crate) fn process_track(
     armed_presence: &mut Option<PresencePair>,
     last_posted_status: &mut Option<String>,
     last_gate_check: &mut Option<Instant>,
+    // Issue #873: see `WriteClocks`. The mid-track re-check watches the
+    // `true`→`false` transition of the idle verdict and arms
+    // `force_resume_write`; the write path consumes it once and clears.
+    last_idle_verdict: &mut Option<bool>,
+    force_resume_write: &mut bool,
 ) -> u64 {
     let track = &now.media;
     let elapsed_ms = last_poll_instant.elapsed().as_millis() as u64;
@@ -3131,24 +3197,40 @@ pub(crate) fn process_track(
         .as_ref()
         .map(|c| c.teams.gate_when_presenting)
         .unwrap_or(false);
+    // Issue #873: the idle threshold. `0` disables the gate entirely; the
+    // non-zero values are clamped to 60..=3600 by `clamp_teams`, so a
+    // hand-edited config cannot put the gate in a state that surprises
+    // the user. The probe is consulted once per iteration (hoisted below)
+    // so the change-time gate and the mid-track re-check stamp the same
+    // reading into `last_idle_verdict`.
+    let idle_threshold_secs: u64 = config
+        .as_ref()
+        .map(|c| c.teams.idle_away_after_seconds)
+        .unwrap_or(0);
     let presence_read_needed = presence_gate_enabled || respect_manual_status;
+
+    // Issues #872/#873: the OS probes are called once per iteration
+    // (hoisted out of the closure) so the change-time gate and the
+    // mid-track re-check stamp the same reading into `last_idle_verdict`
+    // and the resume-after-idle transition is detected exactly once.
+    let presentation_state = crate::platform::focus::probe_focus();
+    let idle_threshold_crossed = if idle_threshold_secs > 0 {
+        crate::platform::idle::seconds_since_last_input()
+            .is_some_and(|secs| secs.0 >= idle_threshold_secs)
+    } else {
+        false
+    };
 
     // The gate verdict for one sample — a local closure so the read sites
     // below (track change, mid-track re-check, pause) cannot drift. The two
     // "what we posted" texts are PARAMETERS rather than captures: the write
     // path below mutates them, and a capturing closure would hold a borrow of
     // them for the whole function.
-    //
-    // Issue #872: the OS probe (`platform::focus::probe_focus`) is called
-    // here, inside the closure, so every gate run sees a fresh reading.
-    // The probe fails open — a `PresentationState::Unknown` collapses to
-    // "the gate is off", so an unavailable probe cannot lock the gate.
     let gate_verdict = |presence: &crate::teams::PresenceInfo,
                         posted: Option<&str>,
                         placeholder: Option<&str>|
      -> Option<String> {
         observe_presence_sample(respect_manual_status, presence, posted, placeholder);
-        let presentation_state = crate::platform::focus::probe_focus();
         presence_gate_decision(
             presence,
             presence_gate_enabled,
@@ -3159,6 +3241,7 @@ pub(crate) fn process_track(
             Utc::now(),
             presentation_state,
             gate_when_presenting,
+            idle_threshold_crossed,
         )
     };
 
@@ -3311,6 +3394,16 @@ pub(crate) fn process_track(
                             }
                             None => {
                                 *gated_track_key = None;
+                                // Issue #873: a track change mid-resume
+                                // also triggers a forced write — the
+                                // `track_key` already moves `changed` to
+                                // true here, but the #384 dedup still
+                                // applies if the new track happens to
+                                // template to the same string as the
+                                // previous one (rare but legal).
+                                if *last_idle_verdict == Some(true) && !idle_threshold_crossed {
+                                    *force_resume_write = true;
+                                }
                             }
                         },
                         Err(e) => {
@@ -3321,6 +3414,11 @@ pub(crate) fn process_track(
                             *gated_track_key = None;
                         }
                     }
+                    // Issue #873: stamp the verdict on every change-time
+                    // gate so a track change records the same state the
+                    // mid-track re-check would have. `idle_threshold_crossed`
+                    // was already computed once at the top of the loop.
+                    *last_idle_verdict = Some(idle_threshold_crossed);
                 } else {
                     *gated_track_key = None;
                 }
@@ -3439,9 +3537,11 @@ pub(crate) fn process_track(
                             // The same verdict as the change-time gate, so a
                             // manual status that lapses mid-track clears the
                             // gate and late-posts exactly like a meeting ending.
-                            // Issue #872: the OS probe runs here too (this
-                            // path is NOT through `gate_verdict`).
-                            let presentation_state = crate::platform::focus::probe_focus();
+                            // Issue #872/#873: the OS probes are HOISTED
+                            // at the top of `process_track` so the
+                            // change-time gate and the mid-track re-check
+                            // stamp the same reading into
+                            // `last_idle_verdict`.
                             match presence_gate_decision(
                                 &presence,
                                 presence_gate_enabled,
@@ -3452,6 +3552,7 @@ pub(crate) fn process_track(
                                 Utc::now(),
                                 presentation_state,
                                 gate_when_presenting,
+                                idle_threshold_crossed,
                             ) {
                                 Some(_) => {
                                     log::debug!("[POLLING] process_track: still presence-gated, keeping suppression");
@@ -3467,8 +3568,28 @@ pub(crate) fn process_track(
                                     // keepalive) stays untouched so the late post
                                     // below is never mistaken for a fresh write.
                                     *last_gate_check = Some(Instant::now());
+                                    // Issue #873: the first iteration after
+                                    // the idle verdict flipped from
+                                    // "threshold crossed" to "active" must
+                                    // force exactly one write — the
+                                    // byte-identical dedup would otherwise
+                                    // skip a resume the user cannot see on
+                                    // Teams. The flag is consumed by the
+                                    // write path below and cleared once.
+                                    if *last_idle_verdict == Some(true) && !idle_threshold_crossed {
+                                        *force_resume_write = true;
+                                        log::info!(
+                                            "[POLLING] process_track: idle gate cleared, forcing resume write"
+                                        );
+                                    }
                                 }
                             }
+                            // Issue #873: track the verdict for the next
+                            // mid-track re-check's transition detection.
+                            // Stamped here (every re-check) so a poll
+                            // iteration without a re-read (e.g. a 304) does
+                            // not silently pin the verdict.
+                            *last_idle_verdict = Some(idle_threshold_crossed);
                         }
                         Err(e) => {
                             log::warn!(
@@ -3554,6 +3675,7 @@ pub(crate) fn process_track(
                 &final_status,
                 *last_teams_update,
                 Instant::now(),
+                *force_resume_write,
             ) {
                 log::debug!("[POLLING] process_track: status identical and keepalive fresh, skipping Teams write");
                 // Issue #790: the skipped POST must not skip the presence
@@ -6600,11 +6722,18 @@ mod tests {
             "first re-check must be due so the late post can fire"
         );
         assert!(
-            !should_skip_identical_write(false, None, "late post", Some(now), now),
+            !should_skip_identical_write(false, None, "late post", Some(now), now, false),
             "a never-posted late status must write (issue #430 posts it)"
         );
         assert!(
-            should_skip_identical_write(false, Some("late post"), "late post", Some(now), now),
+            should_skip_identical_write(
+                false,
+                Some("late post"),
+                "late post",
+                Some(now),
+                now,
+                false
+            ),
             "a byte-identical late post inside the keepalive must not re-POST (no spam)"
         );
     }
@@ -6617,29 +6746,37 @@ mod tests {
         let now = Instant::now();
         let fresh = Some(now);
         assert!(
-            should_skip_identical_write(false, Some("status"), "status", fresh, now),
+            should_skip_identical_write(false, Some("status"), "status", fresh, now, false),
             "identical status inside the keepalive must skip the write"
         );
         assert!(
-            !should_skip_identical_write(false, Some("old"), "new", fresh, now),
+            !should_skip_identical_write(false, Some("old"), "new", fresh, now, false),
             "changed text must write"
         );
         assert!(
-            !should_skip_identical_write(false, None, "status", fresh, now),
+            !should_skip_identical_write(false, None, "status", fresh, now, false),
             "nothing posted yet must write"
         );
         assert!(
-            !should_skip_identical_write(true, Some("status"), "status", fresh, now),
+            !should_skip_identical_write(true, Some("status"), "status", fresh, now, false),
             "a fingerprint/track change must force-write even identical text"
         );
         let stale = Some(now - std::time::Duration::from_secs(STATUS_KEEPALIVE_SECONDS + 1));
         assert!(
-            !should_skip_identical_write(false, Some("status"), "status", stale, now),
+            !should_skip_identical_write(false, Some("status"), "status", stale, now, false),
             "a lapsed keepalive must force-write so the expiry never lapses"
         );
         assert!(
-            !should_skip_identical_write(false, Some("status"), "status", None, now),
+            !should_skip_identical_write(false, Some("status"), "status", None, now, false),
             "no write on record must write"
+        );
+        // Issue #873: a forced resume write bypasses the dedup
+        // exactly once — the first iteration after the idle gate
+        // cleared must surface the status to the user even when the
+        // text is byte-identical to what Teams already shows.
+        assert!(
+            !should_skip_identical_write(false, Some("status"), "status", fresh, now, true),
+            "a resume-after-idle must force-write even identical text"
         );
     }
 
@@ -7233,6 +7370,7 @@ mod tests {
                 &posted,
                 clocks.last_teams_update,
                 now,
+                false,
             ),
             "a manual refresh must honor the #384 identical-write guard"
         );
@@ -7548,14 +7686,15 @@ mod tests {
             ..PresenceInfo::default()
         };
 
-        // Issue #872: a local helper so the 8-argument call sites stay
-        // readable. Default opt-ins (no presentation gate).
+        // Issue #872: a local helper so the 9-argument call sites stay
+        // readable. Default opt-ins (no presentation gate, no idle gate).
         let decide = |presence: &PresenceInfo,
                       gate: bool,
                       ooo: bool,
                       manual_check: bool,
                       ps: PresentationState,
-                      gate_pres: bool|
+                      gate_pres: bool,
+                      idle: bool|
          -> Option<String> {
             presence_gate_decision(
                 presence,
@@ -7567,6 +7706,7 @@ mod tests {
                 now,
                 ps,
                 gate_pres,
+                idle,
             )
         };
 
@@ -7578,6 +7718,7 @@ mod tests {
                 false,
                 true,
                 PresentationState::None,
+                false,
                 false
             )
             .as_deref(),
@@ -7585,27 +7726,70 @@ mod tests {
         );
         // Manual status is reported under its own reason.
         assert_eq!(
-            decide(&manual, true, false, true, PresentationState::None, false).as_deref(),
+            decide(
+                &manual,
+                true,
+                false,
+                true,
+                PresentationState::None,
+                false,
+                false
+            )
+            .as_deref(),
             Some(GATE_REASON_MANUAL_STATUS)
         );
         // Turning the manual check off leaves only the presence gate.
         assert_eq!(
-            decide(&manual, true, false, false, PresentationState::None, false),
+            decide(
+                &manual,
+                true,
+                false,
+                false,
+                PresentationState::None,
+                false,
+                false
+            ),
             None
         );
         // OOO participates only when opted in.
         assert_eq!(
-            decide(&ooo, true, false, true, PresentationState::None, false),
+            decide(
+                &ooo,
+                true,
+                false,
+                true,
+                PresentationState::None,
+                false,
+                false
+            ),
             None
         );
         assert_eq!(
-            decide(&ooo, true, true, true, PresentationState::None, false).as_deref(),
+            decide(
+                &ooo,
+                true,
+                true,
+                true,
+                PresentationState::None,
+                false,
+                false
+            )
+            .as_deref(),
             Some(crate::teams::GATE_REASON_OUT_OF_OFFICE)
         );
         // The manual check survives the presence gate being switched off —
         // that is the one case where it costs an extra Graph read.
         assert_eq!(
-            decide(&manual, false, false, true, PresentationState::None, false).as_deref(),
+            decide(
+                &manual,
+                false,
+                false,
+                true,
+                PresentationState::None,
+                false,
+                false
+            )
+            .as_deref(),
             Some(GATE_REASON_MANUAL_STATUS)
         );
 
@@ -7628,6 +7812,7 @@ mod tests {
                 false,
                 PresentationState::Presentation,
                 true,
+                false,
             )
             .as_deref(),
             Some("busy"),
@@ -7644,6 +7829,7 @@ mod tests {
                 false,
                 false,
                 PresentationState::Presentation,
+                false,
                 false
             ),
             None,
@@ -7658,7 +7844,8 @@ mod tests {
                 false,
                 false,
                 PresentationState::Presentation,
-                true
+                true,
+                false
             )
             .as_deref(),
             Some(crate::teams::GATE_REASON_PRESENTING)
@@ -7671,7 +7858,8 @@ mod tests {
                 false,
                 false,
                 PresentationState::FullScreen,
-                true
+                true,
+                false
             )
             .as_deref(),
             Some(crate::teams::GATE_REASON_PRESENTING)
@@ -7684,7 +7872,8 @@ mod tests {
                 false,
                 false,
                 PresentationState::QuietTime,
-                true
+                true,
+                false
             )
             .as_deref(),
             Some(crate::teams::GATE_REASON_QUIET_TIME)
@@ -7698,10 +7887,60 @@ mod tests {
                 false,
                 false,
                 PresentationState::Unknown,
-                true
+                true,
+                false
             ),
             None,
             "an Unknown probe must fail open, not block"
+        );
+
+        // Issue #873: the idle gate is the LOWEST precedence of all —
+        // only ever blocks a write nothing else already blocked.
+        assert_eq!(
+            decide(
+                &manual,
+                true,
+                false,
+                false,
+                PresentationState::None,
+                false,
+                true
+            )
+            .as_deref(),
+            Some(crate::teams::GATE_REASON_IDLE)
+        );
+        // Issue #873: the manual-status verdict still outranks the idle
+        // reading — a user-typed status message must not be clobbered
+        // by an idle classification.
+        assert_eq!(
+            decide(
+                &manual,
+                true,
+                false,
+                true,
+                PresentationState::None,
+                false,
+                true
+            )
+            .as_deref(),
+            Some(GATE_REASON_MANUAL_STATUS),
+            "manual-status outranks idle"
+        );
+        // Issue #873: a busy Graph sample still outranks the idle
+        // reading — the same precedence contract as #872.
+        assert_eq!(
+            decide(
+                &busy_manual,
+                true,
+                false,
+                false,
+                PresentationState::None,
+                false,
+                true
+            )
+            .as_deref(),
+            Some("busy"),
+            "busy outranks idle"
         );
     }
 

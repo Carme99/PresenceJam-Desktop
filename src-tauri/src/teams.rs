@@ -908,6 +908,8 @@ pub const GATE_REASON_PRESENTING: &str = "presenting";
 /// Windows). Same Dashboard mapping as `presenting`, but distinct on
 /// the wire so a future `quiet-time-only` opt-in can target it.
 pub const GATE_REASON_QUIET_TIME: &str = "quiet-time";
+/// Issue #873: the desktop has been idle past the configured threshold.
+pub const GATE_REASON_IDLE: &str = "idle";
 
 /// The `statusMessage` half of a Graph presence (finding #635, issue #635).
 ///
