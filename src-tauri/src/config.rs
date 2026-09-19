@@ -444,15 +444,6 @@ pub fn profanity_extra_words_for_filter(config: Option<&AppConfig>) -> &[String]
     config
         .map(|c| c.teams.profanity_extra_words.as_slice())
         .unwrap_or(&[])
-=======
-    // Issue #873: the idle-away threshold. `0` disables (no clamp), any
-    // other value is clamped into 60..=3600 so a hand-edited config
-    // cannot put the gate in a state that surprises the user (a 1 s
-    // threshold would have every normal typing pause fire the gate).
-    if cfg.idle_away_after_seconds != 0 {
-        cfg.idle_away_after_seconds = cfg.idle_away_after_seconds.clamp(60, 3600);
-    }
->>>>>>> 821779e (feat: stop advertising listening while the desktop has been idle)
 }
 
 /// The closed set of `availability`/`activity` pairs the Graph
