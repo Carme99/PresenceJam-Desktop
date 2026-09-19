@@ -84,14 +84,13 @@ pub fn require_main_window(window: &tauri::Window) -> Result<(), String> {
 /// get_diagnostics_snapshot (Diagnostics-as-main-route), preview_status
 /// (Settings preview but read-only pure computation), get_sync_status
 /// (Dashboard/Settings status read), get_spotify/teams_granted_scopes
-/// (Settings scope readers, no side effect), is_spotify_client_secret_set
-/// (Settings/Reconnect presence read), clear_failed_update_install
+/// (Settings scope readers, no side effect), clear_failed_update_install
 /// (Diagnostics dismiss; deletes only the marker file),
 /// is_onboarding_complete (issue #770: the boot gate in
 /// `src/routes/+page.svelte`, a main-window route).
 ///
 /// INTENTIONALLY UNGUARDED -- detached-legit (invoked from popped-out
-/// Settings/LogViewer by design): reconnect_spotify, reconnect_teams,
+/// Settings/LogViewer by design): reconnect_teams,
 /// poll_teams_auth, set_autostart_enabled, open_logs_folder,
 /// open_external_url (Teams verification-URL open during detached
 /// device-code flow), save_config (whole-document config write) and
@@ -112,6 +111,17 @@ pub fn require_main_window(window: &tauri::Window) -> Result<(), String> {
 /// and hosts the hotkey card, so the pane that captures a combo must also be
 /// able to (re)register it; the commands act on the persisted config and this
 /// process's own OS grabs only.
+///
+/// REGISTERED BUT CALLERLESS (issue #770 review): `is_spotify_client_secret_set`
+/// (spotify_auth.rs) and `reconnect_spotify` (onboarding.rs) have no `invoke()`
+/// in `src/` or `tests/`, so they belong in neither list above — a command
+/// nothing can reach is not "main-only by caller location" and not
+/// "detached-legit". Reconnect.svelte reads the keychain state through
+/// `loadConfig` (#560) and Settings.svelte:872 calls
+/// `reconnect_spotify_session` (#554), which `tests/settings.test.ts` pins.
+/// Both are pending deletion (the same treatment the seven playback wrappers
+/// got here); `reconnect_spotify` is already deleted on the onboarding slice's
+/// branch, so whoever merges that one should not re-add it.
 #[cfg(test)]
 mod tests {
     /// Regression guard for issue #76: the `commands` module must declare
