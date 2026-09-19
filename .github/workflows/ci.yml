@@ -173,7 +173,13 @@ jobs:
       # because those are what create such paths in the first place.
       - name: Root-level paths are tracked or ignored
         run: |
-          stray=$(git status --porcelain --untracked-files=all | sed -n 's/^?? //p' | grep -v / || true)
+          # `--untracked-files=normal` (the default) collapses a wholly
+          # untracked directory into ONE `dir/` entry, which is what this guard
+          # needs: a dropped tree has to be caught here rather than listed file
+          # by file, and every path inside it contains a `/`. The trailing slash
+          # is stripped before the root-level test so a directory and a file are
+          # judged alike.
+          stray=$(git status --porcelain | sed -n 's/^?? //p' | sed 's:/$::' | grep -v / || true)
           if [ -n "$stray" ]; then
             echo "::error::untracked and unignored at the repository root:"
             echo "$stray"
@@ -696,8 +702,11 @@ jobs:
           persist-credentials: false
 
       # `arguments` is passed BEFORE the subcommand, which is where cargo-deny
-      # takes its global flags; `--config` defaults to <cwd>/deny.toml, not the
-      # manifest's directory, so the policy next to the manifest is named here.
+      # takes its global flags. The policy path is named explicitly so it cannot
+      # be picked up from somewhere else (cargo-deny's own discovery starts at
+      # the manifest it is given); the whole command is:
+      #   cargo deny --manifest-path src-tauri/Cargo.toml --all-features \
+      #     --config src-tauri/deny.toml check licenses bans sources
       - name: Cargo deny (licences, bans, sources)
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25  # v2.1.1
         with:

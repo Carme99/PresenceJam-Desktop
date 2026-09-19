@@ -16,7 +16,9 @@
  *     importing `$app/state` — could not even be collected by a test.
  *
  * Fails pre-fix: the first test sees "Version dev build", and the second test's
- * import of the detached-pane route throws on the unresolved `$app/state`.
+ * dynamic import of the detached-pane route rejects on the unresolved
+ * `$app/state` — the two failures stay independent, so the About assertion is
+ * not taken down by an unrelated breakage in the route's import chain.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, cleanup } from '@testing-library/svelte';
@@ -26,10 +28,7 @@ import { join } from 'node:path';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => () => {}) }));
 
-// The detached-pane route is imported for its module graph: `$app/state` and
-// `$lib/...` have to resolve for this file to load at all.
 import About from '$lib/components/About.svelte';
-import DetachedPane from '../src/routes/detached/[pane]/+page.svelte';
 
 const pkg = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8')) as {
   version: string;
@@ -50,9 +49,13 @@ describe('#839 vitest.config.js loads the app Vite config', () => {
     expect(version).toMatch(expected);
   });
 
-  it('collects a SvelteKit-dependent component, so $app/* resolves', () => {
-    // Loading the module above is the assertion; this only pins that it is the
-    // compiled component rather than an empty module.
+  it('collects a SvelteKit-dependent component, so $app/* resolves', async () => {
+    // A static import cannot go here: it would fail this file at collection in
+    // the pre-fix state, which is exactly the state the first test has to fail
+    // in on its own. The import IS the assertion — the route imports
+    // `$app/state` and `$lib/...`, neither of which resolved before the app
+    // config was merged.
+    const { default: DetachedPane } = await import('../src/routes/detached/[pane]/+page.svelte');
     expect(DetachedPane).toBeTypeOf('function');
   });
 });

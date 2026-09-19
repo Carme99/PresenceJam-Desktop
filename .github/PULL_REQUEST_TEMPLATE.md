@@ -20,8 +20,7 @@
 in this order, plus test counts:
 
 ```
-cd src-tauri && cargo fmt --all --check && cargo check --all-targets && cargo clippy --all-targets -- -D warnings && cargo test --all-targets
-cd src-tauri && cargo deny --all-features check licenses bans sources
+cd src-tauri && cargo fmt --all --check && cargo check --all-targets && cargo clippy --all-targets -- -D warnings && cargo test --all-targets && cargo deny --all-features check licenses bans sources
 cd .. && npm run build && npm run check && npm test
 ```
 

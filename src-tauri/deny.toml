@@ -1,13 +1,13 @@
 # cargo-deny policy for the Rust backend (issue #776).
 #
 # The gate that runs this file is the `cargo-deny` job in
-# .github/workflows/ci.yml; run it locally with:
+# .github/workflows/ci.yml. Run it locally with the same command that job runs:
 #
 #   cargo deny --manifest-path src-tauri/Cargo.toml --all-features \
-#     check licenses bans sources
+#     --config src-tauri/deny.toml check licenses bans sources
 #
-# (cargo-deny resolves this file from the current working directory, so the
-# `--config` flag in the CI job points here explicitly.)
+# `--config` is named explicitly rather than left to discovery, so this policy
+# is the one that always applies.
 
 [licenses]
 # The licence half of the ACKNOWLEDGEMENTS.md inventory, made mechanical.
