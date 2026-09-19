@@ -210,8 +210,7 @@ fn lookup_spotify_client_secret(
 /// Entirely best-effort — the caller already holds the value and must not be
 /// blocked by a failed migration. See audit M2.
 fn forward_migrate_legacy_secret(secret: &str) {
-    let Ok(forward_entry) = keyring::Entry::new(KEYRING_SERVICE, SPOTIFY_CLIENT_SECRET_USER)
-    else {
+    let Ok(forward_entry) = keyring::Entry::new(KEYRING_SERVICE, SPOTIFY_CLIENT_SECRET_USER) else {
         log::warn!(
             "[KEYCHAIN] could not open the namespaced slot for the legacy→namespaced \
              migration (continuing with the legacy value)"
@@ -1028,9 +1027,12 @@ mod tests {
 
         // The slot is gone: the stale cached key must be replaced by a fresh one
         // that the keychain really holds, i.e. the key the next write uses.
-        let regenerated = get_or_create_tokens_aes_key_with(Some(stale), &read, &store, || Ok(fresh))
+        let regenerated = get_or_create_tokens_aes_key_with(Some(stale), read, store, || Ok(fresh))
             .expect("a deleted slot must be regenerated, not reused");
-        assert_eq!(regenerated, fresh, "the stale cached key must not be reused");
+        assert_eq!(
+            regenerated, fresh,
+            "the stale cached key must not be reused"
+        );
         assert_eq!(*store_calls.lock(), 1, "the fresh key must be stored");
         let stored_b64 = slot.lock().clone().expect("the fresh key must be stored");
         assert_eq!(
@@ -1042,11 +1044,10 @@ mod tests {
         // The slot still holds the cached key: no keychain write, no
         // regeneration.
         *slot.lock() = Some(STANDARD.encode(fresh));
-        let confirmed =
-            get_or_create_tokens_aes_key_with(Some(fresh), &read, &store, || {
-                panic!("a key the slot still holds must never be regenerated")
-            })
-            .expect("a confirmed cached key must be used");
+        let confirmed = get_or_create_tokens_aes_key_with(Some(fresh), read, store, || {
+            panic!("a key the slot still holds must never be regenerated")
+        })
+        .expect("a confirmed cached key must be used");
         assert_eq!(confirmed, fresh);
         assert_eq!(
             *store_calls.lock(),
@@ -1058,11 +1059,10 @@ mod tests {
         // ciphertext written by whoever installed it must stay decryptable.
         let replaced = [0xCCu8; 32];
         *slot.lock() = Some(STANDARD.encode(replaced));
-        let adopted =
-            get_or_create_tokens_aes_key_with(Some(fresh), &read, &store, || {
-                panic!("a replaced slot must be adopted, not overwritten")
-            })
-            .expect("a replaced slot must be adopted");
+        let adopted = get_or_create_tokens_aes_key_with(Some(fresh), read, store, || {
+            panic!("a replaced slot must be adopted, not overwritten")
+        })
+        .expect("a replaced slot must be adopted");
         assert_eq!(adopted, replaced);
         assert_eq!(*store_calls.lock(), 1);
 
@@ -1070,7 +1070,7 @@ mod tests {
         // so the cached key is kept rather than failing the persist.
         let unavailable =
             || -> Result<String, keyring::Error> { Err(platform_failure("no secret service")) };
-        let kept = get_or_create_tokens_aes_key_with(Some(fresh), &unavailable, &store, || {
+        let kept = get_or_create_tokens_aes_key_with(Some(fresh), &unavailable, store, || {
             panic!("an unreadable slot must not trigger a regeneration")
         })
         .expect("an unreadable keychain must not discard a confirmed key");
