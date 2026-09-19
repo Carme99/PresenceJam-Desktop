@@ -136,7 +136,7 @@ Trigger: a push of a `v*` tag, **or** `workflow_dispatch` with the `tag` input
 ref). Concurrency keys on `release-<event>-<ref>`, so a re-cut does not queue
 behind the tag-push run.
 
-1. **`resolve-tag`** (~lines 36-100) — resolves the tag (`inputs.tag` for a
+1. **`resolve-tag`** (~lines 36-152) — resolves the tag (`inputs.tag` for a
    dispatch, else `GITHUB_REF_NAME`), rejects anything that is not `v*`,
    verifies the tag exists with `git ls-remote --exit-code --tags`, checks the
    repository out **at that tag**, then runs the tag/version check: `EXPECTED` =
@@ -145,9 +145,14 @@ behind the tag-push run.
    `Cargo.toml` and `Cargo.lock`'s `presence-jam` entry. Drift fails the run
    here — before any compile — because a mismatch means the shipped binary
    self-reports a different version than `latest.json` advertises, which makes
-   the updater re-offer the same update forever (issue #605). The resolved `tag`
-   output is
-   consumed by every downstream job instead of `github.ref_name`.
+   the updater re-offer the same update forever (issue #605). The resolved
+   `tag` output is consumed by every downstream job instead of
+   `github.ref_name`. The same job then requires the release's documentation to
+   exist *before* anything builds (issue #834): `CHANGELOG.md` must carry a
+   `## [X.Y.Z]` section and `docs/STATE-OF-FEATURES.md` a
+   `# State of Features — vX.Y.Z` header, or the run fails with an `::error::`
+   naming the missing file. A pre-release tag (`vX.Y.Z-beta.N`) is gated
+   against the section of the version it will become.
 2. **`verify`** (`needs: resolve-tag`, ~lines 139-213) — checks out the same tag
    and reruns the `ci.yml` gate set there (fmt, clippy, `cargo test`,
    `npm run check`, `npm run test:coverage` — the coverage ratchet, not bare
@@ -169,13 +174,17 @@ behind the tag-push run.
    artifact also gets a SLSA attestation (`actions/attest-build-provenance`,
    `subject-path: matrix.bundle_path`) — supplementary to, not a replacement
    for, the minisign `.sig` files the updater verifies.
-4. **`release`** (`needs: [resolve-tag, build]`, ~lines 401-516) — downloads all
-   artifacts (`digest-mismatch: error`), writes `SHA256SUMS.txt` (one
-   `"<sha256>  <filename>"` line per file; unsigned, and deliberately not covered
-   by the build attestation), publishes the Release with
-   `ncipollo/release-action` **tagged explicitly with the resolved tag**
-   (`allowUpdates: true`, `artifacts: artifacts/**/*`), then generates
-   `latest.json`:
+4. **`release`** (`needs: [resolve-tag, build]`) — checks the tag out (it needs
+   `CHANGELOG.md`), downloads all artifacts (`digest-mismatch: error`), writes
+   `SHA256SUMS.txt` (one `"<sha256>  <filename>"` line per file; unsigned, and
+   deliberately not covered by the build attestation), extracts this version's
+   `CHANGELOG.md` section into `notes.md` — from the `## [X.Y.Z]` header to the
+   next `## [` header, with an empty body failing the job — and publishes the
+   Release with `ncipollo/release-action` **tagged explicitly with the resolved
+   tag**, passing that file as `bodyFile`. `generateReleaseNotes` is off on
+   purpose: the body users read is the curated section, not GitHub's generated
+   PR list (`allowUpdates: true` so a re-cut replaces the body,
+   `artifacts: artifacts/**/*`). It then generates `latest.json`:
 
    ```json
    {
@@ -217,6 +226,11 @@ behind the tag-push run.
    `[Unreleased]`, all in the same commit. If the release changes shipped behaviour, update
    [`STATE-OF-FEATURES.md`](./STATE-OF-FEATURES.md) too (including its version
    header).
+
+   Both are enforced at tag time as well: `resolve-tag` fails the run
+   before any build when the `## [X.Y.Z]` section or the
+   `# State of Features — vX.Y.Z` header is missing, so a forgotten rename
+   surfaces at the tag instead of as a published release with an empty body.
 4. Open the release PR and wait for `version-consistency`, `changelog-links`,
    `rust`, `rust-clippy`, `rust-platform-check`, `frontend` and `secret-scan`.
 5. Merge, then tag the **merge commit on `main`** — tag the commit that is on the

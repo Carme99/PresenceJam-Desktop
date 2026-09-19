@@ -127,6 +127,29 @@ jobs:
           done
           exit "$drift"
 
+      # Changelog gate (issue #834): changelog-links only pairs headers that
+      # already exist with their link definitions, so a tag for a version with
+      # no section at all passed every job. A beta tag (vX.Y.Z-beta.N) is gated
+      # against the section of the version it will become: the note is written
+      # once for the release, not per beta.
+      - name: Verify CHANGELOG section and STATE-OF-FEATURES header
+        env:
+          RELEASE_TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          EXPECTED="${RELEASE_TAG#v}"
+          EXPECTED_BASE="${EXPECTED%%-*}"
+          missing=0
+          if ! grep -q "^## \[${EXPECTED_BASE}\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [${EXPECTED_BASE}]' section for tag ${RELEASE_TAG}"
+            missing=1
+          fi
+          if ! grep -q "^# State of Features — v${EXPECTED_BASE}" docs/STATE-OF-FEATURES.md; then
+            echo "::error::docs/STATE-OF-FEATURES.md has no '# State of Features — v${EXPECTED_BASE}' header for tag ${RELEASE_TAG}"
+            missing=1
+          fi
+          exit "$missing"
+
   # Verification gate (issue #606): ci.yml enforces fmt, clippy, the test
   # suites and the Svelte/TS type check on pull_request / push-to-main
   # only. A tag push jumps straight from resolve-tag into the three-OS
@@ -445,6 +468,15 @@ jobs:
     env:
       RELEASE_TAG: ${{ needs.resolve-tag.outputs.tag }}
     steps:
+      # Needed for CHANGELOG.md: the published body is the changelog section
+      # (issue #834) and this job otherwise works only from downloaded
+      # artifacts. Same tag as every other job; no persisted credentials.
+      - name: Checkout repository at the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.resolve-tag.outputs.tag }}
+
       - name: Download all artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
@@ -470,6 +502,28 @@ jobs:
           echo "=== SHA256SUMS.txt ==="
           cat artifacts/SHA256SUMS.txt
 
+      # The Release body is the hand-written changelog section for this
+      # version, not GitHub's auto-generated PR list (issue #834). resolve-tag
+      # has already failed the run if the section is missing, so this awk only
+      # delimits it: from the '## [VERSION]' header to the next '## [' header.
+      # An empty result fails here rather than publishing a blank body.
+      - name: Extract CHANGELOG section for the release body
+        run: |
+          set -euo pipefail
+          VERSION="${RELEASE_TAG#v}"
+          BLOCK_VERSION="${VERSION%%-*}"
+          awk -v v="$BLOCK_VERSION" '
+            index($0, "## [" v "]") == 1 { in_section = 1; next }
+            in_section && /^## \[/ { exit }
+            in_section
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "::error::CHANGELOG section for ${BLOCK_VERSION} produced an empty release body"
+            exit 1
+          fi
+          echo "=== notes.md ==="
+          head -40 notes.md
+
       - name: Create GitHub Release
         uses: ncipollo/release-action@339a81892b84b4eeb0f6e744e4574d79d0d9b8dd  # v1.21.0
         with:
@@ -482,7 +536,10 @@ jobs:
           draft: false
           prerelease: false
           allowUpdates: true
-          generateReleaseNotes: true
+          # bodyFile, not generateReleaseNotes (issue #834): the curated
+          # section is what users are meant to read, and the generated PR list
+          # buried it. allowUpdates stays so a re-cut replaces the body.
+          bodyFile: notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
