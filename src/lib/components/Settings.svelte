@@ -33,15 +33,37 @@
   let saveMessage = $state('');
   let saveTimeout: ReturnType<typeof setTimeout> | null = null;
 
-  // C9: dirty-state detection. Polling fields arrive as BigInt over the
-  // IPC boundary, which JSON.stringify rejects, so serialize with a
-  // BigInt→number replacer on both sides before comparing.
-  function serializeForCompare(cfg: AppConfig): string {
-    return JSON.stringify(cfg, (_k, v) => (typeof v === 'bigint' ? Number(v) : v));
+  // #890: the draft's dirty state is an explicit flag. It used to be a
+  // `$derived` that serialised the whole document twice — `localConfig` against
+  // `$configStore`, status rules, lexicon and all — and every write to the deep
+  // proxy invalidated it, so one keystroke in any field paid two full
+  // `JSON.stringify` passes on the UI thread. The listeners on the form root
+  // below set the flag and the save/discard paths clear it, so nothing compares
+  // serialised configs here any more — which is also why the BigInt→number
+  // replacer that comparison needed is gone with it.
+  let isDirty = $state(false);
+
+  /** #890: the draft now differs from the saved config. */
+  function markDirty() {
+    isDirty = true;
   }
-  let isDirty = $derived(
-    serializeForCompare(localConfig) !== serializeForCompare($configStore)
-  );
+
+  /**
+   * #890: an edit anywhere in the form marks the draft dirty. `input` and
+   * `change` both bubble, so one pair of listeners on the form root covers
+   * every control — including any added later — instead of re-serialising the
+   * config to find out.
+   *
+   * A control opts out with `data-no-draft`: the settings that apply themselves
+   * immediately through their own store, and the controls that only drive the
+   * reconnect flow. Anything that edits `localConfig` or the lexicon must not
+   * carry it.
+   */
+  function onDraftEdit(event: Event) {
+    const target = event.target;
+    if (target instanceof Element && target.closest('[data-no-draft]') !== null) return;
+    markDirty();
+  }
 
   // C9: effective polling bounds, mirroring Rust `clamp_polling`
   // (src-tauri/src/config.rs:109): minimum clamps to [5, 30] first, then
@@ -64,6 +86,7 @@
     // Findings #635/#637: both new presence policies reset with the card.
     localConfig.teams.respect_manual_status = defaultConfig.teams.respect_manual_status;
     localConfig.teams.gate_when_out_of_office = defaultConfig.teams.gate_when_out_of_office;
+    markDirty();
   }
   function resetStatusFormatDefaults() {
     localConfig.teams.status_format = defaultConfig.teams.status_format;
@@ -72,6 +95,7 @@
     // Issue #538: the custom lexicon belongs to this card too.
     localConfig.teams.profanity_extra_words = [...defaultConfig.teams.profanity_extra_words];
     extraWordsText = '';
+    markDirty();
   }
   // Issue #432: reset the rules section to its (empty) default. Rules are
   // additive with serde defaults, so a default section is always valid.
@@ -81,6 +105,7 @@
     // Reset must not leave those editors showing a stale value.
     localConfig.teams.paused_status_format = defaultConfig.teams.paused_status_format;
     localConfig.teams.stopped_status_format = defaultConfig.teams.stopped_status_format;
+    markDirty();
   }
   // Issue #432: format minutes-since-midnight as HH:MM for time inputs.
   function minutesToTime(m: number): string {
@@ -116,9 +141,11 @@
     if (target < 0 || target >= rules.length) return;
     const [moved] = rules.splice(index, 1);
     rules.splice(target, 0, moved);
+    markDirty();
   }
   function resetPollingDefaults() {
     localConfig.polling = structuredClone(defaultConfig.polling);
+    markDirty();
   }
 
   // ── 4.6 findings #634/#635/#637 + issue #538 consumption sites ──────────
@@ -209,6 +236,7 @@
   });
   function resetAppearanceDefaults() {
     localConfig.autostart = defaultConfig.autostart;
+    markDirty();
   }
 
   // #552: a radiogroup must own `role="radio"`/`aria-checked` children with a
@@ -497,6 +525,7 @@
     const bindings = shortcutBindingsOf(localConfig);
     bindings[slot] = accelerator;
     setShortcutBindings(localConfig, bindings);
+    markDirty();
     const otherSlot = slot === 'toggle_playback' ? 'toggle_sync' : 'toggle_playback';
     void validateShortcut(slot);
     void validateShortcut(otherSlot);
@@ -719,6 +748,7 @@
       // form shows the clamped numbers rather than the raw input.
       localConfig = await saveConfig($state.snapshot(localConfig));
       extraWordsText = localConfig.teams.profanity_extra_words.join('\n');
+      isDirty = false;
       saveMessage = t('settings.saved');
       if (saveTimeout) clearTimeout(saveTimeout);
       saveTimeout = setTimeout(() => saveMessage = '', 2000);
@@ -806,6 +836,7 @@
       // lexicon textarea, which is a projection of the stored list.
       localConfig = await loadConfig();
       extraWordsText = localConfig.teams.profanity_extra_words.join('\n');
+      isDirty = false;
       saveMessage = '';
       backupMessage = t('settings.backupImported', { path: outcome.path });
     } catch (e) {
@@ -1066,7 +1097,7 @@
   }
 </script>
 
-<div class="settings">
+<div class="settings" oninput={onDraftEdit} onchange={onDraftEdit}>
   <PageHeader title={t('settings.title')} onBack={goBack}
     backLabel={detached ? t('settings.popBackIn') : t('common.back')}
     onAction={detached ? undefined : handlePopOut}
@@ -1137,6 +1168,7 @@
             <p class="hint" id="spotify-manual-url-hint">{t('onboarding.manualUrlHint')}</p>
             <input
               id="spotify-manual-url"
+              data-no-draft
               type="text"
               bind:value={spotifyManualUrl}
               aria-label={t('onboarding.manualUrlLabel')}
@@ -1341,7 +1373,7 @@
               <button
                 type="button"
                 class="btn-link"
-                onclick={() => { localConfig.status_rules.quiet_hours.splice(i, 1); }}
+                onclick={() => { localConfig.status_rules.quiet_hours.splice(i, 1); markDirty(); }}
               >{t('rules.removeRule')}</button>
             </div>
             <div class="rule-row days-row" role="group" aria-label={t('rules.quietDays')}>
@@ -1401,7 +1433,7 @@
         <button
           type="button"
           class="btn-secondary"
-          onclick={() => { localConfig.status_rules.quiet_hours.push({ enabled: true, start_minutes: 1320, end_minutes: 420, days: [], replacement_status: '', presence_availability: '', presence_activity: '', pause_polling: false }); }}
+          onclick={() => { localConfig.status_rules.quiet_hours.push({ enabled: true, start_minutes: 1320, end_minutes: 420, days: [], replacement_status: '', presence_availability: '', presence_activity: '', pause_polling: false }); markDirty(); }}
         >{t('rules.addQuietHours')}</button>
       </div>
       <div class="form-group">
@@ -1435,7 +1467,7 @@
               <button
                 type="button"
                 class="btn-link"
-                onclick={() => { localConfig.status_rules.track_rules.splice(j, 1); }}
+                onclick={() => { localConfig.status_rules.track_rules.splice(j, 1); markDirty(); }}
               >{t('rules.removeRule')}</button>
             </div>
             <div class="rule-row">
@@ -1516,7 +1548,7 @@
         <button
           type="button"
           class="btn-secondary"
-          onclick={() => { localConfig.status_rules.track_rules.push({ enabled: false, artist_substring: '', track_substring: '', replacement_status: '', presence_availability: '', presence_activity: '', days: [], start_minutes: 0, end_minutes: 1440 }); }}
+          onclick={() => { localConfig.status_rules.track_rules.push({ enabled: false, artist_substring: '', track_substring: '', replacement_status: '', presence_availability: '', presence_activity: '', days: [], start_minutes: 0, end_minutes: 1440 }); markDirty(); }}
         >{t('rules.addTrackRule')}</button>
       </div>
       <div class="form-group">
@@ -1594,6 +1626,7 @@
           <label for="profanity-preview-sample">{t('settings.profaneSampleToggle')}</label>
           <input
             id="profanity-preview-sample"
+            data-no-draft
             type="checkbox"
             bind:checked={previewProfaneSample}
           />
@@ -1705,6 +1738,7 @@
           <label for={`notifications-${cls}`}>{t(NOTIFICATION_LABELS[cls])}</label>
           <input
             id={`notifications-${cls}`}
+            data-no-draft
             type="checkbox"
             checked={$notificationPreferences[cls]}
             onchange={(e) => toggleNotificationClass(cls, e)}
@@ -1758,6 +1792,7 @@
         <label for="compact-density">{t('settings.densityCompactLabel')}</label>
         <input
           id="compact-density"
+          data-no-draft
           type="checkbox"
           checked={$density === 'compact'}
           onchange={(e) =>
@@ -1770,6 +1805,7 @@
         <!-- Language names are endonyms: shown in their own language by convention. -->
         <select
           id="language"
+          data-no-draft
           value={i18n.locale}
           onchange={(e) => {
             const next = (e.currentTarget as HTMLSelectElement).value as Locale;

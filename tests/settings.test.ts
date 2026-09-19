@@ -1373,3 +1373,69 @@ describe('Settings disconnected Spotify card (#965)', () => {
     expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'reconnect_spotify_session')).toBe(false);
   });
 });
+
+/**
+ * #890 — dirty state used to be recovered by serialising the whole document
+ * twice inside a `$derived` (`localConfig` vs `$configStore`), which every
+ * write to the deep proxy invalidated: one keystroke in any field paid two full
+ * `JSON.stringify` passes over the rules and the lexicon on the UI thread.
+ *
+ * Fails pre-fix: the input event re-serialises the config.
+ */
+describe('Settings dirty flag (#890)', () => {
+  it('marks a text edit dirty without serialising the config', async () => {
+    // The old detection was `JSON.stringify(cfg, replacer)`; nothing else in
+    // this pane passes a replacer function.
+    const stringifySpy = vi.spyOn(JSON, 'stringify');
+    const serialisations = () =>
+      stringifySpy.mock.calls.filter((call) => typeof call[1] === 'function').length;
+    try {
+      const { container } = await mountSettings();
+      const before = serialisations();
+      expect(container.querySelector('.dirty-banner')).toBeNull();
+
+      await fireEvent.input(formatInput(container), { target: { value: '🎧 {track}' } });
+      await tick();
+
+      expect(container.querySelector('.dirty-banner')).not.toBeNull();
+      expect(serialisations()).toBe(before);
+    } finally {
+      stringifySpy.mockRestore();
+    }
+  });
+
+  it('clears the flag once the draft is saved, and keeps it when the save fails', async () => {
+    const { container, getByRole } = await mountSettings();
+    await fireEvent.input(formatInput(container), { target: { value: '🎧 {track}' } });
+    await tick();
+    expect(container.querySelector('.dirty-banner')).not.toBeNull();
+
+    await fireEvent.click(getByRole('button', { name: t('settings.saveChanges') }));
+    await waitFor(() => expect(container.querySelector('.dirty-banner')).toBeNull());
+
+    const base = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'save_config') throw new Error('disk full');
+      return base(cmd, args);
+    });
+
+    await fireEvent.input(formatInput(container), { target: { value: '🎧 {track} — {artist}' } });
+    await tick();
+    await fireEvent.click(getByRole('button', { name: t('settings.saveChanges') }));
+    await waitFor(() => expect(container.querySelector('.settings')?.textContent).toContain('disk full'));
+    // A save that never happened must not clear the flag: Back still asks.
+    expect(container.querySelector('.dirty-banner')).not.toBeNull();
+  });
+
+  it('does not flag the draft for a control that applies itself', async () => {
+    const { container } = await mountSettings();
+    const density = container.querySelector('#compact-density') as HTMLInputElement;
+
+    await fireEvent.click(density);
+    await tick();
+
+    // Spacing is applied and stored by its own store — there is nothing for
+    // Save to commit, so the banner must not claim otherwise.
+    expect(container.querySelector('.dirty-banner')).toBeNull();
+  });
+});
