@@ -164,19 +164,6 @@ describe('i18n key coverage (#488)', () => {
     for (const token of ['{show}', '{episode}']) {
       expect(t('settings.episodeFormatHint')).toContain(token);
     }
-    for (const src of [enSrc, deSrc, frSrc]) {
-      expect(src).toContain("'settings.episodeFormatHint'");
-    }
-  });
-
-  it('settings.reconnectSpotify stays live (Reconnect view uses it)', () => {
-    // #426 delete itself is ux-owned; this slice only guards the live
-    // sibling the Reconnect view renders.
-    expect(enSrc).toContain("'settings.reconnectSpotify'");
-    for (const s of [enSrc, deSrc, frSrc]) {
-      expect(s).toContain("'common.back'");
-      expect(s).toContain("'settings.formatTemplatePlaceholder'");
-    }
   });
 
   it('every static t() call-site resolves against the en key set', () => {

@@ -30,6 +30,7 @@ import Reconnect from '$lib/components/Reconnect.svelte';
 import { defaultConfig } from '$lib/stores/config';
 import { resetAuthFlow, setSpotifyPhase, setTeamsPhase } from '$lib/stores/authFlow.svelte';
 import { currentView } from '$lib/stores/app';
+import { t } from '$lib/i18n';
 
 const CLIENT_ID = 'a'.repeat(32);
 const SYNC_CONNECTED = {
@@ -94,6 +95,19 @@ describe('Reconnect view (#557, #558)', () => {
       'Click below to reconnect your Microsoft Teams account.'
     );
     expect(container.textContent).toContain('Connected');
+  });
+
+  /**
+   * #783 — the reconnect action is named by `settings.reconnectSpotify`, so the
+   * assertion has to come from the rendered view: a source-text containment
+   * check on the dictionary passes even when the view stops rendering the key
+   * (the button then prints the raw key and `t()` no longer matches it).
+   */
+  it('#783 names the Spotify reconnect action from the dictionary', async () => {
+    const { getByRole } = render(Reconnect);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('get_sync_status'));
+
+    expect(getByRole('button', { name: t('settings.reconnectSpotify') })).toBeTruthy();
   });
 
   it('#558 offers a restart (and the manual paste) when the Spotify flow is stuck waiting', async () => {
