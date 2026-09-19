@@ -348,13 +348,19 @@ pub async fn export_config(
     let json = config::export_document(&current)?;
     let suggested = config::export_file_name(env!("CARGO_PKG_VERSION"), chrono::Utc::now());
 
-    let chosen = app
+    // Issue #885: the picker blocks until the user answers, and that wait is
+    // unbounded, so only its terminal call runs on the blocking pool — the
+    // same contract `ask_overwrite` documents below. The dialog itself is
+    // built here, on the command thread.
+    let picker = app
         .dialog()
         .file()
         .set_title(title)
         .set_file_name(&suggested)
-        .add_filter("JSON", &["json"])
-        .blocking_save_file();
+        .add_filter("JSON", &["json"]);
+    let chosen = tauri::async_runtime::spawn_blocking(move || picker.blocking_save_file())
+        .await
+        .map_err(|e| format!("export_config spawn_blocking panicked: {:?}", e))?;
     let Some(chosen) = chosen else {
         log::info!("{CMD} export_config: CANCELLED - dialog dismissed");
         return Ok(None);
@@ -410,7 +416,7 @@ pub struct ImportOutcome {
 /// pressed".
 ///
 /// Blocking on purpose: this is called from the blocking pool (never the main
-/// thread), which is the same pattern the file picker above uses.
+/// thread), the same `spawn_blocking` shape the file pickers above use.
 fn ask_overwrite(
     app: &AppHandle,
     title: &str,
@@ -450,12 +456,16 @@ pub async fn import_config(
 ) -> Result<Option<ImportOutcome>, String> {
     log::info!("{CMD} import_config: ENTRY");
 
-    let chosen = app
+    // Same blocking-pool contract as the export picker (issue #885): building
+    // the dialog is cheap, the wait on the user is not.
+    let picker = app
         .dialog()
         .file()
         .set_title(title.clone())
-        .add_filter("JSON", &["json"])
-        .blocking_pick_file();
+        .add_filter("JSON", &["json"]);
+    let chosen = tauri::async_runtime::spawn_blocking(move || picker.blocking_pick_file())
+        .await
+        .map_err(|e| format!("import_config spawn_blocking panicked: {:?}", e))?;
     let Some(chosen) = chosen else {
         log::info!("{CMD} import_config: CANCELLED - dialog dismissed");
         return Ok(None);
@@ -762,5 +772,59 @@ mod tests {
         assert!(strays.is_empty(), "staged sidecars left behind: {strays:?}");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The statement that carries `needle` when `needle` is an argument of a
+    /// `spawn_blocking` call: from that call to the `;` ending the statement.
+    /// `None` when the call is nowhere inside a `spawn_blocking` argument
+    /// list — the failure the #885 guard exists to catch. Paren-counted, so a
+    /// closure written either inline (`move || expr`, what rustfmt produces)
+    /// or as a block passes.
+    fn blocking_statement_of(body: &str, needle: &str) -> Option<String> {
+        let pos = body.find(needle)?;
+        let open = body[..pos].rfind("spawn_blocking(")?;
+        let tail = &body[open..];
+        let mut depth = 0i32;
+        let mut end = None;
+        for (i, ch) in tail.char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                ';' if depth == 0 => {
+                    end = Some(i);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        Some(tail[..end?].to_string())
+    }
+
+    /// Issue #885: an open file dialog holds a runtime worker for as long as
+    /// the user leaves it open, which on a low-core machine delays every other
+    /// command that hops through the async runtime. Both pickers must
+    /// therefore run on the blocking pool.
+    ///
+    /// Source-level by necessity: showing a native picker needs a real desktop
+    /// session. The structural check — the call is an argument of the
+    /// `spawn_blocking` call, and the join handle is awaited — is what makes
+    /// this more than a proximity scan.
+    #[test]
+    fn file_pickers_run_on_the_blocking_pool() {
+        let prod = prod_source(include_str!("config.rs"));
+
+        for (sig, call) in [
+            ("pub async fn export_config(", "blocking_save_file()"),
+            ("pub async fn import_config(", "blocking_pick_file()"),
+        ] {
+            let body = body_of(prod, sig);
+            let statement = blocking_statement_of(&body, call).unwrap_or_else(|| {
+                panic!("{sig} calls {call} outside a spawn_blocking call (issue #885)")
+            });
+            assert!(
+                statement.contains(".await"),
+                "{sig} must await the picker task, or the command returns before the user answers"
+            );
+        }
     }
 }
