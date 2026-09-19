@@ -540,4 +540,14 @@ export const fr: Dict = {
     '« Système » suit l’apparence de votre système d’exploitation ; Sombre et Clair restent fixes.',
   'settings.densityCompactLabel': 'Espacement compact',
   'settings.densityHint': 'Resserre les espacements et l’échelle typographique. Indépendant du thème.',
+  // --- 5.0 wave1 i18n-lib ---
+  // Key requests routed through this slice's dictionaries (see W1-NOTES.md).
+  'onboarding.pollIntervalClamped':
+    'Votre intervalle enregistré est de {stored}s, hors de la plage {min}–{max}s de cette étape — {seconds}s seront utilisées.',
+  'update.stagingProgressLabel': 'Préparation de la mise à jour',
+  'rules.presenceAvailable': 'Disponible',
+  'rules.presenceBusyCall': 'Occupé — En appel',
+  'rules.presenceBusyConference': 'Occupé — En conférence téléphonique',
+  'rules.presenceAway': 'Absent',
+  'rules.presenceDndPresenting': 'Ne pas déranger — Présentation',
 };

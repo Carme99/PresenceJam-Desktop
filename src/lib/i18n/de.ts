@@ -37,7 +37,7 @@ export const de: Dict = {
   // ── dashboard ─────────────────────────────────────────────────────
   'dashboard.spotifyOff': 'Spotify aus',
   'dashboard.teamsOff': 'Teams aus',
-  'dashboard.syncing': 'Synchronisiert',
+  'dashboard.syncing': 'Synchronisierung',
   'dashboard.logsDetachedTitle': 'Protokolle (abgekoppelt — klicken zum Fokussieren)',
   'dashboard.logsTitle': 'Protokolle',
   'dashboard.logsDetachedAria': 'Protokolle (in separatem Fenster abgekoppelt)',
@@ -531,7 +531,11 @@ export const de: Dict = {
     '„System“ folgt der Darstellung Ihres Betriebssystems; Dunkel und Hell bleiben fest gewählt.',
   'settings.densityCompactLabel': 'Kompakte Abstände',
   'settings.densityHint': 'Verkleinert Abstände und Schriftgrößen. Unabhängig vom Design.',
-  // --- 5.0 wave1 settings ---
+  // --- 5.0 wave1 i18n-lib ---
+  // Key requests routed through this slice's dictionaries (see W1-NOTES.md).
+  'onboarding.pollIntervalClamped':
+    'Dein gespeichertes Intervall beträgt {stored}s und liegt außerhalb des Bereichs {min}–{max}s dieses Schritts — es werden {seconds}s verwendet.',
+  'update.stagingProgressLabel': 'Update wird vorbereitet',
   'rules.presenceAvailable': 'Verfügbar',
   'rules.presenceBusyCall': 'Beschäftigt — In einem Anruf',
   'rules.presenceBusyConference': 'Beschäftigt — In einer Telefonkonferenz',
