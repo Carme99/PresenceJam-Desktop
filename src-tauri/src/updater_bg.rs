@@ -70,17 +70,34 @@ struct StagedUpdate {
     forced: bool,
 }
 
+/// Why a [`StageDeferredOutcome`] staged nothing (issue #957). The banner
+/// branches on these strings, so they are named here instead of being spelled
+/// inline at each return.
+///
+/// `"current"` is the "nothing to do" answer — the manifest no longer offers
+/// the version the banner cached, e.g. after a re-cut or rolled-back release —
+/// and must NOT render the stale-skip copy with its "Install anyway" button,
+/// which would only repeat the same no-op. The two stale reasons are the ones
+/// that button can still change (`"stale"`), or that a forced retry bypasses
+/// (`"already-skipped"`).
+const SKIP_REASON_CURRENT: &str = "current";
+const SKIP_REASON_STALE: &str = "stale";
+const SKIP_REASON_ALREADY_SKIPPED: &str = "already-skipped";
+
 /// Outcome of a `stage_deferred_update` call (issue #431): the staged
-/// version — `None` when the app is already current or the available
-/// version was declined as stale — plus the running version from backend
-/// truth (`CARGO_PKG_VERSION`), so the quit-time confirmation surface
-/// can show staged-vs-current without an extra round-trip or new
-/// frontend permissions. No `ts_rs` export: the shape is mirrored by a
+/// version — `None` when there was nothing to stage — plus the running
+/// version from backend truth (`CARGO_PKG_VERSION`), so the quit-time
+/// confirmation surface can show staged-vs-current without an extra
+/// round-trip or new frontend permissions. `skipped` says WHICH nothing-to-do
+/// this was (issue #957), and is absent on the staged case so that payload's
+/// wire shape is unchanged. No `ts_rs` export: the shape is mirrored by a
 /// local interface in `UpdatePrompt.svelte`.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct StageDeferredOutcome {
     pub staged: Option<String>,
     pub current: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<String>,
 }
 
 /// Managed state holding at most one staged deferred update.
@@ -921,9 +938,11 @@ pub struct StageComplete {
 ///   already-installed version would make the consumer's "update ready" toast
 ///   a lie);
 /// - it fires exactly once per call;
-/// - it does NOT fire for an outcome that staged nothing —
-///   `stage_deferred_update` returns `staged: None` both when the app is
-///   already current and when the candidate was declined as stale.
+/// - it does NOT fire for an outcome that staged nothing, whichever kind of
+///   nothing it was — `stage_deferred_update` returns `staged: None` when the
+///   app is already current, when the candidate was declined as stale, and
+///   when the persisted skip marker short-circuited it (the `skipped` reason
+///   tells those apart, issue #957).
 fn emit_stage_complete<E: FnOnce(&str)>(outcome: &StageDeferredOutcome, emit: E) {
     if let Some(version) = outcome.staged.as_deref() {
         emit(version);
@@ -988,6 +1007,7 @@ pub async fn stage_deferred_update(
                 return Ok::<StageDeferredOutcome, String>(StageDeferredOutcome {
                     staged: None,
                     current,
+                    skipped: Some(SKIP_REASON_CURRENT.to_string()),
                 });
             };
             let version = update.version.clone();
@@ -1007,6 +1027,7 @@ pub async fn stage_deferred_update(
                         return Ok::<StageDeferredOutcome, String>(StageDeferredOutcome {
                             staged: None,
                             current,
+                            skipped: Some(SKIP_REASON_ALREADY_SKIPPED.to_string()),
                         });
                     }
                 }
@@ -1024,6 +1045,7 @@ pub async fn stage_deferred_update(
                     return Ok::<StageDeferredOutcome, String>(StageDeferredOutcome {
                         staged: None,
                         current,
+                        skipped: Some(SKIP_REASON_STALE.to_string()),
                     });
                 }
             }
@@ -1075,6 +1097,7 @@ pub async fn stage_deferred_update(
             Ok(StageDeferredOutcome {
                 staged: Some(version),
                 current,
+                skipped: None,
             })
         })
     })
@@ -1769,6 +1792,7 @@ mod tests {
         let staged = StageDeferredOutcome {
             staged: Some("4.7.0".to_string()),
             current: "4.6.0".to_string(),
+            skipped: None,
         };
         let mut fired: Vec<String> = Vec::new();
         emit_stage_complete(&staged, |version| fired.push(version.to_string()));
@@ -1777,6 +1801,7 @@ mod tests {
         let quiet_outcome = StageDeferredOutcome {
             staged: None,
             current: "4.6.0".to_string(),
+            skipped: Some(SKIP_REASON_STALE.to_string()),
         };
         let mut quiet: Vec<String> = Vec::new();
         emit_stage_complete(&quiet_outcome, |version| quiet.push(version.to_string()));
@@ -1796,6 +1821,52 @@ mod tests {
             .unwrap(),
             r#"{"version":"4.7.0"}"#
         );
+    }
+
+    /// Issue #957: the stage outcome must say WHICH nothing-to-do it returned,
+    /// because the banner's stale-skip copy and its "Install anyway" button are
+    /// only correct for the stale reasons. The staged case keeps issue #431's
+    /// wire shape — no `skipped` key at all — so the banner's existing
+    /// `staged` handling cannot be disturbed by this addition.
+    #[test]
+    fn test_stage_outcome_reports_the_skip_reason() {
+        let staged = StageDeferredOutcome {
+            staged: Some("4.8.0".to_string()),
+            current: "4.7.0".to_string(),
+            skipped: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&staged).unwrap(),
+            r#"{"staged":"4.8.0","current":"4.7.0"}"#,
+            "the staged payload must not gain a skipped key"
+        );
+
+        for reason in [
+            SKIP_REASON_CURRENT,
+            SKIP_REASON_STALE,
+            SKIP_REASON_ALREADY_SKIPPED,
+        ] {
+            let outcome = StageDeferredOutcome {
+                staged: None,
+                current: "4.7.0".to_string(),
+                skipped: Some(reason.to_string()),
+            };
+            assert_eq!(
+                serde_json::to_string(&outcome).unwrap(),
+                format!(r#"{{"staged":null,"current":"4.7.0","skipped":"{reason}"}}"#)
+            );
+            // Nothing staged means no stage-complete event, whatever the
+            // reason — the reason only changes what the banner says.
+            let mut fired: Vec<String> = Vec::new();
+            emit_stage_complete(&outcome, |version| fired.push(version.to_string()));
+            assert!(fired.is_empty());
+        }
+
+        assert_ne!(
+            SKIP_REASON_CURRENT, SKIP_REASON_STALE,
+            "the already-current case must be distinguishable from the stale one"
+        );
+        assert_ne!(SKIP_REASON_STALE, SKIP_REASON_ALREADY_SKIPPED);
     }
 
     /// The banner shows the manifest's own `pub_date` literal. `Update::date`
