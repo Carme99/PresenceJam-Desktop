@@ -63,10 +63,14 @@
   }
 
   // Mirrors the backend `StageDeferredOutcome` shape (kept local so no
-  // generated types need to change for this slice).
+  // generated types need to change for this slice). `skipped` (#957) says
+  // WHICH nothing-to-do a `staged: null` outcome was — the reason names are
+  // the backend's `SKIP_REASON_*` constants — and is absent on the staged
+  // case (`skip_serializing_if`), hence optional.
   interface StageOutcome {
     staged: string | null;
     current: string;
+    skipped?: 'current' | 'stale' | 'already-skipped' | null;
   }
 
   // Mirrors the backend `StageProgress` shape emitted on
@@ -329,6 +333,16 @@
         stagedVersion = outcome.staged;
         confirming = false;
         staleSkippedVersion = '';
+      } else if (outcome.skipped === 'current') {
+        // #957: nothing to do — the manifest no longer offers the version
+        // this banner cached (a re-cut or rolled-back release), so there is
+        // no update to install and no stale decline to report. Drop the
+        // candidate (the banner goes with it) instead of rendering the
+        // stale-skip copy with an "Install anyway" button that would only
+        // repeat the same no-op.
+        staleSkippedVersion = '';
+        confirming = false;
+        update = null;
       } else {
         // Declined as stale (backend recorded a skip marker, so a retry
         // short-circuits without re-downloading): show the skipped
