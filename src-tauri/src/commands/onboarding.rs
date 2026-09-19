@@ -58,7 +58,13 @@ pub async fn is_onboarding_complete(
     tauri::async_runtime::spawn_blocking(move || {
         single_flight(
             &BOOT_GATE_FLIGHT,
-            || cached_verdict(&state_clone, "in-flight check already landed"),
+            // A waiter shares only a verdict that landed: the cache holds
+            // `bool`s and a failed check is not cacheable, so the error type
+            // rides along in `T` for the owner's own `Result` (issue #942).
+            || {
+                cached_verdict(&state_clone, "in-flight check already landed")
+                    .map(Ok::<bool, String>)
+            },
             || {
                 let result = is_onboarding_complete_impl(&state_clone, &app_clone)?;
                 // Store result in cache. We cache both `true` and `false`
@@ -415,6 +421,26 @@ fn is_onboarding_complete_impl(state: &Arc<AppState>, app: &AppHandle) -> Result
     Ok(complete)
 }
 
+/// Machine-readable codes `complete_onboarding` returns when a token slot is
+/// empty (issue #978). The wizard maps each one to localised copy plus the
+/// auth step that fixes it; both-missing yields both codes in a fixed order,
+/// Spotify first, so the wizard sends the user to the first step and the next
+/// Finish surfaces the other.
+const SPOTIFY_NOT_CONNECTED: &str = "spotify_not_connected";
+const TEAMS_NOT_CONNECTED: &str = "teams_not_connected";
+const BOTH_NOT_CONNECTED: &str = "spotify_not_connected,teams_not_connected";
+
+/// The routable code for a `complete_onboarding` finish, or `None` when both
+/// providers are connected and sync may start.
+fn missing_tokens_error(has_spotify: bool, has_teams: bool) -> Option<&'static str> {
+    match (has_spotify, has_teams) {
+        (true, true) => None,
+        (false, true) => Some(SPOTIFY_NOT_CONNECTED),
+        (true, false) => Some(TEAMS_NOT_CONNECTED),
+        (false, false) => Some(BOTH_NOT_CONNECTED),
+    }
+}
+
 #[tauri::command]
 pub async fn complete_onboarding(
     window: tauri::Window,
@@ -443,21 +469,22 @@ pub async fn complete_onboarding(
         has_teams
     );
 
-    if has_spotify && has_teams {
-        log::info!("{CMD} complete_onboarding: both tokens present, starting sync");
-        super::sync::start_syncing(window, state, app).await?;
-        log::info!("{CMD} complete_onboarding: sync started successfully");
-    } else {
+    if let Some(code) = missing_tokens_error(has_spotify, has_teams) {
         log::error!(
             "{CMD} complete_onboarding: missing tokens, cannot start sync (spotify={}, teams={})",
             has_spotify,
             has_teams
         );
-        return Err(format!(
-            "Missing tokens: spotify={}, teams={}",
-            has_spotify, has_teams
-        ));
+        // Issue #978: a stable code instead of the formatted "Missing tokens:
+        // spotify=…, teams=…" internals sentence. The wizard routes on it —
+        // localised copy plus the step that fixes it — and the booleans stay
+        // in the log line above for diagnostics.
+        return Err(code.to_string());
     }
+
+    log::info!("{CMD} complete_onboarding: both tokens present, starting sync");
+    super::sync::start_syncing(window, state, app).await?;
+    log::info!("{CMD} complete_onboarding: sync started successfully");
 
     log::info!("{CMD} complete_onboarding: SUCCESS");
     Ok(())
@@ -556,8 +583,8 @@ pub fn reconnect_teams(
 #[cfg(test)]
 mod tests {
     use super::{
-        boot_gate_client_secret, cached_verdict, record_client_secret_state, session_verdict,
-        single_flight, ONBOARDING_CACHE_TTL, RefreshFailure, SessionVerdict,
+        boot_gate_client_secret, cached_verdict, missing_tokens_error, record_client_secret_state,
+        session_verdict, single_flight, RefreshFailure, SessionVerdict, ONBOARDING_CACHE_TTL,
     };
     use crate::config::{AppConfig, ClientSecretState};
     use crate::keychain::KeychainPresence;
@@ -867,7 +894,11 @@ mod tests {
             || Some(false),
             || panic!("a fresh verdict must not start another gate run"),
         );
-        assert_eq!(verdict, Some(false), "the shared verdict is returned verbatim");
+        assert_eq!(
+            verdict,
+            Some(false),
+            "the shared verdict is returned verbatim"
+        );
         assert_eq!(
             single_flight(&flight, || None, || true),
             true,
@@ -883,5 +914,32 @@ mod tests {
         assert_eq!(cached_verdict(&state, "test"), None);
         *state.onboarding_cache.lock() = Some((Instant::now(), true));
         assert_eq!(cached_verdict(&state, "test"), Some(true));
+    }
+    /// Issue #978: the wizard routes on these codes, so every missing-token
+    /// combination must yield a stable, machine-readable marker. Pre-fix the
+    /// command returned the internals sentence `Missing tokens: spotify=false,
+    /// teams=true`, which the wizard rendered verbatim through
+    /// `validation.setupFailed` — untranslated, and naming no action.
+    #[test]
+    fn missing_token_error_is_a_routable_code() {
+        assert_eq!(
+            missing_tokens_error(true, true),
+            None,
+            "both connected: sync starts, no code"
+        );
+        assert_eq!(
+            missing_tokens_error(false, true),
+            Some("spotify_not_connected")
+        );
+        assert_eq!(
+            missing_tokens_error(true, false),
+            Some("teams_not_connected")
+        );
+        assert_eq!(
+            missing_tokens_error(false, false),
+            Some("spotify_not_connected,teams_not_connected"),
+            "both slots empty: both codes, Spotify first, so the wizard can \
+             route to the first step and surface the other on the next finish"
+        );
     }
 }
