@@ -528,8 +528,15 @@
 
 <style>
   .update-banner {
+    /* #951: docked to the bottom edge instead of floating over the top
+       chrome. Centred at `top: var(--sp-3)` the banner sat on the Dashboard
+       header's icon row at the default window, so the theme, logs,
+       diagnostics, settings and about buttons were unclickable while an
+       update was offered. The bottom placement follows the `.playback-toast`
+       convention in `+layout.svelte`: it covers no chrome, and the z-index
+       stays below that toast so a playback error still wins. */
     position: fixed;
-    top: var(--sp-3);
+    bottom: var(--sp-3);
     left: 50%;
     transform: translateX(-50%);
     z-index: 1000;
@@ -547,12 +554,30 @@
     display: flex;
     flex-direction: column;
     gap: var(--sp-1);
+    /* #950: the column owns the free space in the strip, and `min-width: 0`
+       is what lets the ellipsis rules below cut a long title instead of
+       letting it paint underneath the buttons. */
+    flex: 1 1 auto;
     min-width: 0;
   }
   .update-title {
     font-size: var(--fs-sm);
     font-weight: 700;
     color: var(--fg);
+  }
+  /* #950: every info row is one line in the strip — a long release title or
+     beta note is cut with an ellipsis rather than wrapping the banner into a
+     tall block or spilling past its rounded border. The error row is
+     deliberately left wrapping: its message is diagnostic and has to stay
+     readable. */
+  .update-title,
+  .update-progress,
+  .update-confirm,
+  .update-stale,
+  .update-beta,
+  .update-staged {
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
   }
   .update-progress {
@@ -577,9 +602,13 @@
   }
   .update-actions {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: var(--sp-2);
-    flex-shrink: 0;
+    row-gap: var(--sp-1);
+    /* #950: the group yields to the strip instead of pushing the flex line
+       past its border — its automatic minimum size keeps every button whole
+       and wraps them onto a second row when the window is too narrow. */
   }
   .download-btn {
     padding: var(--sp-2) var(--sp-4);
