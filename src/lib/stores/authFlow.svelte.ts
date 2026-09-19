@@ -83,6 +83,10 @@ export function resetSpotifyAuthFlow() {
 
 /** Clear only the Teams flow; never touches Spotify state. */
 export function resetTeamsAuthFlow() {
+  // Issue #933: captured before the code is cleared, so the backend cancel can
+  // name the abandoned flow instead of clearing whatever is current by the time
+  // the (fire-and-forget) invoke lands.
+  const abandoned = authFlow.teams.deviceCode;
   authFlow.teams.phase = 'idle';
   authFlow.teams.error = null;
   authFlow.teams.userCode = '';
@@ -97,7 +101,7 @@ export function resetTeamsAuthFlow() {
   // the backend must stop treating the abandoned device code as the current
   // flow, so its result can never be committed.
   teamsPollMutex.inFlight = false;
-  cancelTeamsPollOnBackend();
+  cancelTeamsPollOnBackend(abandoned);
 }
 
 /**
@@ -107,9 +111,10 @@ export function resetTeamsAuthFlow() {
  * plain-node unit tests, where a static Tauri import must not be required. A
  * failure here only means the abandoned poll runs to its own timeout.
  */
-function cancelTeamsPollOnBackend() {
+function cancelTeamsPollOnBackend(deviceCode: string) {
+  if (!deviceCode) return;
   void import('@tauri-apps/api/core')
-    .then(({ invoke }) => invoke('cancel_teams_auth_poll'))
+    .then(({ invoke }) => invoke('cancel_teams_auth_poll', { deviceCode }))
     .catch((e) => devLog('[AUTH_FLOW] cancel_teams_auth_poll failed (non-fatal):', e));
 }
 
@@ -136,6 +141,17 @@ export function tryAcquireTeamsPoll(): boolean {
 export function releaseTeamsPoll() {
   teamsPollMutex.holders = Math.max(0, teamsPollMutex.holders - 1);
   teamsPollMutex.inFlight = teamsPollMutex.holders > 0;
+}
+
+/**
+ * Issue #933: `poll_teams_auth` resolves `Ok` even when the backend *discarded*
+ * the tokens it polled, because a newer sign-in superseded that flow (or the
+ * flow was cancelled). So a call site may only adopt the sign-in as successful
+ * while the store still holds the device code that poll belonged to: capture
+ * `authFlow.teams.deviceCode` before the invoke and pass it here afterwards.
+ */
+export function isCurrentTeamsPoll(deviceCode: string): boolean {
+  return deviceCode !== '' && authFlow.teams.deviceCode === deviceCode;
 }
 
 /**

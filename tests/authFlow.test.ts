@@ -15,6 +15,7 @@ import {
   expiresAtFromResponse,
   formatCountdownMs,
   isSafeHttpUrl,
+  isCurrentTeamsPoll,
   releaseTeamsPoll,
   resetSpotifyAuthFlow,
   resetTeamsAuthFlow,
@@ -124,5 +125,34 @@ describe('per-flow resets (#421)', () => {
     expect(authFlow.teams.verificationUrl).toBe('https://microsoft.com/devicelogin');
     expect(authFlow.teams.deviceCode).toBe('device-code');
     expect(authFlow.teams.expiresAt).toBe(1_700_000_000_000);
+  });
+});
+
+describe('a superseded poll is not a successful sign-in (#933)', () => {
+  it('adopts success only while the store still holds the polled device code', () => {
+    setTeamsDeviceCode({
+      userCode: 'AAAA-BBBB',
+      verificationUrl: 'https://microsoft.com/devicelogin',
+      deviceCode: 'code-a',
+      interval: 5
+    });
+    expect(isCurrentTeamsPoll('code-a')).toBe(true);
+
+    // A newer sign-in replaced the flow: the older poll's Ok must not be
+    // adopted as success even though the backend resolved it.
+    setTeamsDeviceCode({
+      userCode: 'CCCC-DDDD',
+      verificationUrl: 'https://microsoft.com/devicelogin',
+      deviceCode: 'code-b',
+      interval: 5
+    });
+    expect(isCurrentTeamsPoll('code-a')).toBe(false);
+    expect(isCurrentTeamsPoll('code-b')).toBe(true);
+
+    // Abandoning the flow clears the code outright, and an empty code is never
+    // a current poll.
+    resetTeamsAuthFlow();
+    expect(isCurrentTeamsPoll('code-b')).toBe(false);
+    expect(isCurrentTeamsPoll('')).toBe(false);
   });
 });
