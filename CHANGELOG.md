@@ -15,6 +15,10 @@ section to the released version and opens a fresh empty one (see `docs/RELEASING
 ### Changed
 
 ### Fixed
+- **The Teams device-code request no longer blocks the window.** `start_teams_auth_device_code` runs its HTTP request on the blocking pool instead of the IPC thread (#878).
+- **A superseded or abandoned device-code poll can no longer report success.** The poll's token write, persist, emit and navigation are gated on the flow that is still current, and the success state in Settings is skipped when the store no longer holds that code (#933).
+- **`is_onboarding_complete` is single-flight.** A boot retry that races the first check shares its verdict instead of spending a second refresh token, and the gate's keychain read happens exactly once per call (#942, #760).
+- **`complete_onboarding` returns machine-readable missing-token codes.** `spotify_not_connected` / `teams_not_connected` replace the internal English sentence; the wizard routing that consumes them is tracked in #978.
 
 ### Security
 

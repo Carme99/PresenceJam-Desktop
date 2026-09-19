@@ -1,3 +1,5 @@
+import { devLog } from '$lib/utils/dev';
+
 export type AuthPhase = 'idle' | 'waiting' | 'error' | 'done';
 
 export const authFlow = $state({
@@ -81,6 +83,10 @@ export function resetSpotifyAuthFlow() {
 
 /** Clear only the Teams flow; never touches Spotify state. */
 export function resetTeamsAuthFlow() {
+  // Issue #933: captured before the code is cleared, so the backend cancel can
+  // name the abandoned flow instead of clearing whatever is current by the time
+  // the (fire-and-forget) invoke lands.
+  const abandoned = authFlow.teams.deviceCode;
   authFlow.teams.phase = 'idle';
   authFlow.teams.error = null;
   authFlow.teams.userCode = '';
@@ -88,24 +94,64 @@ export function resetTeamsAuthFlow() {
   authFlow.teams.deviceCode = '';
   authFlow.teams.interval = 5;
   authFlow.teams.expiresAt = null;
+
+  // Issue #933: whoever resets the flow is leaving whatever poll was running.
+  // A restarted sign-in must not be skipped because that invoke is still in
+  // flight (the holder count below keeps its eventual release harmless), and
+  // the backend must stop treating the abandoned device code as the current
+  // flow, so its result can never be committed.
+  teamsPollMutex.inFlight = false;
+  cancelTeamsPollOnBackend(abandoned);
+}
+
+/**
+ * Issue #933: tell the backend that the device code it is still polling
+ * belongs to a flow the user has left, so its result can never be committed.
+ * Fire-and-forget, and deliberately dynamic: this store is imported by
+ * plain-node unit tests, where a static Tauri import must not be required. A
+ * failure here only means the abandoned poll runs to its own timeout.
+ */
+function cancelTeamsPollOnBackend(deviceCode: string) {
+  if (!deviceCode) return;
+  void import('@tauri-apps/api/core')
+    .then(({ invoke }) => invoke('cancel_teams_auth_poll', { deviceCode }))
+    .catch((e) => devLog('[AUTH_FLOW] cancel_teams_auth_poll failed (non-fatal):', e));
 }
 
 /** Shared `poll_teams_auth` mutex (issue #396). The device-code poll is a
  * long-blocking invoke issued from four call sites (Onboarding, Settings,
  * Reconnect, +layout); only one may run at a time. Call sites use
- * `tryAcquireTeamsPoll()` + `finally { releaseTeamsPoll(); }`. */
-export const teamsPollMutex = $state({ inFlight: false });
+ * `tryAcquireTeamsPoll()` + `finally { releaseTeamsPoll(); }`.
+ *
+ * `holders` counts the polls that still owe a release (issue #933): an
+ * abandoned poll can resolve minutes after `resetTeamsAuthFlow()` released the
+ * mutex for a restarted sign-in, and its late `releaseTeamsPoll()` must not
+ * free the mutex that newer flow is holding. */
+export const teamsPollMutex = $state({ inFlight: false, holders: 0 });
 
 /** Acquire the shared poll mutex. Returns false when a poll is already running. */
 export function tryAcquireTeamsPoll(): boolean {
   if (teamsPollMutex.inFlight) return false;
+  teamsPollMutex.holders += 1;
   teamsPollMutex.inFlight = true;
   return true;
 }
 
 /** Release the shared poll mutex. Always call in a `finally` block. */
 export function releaseTeamsPoll() {
-  teamsPollMutex.inFlight = false;
+  teamsPollMutex.holders = Math.max(0, teamsPollMutex.holders - 1);
+  teamsPollMutex.inFlight = teamsPollMutex.holders > 0;
+}
+
+/**
+ * Issue #933: `poll_teams_auth` resolves `Ok` even when the backend *discarded*
+ * the tokens it polled, because a newer sign-in superseded that flow (or the
+ * flow was cancelled). So a call site may only adopt the sign-in as successful
+ * while the store still holds the device code that poll belonged to: capture
+ * `authFlow.teams.deviceCode` before the invoke and pass it here afterwards.
+ */
+export function isCurrentTeamsPoll(deviceCode: string): boolean {
+  return deviceCode !== '' && authFlow.teams.deviceCode === deviceCode;
 }
 
 /**

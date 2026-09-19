@@ -12,7 +12,7 @@
   let { detached = false }: { detached?: boolean } = $props();
   import { configStore, saveConfig, loadConfig, defaultConfig, clientSecretStateOf, SHORTCUT_SLOTS, shortcutBindingsOf, setShortcutBindings, type ShortcutSlot } from '$lib/stores/config';
   import type { AppConfig, SyncStatus } from '$lib/types';
-  import { authFlow, setSpotifyPhase, setTeamsPhase, formatCountdownMs, resetSpotifyAuthFlow, resetTeamsAuthFlow, teamsPollMutex, tryAcquireTeamsPoll, releaseTeamsPoll, isSafeHttpUrl } from '$lib/stores/authFlow.svelte';
+  import { authFlow, setSpotifyPhase, setTeamsPhase, formatCountdownMs, resetSpotifyAuthFlow, resetTeamsAuthFlow, isCurrentTeamsPoll, teamsPollMutex, tryAcquireTeamsPoll, releaseTeamsPoll, isSafeHttpUrl } from '$lib/stores/authFlow.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
   import PageHeader from './PageHeader.svelte';
   import { t, i18n, type Locale, type TKey } from '$lib/i18n';
@@ -978,11 +978,20 @@
       return;
     }
     setTeamsPhase('waiting');
+    // Issue #933: capture the flow this poll belongs to before the invoke. The
+    // backend resolves `Ok` even when it *discarded* the polled tokens (a newer
+    // sign-in superseded this one, or the flow was cancelled), so success may
+    // only be adopted while the store still holds that exact device code.
+    const polledDeviceCode = authFlow.teams.deviceCode;
     try {
       await invoke('poll_teams_auth', {
-        deviceCode: authFlow.teams.deviceCode,
+        deviceCode: polledDeviceCode,
         interval: authFlow.teams.interval
       });
+      if (!isCurrentTeamsPoll(polledDeviceCode)) {
+        devLog('[SETTINGS] pollTeamsAuth: flow superseded, not adopting the sign-in');
+        return;
+      }
       setTeamsPhase('done');
       teamsStatusConnected = true;
     } catch (e) {

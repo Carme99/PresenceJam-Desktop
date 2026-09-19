@@ -8,6 +8,7 @@ use crate::keychain::{self, KeychainPresence};
 use crate::polling::{cas_refresh_or_discard, CasOutcome};
 use crate::token_io;
 use crate::AppState;
+use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
@@ -44,37 +45,91 @@ pub async fn is_onboarding_complete(
     log::debug!("{CMD} is_onboarding_complete: ENTRY");
 
     // Cache hit — return immediately.
-    {
-        let guard = state.onboarding_cache.lock();
-        if let Some((ts, result)) = *guard {
-            if ts.elapsed() < ONBOARDING_CACHE_TTL {
-                log::info!(
-                    "{CMD} is_onboarding_complete: cache HIT (age={:.2}s, result={})",
-                    ts.elapsed().as_secs_f32(),
-                    result
-                );
-                return Ok(result);
-            }
-        }
+    if let Some(result) = cached_verdict(&state, "cache HIT") {
+        return Ok(result);
     }
 
-    // Cache miss — run the actual check on a blocking thread (HTTPS round-trips).
+    // Cache miss — run the actual check on a blocking thread (HTTPS
+    // round-trips). Overlapping callers share one run (issue #942): the front
+    // end gives up on the boot probe after 8 s and offers Retry, so two gate
+    // runs used to refresh from clones of the same refresh token.
     let state_clone: Arc<AppState> = Arc::clone(&state);
     let app_clone = app.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        is_onboarding_complete_impl(&state_clone, &app_clone)
+    tauri::async_runtime::spawn_blocking(move || {
+        single_flight(
+            &BOOT_GATE_FLIGHT,
+            // A waiter shares only a verdict that landed: the cache holds
+            // `bool`s and a failed check is not cacheable, so the error type
+            // rides along in `T` for the owner's own `Result` (issue #942).
+            || {
+                cached_verdict(&state_clone, "in-flight check already landed")
+                    .map(Ok::<bool, String>)
+            },
+            || {
+                let result = is_onboarding_complete_impl(&state_clone, &app_clone)?;
+                // Store result in cache. We cache both `true` and `false`
+                // outcomes — a recent "complete" result is just as valid as a
+                // recent "incomplete" one for the 30s window. The write happens
+                // inside the flight lock, so a caller that waited for this run
+                // observes this verdict instead of starting another one.
+                *state_clone.onboarding_cache.lock() = Some((Instant::now(), result));
+                log::info!(
+                    "{CMD} is_onboarding_complete: cache MISS, stored fresh result={result}"
+                );
+                Ok(result)
+            },
+        )
     })
     .await
-    .map_err(|e| format!("is_onboarding_complete task panicked: {}", e))??;
+    .map_err(|e| format!("is_onboarding_complete task panicked: {}", e))?
+}
 
-    // Store result in cache. We cache both `true` and `false` outcomes — a recent "complete"
-    // result is just as valid as a recent "incomplete" one for the 30s window.
-    *state.onboarding_cache.lock() = Some((Instant::now(), result));
-    log::info!(
-        "{CMD} is_onboarding_complete: cache MISS, stored fresh result={}",
-        result
-    );
-    Ok(result)
+/// Freshness-window read of the 30 s verdict cache (issues #70, #942).
+/// `why` completes the log line, so a verdict shared from a check that was in
+/// flight stays distinguishable from a plain cache hit.
+fn cached_verdict(state: &Arc<AppState>, why: &str) -> Option<bool> {
+    let guard = state.onboarding_cache.lock();
+    if let Some((ts, result)) = *guard {
+        if ts.elapsed() < ONBOARDING_CACHE_TTL {
+            log::info!(
+                "{CMD} is_onboarding_complete: {why} (age={:.2}s, result={result})",
+                ts.elapsed().as_secs_f32()
+            );
+            return Some(result);
+        }
+    }
+    None
+}
+
+/// Process-wide single-flight lock for the boot gate (issue #942).
+///
+/// The drain-style cache dedupes only *finished* checks, so two overlapping
+/// callers — the boot probe and the Retry the front end offers after its 8 s
+/// `BOOT_TIMEOUT_MS` — each ran the gate and refreshed from clones of the same
+/// refresh token. `cas_refresh_or_discard` refreshes before it compares, so
+/// against a provider that rotated the token the loser's `invalid_grant` arm
+/// clears and persists a session that is alive: a full re-auth for a healthy
+/// user. A plain blocking mutex (parking_lot's, which has no poisoning error
+/// path to unwrap) is the right shape here — every caller reaches it on a
+/// blocking thread (`spawn_blocking`), so waiting parks a pool thread instead
+/// of stalling the async runtime.
+static BOOT_GATE_FLIGHT: Mutex<()> = Mutex::new(());
+
+/// Single-flight core of the boot gate: while one check runs, a second caller
+/// waits for it and shares its verdict instead of spending the same refresh
+/// token again. `cached` is consulted *after* the wait (double-checked): the
+/// owner writes its verdict into the cache before it releases the flight lock,
+/// so `run` only executes when there genuinely is no verdict to share.
+fn single_flight<T>(
+    flight: &Mutex<()>,
+    cached: impl Fn() -> Option<T>,
+    run: impl FnOnce() -> T,
+) -> T {
+    let _in_flight = flight.lock();
+    if let Some(verdict) = cached() {
+        return verdict;
+    }
+    run()
 }
 
 /// Boot-gate verdict for one provider's session (issue #530).
@@ -173,19 +228,17 @@ fn spotify_session_verdict(
             );
             return Err(RefreshFailure::Unavailable);
         }
-        let client_secret = boot_gate_client_secret(
-            keychain::peek_spotify_client_secret(),
-            || {
-                let presence = keychain::spotify_client_secret_presence();
-                // Issue #560: this is the only probe the boot gate makes, and
-                // it runs before any frontend config surface has loaded. Leave
-                // its answer in the in-memory config so a later save cannot
-                // hand the UI a `client_secret_state` that contradicts it.
-                record_client_secret_state(state, &presence);
-                presence
-            },
-            keychain::get_spotify_client_secret,
-        )?;
+        // Issue #760: one typed read instead of a presence probe plus a fetch.
+        // The two keychain operations had a TOCTOU window between them, and
+        // the flattened `Result<String, String>` threw away the difference
+        // between "no secret stored" and "the keychain cannot answer".
+        let read = keychain::read_spotify_client_secret();
+        // Issue #560: this is the only keychain read the boot gate makes, and
+        // it runs before any frontend config surface has loaded. Leave its
+        // answer in the in-memory config so a later save cannot hand the UI a
+        // `client_secret_state` that contradicts it.
+        record_client_secret_state(state, &presence_from_read(&read));
+        let client_secret = boot_gate_client_secret(read)?;
 
         let pre_refresh_access_token = tokens.access_token.clone();
         // Shared CAS guard (ARCHITECTURE.md § Token-refresh concurrency): a
@@ -239,57 +292,71 @@ fn record_client_secret_state(state: &Arc<AppState>, presence: &KeychainPresence
     config.spotify.client_secret_set = matches!(presence, KeychainPresence::Present);
 }
 
-/// Resolve the Spotify `client_secret` for the boot gate.
+/// Project one typed keychain read onto the tri-state the config surface
+/// renders (issue #560), so the boot gate's observation still reaches the
+/// in-memory config from the single read (issue #760).
 ///
-/// Issue #561: the keychain is a *tri-state* — present, absent, or
-/// unavailable (no Secret Service daemon, a locked keyring, denied storage
-/// access). Only a positively absent entry justifies sending the user to
-/// reconnect; an unavailable keychain is transient by construction (the
-/// secret is still there) and must keep the session, exactly like a flaky
-/// network does. Pre-fix this collapsed every keychain error into an empty
-/// string via `unwrap_or_default()`, which the gate read as "not
-/// configured" — so a locked keyring at launch bounced a fully credentialed
-/// user into the setup wizard, contradicting this module's own
-/// transient-failure policy.
-fn boot_gate_client_secret(
-    peeked: Option<String>,
-    presence: impl FnOnce() -> KeychainPresence,
-    fetch: impl FnOnce() -> Result<String, String>,
-) -> Result<String, RefreshFailure> {
-    // The polling thread primes the cache; a hit costs no keychain call.
-    if let Some(secret) = peeked.filter(|s| !s.is_empty()) {
-        return Ok(secret);
+/// A corrupt entry is reported as unavailable rather than absent: the item is
+/// in the keychain, so "nothing is stored" — the answer that sends the user
+/// through re-onboarding — would be wrong.
+fn presence_from_read(read: &Result<String, keychain::KeychainReadError>) -> KeychainPresence {
+    match read {
+        Ok(_) => KeychainPresence::Present,
+        Err(keychain::KeychainReadError::Absent) => KeychainPresence::Absent,
+        Err(keychain::KeychainReadError::Unavailable(help)) => {
+            KeychainPresence::Unavailable(help.clone())
+        }
+        Err(keychain::KeychainReadError::Corrupt(detail)) => {
+            KeychainPresence::Unavailable(detail.clone())
+        }
     }
-    match presence() {
-        KeychainPresence::Present => match fetch() {
-            Ok(secret) if !secret.is_empty() => Ok(secret),
-            Ok(_) => {
-                log::warn!(
-                    "{CMD} is_onboarding_complete: keychain holds an empty Spotify client_secret; re-auth required"
-                );
-                Err(RefreshFailure::Unavailable)
-            }
-            Err(e) => {
-                // Readable a moment ago, failed now (the entry was deleted
-                // from the OS UI mid-call, or the keyring just locked):
-                // retryable, not re-auth.
-                log::warn!(
-                    "{CMD} is_onboarding_complete: keychain reported the Spotify client_secret present but the read failed: {}",
-                    e
-                );
-                Err(RefreshFailure::Transient)
-            }
-        },
-        KeychainPresence::Absent => {
+}
+
+/// Resolve the Spotify `client_secret` for the boot gate from one typed
+/// keychain read (issue #760).
+///
+/// Issue #561: the keychain is a *tri-state* — present, absent, or unavailable
+/// (no Secret Service daemon, a locked keyring, denied storage access). Only a
+/// positively absent entry justifies sending the user to reconnect; an
+/// unavailable keychain is transient by construction (the secret is still
+/// there) and must keep the session, exactly like a flaky network does.
+/// Pre-#561 this collapsed every keychain error into an empty string via
+/// `unwrap_or_default()`, which the gate read as "not configured" — so a
+/// locked keyring at launch bounced a fully credentialed user into the setup
+/// wizard, contradicting this module's own transient-failure policy.
+///
+/// Issue #760: the caller hands over the result of the one read, so the
+/// classification needs no second keychain probe and cannot disagree with the
+/// read it is classifying.
+fn boot_gate_client_secret(
+    read: Result<String, keychain::KeychainReadError>,
+) -> Result<String, RefreshFailure> {
+    match read {
+        Ok(secret) if !secret.is_empty() => Ok(secret),
+        Ok(_) => {
+            log::warn!(
+                "{CMD} is_onboarding_complete: keychain holds an empty Spotify client_secret; re-auth required"
+            );
+            Err(RefreshFailure::Unavailable)
+        }
+        Err(keychain::KeychainReadError::Absent) => {
             log::warn!(
                 "{CMD} is_onboarding_complete: Spotify access token expired but no client_secret is stored; re-auth required"
             );
             Err(RefreshFailure::Unavailable)
         }
-        KeychainPresence::Unavailable(help) => {
+        Err(keychain::KeychainReadError::Unavailable(help)) => {
             log::warn!(
-                "{CMD} is_onboarding_complete: OS keychain unavailable, keeping the session and retrying later: {}",
-                help
+                "{CMD} is_onboarding_complete: OS keychain unavailable, keeping the session and retrying later: {help}"
+            );
+            Err(RefreshFailure::Transient)
+        }
+        Err(keychain::KeychainReadError::Corrupt(detail)) => {
+            // The client-secret read does not produce this today; it is
+            // transient so a future corrupt item can never send a fully
+            // credentialed user back through onboarding.
+            log::warn!(
+                "{CMD} is_onboarding_complete: stored Spotify client_secret is unreadable, keeping the session and retrying later: {detail}"
             );
             Err(RefreshFailure::Transient)
         }
@@ -367,6 +434,26 @@ fn is_onboarding_complete_impl(state: &Arc<AppState>, app: &AppHandle) -> Result
     Ok(complete)
 }
 
+/// Machine-readable codes `complete_onboarding` returns when a token slot is
+/// empty (issue #978). The wizard maps each one to localised copy plus the
+/// auth step that fixes it; both-missing yields both codes in a fixed order,
+/// Spotify first, so the wizard sends the user to the first step and the next
+/// Finish surfaces the other.
+const SPOTIFY_NOT_CONNECTED: &str = "spotify_not_connected";
+const TEAMS_NOT_CONNECTED: &str = "teams_not_connected";
+const BOTH_NOT_CONNECTED: &str = "spotify_not_connected,teams_not_connected";
+
+/// The routable code for a `complete_onboarding` finish, or `None` when both
+/// providers are connected and sync may start.
+fn missing_tokens_error(has_spotify: bool, has_teams: bool) -> Option<&'static str> {
+    match (has_spotify, has_teams) {
+        (true, true) => None,
+        (false, true) => Some(SPOTIFY_NOT_CONNECTED),
+        (true, false) => Some(TEAMS_NOT_CONNECTED),
+        (false, false) => Some(BOTH_NOT_CONNECTED),
+    }
+}
+
 #[tauri::command]
 pub async fn complete_onboarding(
     window: tauri::Window,
@@ -395,31 +482,43 @@ pub async fn complete_onboarding(
         has_teams
     );
 
-    if has_spotify && has_teams {
-        log::info!("{CMD} complete_onboarding: both tokens present, starting sync");
-        super::sync::start_syncing(window, state, app).await?;
-        log::info!("{CMD} complete_onboarding: sync started successfully");
-    } else {
+    if let Some(code) = missing_tokens_error(has_spotify, has_teams) {
         log::error!(
             "{CMD} complete_onboarding: missing tokens, cannot start sync (spotify={}, teams={})",
             has_spotify,
             has_teams
         );
-        return Err(format!(
-            "Missing tokens: spotify={}, teams={}",
-            has_spotify, has_teams
-        ));
+        // Issue #978: a stable code instead of the formatted "Missing tokens:
+        // spotify=…, teams=…" internals sentence. The wizard routes on it —
+        // localised copy plus the step that fixes it — and the booleans stay
+        // in the log line above for diagnostics.
+        return Err(code.to_string());
     }
+
+    log::info!("{CMD} complete_onboarding: both tokens present, starting sync");
+    super::sync::start_syncing(window, state, app).await?;
+    log::info!("{CMD} complete_onboarding: sync started successfully");
 
     log::info!("{CMD} complete_onboarding: SUCCESS");
     Ok(())
 }
 
 #[tauri::command]
-pub fn reconnect_spotify(
+pub async fn reconnect_spotify(
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<(), String> {
+    // Issue #928: the body rewrites tokens.json and clears the keychain
+    // entry — blocking I/O that must not run inline on the IPC thread.
+    let state = Arc::clone(state.inner());
+    tauri::async_runtime::spawn_blocking(move || reconnect_spotify_impl(&state, &app))
+        .await
+        .map_err(|e| format!("reconnect_spotify task panicked: {e}"))?
+}
+
+/// Blocking body of [`reconnect_spotify`]: drop the session, persist the
+/// cleared file, forget the keychain secret, and ask the UI to re-auth.
+fn reconnect_spotify_impl(state: &Arc<AppState>, app: &AppHandle) -> Result<(), String> {
     log::debug!("{CMD} reconnect_spotify: ENTRY");
 
     // Clear Spotify tokens from state
@@ -431,7 +530,7 @@ pub fn reconnect_spotify(
     log::info!("{CMD} reconnect_spotify: cleared pending_spotify_auth");
 
     // Persist the cleared state to disk atomically.
-    if let Err(e) = token_io::persist_tokens(state.inner(), &app) {
+    if let Err(e) = token_io::persist_tokens(state, app) {
         log::warn!(
             "{CMD} reconnect_spotify: failed to persist cleared state - {}",
             e
@@ -464,10 +563,21 @@ pub fn reconnect_spotify(
 }
 
 #[tauri::command]
-pub fn reconnect_teams(
+pub async fn reconnect_teams(
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<(), String> {
+    // Issue #928: the body rewrites tokens.json — blocking I/O that must not
+    // run inline on the IPC thread.
+    let state = Arc::clone(state.inner());
+    tauri::async_runtime::spawn_blocking(move || reconnect_teams_impl(&state, &app))
+        .await
+        .map_err(|e| format!("reconnect_teams task panicked: {e}"))?
+}
+
+/// Blocking body of [`reconnect_teams`]: drop the session, persist the cleared
+/// file, and ask the UI to re-auth.
+fn reconnect_teams_impl(state: &Arc<AppState>, app: &AppHandle) -> Result<(), String> {
     log::debug!("{CMD} reconnect_teams: ENTRY");
 
     // Clear Teams tokens from state
@@ -475,7 +585,7 @@ pub fn reconnect_teams(
     log::info!("{CMD} reconnect_teams: cleared teams_tokens");
 
     // Persist the cleared state to disk atomically.
-    if let Err(e) = token_io::persist_tokens(state.inner(), &app) {
+    if let Err(e) = token_io::persist_tokens(state, app) {
         log::warn!(
             "{CMD} reconnect_teams: failed to persist cleared state - {}",
             e
@@ -508,13 +618,17 @@ pub fn reconnect_teams(
 #[cfg(test)]
 mod tests {
     use super::{
-        boot_gate_client_secret, record_client_secret_state, session_verdict, RefreshFailure,
-        SessionVerdict,
+        boot_gate_client_secret, cached_verdict, missing_tokens_error, presence_from_read,
+        record_client_secret_state, session_verdict, single_flight, RefreshFailure, SessionVerdict,
+        ONBOARDING_CACHE_TTL,
     };
     use crate::config::{AppConfig, ClientSecretState};
-    use crate::keychain::KeychainPresence;
+    use crate::keychain::{KeychainPresence, KeychainReadError};
     use crate::AppState;
+    use parking_lot::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     /// Issue #530: the boot gate must spend the refresh token for a
     /// locally-expired access token instead of reporting a dead session.
@@ -611,91 +725,95 @@ mod tests {
         }
     }
 
-    /// The priming cache hit must not touch the keychain at all: the polling
-    /// thread fills it, and a boot check runs on every onboarding remount.
+    /// Issue #760: the gate classifies the *one* typed read it is handed, so
+    /// the three keychain answers keep three different verdicts. A positively
+    /// absent entry is the only one that can mean "re-onboard"; anything the
+    /// keychain cannot answer must keep the session, because the secret is
+    /// still stored and retrying is free (issue #561).
     #[test]
-    fn cached_client_secret_short_circuits_the_keychain() {
-        let secret = boot_gate_client_secret(
-            Some("cached-secret".to_string()),
-            || panic!("a cache hit must not probe the keychain"),
-            || panic!("a cache hit must not read the keychain"),
-        )
-        .expect("a primed cache is a usable credential");
-        assert_eq!(secret, "cached-secret");
-    }
-
-    /// Issue #561: present, absent and unavailable are three different
-    /// answers. A positively *absent* entry is the only one that can mean
-    /// "re-onboard"; anything the keychain cannot answer must keep the
-    /// session, because the secret is still stored and retrying is free.
-    #[test]
-    fn keychain_error_is_transient_not_unavailable() {
-        let absent = boot_gate_client_secret(
-            None,
-            || KeychainPresence::Absent,
-            || panic!("an absent entry must not be read"),
-        )
-        .expect_err("an absent secret cannot refresh");
+    fn absent_credentials_require_reauth_and_unreadable_ones_do_not() {
+        let absent = boot_gate_client_secret(Err(KeychainReadError::Absent))
+            .expect_err("an absent secret cannot refresh");
         assert_eq!(absent, RefreshFailure::Unavailable);
 
-        let locked = boot_gate_client_secret(
-            None,
-            || KeychainPresence::Unavailable("Secret Service locked".to_string()),
-            || panic!("an unavailable keychain must not be read"),
-        )
+        let locked = boot_gate_client_secret(Err(KeychainReadError::Unavailable(
+            "Secret Service locked".to_string(),
+        )))
         .expect_err("a locked keychain cannot refresh");
         assert_eq!(
             locked,
             RefreshFailure::Transient,
             "a locked keychain is recoverable; the secret is still stored"
         );
+
+        let corrupt = boot_gate_client_secret(Err(KeychainReadError::Corrupt(
+            "undecodable ciphertext".to_string(),
+        )))
+        .expect_err("a corrupt entry cannot refresh");
+        assert_eq!(
+            corrupt,
+            RefreshFailure::Transient,
+            "an unreadable item is not an absent one: re-onboarding would not fix it"
+        );
     }
 
-    /// The end-to-end boot-gate consequence: a keychain error must leave a
-    /// fully credentialed returning user out of the setup wizard, while an
+    /// The end-to-end boot-gate consequence: an unreadable keychain must leave
+    /// a fully credentialed returning user out of the setup wizard, while an
     /// actually absent secret still routes them to reconnect.
     #[test]
     fn boot_gate_keeps_the_session_when_the_keychain_is_locked() {
-        let verdict_for = |presence: KeychainPresence| {
-            session_verdict(true, || {
-                boot_gate_client_secret(None, || presence, || panic!("must not read")).map(|_| ())
-            })
+        let verdict_for = |read: Result<String, KeychainReadError>| {
+            session_verdict(true, || boot_gate_client_secret(read).map(|_| ()))
         };
 
         assert_eq!(
-            verdict_for(KeychainPresence::Unavailable("locked".to_string())),
+            verdict_for(Err(KeychainReadError::Unavailable("locked".to_string()))),
             SessionVerdict::Valid
         );
         assert_eq!(
-            verdict_for(KeychainPresence::Absent),
+            verdict_for(Err(KeychainReadError::Absent)),
             SessionVerdict::ReauthRequired
         );
     }
 
-    /// A keychain that reports the entry present and then fails the read
-    /// (deleted from the OS UI mid-call, or locked between the two calls)
-    /// must not be treated as a missing credential either.
+    /// The success path: a readable secret is returned verbatim, while an entry
+    /// the keychain stores as empty is a missing credential, not a usable one.
     #[test]
-    fn present_then_failing_read_is_transient() {
-        let failure = boot_gate_client_secret(
-            None,
-            || KeychainPresence::Present,
-            || Err("Failed to read Spotify client secret from keychain".to_string()),
-        )
-        .expect_err("a failing read cannot refresh");
-        assert_eq!(failure, RefreshFailure::Transient);
+    fn a_readable_secret_is_returned_and_an_empty_one_is_not() {
+        let secret = boot_gate_client_secret(Ok("live-secret".to_string()))
+            .expect("a readable secret must refresh");
+        assert_eq!(secret, "live-secret");
+
+        let empty =
+            boot_gate_client_secret(Ok(String::new())).expect_err("an empty secret cannot refresh");
+        assert_eq!(empty, RefreshFailure::Unavailable);
     }
 
-    /// The success path: a present, readable secret is returned verbatim.
+    /// Issue #560 has to keep working through the typed read: the single read's
+    /// answer is what `update_config` hands back to the UI, so a keyring that
+    /// locked must not be laundered into `absent`.
     #[test]
-    fn present_readable_secret_is_returned() {
-        let secret = boot_gate_client_secret(
-            None,
-            || KeychainPresence::Present,
-            || Ok("live-secret".to_string()),
-        )
-        .expect("a readable secret must refresh");
-        assert_eq!(secret, "live-secret");
+    fn the_reads_observation_maps_onto_the_config_tri_state() {
+        assert!(matches!(
+            presence_from_read(&Ok("secret".to_string())),
+            KeychainPresence::Present
+        ));
+        assert!(matches!(
+            presence_from_read(&Err(KeychainReadError::Absent)),
+            KeychainPresence::Absent
+        ));
+        assert!(matches!(
+            presence_from_read(&Err(KeychainReadError::Unavailable("locked".into()))),
+            KeychainPresence::Unavailable(help) if help == "locked"
+        ));
+        assert!(
+            matches!(
+                presence_from_read(&Err(KeychainReadError::Corrupt("undecodable".into()))),
+                KeychainPresence::Unavailable(_)
+            ),
+            "an item that is stored but unreadable is not absent: reporting it as \
+             absent would send the user through re-onboarding"
+        );
     }
 
     /// Issue #560: the boot gate's observation has to reach the in-memory
@@ -744,5 +862,175 @@ mod tests {
         let state = Arc::new(AppState::new());
         record_client_secret_state(&state, &KeychainPresence::Unavailable("locked".into()));
         assert!(state.config.get().is_none());
+    }
+
+    /// Issue #942: two overlapping checks must share one refresh, and the
+    /// caller that arrived second must observe the first one's verdict.
+    /// Pre-fix the cache was written only after a check finished, so the Retry
+    /// the front end offers when its 8 s `BOOT_TIMEOUT_MS` fires started a
+    /// second gate run and spent the same refresh token; against a provider
+    /// that rotates tokens the loser's `invalid_grant` arm cleared a session
+    /// that was alive. The refresh counter is the observable.
+    #[test]
+    fn overlapping_boot_checks_share_one_refresh() {
+        let flight = Mutex::new(());
+        let cache = Mutex::new(None::<(Instant, bool)>);
+        let refreshes = AtomicUsize::new(0);
+        let in_check = AtomicBool::new(false);
+
+        let cached = || -> Option<bool> {
+            let guard = cache.lock();
+            let verdict = guard
+                .as_ref()
+                .filter(|(ts, _)| ts.elapsed() < ONBOARDING_CACHE_TTL)
+                .map(|(_, result)| *result);
+            verdict
+        };
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                single_flight(&flight, cached, || {
+                    refreshes.fetch_add(1, Ordering::SeqCst);
+                    in_check.store(true, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(150));
+                    *cache.lock() = Some((Instant::now(), true));
+                    true
+                })
+            });
+
+            // Wait until the first run is provably inside its refresh, so the
+            // second call below overlaps it instead of racing it.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !in_check.load(Ordering::SeqCst) {
+                assert!(Instant::now() < deadline, "the first check never started");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+
+            let shared = single_flight(&flight, cached, || {
+                refreshes.fetch_add(1, Ordering::SeqCst);
+                false
+            });
+
+            assert_eq!(
+                refreshes.load(Ordering::SeqCst),
+                1,
+                "a retry issued while the gate was in flight must not refresh a second time"
+            );
+            assert!(
+                shared,
+                "the overlapping caller must share the in-flight verdict, not its own"
+            );
+            assert!(first.join().expect("the first check must not panic"));
+        });
+    }
+
+    /// The double-check is what makes sharing work: a verdict that is already
+    /// fresh answers without starting another gate run, and the flight lock is
+    /// released with the run rather than poisoned by it.
+    #[test]
+    fn a_fresh_verdict_is_shared_without_running_the_check() {
+        let flight = Mutex::new(());
+        // `T` is `bool` here: the cached closure supplies `Option<bool>` and
+        // the run closure supplies the verdict itself.
+        let shared = single_flight(
+            &flight,
+            || Some(false),
+            || panic!("a fresh verdict must not start another gate run"),
+        );
+        assert!(
+            !shared,
+            "the shared verdict is returned verbatim, not re-derived"
+        );
+        assert!(
+            single_flight(&flight, || None, || true),
+            "the flight lock must be released, or the next boot check would block forever"
+        );
+    }
+
+    /// The command's own cache read: an empty cache has no verdict to share,
+    /// and the verdict a caller just stored is the one the next one gets.
+    #[test]
+    fn cached_verdict_reports_the_stored_result() {
+        let state = Arc::new(AppState::new());
+        assert_eq!(cached_verdict(&state, "test"), None);
+        *state.onboarding_cache.lock() = Some((Instant::now(), true));
+        assert_eq!(cached_verdict(&state, "test"), Some(true));
+    }
+    /// Issue #978: the wizard routes on these codes, so every missing-token
+    /// combination must yield a stable, machine-readable marker. Pre-fix the
+    /// command returned the internals sentence `Missing tokens: spotify=false,
+    /// teams=true`, which the wizard rendered verbatim through
+    /// `validation.setupFailed` — untranslated, and naming no action.
+    #[test]
+    fn missing_token_error_is_a_routable_code() {
+        assert_eq!(
+            missing_tokens_error(true, true),
+            None,
+            "both connected: sync starts, no code"
+        );
+        assert_eq!(
+            missing_tokens_error(false, true),
+            Some("spotify_not_connected")
+        );
+        assert_eq!(
+            missing_tokens_error(true, false),
+            Some("teams_not_connected")
+        );
+        assert_eq!(
+            missing_tokens_error(false, false),
+            Some("spotify_not_connected,teams_not_connected"),
+            "both slots empty: both codes, Spotify first, so the wizard can \
+             route to the first step and surface the other on the next finish"
+        );
+    }
+
+    /// Issue #942: the single-flight lock is only worth anything if the command
+    /// actually routes through it — a direct `is_onboarding_complete_impl` call
+    /// in the command body is the pre-#942 shape, where two overlapping callers
+    /// each refreshed from the same token. Structural because the command needs
+    /// a live `AppHandle` and a real refresh round-trip.
+    #[test]
+    fn the_command_routes_through_the_single_flight_lock() {
+        let body = crate::token_io::test_scan::fn_body(
+            include_str!("onboarding.rs"),
+            "fn is_onboarding_complete(",
+        );
+        let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            flat.contains("single_flight( &BOOT_GATE_FLIGHT,"),
+            "the command must take the process-wide flight lock, or a Retry can \
+             start a second gate run"
+        );
+        assert!(
+            flat.contains("is_onboarding_complete_impl(&state_clone, &app_clone)"),
+            "the gate body must run as the single-flight payload"
+        );
+    }
+
+    /// Issue #760: the boot gate reads the client secret exactly once. The
+    /// presence probe plus the fetch are what the typed island replaced, and
+    /// re-introducing either restores the TOCTOU window between them.
+    #[test]
+    fn the_spotify_gate_reads_the_secret_once() {
+        let body = crate::token_io::test_scan::fn_body(
+            include_str!("onboarding.rs"),
+            "fn spotify_session_verdict(",
+        );
+        assert_eq!(
+            body.matches("keychain::read_spotify_client_secret()")
+                .count(),
+            1,
+            "the gate must perform exactly one keychain read"
+        );
+        for gone in [
+            "spotify_client_secret_presence",
+            "get_spotify_client_secret",
+            "peek_spotify_client_secret",
+        ] {
+            assert!(
+                !body.contains(gone),
+                "`{gone}` must not return to the boot gate: it is the second probe \
+                 the typed read replaced"
+            );
+        }
     }
 }

@@ -7,14 +7,52 @@ use crate::polling::{cas_refresh_or_discard, CasOutcome};
 use crate::teams::{decode_teams_granted_scopes, DeviceCodeResponse, TeamsApiError};
 use crate::token_io;
 use crate::AppState;
+use parking_lot::Mutex;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 
 /// Log tag prefix for this submodule (issue #79 item 3).
 const CMD: &str = "[CMD.TEAMS_AUTH]";
 
+/// Run one blocking round-trip on the async runtime's blocking pool.
+///
+/// Issue #878: Tauri executes a plain `#[tauri::command]` body inline on the
+/// IPC thread, so a synchronous HTTPS request freezes the webview for its
+/// whole duration — normally a few hundred ms, up to the client timeout
+/// behind a captive portal, a dead network or a blackholed DNS. A join
+/// failure is mapped to the same `String` error the flow reports everywhere
+/// else.
+async fn offload_blocking<T, F>(label: &'static str, work: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|e| format!("{CMD} {label} task panicked: {e}"))
+}
+
+/// Device code of the sign-in flow the UI is currently running (issue #933).
+///
+/// [`start_teams_auth_device_code`] makes its code current, and a poll may
+/// only commit while its own code is still the current one. The device code is
+/// the natural key: it is exactly what the frontend threads through
+/// [`poll_teams_auth`], so a newer sign-in supersedes an older attempt with no
+/// new wire field. Supersession is not cosmetic — the token slot and
+/// `cas_refresh_or_discard` are shared, so a stale poll that lands overwrites
+/// the newer flow's tokens, persists them, invalidates the onboarding cache,
+/// and navigates the user to Settings while the flow they are actually running
+/// is still on screen.
+static CURRENT_FLOW: Mutex<Option<String>> = Mutex::new(None);
+
+/// Whether a poll for `device_code` may still commit the tokens it polled
+/// (issue #933). `None` — cancelled, or never started — discards them.
+fn may_commit(current: &Mutex<Option<String>>, device_code: &str) -> bool {
+    current.lock().as_deref() == Some(device_code)
+}
+
 #[tauri::command]
-pub fn start_teams_auth_device_code(
+pub async fn start_teams_auth_device_code(
     window: tauri::Window,
     app: AppHandle,
 ) -> Result<DeviceCodeResponse, String> {
@@ -24,9 +62,15 @@ pub fn start_teams_auth_device_code(
     super::require_main_window(&window)?;
     log::debug!("{CMD} start_teams_auth_device_code: ENTRY");
 
-    let response = match crate::teams::start_teams_auth_device_code() {
-        Ok(r) => r,
-        Err(e) => {
+    // Issue #878: fetching the device code is a blocking HTTPS POST plus a
+    // JSON parse; a synchronous command body would run it on the IPC thread
+    // and freeze the window before the code and verification URL appear.
+    let request = crate::teams::start_teams_auth_device_code;
+    let response = match offload_blocking("start_teams_auth_device_code", request).await {
+        // `offload_blocking` maps a join failure to the same `String`, so the
+        // request's own `Result` is the only one left to classify here.
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) | Err(e) => {
             log::error!("{CMD} start_teams_auth_device_code: failed: {}", e);
             let _ = app.emit("teams-auth-failed", e.clone());
             return Err(e);
@@ -42,6 +86,14 @@ pub fn start_teams_auth_device_code(
     // No pending state is stored: the device code travels to the poll
     // command via the frontend, and a device-code flow needs no registered
     // redirect URI (Entra reply-url docs). See issue #158.
+
+    // Issue #933: this is now the flow the UI is running, which supersedes any
+    // older attempt — its poll may no longer commit.
+    *CURRENT_FLOW.lock() = Some(response.device_code.clone());
+    log::info!(
+        "{CMD} start_teams_auth_device_code: flow is current (device_code.len={})",
+        response.device_code.len()
+    );
 
     log::info!("{CMD} start_teams_auth_device_code: SUCCESS");
     Ok(response)
@@ -69,6 +121,19 @@ pub async fn poll_teams_auth(
     })
     .await
     .map_err(|e| format!("poll_teams_auth task panicked: {}", e))?;
+
+    // Issue #933: the poll runs for up to 900 s. If the user started a newer
+    // sign-in — or abandoned this one — meanwhile, this attempt must not land:
+    // committing would overwrite the newer flow's tokens, persist them and
+    // navigate away from the code the user is actually looking at. Both arms
+    // are discarded, so a superseded attempt cannot report its failure onto
+    // the newer flow's screen either.
+    if !may_commit(&CURRENT_FLOW, &device_code) {
+        log::warn!(
+            "{CMD} poll_teams_auth: flow superseded or cancelled; discarding the polled result without committing"
+        );
+        return Ok(());
+    }
 
     match poll_result {
         Ok(tokens) => {
@@ -129,8 +194,37 @@ pub async fn poll_teams_auth(
     }
 }
 
+/// Supersede the running device-code poll (issue #933).
+///
+/// The frontend calls this from `resetTeamsAuthFlow()` with the code it is
+/// abandoning. Only a slot still holding *that* code is cleared: the reset
+/// fires this fire-and-forget while the restart path immediately fetches a new
+/// device code, so a cancel that lands late must not clear the newer flow's
+/// registration — its own successful poll would then discard itself. The
+/// abandoned poll keeps its HTTP attempt (the retry loop lives in
+/// `teams::poll_teams_auth`), but its result can no longer commit, persist or
+/// navigate, and the same reset releases the frontend's poll mutex, so a
+/// restarted sign-in is not skipped. No main-window guard: a detached Settings
+/// window may abandon the flow it handed back to the main window.
 #[tauri::command]
-pub fn refresh_teams(
+pub fn cancel_teams_auth_poll(device_code: String) {
+    let cancelled = cancel_flow(&CURRENT_FLOW, &device_code);
+    log::info!("{CMD} cancel_teams_auth_poll: ENTRY - cancelled={cancelled}");
+}
+
+/// Testable core of [`cancel_teams_auth_poll`]: clear the slot only while it
+/// still holds `device_code`, so a late cancel cannot revoke a newer flow.
+fn cancel_flow(current: &Mutex<Option<String>>, device_code: &str) -> bool {
+    let mut slot = current.lock();
+    let is_current = slot.as_deref() == Some(device_code);
+    if is_current {
+        *slot = None;
+    }
+    is_current
+}
+
+#[tauri::command]
+pub async fn refresh_teams(
     window: tauri::Window,
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
@@ -139,6 +233,15 @@ pub fn refresh_teams(
     // uses `teams::refresh_teams_token` directly and the frontend never
     // invokes this from a detached window.
     super::require_main_window(&window)?;
+
+    // Issue #928: the refresh is a blocking HTTPS round-trip and the commit
+    // rewrites tokens.json — neither may run inline on the IPC thread.
+    let state = Arc::clone(state.inner());
+    offload_blocking("refresh_teams", move || refresh_teams_impl(&state, &app)).await?
+}
+
+/// Blocking body of [`refresh_teams`].
+fn refresh_teams_impl(state: &Arc<AppState>, app: &AppHandle) -> Result<(), String> {
     log::debug!("{CMD} refresh_teams: ENTRY");
 
     let current_tokens = {
@@ -169,7 +272,7 @@ pub fn refresh_teams(
         // at the end of that statement, so persisting here cannot re-lock the
         // same RwLock for reading.
         CasOutcome::Committed(new_tokens) => {
-            token_io::persist_tokens(state.inner(), &app)?;
+            token_io::persist_tokens(state, app)?;
             log::info!(
                 "{CMD} refresh_teams: SUCCESS (state updated and persisted, access_token.len={})",
                 new_tokens.access_token.len()
@@ -195,7 +298,7 @@ pub fn refresh_teams(
             *state.tokens.teams_mut() = None;
             // Issue #180: the clearing statement above drops its guard at the
             // end of that statement, so this persist cannot self-deadlock.
-            if let Err(e) = token_io::persist_tokens(state.inner(), &app) {
+            if let Err(e) = token_io::persist_tokens(state, app) {
                 log::warn!(
                     "{CMD} refresh_teams: failed to persist cleared teams tokens: {}",
                     e
@@ -227,5 +330,134 @@ pub fn get_teams_granted_scopes(state: tauri::State<'_, Arc<AppState>>) -> Vec<S
     match state.tokens.teams().as_ref() {
         Some(tokens) => decode_teams_granted_scopes(&tokens.access_token),
         None => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{cancel_flow, may_commit, offload_blocking};
+    use parking_lot::Mutex;
+
+    /// Issue #878: the point of the offload is that the thread which *awaits*
+    /// the request is not the thread which *runs* it. `block_on` parks the
+    /// calling thread, so work that ran inline would report the caller's own
+    /// thread id — exactly the freeze the issue describes.
+    #[test]
+    fn offloaded_work_runs_off_the_awaiting_thread() {
+        let awaiting = std::thread::current().id();
+        let worker = tauri::async_runtime::block_on(offload_blocking("test", std::thread::current))
+            .expect("the offloaded work must not panic")
+            .id();
+        assert_ne!(
+            worker, awaiting,
+            "the device-code request must not run on the thread that awaits it: \
+             that thread is the IPC thread, and the HTTPS round-trip would \
+             freeze the window until the request answered"
+        );
+    }
+
+    /// The command's body, sliced by the shared literal-aware scanner (so a
+    /// brace inside a log string cannot end the slice early) and with the
+    /// test module cut off: this module contains the very patterns the
+    /// assertions look for, so a whole-file grep would pass vacuously.
+    fn device_code_command_source() -> String {
+        let src = include_str!("teams_auth.rs");
+        let production = &src[..src.find("\n#[cfg(test)]").expect("a test module")];
+        assert!(
+            production.contains("pub async fn start_teams_auth_device_code("),
+            "the command must be an async `#[tauri::command]`: a synchronous body \
+             runs inline on the IPC thread while it performs the POST"
+        );
+        crate::token_io::test_scan::fn_body(production, "fn start_teams_auth_device_code(")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// A synchronous call left in the command body is the pre-#878
+    /// regression: it runs the HTTPS round-trip on the IPC thread.
+    #[test]
+    fn device_code_command_offloads_its_request() {
+        let body = device_code_command_source();
+        assert!(
+            body.contains("let request = crate::teams::start_teams_auth_device_code;"),
+            "the command must take the blocking request as its offload payload"
+        );
+        assert!(
+            body.contains(
+                "match offload_blocking(\"start_teams_auth_device_code\", request).await"
+            ),
+            "the request must be awaited through `offload_blocking`, or the window \
+             freezes for the round trip"
+        );
+    }
+
+    /// Issue #933: a poll may only commit while its own device code is still
+    /// the flow the UI is running. Pre-fix the spawned task committed whatever
+    /// the code yielded, so an abandoned or superseded attempt still landed —
+    /// including a sign-in as a different Microsoft account, which overwrote
+    /// the newer flow's tokens and navigated the user away from its code.
+    #[test]
+    fn superseded_or_cancelled_flows_may_not_commit() {
+        let current = Mutex::new(None);
+
+        // Nothing registered: a poll whose start never ran has nothing to land on.
+        assert!(!may_commit(&current, "code-a"));
+
+        *current.lock() = Some("code-a".to_string());
+        assert!(
+            may_commit(&current, "code-a"),
+            "the flow the UI started may commit its tokens"
+        );
+
+        // A newer sign-in supersedes it: the older poll is discarded, the
+        // newer one may still commit.
+        *current.lock() = Some("code-b".to_string());
+        assert!(!may_commit(&current, "code-a"));
+        assert!(may_commit(&current, "code-b"));
+
+        // Cancelling is identity-scoped. The slot now holds the newer flow, so
+        // the late cancel the restarted sign-in's reset fired for the code it
+        // abandoned is a no-op: it must not revoke the flow that replaced it.
+        assert!(
+            !cancel_flow(&current, "code-a"),
+            "a cancel for an abandoned code must not clear the newer flow"
+        );
+        assert!(
+            may_commit(&current, "code-b"),
+            "the newer flow must still be able to commit"
+        );
+        assert!(cancel_flow(&current, "code-b"));
+        assert!(
+            !may_commit(&current, "code-b"),
+            "a cancelled flow may not commit"
+        );
+        assert!(
+            !cancel_flow(&current, "code-b"),
+            "cancelling an already-cleared slot is a no-op"
+        );
+    }
+
+    /// The gate has to sit before the commit: a check placed after
+    /// `*guard = Some(tokens)` would already have overwritten the newer flow's
+    /// tokens. Structural because reaching those lines needs a live
+    /// `AppHandle` and the blocking poll loop.
+    #[test]
+    fn the_commit_gate_precedes_the_token_slot_write() {
+        let body = crate::token_io::test_scan::fn_body(
+            include_str!("teams_auth.rs"),
+            "fn poll_teams_auth(",
+        );
+        let gate = body
+            .find("may_commit(")
+            .expect("poll_teams_auth must gate its commit on the flow being current");
+        let commit = body
+            .find("*guard = Some(tokens)")
+            .expect("poll_teams_auth must commit the tokens it polled");
+        assert!(
+            gate < commit,
+            "the supersession gate must run before the token slot is written, or \
+             the stale commit has already clobbered the newer flow's tokens"
+        );
     }
 }
