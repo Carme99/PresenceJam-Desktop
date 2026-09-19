@@ -136,7 +136,7 @@ pub const DE: Strings = Strings {
     pause_sync: "Sync pausieren",
     resume_sync: "Sync fortsetzen",
     open_settings: "Einstellungen öffnen",
-    open_logs_folder: "Log-Ordner öffnen",
+    open_logs_folder: "Protokollordner öffnen",
     quit: "Beenden",
     play_pause: "Wiedergabe/Pause",
     previous: "Zurück",
@@ -699,6 +699,42 @@ mod tests {
             hard_coded_copy(synthetic),
             vec!["Brand New Label".to_string()],
             "only the untranslated label is new copy"
+        );
+    }
+
+    /// Value of `'<key>': '<value>'` in a webview dictionary (#901).
+    fn webview_value(dict: &str, key: &str) -> String {
+        let needle = format!("'{key}':");
+        let start = dict
+            .find(&needle)
+            .unwrap_or_else(|| panic!("{key} is missing from the webview dictionary"));
+        let rest = &dict[start + needle.len()..];
+        let open = rest
+            .find('\'')
+            .unwrap_or_else(|| panic!("{key} has no value"));
+        let after = &rest[open + 1..];
+        let close = after
+            .find('\'')
+            .unwrap_or_else(|| panic!("{key} value is never closed"));
+        after[..close].to_string()
+    }
+
+    /// Issue #901: the German tray/menu table and the German webview dictionary
+    /// name the same control and the same state the same way. Each surface is
+    /// consistent with itself, so only a cross-file check catches the drift —
+    /// `de_and_fr_translate_every_field` never reads the webview.
+    #[test]
+    fn german_tray_wording_matches_the_webview_dictionary() {
+        let de_ts = include_str!("../../src/lib/i18n/de.ts");
+        assert_eq!(
+            DE.open_logs_folder,
+            webview_value(de_ts, "settings.openLogsFolder"),
+            "the tray/menu log-folder item and the Settings card must read alike"
+        );
+        assert_eq!(
+            DE.status_syncing,
+            webview_value(de_ts, "dashboard.syncing"),
+            "the tray status line and the Dashboard badge must read alike"
         );
     }
 }
