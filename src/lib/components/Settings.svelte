@@ -33,15 +33,37 @@
   let saveMessage = $state('');
   let saveTimeout: ReturnType<typeof setTimeout> | null = null;
 
-  // C9: dirty-state detection. Polling fields arrive as BigInt over the
-  // IPC boundary, which JSON.stringify rejects, so serialize with a
-  // BigInt→number replacer on both sides before comparing.
-  function serializeForCompare(cfg: AppConfig): string {
-    return JSON.stringify(cfg, (_k, v) => (typeof v === 'bigint' ? Number(v) : v));
+  // #890: the draft's dirty state is an explicit flag. It used to be a
+  // `$derived` that serialised the whole document twice — `localConfig` against
+  // `$configStore`, status rules, lexicon and all — and every write to the deep
+  // proxy invalidated it, so one keystroke in any field paid two full
+  // `JSON.stringify` passes on the UI thread. The listeners on the form root
+  // below set the flag and the save/discard paths clear it, so nothing compares
+  // serialised configs here any more — which is also why the BigInt→number
+  // replacer that comparison needed is gone with it.
+  let isDirty = $state(false);
+
+  /** #890: the draft now differs from the saved config. */
+  function markDirty() {
+    isDirty = true;
   }
-  let isDirty = $derived(
-    serializeForCompare(localConfig) !== serializeForCompare($configStore)
-  );
+
+  /**
+   * #890: an edit anywhere in the form marks the draft dirty. `input` and
+   * `change` both bubble, so one pair of listeners on the form root covers
+   * every control — including any added later — instead of re-serialising the
+   * config to find out.
+   *
+   * A control opts out with `data-no-draft`: the settings that apply themselves
+   * immediately through their own store, and the controls that only drive the
+   * reconnect flow. Anything that edits `localConfig` or the lexicon must not
+   * carry it.
+   */
+  function onDraftEdit(event: Event) {
+    const target = event.target;
+    if (target instanceof Element && target.closest('[data-no-draft]') !== null) return;
+    markDirty();
+  }
 
   // C9: effective polling bounds, mirroring Rust `clamp_polling`
   // (src-tauri/src/config.rs:109): minimum clamps to [5, 30] first, then
@@ -64,6 +86,7 @@
     // Findings #635/#637: both new presence policies reset with the card.
     localConfig.teams.respect_manual_status = defaultConfig.teams.respect_manual_status;
     localConfig.teams.gate_when_out_of_office = defaultConfig.teams.gate_when_out_of_office;
+    markDirty();
   }
   function resetStatusFormatDefaults() {
     localConfig.teams.status_format = defaultConfig.teams.status_format;
@@ -72,6 +95,7 @@
     // Issue #538: the custom lexicon belongs to this card too.
     localConfig.teams.profanity_extra_words = [...defaultConfig.teams.profanity_extra_words];
     extraWordsText = '';
+    markDirty();
   }
   // Issue #432: reset the rules section to its (empty) default. Rules are
   // additive with serde defaults, so a default section is always valid.
@@ -81,6 +105,7 @@
     // Reset must not leave those editors showing a stale value.
     localConfig.teams.paused_status_format = defaultConfig.teams.paused_status_format;
     localConfig.teams.stopped_status_format = defaultConfig.teams.stopped_status_format;
+    markDirty();
   }
   // Issue #432: format minutes-since-midnight as HH:MM for time inputs.
   function minutesToTime(m: number): string {
@@ -116,9 +141,11 @@
     if (target < 0 || target >= rules.length) return;
     const [moved] = rules.splice(index, 1);
     rules.splice(target, 0, moved);
+    markDirty();
   }
   function resetPollingDefaults() {
     localConfig.polling = structuredClone(defaultConfig.polling);
+    markDirty();
   }
 
   // ── 4.6 findings #634/#635/#637 + issue #538 consumption sites ──────────
@@ -137,18 +164,30 @@
    * accepts. Mirrors `config.rs::PRESENCE_COMBINATIONS` — the closed set the
    * backend normalizes against — and deliberately omits the two the docs say
    * have no effect.
+   *
+   * #955: the wire pair is the value; the visible text is a dictionary key, so
+   * the dropdown is translated like the rest of the card. The five labels were
+   * hardcoded English here and rendered verbatim by both selects.
    */
-  const PRESENCE_OPTIONS = [
-    { availability: 'Available', activity: 'Available', label: 'Available' },
-    { availability: 'Busy', activity: 'InACall', label: 'Busy — In a call' },
+  const PRESENCE_OPTIONS: readonly {
+    availability: string;
+    activity: string;
+    labelKey: TKey;
+  }[] = [
+    { availability: 'Available', activity: 'Available', labelKey: 'rules.presenceAvailable' },
+    { availability: 'Busy', activity: 'InACall', labelKey: 'rules.presenceBusyCall' },
     {
       availability: 'Busy',
       activity: 'InAConferenceCall',
-      label: 'Busy — In a conference call'
+      labelKey: 'rules.presenceBusyConference'
     },
-    { availability: 'Away', activity: 'Away', label: 'Away' },
-    { availability: 'DoNotDisturb', activity: 'Presenting', label: 'Do not disturb — Presenting' }
-  ] as const;
+    { availability: 'Away', activity: 'Away', labelKey: 'rules.presenceAway' },
+    {
+      availability: 'DoNotDisturb',
+      activity: 'Presenting',
+      labelKey: 'rules.presenceDndPresenting'
+    }
+  ];
 
   type PresenceFields = { presence_availability: string; presence_activity: string };
 
@@ -197,6 +236,7 @@
   });
   function resetAppearanceDefaults() {
     localConfig.autostart = defaultConfig.autostart;
+    markDirty();
   }
 
   // #552: a radiogroup must own `role="radio"`/`aria-checked` children with a
@@ -361,7 +401,8 @@
       try {
         const v = await invoke<string>('preview_status', { format, filter_enabled, placeholder, profane_sample, extra_words });
         if (my !== previewSeq) return;
-        previewText = v;
+        // #748: an identical sample is not a new one — never rewrite the node.
+        if (v !== previewText) previewText = v;
       } catch (e) {
         if (my !== previewSeq) return;
         console.warn('[SETTINGS] preview_status failed:', e);
@@ -484,6 +525,7 @@
     const bindings = shortcutBindingsOf(localConfig);
     bindings[slot] = accelerator;
     setShortcutBindings(localConfig, bindings);
+    markDirty();
     const otherSlot = slot === 'toggle_playback' ? 'toggle_sync' : 'toggle_playback';
     void validateShortcut(slot);
     void validateShortcut(otherSlot);
@@ -706,6 +748,7 @@
       // form shows the clamped numbers rather than the raw input.
       localConfig = await saveConfig($state.snapshot(localConfig));
       extraWordsText = localConfig.teams.profanity_extra_words.join('\n');
+      isDirty = false;
       saveMessage = t('settings.saved');
       if (saveTimeout) clearTimeout(saveTimeout);
       saveTimeout = setTimeout(() => saveMessage = '', 2000);
@@ -793,6 +836,7 @@
       // lexicon textarea, which is a projection of the stored list.
       localConfig = await loadConfig();
       extraWordsText = localConfig.teams.profanity_extra_words.join('\n');
+      isDirty = false;
       saveMessage = '';
       backupMessage = t('settings.backupImported', { path: outcome.path });
     } catch (e) {
@@ -832,6 +876,62 @@
     } catch (e) {
       console.error('[SETTINGS] reconnect_spotify_session failed:', e);
       setSpotifyPhase('error', String(e));
+    }
+  }
+
+  // ── #964: the waiting-state escape hatch ────────────────────────────────
+  //
+  // The poller's `spotify-reconnect-required` event lands the user on this
+  // pane with the flow already waiting, so this card is where a lost browser
+  // tab strands them. Reconnect has offered the two ways out since #558; this
+  // is the same pair, reusing its copy.
+  let spotifyManualUrl = $state('');
+  let manualSubmitBusy = $state(false);
+  let manualUrlError = $state('');
+
+  // `reconnectSpotify` refuses a restart while the phase is `waiting`, so the
+  // phase is cleared first and this is not a nested call for its own sake.
+  async function restartSpotifySignIn() {
+    resetSpotifyAuthFlow();
+    await reconnectSpotify();
+  }
+
+  /** Extract `code`/`state` from a pasted Spotify redirect URL. */
+  function extractCodeFromUrl(url: string): { code: string; state: string } | null {
+    try {
+      const parsed = new URL(url);
+      const code = parsed.searchParams.get('code');
+      if (!code) return null;
+      // A missing `state` still passes (empty string) — the backend rejects it,
+      // mirroring the deep-link CSRF check (#162).
+      return { code, state: parsed.searchParams.get('state') ?? '' };
+    } catch {
+      return null;
+    }
+  }
+
+  /** Complete the flow from a pasted redirect URL (the #385 fallback). */
+  async function submitManualUrl() {
+    if (manualSubmitBusy) return;
+    const extracted = extractCodeFromUrl(spotifyManualUrl);
+    if (!extracted) {
+      manualUrlError = t('validation.noCodeInUrl');
+      return;
+    }
+    manualSubmitBusy = true;
+    manualUrlError = '';
+    try {
+      await invoke('complete_spotify_auth_manual', {
+        code: extracted.code,
+        oauthState: extracted.state
+      });
+      setSpotifyPhase('done');
+    } catch (e) {
+      console.error('[SETTINGS] complete_spotify_auth_manual failed:', e);
+      manualUrlError = String(e);
+      setSpotifyPhase('error', String(e));
+    } finally {
+      manualSubmitBusy = false;
     }
   }
 
@@ -997,7 +1097,7 @@
   }
 </script>
 
-<div class="settings">
+<div class="settings" oninput={onDraftEdit} onchange={onDraftEdit}>
   <PageHeader title={t('settings.title')} onBack={goBack}
     backLabel={detached ? t('settings.popBackIn') : t('common.back')}
     onAction={detached ? undefined : handlePopOut}
@@ -1059,7 +1159,40 @@
         {#if isConnected && !spotifyAuthWaiting}
           <button class="btn-secondary" onclick={reconnectSpotify} disabled={spotifyAuthWaiting}>{t('settings.reconnectSpotify')}</button>
         {:else if spotifyAuthWaiting}
-          <span class="hint">{t('settings.completeAuthInBrowser')}</span>
+          <div class="spotify-waiting">
+            <span class="hint">{t('settings.completeAuthInBrowser')}</span>
+            <!-- #964: both escapes Reconnect offers for a stuck flow — the
+                 browser tab may be gone, or the sign-in may have finished
+                 after the `presencejam://` deep link was lost. -->
+            <button type="button" class="btn-secondary" onclick={restartSpotifySignIn}>{t('reconnect.restartSignIn')}</button>
+            <p class="hint" id="spotify-manual-url-hint">{t('onboarding.manualUrlHint')}</p>
+            <input
+              id="spotify-manual-url"
+              data-no-draft
+              type="text"
+              bind:value={spotifyManualUrl}
+              aria-label={t('onboarding.manualUrlLabel')}
+              placeholder={t('onboarding.manualUrlPlaceholder')}
+              aria-describedby="spotify-manual-url-hint"
+              onkeydown={(e) => e.key === 'Enter' && submitManualUrl()}
+            />
+            <button type="button" class="btn-secondary" onclick={submitManualUrl} disabled={manualSubmitBusy}>
+              {t('onboarding.submitCode')}
+            </button>
+            {#if manualUrlError}
+              <p class="error-message" role="alert">{manualUrlError}</p>
+            {/if}
+          </div>
+        {:else if spotifySecretState === 'absent'}
+          <!-- #965: a reconnect cannot succeed without a stored client secret
+               (the flow starts from the one in the keychain), so the card
+               points at onboarding instead of a button that cannot work. -->
+          <button class="btn-secondary" onclick={goToOnboarding}>{t('settings.runOnboarding')}</button>
+        {:else}
+          <!-- #965: disconnected with no flow running had no action at all —
+               the card said "Not connected" and offered nothing, while the
+               Teams row beside it falls through to its own reconnect. -->
+          <button class="btn-secondary" onclick={reconnectSpotify} disabled={spotifyAuthWaiting}>{t('settings.reconnectSpotify')}</button>
         {/if}
       </div>
       {#if authFlow.spotify.error}
@@ -1115,13 +1248,19 @@
               <button class="btn-secondary" onclick={pollTeamsAuth} disabled={teamsPollMutex.inFlight}>{t('common.checkNow')}</button>
             {/if}
           </div>
-          {#if authFlow.teams.error}
-            <p class="error-message" role="alert">{authFlow.teams.error}</p>
-          {/if}
         {:else}
           <button class="btn-secondary" onclick={reconnectTeams}>{t('reconnect.reconnectTeams')}</button>
         {/if}
       </div>
+      <!-- #816: the failure belongs to the card, not to the waiting branch.
+           `setTeamsPhase('error', …)` is what clears `teamsAuthWaiting`, so a
+           block nested inside that branch unmounted the moment the error
+           arrived and the card fell back to a green Connected badge with the
+           same button and no reason shown. `reconnectTeams` calls
+           `resetTeamsAuthFlow()` on entry, so the next attempt clears it. -->
+      {#if authFlow.teams.error}
+        <p class="error-message" role="alert">{authFlow.teams.error}</p>
+      {/if}
       {#if teamsScopesMissing}
         <div class="scope-banner">
           <span class="hint">{t('settings.presenceScopeBanner')}</span>
@@ -1208,7 +1347,9 @@
           <p class="hint">{t('rules.noQuietHours')}</p>
         {/if}
         {#each localConfig.status_rules.quiet_hours as entry, i}
-          <div class="rule-row rule-col" role="group" aria-label={t('rules.quietHoursLabel')}>
+          <!-- #746: the ordinal is appended so two rows are not announced under
+               the same group name; the label keys carry no `{n}` placeholder. -->
+          <div class="rule-row rule-col" role="group" aria-label={`${t('rules.quietHoursLabel')} ${i + 1}`}>
             <div class="rule-row">
               <input type="checkbox" bind:checked={entry.enabled} aria-label={t('rules.ruleEnabled')} />
               <input
@@ -1232,7 +1373,7 @@
               <button
                 type="button"
                 class="btn-link"
-                onclick={() => { localConfig.status_rules.quiet_hours.splice(i, 1); }}
+                onclick={() => { localConfig.status_rules.quiet_hours.splice(i, 1); markDirty(); }}
               >{t('rules.removeRule')}</button>
             </div>
             <div class="rule-row days-row" role="group" aria-label={t('rules.quietDays')}>
@@ -1267,8 +1408,8 @@
                 type="text"
                 bind:value={entry.replacement_status}
                 maxlength={MAX_RULE_STATUS_CHARS}
-                placeholder={t('rules.quietReplacementPlaceholder')}
-                aria-label={t('rules.quietReplacementPlaceholder')}
+                placeholder={t('rules.replacementPlaceholder')}
+                aria-label={t('rules.replacementPlaceholder')}
               />
               <select
                 value={presenceValue(entry.presence_availability, entry.presence_activity)}
@@ -1277,7 +1418,7 @@
               >
                 <option value="">{t('rules.presenceNone')}</option>
                 {#each PRESENCE_OPTIONS as option}
-                  <option value={`${option.availability}|${option.activity}`}>{option.label}</option>
+                  <option value={`${option.availability}|${option.activity}`}>{t(option.labelKey)}</option>
                 {/each}
               </select>
             </div>
@@ -1292,7 +1433,7 @@
         <button
           type="button"
           class="btn-secondary"
-          onclick={() => { localConfig.status_rules.quiet_hours.push({ enabled: true, start_minutes: 1320, end_minutes: 420, days: [], replacement_status: '', presence_availability: '', presence_activity: '', pause_polling: false }); }}
+          onclick={() => { localConfig.status_rules.quiet_hours.push({ enabled: true, start_minutes: 1320, end_minutes: 420, days: [], replacement_status: '', presence_availability: '', presence_activity: '', pause_polling: false }); markDirty(); }}
         >{t('rules.addQuietHours')}</button>
       </div>
       <div class="form-group">
@@ -1302,7 +1443,8 @@
           <p class="hint">{t('rules.noTrackRules')}</p>
         {/if}
         {#each localConfig.status_rules.track_rules as rule, j}
-          <div class="rule-row rule-col" role="group" aria-label={t('rules.trackRulesLabel')}>
+          <!-- #746: same ordinal as the Move up/down buttons below. -->
+          <div class="rule-row rule-col" role="group" aria-label={`${t('rules.trackRulesLabel')} ${j + 1}`}>
             <div class="rule-row">
               <label class="rule-check">
                 <input type="checkbox" bind:checked={rule.enabled} />
@@ -1325,7 +1467,7 @@
               <button
                 type="button"
                 class="btn-link"
-                onclick={() => { localConfig.status_rules.track_rules.splice(j, 1); }}
+                onclick={() => { localConfig.status_rules.track_rules.splice(j, 1); markDirty(); }}
               >{t('rules.removeRule')}</button>
             </div>
             <div class="rule-row">
@@ -1357,7 +1499,7 @@
               >
                 <option value="">{t('rules.presenceNone')}</option>
                 {#each PRESENCE_OPTIONS as option}
-                  <option value={`${option.availability}|${option.activity}`}>{option.label}</option>
+                  <option value={`${option.availability}|${option.activity}`}>{t(option.labelKey)}</option>
                 {/each}
               </select>
             </div>
@@ -1406,7 +1548,7 @@
         <button
           type="button"
           class="btn-secondary"
-          onclick={() => { localConfig.status_rules.track_rules.push({ enabled: false, artist_substring: '', track_substring: '', replacement_status: '', presence_availability: '', presence_activity: '', days: [], start_minutes: 0, end_minutes: 1440 }); }}
+          onclick={() => { localConfig.status_rules.track_rules.push({ enabled: false, artist_substring: '', track_substring: '', replacement_status: '', presence_availability: '', presence_activity: '', days: [], start_minutes: 0, end_minutes: 1440 }); markDirty(); }}
         >{t('rules.addTrackRule')}</button>
       </div>
       <div class="form-group">
@@ -1446,8 +1588,12 @@
         />
       </div>
       <div class="form-group">
+        <!-- #748: the sample is a reading-order element, not a live region.
+             Announcing it re-read the whole sample after every typing pause,
+             layered on top of the field's own echo, which made the template
+             unusable with a screen reader. -->
         <span class="form-label">{t('settings.livePreview')}</span>
-        <div class="preview-box" aria-live="polite">{previewText}</div>
+        <div class="preview-box">{previewText}</div>
       </div>
       <p class="hint">
         {t('settings.placeholdersHint')}
@@ -1480,6 +1626,7 @@
           <label for="profanity-preview-sample">{t('settings.profaneSampleToggle')}</label>
           <input
             id="profanity-preview-sample"
+            data-no-draft
             type="checkbox"
             bind:checked={previewProfaneSample}
           />
@@ -1505,14 +1652,6 @@
               })}
             </p>
           {/if}
-        </div>
-        <div class="toggle-row">
-          <label for="profanity-preview-sample">{t('settings.profaneSampleToggle')}</label>
-          <input
-            id="profanity-preview-sample"
-            type="checkbox"
-            bind:checked={previewProfaneSample}
-          />
         </div>
       {/if}
     </section>
@@ -1599,6 +1738,7 @@
           <label for={`notifications-${cls}`}>{t(NOTIFICATION_LABELS[cls])}</label>
           <input
             id={`notifications-${cls}`}
+            data-no-draft
             type="checkbox"
             checked={$notificationPreferences[cls]}
             onchange={(e) => toggleNotificationClass(cls, e)}
@@ -1652,6 +1792,7 @@
         <label for="compact-density">{t('settings.densityCompactLabel')}</label>
         <input
           id="compact-density"
+          data-no-draft
           type="checkbox"
           checked={$density === 'compact'}
           onchange={(e) =>
@@ -1664,6 +1805,7 @@
         <!-- Language names are endonyms: shown in their own language by convention. -->
         <select
           id="language"
+          data-no-draft
           value={i18n.locale}
           onchange={(e) => {
             const next = (e.currentTarget as HTMLSelectElement).value as Locale;
@@ -1934,6 +2076,18 @@
   .connection-row .device-code-box {
     width: 100%;
   }
+
+  /* #964: the waiting state is the only Spotify state with more than one
+     control, so it stacks instead of sharing the row's baseline. */
+  .connection-row .spotify-waiting {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--sp-2);
+    width: 100%;
+  }
+  .connection-row .spotify-waiting .hint { margin: 0; }
+  .connection-row .spotify-waiting input { width: 100%; }
 
   /* One-time-reconnect banner for the missing tray-playback scope
      (issue #3.0-P3). */

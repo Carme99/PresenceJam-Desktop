@@ -518,6 +518,12 @@ export const en = {
     '“System” follows your operating system’s appearance; Dark and Light stay pinned.',
   'settings.densityCompactLabel': 'Compact spacing',
   'settings.densityHint': 'Tightens the spacing and type scale. Independent of the theme.',
+  // --- 5.0 wave1 settings ---
+  'rules.presenceAvailable': 'Available',
+  'rules.presenceBusyCall': 'Busy — In a call',
+  'rules.presenceBusyConference': 'Busy — In a conference call',
+  'rules.presenceAway': 'Away',
+  'rules.presenceDndPresenting': 'Do not disturb — Presenting',
 };
 
 export type Dict = { readonly [K in keyof typeof en]: string };

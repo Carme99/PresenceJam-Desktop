@@ -41,9 +41,14 @@ import Settings from '$lib/components/Settings.svelte';
 import { currentView } from '$lib/stores/app';
 import { configStore, defaultConfig } from '$lib/stores/config';
 import { notificationPreferences } from '$lib/stores/notifications';
-import { resetSpotifyAuthFlow, resetTeamsAuthFlow } from '$lib/stores/authFlow.svelte';
+import { authFlow, resetSpotifyAuthFlow, resetTeamsAuthFlow, setSpotifyPhase, setTeamsPhase } from '$lib/stores/authFlow.svelte';
 import { theme } from '$lib/stores/theme';
-import { t } from '$lib/i18n';
+import { t, i18n, type TKey, type Locale } from '$lib/i18n';
+// #955: the presence dropdown's labels are dictionary entries, so the test
+// reads the three dictionaries the app ships rather than restating the copy.
+import { en, type Dict } from '$lib/i18n/en';
+import { de } from '$lib/i18n/de';
+import { fr } from '$lib/i18n/fr';
 
 // #693: the persist warning is captured in the always-mounted layout listener
 // and rendered from the shared presence store, so the test drives the store,
@@ -426,7 +431,7 @@ describe('Settings presence-rules and orphaned-field controls (#538/#634/#635/#6
     await tick();
 
     const replacement = container.querySelector(
-      'input[aria-label="' + t('rules.quietReplacementPlaceholder') + '"]'
+      'input[aria-label="' + t('rules.replacementPlaceholder') + '"]'
     ) as HTMLInputElement;
     expect(replacement).not.toBeNull();
     await fireEvent.input(replacement, { target: { value: '🌙 Back at 09:00' } });
@@ -599,7 +604,7 @@ describe('Settings rule scheduling and priority controls (S4/#672)', () => {
     await tick();
 
     const group = container.querySelector(
-      '[role="group"][aria-label="' + t('rules.trackRulesLabel') + '"]'
+      '[role="group"][aria-label="' + t('rules.trackRulesLabel') + ' 1"]'
     ) as HTMLElement;
     expect(group).not.toBeNull();
     const start = group.querySelector(
@@ -995,5 +1000,442 @@ describe('Settings update channel (#678)', () => {
     const { container } = await mountSettings();
     const select = container.querySelector('#update-channel') as HTMLSelectElement;
     expect(select.value).toBe('beta');
+  });
+});
+
+/**
+ * #733 — the profanity card used to render the "preview profane sample"
+ * toggle twice against the same state and the same DOM id, so one `label[for]`
+ * resolved to two controls and any `getElementById` lookup was ambiguous.
+ *
+ * Fails pre-fix: two elements carry `profanity-preview-sample` in both filter
+ * states, and two labels point at it.
+ */
+describe('Settings profanity card a11y (#733)', () => {
+  function profanityConfig(on: boolean) {
+    const cfg = configuredConfig();
+    cfg.teams.profanity_filter = on;
+    return cfg;
+  }
+
+  /** The name a browser computes: aria-labelledby, aria-label, `label[for]`,
+   * or an ancestor `<label>`. */
+  function accessibleName(el: HTMLElement): string {
+    const labelledBy = el.getAttribute('aria-labelledby');
+    if (labelledBy) {
+      return labelledBy
+        .split(/\s+/)
+        .map((id) => el.ownerDocument.getElementById(id)?.textContent?.trim() ?? '')
+        .join(' ')
+        .trim();
+    }
+    const ariaLabel = el.getAttribute('aria-label');
+    if (ariaLabel) return ariaLabel.trim();
+    if (el.id) {
+      const forLabel = el.ownerDocument.querySelector(`label[for="${el.id}"]`);
+      if (forLabel) return (forLabel.textContent ?? '').trim();
+    }
+    return (el.closest('label')?.textContent ?? '').trim();
+  }
+
+  for (const on of [true, false]) {
+    it(`renders unique ids and names every checkbox (filter ${on ? 'on' : 'off'})`, async () => {
+      configStore.set(profanityConfig(on));
+      const { container } = await mountSettings();
+
+      const ids = [...container.querySelectorAll<HTMLElement>('[id]')].map((el) => el.id);
+      expect(ids.length).toBeGreaterThan(0);
+      expect(new Set(ids).size).toBe(ids.length);
+
+      const checkboxes = [
+        ...container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')
+      ];
+      expect(checkboxes.length).toBeGreaterThan(0);
+      for (const box of checkboxes) {
+        expect(accessibleName(box)).not.toBe('');
+      }
+    });
+  }
+
+  it('associates the preview-sample toggle with exactly one label and one input', async () => {
+    configStore.set(profanityConfig(true));
+    const { container } = await mountSettings();
+
+    const labels = [...container.querySelectorAll('label[for="profanity-preview-sample"]')];
+    const boxes = [...container.querySelectorAll<HTMLInputElement>('#profanity-preview-sample')];
+    expect(labels).toHaveLength(1);
+    expect(boxes).toHaveLength(1);
+    // The pair is the row the user sees, not two rows sharing one id.
+    expect(boxes[0].closest('.toggle-row')?.contains(labels[0])).toBe(true);
+  });
+});
+
+/**
+ * #746 — every rule row is a `role="group"`; both rows of a list used to carry
+ * the same `aria-label`, so rule 2 announced itself as rule 1 and the reorder
+ * and Remove controls gave the user nothing to disambiguate them with.
+ *
+ * Fails pre-fix: the names come back as two bare labels with no position.
+ */
+describe('Settings rule group names (#746)', () => {
+  function twoRulesConfig() {
+    const cfg = configuredConfig();
+    cfg.status_rules = {
+      quiet_hours: [
+        {
+          enabled: true,
+          start_minutes: 1320,
+          end_minutes: 420,
+          days: [],
+          replacement_status: '',
+          presence_availability: '',
+          presence_activity: '',
+          pause_polling: false
+        },
+        {
+          enabled: false,
+          start_minutes: 600,
+          end_minutes: 660,
+          days: [1],
+          replacement_status: '',
+          presence_availability: '',
+          presence_activity: '',
+          pause_polling: true
+        }
+      ],
+      track_rules: [
+        {
+          enabled: true,
+          artist_substring: 'first',
+          track_substring: '',
+          replacement_status: '',
+          presence_availability: '',
+          presence_activity: '',
+          days: [],
+          start_minutes: 0,
+          end_minutes: 1440
+        },
+        {
+          enabled: true,
+          artist_substring: 'second',
+          track_substring: '',
+          replacement_status: '',
+          presence_availability: '',
+          presence_activity: '',
+          days: [],
+          start_minutes: 0,
+          end_minutes: 1440
+        }
+      ]
+    };
+    return cfg;
+  }
+
+  it('names each row after its position, matching the Move buttons', async () => {
+    configStore.set(twoRulesConfig());
+    const { container } = await mountSettings();
+
+    const groupNames = [...container.querySelectorAll('[role="group"]')].map(
+      (el) => el.getAttribute('aria-label') ?? ''
+    );
+
+    expect(groupNames.filter((name) => name.startsWith(t('rules.quietHoursLabel')))).toEqual([
+      `${t('rules.quietHoursLabel')} 1`,
+      `${t('rules.quietHoursLabel')} 2`
+    ]);
+    expect(groupNames.filter((name) => name.startsWith(t('rules.trackRulesLabel')))).toEqual([
+      `${t('rules.trackRulesLabel')} 1`,
+      `${t('rules.trackRulesLabel')} 2`
+    ]);
+
+    // The row's ordinal is the one its reorder controls use.
+    const upSecond = container.querySelector(
+      'button[aria-label="' + t('rules.moveRuleUp', { n: 2 }) + '"]'
+    ) as HTMLButtonElement;
+    expect(upSecond.closest('[role="group"]')?.getAttribute('aria-label')).toBe(
+      `${t('rules.trackRulesLabel')} 2`
+    );
+  });
+});
+
+/**
+ * #748 — the live preview was a `polite` live region, so every typing pause
+ * re-announced the whole rendered sample on top of the field's own echo.
+ *
+ * Fails pre-fix: `.preview-box` carries `aria-live="polite"` while the
+ * template is being edited.
+ */
+describe('Settings status preview announcements (#748)', () => {
+  it('exposes no live region while the template is being edited', async () => {
+    const { container } = await mountSettings();
+    const input = formatInput(container);
+    input.focus();
+    await fireEvent.input(input, { target: { value: '🎵 {artist} - {track}' } });
+    await tick();
+
+    const preview = container.querySelector('.preview-box') as HTMLElement;
+    expect(preview).not.toBeNull();
+    expect(preview.getAttribute('aria-live')).toBeNull();
+    // A live region may also be implied by the role: this one has none.
+    expect(preview.getAttribute('role')).toBeNull();
+    // The sample itself is still in the reading order next to its label.
+    expect(preview.previousElementSibling?.textContent?.trim()).toBe(t('settings.livePreview'));
+  });
+});
+
+/**
+ * #816 — every Teams failure path calls `setTeamsPhase('error', …)`, which is
+ * exactly what clears `teamsAuthWaiting`; the block that rendered the message
+ * lived inside the waiting branch, so the card reverted to a green Connected
+ * badge and the same button with no reason shown.
+ *
+ * Fails pre-fix: with the phase at `error` nothing in the tree renders it.
+ */
+describe('Settings Teams reconnect failure (#816)', () => {
+  it('shows the failure on the card and clears it on a fresh attempt', async () => {
+    setTeamsPhase('error', 'device code rejected');
+    const { container, getByRole } = await mountSettings();
+
+    const teamsCard = [...container.querySelectorAll('section.card')].find(
+      (card) => card.querySelector('h2')?.textContent?.trim() === t('settings.sectionTeams')
+    ) as HTMLElement;
+    // The badge is the pre-condition of the defect: still Connected.
+    expect(teamsCard.querySelector('.badge')?.textContent).toContain(t('common.connected'));
+    expect(teamsCard.querySelector('.error-message')?.textContent).toBe('device code rejected');
+
+    // The retry the card offers clears the reason and starts a new attempt.
+    await fireEvent.click(getByRole('button', { name: t('reconnect.reconnectTeams') }));
+    await waitFor(() => expect(authFlow.teams.error).toBeNull());
+    expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'reconnect_teams')).toBe(true);
+  });
+});
+
+/**
+ * #955 — the five availability/activity pairs were the one user-visible string
+ * set in the rules UI that never went through `t()`: a German or French user
+ * got an English dropdown inside an otherwise translated card.
+ *
+ * Fails pre-fix: the options render hardcoded English in every locale, and in
+ * `de`/`fr` the rendered text is the English one rather than the dictionary's.
+ */
+describe('Settings presence option labels (#955)', () => {
+  const PRESENCE_LABELS: readonly { key: TKey; wire: string }[] = [
+    { key: 'rules.presenceAvailable', wire: 'Available|Available' },
+    { key: 'rules.presenceBusyCall', wire: 'Busy|InACall' },
+    { key: 'rules.presenceBusyConference', wire: 'Busy|InAConferenceCall' },
+    { key: 'rules.presenceAway', wire: 'Away|Away' },
+    { key: 'rules.presenceDndPresenting', wire: 'DoNotDisturb|Presenting' }
+  ];
+
+  it('renders the dictionary labels in en, de and fr, with the wire values unchanged', async () => {
+    await i18n.set('en');
+    const { container } = await mountSettings();
+
+    // One row in each list, so both presence selects exist.
+    const [addQuiet] = [...container.querySelectorAll('.btn-secondary')].filter(
+      (b) => b.textContent?.trim() === t('rules.addQuietHours')
+    );
+    const [addTrack] = [...container.querySelectorAll('.btn-secondary')].filter(
+      (b) => b.textContent?.trim() === t('rules.addTrackRule')
+    );
+    await fireEvent.click(addQuiet);
+    await fireEvent.click(addTrack);
+    await tick();
+
+    for (const [locale, dict] of Object.entries({ en, de, fr }) as [Locale, Dict][]) {
+      await i18n.set(locale);
+      await tick();
+
+      const selects = [...container.querySelectorAll('select')].filter(
+        (select) => select.getAttribute('aria-label') === t('rules.presenceLabel')
+      );
+      expect(selects).toHaveLength(2);
+
+      for (const select of selects) {
+        // Index 0 is "don't change my presence"; the five pairs follow it.
+        const pairs = [...select.querySelectorAll('option')].slice(1);
+        // A key missing from any dictionary surfaces here as `undefined`.
+        expect(pairs.map((o) => [o.getAttribute('value'), o.textContent?.trim()])).toEqual(
+          PRESENCE_LABELS.map(({ key, wire }) => [wire, dict[key]])
+        );
+      }
+    }
+
+    await i18n.set('en');
+  });
+});
+
+/**
+ * #964 — the poller's `spotify-reconnect-required` event lands the user on
+ * Settings with the flow already waiting, and the card offered only "Complete
+ * authentication in the browser": `reconnectSpotify` refuses to restart a
+ * waiting flow, so a lost browser tab was a dead end here (Reconnect has had
+ * both escapes since #558).
+ *
+ * Fails pre-fix: neither control is in the waiting branch.
+ */
+describe('Settings Spotify waiting-state escape (#964)', () => {
+  it('offers Restart sign-in, which begins a fresh flow instead of being refused', async () => {
+    setSpotifyPhase('waiting');
+    const { container, getByRole } = await mountSettings();
+
+    expect(container.querySelector('#spotify-manual-url')).not.toBeNull();
+    await fireEvent.click(getByRole('button', { name: t('reconnect.restartSignIn') }));
+
+    await waitFor(() =>
+      expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'reconnect_spotify_session')).toBe(true)
+    );
+    // The restart put the flow back in the waiting state, i.e. it ran.
+    expect(authFlow.spotify.phase).toBe('waiting');
+  });
+
+  it('completes the flow from a pasted redirect URL, and refuses one without a code', async () => {
+    setSpotifyPhase('waiting');
+    const { container, getByRole } = await mountSettings();
+    const input = container.querySelector('#spotify-manual-url') as HTMLInputElement;
+    const submit = getByRole('button', { name: t('onboarding.submitCode') });
+
+    await fireEvent.input(input, { target: { value: 'presencejam://callback?state=xyz' } });
+    await fireEvent.click(submit);
+    await waitFor(() =>
+      expect(container.querySelector('.error-message')?.textContent).toBe(t('validation.noCodeInUrl'))
+    );
+    expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'complete_spotify_auth_manual')).toBe(false);
+
+    await fireEvent.input(input, {
+      target: { value: 'presencejam://callback?code=abc&state=xyz' }
+    });
+    await fireEvent.click(submit);
+    await waitFor(() => {
+      const call = invokeMock.mock.calls.find(([cmd]) => cmd === 'complete_spotify_auth_manual');
+      expect(call?.[1]).toEqual({ code: 'abc', oauthState: 'xyz' });
+    });
+  });
+});
+
+/**
+ * #965 — the connection row's `{#if} … {:else if waiting}` chain had no final
+ * `{:else}`, so a disconnected Spotify account rendered the red "Not connected"
+ * badge and no action at all, while the Teams card beside it falls through to
+ * its own reconnect.
+ *
+ * Fails pre-fix: the disconnected row renders no control.
+ */
+describe('Settings disconnected Spotify card (#965)', () => {
+  /** `get_sync_status` with Spotify down and Teams up. */
+  function spotifyDisconnected() {
+    const base = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) =>
+      cmd === 'get_sync_status'
+        ? {
+            is_syncing: false,
+            current_track: null,
+            spotify_connected: false,
+            teams_connected: true
+          }
+        : base(cmd, args)
+    );
+  }
+
+  it('offers a reconnect when the account is disconnected', async () => {
+    const cfg = configuredConfig();
+    cfg.spotify.client_secret_state = 'present';
+    configStore.set(cfg);
+    spotifyDisconnected();
+    const { container } = await mountSettings();
+
+    // The first `.connection-row` is the Spotify card's.
+    const row = container.querySelector('.connection-row') as HTMLElement;
+    const action = row.querySelector('.btn-secondary') as HTMLButtonElement;
+    expect(action?.textContent?.trim()).toBe(t('settings.reconnectSpotify'));
+
+    await fireEvent.click(action);
+    await waitFor(() =>
+      expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'reconnect_spotify_session')).toBe(true)
+    );
+  });
+
+  it('points at onboarding instead when no client secret is stored', async () => {
+    const cfg = configuredConfig();
+    cfg.spotify.client_secret_state = 'absent';
+    configStore.set(cfg);
+    spotifyDisconnected();
+    const { container } = await mountSettings();
+
+    const row = container.querySelector('.connection-row') as HTMLElement;
+    const action = row.querySelector('.btn-secondary') as HTMLButtonElement;
+    // A reconnect would open a browser flow that cannot finish: the secret it
+    // starts from is not there.
+    expect(action?.textContent?.trim()).toBe(t('settings.runOnboarding'));
+
+    await fireEvent.click(action);
+    await waitFor(() => expect(get(currentView)).toBe('onboarding'));
+    expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'reconnect_spotify_session')).toBe(false);
+  });
+});
+
+/**
+ * #890 — dirty state used to be recovered by serialising the whole document
+ * twice inside a `$derived` (`localConfig` vs `$configStore`), which every
+ * write to the deep proxy invalidated: one keystroke in any field paid two full
+ * `JSON.stringify` passes over the rules and the lexicon on the UI thread.
+ *
+ * Fails pre-fix: the input event re-serialises the config.
+ */
+describe('Settings dirty flag (#890)', () => {
+  it('marks a text edit dirty without serialising the config', async () => {
+    // The old detection was `JSON.stringify(cfg, replacer)`; nothing else in
+    // this pane passes a replacer function.
+    const stringifySpy = vi.spyOn(JSON, 'stringify');
+    const serialisations = () =>
+      stringifySpy.mock.calls.filter((call) => typeof call[1] === 'function').length;
+    try {
+      const { container } = await mountSettings();
+      const before = serialisations();
+      expect(container.querySelector('.dirty-banner')).toBeNull();
+
+      await fireEvent.input(formatInput(container), { target: { value: '🎧 {track}' } });
+      await tick();
+
+      expect(container.querySelector('.dirty-banner')).not.toBeNull();
+      expect(serialisations()).toBe(before);
+    } finally {
+      stringifySpy.mockRestore();
+    }
+  });
+
+  it('clears the flag once the draft is saved, and keeps it when the save fails', async () => {
+    const { container, getByRole } = await mountSettings();
+    await fireEvent.input(formatInput(container), { target: { value: '🎧 {track}' } });
+    await tick();
+    expect(container.querySelector('.dirty-banner')).not.toBeNull();
+
+    await fireEvent.click(getByRole('button', { name: t('settings.saveChanges') }));
+    await waitFor(() => expect(container.querySelector('.dirty-banner')).toBeNull());
+
+    const base = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'save_config') throw new Error('disk full');
+      return base(cmd, args);
+    });
+
+    await fireEvent.input(formatInput(container), { target: { value: '🎧 {track} — {artist}' } });
+    await tick();
+    await fireEvent.click(getByRole('button', { name: t('settings.saveChanges') }));
+    await waitFor(() => expect(container.querySelector('.settings')?.textContent).toContain('disk full'));
+    // A save that never happened must not clear the flag: Back still asks.
+    expect(container.querySelector('.dirty-banner')).not.toBeNull();
+  });
+
+  it('does not flag the draft for a control that applies itself', async () => {
+    const { container } = await mountSettings();
+    const density = container.querySelector('#compact-density') as HTMLInputElement;
+
+    await fireEvent.click(density);
+    await tick();
+
+    // Spacing is applied and stored by its own store — there is nothing for
+    // Save to commit, so the banner must not claim otherwise.
+    expect(container.querySelector('.dirty-banner')).toBeNull();
   });
 });
