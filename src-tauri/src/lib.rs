@@ -325,6 +325,11 @@ pub struct AppState {
     pub pending: PendingAuths,
     pub config: Config,
     pub onboarding_cache: OnboardingCache,
+    /// Issue #867: cached Outlook calendar gate. Shared between the polling
+    /// loop (consults `busy_at` + `next_boundary`) and the tray snooze
+    /// handler (consults `meeting_active` + `current_meeting_end` for the
+    /// "Until this meeting ends" preset).
+    pub calendar: crate::calendar::CalendarGate,
     /// Per-launch OAuth anti-hijack binding (`pkce::LaunchBinding`), held in
     /// memory only (`OnceLock`), never persisted. Two layers (issue #66;
     /// scope-3.3 §C1): the per-launch secret is bound into the OAuth `state`
@@ -360,6 +365,7 @@ impl AppState {
             pending: PendingAuths::new(),
             config: Config::new(),
             onboarding_cache: OnboardingCache::new(),
+            calendar: crate::calendar::CalendarGate::new(),
             launch_binding,
         }
     }
@@ -372,6 +378,7 @@ impl Default for AppState {
     }
 }
 
+pub mod calendar;
 pub mod commands;
 pub mod config;
 pub mod diagnostics;
@@ -1876,6 +1883,7 @@ pub fn run() {
             commands::config::load_config,
             commands::config::save_config,
             commands::config::update_config,
+            commands::config::import_working_hours,
             commands::config::set_locale,
             commands::spotify_auth::start_spotify_auth,
             commands::spotify_auth::start_spotify_reconnect,

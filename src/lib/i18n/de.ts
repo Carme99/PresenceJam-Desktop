@@ -351,6 +351,7 @@ export const de: Dict = {
   'rules.quietStart': 'Beginn der Ruhezeit',
   'rules.quietEnd': 'Ende der Ruhezeit',
   'rules.quietDays': 'Aktive Tage (nichts gewählt = jeden Tag)',
+  'rules.dayEveryDay': 'Jeden Tag',
   'rules.day1': 'Mo',
   'rules.day2': 'Di',
   'rules.day3': 'Mi',
@@ -579,6 +580,16 @@ export const de: Dict = {
   'dashboard.seekAria': 'Zum Springen klicken',
   'dashboard.seekUnavailableAria': 'Dieses Gerät unterstützt kein Springen',
 
-  // --- 5.0 wave3 features-gating ---
+  // --- 5.0 wave3 features-outlook ---
+  'rules.importWorkingHours': 'Outlook-Arbeitszeiten importieren',
+  'rules.importWorkingHoursHint': 'Liest deinen Arbeitszeiten-Tab und wandelt jede arbeitsfreie Zeit in eine Ruhezeitenregel um. Vorschau vor dem Übernehmen.',
+  'rules.importWorkingHoursPreviewTitle': 'Outlook-Arbeitszeiten-Vorschau',
+  'rules.importWorkingHoursApply': 'Diese Regeln übernehmen',
+  'rules.importWorkingHoursReplace': 'Bestehende Ruhezeitenregeln ersetzen',
+  'rules.importWorkingHoursCancel': 'Abbrechen',
+  'rules.importWorkingHoursReplaceHint': 'Ersetzt deine bestehenden Ruhezeitenregeln durch den importierten Satz. Häkchen entfernen, um beide zu behalten.',
+  'rules.importWorkingHoursDaysLabel': 'Outlook meldet {days} Arbeitstage von {start} bis {end}',
+  'rules.importWorkingHoursDaysAllOff': 'Outlook meldet keine Arbeitstage — nichts zu importieren',
 
+  // --- 5.0 wave3 features-gating ---
 };

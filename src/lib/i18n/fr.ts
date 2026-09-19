@@ -360,6 +360,7 @@ export const fr: Dict = {
   'rules.quietStart': 'Début des heures silencieuses',
   'rules.quietEnd': 'Fin des heures silencieuses',
   'rules.quietDays': 'Jours actifs (aucun = tous les jours)',
+  'rules.dayEveryDay': 'Tous les jours',
   'rules.day1': 'Lun',
   'rules.day2': 'Mar',
   'rules.day3': 'Mer',
@@ -591,6 +592,16 @@ export const fr: Dict = {
   'dashboard.seekAria': 'Cliquer pour chercher',
   'dashboard.seekUnavailableAria': 'Cet appareil ne prend pas en charge la recherche',
 
-  // --- 5.0 wave3 features-gating ---
+  // --- 5.0 wave3 features-outlook ---
+  'rules.importWorkingHours': 'Importer les horaires Outlook',
+  'rules.importWorkingHoursHint': 'Lit votre onglet Horaires de travail et transforme chaque plage hors travail en règle de plage calme. Aperçu avant application.',
+  'rules.importWorkingHoursPreviewTitle': 'Aperçu des horaires Outlook',
+  'rules.importWorkingHoursApply': 'Appliquer ces règles',
+  'rules.importWorkingHoursReplace': 'Remplacer les règles de plages calmes existantes',
+  'rules.importWorkingHoursCancel': 'Annuler',
+  'rules.importWorkingHoursReplaceHint': 'Remplace vos règles de plages calmes existantes par le jeu importé. Décochez pour conserver les deux.',
+  'rules.importWorkingHoursDaysLabel': 'Outlook indique {days} jours travaillés de {start} à {end}',
+  'rules.importWorkingHoursDaysAllOff': 'Outlook n’indique aucun jour travaillé — rien à importer',
 
+  // --- 5.0 wave3 features-gating ---
 };

@@ -37,8 +37,8 @@ use crate::teams::{
     clear_user_preferred_presence_quick, get_teams_presence,
     is_token_expired as is_teams_token_expired, presence_gate_reason, refresh_teams_token,
     set_teams_presence, set_teams_status_message, set_user_preferred_presence, TeamsApiError,
-    TeamsTokens, GATE_REASON_IDLE, GATE_REASON_MANUAL_STATUS, GATE_REASON_QUIET_HOURS,
-    GATE_REASON_TRACK_RULE,
+    TeamsTokens, GATE_REASON_CALENDAR, GATE_REASON_IDLE, GATE_REASON_MANUAL_STATUS,
+    GATE_REASON_QUIET_HOURS, GATE_REASON_TRACK_RULE,
 };
 use crate::token_io;
 use crate::AppState;
@@ -2953,7 +2953,27 @@ fn first_no_track_attempts_clear(last_track_key: &Option<String>, first_iteratio
 /// re-check is at least the re-arm cadence old, or there is no re-check
 /// on record. Threaded on its own `last_gate_check` clock so re-checks
 /// never shift the debounce + keepalive write windows.
-fn gate_recheck_due(last_gate_check: Option<Instant>, now: Instant) -> bool {
+///
+/// Issue #867 widens the predicate with a calendar-boundary check: if the
+/// Outlook calendar cache reports a meeting boundary at or before `now_wall`,
+/// the re-check is due **now** — the un-gate lands within one poll of the
+/// meeting end instead of waiting up to `AVAILABILITY_REARM_SECONDS`
+/// (4 minutes) for the cadence to elapse. `next_meeting_boundary` is the
+/// earliest future wall-clock boundary the [`crate::calendar::CalendarGate`]
+/// cached; `None` is a no-op (the cadence alone gates the re-check). The
+/// boundary is compared in wall-clock because converting it to `Instant`
+/// requires a process-start baseline the polling thread does not have.
+fn gate_recheck_due(
+    last_gate_check: Option<Instant>,
+    now: Instant,
+    now_wall: chrono::DateTime<chrono::Utc>,
+    next_meeting_boundary: Option<chrono::DateTime<chrono::Utc>>,
+) -> bool {
+    if let Some(boundary) = next_meeting_boundary {
+        if now_wall >= boundary {
+            return true;
+        }
+    }
     match last_gate_check {
         Some(t) => now.duration_since(t).as_secs() >= AVAILABILITY_REARM_SECONDS,
         None => true,
@@ -3160,6 +3180,45 @@ pub(crate) fn process_track(
     let stored_is_playing = state.polling.current_track().as_ref().map(|t| t.is_playing);
     let playing_changed = !changed && playback_state_changed(stored_is_playing, track.is_playing);
 
+    // Issue #867: the calendar-boundary lookup the gate re-check consults
+    // when deciding whether the re-arm cadence alone is enough. Computed
+    // ONCE here so every `gate_recheck_due` call inside this iteration
+    // sees the same boundary — refreshing mid-iteration would let the
+    // cache race a meeting end and leave the gate stuck suppressed.
+    //
+    // The list_upcoming call below drives the actual fetch; the
+    // 5-minute TTL plus the boundary-driven refresh (see calendar.rs)
+    // mean a steady iteration fires the network call once every
+    // `CALENDAR_CACHE_TTL` OR at a meeting start/end, whichever lands
+    // first. The closure captures the cached HTTP client so we don't
+    // rebuild a TLS stack on every fetch.
+    let now_wall = chrono::Utc::now();
+    if let Some(teams_token) = state.tokens.teams().as_ref() {
+        if !crate::teams::is_token_expired(teams_token) {
+            state
+                .calendar
+                .set_access_token(teams_token.access_token.clone());
+            match crate::teams::build_teams_client() {
+                Ok(client) => {
+                    let _ = state.calendar.list_upcoming(
+                        now_wall,
+                        chrono::Duration::hours(4),
+                        |token, start, end| {
+                            crate::calendar::fetch_calendar_view(&client, token, start, end)
+                        },
+                    );
+                }
+                Err(e) => {
+                    log::debug!(
+                        "[CALENDAR] process_track: HTTP client build failed, calendar pre-gate is a no-op: {}",
+                        e
+                    );
+                }
+            }
+        }
+    }
+    let next_meeting_boundary = state.calendar.next_boundary(now_wall);
+
     // Issue #432 / finding PollCore#1 (issue #569) / PollCore#2 (issue #570) /
     // finding #634 (issue #634): the per-iteration rule decision is computed
     // ONCE, here, so EVERY write path can consult it — the playing write, the
@@ -3169,6 +3228,25 @@ pub(crate) fn process_track(
     // the debounce early-return below.
     let quiet_active = quiet_hours_active_now(config);
     let rule = rule_gate(config, &track.artist, &track.title);
+    // Issue #867: the calendar pre-gate. Active when a busy Outlook event
+    // covers `now` (including the `pre_meeting_suppress_minutes` window the
+    // user configures in Settings). A `pre_meeting_suppress_minutes` of 0
+    // collapses the pre-window to nothing, so a tenant that never consents
+    // to `Calendars.ReadBasic` (and stays at 0) reproduces today's
+    // behaviour exactly.
+    let pre_meeting_suppress_minutes = config
+        .as_ref()
+        .map(|c| c.teams.pre_meeting_suppress_minutes)
+        .unwrap_or(0);
+    let calendar_busy = state
+        .calendar
+        .busy_at(chrono::Utc::now(), pre_meeting_suppress_minutes);
+    // The combined suppression predicate the write path consults. The
+    // calendar reason flows through the same `gated_track_key` /
+    // `last_gate_check` plumbing the rule gate already uses, so a meeting
+    // end lands within one poll of `gate_recheck_due` firing at the
+    // boundary — see the comment on `gate_recheck_due` above.
+    let calendar_suppresses = calendar_busy;
     // Finding #637: a rule with its own presence action overrides the
     // out-of-office default (a track rule cannot override it for the
     // no-track path, where `rule_gate` is fed empty strings).
@@ -3358,7 +3436,15 @@ pub(crate) fn process_track(
             // with the paused and the no-track write paths.
             let rule_replacement: Option<String> = rule.replacement.clone();
             if changed {
-                if rule.suppresses() {
+                if calendar_suppresses {
+                    log::info!(
+                        "[POLLING] process_track: calendar busy, suppressing status write (pre_meeting_suppress_minutes={})",
+                        pre_meeting_suppress_minutes
+                    );
+                    *gated_track_key = Some(track_key.clone());
+                    *last_gate_check = Some(Instant::now());
+                    emit_presence_gated(app, GATE_REASON_CALENDAR, "", "");
+                } else if rule.suppresses() {
                     let reason = rule.reason.unwrap_or(GATE_REASON_QUIET_HOURS);
                     log::info!(
                         "[POLLING] process_track: {} active, skipping status write",
@@ -3497,8 +3583,36 @@ pub(crate) fn process_track(
                 );
                 let remaining_ms =
                     corrected_progress_ms.map(|c| track.duration_ms.saturating_sub(c));
+                // Issue #867: calendar pre-gate re-evaluates here too. The
+                // gate_recheck_due call below returns true at the next
+                // meeting boundary, so the calendar busy predicate clears
+                // within one poll of the meeting end and the write below
+                // posts the late status (the same shape #430 already uses
+                // for a presence-gate meeting ending mid-track).
+                let current_calendar_busy = state
+                    .calendar
+                    .busy_at(chrono::Utc::now(), pre_meeting_suppress_minutes);
+                if current_calendar_busy {
+                    if gate_recheck_due(
+                        *last_gate_check,
+                        Instant::now(),
+                        chrono::Utc::now(),
+                        next_meeting_boundary,
+                    ) {
+                        *last_gate_check = Some(Instant::now());
+                    }
+                    log::debug!(
+                        "[POLLING] process_track: still calendar-gated, keeping suppression"
+                    );
+                    return playing_track_sleep(remaining_ms, config).max(teams_backoff_secs);
+                }
                 if current_rule.suppresses() {
-                    if gate_recheck_due(*last_gate_check, Instant::now()) {
+                    if gate_recheck_due(
+                        *last_gate_check,
+                        Instant::now(),
+                        chrono::Utc::now(),
+                        next_meeting_boundary,
+                    ) {
                         *last_gate_check = Some(Instant::now());
                     }
                     log::debug!("[POLLING] process_track: still rule-gated, keeping suppression");
@@ -3515,7 +3629,12 @@ pub(crate) fn process_track(
                 }
                 if !presence_read_needed {
                     *gated_track_key = None;
-                } else if gate_recheck_due(*last_gate_check, Instant::now()) {
+                } else if gate_recheck_due(
+                    *last_gate_check,
+                    Instant::now(),
+                    chrono::Utc::now(),
+                    next_meeting_boundary,
+                ) {
                     match get_teams_presence(&teams_tok.access_token) {
                         Ok(presence) => {
                             // Review round 3 (item 3): this read does NOT go
@@ -3941,7 +4060,12 @@ pub(crate) fn process_track(
             // The read is skipped exactly where its result cannot matter:
             let already_posted = last_posted_placeholder.as_deref() == Some(placeholder);
             let recorded_gate_due = gated_track_key.as_deref() == Some(track_key.as_str())
-                && gate_recheck_due(*last_gate_check, Instant::now());
+                && gate_recheck_due(
+                    *last_gate_check,
+                    Instant::now(),
+                    chrono::Utc::now(),
+                    next_meeting_boundary,
+                );
             let mut gate_blocked = false;
             let mut gate_reason: Option<String> = None;
             let mut gate_sample: Option<(String, String)> = None;
@@ -3966,7 +4090,12 @@ pub(crate) fn process_track(
                 gate_blocked = true;
                 gate_reason = Some(reason.to_string());
             } else if gated_track_key.as_deref() == Some(track_key.as_str())
-                && !gate_recheck_due(*last_gate_check, Instant::now())
+                && !gate_recheck_due(
+                    *last_gate_check,
+                    Instant::now(),
+                    chrono::Utc::now(),
+                    next_meeting_boundary,
+                )
             {
                 // Inside the re-check window: keep the recorded verdict (it was
                 // surfaced when it was taken, so nothing to emit).
@@ -6202,23 +6331,56 @@ mod tests {
 
     /// Issue #380: the gate re-check follows the re-arm cadence — due
     /// with no re-check on record or a stale one, not due right after one.
+    /// Issue #867 adds a calendar-boundary shortcut: a boundary that has
+    /// already passed forces the re-check on the same poll, so the un-gate
+    /// lands within one poll of the meeting end instead of waiting up to
+    /// `AVAILABILITY_REARM_SECONDS` (4 minutes).
     #[test]
     fn test_gate_recheck_due_follows_rearm_cadence() {
         let now = Instant::now();
+        let now_wall = chrono::Utc::now();
         assert!(
-            gate_recheck_due(None, now),
+            gate_recheck_due(None, now, now_wall, None),
             "no re-check on record means the re-check is due"
         );
         assert!(
             gate_recheck_due(
                 Some(now - std::time::Duration::from_secs(AVAILABILITY_REARM_SECONDS + 1)),
-                now
+                now,
+                now_wall,
+                None,
             ),
             "a re-check older than the re-arm cadence means the re-check is due"
         );
         assert!(
-            !gate_recheck_due(Some(now), now),
+            !gate_recheck_due(Some(now), now, now_wall, None),
             "a fresh re-check must not re-read presence every poll"
+        );
+        // Issue #867: a boundary in the past overrides the cadence — the
+        // meeting just ended, the un-gate must fire on this poll.
+        assert!(
+            gate_recheck_due(
+                Some(now),
+                now,
+                now_wall,
+                Some(now_wall - chrono::Duration::seconds(1))
+            ),
+            "a meeting boundary that has just passed forces the re-check on the same poll"
+        );
+        // Issue #867: a boundary in the future leaves the cadence in charge.
+        assert!(
+            !gate_recheck_due(
+                Some(now),
+                now,
+                now_wall,
+                Some(now_wall + chrono::Duration::minutes(30)),
+            ),
+            "a boundary in the future does not shortcut the cadence"
+        );
+        // Issue #867: no boundary means no shortcut (cadence alone).
+        assert!(
+            !gate_recheck_due(Some(now), now, now_wall, None),
+            "a fresh re-check with no boundary stays throttled by the cadence"
         );
     }
     /// Issue #432: quiet-hours predicate — plain range, wrap-around,
@@ -6713,8 +6875,9 @@ mod tests {
         //    status always writes, a byte-identical one inside the
         //    keepalive does not (no spam).
         let now = Instant::now();
+        let now_wall = chrono::Utc::now();
         assert!(
-            gate_recheck_due(None, now),
+            gate_recheck_due(None, now, now_wall, None),
             "first re-check must be due so the late post can fire"
         );
         assert!(
@@ -8302,8 +8465,13 @@ mod tests {
         );
         // The pause is re-decided once its re-check is due, like the playing
         // branch — otherwise the gate could never clear on the pause path.
+        // Issue #867 widens the call with `chrono::Utc::now()` and the
+        // calendar boundary so the boundary-driven un-gate works there too;
+        // the assertion only needs to prove the call still happens here.
         assert!(
-            paused.contains("gate_recheck_due(*last_gate_check, Instant::now())"),
+            paused.contains("gate_recheck_due(")
+                && paused.contains("*last_gate_check,")
+                && paused.contains("Instant::now(),"),
             "the paused-clear gate must be re-evaluated once the re-check is due \
              (finding D3)"
         );

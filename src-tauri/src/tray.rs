@@ -50,10 +50,13 @@ const DEVICE_ITEM_PREFIX: &str = "devices|";
 
 // Snooze submenu (4.7.0, S9 / issue #677). The three unqualified ids are the
 // presets; the fourth only exists while a snooze is active, so the way out of a
-// snooze always sits beside the way in.
+// snooze always sits beside the way in. Issue #867 adds a fifth id — the
+// "until this meeting ends" entry — that is appended only while a busy
+// Outlook meeting is currently in progress.
 const ID_SNOOZE_30: &str = "snooze|30m";
 const ID_SNOOZE_1H: &str = "snooze|1h";
 const ID_SNOOZE_TOMORROW: &str = "snooze|tomorrow";
+const ID_SNOOZE_NEXT_MEETING: &str = "snooze|next_meeting";
 const ID_SNOOZE_RESUME: &str = "snooze|resume";
 /// Menu-item id prefix for the snooze submenu. Mirrors the ids above literally
 /// (`concat!` cannot take a const); keep both in sync when either changes.
@@ -61,6 +64,7 @@ const SNOOZE_ITEM_PREFIX: &str = "snooze|";
 const SNOOZE_30_SUFFIX: &str = "30m";
 const SNOOZE_1H_SUFFIX: &str = "1h";
 const SNOOZE_TOMORROW_SUFFIX: &str = "tomorrow";
+const SNOOZE_NEXT_MEETING_SUFFIX: &str = "next_meeting";
 const SNOOZE_RESUME_SUFFIX: &str = "resume";
 
 // Issue #870: the "Recent statuses" submenu entries carry the
@@ -334,10 +338,25 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
                     match selection {
                         Some(SnoozeMenuSelection::Preset(preset)) => {
                             let now_utc = chrono::Utc::now();
+                            // Issue #867: the meeting-bound preset needs the
+                            // calendar cache at click time. We capture it here
+                            // (no fetch) — the entry is only built while a
+                            // meeting is active, so the cache is fresh
+                            // enough.
+                            let next_meeting_end = if preset
+                                == crate::config::SnoozePreset::UntilNextMeetingEnds
+                            {
+                                let state = app_handle
+                                    .state::<std::sync::Arc<crate::AppState>>();
+                                state.calendar.current_meeting_end(now_utc)
+                            } else {
+                                None
+                            };
                             let deadline = crate::config::snooze_preset_deadline(
                                 preset,
                                 now_utc,
                                 chrono::Local::now(),
+                                next_meeting_end,
                             );
                             if let Err(e) = write_snooze(&app_handle, Some(deadline)) {
                                 log::error!("[TRAY] snooze: could not store the deadline: {}", e);
@@ -1326,8 +1345,35 @@ fn build_snooze_submenu(
     let tomorrow = MenuItemBuilder::with_id(ID_SNOOZE_TOMORROW, s.snooze_until_tomorrow)
         .build(app)
         .map_err(|e| e.to_string())?;
+    let mut leading: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> =
+        vec![&thirty, &hour, &tomorrow];
+    // Issue #867: surface "Until this meeting ends" only while a busy meeting
+    // is in progress (calendar cache is non-empty AND has a busy event
+    // covering `now`). Outside of a meeting the entry is hidden so the
+    // user can't pick a deadline that's effectively the same as "30
+    // minutes" with an opaque end time.
+    let meeting_active = {
+        let state = app.state::<std::sync::Arc<crate::AppState>>();
+        state.calendar.meeting_active(chrono::Utc::now())
+    };
+    // Issue #867: a single allocated `MenuItem` for the meeting entry, kept
+    // alive for the duration of `leading`'s borrow. Boxed so the conditional
+    // push does not need a separate `Option` shim and the references remain
+    // `Send`/`Sync`-safe to copy into the `items` slice below.
+    let meeting_entry: Option<tauri::menu::MenuItem<tauri::Wry>> = if meeting_active {
+        Some(
+            MenuItemBuilder::with_id(ID_SNOOZE_NEXT_MEETING, s.snooze_until_next_meeting_ends)
+                .build(app)
+                .map_err(|e| e.to_string())?,
+        )
+    } else {
+        None
+    };
+    if let Some(ref entry) = meeting_entry {
+        leading.push(entry);
+    }
     let submenu = SubmenuBuilder::new(app, s.snooze_pause_menu)
-        .items(&[&thirty, &hour, &tomorrow])
+        .items(&leading)
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -1524,7 +1570,7 @@ fn parse_seek_menu_id(id: &str) -> Option<SeekMenuSelection> {
 }
 
 /// Parses a snooze menu-item id. `None` for anything that is not one of the
-/// four known ids — a stale menu from an older build must not snooze by
+/// five known ids — a stale menu from an older build must not snooze by
 /// accident.
 fn parse_snooze_menu_id(id: &str) -> Option<SnoozeMenuSelection> {
     match id.strip_prefix(SNOOZE_ITEM_PREFIX)? {
@@ -1536,6 +1582,13 @@ fn parse_snooze_menu_id(id: &str) -> Option<SnoozeMenuSelection> {
         )),
         SNOOZE_TOMORROW_SUFFIX => Some(SnoozeMenuSelection::Preset(
             crate::config::SnoozePreset::UntilTomorrow,
+        )),
+        // Issue #867: the meeting-bound preset is parsed here so a stale
+        // menu from a build that never had it cannot pick the wrong
+        // deadline. The click handler still queries the calendar cache to
+        // compute the actual end-of-meeting instant.
+        SNOOZE_NEXT_MEETING_SUFFIX => Some(SnoozeMenuSelection::Preset(
+            crate::config::SnoozePreset::UntilNextMeetingEnds,
         )),
         SNOOZE_RESUME_SUFFIX => Some(SnoozeMenuSelection::Resume),
         _ => None,
@@ -3175,6 +3228,13 @@ mod tests {
         assert_eq!(
             parse_snooze_menu_id(ID_SNOOZE_TOMORROW),
             Some(SnoozeMenuSelection::Preset(SnoozePreset::UntilTomorrow))
+        );
+        // Issue #867: the meeting-bound preset id parses to the new variant.
+        assert_eq!(
+            parse_snooze_menu_id(ID_SNOOZE_NEXT_MEETING),
+            Some(SnoozeMenuSelection::Preset(
+                SnoozePreset::UntilNextMeetingEnds
+            ))
         );
         assert_eq!(
             parse_snooze_menu_id(ID_SNOOZE_RESUME),
