@@ -8,8 +8,10 @@
 //! below must stay field-for-field identical. That is enforced, not assumed:
 //! `tables_carry_an_identical_field_set` parses the struct declaration out of
 //! this file and fails when a table misses a field or falls out of order, and
-//! `no_user_visible_literal_stays_hard_coded` fails when a literal reappears
-//! in `tray.rs`/`menu.rs` outside these tables.
+//! `no_user_visible_literal_stays_hard_coded` fails when a copy of a table
+//! value OR any new copy the tables do not carry appears in `tray.rs`/`menu.rs`
+//! instead of being read from `current()` — the second half is issue #843, the
+//! case the original table-value scan could not see.
 //!
 //! Deliberate exceptions, mirroring the frontend's documented limitation:
 //! error strings surfaced through `invoke()` rejections or event payloads
@@ -555,8 +557,93 @@ mod tests {
         assert_eq!(current().show_window, EN.show_window);
     }
 
-    /// Issue #674 acceptance: no user-visible literal may stay hard-coded in
-    /// the two modules that build the native surfaces.
+    /// Every literal in the production half of `src` that reads as user-facing
+    /// copy the tables do not carry (issue #843).
+    ///
+    /// The original #674 scan ran the other way — it searched these modules for
+    /// the tables' values — so it could never fail on copy that is not in a
+    /// table yet: a brand-new English-only label kept it green. This scans the
+    /// modules' own literals instead. A function rather than an inline loop so
+    /// the scanner can be self-tested on a snippet below.
+    fn hard_coded_copy(src: &str) -> Vec<String> {
+        let translated = table_values();
+        let mut offenders: Vec<String> = quoted_literals(src)
+            .into_iter()
+            .filter(|literal| reads_as_copy(literal))
+            .filter(|literal| !is_internal_literal(literal))
+            .filter(|literal| !translated.contains(literal.as_str()))
+            .collect();
+        offenders.sort();
+        offenders.dedup();
+        offenders
+    }
+
+    /// Double-quoted literals in the production half of `src`.
+    fn quoted_literals(src: &str) -> Vec<String> {
+        let prod = strip_line_comments(prod_source(src));
+        let mut literals = Vec::new();
+        let mut rest = prod.as_str();
+        while let Some(start) = rest.find('"') {
+            let after = &rest[start + 1..];
+            let Some(end) = after.find('"') else { break };
+            literals.push(after[..end].to_string());
+            rest = &after[end + 1..];
+        }
+        literals
+    }
+
+    /// Every value of the three tables: the "already translated" set.
+    fn table_values() -> HashSet<&'static str> {
+        [&EN, &DE, &FR]
+            .into_iter()
+            .flat_map(|table| table.values().into_iter().map(|(_, value)| value))
+            .collect()
+    }
+
+    /// Prose has a space or a word of at least three ASCII letters; a lone
+    /// emoji, a unit of punctuation or a two-letter token is not copy (#843).
+    fn reads_as_copy(literal: &str) -> bool {
+        let letters = literal.chars().filter(char::is_ascii_alphabetic).count();
+        literal.contains(' ') || letters >= 3
+    }
+
+    /// Literals that are internal, so they may stay inline (#843). Each entry
+    /// carries its reason; `is_internal_literal` recognises the shapes below
+    /// that need no entry of their own.
+    const INTERNAL_LITERALS: [&str; 9] = [
+        // The product name — a documented exception (see the module doc).
+        "PresenceJam",
+        // Error strings surfaced through `invoke()` rejections or event
+        // payloads — English by design, the other documented exception.
+        "No default icon",
+        "Tray already initialized",
+        "Tray not initialized",
+        "main window not found",
+        "No active playback device - pick one from the tray Devices menu",
+        // Log and telemetry payloads, never rendered: a redacted device id and
+        // two context labels for `player_with_refresh_typed`.
+        "<invalid>",
+        "play/pause state",
+        "transfer device list",
+    ];
+
+    /// Shapes that are never UI copy: module log tags (`[TRAY] ...`), format
+    /// templates (`{}`), menu accelerators, and identifier-shaped ids and event
+    /// names (`snooze|30m`, `open-logs-folder`, `playback-state-changed`).
+    fn is_internal_literal(literal: &str) -> bool {
+        let identifier_shaped = literal
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "_|./-".contains(c));
+        INTERNAL_LITERALS.contains(&literal)
+            || literal.starts_with('[')
+            || literal.contains("{}")
+            || literal.starts_with("CmdOrCtrl")
+            || identifier_shaped
+    }
+
+    /// Issue #674, hardened by #843: no user-visible literal may stay hard-coded
+    /// in the two modules that build the native surfaces — neither a copy of a
+    /// table value (the original scan) nor copy the tables do not carry yet.
     #[test]
     fn no_user_visible_literal_stays_hard_coded() {
         let modules = [
@@ -576,10 +663,40 @@ mod tests {
                 }
             }
         }
+        for (module, src) in modules {
+            for literal in hard_coded_copy(src) {
+                offenders.push(format!("{module} hard-codes {literal:?} (no table carries it)"));
+            }
+        }
         assert!(
             offenders.is_empty(),
             "user-visible literals must come from the i18n tables: {:?}",
             offenders
+        );
+    }
+
+    /// The scanner must report the one case the original direction was blind to
+    /// (#843): copy the tables do not carry. A table-backed literal, an internal
+    /// id, and a literal quoted inside a comment are not copy.
+    #[test]
+    fn the_hard_coded_copy_scanner_reports_new_copy() {
+        assert!(table_values().contains("Settings..."));
+        let synthetic = concat!(
+            "fn build() {\n",
+            "    let id = \"snooze|30m\";\n",
+            "    let known = \"Settings...\";\n",
+            "    let fresh = \"Brand New Label\";\n",
+            "}\n",
+            "\n#[cfg(test)]\nmod tests {\n",
+            "    // \"Comment Only Label\" is prose, not a literal\n",
+            "    #[test]\n",
+            "    fn placeholder() {}\n",
+            "}\n",
+        );
+        assert_eq!(
+            hard_coded_copy(synthetic),
+            vec!["Brand New Label".to_string()],
+            "only the untranslated label is new copy"
         );
     }
 }
