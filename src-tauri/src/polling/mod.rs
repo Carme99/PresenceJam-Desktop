@@ -44,23 +44,78 @@ pub(crate) enum ErrorSeverity {
     Error,
 }
 
-/// Emit an `error` event to the frontend with a stable shape:
+impl ErrorSeverity {
+    /// The wire spelling of this tier. `Dashboard.svelte` gates its red banner
+    /// on the literal `"error"`, so the two strings are a frontend contract,
+    /// not an internal detail (see issue #79 and `ErrorEventPayload` in
+    /// `src/lib/types.ts`).
+    fn as_str(self) -> &'static str {
+        match self {
+            ErrorSeverity::Warning => "warning",
+            ErrorSeverity::Error => "error",
+        }
+    }
+}
+
+/// The `error` event payload, as the frontend receives it:
 /// `{ "source": <string>, "message": <string>, "severity": "warning" | "error" }`.
 ///
-/// Centralised so the field shape cannot drift between emit sites
-/// (polling.rs had 3 of them, see issue #79). All call sites in
-/// `poll_once` route through this helper.
+/// Pure so the shape is asserted by a test that runs it (issue #761):
+/// centralised here so the field names cannot drift between emit sites
+/// (polling.rs had 3 of them, see issue #79). All call sites in `poll_once`
+/// route through [`emit_error`].
+fn error_payload(source: &str, message: String, severity: ErrorSeverity) -> serde_json::Value {
+    serde_json::json!({
+        "source": source,
+        "message": message,
+        "severity": severity.as_str(),
+    })
+}
+
+/// Emit an `error` event to the frontend in the [`error_payload`] shape.
+///
+/// Needs a live `AppHandle`, so the payload itself is built by the pure
+/// helper above and asserted there; this wrapper only hands it to the emitter.
 pub(crate) fn emit_error(app: &AppHandle, source: &str, message: String, severity: ErrorSeverity) {
-    let severity_str = match severity {
-        ErrorSeverity::Warning => "warning",
-        ErrorSeverity::Error => "error",
-    };
-    let _ = app.emit(
-        "error",
-        serde_json::json!({
-            "source": source,
-            "message": message,
-            "severity": severity_str,
-        }),
-    );
+    let _ = app.emit("error", error_payload(source, message, severity));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{error_payload, ErrorSeverity};
+    use serde_json::json;
+
+    /// Issue #761: the `error` envelope is the app's single canonical error
+    /// shape, and its field names are what every listener reads — `source`
+    /// (which subsystem), `message` (what happened) and `severity` (whether
+    /// the Dashboard pops the red banner or only logs it). A rename drops a
+    /// field to `undefined` in the listener with no type error on the Rust
+    /// side, so the three names are pinned here by running the builder.
+    #[test]
+    fn error_payload_carries_source_message_and_severity() {
+        let payload = error_payload(
+            "poll_once",
+            "token refresh failed".to_string(),
+            ErrorSeverity::Error,
+        );
+
+        assert_eq!(
+            payload,
+            json!({
+                "source": "poll_once",
+                "message": "token refresh failed",
+                "severity": "error",
+            }),
+            "the error envelope is the frontend's contract"
+        );
+    }
+
+    /// Both tiers have to keep their exact spelling: `Dashboard.svelte` treats
+    /// `"error"` as the persistent-banner case and anything else as log-only,
+    /// so a reworded literal would silently downgrade every hard failure.
+    #[test]
+    fn error_severity_spells_both_tiers_for_the_frontend() {
+        assert_eq!(ErrorSeverity::Warning.as_str(), "warning");
+        assert_eq!(ErrorSeverity::Error.as_str(), "error");
+    }
 }
