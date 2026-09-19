@@ -74,7 +74,7 @@ The UI is localized to **English, German, and French** via the i18n barrel
   detached windows through the `storage` listener below, and a value found
   there while the config carries none is migrated into the config once. First
   run still defaults to the browser language (`de`/`fr` prefixes), falling back
-  to English. The picker lives in Settings → General.
+  to English. The picker lives in Settings → Appearance (there is no General card).
 - **Intl formatting (4.6):** the locale's `Intl.NumberFormat` and
   `Intl.PluralRules` are built once per locale and reused (constructing a
   formatter per render would dominate `t()`). Numeric params go through the
