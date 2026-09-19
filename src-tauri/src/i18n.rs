@@ -77,6 +77,10 @@ pub struct Strings {
     pub snooze_30_minutes: &'static str,
     pub snooze_1_hour: &'static str,
     pub snooze_until_tomorrow: &'static str,
+    /// Issue #867: only present while a busy Outlook meeting is in
+    /// progress. The entry reads the calendar cache at click time; the
+    /// label is the literal copy the tray shows.
+    pub snooze_until_next_meeting_ends: &'static str,
     /// Only present while a snooze is active.
     pub snooze_resume_now: &'static str,
     /// Leading status word while snoozed: "Snoozed — 29 min left (→ 14:32)".
@@ -146,6 +150,7 @@ pub const EN: Strings = Strings {
     snooze_30_minutes: "30 minutes",
     snooze_1_hour: "1 hour",
     snooze_until_tomorrow: "Until tomorrow",
+    snooze_until_next_meeting_ends: "Until this meeting ends",
     snooze_resume_now: "Resume sync now",
     snooze_paused: "Snoozed",
     snooze_minutes_left: "min left",
@@ -196,6 +201,7 @@ pub const DE: Strings = Strings {
     snooze_30_minutes: "30 Minuten",
     snooze_1_hour: "1 Stunde",
     snooze_until_tomorrow: "Bis morgen",
+    snooze_until_next_meeting_ends: "Bis zum Ende dieses Termins",
     snooze_resume_now: "Sync jetzt fortsetzen",
     snooze_paused: "Sync pausiert",
     snooze_minutes_left: "Min. verbleibend",
@@ -246,6 +252,7 @@ pub const FR: Strings = Strings {
     snooze_30_minutes: "Pendant 30 minutes",
     snooze_1_hour: "Pendant 1 heure",
     snooze_until_tomorrow: "Jusqu’à demain",
+    snooze_until_next_meeting_ends: "Jusqu’à la fin de cette réunion",
     snooze_resume_now: "Reprendre la synchro maintenant",
     snooze_paused: "Synchro en pause",
     snooze_minutes_left: "min restant",
@@ -400,6 +407,10 @@ impl Strings {
             ("snooze_30_minutes", self.snooze_30_minutes),
             ("snooze_1_hour", self.snooze_1_hour),
             ("snooze_until_tomorrow", self.snooze_until_tomorrow),
+            (
+                "snooze_until_next_meeting_ends",
+                self.snooze_until_next_meeting_ends,
+            ),
             ("snooze_resume_now", self.snooze_resume_now),
             ("snooze_paused", self.snooze_paused),
             ("snooze_minutes_left", self.snooze_minutes_left),

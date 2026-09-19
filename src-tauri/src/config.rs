@@ -133,7 +133,7 @@ pub struct TeamsConfig {
     /// user opts in.
     #[serde(default = "default_gate_when_out_of_office")]
     pub gate_when_out_of_office: bool,
-    /// Issue #872: also gate the status write while the OS reports a
+/// Issue #872: also gate the status write while the OS reports a
     /// full-screen app, presentation mode, or Quiet Time. OFF by default
     /// — a hand-edited config flips it on; the GUI does too. Linux/macOS
     /// always report `Unknown` (`platform::focus`), so the toggle is a
@@ -151,6 +151,13 @@ pub struct TeamsConfig {
     /// on those targets.
     #[serde(default)]
     pub idle_away_after_seconds: u64,
+    /// Issue #867: minutes before a busy Outlook calendar event starts that
+    /// the status write is suppressed. `0` means suppress only during the
+    /// meeting itself (the same behaviour as the presence-gate today);
+    /// `>0` lets a user pre-gate so a track that started ten minutes before
+    /// the meeting is also caught. Capped at 60 minutes by `clamp_teams`.
+    #[serde(default)]
+    pub pre_meeting_suppress_minutes: u16,
     /// S4 (issue #672): the text posted as the Teams status message while
     /// playback is paused — the user-templatable form of the literal the
     /// paused clear used to hardcode (`"🎵 Paused"`, emoji included by
@@ -380,14 +387,18 @@ fn clamp_teams(cfg: &mut TeamsConfig) {
     // fields when they fail to match `PRESENCE_COMBINATIONS`, so
     // disabling an unsupported config is automatic.
     clamp_preferred_presence(&mut cfg.preferred_presence);
-
-    // Issue #873: the idle-away threshold. `0` disables (no clamp), any
+// Issue #873: the idle-away threshold. `0` disables (no clamp), any
     // other value is clamped into 60..=3600 so a hand-edited config
     // cannot put the gate in a state that surprises the user (a 1 s
     // threshold would have every normal typing pause fire the gate).
     if cfg.idle_away_after_seconds != 0 {
         cfg.idle_away_after_seconds = cfg.idle_away_after_seconds.clamp(60, 3600);
     }
+
+    // Issue #867: cap the pre-meeting suppression window at 60 minutes —
+    // anything larger is almost certainly a hand-edited mistake, and a
+    // longer window only widens the blast radius of a flaky calendar.
+    cfg.pre_meeting_suppress_minutes = cfg.pre_meeting_suppress_minutes.min(60);
 }
 
 /// Issue #866: bound the preferred-presence config the same way `clamp_rules`
@@ -734,32 +745,48 @@ pub fn clamp_snooze(cfg: &mut AppConfig, now: chrono::DateTime<chrono::Utc>) -> 
     true
 }
 
-/// A snooze preset offered by the tray submenu (4.7.0, S9 / issue #677).
+/// A snooze preset offered by the tray submenu (4.7.0, S9 / issue #677;
+/// issue #867 adds the calendar-bound `UntilNextMeetingEnds`).
 ///
 /// The first two are instant offsets (`now + delta`), which no timezone can
 /// move. The third is a LOCAL calendar boundary, which is why it is a variant
 /// of its own rather than a `Duration` — see [`next_local_midnight_utc`].
+/// The fourth (issue #867) reads from the Outlook calendar cache and falls
+/// back to "until tomorrow" when no meeting is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SnoozePreset {
     ThirtyMinutes,
     OneHour,
     UntilTomorrow,
+    UntilNextMeetingEnds,
 }
 
-/// The deadline a preset denotes (4.7.0, S9 / issue #677).
+/// The deadline a preset denotes (4.7.0, S9 / issue #677; issue #867).
 ///
 /// Both clocks are arguments rather than read inside, so the "until tomorrow"
 /// boundary can be pinned at an exact wall-clock time and timezone in a unit
 /// test — the boundary is where a timezone bug would hide.
+///
+/// `next_meeting_end` (issue #867) is the end of the meeting currently in
+/// progress, computed by the tray handler from the [`crate::calendar`] cache.
+/// When `preset` is `UntilNextMeetingEnds` and `next_meeting_end` is `None`
+/// (no active meeting, or the cache is empty), the deadline falls back to
+/// "until tomorrow" — clicking the entry while no meeting is in progress
+/// still produces a valid deadline.
 pub fn snooze_preset_deadline<Tz: chrono::TimeZone>(
     preset: SnoozePreset,
     now_utc: chrono::DateTime<chrono::Utc>,
     now_local: chrono::DateTime<Tz>,
+    next_meeting_end: Option<chrono::DateTime<chrono::Utc>>,
 ) -> chrono::DateTime<chrono::Utc> {
     match preset {
         SnoozePreset::ThirtyMinutes => now_utc + chrono::TimeDelta::minutes(30),
         SnoozePreset::OneHour => now_utc + chrono::TimeDelta::minutes(60),
         SnoozePreset::UntilTomorrow => next_local_midnight_utc(now_local),
+        SnoozePreset::UntilNextMeetingEnds => match next_meeting_end {
+            Some(end) => end,
+            None => next_local_midnight_utc(now_local),
+        },
     }
 }
 
@@ -1447,11 +1474,16 @@ impl Default for TeamsConfig {
             profanity_extra_words: Vec::new(),
             respect_manual_status: default_respect_manual_status(),
             gate_when_out_of_office: default_gate_when_out_of_office(),
+<<<<<<< HEAD
             gate_when_presenting: default_gate_when_presenting(),
             // Issue #873: `0` = off (the default; an untouched config
             // behaves exactly as today). The clamp runs through
             // `clamp_teams` so any non-zero value lands in 60..=3600.
             idle_away_after_seconds: 0,
+            // Issue #867: 0 disables the pre-meeting suppression window
+            // (the previous behaviour, which also matches the documented
+            // default); any non-zero value is capped at 60 by `clamp_teams`.
+            pre_meeting_suppress_minutes: 0,
             paused_status_format: default_paused_status_format(),
             stopped_status_format: default_stopped_status_format(),
             preferred_presence: PreferredPresenceConfig::default(),
@@ -5066,7 +5098,8 @@ mod tests {
             for (h, mi) in [(0, 0), (0, 1), (12, 30), (23, 59)] {
                 let now = utc(2026, 3, 4, h, mi, 0).with_timezone(&tz);
                 let now_utc = now.with_timezone(&chrono::Utc);
-                let deadline = snooze_preset_deadline(SnoozePreset::UntilTomorrow, now_utc, now);
+                let deadline =
+                    snooze_preset_deadline(SnoozePreset::UntilTomorrow, now_utc, now, None);
                 let secs = (deadline - now_utc).num_seconds();
                 assert!(
                     secs > 0 && secs <= 24 * 3600,
@@ -5282,23 +5315,44 @@ mod tests {
     }
 
     /// The preset table: the two duration presets are pure instant offsets (no
-    /// timezone can move them), and "until tomorrow" is the local boundary.
+    /// timezone can move them), "until tomorrow" is the local boundary, and
+    /// "until this meeting ends" (issue #867) reads the supplied
+    /// `next_meeting_end`, falling back to tomorrow when no meeting is
+    /// active.
     #[test]
     fn snooze_presets_map_to_deadlines() {
         let now_utc = utc(2026, 6, 1, 9, 0, 0);
         let now_local = now_utc.with_timezone(&zone(2));
         assert_eq!(
-            snooze_preset_deadline(SnoozePreset::ThirtyMinutes, now_utc, now_local),
+            snooze_preset_deadline(SnoozePreset::ThirtyMinutes, now_utc, now_local, None),
             utc(2026, 6, 1, 9, 30, 0)
         );
         assert_eq!(
-            snooze_preset_deadline(SnoozePreset::OneHour, now_utc, now_local),
+            snooze_preset_deadline(SnoozePreset::OneHour, now_utc, now_local, None),
             utc(2026, 6, 1, 10, 0, 0)
         );
         assert_eq!(
-            snooze_preset_deadline(SnoozePreset::UntilTomorrow, now_utc, now_local),
+            snooze_preset_deadline(SnoozePreset::UntilTomorrow, now_utc, now_local, None),
             utc(2026, 6, 1, 22, 0, 0),
             "11:00 local → the midnight that follows it, in UTC"
+        );
+        // Issue #867: an active meeting end is the deadline.
+        let meeting_end = utc(2026, 6, 1, 10, 30, 0);
+        assert_eq!(
+            snooze_preset_deadline(
+                SnoozePreset::UntilNextMeetingEnds,
+                now_utc,
+                now_local,
+                Some(meeting_end)
+            ),
+            meeting_end,
+            "an active meeting end is the deadline"
+        );
+        // Issue #867: no active meeting falls back to tomorrow.
+        assert_eq!(
+            snooze_preset_deadline(SnoozePreset::UntilNextMeetingEnds, now_utc, now_local, None),
+            utc(2026, 6, 1, 22, 0, 0),
+            "no meeting in progress → fall back to the local-midnight deadline"
         );
     }
 
