@@ -155,6 +155,27 @@ pub struct ConfigSummary {
     /// launch, so this is also how a later session can point the user at
     /// the settings it lost.
     pub config_quarantine_backup: Option<String>,
+    /// Finding #635 gate switch (issue #864): ON by default, and one of the
+    /// most common reasons a status write is held back on purpose.
+    pub respect_manual_status: bool,
+    /// Finding #637 gate switch (issue #864).
+    pub gate_when_out_of_office: bool,
+    /// Count only, like the rule counts above: the extra words are user
+    /// content and never travel (#432 rule, issue #864).
+    pub profanity_extra_words_count: usize,
+    /// Configured UI locale; `None` is the documented `"en"` default
+    /// (issue #864) — needed to reproduce anything from a translated build.
+    pub locale: Option<String>,
+    /// `stable` / `beta`: which release manifest this install consults
+    /// (issue #864).
+    pub update_channel: String,
+    /// An active snooze right now, and the whole minutes left — the reason a
+    /// long silence looks like a hang (issue #864). Derived, not the stored
+    /// deadline: [`crate::config::snooze_status`] already applies the
+    /// expiry/parse rules, and [`crate::config::snooze_minutes_left`] is the
+    /// same rounding the tray and Dashboard render.
+    pub snoozed: bool,
+    pub snooze_minutes_left: Option<i64>,
 }
 
 /// Token metadata ONLY. There is deliberately no field that could carry
@@ -599,6 +620,7 @@ fn config_summary(
     quarantine: &ConfigQuarantine,
 ) -> ConfigSummary {
     let cfg = state.config.get().clone().unwrap_or_default();
+    let snooze = crate::config::snooze_status(&cfg, chrono::Utc::now());
     ConfigSummary {
         spotify_client_id: cfg.spotify.client_id,
         redirect_uri: cfg.spotify.redirect_uri,
@@ -637,7 +659,28 @@ fn config_summary(
             .backup_name
             .as_deref()
             .and_then(quarantine_backup_field),
+        respect_manual_status: cfg.teams.respect_manual_status,
+        gate_when_out_of_office: cfg.teams.gate_when_out_of_office,
+        profanity_extra_words_count: cfg.teams.profanity_extra_words.len(),
+        locale: cfg.locale,
+        update_channel: update_channel_token(cfg.updates.channel),
+        snoozed: snooze.is_some(),
+        snooze_minutes_left: snooze
+            .map(|s| crate::config::snooze_minutes_left(s.remaining_seconds)),
     }
+}
+
+/// Wire spelling of the update channel (issue #864). Mirrors the
+/// `#[serde(rename_all = "lowercase")]` contract that the Settings picker and
+/// `updates.channel` in `config.json` round-trip, so the snapshot reads the
+/// same token as the file it reports. An exhaustive match keeps a future
+/// channel from silently missing the snapshot.
+fn update_channel_token(channel: crate::config::UpdateChannel) -> String {
+    match channel {
+        crate::config::UpdateChannel::Stable => "stable",
+        crate::config::UpdateChannel::Beta => "beta",
+    }
+    .to_string()
 }
 
 /// Tail the on-disk log file written by `tauri_plugin_log`'s `LogDir`
@@ -1760,5 +1803,77 @@ mod tests {
             snapshot.os.install_flavor, expected,
             "an unbundled Linux/Windows binary reports the fallback token"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // U10 (#864): the config summary carries the switches, locale and
+    // channel a support reader needs.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_config_summary_reports_gating_switches_locale_channel_and_snooze() {
+        let state = crate::AppState::default();
+        {
+            let mut cfg = crate::config::AppConfig::default();
+            cfg.teams.respect_manual_status = false;
+            cfg.teams.gate_when_out_of_office = true;
+            cfg.teams.profanity_extra_words =
+                vec!["frobnicate".into(), "wibble".into(), "wobble".into()];
+            cfg.locale = Some("de-AT".into());
+            cfg.updates.channel = crate::config::UpdateChannel::Beta;
+            cfg.snooze_until =
+                Some((chrono::Utc::now() + chrono::Duration::minutes(30)).to_rfc3339());
+            *state.config.get_mut() = Some(cfg);
+        }
+
+        let snapshot = build_snapshot(
+            &state,
+            None,
+            inert_keychain(),
+            None,
+            ConfigQuarantine::default(),
+        );
+        let config = &snapshot.config;
+        assert!(
+            !config.respect_manual_status,
+            "the switch is reported as set"
+        );
+        assert!(config.gate_when_out_of_office);
+        assert_eq!(config.locale.as_deref(), Some("de-AT"));
+        assert_eq!(config.update_channel, "beta");
+        assert_eq!(config.profanity_extra_words_count, 3);
+        assert!(config.snoozed, "a running snooze must be visible");
+        let minutes = config.snooze_minutes_left.expect("snooze minutes");
+        assert!(
+            (25..=30).contains(&minutes),
+            "minutes left are rounded up from the deadline, got {minutes}"
+        );
+
+        // The words themselves are user content and must not travel (#432).
+        let json = serde_json::to_string(&snapshot).expect("serialize snapshot");
+        assert!(!json.contains("frobnicate"), "{json}");
+        assert!(!json.contains("wibble"), "{json}");
+    }
+
+    #[test]
+    fn test_config_summary_snooze_state_is_absent_without_a_deadline() {
+        let state = crate::AppState::default();
+        let snapshot = build_snapshot(
+            &state,
+            None,
+            inert_keychain(),
+            None,
+            ConfigQuarantine::default(),
+        );
+        assert!(!snapshot.config.snoozed);
+        assert_eq!(snapshot.config.snooze_minutes_left, None);
+    }
+
+    #[test]
+    fn test_update_channel_token_matches_the_serde_spelling() {
+        use crate::config::UpdateChannel;
+        // The token must be the on-disk spelling, not a Debug rendering.
+        assert_eq!(update_channel_token(UpdateChannel::Stable), "stable");
+        assert_eq!(update_channel_token(UpdateChannel::Beta), "beta");
     }
 }
