@@ -4,8 +4,15 @@ const PROFANITY_LIST: &[&str] = &[
     "faggot", "douche", "asshole", "tits", "twat",
 ];
 
+/// Shipped default of `teams.profanity_placeholder`, byte-identical to the
+/// pre-4.7 literal so a stored config stays comparable. The POST path resolves
+/// it through the i18n tables instead of posting it verbatim (issue #980) — see
+/// [`crate::i18n::posted_text`]; `config.rs` uses it as the field's serde
+/// default, so this value must stay English.
 const SAFE_PLACEHOLDER_DEFAULT: &str = "Currently Listening to Spotify";
 
+/// The shipped default above, for `config.rs` and the config-less poll paths.
+/// Locale resolution happens at post time (issue #980), not here.
 pub fn safe_placeholder_default() -> &'static str {
     SAFE_PLACEHOLDER_DEFAULT
 }

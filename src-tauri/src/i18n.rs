@@ -85,6 +85,16 @@ pub struct Strings {
     pub snooze_paused: &'static str,
     /// Countdown unit, composed as `{word} — {n} {unit} (→ HH:MM)`.
     pub snooze_minutes_left: &'static str,
+
+    // ── Posted status texts (issue #980) ────────────────────────────────────
+    /// Shipped default of `teams.profanity_placeholder`: what is posted when the
+    /// filter replaces a profane status. The POST path resolves it through the
+    /// installed table (see [`posted_text`]), never by rewriting the config.
+    pub placeholder_default: &'static str,
+    /// Shipped default of `teams.paused_status_format`.
+    pub status_paused_default: &'static str,
+    /// Shipped default of `teams.stopped_status_format`.
+    pub status_stopped_default: &'static str,
 }
 
 /// English table — the source of truth the other two mirror.
@@ -127,6 +137,10 @@ pub const EN: Strings = Strings {
     snooze_resume_now: "Resume sync now",
     snooze_paused: "Snoozed",
     snooze_minutes_left: "min left",
+
+    placeholder_default: "Currently Listening to Spotify",
+    status_paused_default: "Paused",
+    status_stopped_default: "Nothing playing on Spotify",
 };
 
 /// German table.
@@ -169,6 +183,10 @@ pub const DE: Strings = Strings {
     snooze_resume_now: "Sync jetzt fortsetzen",
     snooze_paused: "Sync pausiert",
     snooze_minutes_left: "Min. verbleibend",
+
+    placeholder_default: "Hört gerade Spotify",
+    status_paused_default: "Pausiert",
+    status_stopped_default: "Nichts läuft auf Spotify",
 };
 
 /// French table.
@@ -211,6 +229,10 @@ pub const FR: Strings = Strings {
     snooze_resume_now: "Reprendre la synchro maintenant",
     snooze_paused: "Synchro en pause",
     snooze_minutes_left: "min restant",
+
+    placeholder_default: "Écoute actuellement Spotify",
+    status_paused_default: "En pause",
+    status_stopped_default: "Rien ne joue sur Spotify",
 };
 
 /// Canonical locale tags, in table order. The value persisted in
@@ -308,6 +330,25 @@ pub fn install_from_config(cfg: &crate::config::AppConfig) -> bool {
     CURRENT.load(Ordering::Relaxed) != previous
 }
 
+/// A posted status text resolved through the tables (issue #980).
+///
+/// The shipped defaults of `teams.profanity_placeholder`,
+/// `teams.paused_status_format` and `teams.stopped_status_format` are deliberate
+/// byte-copies of the pre-4.7 English literals, so an unedited config posts
+/// English even for a `de`/`fr` user while the tray reads German. The stored
+/// configs are never rewritten — this resolves the text at POST time instead:
+/// `stored` counts as "the user never touched this field" while it is empty or
+/// still byte-equal to `english_default`, and `localized` (the table's copy of
+/// the same field, e.g. [`Strings::status_paused_default`]) is posted in its
+/// place. Anything else is the user's own text and is returned verbatim.
+pub fn posted_text<'a>(stored: &'a str, english_default: &str, localized: &'a str) -> &'a str {
+    if stored.trim().is_empty() || stored == english_default {
+        localized
+    } else {
+        stored
+    }
+}
+
 /// Serialises the tests that install a process-wide table, so a test asserting
 /// `current()` cannot observe another test's locale.
 #[cfg(test)]
@@ -357,6 +398,9 @@ impl Strings {
             ("snooze_resume_now", self.snooze_resume_now),
             ("snooze_paused", self.snooze_paused),
             ("snooze_minutes_left", self.snooze_minutes_left),
+            ("placeholder_default", self.placeholder_default),
+            ("status_paused_default", self.status_paused_default),
+            ("status_stopped_default", self.status_stopped_default),
         ]
     }
 }
@@ -735,6 +779,111 @@ mod tests {
             DE.status_syncing,
             webview_value(de_ts, "dashboard.syncing"),
             "the tray status line and the Dashboard badge must read alike"
+        );
+    }
+
+    /// Issue #980: a stored config carries the English literals as its defaults,
+    /// so the POST path has to resolve them through the tables — while a text the
+    /// user typed is posted untouched.
+    #[test]
+    fn posted_defaults_resolve_through_the_tables_and_spare_user_copy() {
+        let default = crate::config::AppConfig::default();
+        assert_eq!(
+            EN.placeholder_default,
+            crate::profanity::safe_placeholder_default(),
+            "the EN row must be the shipped default, or an unedited config is not recognised"
+        );
+        assert_eq!(EN.status_paused_default, default.teams.paused_status_format);
+        assert_eq!(
+            EN.status_stopped_default,
+            default.teams.stopped_status_format
+        );
+
+        // Unedited fields follow the locale ...
+        assert_eq!(
+            posted_text(
+                &default.teams.profanity_placeholder,
+                EN.placeholder_default,
+                DE.placeholder_default
+            ),
+            "Hört gerade Spotify"
+        );
+        assert_eq!(
+            posted_text(
+                &default.teams.paused_status_format,
+                EN.status_paused_default,
+                DE.status_paused_default
+            ),
+            "Pausiert"
+        );
+        assert_eq!(
+            posted_text(
+                &default.teams.stopped_status_format,
+                EN.status_stopped_default,
+                DE.status_stopped_default
+            ),
+            "Nichts läuft auf Spotify"
+        );
+        assert_eq!(
+            posted_text(
+                &default.teams.profanity_placeholder,
+                EN.placeholder_default,
+                FR.placeholder_default
+            ),
+            "Écoute actuellement Spotify"
+        );
+        assert_eq!(
+            posted_text(
+                &default.teams.paused_status_format,
+                EN.status_paused_default,
+                FR.status_paused_default
+            ),
+            "En pause"
+        );
+        assert_eq!(
+            posted_text(
+                &default.teams.stopped_status_format,
+                EN.status_stopped_default,
+                FR.status_stopped_default
+            ),
+            "Rien ne joue sur Spotify"
+        );
+        // ... while the user's own text is posted byte-identically, and an empty
+        // field means the default exactly as the poller reads it.
+        assert_eq!(
+            posted_text(
+                "In a meeting",
+                EN.status_paused_default,
+                DE.status_paused_default
+            ),
+            "In a meeting"
+        );
+        assert_eq!(
+            posted_text(
+                "En réunion",
+                EN.status_paused_default,
+                FR.status_paused_default
+            ),
+            "En réunion"
+        );
+        assert_eq!(
+            posted_text("", EN.status_paused_default, FR.status_paused_default),
+            FR.status_paused_default
+        );
+        // The Settings hints show the same wording, so the preview cannot drift
+        // from what colleagues end up seeing.
+        let de_ts = include_str!("../../src/lib/i18n/de.ts");
+        assert_eq!(
+            DE.placeholder_default,
+            webview_value(de_ts, "settings.placeholderTextPlaceholder")
+        );
+        assert_eq!(
+            DE.status_paused_default,
+            webview_value(de_ts, "rules.pausedStatusPlaceholder")
+        );
+        assert_eq!(
+            DE.status_stopped_default,
+            webview_value(de_ts, "rules.stoppedStatusPlaceholder")
         );
     }
 }
