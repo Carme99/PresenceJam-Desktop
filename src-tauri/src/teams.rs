@@ -1,5 +1,6 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
 use std::thread;
 use std::time::Duration as StdDuration;
 
@@ -118,6 +119,10 @@ impl TeamsApiError {
 /// (which mirrors `tauri.conf.json` → `version`) automatically on every
 /// release. Never hardcode the version — see CONTRIBUTING.md. See audit
 /// Q8.
+///
+/// Only the exit-path cleanup still calls this (issue #884): it is the one
+/// caller that needs a timeout other than the shared 10 s, and caching a
+/// client per timeout value would defeat the point of the cache.
 fn build_teams_client_with_timeout(
     timeout: std::time::Duration,
 ) -> Result<reqwest::blocking::Client, String> {
@@ -128,8 +133,28 @@ fn build_teams_client_with_timeout(
         .map_err(|e| format!("Failed to create HTTP client: {}", e))
 }
 
+/// The shared Graph client: built once per process and cached (issue #884).
+///
+/// `reqwest::blocking::Client` is `Arc`-backed, so every later call is a
+/// refcount bump over the SAME connection pool instead of a fresh pool per
+/// call — the memoization `spotify.rs::build_spotify_client` already has
+/// (#576). Eight Teams call sites used to open and discard a pool each: a
+/// presence read plus a status POST every poll, i.e. a new TCP+TLS handshake
+/// per iteration with no keep-alive reuse.
+///
+/// The cache memoizes a failed build too: the builder fails only on
+/// environmental TLS/runtime init, where a retry would fail identically. The
+/// signature is `Result<Client, String>` as before, so the call sites and
+/// their error mapping are untouched.
 fn build_teams_client() -> Result<reqwest::blocking::Client, String> {
-    build_teams_client_with_timeout(std::time::Duration::from_secs(10))
+    static CLIENT: LazyLock<Result<reqwest::blocking::Client, String>> = LazyLock::new(|| {
+        reqwest::blocking::Client::builder()
+            .user_agent(format!("PresenceJam/{}", env!("CARGO_PKG_VERSION")))
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|e| format!("Failed to create HTTP client: {}", e))
+    });
+    CLIENT.as_ref().map(|c| c.clone()).map_err(|e| e.clone())
 }
 
 /// Binding budget for the exit-path cleanup (finding #636, issue #636).
@@ -2213,5 +2238,55 @@ mod tests {
         assert!(TeamsApiError::Other(418, body.to_string())
             .user_message()
             .contains("418"));
+    }
+
+    /// Issue #884: the shared Graph client must stay memoized. Reintroducing a
+    /// builder call in `build_teams_client` would silently restore a fresh
+    /// connection pool per Graph call — exactly what the `LazyLock` removed —
+    /// and the exit path must keep its own bounded client (3 s, #636).
+    #[test]
+    fn build_teams_client_uses_one_cached_pool() {
+        let src = include_str!("teams.rs");
+        // Both needles are assembled with `concat!` so this test's own source
+        // never inflates the counts it asserts.
+        let builder = concat!("Client::", "builder()");
+        let exit_call = concat!("build_teams_client_with_timeout(", "EXIT_CLEANUP_TIMEOUT)");
+        assert_eq!(
+            src.matches(builder).count(),
+            2,
+            "exactly two client builders: the cache initializer and the bounded exit-path one"
+        );
+        let shared = fn_body(src, "fn build_teams_client()");
+        // The shared client is built exactly once, and that one builder call
+        // must sit inside the process-wide cache: reverting to a per-call
+        // client drops this to 0, and adding a second per-call builder beside
+        // the cache raises it to 2.
+        assert_eq!(
+            shared.matches(builder).count(),
+            1,
+            "the shared client must build once, inside its cache initializer: {shared}"
+        );
+        assert!(
+            shared.contains("static CLIENT: LazyLock"),
+            "…and that builder must sit in a process-wide cache: {shared}"
+        );
+        // The exit path (its own 3 s budget, #636) is the one deliberate
+        // exception — a cache keyed by timeout value would defeat the cache.
+        let exit_path = fn_body(src, "fn build_teams_client_with_timeout(");
+        assert!(
+            exit_path.contains(builder),
+            "the exit path builds its own bounded client: {exit_path}"
+        );
+        assert!(
+            exit_path.contains(".timeout("),
+            "…with an explicit timeout: {exit_path}"
+        );
+        // Two call sites keep the exit budget, and no other call site may
+        // reintroduce a per-call client.
+        assert_eq!(
+            src.matches(exit_call).count(),
+            2,
+            "the 3 s client must stay confined to the two exit-path calls"
+        );
     }
 }
