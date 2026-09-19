@@ -1544,6 +1544,29 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// After a rotation the active file can be absent (the plugin writes a
+    /// fresh one only on the next write) while the archives still hold the
+    /// history: the tail must come from them, and the status must say so.
+    #[test]
+    fn test_tail_log_file_reads_archives_when_the_active_file_is_gone() {
+        let dir = std::env::temp_dir().join(format!("pj-diag-noactive-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        let archive = "PresenceJam_2026-09-17_04-00-01.log";
+        let rotated: Vec<String> = (0..5).map(|i| format!("arch-{i:04}")).collect();
+        std::fs::write(dir.join(archive), rotated.join("\n") + "\n").expect("write archive");
+
+        let (lines, status) = tail_log_file(Some(dir.clone()), 3);
+
+        assert_eq!(lines, rotated, "the archive alone is the history");
+        assert_eq!(
+            status,
+            format!("ok: last 5 of 5 lines ({archive})"),
+            "the status names only the file the lines came from"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// The archive prefix has to be the active file's stem or the tail would
     /// silently stop seeing rotations.
     #[test]
@@ -2068,6 +2091,8 @@ mod tests {
                 vec!["frobnicate".into(), "wibble".into(), "wobble".into()];
             cfg.locale = Some("de-AT".into());
             cfg.updates.channel = crate::config::UpdateChannel::Beta;
+            cfg.logging.max_file_size_mb = 25;
+            cfg.logging.keep_files = 7;
             cfg.snooze_until =
                 Some((chrono::Utc::now() + chrono::Duration::minutes(30)).to_rfc3339());
             *state.config.get_mut() = Some(cfg);
@@ -2089,6 +2114,8 @@ mod tests {
         assert_eq!(config.locale.as_deref(), Some("de-AT"));
         assert_eq!(config.update_channel, "beta");
         assert_eq!(config.profanity_extra_words_count, 3);
+        assert_eq!(config.log_max_file_size_mb, 25);
+        assert_eq!(config.log_keep_files, 7);
         assert!(config.snoozed, "a running snooze must be visible");
         let minutes = config.snooze_minutes_left.expect("snooze minutes");
         assert!(
