@@ -28,6 +28,53 @@ use tauri::AppHandle;
 use crate::tray;
 use crate::AppState;
 
+/// Issue #866: the snooze-start path of the preferred-presence feature.
+/// Resolves the configured pair and POSTs `setUserPreferredPresence` so the
+/// user's Teams bubble carries Busy/DND/BeRightBack/Away for the duration of
+/// the snooze, then clears at expiry (the poll-loop tick in
+/// `poll_once::clear_expired_preferred_presence`) and on `RunEvent::Exit`.
+/// No-op when the feature is off, the user's manual-status window is in
+/// force, the snooze is for an unsupported pair, or the Teams token is
+/// unavailable — every gate the rule path uses, just routed through the
+/// snooze trigger instead of a matching rule.
+fn arm_preferred_for_snooze(state: &AppState, app: &tauri::AppHandle) {
+    let cfg = state.config.get();
+    let Some(config) = cfg.as_ref() else { return };
+    let pair = match crate::config::preferred_presence_pair(
+        &config.teams,
+        config.teams.respect_manual_status,
+    ) {
+        Some(p) => p,
+        None => return,
+    };
+    let Some(tokens) = state.tokens.teams().clone() else {
+        return;
+    };
+    super::poll_once::arm_preferred_presence_session(
+        app,
+        &tokens.access_token,
+        &pair,
+        &crate::config::preferred_presence_expiry_duration(&config.teams),
+        "Snooze preferred presence",
+    );
+}
+
+/// Issue #866: the snooze-end sibling of [`arm_preferred_for_snooze`]. Called
+/// when `snooze_gate` reports the deadline lapsed, before the
+/// `clear_snooze_if_expired` step that resets the stored value. No-op when no
+/// preferred-presence session is armed — a snooze that started without the
+/// feature must end without firing a clear.
+fn clear_preferred_for_snooze(state: &AppState, app: &tauri::AppHandle) {
+    let Some(tokens) = state.tokens.teams().clone() else {
+        return;
+    };
+    super::poll_once::clear_preferred_presence_session(
+        app,
+        &tokens.access_token,
+        "Snooze preferred presence cleared",
+    );
+}
+
 /// Drive the polling loop. Owns the mutable per-thread state across
 /// iterations; each iteration's logic lives in
 /// [`super::poll_once::run`].
@@ -102,6 +149,20 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
         };
         match snooze_gate {
             super::poll_once::SnoozeGate::Skipped(seconds) => {
+                // Issue #866: the snooze transition is the second site (after
+                // `rule_gate_at`) where the app drives the
+                // `setUserPreferredPresence` POST. `snooze_gate` already
+                // emitted the start-of-snooze log line on the false→true edge,
+                // so we only POST here when the same edge fired — the
+                // `Skipped` arm is reached on every iteration the snooze
+                // remains live, and the helper's own debounce suppresses the
+                // re-arms.
+                //
+                // The trigger fires once per snooze, the `Box::leak` in
+                // `arm_preferred_presence_session` makes the label stable
+                // across iterations, and the `Eq` arm there skips the POST
+                // while we are still inside the same expiry window.
+                arm_preferred_for_snooze(&state, &app);
                 // Repaint the tray so its countdown line and the submenu's
                 // "Resume sync now" entry follow the snooze. The rebuild is
                 // forced into its cache-only fetch mode by the active snooze
@@ -131,6 +192,14 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
                 }
             }
             super::poll_once::SnoozeGate::Expired => {
+                // Issue #866: a snooze ending is the natural clear of the
+                // preferred-presence session — the user opted into
+                // "be Busy/DND for the duration of the snooze" and the
+                // duration just elapsed. The clear runs through the regular
+                // `clear_preferred_presence_session` so the dashboard's
+                // `preferred-presence-updated` event lands and the tray
+                // submenu can drop its preferred-state badge.
+                clear_preferred_for_snooze(&state, &app);
                 // The deadline passed while the thread slept. Clear the stored
                 // value once, so the chip and the tray stop claiming a snooze,
                 // then fall through to a normal iteration.

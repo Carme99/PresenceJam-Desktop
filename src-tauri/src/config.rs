@@ -145,6 +145,23 @@ pub struct TeamsConfig {
     /// `"🎵 Nothing playing on Spotify"`. Defaults to that literal's text.
     #[serde(default = "default_stopped_status_format")]
     pub stopped_status_format: String,
+    /// Issue #866: a long-lived "preferred presence" the app sets on the user's
+    /// behalf via Graph `setUserPreferredPresence`, applying the documented
+    /// Busy / DND / BeRightBack / Away pairs while a rule or snooze wants
+    /// presence moved. The user's own Teams bubble wins — `respect_manual_status`
+    /// suppresses the call — and the user can clear it from the Settings pane
+    /// or by quitting the app (the `RunEvent::Exit` arm invokes the Graph
+    /// `clearUserPreferredPresence` counterpart).
+    ///
+    /// National-cloud note: `setUserPreferredPresence` is a commercial-Graph
+    /// surface. The free `graph.microsoft.com` endpoint used by `setPresence`
+    /// is the same on every cloud, but sovereign clouds (US Gov / DoD, China,
+    /// Germany) have historically rejected preferred-presence POSTs. The app
+    /// always prefers `setUserPreferredPresence` when enabled, and logs a
+    /// one-shot warning the first time the endpoint answers with the
+    /// documented 4xx shape.
+    #[serde(default)]
+    pub preferred_presence: PreferredPresenceConfig,
     /// Unknown / future keys NESTED inside this section, retained across
     /// load→save so a section written by a newer binary is not silently
     /// stripped by an older one (issue #938 — the section-level companion of
@@ -198,6 +215,57 @@ fn default_paused_status_format() -> String {
 
 fn default_stopped_status_format() -> String {
     "Nothing playing on Spotify".to_string()
+}
+
+/// Issue #866: the user-configurable "preferred presence" the app drives on
+/// the user's behalf via Graph `setUserPreferredPresence`. Distinct from the
+/// ephemeral [`Self::availability_sync`] `setPresence` session — preferred
+/// presence is the documented Busy / DND / BeRightBack / Away vehicle and
+/// survives across processes the user did not start themselves.
+///
+/// `expiry_minutes` is bound by [`clamp_preferred_presence`] into
+/// `5..=720`. The pair is bound by the same [`normalize_presence_pair`] the
+/// rules use — a hand-edited file that names a pair Graph silently drops is
+/// normalized away at the IPC boundary exactly like the rule pairs.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
+pub struct PreferredPresenceConfig {
+    /// OFF by default — preferred presence is opt-in, mirroring how
+    /// `availability_sync` shipped (it overrides the user's manual bubble).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Graph availability token (`Busy`, `DoNotDisturb`, `BeRightBack`,
+    /// `Away`). Normalized through [`normalize_presence_pair`] on load and on
+    /// every save; an unsupported value clears the pair and disables the
+    /// feature (the call would never land anyway).
+    #[serde(default)]
+    pub availability: String,
+    /// Graph activity token (`Busy`, `DoNotDisturb`, `Away`, `BeRightBack`,
+    /// or — for `Busy` — `InACall`/`InAConferenceCall`/`Presenting`). Same
+    /// normalizer as `availability`.
+    #[serde(default)]
+    pub activity: String,
+    /// How long the preferred presence survives a successful
+    /// `setUserPreferredPresence` before the app clears it at expiry (the
+    /// same expiry the rule+snooze path observed, and the same `RunEvent::Exit`
+    /// arm clears on quit). Default: 60 minutes.
+    #[serde(default = "default_preferred_presence_expiry")]
+    pub expiry_minutes: u32,
+}
+
+fn default_preferred_presence_expiry() -> u32 {
+    60
+}
+
+impl Default for PreferredPresenceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            availability: String::new(),
+            activity: String::new(),
+            expiry_minutes: default_preferred_presence_expiry(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
@@ -285,6 +353,57 @@ fn clamp_teams(cfg: &mut TeamsConfig) {
     // alone — `poll_once` reads it as "use the default".
     clamp_rule_text(&mut cfg.paused_status_format);
     clamp_rule_text(&mut cfg.stopped_status_format);
+    // Issue #866: the preferred-presence pair rides the same
+    // normalizer — `normalize_presence_pair` already clears both
+    // fields when they fail to match `PRESENCE_COMBINATIONS`, so
+    // disabling an unsupported config is automatic.
+    clamp_preferred_presence(&mut cfg.preferred_presence);
+}
+
+/// Issue #866: bound the preferred-presence config the same way `clamp_rules`
+/// bounds rule pairs. The expiry is clamped to `5..=720` minutes (Graph's
+/// `expirationDuration` accepts anything but the app's clear-at-expiry logic
+/// needs a sane cadence); an unsupported pair clears BOTH fields and disables
+/// the feature — a Graph POST with a pair outside `PRESENCE_COMBINATIONS`
+/// would 4xx every call, and the user would never see a presence move.
+fn clamp_preferred_presence(cfg: &mut PreferredPresenceConfig) {
+    cfg.expiry_minutes = cfg.expiry_minutes.clamp(5, 720);
+    match normalize_presence_pair(&cfg.availability, &cfg.activity) {
+        Some(pair) => {
+            cfg.availability = pair.availability;
+            cfg.activity = pair.activity;
+        }
+        None => {
+            cfg.availability.clear();
+            cfg.activity.clear();
+            cfg.enabled = false;
+        }
+    }
+}
+
+/// Issue #866: resolve the preferred-presence config into the validated
+/// `PresencePair` the Graph POST needs — `None` when the feature is off, the
+/// pair is empty, or the user's `respect_manual_status` setting wins the
+/// decision. Pure so the gating tests do not need a Tauri runtime.
+pub fn preferred_presence_pair(
+    teams: &TeamsConfig,
+    respect_manual_status: bool,
+) -> Option<PresencePair> {
+    if !teams.preferred_presence.enabled || respect_manual_status {
+        return None;
+    }
+    normalize_presence_pair(
+        &teams.preferred_presence.availability,
+        &teams.preferred_presence.activity,
+    )
+}
+
+/// Issue #866: the `expirationDuration` the Graph
+/// `setUserPreferredPresence` POST carries. Pure so the same shape that
+/// goes to `setPresence` can be tested in isolation.
+pub fn preferred_presence_expiry_duration(teams: &TeamsConfig) -> String {
+    let minutes = teams.preferred_presence.expiry_minutes.max(5);
+    format!("PT{}M", minutes)
 }
 
 /// The closed set of `availability`/`activity` pairs the Graph
@@ -1279,6 +1398,7 @@ impl Default for TeamsConfig {
             gate_when_out_of_office: default_gate_when_out_of_office(),
             paused_status_format: default_paused_status_format(),
             stopped_status_format: default_stopped_status_format(),
+            preferred_presence: PreferredPresenceConfig::default(),
             extra: BTreeMap::new(),
         }
     }
@@ -1374,6 +1494,11 @@ pub struct TeamsPatch {
     pub paused_status_format: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stopped_status_format: Option<String>,
+    /// Issue #866: the preferred-presence config. Replaced wholesale when
+    /// present, exactly like the rule lists above — there is no per-field
+    /// addressing, and the Settings pane edits the section as one form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_presence: Option<PreferredPresenceConfig>,
 }
 
 /// Field-level patch for the `polling` section (CfgDiag#0, issue #535). Every
@@ -1490,6 +1615,9 @@ pub fn apply_patch(base: &mut AppConfig, patch: &ConfigPatch) {
         }
         if let Some(v) = &p.stopped_status_format {
             base.teams.stopped_status_format = v.clone();
+        }
+        if let Some(v) = &p.preferred_presence {
+            base.teams.preferred_presence = v.clone();
         }
     }
     if let Some(p) = &patch.polling {
@@ -3283,6 +3411,125 @@ mod tests {
         let back: AppConfig = serde_json::from_str(&json).expect("must re-parse");
         assert_eq!(back.status_rules.quiet_hours.len(), 1);
         assert_eq!(back.status_rules.track_rules.len(), 1);
+    }
+
+    // ---------------------------------------------------------------
+    // Issue #866: preferred-presence defaults + clamp + gating.
+    // ---------------------------------------------------------------
+
+    /// Issue #866: a hand-edited config that omits `teams.preferred_presence`
+    /// loads the documented OFF defaults — every field absent, expiry at the
+    /// 60-minute default, and the resolved pair `None`. The absence is the
+    /// "feature off" state, not a failure.
+    #[test]
+    fn test_preferred_presence_default_when_absent() {
+        let cfg: AppConfig = serde_json::from_str(r#"{}"#).expect("must parse");
+        assert!(!cfg.teams.preferred_presence.enabled);
+        assert!(cfg.teams.preferred_presence.availability.is_empty());
+        assert!(cfg.teams.preferred_presence.activity.is_empty());
+        assert_eq!(cfg.teams.preferred_presence.expiry_minutes, 60);
+    }
+
+    /// Issue #866: `clamp_preferred_presence` rejects unsupported pairs
+    /// exactly like `clamp_rules` does — clearing BOTH fields and disabling
+    /// the feature so a Graph POST would never 4xx. The expiry is clamped to
+    /// `5..=720`.
+    #[test]
+    fn test_preferred_presence_clamp_rejects_unsupported_pair() {
+        let mut pp = PreferredPresenceConfig {
+            enabled: true,
+            availability: "Busy".to_string(),
+            activity: "InACall".to_string(),
+            expiry_minutes: 60,
+        };
+        clamp_preferred_presence(&mut pp);
+        assert!(pp.enabled);
+        assert_eq!(pp.availability, "Busy");
+        assert_eq!(pp.activity, "InACall");
+
+        // Case-insensitive normalization mirrors `normalize_presence_pair`.
+        let mut pp = PreferredPresenceConfig {
+            enabled: true,
+            availability: "busy".to_string(),
+            activity: "inacall".to_string(),
+            expiry_minutes: 60,
+        };
+        clamp_preferred_presence(&mut pp);
+        assert_eq!(pp.availability, "Busy");
+        assert_eq!(pp.activity, "InACall");
+
+        // Unsupported pair → both fields empty, feature disabled.
+        let mut pp = PreferredPresenceConfig {
+            enabled: true,
+            availability: "Busy".to_string(),
+            activity: "DoNotDisturb".to_string(),
+            expiry_minutes: 60,
+        };
+        clamp_preferred_presence(&mut pp);
+        assert!(!pp.enabled, "unsupported pair must disable the feature");
+        assert!(pp.availability.is_empty());
+        assert!(pp.activity.is_empty());
+
+        // Expiry clamping is independent of the pair.
+        let mut pp = PreferredPresenceConfig {
+            enabled: true,
+            availability: "Busy".to_string(),
+            activity: "InACall".to_string(),
+            expiry_minutes: 1,
+        };
+        clamp_preferred_presence(&mut pp);
+        assert_eq!(pp.expiry_minutes, 5);
+        let mut pp = PreferredPresenceConfig {
+            enabled: true,
+            availability: "Busy".to_string(),
+            activity: "InACall".to_string(),
+            expiry_minutes: 9999,
+        };
+        clamp_preferred_presence(&mut pp);
+        assert_eq!(pp.expiry_minutes, 720);
+    }
+
+    /// Issue #866: `preferred_presence_pair` is the single source of truth
+    /// for "do we have a preferred pair to POST?" — disabled, empty, and
+    /// respect-manual-status all return `None`. A valid Busy/InACall pair
+    /// returns the canonical pair.
+    #[test]
+    fn test_preferred_presence_pair_gates_on_manual_status() {
+        let mut teams = TeamsConfig::default();
+        teams.preferred_presence = PreferredPresenceConfig {
+            enabled: true,
+            availability: "Busy".to_string(),
+            activity: "InACall".to_string(),
+            expiry_minutes: 60,
+        };
+        let pair = preferred_presence_pair(&teams, false).expect("must resolve");
+        assert_eq!(pair.availability, "Busy");
+        assert_eq!(pair.activity, "InACall");
+        // Respect-manual-status wins: the user's own bubble is never
+        // overridden by an opt-in preferred presence.
+        assert!(preferred_presence_pair(&teams, true).is_none());
+
+        // Disabled feature returns None even with a valid pair.
+        teams.preferred_presence.enabled = false;
+        assert!(preferred_presence_pair(&teams, false).is_none());
+    }
+
+    /// Issue #866: the expiry is the documented ISO-8601 `PT<minutes>M`
+    /// shape `setUserPreferredPresence` expects. The `5` floor matches the
+    /// clamp — a stored `0` can never survive the round-trip and reach
+    /// here, but we still do not pass `PT0M` to Graph if a stale config
+    /// does.
+    #[test]
+    fn test_preferred_presence_expiry_duration_is_iso8601() {
+        let mut teams = TeamsConfig::default();
+        teams.preferred_presence.expiry_minutes = 60;
+        assert_eq!(preferred_presence_expiry_duration(&teams), "PT60M");
+        teams.preferred_presence.expiry_minutes = 5;
+        assert_eq!(preferred_presence_expiry_duration(&teams), "PT5M");
+        // Stale `0` cannot round-trip past clamp_preferred_presence,
+        // but the helper still floors it rather than emitting PT0M.
+        teams.preferred_presence.expiry_minutes = 0;
+        assert_eq!(preferred_presence_expiry_duration(&teams), "PT5M");
     }
 
     // ---------------------------------------------------------------

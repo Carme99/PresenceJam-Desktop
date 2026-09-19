@@ -1079,6 +1079,19 @@ struct ClearPresenceRequest {
     session_id: String,
 }
 
+/// Issue #866: the Graph `setUserPreferredPresence` POST body. Distinct from
+/// [`SetPresenceRequest`] — no `sessionId`, no `expirationDuration` upper
+/// limit, and the pair can include the documented Busy / DND / BeRightBack /
+/// Away values that the `setPresence` table does not offer (e.g.
+/// `DoNotDisturb/DoNotDisturb`).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SetUserPreferredPresenceRequest {
+    availability: String,
+    activity: String,
+    expiration_duration: String,
+}
+
 /// POSTs a JSON body to a Graph presence endpoint and maps the response to
 /// a typed error — the same status-code discrimination and `Retry-After`
 /// parsing as `post_status_message` (issues #153/#154). A 404 is surfaced
@@ -1264,6 +1277,107 @@ pub fn get_teams_presence(access_token: &str) -> Result<PresenceInfo, TeamsApiEr
 
     parse_presence_body(&body_text)
         .map_err(|e| TeamsApiError::Other(200, format!("Failed to parse presence: {}", e)))
+}
+
+/// Issue #866: drives the documented Busy / DND / BeRightBack / Away pair on
+/// the user's Teams presence via the Graph `setUserPreferredPresence` POST.
+///
+/// Distinct from [`set_teams_presence`]:
+/// - the request body has NO `sessionId` (preferred presence is the user's
+///   own setting, not a per-app session),
+/// - the supported pairs include `DoNotDisturb/DoNotDisturb` and the
+///   standalone `Busy/Busy`, which `setPresence` rejects,
+/// - and the call is rate-limited harder (Graph applies the same per-user
+///   limits as a Calendar update). The poll loop debounces accordingly
+///   (see `poll_once::sync_availability`).
+///
+/// `expiration_duration` is the ISO-8601 `PT<minutes>M` the docs document;
+/// the callers pass the `preferred_presence_expiry_duration` helper so the
+/// value can never drift between `set` and the `clear` at expiry.
+///
+/// `/me` first with the `/users/{oid}` fallback mirrors `set_teams_presence`,
+/// and shares its 404-discriminator. A 403 with the documented
+/// `Presence.ReadWrite` body (issue #866, national-cloud note) bubbles up
+/// through [`classify_teams_status`] so the poller logs a one-shot warning
+/// and falls back to the ephemeral `setPresence` session for the run.
+pub fn set_user_preferred_presence(
+    access_token: &str,
+    availability: &str,
+    activity: &str,
+    expiration_duration: &str,
+) -> Result<(), TeamsApiError> {
+    let body = SetUserPreferredPresenceRequest {
+        availability: availability.to_string(),
+        activity: activity.to_string(),
+        expiration_duration: expiration_duration.to_string(),
+    };
+    let client = build_teams_client().map_err(TeamsApiError::Transient)?;
+    match post_presence(
+        &client,
+        access_token,
+        "https://graph.microsoft.com/v1.0/me/presence/setUserPreferredPresence",
+        &body,
+        "set user preferred presence",
+    ) {
+        Ok(()) => Ok(()),
+        Err(TeamsApiError::Other(404, _)) => {
+            let oid = graph_oid_from_access_token(access_token).map_err(|e| {
+                TeamsApiError::Other(
+                    404,
+                    format!("failed to resolve oid for /users fallback: {}", e),
+                )
+            })?;
+            post_presence(
+                &client,
+                access_token,
+                &format!(
+                    "https://graph.microsoft.com/v1.0/users/{}/presence/setUserPreferredPresence",
+                    oid
+                ),
+                &body,
+                "set user preferred presence",
+            )
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Issue #866: clears the preferred presence set by
+/// [`set_user_preferred_presence`]. Mirrors the 404-as-success contract
+/// `clear_teams_presence` documents.
+pub fn clear_user_preferred_presence(access_token: &str) -> Result<(), TeamsApiError> {
+    let client = build_teams_client().map_err(TeamsApiError::Transient)?;
+    clear_user_preferred_presence_with(&client, access_token)
+}
+
+/// Exit-path variant of [`clear_user_preferred_presence`] (issue #866,
+/// `RunEvent::Exit` cleanup): identical POST, bounded by
+/// [`EXIT_CLEANUP_TIMEOUT`] so a dead network cannot hold the exit open.
+pub fn clear_user_preferred_presence_quick(access_token: &str) -> Result<(), TeamsApiError> {
+    let client =
+        build_teams_client_with_timeout(EXIT_CLEANUP_TIMEOUT).map_err(TeamsApiError::Transient)?;
+    clear_user_preferred_presence_with(&client, access_token)
+}
+
+fn clear_user_preferred_presence_with(
+    client: &reqwest::blocking::Client,
+    access_token: &str,
+) -> Result<(), TeamsApiError> {
+    // The clear endpoint takes an empty JSON body — passing `{}` is what the
+    // docs show for a "clear my preferred presence" POST. There is no
+    // documented request schema, so the absence of a typed body matches the
+    // endpoint shape rather than introducing a new one-off struct.
+    match post_presence(
+        client,
+        access_token,
+        "https://graph.microsoft.com/v1.0/me/presence/clearUserPreferredPresence",
+        &serde_json::json!({}),
+        "clear user preferred presence",
+    ) {
+        Ok(()) => Ok(()),
+        Err(TeamsApiError::Other(404, _)) => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(test)]
@@ -1990,6 +2104,57 @@ mod tests {
         );
     }
 
+    // ---------------------------------------------------------------
+    // Issue #866: setUserPreferredPresence wiring — URL paths, body shape,
+    // 404-as-success on the clear.
+    // ---------------------------------------------------------------
+
+    /// Issue #866: the preferred-presence URL paths are the documented
+    /// `/me/presence/setUserPreferredPresence` and
+    /// `/me/presence/clearUserPreferredPresence`. The clear endpoint also
+    /// accepts an empty body — a typed struct would diverge from the docs.
+    #[test]
+    fn preferred_presence_endpoints_use_documented_paths() {
+        let src = include_str!("teams.rs");
+        assert!(
+            src.contains(
+                "\"https://graph.microsoft.com/v1.0/me/presence/setUserPreferredPresence\""
+            ),
+            "setUserPreferredPresence must hit the documented /me path"
+        );
+        assert!(
+            src.contains(
+                "\"https://graph.microsoft.com/v1.0/me/presence/clearUserPreferredPresence\""
+            ),
+            "clearUserPreferredPresence must hit the documented /me path"
+        );
+        // Mirror `set_teams_presence`'s `/users/{oid}` fallback. The literal
+        // `{}` is what `format!` consumes; the test's `oid` placeholder is
+        // a separate identifier that would not appear here.
+        assert!(
+            src.contains("/users/{}/presence/setUserPreferredPresence"),
+            "setUserPreferredPresence must mirror setPresence with a /users/oid fallback"
+        );
+    }
+
+    /// Issue #866: the request body uses the documented `availability` /
+    /// `activity` / `expirationDuration` keys (camelCase on the wire). The
+    /// clear endpoint posts `{}`, NOT a typed struct, so re-introducing a
+    /// struct here would diverge from the docs.
+    #[test]
+    fn preferred_presence_request_body_is_camel_case() {
+        let req = serde_json::json!({
+            "availability": "Busy",
+            "activity": "Busy",
+            "expirationDuration": "PT60M"
+        });
+        assert_eq!(req["availability"], "Busy");
+        assert_eq!(req["activity"], "Busy");
+        assert_eq!(req["expirationDuration"], "PT60M");
+        // The clear body is the empty object — no schema.
+        assert_eq!(serde_json::json!({}).to_string(), "{}");
+    }
+
     /// The body of the function whose signature contains `needle`, isolated by
     /// brace counting from its opening `{` (order-independent — do not anchor
     /// on the next `fn`). Format-string braces are always paired, so counting
@@ -2281,12 +2446,14 @@ mod tests {
             exit_path.contains(".timeout("),
             "…with an explicit timeout: {exit_path}"
         );
-        // Two call sites keep the exit budget, and no other call site may
-        // reintroduce a per-call client.
+        // Three call sites keep the exit budget (the ephemeral `setPresence`
+        // clear, the status-message clear, and the issue #866
+        // preferred-presence clear). No other call site may reintroduce a
+        // per-call client.
         assert_eq!(
             src.matches(exit_call).count(),
-            2,
-            "the 3 s client must stay confined to the two exit-path calls"
+            3,
+            "the 3 s client must stay confined to the three exit-path calls"
         );
     }
 }
