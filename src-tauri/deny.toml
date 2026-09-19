@@ -1,0 +1,50 @@
+# cargo-deny policy for the Rust backend (issue #776).
+#
+# The gate that runs this file is the `cargo-deny` job in
+# .github/workflows/ci.yml; run it locally with:
+#
+#   cargo deny --manifest-path src-tauri/Cargo.toml --all-features \
+#     check licenses bans sources
+#
+# (cargo-deny resolves this file from the current working directory, so the
+# `--config` flag in the CI job points here explicitly.)
+
+[licenses]
+# The licence half of the ACKNOWLEDGEMENTS.md inventory, made mechanical.
+# Measured against the 609 registry crates resolved in src-tauri/Cargo.lock
+# (their `license` fields), so every entry below names a licence this tree
+# really requires. A dependency whose licence cannot be satisfied by this list
+# fails the check instead of silently changing what the project ships.
+allow = [
+  # The permissive core, as specified by #776.
+  "MIT",
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "MPL-2.0",                         # cssparser, selectors, dtoa-short (file-level copyleft)
+  "Unicode-3.0",                     # icu_collections, icu_normalizer, unicode-ident
+  # Measured additions, each one required by a crate already in this tree:
+  "Apache-2.0 WITH LLVM-exception",  # target-lexicon
+  "Zlib",                            # foldhash
+  "CC0-1.0",                         # tiny-keccak
+  "Unlicense",                       # aho-corasick, memchr, walkdir
+  "CDLA-Permissive-2.0",             # webpki-root-certs (root certificate data)
+]
+# An allowed licence that nothing in the graph needs is reported, never fatal:
+# it tells the reader the entry above may be removable, without blocking a PR.
+unused-allowed-license = "warn"
+
+[bans]
+# Duplicate crate versions are reported but tolerated: the list was measured at
+# introduction (#776) and carries no duplicate that a reviewer must act on.
+multiple-versions = "warn"
+
+[sources]
+# crates.io only. A path or git dependency has to be an explicit, reviewed edit
+# to this file, because the default specifier on a git source is a wildcard that
+# silently tracks a branch.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

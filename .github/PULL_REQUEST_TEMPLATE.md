@@ -16,11 +16,12 @@
 
 ## Gate evidence
 
-[Paste the exact commands you ran and their final status — the two local gate
-lines in this order, plus test counts:
+[Paste the exact commands you ran and their final status — the local gate lines
+in this order, plus test counts:
 
 ```
 cd src-tauri && cargo fmt --all --check && cargo check --all-targets && cargo clippy --all-targets -- -D warnings && cargo test --all-targets
+cd src-tauri && cargo deny --all-features check licenses bans sources
 cd .. && npm run build && npm run check && npm test
 ```
 

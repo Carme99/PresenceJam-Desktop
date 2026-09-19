@@ -427,6 +427,7 @@ jobs:
   # (see SECURITY.md "Accepted transitive risks"); then remove the flag to
   # enforce. The npm audit leg stays advisory-only: `npm audit` exits
   # non-zero on any finding, so it reports without gating.
+
   dep-audit:
     name: Dependency audit (cargo + npm)
     runs-on: ubuntu-latest
@@ -458,3 +459,33 @@ jobs:
         # ran at all). Keep the value on its own line if it cites an issue.
         run: |
           npm audit --audit-level=high || echo "::warning::npm audit found advisories (advisory-only, see issue #357)"
+
+  # Licence + source policy gate (issue #776): src-tauri/deny.toml allow-lists
+  # the licences this tree may ship — measured from the 609 registry crates
+  # resolved in src-tauri/Cargo.lock — and denies every source but crates.io, so
+  # a copyleft licence or a path/git dependency cannot enter the tree unnoticed.
+  # That is the failure mode that made ACKNOWLEDGEMENTS.md's hand-maintained
+  # inventory drift twice (#281, #626). Duplicate crate versions are reported by
+  # `bans` at warn level, not denied: the list carries nothing a reviewer must act
+  # on, so the whole check set can stay in the job from the start.
+  cargo-deny:
+    name: Cargo deny (licences + sources)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # `arguments` is passed BEFORE the subcommand, which is where cargo-deny
+      # takes its global flags; `--config` defaults to <cwd>/deny.toml, not the
+      # manifest's directory, so the policy next to the manifest is named here.
+      - name: Cargo deny (licences, bans, sources)
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25  # v2.1.1
+        with:
+          manifest-path: src-tauri/Cargo.toml
+          arguments: --all-features --config src-tauri/deny.toml
+          command: check licenses bans sources
