@@ -17,11 +17,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Cross-platform compile gate (issue #355): the `rust` job below checks
-  # Linux only; this leg runs `cargo check` on macOS + Windows so
-  # platform-gated code (e.g. tray.rs macOS dock-badge cfg) compiles in CI.
-  # Deliberately check-only (no fmt/clippy/test): the ubuntu legs remain the
-  # enforcing gates; a full triple-OS test matrix is future work.
+  # Cross-platform compile + test gate (issues #355, #836): the `rust` job
+  # below executes Linux only; this leg runs `cargo check` AND `cargo test
+  # --lib` on macOS + Windows so platform-gated code (the macOS
+  # `ActivationPolicy` branch in commands/config.rs, the dock-badge path in
+  # tray.rs, the macOS deep-link registration, the Windows tray and
+  # notification paths) is executed in CI rather than merely compiled.
+  # Still no fmt/clippy — the ubuntu legs remain the enforcing gates for
+  # those — and `--lib` rather than `--all-targets` bounds the billed
+  # macOS/Windows minutes; that reduced scope is stated in
+  # docs/RELEASING.md §3.
   rust-platform-check:
     name: Rust check (macOS + Windows)
     strategy:
@@ -29,7 +34,7 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 45
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -60,6 +65,16 @@ jobs:
         env:
           CARGO_INCREMENTAL: 0
         run: cargo check --manifest-path src-tauri/Cargo.toml --all-targets
+
+      # Platform-gated behaviour (#836): the check above proves these branches
+      # compile, this proves they run, which is the gap that let a regression
+      # inside a `#[cfg(target_os = "macos")]` or `#[cfg(windows)]` branch ship
+      # green. `--lib` (not the ubuntu `rust` job's `--all-targets`) keeps the
+      # billed macOS/Windows minutes sane; see docs/RELEASING.md §3.
+      - name: Cargo test (lib)
+        env:
+          CARGO_INCREMENTAL: 0
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
 
   # Frontend: catches Svelte/TS build errors. Mirrors the npm ci + npm run build
   # steps from release.yml. Cached via actions/setup-node cache: 'npm'.
