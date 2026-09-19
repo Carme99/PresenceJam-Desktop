@@ -1187,6 +1187,10 @@ fn forward_launch_to_running_instance(app: &AppHandle, argv: Vec<String>, _cwd: 
     // browser when the app is already open).
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
+        // Issue #886: the tray's dedup key reads a visibility mirror, so every
+        // path that shows the window has to report it — otherwise the raise
+        // would be deduped away and the Show/Hide label would keep "Show Window".
+        crate::tray::note_window_visibility(true);
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
@@ -1391,6 +1395,8 @@ pub fn run() {
                         );
                         if let Some(window) = app.get_webview_window("main") {
                             let _ = window.hide();
+                            // Issue #886: report the hide to the tray's mirror.
+                            crate::tray::note_window_visibility(false);
                         }
                         #[cfg(target_os = "macos")]
                         {
@@ -1723,8 +1729,20 @@ pub fn run() {
                     );
                     return;
                 }
+                // Issue #927: a session whose tray failed to initialise has no
+                // reachable way back to a hidden window, so close-to-tray must
+                // not engage — the close proceeds and the app exits with it.
+                if !crate::tray::tray_available() {
+                    log::warn!(
+                        "[APP] window_event: CloseRequested with no tray — closing instead of hiding"
+                    );
+                    return;
+                }
                 log::info!("[APP] window_event: CloseRequested received, hiding window");
                 let _ = window.hide();
+                // Issue #886: the hide has to reach the tray's visibility mirror,
+                // which is what the dedup key is built from.
+                crate::tray::note_window_visibility(false);
                 api.prevent_close();
             }
         })
@@ -2100,21 +2118,28 @@ mod tests {
                 detached
             );
         }
-        // The handler must actually consult the guard before hiding, and
-        // still prevent the close for the main window.
+        // The handler must actually consult the guard before hiding, and still
+        // prevent the close for the main window. Anchored on the arm's own
+        // statements rather than a fixed byte window: the arm grew with the
+        // #927 no-tray guard and the #886 visibility report, and a byte window
+        // would silently stop covering `api.prevent_close()` when it does.
         let source = include_str!("lib.rs");
-        let needle = "tauri::WindowEvent::CloseRequested";
-        let idx = source
-            .find(needle)
+        let arm = source
+            .find("tauri::WindowEvent::CloseRequested")
             .expect("lib.rs must handle WindowEvent::CloseRequested");
-        let tail = &source[idx..idx + 1200.min(source.len() - idx)];
+        let tail = &source[arm..];
+        let guard = tail
+            .find("close_hides_window(window.label())")
+            .expect("the CloseRequested arm must guard on the window label (issue #585)");
+        let hide = tail
+            .find("window.hide()")
+            .expect("the main window must still be hidden (close-to-tray)");
+        let prevent = tail
+            .find("api.prevent_close()")
+            .expect("the main window must still prevent the close (close-to-tray)");
         assert!(
-            tail.contains("close_hides_window(window.label())"),
-            "the CloseRequested arm must guard on the window label (issue #585)"
-        );
-        assert!(
-            tail.contains("api.prevent_close()"),
-            "the main window must still prevent the close (close-to-tray)"
+            guard < hide && hide < prevent,
+            "the arm must guard on the label, hide, and then prevent the close"
         );
     }
 

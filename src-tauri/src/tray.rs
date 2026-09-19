@@ -164,7 +164,7 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
                 let _ = app.emit("navigate", "settings");
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.show();
-                note_window_visibility(true);
+                    note_window_visibility(true);
                     // Issue #483: mirror the unminimize in the Show arm.
                     let _ = window.unminimize();
                     let _ = window.set_focus();
