@@ -361,7 +361,8 @@
       try {
         const v = await invoke<string>('preview_status', { format, filter_enabled, placeholder, profane_sample, extra_words });
         if (my !== previewSeq) return;
-        previewText = v;
+        // #748: an identical sample is not a new one — never rewrite the node.
+        if (v !== previewText) previewText = v;
       } catch (e) {
         if (my !== previewSeq) return;
         console.warn('[SETTINGS] preview_status failed:', e);
@@ -1449,8 +1450,12 @@
         />
       </div>
       <div class="form-group">
+        <!-- #748: the sample is a reading-order element, not a live region.
+             Announcing it re-read the whole sample after every typing pause,
+             layered on top of the field's own echo, which made the template
+             unusable with a screen reader. -->
         <span class="form-label">{t('settings.livePreview')}</span>
-        <div class="preview-box" aria-live="polite">{previewText}</div>
+        <div class="preview-box">{previewText}</div>
       </div>
       <p class="hint">
         {t('settings.placeholdersHint')}

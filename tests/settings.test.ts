@@ -1152,3 +1152,28 @@ describe('Settings rule group names (#746)', () => {
     );
   });
 });
+
+/**
+ * #748 — the live preview was a `polite` live region, so every typing pause
+ * re-announced the whole rendered sample on top of the field's own echo.
+ *
+ * Fails pre-fix: `.preview-box` carries `aria-live="polite"` while the
+ * template is being edited.
+ */
+describe('Settings status preview announcements (#748)', () => {
+  it('exposes no live region while the template is being edited', async () => {
+    const { container } = await mountSettings();
+    const input = formatInput(container);
+    input.focus();
+    await fireEvent.input(input, { target: { value: '🎵 {artist} - {track}' } });
+    await tick();
+
+    const preview = container.querySelector('.preview-box') as HTMLElement;
+    expect(preview).not.toBeNull();
+    expect(preview.getAttribute('aria-live')).toBeNull();
+    // A live region may also be implied by the role: this one has none.
+    expect(preview.getAttribute('role')).toBeNull();
+    // The sample itself is still in the reading order next to its label.
+    expect(preview.previousElementSibling?.textContent?.trim()).toBe(t('settings.livePreview'));
+  });
+});
