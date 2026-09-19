@@ -2774,6 +2774,19 @@ mod tests {
         with_rate_limit_window(|| {
             note_rate_limit(None);
             check_rate_limit().expect("a header-less 429 must not block other callers");
+
+            // A header-less 429 from a second caller must not disturb a window
+            // that is already open either: the deadline is only ever extended,
+            // never reset by a response that carries no wait.
+            note_rate_limit(Some(60));
+            note_rate_limit(None);
+            assert!(
+                matches!(
+                    check_rate_limit(),
+                    Err(SpotifyApiError::RateLimited(Some(secs))) if secs > 0 && secs <= 60
+                ),
+                "a header-less 429 must leave the open deadline untouched"
+            );
         });
     }
 
