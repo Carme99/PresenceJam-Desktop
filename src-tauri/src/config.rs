@@ -133,7 +133,7 @@ pub struct TeamsConfig {
     /// user opts in.
     #[serde(default = "default_gate_when_out_of_office")]
     pub gate_when_out_of_office: bool,
-/// Issue #872: also gate the status write while the OS reports a
+    /// Issue #872: also gate the status write while the OS reports a
     /// full-screen app, presentation mode, or Quiet Time. OFF by default
     /// — a hand-edited config flips it on; the GUI does too. Linux/macOS
     /// always report `Unknown` (`platform::focus`), so the toggle is a
@@ -387,7 +387,7 @@ fn clamp_teams(cfg: &mut TeamsConfig) {
     // fields when they fail to match `PRESENCE_COMBINATIONS`, so
     // disabling an unsupported config is automatic.
     clamp_preferred_presence(&mut cfg.preferred_presence);
-// Issue #873: the idle-away threshold. `0` disables (no clamp), any
+    // Issue #873: the idle-away threshold. `0` disables (no clamp), any
     // other value is clamped into 60..=3600 so a hand-edited config
     // cannot put the gate in a state that surprises the user (a 1 s
     // threshold would have every normal typing pause fire the gate).
@@ -1474,7 +1474,7 @@ impl Default for TeamsConfig {
             profanity_extra_words: Vec::new(),
             respect_manual_status: default_respect_manual_status(),
             gate_when_out_of_office: default_gate_when_out_of_office(),
-gate_when_presenting: default_gate_when_presenting(),
+            gate_when_presenting: default_gate_when_presenting(),
             // Issue #873: `0` = off (the default; an untouched config
             // behaves exactly as today). The clamp runs through
             // `clamp_teams` so any non-zero value lands in 60..=3600.

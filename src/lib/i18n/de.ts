@@ -579,11 +579,7 @@ export const de: Dict = {
   'dashboard.volumeAria': 'Spotify-Lautstärkeregler',
   'dashboard.seekAria': 'Zum Springen klicken',
   'dashboard.seekUnavailableAria': 'Dieses Gerät unterstützt kein Springen',
-<<<<<<< HEAD
 
-  // --- 5.0 wave3 features-gating ---
-
-=======
   // --- 5.0 wave3 features-outlook ---
   'rules.importWorkingHours': 'Outlook-Arbeitszeiten importieren',
   'rules.importWorkingHoursHint': 'Liest deinen Arbeitszeiten-Tab und wandelt jede arbeitsfreie Zeit in eine Ruhezeitenregel um. Vorschau vor dem Übernehmen.',
@@ -594,5 +590,6 @@ export const de: Dict = {
   'rules.importWorkingHoursReplaceHint': 'Ersetzt deine bestehenden Ruhezeitenregeln durch den importierten Satz. Häkchen entfernen, um beide zu behalten.',
   'rules.importWorkingHoursDaysLabel': 'Outlook meldet {days} Arbeitstage von {start} bis {end}',
   'rules.importWorkingHoursDaysAllOff': 'Outlook meldet keine Arbeitstage — nichts zu importieren',
->>>>>>> 8c75992 (feat(settings): import Outlook working hours into quiet-hours rules (#876))
+
+  // --- 5.0 wave3 features-gating ---
 };
