@@ -901,20 +901,19 @@ fn run_inner(
                                         // Issue #790: the post-refresh retry
                                         // owes the same availability re-arm as
                                         // the sibling 304 arm above.
-                                        let availability_backoff =
-                                            rearm_availability_after_304(
-                                                app,
-                                                state,
-                                                last_track_key,
-                                                last_poll_instant_retry,
-                                                &config,
-                                                gate_blocks_304_rearm(
-                                                    gated_track_key.as_deref(),
-                                                    last_track_key.as_deref(),
-                                                ),
-                                                armed_presence,
-                                                last_availability_arm,
-                                            );
+                                        let availability_backoff = rearm_availability_after_304(
+                                            app,
+                                            state,
+                                            last_track_key,
+                                            last_poll_instant_retry,
+                                            &config,
+                                            gate_blocks_304_rearm(
+                                                gated_track_key.as_deref(),
+                                                last_track_key.as_deref(),
+                                            ),
+                                            armed_presence,
+                                            last_availability_arm,
+                                        );
                                         let mut iteration = not_modified_iteration(
                                             last_track_key,
                                             consecutive_pauses,
@@ -922,8 +921,7 @@ fn run_inner(
                                             consecutive_network_failures,
                                             &config,
                                         );
-                                        if let PollIteration::Sleep { seconds } = &mut iteration
-                                        {
+                                        if let PollIteration::Sleep { seconds } = &mut iteration {
                                             *seconds = (*seconds).max(availability_backoff);
                                         }
                                         return iteration;
@@ -2145,7 +2143,7 @@ fn rearm_availability_after_304(
     // last stored track plus the elapsed poll interval — the same correction
     // `process_track` applies. Without a stored track (or an unknown position,
     // issue #165) it falls back to the unknown-position bound.
-    let remaining_ms = state.polling.current_track().and_then(|t| {
+    let remaining_ms = state.polling.current_track().as_ref().and_then(|t| {
         let elapsed_ms = last_poll_instant.elapsed().as_millis() as u64;
         t.progress_ms
             .map(|p| t.duration_ms.saturating_sub(p.saturating_add(elapsed_ms)))
