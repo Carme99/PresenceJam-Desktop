@@ -1040,7 +1040,11 @@ fn windows_release() -> String {
     )
 }
 
-/// One `<name>  <type>  <value>` row of `reg query` output.
+/// One `<name>  <type>  <value…>` row of `reg query` output.
+///
+/// The value runs to the end of the line: registry values contain spaces
+/// (`ProductName` reads `Windows Server 2022`), so everything after the type
+/// field is joined back together.
 ///
 /// Compiled for tests on every host so the parser is covered off-Windows.
 #[cfg(any(target_os = "windows", test))]
@@ -1050,8 +1054,10 @@ fn reg_value(text: &str, name: &str) -> Option<String> {
         if fields.next()? != name {
             return None;
         }
-        let value = fields.nth(1)?;
-        Some(value.to_string())
+        // `<type>` is `REG_SZ`/`REG_DWORD`; the value follows it.
+        fields.next()?;
+        let value = fields.collect::<Vec<_>>().join(" ");
+        (!value.is_empty()).then_some(value)
     })
 }
 
@@ -1897,13 +1903,19 @@ mod tests {
 
     #[test]
     fn test_reg_value_reads_a_reg_query_row() {
-        let out = "\r\nHKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\r\n    CurrentBuildNumber    REG_SZ    26100\r\n    DisplayVersion    REG_SZ    24H2\r\n\r\n";
+        let out = "\r\nHKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\r\n    CurrentBuildNumber    REG_SZ    26100\r\n    DisplayVersion    REG_SZ    24H2\r\n    ProductName    REG_SZ    Windows Server 2022\r\n\r\n";
         assert_eq!(
             reg_value(out, "CurrentBuildNumber").as_deref(),
             Some("26100")
         );
         assert_eq!(reg_value(out, "DisplayVersion").as_deref(), Some("24H2"));
-        assert_eq!(reg_value(out, "ProductName"), None);
+        // The value runs to the end of the line: `ProductName` is multi-word,
+        // and stopping at the first space reported "Windows" (D1 review).
+        assert_eq!(
+            reg_value(out, "ProductName").as_deref(),
+            Some("Windows Server 2022")
+        );
+        assert_eq!(reg_value(out, "Missing"), None);
     }
 
     #[test]
