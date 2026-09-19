@@ -290,6 +290,103 @@ fn parse_retry_after(response: &reqwest::blocking::Response) -> Option<u64> {
         .and_then(parse_retry_after_value)
 }
 
+/// Failure message for the overall device-code deadline.
+const AUTH_TIMEOUT_MSG: &str = "Authentication timed out";
+
+/// What [`poll_teams_auth`] does with one token-endpoint response.
+#[derive(Debug, PartialEq, Eq)]
+enum PollAction {
+    /// Poll again — after `server_wait` seconds when the server sent a
+    /// `Retry-After`, else after the loop's current interval.
+    Retry {
+        server_wait: Option<u64>,
+        slow_down: bool,
+    },
+    /// Stop polling; the string is the user-facing sentence.
+    Fail(String),
+}
+
+/// Pure decision for one device-code token response (issue #797).
+///
+/// The poll used to parse every non-success body as the OAuth error envelope
+/// with `?`, so a gateway 502 HTML page — or a 429 without the JSON error
+/// object — ended sign-in on a serde error the user could not act on, and the
+/// whole multi-minute consent step had to be redone. HTTP-level blips (5xx,
+/// 429, 408) and any body that is not the OAuth error envelope are now
+/// retries, bounded by the caller's overall deadline; only a real verdict on
+/// the device code ends the flow. Split out from the network loop so the whole
+/// matrix is unit-testable without HTTP.
+fn classify_device_code_response(
+    status: u16,
+    retry_after: Option<u64>,
+    body: &str,
+) -> PollAction {
+    if (500..=599).contains(&status) || status == 429 || status == 408 {
+        return PollAction::Retry {
+            server_wait: retry_after,
+            slow_down: false,
+        };
+    }
+    let Ok(error_resp) = serde_json::from_str::<TokenErrorResponse>(body) else {
+        // An interposed proxy page, an HTML error page or an empty body is not
+        // a verdict on the device code: keep the code usable and retry.
+        return PollAction::Retry {
+            server_wait: retry_after,
+            slow_down: false,
+        };
+    };
+    match error_resp.error.as_str() {
+        "authorization_pending" => PollAction::Retry {
+            server_wait: None,
+            slow_down: false,
+        },
+        "slow_down" => PollAction::Retry {
+            server_wait: None,
+            slow_down: true,
+        },
+        "authorization_declined" => {
+            PollAction::Fail("Microsoft sign-in was declined in the browser.".to_string())
+        }
+        "expired_token" => PollAction::Fail(
+            "The Microsoft sign-in code expired. Please start sign-in again.".to_string(),
+        ),
+        // Every other OAuth error code (bad_verification_code,
+        // unauthorized_client, …) is terminal for this code. The server's own
+        // description is the best actionable text; the raw body is logged by
+        // the caller and never shown (issue #974).
+        _ => {
+            let detail = error_resp
+                .error_description
+                .as_deref()
+                .map(str::trim)
+                .filter(|d| !d.is_empty())
+                .unwrap_or(error_resp.error.as_str());
+            PollAction::Fail(format!("Microsoft sign-in failed: {}", detail))
+        }
+    }
+}
+
+/// Sleeps up to `secs` seconds in 30-second chunks, giving up as soon as the
+/// overall device-code deadline passes — so a server-directed `Retry-After`
+/// (already clamped to 300 s by [`parse_retry_after_value`]) or a ramped
+/// `slow_down` interval can never block the thread past the deadline.
+fn sleep_within_deadline(
+    start_time: std::time::Instant,
+    timeout: StdDuration,
+    secs: u64,
+) -> Result<(), String> {
+    let mut remaining = secs;
+    while remaining > 0 {
+        if start_time.elapsed() > timeout {
+            return Err(AUTH_TIMEOUT_MSG.to_string());
+        }
+        let chunk = remaining.min(30);
+        thread::sleep(StdDuration::from_secs(chunk));
+        remaining -= chunk;
+    }
+    Ok(())
+}
+
 pub fn poll_teams_auth(device_code: &str, interval: u64) -> Result<TeamsTokens, String> {
     let client = build_teams_client()?;
     let start_time = std::time::Instant::now();
@@ -303,7 +400,7 @@ pub fn poll_teams_auth(device_code: &str, interval: u64) -> Result<TeamsTokens, 
 
     loop {
         if start_time.elapsed() > timeout {
-            return Err("Authentication timed out".to_string());
+            return Err(AUTH_TIMEOUT_MSG.to_string());
         }
 
         let params = [
@@ -320,6 +417,9 @@ pub fn poll_teams_auth(device_code: &str, interval: u64) -> Result<TeamsTokens, 
             .map_err(|e| format!("Failed to send token request: {}", e))?;
 
         let status = response.status();
+        // Read the server's directive before `text()` consumes the response
+        // (issue #797): on a throttle it wins over the loop's current interval.
+        let retry_after = parse_retry_after(&response);
 
         let raw_body = response
             .text()
@@ -331,13 +431,22 @@ pub fn poll_teams_auth(device_code: &str, interval: u64) -> Result<TeamsTokens, 
         );
 
         if status.is_success() {
-            let token_resp: TokenResponse = serde_json::from_str(&raw_body).map_err(|e| {
-                format!(
-                    "Failed to parse token response: {} (body was: {})",
-                    e,
-                    truncate_for_log(&raw_body)
-                )
-            })?;
+            let token_resp: TokenResponse = match serde_json::from_str(&raw_body) {
+                Ok(parsed) => parsed,
+                Err(e) => {
+                    // A 2xx body that is not the token envelope is an
+                    // interposed proxy/captive-portal page rather than a
+                    // verdict on the device code (issue #797): retry within
+                    // the deadline instead of ending sign-in on a serde error.
+                    log::error!(
+                        "{TAG} poll_teams_auth: unparseable 2xx body: {} ({}-byte body)",
+                        e,
+                        raw_body.len()
+                    );
+                    sleep_within_deadline(start_time, timeout, wait)?;
+                    continue;
+                }
+            };
 
             let expires_at =
                 chrono::Utc::now() + chrono::Duration::seconds(token_resp.expires_in as i64);
@@ -351,79 +460,36 @@ pub fn poll_teams_auth(device_code: &str, interval: u64) -> Result<TeamsTokens, 
             });
         }
 
-        let error_resp: TokenErrorResponse = serde_json::from_str(&raw_body).map_err(|e| {
-            format!(
-                "Failed to parse error response: {} (body was: {})",
-                e,
-                truncate_for_log(&raw_body)
-            )
-        })?;
-
-        match error_resp.error.as_str() {
-            "authorization_pending" => {
-                log::debug!("{TAG} Authorization pending, waiting {} seconds", wait);
-                // Cap each sleep chunk at 30s and re-check timeout between chunks
-                // so an inflated interval (even after slow_down ramps) cannot
-                // block the thread past the 900s overall deadline.
-                let mut remaining = wait;
-                while remaining > 0 {
-                    if start_time.elapsed() > timeout {
-                        return Err("Authentication timed out".to_string());
-                    }
-                    let chunk = remaining.min(30);
-                    thread::sleep(StdDuration::from_secs(chunk));
-                    remaining -= chunk;
+        match classify_device_code_response(status.as_u16(), retry_after, &raw_body) {
+            PollAction::Fail(message) => {
+                // The response body is already logged, truncated, by the
+                // `status={}, body={}` debug line above; the user gets the
+                // sentence only — never the raw JSON (issues #797/#974).
+                log::error!("{TAG} poll_teams_auth: {}", message);
+                return Err(message);
+            }
+            PollAction::Retry {
+                server_wait,
+                slow_down,
+            } => {
+                if slow_down {
+                    // RFC 8628 §3.5: slow_down carries no interval of its own;
+                    // the client must increase its polling interval by 5s for
+                    // this and all subsequent requests.
+                    wait = next_poll_wait(wait, "slow_down");
+                    log::warn!("{TAG} Server requested slow down, waiting {} seconds", wait);
+                } else if server_wait.is_none() {
+                    log::debug!("{TAG} Authorization pending, waiting {} seconds", wait);
+                } else {
+                    log::warn!(
+                        "{TAG} poll_teams_auth: status {} throttled, waiting up to {} seconds",
+                        status,
+                        server_wait.unwrap_or_default()
+                    );
                 }
+                let sleep_secs = server_wait.unwrap_or(wait).max(1);
+                sleep_within_deadline(start_time, timeout, sleep_secs)?;
                 continue;
-            }
-            "slow_down" => {
-                // RFC 8628 §3.5: slow_down carries no interval; the
-                // client must increase its polling interval by 5s for
-                // this and all subsequent requests.
-                wait = next_poll_wait(wait, error_resp.error.as_str());
-                log::warn!("{TAG} Server requested slow down, waiting {} seconds", wait);
-                let mut remaining = wait;
-                while remaining > 0 {
-                    if start_time.elapsed() > timeout {
-                        return Err("Authentication timed out".to_string());
-                    }
-                    let chunk = remaining.min(30);
-                    thread::sleep(StdDuration::from_secs(chunk));
-                    remaining -= chunk;
-                }
-                continue;
-            }
-            "authorization_declined" => {
-                return Err("Authorization was declined by the user".to_string());
-            }
-            "expired_token" => {
-                return Err(
-                    "The device code has expired. Please start authentication again.".to_string(),
-                );
-            }
-            "bad_verification_code" => {
-                return Err(format!(
-                    "Authentication failed: {} - {} (raw body: {})",
-                    error_resp.error,
-                    error_resp.error_description.unwrap_or_default(),
-                    truncate_for_log(&raw_body)
-                ));
-            }
-            "unauthorized_client" => {
-                return Err(format!(
-                    "Authentication failed: {} - {} (raw body: {})",
-                    error_resp.error,
-                    error_resp.error_description.unwrap_or_default(),
-                    truncate_for_log(&raw_body)
-                ));
-            }
-            _ => {
-                return Err(format!(
-                    "Authentication failed: {} - {} (raw body: {})",
-                    error_resp.error,
-                    error_resp.error_description.unwrap_or_default(),
-                    truncate_for_log(&raw_body)
-                ));
             }
         }
     }
@@ -1887,5 +1953,140 @@ mod tests {
             }
             i += 1;
         }
+    }
+
+    // Issue #797: a transient HTTP failure during the multi-minute device-code
+    // poll must not end sign-in. The classifier is pure, so the whole matrix is
+    // unit-tested without a network.
+    #[test]
+    fn classify_device_code_response_retries_http_blips() {
+        use super::{classify_device_code_response as classify, PollAction};
+        // A gateway 502 HTML page — not the OAuth error envelope.
+        assert_eq!(
+            classify(502, None, "<html><body>502 Bad Gateway</body></html>"),
+            PollAction::Retry {
+                server_wait: None,
+                slow_down: false
+            }
+        );
+        // A 429 without the JSON error object keeps the server's directive.
+        assert_eq!(
+            classify(429, Some(120), "<html>Too Many Requests</html>"),
+            PollAction::Retry {
+                server_wait: Some(120),
+                slow_down: false
+            }
+        );
+        assert_eq!(
+            classify(503, Some(7), ""),
+            PollAction::Retry {
+                server_wait: Some(7),
+                slow_down: false
+            }
+        );
+        assert_eq!(
+            classify(408, None, "not json"),
+            PollAction::Retry {
+                server_wait: None,
+                slow_down: false
+            }
+        );
+        // An unparseable 400 is a blip, not a verdict on the device code.
+        assert_eq!(
+            classify(400, None, "<html>Bad Request</html>"),
+            PollAction::Retry {
+                server_wait: None,
+                slow_down: false
+            }
+        );
+    }
+
+    #[test]
+    fn classify_device_code_response_keeps_the_real_verdicts() {
+        use super::{classify_device_code_response as classify, PollAction};
+        assert_eq!(
+            classify(400, None, r#"{"error":"authorization_pending"}"#),
+            PollAction::Retry {
+                server_wait: None,
+                slow_down: false
+            }
+        );
+        assert_eq!(
+            classify(400, None, r#"{"error":"slow_down"}"#),
+            PollAction::Retry {
+                server_wait: None,
+                slow_down: true
+            }
+        );
+        // `expired_token` still ends the flow — with a sentence, not a body.
+        match classify(
+            400,
+            None,
+            r#"{"error":"expired_token","error_description":"the code expired"}"#,
+        ) {
+            PollAction::Fail(message) => {
+                assert!(
+                    message.contains("expired"),
+                    "must name the cause: {message}"
+                );
+                assert!(
+                    __omp_shell("message.contains('{') && !message.contains("raw body"),")
+                    "the raw body must never reach the user: {message}"
+                );
+            }
+            other => panic!("expired_token must end the flow, got {other:?}"),
+        }
+        match classify(400, None, r#"{"error":"authorization_declined"}"#) {
+            PollAction::Fail(message) => {
+                assert!(message.contains("declined"), "got: {message}");
+                assert!(!message.contains('{'), "got: {message}");
+            }
+            other => panic!("authorization_declined must end the flow, got {other:?}"),
+        }
+        // An unknown code carries the server's description, never the JSON.
+        match classify(
+            400,
+            None,
+            r#"{"error":"bad_verification_code","error_description":"The device code is invalid"}"#,
+        ) {
+            PollAction::Fail(message) => {
+                assert!(
+                    message.contains("The device code is invalid"),
+                    "got: {message}"
+                );
+                assert!(
+                    __omp_shell("message.contains('{') && !message.contains("raw body"),")
+                    "got: {message}"
+                );
+            }
+            other => panic!("bad_verification_code must end the flow, got {other:?}"),
+        }
+        // …and falls back to the code itself when it carries no description.
+        match classify(400, None, r#"{"error":"unauthorized_client"}"#) {
+            PollAction::Fail(message) => {
+                assert!(message.contains("unauthorized_client"), "got: {message}")
+            }
+            other => panic!("unauthorized_client must end the flow, got {other:?}"),
+        }
+    }
+
+    /// Issue #797: the retry path is bounded. A server `Retry-After` (clamped
+    /// to 300 s) or a ramped `slow_down` interval must never block the thread
+    /// past the 900 s deadline, so the sleep gives up as soon as it passes.
+    #[test]
+    fn sleep_within_deadline_gives_up_after_the_overall_deadline() {
+        use std::time::{Duration, Instant};
+        // Zero seconds never sleeps and never expires.
+        assert_eq!(
+            super::sleep_within_deadline(Instant::now(), Duration::from_secs(900), 0),
+            Ok(())
+        );
+        // A deadline already passed: no sleep at all, straight to the error.
+        let start = Instant::now();
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(
+            super::sleep_within_deadline(start, Duration::from_millis(1), 300),
+            Err(super::AUTH_TIMEOUT_MSG.to_string())
+        );
     }
 }
