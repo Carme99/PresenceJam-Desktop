@@ -599,7 +599,7 @@ describe('Settings rule scheduling and priority controls (S4/#672)', () => {
     await tick();
 
     const group = container.querySelector(
-      '[role="group"][aria-label="' + t('rules.trackRulesLabel') + '"]'
+      '[role="group"][aria-label="' + t('rules.trackRulesLabel') + ' 1"]'
     ) as HTMLElement;
     expect(group).not.toBeNull();
     const start = group.querySelector(
@@ -1062,5 +1062,93 @@ describe('Settings profanity card a11y (#733)', () => {
     expect(boxes).toHaveLength(1);
     // The pair is the row the user sees, not two rows sharing one id.
     expect(boxes[0].closest('.toggle-row')?.contains(labels[0])).toBe(true);
+  });
+});
+
+/**
+ * #746 — every rule row is a `role="group"`; both rows of a list used to carry
+ * the same `aria-label`, so rule 2 announced itself as rule 1 and the reorder
+ * and Remove controls gave the user nothing to disambiguate them with.
+ *
+ * Fails pre-fix: the names come back as two bare labels with no position.
+ */
+describe('Settings rule group names (#746)', () => {
+  function twoRulesConfig() {
+    const cfg = configuredConfig();
+    cfg.status_rules = {
+      quiet_hours: [
+        {
+          enabled: true,
+          start_minutes: 1320,
+          end_minutes: 420,
+          days: [],
+          replacement_status: '',
+          presence_availability: '',
+          presence_activity: '',
+          pause_polling: false
+        },
+        {
+          enabled: false,
+          start_minutes: 600,
+          end_minutes: 660,
+          days: [1],
+          replacement_status: '',
+          presence_availability: '',
+          presence_activity: '',
+          pause_polling: true
+        }
+      ],
+      track_rules: [
+        {
+          enabled: true,
+          artist_substring: 'first',
+          track_substring: '',
+          replacement_status: '',
+          presence_availability: '',
+          presence_activity: '',
+          days: [],
+          start_minutes: 0,
+          end_minutes: 1440
+        },
+        {
+          enabled: true,
+          artist_substring: 'second',
+          track_substring: '',
+          replacement_status: '',
+          presence_availability: '',
+          presence_activity: '',
+          days: [],
+          start_minutes: 0,
+          end_minutes: 1440
+        }
+      ]
+    };
+    return cfg;
+  }
+
+  it('names each row after its position, matching the Move buttons', async () => {
+    configStore.set(twoRulesConfig());
+    const { container } = await mountSettings();
+
+    const groupNames = [...container.querySelectorAll('[role="group"]')].map(
+      (el) => el.getAttribute('aria-label') ?? ''
+    );
+
+    expect(groupNames.filter((name) => name.startsWith(t('rules.quietHoursLabel')))).toEqual([
+      `${t('rules.quietHoursLabel')} 1`,
+      `${t('rules.quietHoursLabel')} 2`
+    ]);
+    expect(groupNames.filter((name) => name.startsWith(t('rules.trackRulesLabel')))).toEqual([
+      `${t('rules.trackRulesLabel')} 1`,
+      `${t('rules.trackRulesLabel')} 2`
+    ]);
+
+    // The row's ordinal is the one its reorder controls use.
+    const upSecond = container.querySelector(
+      'button[aria-label="' + t('rules.moveRuleUp', { n: 2 }) + '"]'
+    ) as HTMLButtonElement;
+    expect(upSecond.closest('[role="group"]')?.getAttribute('aria-label')).toBe(
+      `${t('rules.trackRulesLabel')} 2`
+    );
   });
 });

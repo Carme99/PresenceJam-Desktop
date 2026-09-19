@@ -1208,7 +1208,9 @@
           <p class="hint">{t('rules.noQuietHours')}</p>
         {/if}
         {#each localConfig.status_rules.quiet_hours as entry, i}
-          <div class="rule-row rule-col" role="group" aria-label={t('rules.quietHoursLabel')}>
+          <!-- #746: the ordinal is appended so two rows are not announced under
+               the same group name; the label keys carry no `{n}` placeholder. -->
+          <div class="rule-row rule-col" role="group" aria-label={`${t('rules.quietHoursLabel')} ${i + 1}`}>
             <div class="rule-row">
               <input type="checkbox" bind:checked={entry.enabled} aria-label={t('rules.ruleEnabled')} />
               <input
@@ -1302,7 +1304,8 @@
           <p class="hint">{t('rules.noTrackRules')}</p>
         {/if}
         {#each localConfig.status_rules.track_rules as rule, j}
-          <div class="rule-row rule-col" role="group" aria-label={t('rules.trackRulesLabel')}>
+          <!-- #746: same ordinal as the Move up/down buttons below. -->
+          <div class="rule-row rule-col" role="group" aria-label={`${t('rules.trackRulesLabel')} ${j + 1}`}>
             <div class="rule-row">
               <label class="rule-check">
                 <input type="checkbox" bind:checked={rule.enabled} />
