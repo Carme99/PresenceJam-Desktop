@@ -54,31 +54,61 @@ fn is_no_active_device_404(status: u16, body: &str) -> bool {
     status == 404 && parse_error_reason(body).as_deref() == Some("NO_ACTIVE_DEVICE")
 }
 
-/// Maps a non-success Spotify response to `SpotifyApiError`. Shared by the
-/// player control/query functions so the mapping lives in one place:
+/// Classifies a non-success Spotify response into the typed error every
+/// endpoint shares (issue #749).
+///
+/// Split out of [`map_player_error`] so variant selection is unit-testable
+/// without a live `reqwest::blocking::Response`, exactly like
+/// [`is_no_active_device_404`]:
 /// - 401 → `ExpiredToken` (re-auth required)
 /// - 403 → `NotPremium` (playback control requires Premium)
-/// - 429 → `RateLimited` honouring the `Retry-After` header (issue #159)
+/// - 429 → `RateLimited` honouring the parsed `Retry-After` (issue #159)
 /// - 404 with `reason: "NO_ACTIVE_DEVICE"` → `NoActiveDevice` (callers can
 ///   offer device transfer)
-/// - anything else → `Other` with the response body for diagnosis
+/// - 5xx → `Transient` (the request is worth retrying)
+/// - anything else → `Http` carrying the status
 ///
-/// Takes the response by value because `Response::text` consumes it; each
-/// arm reads the response exactly once.
-fn map_player_error(response: reqwest::blocking::Response, context: &str) -> SpotifyApiError {
-    let status = response.status().as_u16();
+/// `context` names the endpoint in the user-facing message; `body` is kept on
+/// the error for logging only (issue #796).
+fn classify_spotify_status(
+    status: u16,
+    retry_after: Option<u64>,
+    context: &'static str,
+    body: &str,
+) -> SpotifyApiError {
     match status {
         401 => SpotifyApiError::ExpiredToken,
         403 => SpotifyApiError::NotPremium,
-        429 => SpotifyApiError::RateLimited(parse_retry_after(&response)),
-        _ => {
-            let body = response.text().unwrap_or_default();
-            if is_no_active_device_404(status, &body) {
-                return SpotifyApiError::NoActiveDevice;
-            }
-            SpotifyApiError::Other(format!("{} request failed: {}", context, body))
-        }
+        429 => SpotifyApiError::RateLimited(retry_after),
+        _ if is_no_active_device_404(status, body) => SpotifyApiError::NoActiveDevice,
+        500..=599 => SpotifyApiError::Transient {
+            status,
+            context,
+            body: body.to_string(),
+        },
+        _ => SpotifyApiError::Http {
+            status,
+            context,
+            body: body.to_string(),
+        },
     }
+}
+
+/// Maps a non-success Spotify response to `SpotifyApiError` through
+/// [`classify_spotify_status`]. Shared by every endpoint — the player
+/// commands, devices, queue and the currently-playing GET — so one HTTP status
+/// yields one variant and one user-facing message everywhere.
+///
+/// Takes the response by value because `Response::text` consumes it; the
+/// status and the `Retry-After` header are read before the body.
+fn map_player_error(
+    response: reqwest::blocking::Response,
+    context: &'static str,
+) -> SpotifyApiError {
+    let status = response.status().as_u16();
+    let retry_after = parse_retry_after(&response);
+    let body = response.text().unwrap_or_default();
+    classify_spotify_status(status, retry_after, context, &body)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
@@ -274,9 +304,29 @@ pub enum SpotifyApiError {
     /// device must be selected (transfer) before playback commands work.
     /// See issue #3.0-P3.
     NoActiveDevice,
-    /// The player endpoint returned 403 — playback control requires Spotify
+    /// The endpoint returned 403 — playback control requires Spotify
     /// Premium, which this account does not have.
     NotPremium,
+    /// A 5xx response: the service failed on its side, so the same request is
+    /// worth retrying — the Spotify counterpart of `TeamsApiError::Transient`
+    /// (issue #749). `context` names the endpoint that failed; `body` is the
+    /// response body **for logging only** and never reaches `Display`
+    /// (issue #796).
+    Transient {
+        status: u16,
+        context: &'static str,
+        body: String,
+    },
+    /// Any other status the client does not classify (issue #749). Carrying
+    /// the status is what lets a caller tell a permanent 4xx from a transient
+    /// 5xx; `Other(String)` alone could not. `body` is for logging only.
+    Http {
+        status: u16,
+        context: &'static str,
+        body: String,
+    },
+    /// A failure with no HTTP status at all: client construction, transport
+    /// errors and response-parse errors raised inside this module.
     Other(String),
 }
 
@@ -312,6 +362,19 @@ impl std::fmt::Display for SpotifyApiError {
                 f,
                 "Playback control requires Spotify Premium"
             ),
+            // The response body is deliberately not interpolated (issue #796):
+            // a raw CDN error page or JSON envelope in a toast is not
+            // actionable, and the same string is written to the log.
+            SpotifyApiError::Transient {
+                status, context, ..
+            } => write!(
+                f,
+                "{} request failed (HTTP {}) - Spotify reported a temporary problem, try again shortly",
+                context, status
+            ),
+            SpotifyApiError::Http {
+                status, context, ..
+            } => write!(f, "{} request failed (HTTP {})", context, status),
             SpotifyApiError::Other(s) => write!(f, "{}", s),
         }
     }
@@ -939,21 +1002,7 @@ pub fn get_currently_playing(
             now: None,
             etag: read_etag(&response),
         }),
-        401 => Err(SpotifyApiError::ExpiredToken),
-        429 => {
-            // Spotify's rate-limit docs: the 429 response normally includes a
-            // `Retry-After` header in seconds — honor it instead of a fixed
-            // backoff. `None` when the header is absent/unparseable. See
-            // issue #159.
-            Err(SpotifyApiError::RateLimited(parse_retry_after(&response)))
-        }
-        _ => {
-            let body = response.text().unwrap_or_default();
-            Err(SpotifyApiError::Other(format!(
-                "Currently playing request failed: {}",
-                body
-            )))
-        }
+        _ => Err(map_player_error(response, "Currently playing")),
     }
 }
 
@@ -969,7 +1018,7 @@ fn send_player_command(
     access_token: &str,
     device_id: Option<&str>,
     body: Option<serde_json::Value>,
-    context: &str,
+    context: &'static str,
 ) -> Result<(), SpotifyApiError> {
     let client = build_spotify_client().map_err(SpotifyApiError::Other)?;
     let mut url = format!("https://api.spotify.com/v1{}", path);
@@ -2319,5 +2368,104 @@ mod tests {
             "the stored expiry must stay inside the accepted range, got {}",
             tokens.expires_at
         );
+    }
+
+    // Issue #749: `Other(String)` could not tell a retryable 5xx from a
+    // permanent 4xx, and 403 mapped to `NotPremium` on the player commands
+    // while the currently-playing GET sent the same status into the generic
+    // body arm — one status, two messages. `classify_spotify_status` is the pure
+    // mapping every endpoint now shares.
+    #[test]
+    fn classify_spotify_status_selects_the_variant_for_each_status() {
+        const NO_DEVICE: &str = r#"{"error":{"status":404,"reason":"NO_ACTIVE_DEVICE"}}"#;
+        const OTHER_404: &str = r#"{"error":{"status":404,"reason":"NOT_FOUND"}}"#;
+        let err = |status, retry_after, body| {
+            classify_spotify_status(status, retry_after, "play", body)
+        };
+
+        assert!(matches!(err(401, None, "{}"), SpotifyApiError::ExpiredToken));
+        assert!(matches!(err(403, None, "{}"), SpotifyApiError::NotPremium));
+        assert!(matches!(
+            err(429, Some(7), "{}"),
+            SpotifyApiError::RateLimited(Some(7))
+        ));
+        assert!(matches!(
+            err(429, None, "{}"),
+            SpotifyApiError::RateLimited(None)
+        ));
+        assert!(matches!(
+            err(404, None, NO_DEVICE),
+            SpotifyApiError::NoActiveDevice
+        ));
+        assert!(matches!(
+            err(503, None, "{}"),
+            SpotifyApiError::Transient { status: 503, .. }
+        ));
+        assert!(matches!(
+            err(500, None, "{}"),
+            SpotifyApiError::Transient { status: 500, .. }
+        ));
+        assert!(matches!(
+            err(400, None, "{}"),
+            SpotifyApiError::Http { status: 400, .. }
+        ));
+        assert!(
+            matches!(
+                err(404, None, OTHER_404),
+                SpotifyApiError::Http { status: 404, .. }
+            ),
+            "a 404 without NO_ACTIVE_DEVICE is not a device problem"
+        );
+    }
+
+    // The distinction a 5xx/4xx-blind `Other(String)` could not express.
+    #[test]
+    fn a_5xx_is_distinguishable_from_a_4xx_at_the_type_level() {
+        let transient = classify_spotify_status(500, None, "play", "upstream boom");
+        let permanent = classify_spotify_status(400, None, "play", "upstream boom");
+
+        assert!(matches!(transient, SpotifyApiError::Transient { .. }));
+        assert!(!matches!(permanent, SpotifyApiError::Transient { .. }));
+        assert!(transient.to_string().contains("500"), "got {}", transient);
+        assert!(permanent.to_string().contains("400"), "got {}", permanent);
+        assert_ne!(transient.to_string(), permanent.to_string());
+    }
+
+    // Acceptance criterion for issue #749: the same status must yield the same
+    // variant and the same user-facing message regardless of which endpoint
+    // produced it. The player commands and the currently-playing GET both map
+    // through `map_player_error` now, so their contexts differ while the
+    // message does not.
+    #[test]
+    fn a_403_reads_the_same_on_a_player_command_and_on_currently_playing() {
+        let player = classify_spotify_status(403, None, "pause", "{}");
+        let currently_playing = classify_spotify_status(403, None, "Currently playing", "{}");
+
+        assert!(matches!(player, SpotifyApiError::NotPremium));
+        assert!(matches!(currently_playing, SpotifyApiError::NotPremium));
+        assert_eq!(player.to_string(), currently_playing.to_string());
+        assert_eq!(player.to_string(), "Playback control requires Spotify Premium");
+    }
+
+    // Issue #796's contract, pinned at the type's own boundary: whatever the
+    // endpoint, an unclassified status names the HTTP status and never leaks the
+    // response body into text the UI renders.
+    #[test]
+    fn unclassified_statuses_never_leak_the_response_body_into_display() {
+        const BODY: &str = "<html>edge refused: request blocked by CDN rule 12345</html>";
+
+        for status in [400u16, 404, 500, 503] {
+            let text = classify_spotify_status(status, None, "Currently playing", BODY).to_string();
+            assert!(
+                text.contains(&status.to_string()),
+                "the message must name the status, got {}",
+                text
+            );
+            assert!(
+                !text.contains("CDN rule") && !text.contains("<html>") && !text.contains(BODY),
+                "the response body must not reach user-facing text, got {}",
+                text
+            );
+        }
     }
 }
