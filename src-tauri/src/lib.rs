@@ -2466,6 +2466,13 @@ mod tests {
     /// the app is built (`App::run` builds one webview per `create = true`
     /// entry). Exercised against the real embedded config, so a window added to
     /// `tauri.conf.json` later is covered without touching this test.
+    ///
+    /// Linux-only: `tauri::generate_context!()` emits a static `EmbedInfo`
+    /// whose macOS `_EMBED_INFO_PLIST` / Windows resource symbol collides when
+    /// the test binary is linked against the same crate (the production
+    /// `run()` already calls it once). The CLI suppression itself is
+    /// platform-agnostic and the Linux leg covers it.
+    #[cfg(target_os = "linux")]
     #[test]
     fn test_cli_mode_suppresses_every_config_window() {
         let mut context: tauri::Context<tauri::Wry> = tauri::generate_context!();
