@@ -43,7 +43,12 @@ import { configStore, defaultConfig } from '$lib/stores/config';
 import { notificationPreferences } from '$lib/stores/notifications';
 import { authFlow, resetSpotifyAuthFlow, resetTeamsAuthFlow, setTeamsPhase } from '$lib/stores/authFlow.svelte';
 import { theme } from '$lib/stores/theme';
-import { t } from '$lib/i18n';
+import { t, i18n, type TKey, type Locale } from '$lib/i18n';
+// #955: the presence dropdown's labels are dictionary entries, so the test
+// reads the three dictionaries the app ships rather than restating the copy.
+import { en, type Dict } from '$lib/i18n/en';
+import { de } from '$lib/i18n/de';
+import { fr } from '$lib/i18n/fr';
 
 // #693: the persist warning is captured in the always-mounted layout listener
 // and rendered from the shared presence store, so the test drives the store,
@@ -1202,5 +1207,60 @@ describe('Settings Teams reconnect failure (#816)', () => {
     await fireEvent.click(getByRole('button', { name: t('reconnect.reconnectTeams') }));
     await waitFor(() => expect(authFlow.teams.error).toBeNull());
     expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'reconnect_teams')).toBe(true);
+  });
+});
+
+/**
+ * #955 — the five availability/activity pairs were the one user-visible string
+ * set in the rules UI that never went through `t()`: a German or French user
+ * got an English dropdown inside an otherwise translated card.
+ *
+ * Fails pre-fix: the options render hardcoded English in every locale, and in
+ * `de`/`fr` the rendered text is the English one rather than the dictionary's.
+ */
+describe('Settings presence option labels (#955)', () => {
+  const PRESENCE_LABELS: readonly { key: TKey; wire: string }[] = [
+    { key: 'rules.presenceAvailable', wire: 'Available|Available' },
+    { key: 'rules.presenceBusyCall', wire: 'Busy|InACall' },
+    { key: 'rules.presenceBusyConference', wire: 'Busy|InAConferenceCall' },
+    { key: 'rules.presenceAway', wire: 'Away|Away' },
+    { key: 'rules.presenceDndPresenting', wire: 'DoNotDisturb|Presenting' }
+  ];
+
+  it('renders the dictionary labels in en, de and fr, with the wire values unchanged', async () => {
+    await i18n.set('en');
+    const { container } = await mountSettings();
+
+    // One row in each list, so both presence selects exist.
+    const [addQuiet] = [...container.querySelectorAll('.btn-secondary')].filter(
+      (b) => b.textContent?.trim() === t('rules.addQuietHours')
+    );
+    const [addTrack] = [...container.querySelectorAll('.btn-secondary')].filter(
+      (b) => b.textContent?.trim() === t('rules.addTrackRule')
+    );
+    await fireEvent.click(addQuiet);
+    await fireEvent.click(addTrack);
+    await tick();
+
+    for (const [locale, dict] of Object.entries({ en, de, fr }) as [Locale, Dict][]) {
+      await i18n.set(locale);
+      await tick();
+
+      const selects = [...container.querySelectorAll('select')].filter(
+        (select) => select.getAttribute('aria-label') === t('rules.presenceLabel')
+      );
+      expect(selects).toHaveLength(2);
+
+      for (const select of selects) {
+        // Index 0 is "don't change my presence"; the five pairs follow it.
+        const pairs = [...select.querySelectorAll('option')].slice(1);
+        // A key missing from any dictionary surfaces here as `undefined`.
+        expect(pairs.map((o) => [o.getAttribute('value'), o.textContent?.trim()])).toEqual(
+          PRESENCE_LABELS.map(({ key, wire }) => [wire, dict[key]])
+        );
+      }
+    }
+
+    await i18n.set('en');
   });
 });

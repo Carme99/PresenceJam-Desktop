@@ -137,18 +137,30 @@
    * accepts. Mirrors `config.rs::PRESENCE_COMBINATIONS` — the closed set the
    * backend normalizes against — and deliberately omits the two the docs say
    * have no effect.
+   *
+   * #955: the wire pair is the value; the visible text is a dictionary key, so
+   * the dropdown is translated like the rest of the card. The five labels were
+   * hardcoded English here and rendered verbatim by both selects.
    */
-  const PRESENCE_OPTIONS = [
-    { availability: 'Available', activity: 'Available', label: 'Available' },
-    { availability: 'Busy', activity: 'InACall', label: 'Busy — In a call' },
+  const PRESENCE_OPTIONS: readonly {
+    availability: string;
+    activity: string;
+    labelKey: TKey;
+  }[] = [
+    { availability: 'Available', activity: 'Available', labelKey: 'rules.presenceAvailable' },
+    { availability: 'Busy', activity: 'InACall', labelKey: 'rules.presenceBusyCall' },
     {
       availability: 'Busy',
       activity: 'InAConferenceCall',
-      label: 'Busy — In a conference call'
+      labelKey: 'rules.presenceBusyConference'
     },
-    { availability: 'Away', activity: 'Away', label: 'Away' },
-    { availability: 'DoNotDisturb', activity: 'Presenting', label: 'Do not disturb — Presenting' }
-  ] as const;
+    { availability: 'Away', activity: 'Away', labelKey: 'rules.presenceAway' },
+    {
+      availability: 'DoNotDisturb',
+      activity: 'Presenting',
+      labelKey: 'rules.presenceDndPresenting'
+    }
+  ];
 
   type PresenceFields = { presence_availability: string; presence_activity: string };
 
@@ -1286,7 +1298,7 @@
               >
                 <option value="">{t('rules.presenceNone')}</option>
                 {#each PRESENCE_OPTIONS as option}
-                  <option value={`${option.availability}|${option.activity}`}>{option.label}</option>
+                  <option value={`${option.availability}|${option.activity}`}>{t(option.labelKey)}</option>
                 {/each}
               </select>
             </div>
@@ -1367,7 +1379,7 @@
               >
                 <option value="">{t('rules.presenceNone')}</option>
                 {#each PRESENCE_OPTIONS as option}
-                  <option value={`${option.availability}|${option.activity}`}>{option.label}</option>
+                  <option value={`${option.availability}|${option.activity}`}>{t(option.labelKey)}</option>
                 {/each}
               </select>
             </div>
