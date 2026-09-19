@@ -111,6 +111,20 @@ pub struct Strings {
     pub seek_back_30s_label: &'static str,
     /// Label of the "seek forward N seconds" entry (issue #871).
     pub seek_forward_30s_label: &'static str,
+    // ── Profile submenu (issue #869) ──────────────────────────────────────────
+    /// Title of the tray's "Active profile" submenu (issue #869). The
+    /// first entry is "Base configuration" (no profile); the rest are the
+    /// configured profile names in their stored order. `clamp_presence_profiles`
+    /// guarantees names are unique and ≤ 32 characters, so the submenu cannot
+    /// have colliding labels.
+    pub profile_menu: &'static str,
+    /// Sentinel entry that clears the active profile. The contract is the
+    /// same as the CLI's `--profile base` — switching back to "Base
+    /// configuration" never rewrites the on-disk base values, the
+    /// `effective_config` overlay just resolves to a no-op.
+    pub profile_base: &'static str,
+    /// Disabled placeholder shown when the profile list is empty.
+    pub profile_empty: &'static str,
 }
 
 /// English table — the source of truth the other two mirror.
@@ -162,6 +176,10 @@ pub const EN: Strings = Strings {
     seek_menu: "Seek",
     seek_back_30s_label: "Back {seconds} s",
     seek_forward_30s_label: "Forward {seconds} s",
+    // ── Profile submenu (issue #869) ──────────────────────────────────────────
+    profile_menu: "Active profile",
+    profile_base: "Base configuration",
+    profile_empty: "(no profiles configured)",
 };
 
 /// German table.
@@ -213,6 +231,10 @@ pub const DE: Strings = Strings {
     seek_menu: "Spulen",
     seek_back_30s_label: "{seconds} s zurück",
     seek_forward_30s_label: "{seconds} s vor",
+    // ── Profile submenu (issue #869) ──────────────────────────────────────────
+    profile_menu: "Aktives Profil",
+    profile_base: "Basiskonfiguration",
+    profile_empty: "(keine Profile konfiguriert)",
 };
 
 /// French table.
@@ -264,6 +286,10 @@ pub const FR: Strings = Strings {
     seek_menu: "Position",
     seek_back_30s_label: "Reculer de {seconds} s",
     seek_forward_30s_label: "Avancer de {seconds} s",
+    // ── Profile submenu (issue #869) ──────────────────────────────────────────
+    profile_menu: "Profil actif",
+    profile_base: "Configuration de base",
+    profile_empty: "(aucun profil configuré)",
 };
 
 /// Canonical locale tags, in table order. The value persisted in
@@ -425,6 +451,9 @@ impl Strings {
             ("seek_menu", self.seek_menu),
             ("seek_back_30s_label", self.seek_back_30s_label),
             ("seek_forward_30s_label", self.seek_forward_30s_label),
+            ("profile_menu", self.profile_menu),
+            ("profile_base", self.profile_base),
+            ("profile_empty", self.profile_empty),
         ]
     }
 }

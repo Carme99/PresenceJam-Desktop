@@ -139,6 +139,12 @@ export const defaultConfig: AppConfig = {
   snooze_until: null,
   // Issue #432: mirrors Rust StatusRulesConfig::default (empty rule lists).
   status_rules: { quiet_hours: [], track_rules: [] },
+  // Issue #869: the named presence profiles the user can switch from the
+  // tray, a hotkey or `presencejam --profile <id>`. Empty list + `null`
+  // active id mirror Rust's serde defaults — pre-5.0 configs load with
+  // no profiles and the `effective_config` overlay is a no-op.
+  presence_profiles: [],
+  active_profile: null,
   // 4.7.0 (issue #676): mirrors Rust `ShortcutsConfig::default()`. Spread from
   // `DEFAULT_SHORTCUTS` rather than written as a literal so the values have
   // exactly one home in this file.
@@ -146,7 +152,9 @@ export const defaultConfig: AppConfig = {
   // Mirrors Rust `config::SCHEMA_VERSION` (issues #379 / #536). The backend
   // stamps the persisted value itself, so this is only the pre-load
   // placeholder — it is never trusted as an instruction.
-  schema_version: 2
+  // Issue #869: bumped from 2 to 3 for the `presence_profiles` /
+  // `active_profile` additions.
+  schema_version: 3
 } as AppConfig;
 
 /**

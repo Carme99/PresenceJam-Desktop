@@ -149,6 +149,14 @@
     rules.splice(target, 0, moved);
     markDirty();
   }
+  // Issue #869: name for a freshly-added profile. The Rust side dedupes
+  // again on load, so a concurrent edit cannot wedge the form — this is
+  // only the prefix the new-row picker suggests. `Profile` is the prefix
+  // the user can rename, and the trailing number is just a uniqueness
+  // hint until they do.
+  function defaultProfileName(n: number): string {
+    return `Profile ${n}`;
+  }
   function resetPollingDefaults() {
     localConfig.polling = structuredClone(defaultConfig.polling);
     markDirty();
@@ -164,6 +172,13 @@
   const EXTRA_WORDS_MAX_CHARS = 32;
   const PAUSE_BACKOFF_MIN_SECONDS = 60;
   const PAUSE_BACKOFF_MAX_SECONDS = 3600;
+  // Issue #869: presence-profile bounds mirror `clamp_presence_profiles`.
+  // The Rust side is the source of truth, so these constants exist only to
+  // give the input its `maxlength` / `max` attribute. A user typing past
+  // either is still accepted by Rust, but the form lets them see the
+  // effective value the backend stored rather than the raw keystrokes.
+  const MAX_PROFILE_ID_CHARS = 32;
+  const MAX_PROFILE_IDLE_SECONDS = 86400;
 
   /**
    * The five availability/activity pairs Graph `presence: setPresence`
@@ -249,6 +264,137 @@
   let workingHoursReplaceExisting = $state(true);
   let workingHoursBusy = $state(false);
   let workingHoursError = $state('');
+
+  // Issue #868: dry-run tester state. The synthetic track the user types
+  // in the form; the parsed `now_minutes` / `weekday` feed `explain_rules`
+  // alongside it; the result renders below the button.
+  interface RuleTestSynthetic {
+    artist: string;
+    track: string;
+    album: string;
+    show: string;
+    device: string;
+    playlist_uri: string;
+    duration_ms: number;
+    weekday: number;
+  }
+  interface RuleTestStep {
+    index: number;
+    enabled: boolean;
+    matched: boolean;
+    reason: string | null;
+    negated: boolean;
+    action: unknown;
+    match_kind: 'substring' | 'exact' | 'glob';
+  }
+  interface RuleTestResult {
+    matched_index: number | null;
+    summary: string;
+    reason_chain: RuleTestStep[];
+    synthetic_track: RuleTestSynthetic;
+    now_minutes: number;
+    weekday: number;
+  }
+  let ruleTest = $state<RuleTestSynthetic>({
+    artist: '',
+    track: '',
+    album: '',
+    show: '',
+    device: '',
+    playlist_uri: '',
+    duration_ms: 0,
+    weekday: 1,
+  });
+  let ruleTestDurationInput = $state('');
+  let ruleTestMinuteInput = $state('12:00');
+  let ruleTestRunning = $state(false);
+  let ruleTestResult = $state<RuleTestResult | null>(null);
+  let ruleTestError = $state('');
+
+  function parseDurationToMs(value: string): number {
+    // `mm:ss` or empty. Anything we cannot parse becomes 0 (the
+    // documented "no duration gate" default).
+    const trimmed = value.trim();
+    if (!trimmed) return 0;
+    const parts = trimmed.split(':');
+    if (parts.length === 2) {
+      const minutes = parseInt(parts[0], 10);
+      const seconds = parseInt(parts[1], 10);
+      if (Number.isFinite(minutes) && Number.isFinite(seconds) && minutes >= 0 && seconds >= 0) {
+        return (minutes * 60 + seconds) * 1000;
+      }
+    }
+    const single = parseInt(trimmed, 10);
+    if (Number.isFinite(single) && single >= 0) {
+      // Bare number is interpreted as seconds — the same way the
+      // status-template engine treats `{duration_seconds}`.
+      return single * 1000;
+    }
+    return 0;
+  }
+
+  function parseMinuteInputToNumber(value: string): number {
+    // `HH:MM` from a `<input type="time">`. Empty / invalid falls back
+    // to 0 (the start of the day, inside every default window).
+    if (!value) return 0;
+    const parts = value.split(':');
+    if (parts.length !== 2) return 0;
+    const hours = parseInt(parts[0], 10);
+    const minutes = parseInt(parts[1], 10);
+    if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return 0;
+    return Math.max(0, Math.min(1439, hours * 60 + minutes));
+  }
+
+  // Issue #868: factory for the rule `action` discriminated union —
+  // switching the kind resets the inner fields so the old kind's
+  // payload cannot leak into the new variant (a Replace `status`
+  // showing up inside a SnoozeMinutes would silently fail to
+  // serialize through the Rust boundary). The return type matches
+  // `TrackRuleAction` exactly so the `<select onchange>` assignment
+  // typechecks against the generated Rust enum.
+  function actionForKind(kind: string): TrackRuleAction {
+    switch (kind) {
+      case 'replace':
+        return { kind: 'replace', status: '' };
+      case 'snoozeminutes':
+        return { kind: 'snoozeminutes', value: 30 };
+      case 'profile':
+        return { kind: 'profile', id: '' };
+      case 'presence':
+        return { kind: 'presence', availability: '', activity: '' };
+      default:
+        return { kind: 'suppress' };
+    }
+  }
+
+  type TrackRuleAction =
+    | { kind: 'suppress' }
+    | { kind: 'replace'; status: string }
+    | { kind: 'snoozeminutes'; value: number }
+    | { kind: 'profile'; id: string }
+    | { kind: 'presence'; availability: string; activity: string };
+
+  async function runRuleTest() {
+    ruleTestError = '';
+    ruleTestRunning = true;
+    try {
+      const now_minutes = parseMinuteInputToNumber(ruleTestMinuteInput);
+      const synthetic = {
+        ...ruleTest,
+        duration_ms: parseDurationToMs(ruleTestDurationInput),
+      };
+      const result = (await invoke('explain_rules', {
+        nowMinutes: now_minutes,
+        weekday: ruleTest.weekday,
+        syntheticTrack: synthetic,
+      })) as RuleTestResult;
+      ruleTestResult = result;
+    } catch (e) {
+      ruleTestError = typeof e === 'string' ? e : t('common.retry');
+    } finally {
+      ruleTestRunning = false;
+    }
+  }
 
   async function requestWorkingHoursPreview() {
     workingHoursError = '';
@@ -1716,13 +1862,280 @@
               {/each}
             </div>
             <p class="hint">{t('rules.presenceHint')}</p>
+            <!-- Issue #868: the new match-kind / album / show / device /
+                 playlist-uri / duration / negate / action surfaces.
+                 The Settings picker mirrors the rule walker exactly so a
+                 what-you-see-is-what-fires mental model holds.
+              -->
+            <div class="rule-row">
+              <select
+                aria-label={t('rules.matchKindLabel')}
+                value={rule.match_kind ?? 'substring'}
+                onchange={(e) => { rule.match_kind = (e.currentTarget as HTMLSelectElement).value as 'substring' | 'exact' | 'glob'; }}
+              >
+                <option value="substring">{t('rules.matchKindSubstring')}</option>
+                <option value="exact">{t('rules.matchKindExact')}</option>
+                <option value="glob">{t('rules.matchKindGlob')}</option>
+              </select>
+              <input
+                type="number"
+                min="0"
+                placeholder={t('rules.minDurationLabel')}
+                aria-label={t('rules.minDurationLabel')}
+                value={rule.min_duration_seconds ?? 0}
+                onchange={(e) => { rule.min_duration_seconds = Math.max(0, parseInt((e.currentTarget as HTMLInputElement).value, 10) || 0); }}
+              />
+            </div>
+            <div class="rule-row">
+              <input
+                type="text"
+                placeholder={t('rules.albumSubstringLabel')}
+                aria-label={t('rules.albumSubstringLabel')}
+                bind:value={rule.album_substring}
+              />
+              <input
+                type="text"
+                placeholder={t('rules.showSubstringLabel')}
+                aria-label={t('rules.showSubstringLabel')}
+                bind:value={rule.show_substring}
+              />
+            </div>
+            <div class="rule-row">
+              <input
+                type="text"
+                placeholder={t('rules.deviceSubstringLabel')}
+                aria-label={t('rules.deviceSubstringLabel')}
+                bind:value={rule.device_substring}
+              />
+              <input
+                type="text"
+                placeholder={t('rules.playlistUriLabel')}
+                aria-label={t('rules.playlistUriLabel')}
+                bind:value={rule.playlist_uri}
+              />
+            </div>
+            <div class="rule-row">
+              <label class="rule-check">
+                <input type="checkbox" bind:checked={rule.negate} />
+                <span>{t('rules.negateLabel')}</span>
+              </label>
+            </div>
+            <div class="rule-row">
+              <select
+                aria-label={t('rules.actionLabel')}
+                value={(rule.action as { kind: string })?.kind ?? 'suppress'}
+                onchange={(e) => {
+                  const next = (e.currentTarget as HTMLSelectElement).value;
+                  rule.action = actionForKind(next);
+                }}
+              >
+                <option value="suppress">{t('rules.actionSuppress')}</option>
+                <option value="replace">{t('rules.actionReplace')}</option>
+                <option value="snoozeminutes">{t('rules.actionSnoozeMinutes')}</option>
+                <option value="profile">{t('rules.actionProfile')}</option>
+                <option value="presence">{t('rules.actionPresence')}</option>
+              </select>
+            </div>
+            {#if (rule.action as { kind: string })?.kind === 'replace'}
+              <div class="rule-row">
+                <input
+                  type="text"
+                  placeholder={t('rules.actionReplaceStatusPlaceholder')}
+                  aria-label={t('rules.actionReplaceStatusPlaceholder')}
+                  value={(rule.action as { status?: string }).status ?? ''}
+                  oninput={(e) => { rule.action = { kind: 'replace', status: (e.currentTarget as HTMLInputElement).value }; }}
+                />
+              </div>
+            {/if}
+            {#if (rule.action as { kind: string })?.kind === 'snoozeminutes'}
+              <div class="rule-row">
+                <input
+                  type="number"
+                  min="1"
+                  placeholder={t('rules.actionSnoozePlaceholder')}
+                  aria-label={t('rules.actionSnoozePlaceholder')}
+                  value={(rule.action as { value?: number }).value ?? 30}
+                  oninput={(e) => { rule.action = { kind: 'snoozeminutes', value: Math.max(1, parseInt((e.currentTarget as HTMLInputElement).value, 10) || 30) }; }}
+                />
+              </div>
+            {/if}
+            {#if (rule.action as { kind: string })?.kind === 'profile'}
+              <div class="rule-row">
+                <input
+                  type="text"
+                  placeholder={t('rules.actionProfilePlaceholder')}
+                  aria-label={t('rules.actionProfilePlaceholder')}
+                  value={(rule.action as { id?: string }).id ?? ''}
+                  oninput={(e) => { rule.action = { kind: 'profile', id: (e.currentTarget as HTMLInputElement).value }; }}
+                />
+              </div>
+            {/if}
+            {#if (rule.action as { kind: string })?.kind === 'presence'}
+              <div class="rule-row">
+                <input
+                  type="text"
+                  placeholder={t('rules.actionAvailabilityPlaceholder')}
+                  aria-label={t('rules.actionAvailabilityPlaceholder')}
+                  value={(rule.action as { availability?: string }).availability ?? ''}
+                  oninput={(e) => {
+                    const prev = rule.action as { availability?: string; activity?: string };
+                    rule.action = {
+                      kind: 'presence',
+                      availability: (e.currentTarget as HTMLInputElement).value,
+                      activity: prev.activity ?? '',
+                    };
+                  }}
+                />
+                <input
+                  type="text"
+                  placeholder={t('rules.actionActivityPlaceholder')}
+                  aria-label={t('rules.actionActivityPlaceholder')}
+                  value={(rule.action as { activity?: string }).activity ?? ''}
+                  oninput={(e) => {
+                    const prev = rule.action as { availability?: string; activity?: string };
+                    rule.action = {
+                      kind: 'presence',
+                      availability: prev.availability ?? '',
+                      activity: (e.currentTarget as HTMLInputElement).value,
+                    };
+                  }}
+                />
+              </div>
+            {/if}
           </div>
         {/each}
         <button
           type="button"
           class="btn-secondary"
-          onclick={() => { localConfig.status_rules.track_rules.push({ enabled: false, artist_substring: '', track_substring: '', replacement_status: '', presence_availability: '', presence_activity: '', days: [], start_minutes: 0, end_minutes: 1440 }); markDirty(); }}
+          onclick={() => {
+            localConfig.status_rules.track_rules.push({
+              enabled: false,
+              artist_substring: '',
+              track_substring: '',
+              match_kind: 'substring',
+              album_substring: '',
+              show_substring: '',
+              device_substring: '',
+              playlist_uri: '',
+              min_duration_seconds: 0,
+              negate: false,
+              replacement_status: '',
+              presence_availability: '',
+              presence_activity: '',
+              action: { kind: 'suppress' },
+              days: [],
+              start_minutes: 0,
+              end_minutes: 1440,
+            });
+            markDirty();
+          }}
         >{t('rules.addTrackRule')}</button>
+        <!-- Issue #868: dry-run tester for the live track-rule walker. The
+             user types a synthetic track / minute / weekday and we invoke
+             `explain_rules`, which runs the same matcher the live
+             `process_track` path uses. -->
+        <div class="rule-test" role="group" aria-label={t('rules.testTitle')}>
+          <span class="form-label">{t('rules.testTitle')}</span>
+          <p class="hint">{t('rules.testHint')}</p>
+          <div class="rule-row">
+            <input
+              type="text"
+              placeholder={t('rules.testArtistLabel')}
+              aria-label={t('rules.testArtistLabel')}
+              bind:value={ruleTest.artist}
+            />
+            <input
+              type="text"
+              placeholder={t('rules.testTrackLabel')}
+              aria-label={t('rules.testTrackLabel')}
+              bind:value={ruleTest.track}
+            />
+          </div>
+          <div class="rule-row">
+            <input
+              type="text"
+              placeholder={t('rules.testAlbumLabel')}
+              aria-label={t('rules.testAlbumLabel')}
+              bind:value={ruleTest.album}
+            />
+            <input
+              type="text"
+              placeholder={t('rules.testShowLabel')}
+              aria-label={t('rules.testShowLabel')}
+              bind:value={ruleTest.show}
+            />
+          </div>
+          <div class="rule-row">
+            <input
+              type="text"
+              placeholder={t('rules.testDeviceLabel')}
+              aria-label={t('rules.testDeviceLabel')}
+              bind:value={ruleTest.device}
+            />
+            <input
+              type="text"
+              placeholder={t('rules.testPlaylistLabel')}
+              aria-label={t('rules.testPlaylistLabel')}
+              bind:value={ruleTest.playlist_uri}
+            />
+          </div>
+          <div class="rule-row">
+            <input
+              type="text"
+              placeholder={t('rules.testDurationLabel')}
+              aria-label={t('rules.testDurationLabel')}
+              bind:value={ruleTestDurationInput}
+            />
+            <select aria-label={t('rules.testWeekdayLabel')} bind:value={ruleTest.weekday}>
+              {#each [1, 2, 3, 4, 5, 6, 7] as day}
+                <option value={day}>{t(`rules.day${day}` as 'rules.day1')}</option>
+              {/each}
+            </select>
+            <input
+              type="time"
+              aria-label={t('rules.testMinuteLabel')}
+              bind:value={ruleTestMinuteInput}
+            />
+          </div>
+          <div class="rule-row">
+            <button
+              type="button"
+              class="btn-secondary"
+              onclick={runRuleTest}
+              disabled={ruleTestRunning}
+            >{ruleTestRunning ? t('rules.testRunning') : t('rules.testRun')}</button>
+          </div>
+          {#if ruleTestError}
+            <p class="hint error" role="status">{ruleTestError}</p>
+          {/if}
+          {#if ruleTestResult}
+            <p class="hint" role="status">
+              {#if ruleTestResult.matched_index !== null && ruleTestResult.matched_index !== undefined}
+                {t('rules.testSummaryRuleMatched', {
+                  index: ruleTestResult.matched_index + 1,
+                  summary: ruleTestResult.summary,
+                })}
+              {:else}
+                {t('rules.testSummaryNoMatch')}
+              {/if}
+            </p>
+            <ol class="rule-test-chain">
+              {#each ruleTestResult.reason_chain as step, stepIdx}
+                <li class:matched={step.matched}>
+                  <strong>{`#${stepIdx + 1}`}</strong>
+                  {' — '}
+                  {step.matched ? t('rules.testStepMatched') : t('rules.testStepNotMatched')}
+                  {#if step.reason}
+                    <span class="reason">{t('rules.testStepReason', { reason: step.reason })}</span>
+                  {/if}
+                  {#if step.negated}
+                    <span class="reason">{t('rules.testStepNegated')}</span>
+                  {/if}
+                </li>
+              {/each}
+            </ol>
+          {/if}
+        </div>
       </div>
       <div class="form-group">
         <span class="form-label">{t('rules.manualStatusLabel')}</span>
@@ -1745,6 +2158,188 @@
         </div>
       </div>
       {/if}
+    </section>
+    <!-- Issue #869: presence-profile card. The Settings UI is the canonical
+         place to author profiles; the tray / hotkey / CLI only flip the
+         active id. Mirrors `clamp_presence_profiles`: names are deduped +
+         trimmed to 32 chars and the active pointer clears on a missing id. -->
+    <section class="card pane-card">
+      <header class="section-header">
+        <h2>{t('profiles.sectionTitle')}</h2>
+      </header>
+      <p class="hint">{t('profiles.sectionHint')}</p>
+      <div class="form-group">
+        <label for="active-profile">{t('profiles.activeProfileLabel')}</label>
+        <select
+          id="active-profile"
+          value={localConfig.active_profile ?? ''}
+          onchange={(e) => {
+            const value = (e.currentTarget as HTMLSelectElement).value;
+            localConfig.active_profile = value === '' ? null : value;
+            markDirty();
+          }}
+        >
+          <option value="">{t('profiles.activeProfileNone')}</option>
+          {#each localConfig.presence_profiles as profile}
+            <option value={profile.name}>{profile.name}</option>
+          {/each}
+        </select>
+        <!-- Issue #869: the picker's options are derived from
+             `localConfig.presence_profiles`, so a name the user just deleted
+             cannot appear; the spec's "unknown id clears to base" safety net
+             is the Rust-side `clamp_presence_profiles`. -->
+      </div>
+      {#if localConfig.presence_profiles.length === 0}
+        <p class="hint">{t('profiles.empty')}</p>
+      {/if}
+      {#each localConfig.presence_profiles as profile, i}
+        <div class="rule-row rule-col" role="group" aria-label={`${t('profiles.sectionTitle')} ${i + 1}`}>
+          <div class="rule-row">
+            <input
+              type="text"
+              value={profile.name}
+              placeholder={t('profiles.profileNamePlaceholder')}
+              aria-label={t('profiles.profileNameLabel')}
+              oninput={(e) => {
+                const next = (e.currentTarget as HTMLInputElement).value;
+                const trimmed = next.slice(0, MAX_PROFILE_ID_CHARS);
+                // Reject duplicates (case-sensitive, ignores self).
+                const clash = localConfig.presence_profiles.some(
+                  (other, idx) => idx !== i && other.name === trimmed
+                );
+                if (clash) {
+                  saveMessage = t('profiles.profileNameDuplicate');
+                  return;
+                }
+                if (trimmed.length === 0) {
+                  saveMessage = t('profiles.profileNameMissing');
+                  return;
+                }
+                saveMessage = '';
+                profile.name = trimmed;
+                markDirty();
+              }}
+            />
+            <button
+              type="button"
+              class="btn-link"
+              onclick={() => {
+                localConfig.presence_profiles.splice(i, 1);
+                // If the active profile was the deleted one, reset to base.
+                if (localConfig.active_profile === profile.name) {
+                  localConfig.active_profile = null;
+                }
+                markDirty();
+              }}
+            >{t('profiles.removeProfile')}</button>
+          </div>
+          <div class="form-group">
+            <label for={`profile-status-${i}`}>{t('profiles.overlayStatusFormatLabel')}</label>
+            <input
+              id={`profile-status-${i}`}
+              type="text"
+              value={profile.status_format ?? ''}
+              placeholder={localConfig.teams.status_format}
+              oninput={(e) => {
+                const v = (e.currentTarget as HTMLInputElement).value;
+                profile.status_format = v.length === 0 ? null : v;
+                markDirty();
+              }}
+            />
+          </div>
+          <div class="form-group">
+            <label class="rule-check">
+              <input
+                type="checkbox"
+                checked={profile.clear_on_pause ?? localConfig.teams.clear_on_pause}
+                onchange={(e) => {
+                  profile.clear_on_pause = (e.currentTarget as HTMLInputElement).checked;
+                  markDirty();
+                }}
+              />
+              <span>{t('profiles.overlayClearOnPauseLabel')}</span>
+            </label>
+          </div>
+          <div class="form-group">
+            <label class="rule-check">
+              <input
+                type="checkbox"
+                checked={profile.availability_sync ?? localConfig.teams.availability_sync}
+                onchange={(e) => {
+                  profile.availability_sync = (e.currentTarget as HTMLInputElement).checked;
+                  markDirty();
+                }}
+              />
+              <span>{t('profiles.overlayAvailabilitySyncLabel')}</span>
+            </label>
+          </div>
+          <div class="form-group">
+            <label class="rule-check">
+              <input
+                type="checkbox"
+                checked={profile.gate_when_out_of_office ?? localConfig.teams.gate_when_out_of_office}
+                onchange={(e) => {
+                  profile.gate_when_out_of_office = (e.currentTarget as HTMLInputElement).checked;
+                  markDirty();
+                }}
+              />
+              <span>{t('profiles.overlayGateOutOfOfficeLabel')}</span>
+            </label>
+          </div>
+          <div class="form-group">
+            <label class="rule-check">
+              <input
+                type="checkbox"
+                checked={profile.gate_when_presenting ?? localConfig.teams.gate_when_presenting}
+                onchange={(e) => {
+                  profile.gate_when_presenting = (e.currentTarget as HTMLInputElement).checked;
+                  markDirty();
+                }}
+              />
+              <span>{t('profiles.overlayGatePresentingLabel')}</span>
+            </label>
+          </div>
+          <div class="form-group">
+            <label for={`profile-idle-${i}`}>{t('profiles.overlayIdleAwayLabel')}</label>
+            <input
+              id={`profile-idle-${i}`}
+              type="number"
+              min="0"
+              max={MAX_PROFILE_IDLE_SECONDS}
+              value={profile.idle_away_after_seconds === null || profile.idle_away_after_seconds === undefined
+                ? ''
+                : Number(profile.idle_away_after_seconds)}
+              placeholder={String(Number(localConfig.teams.idle_away_after_seconds))}
+              oninput={(e) => {
+                const raw = (e.currentTarget as HTMLInputElement).value;
+                if (raw === '') {
+                  profile.idle_away_after_seconds = null;
+                } else {
+                  const n = Math.min(MAX_PROFILE_IDLE_SECONDS, Math.max(0, Number(raw)));
+                  profile.idle_away_after_seconds = BigInt(n);
+                }
+                markDirty();
+              }}
+            />
+          </div>
+        </div>
+      {/each}
+      <button
+        type="button"
+        class="btn-secondary"
+        onclick={() => {
+          // Generate a unique default name like "Profile 1", "Profile 2", ...
+          // by finding the lowest positive integer suffix that does not
+          // collide with an existing name. The Rust side will dedupe again
+          // on load, so a concurrent edit cannot wedge the form.
+          let n = 1;
+          while (localConfig.presence_profiles.some((p) => p.name === defaultProfileName(n))) {
+            n += 1;
+          }
+          localConfig.presence_profiles.push({ name: defaultProfileName(n) });
+          markDirty();
+        }}
+      >{t('profiles.addProfile')}</button>
     </section>
     <section class="card pane-card">
       <header class="section-header">

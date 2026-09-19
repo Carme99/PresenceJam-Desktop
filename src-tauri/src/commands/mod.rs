@@ -21,12 +21,16 @@
 //!   - `status` — set_manual_status, clear_manual_status (issue #870, user-composed
 //!     Teams status with an expiry, mirrored by a Dashboard composer, a tray
 //!     "Recent statuses" submenu, and a `--set-status` CLI flag)
+//!   - `rules` — explain_rules (issue #868, track-rule dry-run tester; a
+//!     pure projection that runs the same walker the live `process_track`
+//!     path uses, against a Settings-typed synthetic track)
 
 pub mod config;
 pub mod logs;
 pub mod misc;
 pub mod onboarding;
 pub mod playback;
+pub mod rules;
 pub mod shortcuts;
 pub mod spotify_auth;
 pub mod status;
@@ -147,6 +151,7 @@ mod tests {
             "misc",
             "shortcuts",
             "status",
+            "rules",
         ] {
             let needle_pub = format!("pub mod {};", group);
             let needle_priv = format!("mod {};", group);

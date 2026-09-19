@@ -671,7 +671,7 @@ fn ask_overwrite(
 
 /// Top-level keys a genuine PresenceJam export always carries. A document with
 /// none of them is not one of ours (issue #963).
-const IMPORT_SECTION_KEYS: [&str; 9] = [
+const IMPORT_SECTION_KEYS: [&str; 11] = [
     "schema_version",
     "spotify",
     "teams",
@@ -681,6 +681,8 @@ const IMPORT_SECTION_KEYS: [&str; 9] = [
     "notifications",
     "shortcuts",
     "status_rules",
+    "presence_profiles",
+    "active_profile",
 ];
 
 /// Whether `value` is recognisably a PresenceJam configuration (issue #963).
@@ -714,7 +716,7 @@ fn read_import_source(path: &Path) -> Result<String, String> {
         Ok(value) if !is_presencejam_document(&value) => {
             log::warn!("{CMD} import_config: REFUSED - not a PresenceJam configuration");
             Err(
-                "Imported file is not a PresenceJam configuration (no recognisable section: expected schema_version, spotify, teams, polling, logging, updates, notifications, shortcuts or status_rules)"
+                "Imported file is not a PresenceJam configuration (no recognisable section: expected schema_version, spotify, teams, polling, logging, updates, notifications, shortcuts, status_rules, presence_profiles or active_profile)"
                     .to_string(),
             )
         }

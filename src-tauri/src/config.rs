@@ -533,7 +533,10 @@ const QUIET_HOURS_DAY_MINUTES: u16 = 1440;
 /// windows ([`clamp_quiet_hours_window`] for quiet hours, issue #821;
 /// [`clamp_track_rule_window`] for track rules, issue #672). Mirrors
 /// `clamp_polling` / `clamp_teams`, so it runs on load and on every save through
-/// [`clamped_config`].
+/// [`clamped_config`]. Issue #868 adds the action's nested text / value / id
+/// normalization through [`clamp_track_rule_action`] — the SINGLE
+/// normalizer the spec mandates, so a hand-edited config cannot smuggle a
+/// 200-character status or a 100 000-minute snooze past the IPC boundary.
 fn clamp_rules(cfg: &mut StatusRulesConfig) {
     for entry in &mut cfg.quiet_hours {
         clamp_presence_pair(
@@ -547,7 +550,199 @@ fn clamp_rules(cfg: &mut StatusRulesConfig) {
         clamp_presence_pair(&mut rule.presence_availability, &mut rule.presence_activity);
         clamp_rule_text(&mut rule.replacement_status);
         clamp_track_rule_window(rule);
+        clamp_track_rule_action(rule);
     }
+}
+
+/// Normalize a track rule's `action` field (issue #868). The legacy
+/// flat fields (`replacement_status`, `presence_availability` /
+/// `presence_activity`) are also mirrored INTO the action so the rule
+/// walker and the dry-run tester share one projection — a rule that
+/// sets `replacement_status` but keeps `action: Suppress` continues to
+/// behave like the legacy "post this fixed text" replacement, but a
+/// rule that sets `action: Replace { status: "…" }` now uses the new
+/// field verbatim. The `min_duration_seconds` cap mirrors the same
+/// paranoia as the `clamp_teams` caps — a hand-edited config cannot
+/// put the duration gate in a permanently-firing state.
+fn clamp_track_rule_action(rule: &mut TrackRuleEntry) {
+    rule.min_duration_seconds = rule.min_duration_seconds.min(MAX_TRACK_RULE_DURATION_SECS);
+    match &mut rule.action {
+        TrackRuleAction::Suppress => {
+            // No fields to clamp.
+        }
+        TrackRuleAction::Replace { status } => {
+            clamp_rule_text(status);
+        }
+        TrackRuleAction::SnoozeMinutes { value } => {
+            // 1..=1440 minutes (24 hours); an empty / zero value falls
+            // back to the legacy SnoozePreset::ForMinutes(15) default
+            // when the rule fires, so the gate can still act.
+            if *value == 0 {
+                *value = 15;
+            }
+            *value = (*value).clamp(1, MAX_TRACK_RULE_SNOOZE_MINUTES);
+        }
+        TrackRuleAction::Profile { id } => {
+            clamp_profile_id(id);
+        }
+        TrackRuleAction::Presence {
+            availability,
+            activity,
+        } => {
+            clamp_presence_pair(availability, activity);
+        }
+    }
+}
+
+/// Upper bound on `min_duration_seconds` (issue #868): 24 h. Mirrors
+/// the 60 minute pre-meeting cap and the `clamp_teams` upper bounds so
+/// a hand-edited config cannot wedge the duration gate in a
+/// permanently-matching state.
+pub const MAX_TRACK_RULE_DURATION_SECS: u32 = 24 * 60 * 60;
+
+/// Upper bound on `SnoozeMinutes.value` (issue #868): 24 h.
+pub const MAX_TRACK_RULE_SNOOZE_MINUTES: u32 = 24 * 60;
+
+/// Issue #869: shared cap on a presence profile's `id`. Also reused by
+/// `clamp_track_rule_action` for `TrackRuleAction::Profile { id }`.
+pub const MAX_PROFILE_ID_CHARS: usize = 32;
+
+/// Issue #869: trim / cap a presence profile id (and the matching
+/// `TrackRuleAction::Profile { id }`). Whitespace is stripped from the
+/// edges; the result is truncated to [`MAX_PROFILE_ID_CHARS`]; an empty
+/// id stays empty so the rule walker treats it as `Suppress`.
+pub fn clamp_profile_id(id: &mut String) {
+    let trimmed = id.trim().to_string();
+    if trimmed.chars().count() > MAX_PROFILE_ID_CHARS {
+        *id = trimmed.chars().take(MAX_PROFILE_ID_CHARS).collect();
+    } else {
+        *id = trimmed;
+    }
+}
+
+/// Issue #869: normalize the presence-profile list (issue #869).
+///
+/// - Names are trimmed + truncated to [`MAX_PROFILE_ID_CHARS`] and
+///   must be unique (case-sensitive); a duplicate is dropped so a
+///   hand-edited config cannot smuggle two profiles under the same id
+///   and confuse the tray / hotkey / CLI.
+/// - A profile whose name normalises to empty is dropped for the same
+///   reason `clamp_profile_id` clears empty ids.
+/// - The active-profile pointer is cleared if its name no longer
+///   matches any surviving profile (Settings just deleted it; a hand
+///   edit typo'd it; an upgrade dropped the whole list). The pointer
+///   is `Option<&mut Option<String>>` so the caller can pass either
+///   `&mut config.active_profile` or a local — both paths share one
+///   definition of "the pointer is invalid, so it must be cleared".
+pub fn clamp_presence_profiles(profiles: &mut Vec<PresenceProfile>, active: &mut Option<String>) {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    profiles.retain_mut(|profile| {
+        clamp_profile_id(&mut profile.name);
+        if profile.name.is_empty() {
+            log::warn!(
+                "[CFG] presence_profiles: dropped a profile with an empty name (issue #869)"
+            );
+            return false;
+        }
+        if !seen.insert(profile.name.clone()) {
+            log::warn!(
+                "[CFG] presence_profiles: dropped a duplicate profile named {:?} (issue #869)",
+                profile.name
+            );
+            return false;
+        }
+        // Cap the idle threshold so a hand-edited config cannot put
+        // the idle gate in a permanently-firing state.
+        if let Some(value) = profile.idle_away_after_seconds.as_mut() {
+            *value = (*value).min(86_400);
+        }
+        // A profile's `track_rules` overlay, when present, is itself
+        // a Vec<TrackRuleEntry> — re-run `clamp_rules` semantics on
+        // it so a profile stored before the rule extensions existed
+        // gets the same normalization every other rule path gets.
+        if let Some(rules) = profile.track_rules.as_mut() {
+            for rule in rules.iter_mut() {
+                clamp_track_rule_window(rule);
+                clamp_track_rule_action(rule);
+            }
+        }
+        true
+    });
+    if let Some(name) = active.as_ref() {
+        let still_present = profiles.iter().any(|p| &p.name == name);
+        if !still_present {
+            log::warn!(
+                "[CFG] active_profile: the stored profile {:?} no longer exists — cleared (issue #869)",
+                name
+            );
+            *active = None;
+        }
+    }
+}
+
+/// Issue #869: resolve the active profile overlay onto the base
+/// configuration at READ time. `effective_config` is the single
+/// non-mutating overlay path the tray / hotkey / CLI / Settings all
+/// share; it MUST NOT mutate the input (the spec calls this out
+/// explicitly — a "switch to profile X" call is a runtime state
+/// change, not a config rewrite).
+///
+/// Resolution rules:
+/// - `active_profile == None` → the input is returned unchanged.
+/// - `active_profile == Some(name)` but `name` does not match any
+///   profile → the input is returned unchanged (defensive parity
+///   with `clamp_presence_profiles`, which would have cleared the
+///   pointer; the runtime side keeps the read-only contract even if a
+///   caller forgot to clamp first).
+/// - Otherwise, every `Some(_)` field on the matched profile wins
+///   over the base field. `None` overlay fields fall through to the
+///   base unchanged. The `track_rules` overlay, when present, REPLACES
+///   the base rules list — the spec's documented "rules subset"
+///   semantics — so `Some(vec![])` is a legitimate "no rules while
+///   this profile is active" shape.
+pub fn effective_config(config: &AppConfig) -> AppConfig {
+    let Some(active_name) = config.active_profile.as_ref() else {
+        return config.clone();
+    };
+    let Some(profile) = config
+        .presence_profiles
+        .iter()
+        .find(|p| &p.name == active_name)
+    else {
+        // Defensive: the clamp normally clears this case, but the
+        // runtime side keeps the read-only contract. Return the base
+        // unchanged rather than panic / silently pick a wrong profile.
+        return config.clone();
+    };
+    let mut out = config.clone();
+    if let Some(v) = &profile.status_format {
+        out.teams.status_format = v.clone();
+    }
+    if let Some(v) = profile.clear_on_pause {
+        out.teams.clear_on_pause = v;
+    }
+    if let Some(v) = profile.availability_sync {
+        out.teams.availability_sync = v;
+    }
+    if let Some(v) = profile.gate_when_out_of_office {
+        out.teams.gate_when_out_of_office = v;
+    }
+    if let Some(v) = profile.gate_when_presenting {
+        out.teams.gate_when_presenting = v;
+    }
+    if let Some(v) = profile.idle_away_after_seconds {
+        out.teams.idle_away_after_seconds = v;
+    }
+    if let Some(pp) = &profile.preferred_presence {
+        out.teams.preferred_presence = pp.clone();
+    }
+    if let Some(rules) = &profile.track_rules {
+        out.status_rules.track_rules = rules.clone();
+    }
+    if let Some(notifications) = &profile.notifications {
+        out.notifications = notifications.clone();
+    }
+    out
 }
 
 /// Rewrite a rule's pair in place to its canonical form, or clear BOTH fields
@@ -946,8 +1141,13 @@ pub fn apply_log_level(cfg: &LoggingConfig) {
 ///
 /// Deliberately separate from [`default_schema_version`]: a file with no
 /// `schema_version` key predates 4.3.0 and is therefore a *v1* file, so the
-/// dispatcher must still run for it.
-pub const SCHEMA_VERSION: u32 = 2;
+/// dispatcher must still run for it. Issue #869: bumped from 2 to 3 for the
+/// `presence_profiles` / `active_profile` additions — both are
+/// `#[serde(default)]`, so pre-5.0 documents still load as `presence_profiles
+/// = vec![]` / `active_profile = None` without a migration step, but the
+/// version marker is bumped so a future dispatcher can tell which binary
+/// authored a given file.
+pub const SCHEMA_VERSION: u32 = 3;
 
 fn default_schema_version() -> u32 {
     1
@@ -1077,12 +1277,70 @@ fn default_track_rule_end() -> u32 {
     TRACK_RULE_DAY_MINUTES
 }
 
-/// One track-matching rule for issue #432: when `artist_substring` /
-/// `track_substring` (case-insensitive) both match the current track, the
-/// rule suppresses the status write for this track exactly like the
-/// presence gate — flowing through the same `gated_track_key`
-/// suppression + mid-track re-evaluation path. Empty substrings match
-/// everything (so a rule with only one field set still works).
+/// Issue #868: how `artist_substring` / `track_substring` are compared
+/// against the playing track. Substring is the legacy behaviour (case-
+/// insensitive `contains`); Exact requires a full case-insensitive
+/// equality; Glob treats the two substrings as case-insensitive glob
+/// patterns (`*` matches any run, `?` matches one character) evaluated
+/// independently. Album / show / device / playlist-uri remain substring
+/// matches regardless of `match_kind` — they are extension surfaces, not
+/// primary identifiers, and the Settings UI exposes only the substring
+/// field for them.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, ts_rs::TS, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
+pub enum TrackRuleMatchKind {
+    #[default]
+    Substring,
+    Exact,
+    Glob,
+}
+
+/// Issue #868: what happens when a track rule matches. `Suppress` is the
+/// documented "write nothing" default; `Replace` posts a fixed status text
+/// instead of the track template; `SnoozeMinutes { value }` arms the snooze
+/// for `value` minutes; `Profile { id }` switches the active presence
+/// profile for the duration of the track; `Presence { availability,
+/// activity }` applies a Teams presence pair while the track plays. The
+/// legacy `replacement_status` + `presence_availability` /
+/// `presence_activity` fields continue to feed the `Replace` / `Presence`
+/// variants during the transition — see `explain_rules` for the canonical
+/// "what would fire" projection.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
+pub enum TrackRuleAction {
+    /// Default: write nothing for this track (suppress the status update).
+    #[default]
+    Suppress,
+    /// Post a fixed status text instead of the track template.
+    Replace { status: String },
+    /// Snooze sync for `value` minutes (clamped into 1..=1440 by
+    /// `clamp_track_rule_action`).
+    SnoozeMinutes { value: u32 },
+    /// Switch the active presence profile for this track. `id` is the
+    /// profile name from `AppConfig::presence_profiles`; a missing id is
+    /// treated as `Suppress` by the rule walker.
+    Profile { id: String },
+    /// Apply a Teams presence pair for the duration of the track. The pair
+    /// is normalized against [`PRESENCE_COMBINATIONS`] by `clamp_rules`
+    /// exactly like the legacy `presence_availability` /
+    /// `presence_activity` fields.
+    Presence {
+        availability: String,
+        activity: String,
+    },
+}
+
+/// One track-matching rule for issue #432 / issue #868: when the
+/// substring conditions AND the album / show / device / playlist-uri
+/// extensions AND the duration gate all match, the rule's `action` runs.
+/// Issue #868 also adds `negate` so an empty match list still wins when
+/// the negation's conditions match (a "suppress on the absence of a
+/// device substring" pattern), plus `match_kind` and the new
+/// `action` enum. Empty substrings match everything (so a rule with
+/// only one field set still works); `min_duration_seconds == 0` skips the
+/// duration gate.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct TrackRuleEntry {
@@ -1092,8 +1350,43 @@ pub struct TrackRuleEntry {
     pub artist_substring: String,
     #[serde(default)]
     pub track_substring: String,
+    /// Issue #868: how `artist_substring` / `track_substring` are compared.
+    /// Defaults to `Substring` (the legacy case-insensitive `contains`).
+    #[serde(default)]
+    pub match_kind: TrackRuleMatchKind,
+    /// Issue #868: substring matched against the track's album title
+    /// (empty = match any album).
+    #[serde(default)]
+    pub album_substring: String,
+    /// Issue #868: substring matched against the episode's show name when
+    /// the playing item is a podcast episode (empty = match any show or any
+    /// track).
+    #[serde(default)]
+    pub show_substring: String,
+    /// Issue #868: substring matched against the active Spotify device's
+    /// name (empty = match any device).
+    #[serde(default)]
+    pub device_substring: String,
+    /// Issue #868: substring matched against the playing context URI
+    /// (e.g. `spotify:playlist:abc…`). Empty = match any context.
+    #[serde(default)]
+    pub playlist_uri: String,
+    /// Issue #868: minimum track / episode duration, in seconds, for this
+    /// rule to match. `0` (the default) disables the gate. Capped at 86 400
+    /// (24 h) by `clamp_track_rule_action` so a hand-edited config cannot
+    /// put the gate in a permanently-firing state.
+    #[serde(default)]
+    pub min_duration_seconds: u32,
+    /// Issue #868: when `true`, the rule matches the NEGATION of the
+    /// combined conditions (the "suppress unless something matches"
+    /// pattern). `false` (the default) keeps the legacy "match if the
+    /// conditions hold" semantics.
+    #[serde(default)]
+    pub negate: bool,
     /// Optional fixed status posted instead of suppressing (issue #432
-    /// "busy/focus" alternative). Empty = suppress silently.
+    /// "busy/focus" alternative, retained for the legacy
+    /// `TrackRuleAction::Replace { status: … }` projection).
+    /// Empty = suppress silently.
     #[serde(default)]
     pub replacement_status: String,
     /// setPresence pair applied while this rule matches (finding #634, issue
@@ -1104,6 +1397,11 @@ pub struct TrackRuleEntry {
     pub presence_availability: String,
     #[serde(default)]
     pub presence_activity: String,
+    /// Issue #868: the rule's effect. Defaults to `Suppress`, the legacy
+    /// "write nothing for this track" outcome. `clamp_rules` normalizes
+    /// the inner text / value / id fields into their canonical forms.
+    #[serde(default)]
+    pub action: TrackRuleAction,
     /// S4 (issue #672): ISO weekday numbers 1 (Mon)..=7 (Sun) this rule
     /// applies on; empty = every day — the same shape and semantics
     /// [`QuietHoursEntry::days`] uses, normalized by `clamp_rules` (see
@@ -1129,9 +1427,17 @@ impl Default for TrackRuleEntry {
             enabled: false,
             artist_substring: String::new(),
             track_substring: String::new(),
+            match_kind: TrackRuleMatchKind::default(),
+            album_substring: String::new(),
+            show_substring: String::new(),
+            device_substring: String::new(),
+            playlist_uri: String::new(),
+            min_duration_seconds: 0,
+            negate: false,
             replacement_status: String::new(),
             presence_availability: String::new(),
             presence_activity: String::new(),
+            action: TrackRuleAction::default(),
             days: default_track_rule_days(),
             start_minutes: default_track_rule_start(),
             end_minutes: default_track_rule_end(),
@@ -1210,6 +1516,65 @@ impl Default for NotificationsConfig {
             extra: BTreeMap::new(),
         }
     }
+}
+
+/// Issue #869: one named presence profile — a typed overlay of the
+/// base `AppConfig` the user can switch from the tray, a hotkey, or
+/// `presencejam --profile <id>`. Every overlay field is `Option<_>`
+/// so a profile can carry JUST a status format (a one-line tweak) or a
+/// full rules replacement (a "Focus" mode that suppresses every track
+/// except the user's whitelist). Names are unique and at most 32
+/// characters — [`clamp_presence_profiles`] enforces both at load and
+/// on every save. Profile overlays are resolved at READ time through
+/// [`effective_config`], so the on-disk base values stay untouched
+/// even while a non-default profile is active.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
+pub struct PresenceProfile {
+    /// Profile name, the id the tray / hotkey / CLI use to switch.
+    /// Case-sensitive, unique within `presence_profiles`, ≤ 32
+    /// characters after trim (`MAX_PROFILE_ID_CHARS`). A profile whose
+    /// name normalises to empty is dropped by `clamp_presence_profiles`.
+    pub name: String,
+    /// `None` keeps the base `teams.status_format`; `Some` overrides it
+    /// while the profile is active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clear_on_pause: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub availability_sync: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_when_out_of_office: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_when_presenting: Option<bool>,
+    /// Capped at 86 400 (24 h) by `clamp_presence_profiles` so a hand-
+    /// edited config cannot put the idle gate in a permanently-firing
+    /// state. `None` keeps the base value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_away_after_seconds: Option<u64>,
+    /// `None` keeps the base `teams.preferred_presence`; `Some` overlays
+    /// the whole `PreferredPresenceConfig` (enabled, availability,
+    /// activity, expiry) while the profile is active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_presence: Option<PreferredPresenceConfig>,
+    /// `None` keeps the base `status_rules.track_rules`; `Some`
+    /// replaces the whole list while the profile is active. The
+    /// `Some(vec![])` shape is a legitimate "no rules" overlay (a
+    /// silent profile that only flips the status format).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_rules: Option<Vec<TrackRuleEntry>>,
+    /// `None` keeps the base `notifications`; `Some` overlays each
+    /// notification class while the profile is active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notifications: Option<NotificationsConfig>,
+    /// Unknown / future keys NESTED inside this section, retained across
+    /// load→save so a section written by a newer binary is not silently
+    /// stripped by an older one (issue #938 — the section-level companion of
+    /// [`AppConfig::extra`]).
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[ts(skip)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 /// Default accelerator for the playback toggle (issue #676).
@@ -1408,6 +1773,25 @@ pub struct AppConfig {
     pub snooze_until: Option<String>,
     #[serde(default)]
     pub status_rules: StatusRulesConfig,
+    /// Issue #869: the named presence profiles the user can switch from the
+    /// tray, a hotkey or `presencejam --profile <id>`. Each profile is a
+    /// typed overlay of a SUBSET of the base config — `status_format`,
+    /// `clear_on_pause`, `availability_sync`, the gate flags, the preferred
+    /// presence, a rules subset and notifications. Switching resolves at
+    /// READ time through [`effective_config`], so a profile change NEVER
+    /// rewrites the on-disk base values. Empty by default, additive with
+    /// `#[serde(default)]` so a pre-5.0 config file loads with no profiles
+    /// and the `effective_config` overlay is a no-op.
+    #[serde(default)]
+    pub presence_profiles: Vec<PresenceProfile>,
+    /// Issue #869: the name of the active profile. `None` — the documented
+    /// pre-5.0 default — means "use the base configuration". A value that
+    /// does not match any profile name is treated as `None` by
+    /// [`clamp_presence_profiles`] (the active id is cleared at the IPC
+    /// boundary) so a hand-edited config cannot silently land on a phantom
+    /// profile and never resolve.
+    #[serde(default)]
+    pub active_profile: Option<String>,
     /// Global-shortcut bindings (issue #676). Additive with
     /// `#[serde(default)]`, so a pre-4.7 config file loads with the documented
     /// default accelerators rather than with no shortcuts at all.
@@ -1538,6 +1922,8 @@ impl Default for AppConfig {
             locale: None,
             snooze_until: None,
             status_rules: StatusRulesConfig::default(),
+            presence_profiles: Vec::new(),
+            active_profile: None,
             shortcuts: ShortcutsConfig::default(),
             extra: BTreeMap::new(),
             schema_version: default_schema_version(),
@@ -1862,7 +2248,7 @@ fn quarantine_corrupt_config(path: &std::path::Path, parse_err: impl std::fmt::D
 /// section can be replaced by its default without rejecting the rest.
 /// `typed_config_keys_match_the_serialized_schema` fails if this list and the
 /// struct ever disagree.
-const TYPED_CONFIG_KEYS: [&str; 13] = [
+const TYPED_CONFIG_KEYS: [&str; 15] = [
     "spotify",
     "teams",
     "polling",
@@ -1873,6 +2259,8 @@ const TYPED_CONFIG_KEYS: [&str; 13] = [
     "locale",
     "snooze_until",
     "status_rules",
+    "presence_profiles",
+    "active_profile",
     "shortcuts",
     "schema_version",
     "revision",
@@ -1946,6 +2334,8 @@ fn config_from_sections(root: serde_json::Map<String, serde_json::Value>) -> App
         locale: field_or_fallback(&root, "locale", Default::default()),
         snooze_until: field_or_fallback(&root, "snooze_until", Default::default()),
         status_rules: field_or_fallback(&root, "status_rules", Default::default()),
+        presence_profiles: field_or_fallback(&root, "presence_profiles", Default::default()),
+        active_profile: field_or_fallback(&root, "active_profile", Default::default()),
         shortcuts: field_or_fallback(&root, "shortcuts", Default::default()),
         schema_version: field_or_fallback(&root, "schema_version", default_schema_version()),
         revision: field_or_fallback(&root, "revision", 0),
@@ -2086,6 +2476,12 @@ fn load_config_from(path: &std::path::Path) -> Result<AppConfig, String> {
     clamp_teams(&mut config.teams);
     clamp_rules(&mut config.status_rules);
     clamp_logging(&mut config.logging);
+    // Issue #869: enforce name uniqueness + ≤ 32 chars + active-profile
+    // validity on every load, mirroring the other `clamp_*` calls. The
+    // active-profile pointer is cleared if the named profile has been
+    // removed (a hand-edited config or an upgrade that dropped profiles
+    // cannot silently land on a phantom id).
+    clamp_presence_profiles(&mut config.presence_profiles, &mut config.active_profile);
     // 4.7.0 (S9, issue #677): an expired snooze is reported here and REMOVED by
     // the guarded writers below, never by this reader.
     //
@@ -2510,6 +2906,12 @@ pub fn clamped_config(config: &AppConfig) -> AppConfig {
     clamp_teams(&mut cfg.teams);
     clamp_rules(&mut cfg.status_rules);
     clamp_logging(&mut cfg.logging);
+    // Issue #869: clamp the profile list + active id on every save
+    // (mirrors `clamp_rules` and `clamp_teams`). The active-profile
+    // pointer is cleared if its name no longer matches — a Settings
+    // delete that removes the active profile must not leave a phantom
+    // pointer behind.
+    clamp_presence_profiles(&mut cfg.presence_profiles, &mut cfg.active_profile);
     // 4.7.0 (S9, issue #677): a write that carries an already-expired deadline
     // (a whole-document save from a stale draft, or a resume click that raced
     // its own deadline) normalizes it away, so the in-memory copy, the file on
@@ -2943,6 +3345,12 @@ pub fn prepare_import(raw: &str) -> Result<PreparedImport, String> {
     clamp_teams(&mut config.teams);
     clamp_rules(&mut config.status_rules);
     clamp_logging(&mut config.logging);
+    // Issue #869: clamp the profile list + active id on every load
+    // (mirrors the other `clamp_*` calls). The active-profile pointer
+    // is cleared if its name no longer matches — a hand-edited config
+    // or an upgrade that dropped profiles cannot silently land on a
+    // phantom id.
+    clamp_presence_profiles(&mut config.presence_profiles, &mut config.active_profile);
     // Deliberately NOT `stamp_schema_version`: `migrate_config` raises the
     // version to the floor and passes a *newer* file through at its own
     // version, exactly as `load_config` does. Stamping would relabel a
@@ -3739,6 +4147,7 @@ mod tests {
             replacement_status: "Focus".to_string(),
             presence_availability: "DoNotDisturb".to_string(),
             presence_activity: "Presenting".to_string(),
+            ..TrackRuleEntry::default()
         });
         cfg.extra
             .insert("future_key".to_string(), serde_json::json!({"a": 1}));
@@ -4530,6 +4939,235 @@ mod tests {
         assert!(!back.teams.respect_manual_status);
         assert!(back.teams.gate_when_out_of_office);
         assert_eq!(back.status_rules.track_rules[0].presence_activity, "Away");
+    }
+
+    // ---------------------------------------------------------------
+    // Issue #869: presence-profile overlay (clamp + effective_config + export).
+    // ---------------------------------------------------------------
+
+    /// `clamp_presence_profiles` drops duplicates + empty names and clears the
+    /// active id when its name no longer survives — the spec's hand-edit
+    /// safety net.
+    #[test]
+    fn test_clamp_presence_profiles_dedupes_and_clears_orphan_active_id() {
+        let mut profiles = vec![
+            PresenceProfile {
+                name: "Focus".to_string(),
+                ..PresenceProfile::default()
+            },
+            // Empty name — must be dropped silently with a warn.
+            PresenceProfile {
+                name: "   ".to_string(),
+                ..PresenceProfile::default()
+            },
+            // Duplicate name — second occurrence dropped, first wins.
+            PresenceProfile {
+                name: "Focus".to_string(),
+                ..PresenceProfile::default()
+            },
+            // Distinct survivor.
+            PresenceProfile {
+                name: "Party".to_string(),
+                ..PresenceProfile::default()
+            },
+        ];
+        let mut active = Some("Nonexistent".to_string());
+        clamp_presence_profiles(&mut profiles, &mut active);
+        assert_eq!(
+            profiles.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            vec!["Focus", "Party"],
+            "the empty and duplicate profiles must be dropped in favour of the surviving list"
+        );
+        assert!(
+            active.is_none(),
+            "an active id that no longer matches must be cleared"
+        );
+        // The matched id survives.
+        let mut active = Some("Party".to_string());
+        clamp_presence_profiles(&mut profiles, &mut active);
+        assert_eq!(active.as_deref(), Some("Party"));
+    }
+
+    /// `clamp_presence_profiles` caps `idle_away_after_seconds` at 86 400 so a
+    /// hand-edited config cannot put the idle gate in a permanently-firing
+    /// state (mirrors the rule duration clamp).
+    #[test]
+    fn test_clamp_presence_profiles_caps_idle_away_seconds() {
+        let mut profiles = vec![PresenceProfile {
+            name: "Focus".to_string(),
+            idle_away_after_seconds: Some(7 * 86_400),
+            ..PresenceProfile::default()
+        }];
+        let mut active = None;
+        clamp_presence_profiles(&mut profiles, &mut active);
+        assert_eq!(
+            profiles[0].idle_away_after_seconds,
+            Some(86_400),
+            "idle_away_after_seconds must be capped at 24h"
+        );
+    }
+
+    /// Spec acceptance: switching a profile changes the effective status
+    /// format and gate flags while the on-disk base values stay untouched.
+    /// The overlay is read-only — `effective_config` MUST NOT mutate the
+    /// input. The base `AppConfig` is a clone here so the assertion is
+    /// literal, but the production code path receives a borrow of
+    /// `state.config` and so the in-memory store cannot be touched
+    /// either.
+    #[test]
+    fn test_effective_config_overlays_without_mutating_base() {
+        let base = AppConfig {
+            teams: TeamsConfig {
+                status_format: "🎵 {artist} - {track} 🎧".to_string(),
+                gate_when_out_of_office: false,
+                gate_when_presenting: false,
+                idle_away_after_seconds: 600,
+                availability_sync: true,
+                ..TeamsConfig::default()
+            },
+            active_profile: Some("Focus".to_string()),
+            presence_profiles: vec![PresenceProfile {
+                name: "Focus".to_string(),
+                status_format: Some("🎧 In focus — {artist}".to_string()),
+                gate_when_out_of_office: Some(true),
+                gate_when_presenting: Some(true),
+                idle_away_after_seconds: Some(60),
+                availability_sync: Some(false),
+                ..PresenceProfile::default()
+            }],
+            ..AppConfig::default()
+        };
+        let snapshot = base.clone();
+        let effective = effective_config(&base);
+        // Base stays untouched.
+        assert_eq!(base.teams.status_format, snapshot.teams.status_format);
+        assert_eq!(
+            base.teams.gate_when_out_of_office,
+            snapshot.teams.gate_when_out_of_office
+        );
+        assert_eq!(
+            base.teams.gate_when_presenting,
+            snapshot.teams.gate_when_presenting
+        );
+        assert_eq!(
+            base.teams.idle_away_after_seconds,
+            snapshot.teams.idle_away_after_seconds
+        );
+        assert_eq!(
+            base.teams.availability_sync,
+            snapshot.teams.availability_sync
+        );
+        // Overlay applied to the effective copy.
+        assert_eq!(effective.teams.status_format, "🎧 In focus — {artist}");
+        assert!(effective.teams.gate_when_out_of_office);
+        assert!(effective.teams.gate_when_presenting);
+        assert_eq!(effective.teams.idle_away_after_seconds, 60);
+        assert!(!effective.teams.availability_sync);
+    }
+
+    /// `effective_config` is a no-op when no profile is active.
+    #[test]
+    fn test_effective_config_returns_base_unchanged_when_no_profile_is_active() {
+        let base = AppConfig::default();
+        let effective = effective_config(&base);
+        assert_eq!(effective.teams.status_format, base.teams.status_format);
+        assert_eq!(
+            effective.teams.gate_when_out_of_office,
+            base.teams.gate_when_out_of_office
+        );
+        // An orphan active id (not in the list) also disables the overlay.
+        let mut with_orphan = base.clone();
+        with_orphan.active_profile = Some("Nonexistent".to_string());
+        let effective_orphan = effective_config(&with_orphan);
+        assert_eq!(
+            effective_orphan.teams.status_format,
+            base.teams.status_format
+        );
+    }
+
+    /// A profile's `track_rules` overlay REPLACES the base list (not
+    /// appends); `Some(vec![])` is a legitimate "no rules while this
+    /// profile is active" shape — a silent profile that only flips the
+    /// status format.
+    #[test]
+    fn test_effective_config_replaces_track_rules_when_overlay_uses_empty_list() {
+        let base_rules = vec![TrackRuleEntry {
+            enabled: true,
+            artist_substring: "Foo".to_string(),
+            ..TrackRuleEntry::default()
+        }];
+        let mut base = AppConfig::default();
+        base.status_rules.track_rules = base_rules.clone();
+        base.active_profile = Some("Silent".to_string());
+        base.presence_profiles = vec![PresenceProfile {
+            name: "Silent".to_string(),
+            track_rules: Some(Vec::new()),
+            ..PresenceProfile::default()
+        }];
+        let effective = effective_config(&base);
+        assert!(
+            effective.status_rules.track_rules.is_empty(),
+            "Some(vec![]) must REPLACE the base list, not append"
+        );
+        assert_eq!(base.status_rules.track_rules.len(), 1, "base unchanged");
+    }
+
+    /// Round-trip through export + import preserves both the profile list
+    /// and the active id. The export code path is the same one
+    /// `export_config` uses, so this pins the on-disk contract for the
+    /// user's `--profile` switches.
+    #[test]
+    fn test_presence_profiles_and_active_id_round_trip_through_export_import() {
+        let cfg = AppConfig {
+            presence_profiles: vec![
+                PresenceProfile {
+                    name: "Focus".to_string(),
+                    status_format: Some("🎧 {artist}".to_string()),
+                    ..PresenceProfile::default()
+                },
+                PresenceProfile {
+                    name: "Party".to_string(),
+                    availability_sync: Some(true),
+                    ..PresenceProfile::default()
+                },
+            ],
+            active_profile: Some("Focus".to_string()),
+            ..AppConfig::default()
+        };
+
+        let exported = serde_json::to_string(&cfg).expect("profile overlay must serialise");
+        let back: AppConfig = serde_json::from_str(&exported).expect("profile overlay must parse");
+
+        assert_eq!(back.presence_profiles.len(), 2);
+        assert_eq!(back.presence_profiles[0].name, "Focus");
+        assert_eq!(
+            back.presence_profiles[0].status_format.as_deref(),
+            Some("🎧 {artist}")
+        );
+        assert_eq!(back.presence_profiles[1].name, "Party");
+        assert_eq!(back.presence_profiles[1].availability_sync, Some(true));
+        assert_eq!(back.active_profile.as_deref(), Some("Focus"));
+    }
+
+    /// `prepare_import` survives a malformed / over-long profile name the
+    /// same way `clamp_presence_profiles` does on load: it drops the
+    /// empty entries and clears the active id, leaving the rest of the
+    /// config (and the surviving profiles) intact.
+    #[test]
+    fn test_prepare_import_clears_orphan_active_profile_id() {
+        let raw = r#"{
+            "schema_version": 3,
+            "presence_profiles": [
+                {"name": "Focus"},
+                {"name": ""}
+            ],
+            "active_profile": "Vanished",
+            "autostart": false
+        }"#;
+        let prepared = prepare_import(raw).expect("must accept a valid shape");
+        assert_eq!(prepared.config.active_profile, None);
+        assert_eq!(prepared.config.presence_profiles.len(), 1);
+        assert_eq!(prepared.config.presence_profiles[0].name, "Focus");
     }
 
     // ---------------------------------------------------------------

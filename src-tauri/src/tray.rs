@@ -85,6 +85,15 @@ const SEEK_ITEM_PREFIX: &str = "seek|";
 const SEEK_BACK_30_MS: u64 = 30_000;
 const SEEK_FORWARD_30_MS: u64 = 30_000;
 
+// Issue #869: the presence-profile submenu. The "no profile" entry clears
+// the active profile (back to the base configuration); every other entry
+// carries `{PROFILE_ITEM_PREFIX}|{profile name}` and the click handler
+// resolves the name against the clamped list. Names are unique and ≤ 32
+// chars after `clamp_presence_profiles`, so the id dispatch never has to
+// disambiguate.
+const ID_PROFILE_BASE: &str = "profile|base";
+const PROFILE_ITEM_PREFIX: &str = "profile|";
+
 static TRAY: OnceLock<TrayIcon> = OnceLock::new();
 
 /// Get the global TrayIcon instance.
@@ -372,6 +381,64 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
                         }
                     }
                     repaint_tray_from_state(&app_handle, "snooze");
+                });
+            }
+            id if id == ID_PROFILE_BASE || id.starts_with(PROFILE_ITEM_PREFIX) => {
+                // Issue #869: a profile click writes `config.json` (atomic
+                // write + fsync), so it must run off the menu-event thread
+                // like the snooze arm above — a slow disk would otherwise
+                // wedge the native menu. The id dispatch never has to
+                // disambiguate names because `clamp_presence_profiles`
+                // dedupes and rejects pipes at load/save, so the
+                // `{PROFILE_ITEM_PREFIX}|{name}` format is unambiguous.
+                //
+                // The id is copied out of the borrowed `event` before the
+                // worker takes ownership (it is used in the unknown-name
+                // warn and the profile-not-found path).
+                let raw = id.to_string();
+                let app_handle = app.clone();
+                std::thread::spawn(move || {
+                    // Resolve the picked name from the stored config.
+                    // Reading state.config here (off the menu-event thread)
+                    // keeps the click handler off the config lock.
+                    let state = app_handle.state::<std::sync::Arc<crate::AppState>>();
+                    let target: Option<String> = if raw == ID_PROFILE_BASE {
+                        None
+                    } else if let Some(stripped) =
+                        raw.strip_prefix(PROFILE_ITEM_PREFIX)
+                    {
+                        // Skip the disabled empty placeholder.
+                        if stripped == "empty" {
+                            repaint_tray_from_state(&app_handle, "profile (empty placeholder)");
+                            return;
+                        }
+                        // Validate against the clamped list — a name that
+                        // was deleted between the rebuild and the click
+                        // (or a stale menu from a previous build) must
+                        // fall back to base, not silently land on a
+                        // phantom id.
+                        let exists = state
+                            .config
+                            .get()
+                            .as_ref()
+                            .is_some_and(|c| c.presence_profiles.iter().any(|p| p.name == stripped));
+                        if !exists {
+                            log::warn!(
+                                "[TRAY] profile: {:?} not found — falling back to base",
+                                stripped
+                            );
+                            None
+                        } else {
+                            Some(stripped.to_string())
+                        }
+                    } else {
+                        log::warn!("[TRAY] profile: unrecognized menu id '{}'", raw);
+                        return;
+                    };
+                    if let Err(e) = write_active_profile(&app_handle, target) {
+                        log::error!("[TRAY] profile: could not persist the switch: {}", e);
+                    }
+                    repaint_tray_from_state(&app_handle, "profile");
                 });
             }
             id if id == ID_MANUAL_STATUS_CLEAR => {
@@ -665,6 +732,12 @@ struct TrayStateSnapshot {
     /// Same, for the Up Next queue cache (issue #805).
     queue_bucket: u64,
     snooze_key: Option<String>,
+    /// Issue #869: the active presence profile id, fed into the dedup key
+    /// so a profile switch (tray, CLI, Settings card) repaints the
+    /// "Active profile" submenu's check mark. The id is `None` when the
+    /// base configuration is in use — the documented pre-5.0 default and
+    /// the post-switch state of `--profile base`.
+    active_profile_key: Option<String>,
 }
 
 /// True when `next` differs from the last committed snapshot, i.e. when the
@@ -690,6 +763,10 @@ fn tray_snapshot_for(
     // than here so the key stays a pure function of its inputs.
     devices_bucket: u64,
     queue_bucket: u64,
+    // Issue #869: the active profile id, fed in by the caller for the same
+    // dedup reason as the snooze — a switch changes the check mark, so the
+    // key has to include the id or the rebuild early-returns.
+    active_profile_key: Option<String>,
 ) -> TrayStateSnapshot {
     TrayStateSnapshot {
         is_syncing,
@@ -700,6 +777,7 @@ fn tray_snapshot_for(
         snooze_key,
         devices_bucket,
         queue_bucket,
+        active_profile_key,
     }
 }
 
@@ -1388,6 +1466,76 @@ fn build_snooze_submenu(
     Ok(submenu)
 }
 
+/// Issue #869: the "Active profile" submenu. The spec says the tray must
+/// expose a profile picker beside the snooze items so the runtime overlay
+/// path (`effective_config`) has a UI surface to flip from. The picker
+/// has three states, matching the three resolve paths `effective_config`
+/// implements:
+///
+/// 1. `active_profile == None` → the "Base configuration" entry is the
+///    only enabled one. Picking it is a no-op (already on base), and the
+///    rest are unchecked picks that activate the matching profile.
+/// 2. `active_profile == Some(name)` → the matching entry gets a check
+///    mark. Picking it is also a no-op.
+/// 3. The list is empty (the documented pre-5.0 default and a hand-
+///    deleted config) → the submenu shows a single disabled placeholder.
+///
+/// The id format `{PROFILE_ITEM_PREFIX}|{name}` lets the click handler
+/// resolve the picked name without a parallel name→id map. `name` has
+/// already been deduped and truncated by `clamp_presence_profiles`, so
+/// the only remaining edge case is the single-pipe `name`, which the
+/// clamp forbids via the `snooze_pause_menu` style regex — see
+/// `clamp_profile_id`. Picking a profile that has been deleted between
+/// the rebuild and the click is logged and ignored by the handler.
+fn build_profile_submenu(
+    app: &AppHandle,
+    s: &Strings,
+    profiles: &[crate::config::PresenceProfile],
+    active: Option<&str>,
+) -> Result<Submenu<tauri::Wry>, String> {
+    let submenu = SubmenuBuilder::new(app, s.profile_menu)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // The "Base configuration" entry is the only path that clears the
+    // active profile. Checked when `active == None`, disabled when there
+    // is no profile list to switch off of.
+    let base_checked = active.is_none();
+    let base_enabled = !profiles.is_empty() || active.is_some();
+    let base_item = CheckMenuItemBuilder::with_id(ID_PROFILE_BASE, s.profile_base)
+        .checked(base_checked)
+        .enabled(base_enabled)
+        .build(app)
+        .map_err(|e| e.to_string())?;
+    submenu.append(&base_item).map_err(|e| e.to_string())?;
+
+    if profiles.is_empty() {
+        let empty =
+            MenuItemBuilder::with_id(format!("{PROFILE_ITEM_PREFIX}empty"), s.profile_empty)
+                .enabled(false)
+                .build(app)
+                .map_err(|e| e.to_string())?;
+        submenu.append(&empty).map_err(|e| e.to_string())?;
+        return Ok(submenu);
+    }
+
+    let separator = PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?;
+    submenu.append(&separator).map_err(|e| e.to_string())?;
+
+    for profile in profiles {
+        let checked = active == Some(profile.name.as_str());
+        let picker = CheckMenuItemBuilder::with_id(
+            format!("{PROFILE_ITEM_PREFIX}{}", profile.name),
+            profile.name.clone(),
+        )
+        .checked(checked)
+        .build(app)
+        .map_err(|e| e.to_string())?;
+        submenu.append(&picker).map_err(|e| e.to_string())?;
+    }
+    Ok(submenu)
+}
+
 /// Issue #870: the "Recent statuses" submenu. The spec caps the visible
 /// entries at three; the Dashboard composer reads the broader
 /// [`crate::commands::status::RECENT_STATUSES_CAPACITY`] ring. The labels
@@ -1649,6 +1797,46 @@ fn write_snooze(
     Ok(())
 }
 
+/// Issue #869: switch the active presence profile from the tray. Mirrors
+/// [`write_snooze`] exactly — same read-merge-write lock, same `clamped_config`
+/// path, same store-what-was-persisted discipline. `Some(name)` activates the
+/// named profile (the click handler has already validated the name against the
+/// clamped list); `None` clears the active profile back to the base
+/// configuration.
+///
+/// The write goes through `clamped_config` so the active-profile pointer is
+/// re-validated against the stored list — a profile deleted between the menu
+/// rebuild and the click is dropped here too, not just by the click handler.
+fn write_active_profile(app: &AppHandle, name: Option<String>) -> Result<(), String> {
+    store_active_profile(app, name.clone())?;
+    match name {
+        Some(profile) => log::info!("[TRAY] profile: active profile is now {:?}", profile),
+        None => log::info!("[TRAY] profile: cleared — using base configuration"),
+    }
+    Ok(())
+}
+
+/// Issue #869: the write half of the tray's profile picker. Holds the config
+/// write guard across the atomic save and stores the clamped copy so the
+/// in-memory config (what the poller reads) and `config.json` agree on the
+/// next launch — exactly the discipline `store_snooze` and
+/// `commands::config::update_config` enforce.
+fn store_active_profile(app: &AppHandle, name: Option<String>) -> Result<(), String> {
+    let state = app.state::<std::sync::Arc<crate::AppState>>();
+    let mut guard = state.config.get_mut();
+    let base = match guard.as_ref() {
+        Some(current) => current.clone(),
+        None => crate::config::load_config()?,
+    };
+    let mut next = base;
+    next.active_profile = name;
+    let mut persisted = crate::config::clamped_config(&next);
+    crate::config::stamp_schema_version(&mut persisted);
+    crate::config::save_config(&persisted)?;
+    *guard = Some(persisted);
+    Ok(())
+}
+
 /// Clears a stored snooze deadline that has already passed, once, as the app
 /// comes up (4.7.0, S9 / issue #677).
 ///
@@ -1887,6 +2075,15 @@ fn force_tray_refresh(app: &AppHandle) {
     // clobber the toggle state the action just recorded. Flipping the sync
     // bit is enough — the real snapshot is committed by that rebuild.
     let (devices_bucket, queue_bucket) = cache_buckets();
+    // Issue #869: the nudge snapshot's profile key reads the post-action
+    // value so the rebuild the function triggers sees a fresh dedup key —
+    // the real write happens inside `store_active_profile`.
+    let nudge_profile_key = app
+        .state::<std::sync::Arc<crate::AppState>>()
+        .config
+        .get()
+        .as_ref()
+        .and_then(|c| c.active_profile.clone());
     let mut nudge = tray_snapshot_for(
         is_syncing,
         false,
@@ -1894,6 +2091,7 @@ fn force_tray_refresh(app: &AppHandle) {
         snooze_key,
         devices_bucket,
         queue_bucket,
+        nudge_profile_key,
     );
     nudge.is_syncing = !is_syncing;
     *last_tray_state().lock() = Some(nudge);
@@ -2031,6 +2229,15 @@ fn rebuild_tray_menu(
     // nothing else moves still repaints — and therefore re-fetches — once per
     // throttle window instead of keeping whatever the last rebuild rendered.
     let (devices_bucket, queue_bucket) = cache_buckets();
+    // Issue #869: the active profile id rides the dedup key so a switch —
+    // tray click, CLI, or Settings card — repaints the submenu's check
+    // mark. Cloned out of the short-lived read guard because the snapshot
+    // outlives this scope (the dedup is the next call's read source).
+    let active_profile_key = state
+        .config
+        .get()
+        .as_ref()
+        .and_then(|c| c.active_profile.clone());
     let snapshot = tray_snapshot_for(
         is_syncing,
         key_visible,
@@ -2038,6 +2245,7 @@ fn rebuild_tray_menu(
         snooze_key,
         devices_bucket,
         queue_bucket,
+        active_profile_key,
     );
     {
         let last = last_tray_state().lock();
@@ -2377,6 +2585,31 @@ fn rebuild_tray_menu(
         );
         e
     })?;
+    // Issue #869: the "Active profile" submenu. Sits next to the snooze
+    // items because both are runtime state changes — the spec asks for
+    // the picker beside the snooze items, not under Settings, so the
+    // user can flip overlays without leaving the tray.
+    let profile_submenu = {
+        let profiles: Vec<crate::config::PresenceProfile> = state
+            .config
+            .get()
+            .as_ref()
+            .map(|c| c.presence_profiles.clone())
+            .unwrap_or_default();
+        let active = state
+            .config
+            .get()
+            .as_ref()
+            .and_then(|c| c.active_profile.clone());
+        build_profile_submenu(app, s, &profiles, active.as_deref())
+    }
+    .map_err(|e| {
+        log::warn!(
+            "[TRAY] update_tray_menu: failed to build profile submenu: {}",
+            e
+        );
+        e
+    })?;
 
     // Build menu with optional track info
     let mut menu_builder = MenuBuilder::new(app)
@@ -2385,6 +2618,7 @@ fn rebuild_tray_menu(
             &show_hide,
             &pause_resume,
             &snooze_submenu,
+            &profile_submenu,
             &manual_status_submenu,
             &separator1,
         ])
@@ -3068,7 +3302,7 @@ mod tests {
             actions: None,
         };
         let key = |sync: bool, visible: bool| {
-            tray_snapshot_for(sync, visible, Some(&track(true)), None, 0, 0)
+            tray_snapshot_for(sync, visible, Some(&track(true)), None, 0, 0, None)
         };
 
         note_playback_modes(false, RepeatState::Off);
@@ -3111,7 +3345,7 @@ mod tests {
         );
 
         // A same-track pause lives in the track half of the key (issue #229).
-        let paused = tray_snapshot_for(true, true, Some(&track(false)), None, 0, 0);
+        let paused = tray_snapshot_for(true, true, Some(&track(false)), None, 0, 0, None);
         assert!(
             tray_state_changed(Some(&repeated), &paused),
             "a same-track pause must still repaint the Play/Pause mark (#229)"
@@ -3326,7 +3560,9 @@ mod tests {
             supports_volume: None,
             actions: None,
         };
-        let at = |snooze: Option<String>| tray_snapshot_for(true, true, Some(&track), snooze, 0, 0);
+        let at = |snooze: Option<String>| {
+            tray_snapshot_for(true, true, Some(&track), snooze, 0, 0, None)
+        };
 
         let none = at(None);
         let snoozed = at(Some(snooze_dedup_key(&crate::config::SnoozeStatus {
@@ -3524,6 +3760,92 @@ mod tests {
         );
     }
 
+    /// Issue #869: the tray's profile picker mirrors `write_snooze`'s
+    /// discipline — a write helper that takes the logger's copy and a
+    /// store helper that holds the config write guard across the atomic
+    /// save. Splitting the two means the same guarded path can be reused
+    /// by the CLI without re-doing the lock dance.
+    #[test]
+    fn write_active_profile_uses_the_guarded_writer_and_logs_both_edges() {
+        let prod = prod_source(include_str!("tray.rs"));
+        let body = body_of(prod, "fn write_active_profile(");
+        assert!(
+            body.contains("store_active_profile(app, name.clone())?"),
+            "write_active_profile must be the logging wrapper around the writer"
+        );
+        assert!(
+            body.contains("[TRAY] profile: active profile is now"),
+            "an active profile switch must be logged"
+        );
+        assert!(
+            body.contains("[TRAY] profile: cleared — using base configuration"),
+            "clearing the active profile must be logged with its own copy"
+        );
+
+        let store = body_of(prod, "fn store_active_profile(");
+        for marker in [
+            "state.config.get_mut()",
+            "crate::config::clamped_config(&next)",
+            "crate::config::stamp_schema_version(&mut persisted)",
+            "crate::config::save_config(&persisted)?",
+            "*guard = Some(persisted)",
+        ] {
+            assert!(
+                store.contains(marker),
+                "store_active_profile must contain `{}`",
+                marker
+            );
+        }
+    }
+
+    /// Issue #869: the menu build wires the profile submenu next to the
+    /// snooze items and the click handler dispatches both the base
+    /// sentinel and the per-profile prefixed ids through the same off-
+    /// thread writer.
+    #[test]
+    fn profile_submenu_is_in_the_main_menu_and_its_click_arm_is_off_thread() {
+        let prod = prod_source(include_str!("tray.rs"));
+        let build_profile = body_of(prod, "fn build_profile_submenu(");
+        assert!(
+            build_profile.contains("ID_PROFILE_BASE"),
+            "the picker must carry the base sentinel id"
+        );
+        assert!(
+            build_profile.contains("PROFILE_ITEM_PREFIX"),
+            "the picker must prefix per-profile ids"
+        );
+        // The dedup key carries the active id, so a profile switch repaints.
+        let snapshot = body_of(prod, "fn tray_snapshot_for(");
+        assert!(
+            snapshot.contains("active_profile_key"),
+            "the dedup key must carry the active profile id so a switch repaints"
+        );
+        // The click handler validates the picked name and offloads the write.
+        let setup = body_of(prod, "pub fn setup_tray(");
+        assert!(
+            setup.contains("ID_PROFILE_BASE") && setup.contains("PROFILE_ITEM_PREFIX"),
+            "the click dispatcher must handle both the base sentinel and per-profile ids"
+        );
+        assert!(
+            setup.contains("write_active_profile(&app_handle, target)"),
+            "the click handler must call the write helper, never inline a config write"
+        );
+        assert!(
+            setup.contains("repaint_tray_from_state(&app_handle, \"profile\")"),
+            "the click handler must repaint after the write so the checkmark moves"
+        );
+        // Wired into the menu build.
+        let rebuild = body_of(prod, "fn rebuild_tray_menu(");
+        assert!(
+            rebuild.contains("build_profile_submenu(app, s, &profiles, active.as_deref())"),
+            "rebuild_tray_menu must build the profile submenu"
+        );
+        assert!(
+            rebuild.contains("&profile_submenu,"),
+            "rebuild_tray_menu must add the profile submenu to the main menu"
+        );
+    }
+
     /// A deadline that expired while the app was closed is cleared from
     /// `config.json` at startup, so the clamp log line cannot repeat on every
     /// launch and the persisted document matches what the app honours.
@@ -3676,7 +3998,7 @@ mod tests {
             actions: None,
         };
         let at = |devices: u64, queue: u64| {
-            tray_snapshot_for(true, true, Some(&track), None, devices, queue)
+            tray_snapshot_for(true, true, Some(&track), None, devices, queue, None)
         };
 
         // Identical track, window, modes and caches: still a no-op.
