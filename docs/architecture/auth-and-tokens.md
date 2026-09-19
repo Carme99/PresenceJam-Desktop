@@ -94,7 +94,12 @@ and `sessionId` is always the app's Azure AD client id
   access-token JWT (`teams.rs::graph_oid_from_access_token`), which is
   present once `profile` is in the scope string. Only five
   availability/activity combinations are valid; PresenceJam uses
-  `Available`/`Available` (expiration `PT4H`) for availability sync.
+  `Available`/`Available` for availability sync, and the expiration is
+  derived rather than fixed — `poll_once.rs::presence_expiration_duration`
+  adds one re-arm period (`AVAILABILITY_REARM_SECONDS`) to the remaining
+  listening time and clamps the result into `PT5M`–`PT4H`, reserving
+  `PT4H` for the unknown-position and live-stream branches (#165). See the
+  presence-gating section of `polling.md` for the 240 s re-arm cadence.
 - **`clear_teams_presence()`** — `POST /me/presence/clearPresence`, same
   `/users/{oid}` fallback; a 404 on either path is documented success (the
   session is already gone).

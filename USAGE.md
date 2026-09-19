@@ -166,25 +166,22 @@ All four are clamped by the backend (`config.rs::clamp_polling`): default 5–30
 
 All four classes are stored in `config.json` under `notifications` (`track_change`, `sync_stopped`, `auth_required`, `update_staged`); an install that still carries the pre-4.7 `notificationsEnabled` flag migrates it into `track_change` once, on the first save. Track changes keep their 5 s throttle and replace-in-place id; the other three notify at most once per occurrence. The track-change toast is dispatched by the Dashboard, the other three by the always-mounted layout, so they arrive whichever view is on screen — and the first one you enable may ask your OS for notification permission.
 
-### General
-
-| Launch at login | Start PresenceJam automatically when your OS boots |
-| Language | Interface language: English, Deutsch (German), or Français (French). Defaults to your OS/browser language. The choice is stored in `config.json` (`locale`) and is the single source of truth for the window, the tray menu and the native application menu — an unknown value falls back to English. Switching it also retags `<html lang>` for screen readers and applies the locale's number and plural rules (French counts `0` as singular). Detached Logs and Settings windows follow the switch. |
-| Start minimized | Open the app minimized to the tray (window hidden on launch). There is no Settings toggle — set `teams.start_minimized` to `true` in `config.json` (consumed at `src-tauri/src/lib.rs`). On macOS, it also switches the app's activation policy to `Accessory`, removing the dock icon and menu-bar app menu — the app becomes a pure tray-resident app. The dock icon reappears when you set the field back to `false` (no restart needed). |
-
 ### Appearance
 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | Theme | Dark | **Dark**, **Light** or **System**. *System* follows your operating system's appearance live — switching the desktop between light and dark repaints the app immediately, with no restart — while an explicit Dark or Light stays pinned and is never overridden by the OS. The pre-paint bootstrap resolves the stored preference, so a System user never sees a flash of the wrong theme on launch. |
 | Compact spacing | Off | Tightens the spacing and type scale (a token-scale override applied before first paint, not a set of component variants). It is independent of the theme, including the System option. |
+| Launch at login | Off | Start PresenceJam automatically when your OS boots |
+| Language | System | Interface language: English, Deutsch (German), or Français (French). Defaults to your OS/browser language. The choice is stored in `config.json` (`locale`) and is the single source of truth for the window, the tray menu and the native application menu — an unknown value falls back to English. Switching it also retags `<html lang>` for screen readers and applies the locale's number and plural rules (French counts `0` as singular). Detached Logs and Settings windows follow the switch. |
+| Start minimized | Off | Open the app minimized to the tray (window hidden on launch). There is no Settings toggle — set `teams.start_minimized` to `true` in `config.json` (consumed at `src-tauri/src/lib.rs`). On macOS, it also switches the app's activation policy to `Accessory`, removing the dock icon and menu-bar app menu — the app becomes a pure tray-resident app. The dock icon reappears when you set the field back to `false` (no restart needed). |
 
 ### Logging
 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | Write a log file | On | Turns the on-disk log off entirely; the in-app Log Viewer still works from the live buffer. Takes effect immediately. |
-| Log level | Info | `Error`, `Warn`, `Info` or `Debug`. Takes effect immediately. |
+| Log level | Info | `Off`, `Error`, `Warn`, `Info`, `Debug` or `Trace`. Takes effect immediately. |
 | Maximum log file size (MB) | 10 | The live file rotates once it reaches this size. Accepted range 1–500 MB. |
 | Archived log files to keep | 3 | How many rotated files are kept. Accepted range 1–20. The live log is kept **in addition** to the archives, so the folder holds at most `keep_files + 1` files — one more than the number in the field. |
 
@@ -271,6 +268,8 @@ The **Log Viewer** in-app lets you browse these logs without opening the filesys
 | `WARN` | Unexpected but recoverable (e.g., slow network) |
 | `INFO` | Normal operations (track changed, status updated) |
 | `DEBUG` | Verbose — every polling iteration logged |
+| `TRACE` | Very verbose — adds the per-iteration detail a support report needs |
+| `OFF` | Silences the logger (nothing is recorded), exactly like clearing **Write a log file** |
 
 The current log level is set in **Settings → Logging** (the same value lives in `config.json` under `logging.log_level`), and that card also turns file logging off entirely and sets the size/retention fields above.
 

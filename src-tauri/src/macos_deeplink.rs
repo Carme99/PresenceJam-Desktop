@@ -46,8 +46,15 @@
 //!   `OSStatus` otherwise. It never throws, never blocks on user input, and
 //!   never prompts.
 //! - LaunchServices is thread-safe. We call it from the Tauri `setup`
-//!   closure — once, before any window is shown — and latch the call so the
-//!   process performs this global OS-state mutation at most once.
+//!   closure, after the config-declared windows exist (`tauri.conf.json`
+//!   declares the main window visible, so it is already on screen) and
+//!   before the tray/menu wiring, and latch the call so the process
+//!   performs this global OS-state mutation at most once. The later
+//!   ordering is safe because what makes an early interception harmless is
+//!   the PKCE launch binding, not window timing — see
+//!   `AppState::launch_binding` and `handle_spotify_callback`. A genuinely
+//!   pre-window claim would need a plugin init hook and is a separate,
+//!   deliberate change.
 //! - Apple marks the symbol deprecated as of macOS 12 (superseded by
 //!   `-[NSWorkspace setDefaultApplicationAtURL:toOpenURLsWithScheme:completionHandler:]`)
 //!   but it remains present and functional, and it is the only *synchronous*
