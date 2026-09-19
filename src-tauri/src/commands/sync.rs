@@ -38,6 +38,28 @@ fn missing_session_code(state: &AppState) -> Option<&'static str> {
     None
 }
 
+/// Issue #941: publish the claim-window owner sentinel.
+///
+/// `try_claim()` sets only `is_syncing`; the poller's own `ThreadId` is
+/// stored later, after `spawn_blocking` has queued (and run)
+/// `start_polling`. That window therefore held a flag with no owner, and
+/// `stop_polling_and_join`'s no-handle branch read `thread_id == None` as
+/// "wedged flag" and cleared it out from under the start: the fresh
+/// poller's first loop check then saw `is_syncing == false` and broke
+/// immediately, so a Start that should have run never polled and a
+/// "sync stopped unexpectedly" notification fired for a stop the user
+/// issued. The window covers the whole `spawn_blocking` queue wait, so it
+/// widens under blocking-pool load.
+///
+/// Publishing the claiming thread's id as owner until the real id replaces
+/// it makes the window look like what it is — a live owner — so a stop
+/// arriving in it leaves the flag to the start instead of stealing it.
+fn publish_start_sentinel(state: &AppState) -> std::thread::ThreadId {
+    let tid = std::thread::current().id();
+    *state.polling.thread_id_mut() = Some(tid);
+    tid
+}
+
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct SyncStatus {
@@ -134,6 +156,12 @@ pub async fn start_syncing_with(state: Arc<AppState>, app: &AppHandle) -> Result
     }
     log::info!("{CMD} start_syncing: is_syncing flag set to true");
 
+    // Issue #941: own the claim window immediately. Until this line the
+    // flag was set with `thread_id == None`, which a concurrent stop read
+    // as a wedged flag and cleared.
+    let sentinel = publish_start_sentinel(&state);
+    log::debug!("{CMD} start_syncing: claim-window owner sentinel {sentinel:?} published");
+
     // #215: start_polling thread creation is offloaded to the blocking pool
     // so the async command does not block the Tauri async runtime. The
     // returned JoinHandle is stored under the polling lock.
@@ -143,7 +171,19 @@ pub async fn start_syncing_with(state: Arc<AppState>, app: &AppHandle) -> Result
         polling::start_polling(state_for_spawn, app_for_spawn)
     })
     .await
-    .map_err(|e| format!("start_syncing spawn_blocking panicked: {:?}", e))?
+    .map_err(|e| {
+        // Issue #941: a start that panicked before storing a handle must
+        // release the claim it published, sentinel included — otherwise the
+        // slot stays owned by a thread that is not polling and the next
+        // start is wedged.
+        log::error!(
+            "{CMD} start_syncing: spawn_blocking panicked - {:?}; rolling back is_syncing",
+            e
+        );
+        state.polling.set_syncing(false, Ordering::Release);
+        *state.polling.thread_id_mut() = None;
+        format!("start_syncing spawn_blocking panicked: {:?}", e)
+    })?
     .map_err(|e| {
         // Roll back is_syncing flag and thread_id since no handle was created
         log::error!(
@@ -166,6 +206,7 @@ pub async fn start_syncing_with(state: Arc<AppState>, app: &AppHandle) -> Result
             let mut handle_guard = state.polling.handle_mut();
             *handle_guard = Some(handle);
         }
+        // Issue #941: the real poller id replaces the claim-window sentinel.
         *state.polling.thread_id_mut() = Some(tid);
         log::info!(
             "{CMD} start_syncing: polling handle stored with thread id {:?}",
@@ -261,6 +302,12 @@ async fn stop_polling_and_join(state: Arc<AppState>, context: &'static str) {
         // (set but owned by no live thread) so a future start is never
         // stuck; when another thread still owns the state, its in-flight
         // join owns the clear and we leave the flag alone.
+        //
+        // Issue #941: an owner is not only a running poller — a start
+        // between `try_claim` and the handle store owns the slot through
+        // the sentinel `start_syncing_with` publishes. Clearing the flag
+        // there would stop the poller the user just asked for, so the flag
+        // is only ever cleared when no owner at all is stored.
         if state.polling.is_syncing(Ordering::Acquire) {
             let owner = *state.polling.thread_id();
             match owner {
@@ -273,7 +320,7 @@ async fn stop_polling_and_join(state: Arc<AppState>, context: &'static str) {
                 }
                 Some(tid) => {
                     log::warn!(
-                        "{CMD} {context}: no polling handle but thread {:?} still owns polling state; leaving flag for the in-flight join",
+                        "{CMD} {context}: no polling handle but thread {:?} still owns polling state (running poller or a start in its claim window); leaving flag for the in-flight owner",
                         tid
                     );
                 }
@@ -567,8 +614,8 @@ mod tests {
             "the no-handle branch must clear a wedged flag when no thread owns the state (issue #395)"
         );
         assert!(
-            body.contains("leaving flag for the in-flight join"),
-            "the no-handle branch must not steal the flag from a live owner's in-flight join (issue #395)"
+            body.contains("leaving flag for the in-flight owner"),
+            "the no-handle branch must not steal the flag from a live owner's in-flight drain (issue #395), nor from a start in its claim window (issue #941)"
         );
     }
 
@@ -672,6 +719,74 @@ mod tests {
             guard < claim,
             "the session guard must run before try_claim, so a refused start \
              never claims the flag (issue #809)"
+        );
+    }
+
+    /// Issue #941: a stop arriving between `try_claim` and the handle store
+    /// must leave the flag to the in-flight start. Before the fix the claim
+    /// window was an ownerless flag, the drain's no-handle branch read that
+    /// as "wedged" and cleared it, and the poller the user had just started
+    /// broke on its first loop check.
+    #[test]
+    fn test_stop_in_the_claim_window_leaves_the_flag_for_the_start() {
+        use super::{publish_start_sentinel, stop_polling_and_join, AppState};
+        use std::sync::atomic::Ordering;
+        use std::sync::Arc;
+
+        let state = Arc::new(AppState::new());
+
+        // The production claim, in order: flag, then owner sentinel, then
+        // (only later, on the blocking pool) the real handle + thread id.
+        assert!(
+            state.polling.try_claim(),
+            "a fresh state must hand the claim to the first start"
+        );
+        publish_start_sentinel(&state);
+        assert!(
+            state.polling.thread_id().is_some(),
+            "the claim window must publish an owner, or a stop in it reads \
+             the flag as wedged (issue #941)"
+        );
+
+        // The racing stop, through the real drain path.
+        tauri::async_runtime::block_on(stop_polling_and_join(
+            Arc::clone(&state),
+            "test_claim_window",
+        ));
+
+        assert!(
+            state.polling.is_syncing(Ordering::Acquire),
+            "a stop in the claim window must leave is_syncing true for the \
+             start that owns it (issue #941)"
+        );
+        assert!(
+            state.polling.thread_id().is_some(),
+            "the winning start's owner entry must survive the racing stop \
+             (issue #941)"
+        );
+    }
+
+    /// Issue #941 acceptance: wedged-flag recovery must still work — a flag
+    /// set with no owner at all (no poller, no start in flight) is cleared.
+    #[test]
+    fn test_wedged_flag_without_any_owner_is_still_recovered() {
+        use super::{stop_polling_and_join, AppState};
+        use std::sync::atomic::Ordering;
+        use std::sync::Arc;
+
+        let state = Arc::new(AppState::new());
+        state.polling.set_syncing(true, Ordering::Release);
+        assert!(state.polling.thread_id().is_none());
+
+        tauri::async_runtime::block_on(stop_polling_and_join(
+            Arc::clone(&state),
+            "test_wedged_flag",
+        ));
+
+        assert!(
+            !state.polling.is_syncing(Ordering::Acquire),
+            "an ownerless flag must still be cleared so a future start is not \
+             permanently wedged (issue #395/#941)"
         );
     }
 }
