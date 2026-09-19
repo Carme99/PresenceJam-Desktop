@@ -330,22 +330,57 @@ pub fn clear_failed_update_install() -> Result<(), String> {
     log::info!("{TAG} clear_failed_update_install: SUCCESS");
     Ok(())
 }
+/// Empties an update slot, handing back whatever was staged in it — the
+/// verified payload bytes are released with it.
+///
+/// This is the take-and-report rule shared by [`cancel_deferred_update`]
+/// (issue #590: the user pressed Cancel) and [`discard_staged_update`]
+/// (issue #806: the app is about to restart into a version it just
+/// installed, so a payload staged for the deferred "Install on quit" flow
+/// must not be applied on the way out). Generic over the slot payload
+/// because `tauri_plugin_updater::Update` has no public constructor, so the
+/// rule is unit-tested on the slot rather than through an `AppHandle`.
+#[cfg(desktop)]
+fn take_staged<T>(slot: &Mutex<Option<T>>) -> Option<T> {
+    slot.lock().take()
+}
+
+/// Discards any staged deferred update, releasing the verified payload bytes
+/// (issue #806).
+///
+/// The immediate "Download & Install" path restarts the process
+/// (`commands::misc::relaunch_app`), and that restart fires `RunEvent::Exit`
+/// — i.e. [`install_pending_on_exit`]. A payload still staged for the
+/// deferred flow would then be applied on top of the version the user has
+/// just installed, leaving the app on the staged (older) build and still
+/// offering the newer one; the staleness guard inside
+/// [`install_pending_on_exit`] cannot catch that, because it compares the
+/// staged version against the pre-install `CARGO_PKG_VERSION`. The immediate
+/// path therefore calls this before restarting.
+#[cfg(desktop)]
+pub fn discard_staged_update(app: &AppHandle) {
+    use tauri::Manager;
+
+    let state = app.state::<PendingUpdate>();
+    if take_staged(&state.0).is_some() {
+        log::info!("{TAG} discard_staged_update: staged update discarded");
+    } else {
+        log::debug!("{TAG} discard_staged_update: nothing staged");
+    }
+}
+
 /// Tauri command: discards a staged deferred update (issue #590). Before
 /// this existed, staging was one-way — the only exit was applying the
 /// payload at the next quit, so an accidental click could not be undone and
 /// the verified bytes stayed resident for the rest of the session. Dropping
 /// the [`StagedUpdate`] releases that payload immediately.
+///
+/// Shares [`discard_staged_update`]'s body: the command and the immediate
+/// install path must be the same operation, or one of them will drift.
 #[cfg(desktop)]
 #[tauri::command]
 pub fn cancel_deferred_update(app: AppHandle) -> Result<(), String> {
-    use tauri::Manager;
-
-    let state = app.state::<PendingUpdate>();
-    if state.0.lock().take().is_some() {
-        log::info!("{TAG} cancel_deferred_update: staged update discarded");
-    } else {
-        log::debug!("{TAG} cancel_deferred_update: nothing staged");
-    }
+    discard_staged_update(&app);
     Ok(())
 }
 
@@ -934,6 +969,14 @@ pub async fn stage_deferred_update(
 /// plugin's `install_inner` runs the installer and then calls
 /// `std::process::exit(0)` without returning.
 ///
+/// Restart interaction (issue #806): the immediate "Download & Install"
+/// path restarts the process (`commands::misc::relaunch_app`), which fires
+/// this same `RunEvent::Exit` arm. That caller discards the staged payload
+/// first ([`discard_staged_update`]) so a deferred stage cannot be applied
+/// on top of the version the user just installed — the staleness guard
+/// below cannot catch that, since it compares against the pre-install
+/// `CARGO_PKG_VERSION`.
+///
 /// Stale-stage guard (issue #431): a staged version older than or equal
 /// to the running version is never installed — it is skipped with a log
 /// line and a skip marker, unless the stage was explicitly forced through
@@ -1507,6 +1550,36 @@ mod tests {
         assert_eq!(
             manifest_pub_date(&serde_json::json!({ "pub_date": 42 })),
             None
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Immediate-install discard (issue #806)
+    // -----------------------------------------------------------------
+
+    /// The take-and-report rule behind both discard paths. A populated slot
+    /// must be emptied — that emptiness is exactly what stops
+    /// `install_pending_on_exit` from reinstalling a payload the user has
+    /// already installed — and a second discard (the restart path can run
+    /// more than once) must find nothing rather than re-report a payload it
+    /// no longer holds.
+    #[test]
+    fn test_take_staged_empties_the_slot() {
+        let slot: Mutex<Option<Vec<u8>>> = Mutex::new(Some(vec![1, 2, 3]));
+
+        assert_eq!(
+            take_staged(&slot),
+            Some(vec![1, 2, 3]),
+            "the staged payload must be handed back so it can be released"
+        );
+        assert!(
+            slot.lock().is_none(),
+            "PendingUpdate must be left empty so the exit-time install has nothing to apply"
+        );
+        assert_eq!(take_staged(&slot), None, "a second discard is a no-op");
+        assert!(
+            take_staged(&PendingUpdate::new().0).is_none(),
+            "a freshly managed PendingUpdate starts empty"
         );
     }
 }
