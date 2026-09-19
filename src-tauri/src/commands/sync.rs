@@ -618,6 +618,15 @@ pub async fn refresh_status(
 
 #[cfg(test)]
 mod tests {
+    use super::{stop_polling_and_join, sync_status_from_state};
+    use crate::config::AppConfig;
+    use crate::spotify::{SpotifyTokens, TrackInfo};
+    use crate::teams::TeamsTokens;
+    use crate::AppState;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+    use std::time::Duration;
+
     /// Brace-counted body isolation (house style — never boundary anchors,
     /// which drift).
     fn fn_body<'a>(prod_source: &'a str, sig: &str) -> &'a str {
@@ -670,18 +679,38 @@ mod tests {
             body.contains("leaving flag for the in-flight owner"),
             "the no-handle branch must not steal the flag from a live owner's in-flight drain (issue #395), nor from a start in its claim window (issue #941)"
         );
+
+    fn spotify_tokens() -> SpotifyTokens {
+        SpotifyTokens {
+            access_token: "spotify-access".to_string(),
+            refresh_token: "spotify-refresh".to_string(),
+            expires_at: chrono::Utc::now(),
+        }
+
     }
 
-    /// Issue #398: the status snapshot must be assembled under a single
-    /// critical section — all four read guards held at once — so torn snapshots
-    /// are unobservable, with the lock order documented.
-    ///
-    /// Issue #679 moved the assembly out of the `get_sync_status` command into
-    /// `sync_status_from_state` (the command, and the headless `--status` CLI
-    /// flag, both call it) — the invariant follows the code, so the guard names
-    /// the fn that now holds the guards.
+    fn teams_tokens() -> TeamsTokens {
+        TeamsTokens {
+            access_token: "teams-access".to_string(),
+            refresh_token: None,
+            expires_at: chrono::Utc::now(),
+        }
+    }
+
+    /// A config carrying the client id the Spotify connection check needs.
+    fn configured() -> AppConfig {
+        let mut config = AppConfig::default();
+        config.spotify.client_id = "client-id".to_string();
+        config
+    }
+
+    /// Issue #679: the command must return the shared derivation instead of a
+    /// second copy of the assembly. Source-level by necessity — `get_sync_status`
+    /// takes a `tauri::State`, which no unit test can build — and the behaviour
+    /// the derivation owns (the single critical section) is asserted by
+    /// `status_snapshot_holds_every_read_guard_across_the_assembly` below.
     #[test]
-    fn test_get_sync_status_reads_under_single_critical_section() {
+    fn get_sync_status_returns_the_shared_derivation() {
         let source = include_str!("sync.rs");
         let prod_source = source
             .split("#[cfg(test)]\nmod tests")
@@ -707,6 +736,8 @@ mod tests {
         // Issue #879: the assembly is reached through the offload, so the
         // command must still return the shared derivation and nothing else.
         let command_body = fn_body(prod_source, "pub async fn get_sync_status(");
+
+
         assert!(
             command_body.contains("sync_status_offloaded("),
             "the command must return the shared derivation through the blocking-pool offload, never a second copy of it (issues #679, #879)"
@@ -1003,5 +1034,180 @@ mod tests {
             state.polling.thread_id().is_none(),
             "the owner entry must be released with the flag (issue #941, F2)"
         );
+    }
+
+    /// Issue #761: the snapshot is what the Dashboard, the Settings pane and
+    /// the headless `--status` flag all read, so each guarded slot has to be
+    /// projected on its own. Asserted by building an `AppState` and reading it
+    /// back — the shape this replaces was a scan of the accessor names.
+    ///
+    /// `presence_gated` / `last_posted_status` are deliberately not asserted
+    /// here: they read the process-global write clocks, which `cargo test`'s
+    /// parallel threads share.
+    #[test]
+    fn status_snapshot_projects_each_lock_state() {
+        let state = AppState::new();
+
+        // Nothing loaded, nothing playing.
+        let empty = sync_status_from_state(&state);
+        assert!(!empty.spotify_connected);
+        assert!(!empty.teams_connected);
+        assert!(!empty.is_syncing);
+        assert!(!empty.presence_paused);
+        assert!(empty.current_track.is_none());
+
+        // Stored tokens are not a Spotify connection on their own: the refresh
+        // path also needs the configured client id, and the config slot may
+        // still be empty at that point in the boot.
+        *state.tokens.spotify_mut() = Some(spotify_tokens());
+        assert!(!sync_status_from_state(&state).spotify_connected);
+        *state.config.get_mut() = Some(AppConfig::default());
+        assert!(!sync_status_from_state(&state).spotify_connected);
+        *state.config.get_mut() = Some(configured());
+        assert!(sync_status_from_state(&state).spotify_connected);
+
+        // Teams has no such coupling.
+        assert!(!sync_status_from_state(&state).teams_connected);
+        *state.tokens.teams_mut() = Some(teams_tokens());
+        assert!(sync_status_from_state(&state).teams_connected);
+
+        // A paused track is kept (the poller holds it), and reported as paused
+        // rather than dropped like a stop.
+        let paused = TrackInfo {
+            is_playing: false,
+            ..TrackInfo::default()
+        };
+        *state.polling.current_track_mut() = Some(paused);
+        let snapshot = sync_status_from_state(&state);
+        assert!(snapshot.current_track.is_some());
+        assert!(snapshot.presence_paused);
+
+        let playing = TrackInfo {
+            is_playing: true,
+            ..TrackInfo::default()
+        };
+        *state.polling.current_track_mut() = Some(playing);
+        assert!(!sync_status_from_state(&state).presence_paused);
+
+        // The sync flag is the atomic, not a lock.
+        state.polling.set_syncing(true, Ordering::Release);
+        assert!(sync_status_from_state(&state).is_syncing);
+    }
+
+    /// Issue #398, behaviourally: `sync_status_from_state` must assemble the
+    /// snapshot inside ONE critical section — all four read guards held at once
+    /// — so no writer can land between the fields it clones. The scan this
+    /// replaces could only see that the four accessor names appear in the body;
+    /// it could not observe the ordering, and it failed CI when the comment
+    /// next to the guards was reworded.
+    ///
+    /// Driven through the real locks. The test takes the write side of the
+    /// third lock in the documented order (`config`), which parks the assembly
+    /// with the first two read guards still in hand; a writer for each of those
+    /// must then be unable to get in. The fourth lock is probed the same way at
+    /// the end.
+    #[test]
+    fn status_snapshot_holds_every_read_guard_across_the_assembly() {
+        let state = Arc::new(AppState::new());
+        *state.tokens.spotify_mut() = Some(spotify_tokens());
+        *state.tokens.teams_mut() = Some(teams_tokens());
+        *state.config.get_mut() = Some(configured());
+
+        // Park the assembly: it cannot pass `config` while this guard is ours,
+        // so the wait below can only fail a regression that dropped it.
+        let config_guard = state.config.get_mut();
+        let first_state = Arc::clone(&state);
+        let first = std::thread::spawn(move || sync_status_from_state(&first_state));
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!first.is_finished(), "the config guard must be held");
+
+        // Both earlier guards are held AT THE SAME TIME: a writer for either
+        // cannot get in while the assembly waits on `config`.
+        let (track_tx, track_rx) = std::sync::mpsc::channel();
+        let track_state = Arc::clone(&state);
+        let track_probe = std::thread::spawn(move || {
+            drop(track_state.polling.current_track_mut());
+            let _ = track_tx.send(());
+        });
+        let (spotify_tx, spotify_rx) = std::sync::mpsc::channel();
+        let spotify_state = Arc::clone(&state);
+        let spotify_probe = std::thread::spawn(move || {
+            drop(spotify_state.tokens.spotify_mut());
+            let _ = spotify_tx.send(());
+        });
+        let held = Duration::from_millis(300);
+        assert!(
+            track_rx.recv_timeout(held).is_err(),
+            "the current_track guard must be held while the assembly waits on config"
+        );
+        assert!(
+            spotify_rx.recv_timeout(held).is_err(),
+            "the spotify guard must be held while the assembly waits on config"
+        );
+
+        // Release, and the snapshot is the consistent one the guards protected.
+        drop(config_guard);
+        let status = first.join().expect("the status thread must not panic");
+        assert!(status.spotify_connected, "spotify tokens were stored");
+        assert!(status.teams_connected, "teams tokens were stored");
+        track_probe.join().expect("the track probe must not panic");
+        spotify_probe.join().expect("the spotify probe must not panic");
+
+        // The fourth lock: with its write side held the assembly cannot finish,
+        // so a dropped teams guard fails here.
+        let teams_guard = state.tokens.teams_mut();
+        let second_state = Arc::clone(&state);
+        let second = std::thread::spawn(move || sync_status_from_state(&second_state));
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!second.is_finished(), "the teams guard must be held");
+        drop(teams_guard);
+        second.join().expect("the status thread must not panic");
+    }
+
+    /// Issue #395, behaviourally: draining a state with no stored handle must
+    /// clear a wedged `is_syncing` flag — set, but owned by no live thread — so
+    /// the next start can claim it, while a flag another thread still owns is
+    /// left alone for that thread's in-flight join. The scan this replaces
+    /// asserted the three log sentences instead, so the behaviour was never
+    /// executed and rewording a log line broke the suite.
+    #[test]
+    fn draining_without_a_handle_clears_only_a_wedged_flag() {
+        let wedged = Arc::new(AppState::new());
+        wedged.polling.set_syncing(true, Ordering::Release);
+        tauri::async_runtime::block_on(stop_polling_and_join(Arc::clone(&wedged), "test"));
+        assert!(
+            !wedged.polling.is_syncing(Ordering::Acquire),
+            "a wedged flag must be cleared"
+        );
+        assert!(wedged.polling.thread_id().is_none());
+
+        // A live owner's in-flight join owns the clear, so the flag stays set.
+        let owned = Arc::new(AppState::new());
+        owned.polling.set_syncing(true, Ordering::Release);
+        *owned.polling.thread_id_mut() = Some(std::thread::current().id());
+        tauri::async_runtime::block_on(stop_polling_and_join(Arc::clone(&owned), "test"));
+        assert!(
+            owned.polling.is_syncing(Ordering::Acquire),
+            "an owned flag must stay set"
+        );
+
+        // Nothing to drain: no flag, no owner, no handle.
+        let idle = Arc::new(AppState::new());
+        tauri::async_runtime::block_on(stop_polling_and_join(Arc::clone(&idle), "test"));
+        assert!(!idle.polling.is_syncing(Ordering::Acquire));
+        assert!(idle.polling.thread_id().is_none());
+
+        // A stored handle is really drained: the join clears the flag and the
+        // thread id, and empties the slot so a second drain cannot join the
+        // same thread twice.
+        let draining = Arc::new(AppState::new());
+        let worker = std::thread::spawn(|| {});
+        *draining.polling.thread_id_mut() = Some(worker.thread().id());
+        draining.polling.set_syncing(true, Ordering::Release);
+        *draining.polling.handle_mut() = Some(worker);
+        tauri::async_runtime::block_on(stop_polling_and_join(Arc::clone(&draining), "test"));
+        assert!(!draining.polling.is_syncing(Ordering::Acquire));
+        assert!(draining.polling.thread_id().is_none());
+        assert!(draining.polling.handle().is_none());
     }
 }
