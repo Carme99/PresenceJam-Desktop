@@ -60,6 +60,34 @@ fn publish_start_sentinel(state: &AppState) -> std::thread::ThreadId {
     tid
 }
 
+/// Issue #941 (F2): conclude a stop that won the race against this start.
+///
+/// `stop_tx == None` immediately after the handle store means no live poller:
+/// either a racing stop dropped the channel `start_polling` had just installed
+/// — so the fresh poller takes `Disconnected` and breaks on its first loop
+/// check — or the poller already self-exited. The drain that produced that
+/// state had no handle to join and deliberately left the flag to this start,
+/// so the start has to finish the stop: publishing the session now would leave
+/// `is_syncing == true`, a finished handle and nothing polling, which is
+/// exactly the "Syncing" UI with no Teams traffic the issue is about. The
+/// finished handle stays for the next start's drain to reclaim.
+///
+/// A *live* channel means the racing stop landed before `start_polling`
+/// installed the channel (it closed nothing) — the start owns the session and
+/// keeps its flag, which is the claim-window behaviour the issue's acceptance
+/// criteria ask for. Returns true when the stop was concluded here.
+fn conclude_raced_stop(state: &AppState) -> bool {
+    if state.polling.stop_tx().is_some() {
+        return false;
+    }
+    log::warn!(
+        "{CMD} start_syncing: stop channel already closed when the poller started - a stop won the race; clearing is_syncing instead of publishing a dead session"
+    );
+    state.polling.set_syncing(false, Ordering::Release);
+    *state.polling.thread_id_mut() = None;
+    true
+}
+
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct SyncStatus {
@@ -212,6 +240,13 @@ pub async fn start_syncing_with(state: Arc<AppState>, app: &AppHandle) -> Result
             "{CMD} start_syncing: polling handle stored with thread id {:?}",
             tid
         );
+    }
+
+    // Issue #941 (F2): if a stop won the race while this start was in flight,
+    // the poller it raced is already dead — conclude the stop rather than
+    // publishing a session that can never poll.
+    if conclude_raced_stop(&state) {
+        return Ok(());
     }
 
     log::info!("{CMD} start_syncing: EMIT sync-started event");
@@ -917,6 +952,56 @@ mod tests {
             "one publication, and None in both rollback paths (spawn_blocking \
              join failure and polling-start failure), so a failed start never \
              leaves an owner behind (issue #941)"
+        );
+    }
+
+    /// Issue #941 (F2): a stop landing after `start_polling` installed its stop
+    /// channel but before the handle store drops that fresh channel — the
+    /// poller then takes `Disconnected` and breaks on its first loop check,
+    /// while the drain, which has no handle to join, leaves the flag to the
+    /// in-flight start. The start must conclude the stop instead of publishing
+    /// a session that can never poll (which would show "Syncing" with nothing
+    /// reaching Teams).
+    #[test]
+    fn test_start_concludes_a_stop_that_won_the_race() {
+        use super::{conclude_raced_stop, publish_start_sentinel, AppState};
+        use std::sync::atomic::Ordering;
+
+        let state = AppState::new();
+
+        // Start-wins: the racing stop landed before `start_polling` installed
+        // the channel, so it closed nothing and the poller is alive.
+        assert!(state.polling.try_claim());
+        publish_start_sentinel(&state);
+        let (stop_tx, _stop_rx) = std::sync::mpsc::channel::<()>();
+        *state.polling.stop_tx_mut() = Some(stop_tx);
+        assert!(
+            !conclude_raced_stop(&state),
+            "a live stop channel means the poller is running and the start owns \
+             the session (issue #941)"
+        );
+        assert!(
+            state.polling.is_syncing(Ordering::Acquire),
+            "a start that won the race keeps is_syncing true (issue #941)"
+        );
+
+        // Stop-wins, exactly as the drain leaves it: the channel is gone, so
+        // the poller is already breaking out, and the flag is still the
+        // in-flight start's.
+        *state.polling.stop_tx_mut() = None;
+        assert!(
+            conclude_raced_stop(&state),
+            "a closed stop channel with the handle just stored means the stop \
+             won (issue #941, F2)"
+        );
+        assert!(
+            !state.polling.is_syncing(Ordering::Acquire),
+            "concluding the raced stop must clear is_syncing, or the UI reports \
+             Syncing while nothing polls (issue #941, F2)"
+        );
+        assert!(
+            state.polling.thread_id().is_none(),
+            "the owner entry must be released with the flag (issue #941, F2)"
         );
     }
 }
