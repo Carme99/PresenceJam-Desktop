@@ -53,18 +53,21 @@ const MAX_LOG_LINES: usize = 500;
 /// Read up to `limit` trailing lines of `path`, oldest first.
 ///
 /// A missing file is `Ok(empty)` — that is the normal first run, not an
-/// error. A genuine read failure is `Err`, carrying only the bare file name:
-/// the absolute path embeds the OS username (issue #409 hygiene) and the
-/// message can surface in the webview console.
+/// error. Any other failure to stat or read is `Err`, carrying only the bare
+/// file name: the absolute path embeds the OS username (issue #409 hygiene)
+/// and the message can surface in the webview console.
 fn read_log_tail(path: &Path, limit: usize, max_bytes: u64) -> Result<Vec<String>, String> {
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let len = std::fs::metadata(path)
-        .map_err(|e| format!("error reading {LOG_FILE_NAME}: {e}"))?
-        .len();
+    // `Path::exists()` collapses *every* stat error to `false`, which
+    // reported a permission or I/O failure as "no log file yet" — an empty
+    // pane with nothing logged anywhere (issue #825). Only `NotFound` is the
+    // first-run case; the one stat call also supplies the length.
+    let len = match std::fs::metadata(path) {
+        Ok(md) => md.len(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("error reading {LOG_FILE_NAME}: {e}")),
+    };
     let start = len.saturating_sub(max_bytes);
-    let bytes =
+    let (bytes, on_record_boundary) =
         read_from_offset(path, start).map_err(|e| format!("error reading {LOG_FILE_NAME}: {e}"))?;
     let text = String::from_utf8_lossy(&bytes);
     let mut lines: Vec<&str> = text.lines().collect();
@@ -74,7 +77,7 @@ fn read_log_tail(path: &Path, limit: usize, max_bytes: u64) -> Result<Vec<String
     // first split line is then whole: dropping it would lose a complete
     // record, so the drop is conditional on the byte before the window
     // (issue #824).
-    if start > 0 && !lines.is_empty() && byte_before(path, start) != Some(b'\n') {
+    if start > 0 && !lines.is_empty() && !on_record_boundary {
         lines.remove(0);
     }
     let first = lines.len().saturating_sub(limit);
@@ -83,31 +86,28 @@ fn read_log_tail(path: &Path, limit: usize, max_bytes: u64) -> Result<Vec<String
 
 /// Offset read, so the byte cap above is actually honoured — `fs::read`
 /// would pull the whole file in before any bound could apply.
-fn read_from_offset(path: &Path, offset: u64) -> Result<Vec<u8>, String> {
+///
+/// The same open also probes the byte at `offset - 1`: a newline there means
+/// the window starts on a record boundary and its first line is whole
+/// (issue #824). Returns the window plus that flag.
+fn read_from_offset(path: &Path, offset: u64) -> Result<(Vec<u8>, bool), String> {
     use std::io::{Read, Seek, SeekFrom};
     let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let on_record_boundary = if offset == 0 {
+        true
+    } else {
+        f.seek(SeekFrom::Start(offset - 1))
+            .map_err(|e| e.to_string())?;
+        let mut prev = [0u8; 1];
+        // A short read (a rotation truncating the file under us) is not a
+        // newline: fall back to dropping the first fragment, as before.
+        let n = f.read(&mut prev).map_err(|e| e.to_string())?;
+        n == 1 && prev[0] == b'\n'
+    };
     f.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
     let mut buf = Vec::new();
     f.read_to_end(&mut buf).map_err(|e| e.to_string())?;
-    Ok(buf)
-}
-
-/// The byte at `offset - 1`, or `None` when it cannot be read.
-///
-/// Used to decide whether a byte-window seek landed inside a line or on a
-/// record boundary (issue #824). An unreadable byte is treated as "not a
-/// newline" by the caller, which keeps the conservative behaviour of
-/// dropping the first fragment.
-fn byte_before(path: &Path, offset: u64) -> Option<u8> {
-    use std::io::{Read, Seek, SeekFrom};
-    if offset == 0 {
-        return None;
-    }
-    let mut f = std::fs::File::open(path).ok()?;
-    f.seek(SeekFrom::Start(offset - 1)).ok()?;
-    let mut byte = [0u8; 1];
-    f.read_exact(&mut byte).ok()?;
-    Some(byte[0])
+    Ok((buf, on_record_boundary))
 }
 
 /// Clamp a caller-supplied line count into `1..=`[`MAX_LOG_LINES`].
@@ -167,6 +167,30 @@ mod tests {
             read_log_tail(&dir.join(LOG_FILE_NAME), 10, LOG_TAIL_MAX_BYTES),
             Ok(Vec::new()),
             "first run has no log file yet — that must not be an error"
+        );
+    }
+
+    /// A stat failure other than `NotFound` must surface, not pose as a
+    /// first run: an empty pane with no error is the one failure the log
+    /// viewer must not have (issue #825). A self-referential symlink gives a
+    /// deterministic `ELOOP` here, where a mode-based `EACCES` would not be
+    /// observable for a root-run test process.
+    #[cfg(unix)]
+    #[test]
+    fn test_read_log_tail_stat_failure_is_an_error_not_an_empty_history() {
+        let dir = scratch_dir("statfail");
+        let path = dir.join(LOG_FILE_NAME);
+        std::os::unix::fs::symlink(&path, &path).expect("create self-referential symlink");
+
+        let result = read_log_tail(&path, 10, LOG_TAIL_MAX_BYTES);
+        let err = result.expect_err("a stat failure must not look like a missing log");
+        assert!(
+            err.starts_with(&format!("error reading {LOG_FILE_NAME}:")),
+            "the message names the file and nothing else: {err}"
+        );
+        assert!(
+            !err.contains(dir.to_string_lossy().as_ref()),
+            "no absolute path in the message (#409 hygiene): {err}"
         );
     }
 
