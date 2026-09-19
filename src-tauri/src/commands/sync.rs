@@ -869,4 +869,54 @@ mod tests {
              (issues #398, #879)"
         );
     }
+
+    /// Issue #941 acceptance, wiring half: the sentinel must be published by
+    /// `start_syncing_with` itself, between the claim and the spawn, and the
+    /// real poller id must replace it once the handle is stored — a sentinel
+    /// that is never published, or never replaced, leaves the claim window
+    /// ownerless again (or the poller's own exit cleanup unmatched).
+    #[test]
+    fn test_start_syncing_publishes_the_sentinel_between_claim_and_spawn() {
+        let source = include_str!("sync.rs");
+        let prod_source = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("sync.rs has no #[cfg(test)] mod tests block");
+        let body = fn_body(prod_source, "pub async fn start_syncing_with(");
+
+        let claim = body
+            .find("try_claim()")
+            .expect("start_syncing_with must claim the polling flag");
+        let sentinel = body
+            .find("publish_start_sentinel(")
+            .expect("start_syncing_with must publish the claim-window sentinel (issue #941)");
+        let spawn = body
+            .find("spawn_blocking(")
+            .expect("start_syncing_with must spawn the poller");
+        assert!(
+            claim < sentinel && sentinel < spawn,
+            "the sentinel must be published after try_claim and before the \
+             poller spawn, so the whole claim window has an owner (issue #941)"
+        );
+
+        let store = body
+            .find("*state.polling.thread_id_mut() = Some(tid)")
+            .expect("start_syncing_with must store the real poller id");
+        assert!(
+            store > spawn,
+            "the real poller id must replace the sentinel once the handle is \
+             stored (issue #941)"
+        );
+        let sentinels = body.matches("publish_start_sentinel(").count();
+        let clears = body
+            .matches("*state.polling.thread_id_mut() = None")
+            .count();
+        assert_eq!(
+            (sentinels, clears),
+            (1, 2),
+            "one publication, and None in both rollback paths (spawn_blocking \
+             join failure and polling-start failure), so a failed start never \
+             leaves an owner behind (issue #941)"
+        );
+    }
 }

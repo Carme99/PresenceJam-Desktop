@@ -361,7 +361,12 @@ mod tests {
 
         // Scanner sanity + no stale exceptions: both prove the parse above
         // really walked these files rather than finding nothing.
-        for expected in ["show_window", "preview_status", "relaunch_app", "get_sync_status"] {
+        for expected in [
+            "show_window",
+            "preview_status",
+            "relaunch_app",
+            "get_sync_status",
+        ] {
             assert!(
                 scanned.iter().any(|name| name.as_str() == expected),
                 "the scanner must see `{expected}` (issue #928)"

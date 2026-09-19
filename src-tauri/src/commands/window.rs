@@ -260,8 +260,10 @@ mod tests {
         let not_found = body
             .find("main window not found")
             .expect("show_window must name the missing-window condition (issue #826)");
+        // Anchored to the log literal: the bare word SUCCESS also appears in
+        // the production comment above the guard, which would match first.
         let success = body
-            .find("SUCCESS")
+            .find("show_window: SUCCESS")
             .expect("show_window must still report success on the raise path (issue #826)");
 
         assert!(
