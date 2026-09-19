@@ -179,9 +179,40 @@ pub async fn open_external_url(url: String) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    /// Issue #391: show_window must unminimize (a minimized window stays
-    /// minimized after show()). Brace-counted body isolation
-    /// (order-independent): do not anchor on the next fn.
+    use super::validate_http_url;
+
+    /// Issue #67/#761: `open_external_url` is the app's only shell-open path
+    /// and the frontend hands it an arbitrary string, so the scheme/host/
+    /// userinfo gate is asserted by running it — the two schemes it accepts,
+    /// the three rejections it documents, and the parse failure. Before this,
+    /// window.rs's whole suite was a source scan.
+    #[test]
+    fn validate_http_url_accepts_only_plain_http_urls_with_a_host() {
+        assert!(validate_http_url("https://learn.microsoft.com/device").is_ok());
+        assert!(validate_http_url("http://127.0.0.1:8899/callback").is_ok());
+
+        // A non-http scheme would hand the OS opener a script or a local file.
+        for url in [
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "data:text/html,<script>x</script>",
+        ] {
+            assert!(validate_http_url(url).is_err(), "{url} must be denied");
+        }
+
+        // No host: there is nothing to open.
+        assert!(validate_http_url("https://").is_err());
+        // Userinfo: a credential-bearing URL must never reach the OS opener.
+        assert!(validate_http_url("https://user:pass@example.com").is_err());
+        assert!(validate_http_url("not a url").is_err());
+    }
+
+    /// Issue #391: every show path must unminimize a minimized window (it stays
+    /// minimized after `show()`), then show and focus it. Source-level because
+    /// the invariant is the sequence of calls on a live `tauri::Window`, which
+    /// no unit test can build — the window handle is the entire fixture — so
+    /// the scan pins that all three calls are still made. Brace-counted body
+    /// isolation (order-independent): do not anchor on the next fn.
     #[test]
     fn show_window_unminimizes() {
         let src = include_str!("window.rs");
