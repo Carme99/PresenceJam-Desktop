@@ -257,6 +257,41 @@ Policy for adding a channel:
 - Every published format is asserted in the release job's asset check, so a run
   that silently stops producing one fails instead of shipping.
 
+### Cutting a beta
+
+A beta is an ordinary tag whose version carries a prerelease suffix —
+`vX.Y.Z-beta.N`. The same pipeline cuts it, with four differences that keep the
+Beta channel from leaking into the stable one:
+
+- `ncipollo/release-action` publishes it with `prerelease: true`, so
+  `/releases/latest/` — and therefore the `latest.json` every stable install
+  reads — still resolves to the newest stable release.
+- The CHANGELOG and AppStream gates are satisfied by the entries for the
+  version the beta will become (`## [X.Y.Z]`, `# State of Features — vX.Y.Z`
+  and the metainfo's newest `<release>`), so the notes are written once, not
+  per beta.
+- The job also publishes `latest-beta.json` — same body and signatures as
+  `latest.json` — onto a rolling **prerelease tagged `beta`**, overwritten with
+  `gh release upload --clobber` on every beta cut.
+- The verification step downloads
+  `https://github.com/Carme99/PresenceJam-Desktop/releases/download/beta/latest-beta.json`
+  and requires it to name the beta's version, so a beta that fails to publish
+  its manifest fails the run instead of leaving the channel dangling.
+
+That URL is the contract: `BETA_ENDPOINT` in `src-tauri/src/updater_bg.rs` must
+be exactly it, and it must never go through `/releases/latest/`, which
+structurally cannot resolve to a prerelease — a beta published that way would
+serve its own manifest to every stable user.
+
+```bash
+git tag -a vX.Y.Z-beta.1 -m "PresenceJam X.Y.Z-beta.1" <merge-sha>
+git push origin vX.Y.Z-beta.1
+```
+
+The rolling `beta` release must stay a prerelease and must not be deleted: the
+Beta channel downloads `latest-beta.json` from that tag, and a 404 there makes
+every Beta-channel check fall through to stable silently.
+
 ## 5. Cutting a release — checklist
 
 1. `main` is green, and every slice PR for the release is merged.

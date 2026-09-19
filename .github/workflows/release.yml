@@ -621,7 +621,13 @@ jobs:
           tag: ${{ needs.resolve-tag.outputs.tag }}
           artifacts: artifacts/**/*
           draft: false
-          prerelease: false
+          # A beta tag publishes a prerelease (issue #895), so GitHub's
+          # /releases/latest/ — which resolves to the newest release that is
+          # neither a draft nor a prerelease — keeps pointing at the newest
+          # STABLE release and its latest.json. The action compares the input
+          # to the literal string "true", which is what this expression
+          # renders.
+          prerelease: ${{ contains(needs.resolve-tag.outputs.tag, '-beta') }}
           allowUpdates: true
           # bodyFile, not generateReleaseNotes (issue #834): the curated
           # section is what users are meant to read, and the generated PR list
@@ -678,6 +684,35 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # Beta channel manifest (issue #895). BETA_ENDPOINT in
+      # src-tauri/src/updater_bg.rs must NOT go through /releases/latest/:
+      # GitHub resolves that path to the newest release that is neither a
+      # draft nor a prerelease, so a beta can never be published under it —
+      # the only release that satisfied the old URL was a normal one, which
+      # then served the beta manifest to every stable user. The pipeline
+      # serves it from a rolling prerelease tagged `beta` instead, which each
+      # beta cut overwrites with --clobber:
+      #   https://github.com/Carme99/PresenceJam-Desktop/releases/download/beta/latest-beta.json
+      - name: Publish beta channel manifest
+        if: contains(needs.resolve-tag.outputs.tag, '-beta')
+        run: |
+          set -euo pipefail
+          # Same body as latest.json: its URLs already point at this beta
+          # release's own artefacts, and its version is the beta's version,
+          # which is what the Beta channel compares against the running one.
+          cp latest.json latest-beta.json
+          if ! gh release view beta --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create beta --repo "$GITHUB_REPOSITORY" \
+              --prerelease \
+              --latest=false \
+              --title "Beta channel" \
+              --notes "Rolling prerelease carrying latest-beta.json for the updater's Beta channel. It must stay a prerelease (so /releases/latest/ keeps resolving to the newest stable) and must not be deleted: the Beta channel endpoint downloads latest-beta.json from this tag."
+          fi
+          gh release upload --clobber --repo "$GITHUB_REPOSITORY" beta latest-beta.json
+          echo "Beta manifest published at https://github.com/${GITHUB_REPOSITORY}/releases/download/beta/latest-beta.json"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       # The comment above is now the implementation: the URLs come from
       # latest.json itself, so a payload-flavour switch (issue #897 moved
       # windows-x86_64 from the per-machine MSI to the per-user NSIS
@@ -721,6 +756,26 @@ jobs:
             fi
             echo "Found expected asset: $expected"
           done
+          # (c) a beta must be reachable through the Beta channel: resolve the
+          # rolling manifest URL and check it names this build. A 404 there is
+          # the failure the issue describes — every Beta-channel check silently
+          # falling through to stable.
+          case "$RELEASE_TAG" in
+            *-beta*)
+              BETA_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/beta/latest-beta.json"
+              BETA_CODE=$(curl -sSL -o /tmp/latest-beta.json -w '%{http_code}' "$BETA_URL")
+              if [ "$BETA_CODE" != "200" ]; then
+                echo "::error::Beta manifest ${BETA_URL} returned ${BETA_CODE} — the Beta channel would fall through to stable"
+                exit 1
+              fi
+              BETA_VERSION=$(jq -r .version /tmp/latest-beta.json)
+              if [ "$BETA_VERSION" != "${RELEASE_TAG#v}" ]; then
+                echo "::error::Beta manifest ${BETA_URL} reports version '${BETA_VERSION}', expected '${RELEASE_TAG#v}'"
+                exit 1
+              fi
+              echo "Beta manifest verified: ${BETA_URL} -> ${BETA_VERSION}"
+              ;;
+          esac
           echo "All expected updater assets verified"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
