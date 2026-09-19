@@ -561,7 +561,7 @@ struct ExpiryDateTime {
 /// call site funnels through this so the 401/403/429/5xx discrimination
 /// lives in one unit-testable place. Shared by the set and clear paths so
 /// both get identical status-code discrimination and `Retry-After`
-/// parsing (see issues #153/#154). Takes the already-parsed Retry-After
+/// parsing (see issues #153/#154/#820). Takes the already-parsed Retry-After
 /// value and the response body text. Callers truncate bodies for log
 /// safety before display; the stored body here stays raw for diagnosis.
 fn classify_teams_status(status_code: u16, retry_after: Option<u64>, body: &str) -> TeamsApiError {
@@ -569,7 +569,17 @@ fn classify_teams_status(status_code: u16, retry_after: Option<u64>, body: &str)
         401 => TeamsApiError::ExpiredToken(status_code),
         403 => TeamsApiError::Forbidden(status_code, body.to_string()),
         429 => TeamsApiError::RateLimited(retry_after),
-        500..=599 => TeamsApiError::Transient(format!("server error {}: {}", status_code, body)),
+        // Issue #820: a throttled 5xx (Graph answers 503 with `Retry-After`
+        // when a backend is unavailable) is still a server DIRECTIVE, not a
+        // bare transient — `poll_once::rate_limit_sleep_secs` turns
+        // `RateLimited(Some(secs))` into exactly that sleep, the way it
+        // already does for a 429 (#154). Collapsing the header away made the
+        // app re-poll and re-POST sooner than the server asked and sustained
+        // the outage the header exists to ride out.
+        500..=599 => match retry_after {
+            Some(secs) => TeamsApiError::RateLimited(Some(secs)),
+            None => TeamsApiError::Transient(format!("server error {}: {}", status_code, body)),
+        },
         _ => TeamsApiError::Other(status_code, body.to_string()),
     }
 }
@@ -1176,6 +1186,18 @@ mod tests {
         assert!(matches!(
             classify_teams_status(503, None, "boom"),
             TeamsApiError::Transient(_)
+        ));
+        // Issue #820: a throttled 5xx keeps the server's directive — the
+        // poller reads it back through `rate_limit_sleep_secs`, so a
+        // `Retry-After` that reaches this arm must not be dropped (this row
+        // fails while the 5xx arm collapses everything to Transient).
+        assert!(matches!(
+            classify_teams_status(503, Some(120), "service unavailable"),
+            TeamsApiError::RateLimited(Some(120))
+        ));
+        assert!(matches!(
+            classify_teams_status(502, Some(30), ""),
+            TeamsApiError::RateLimited(Some(30))
         ));
         assert!(matches!(
             classify_teams_status(418, None, "teapot"),
