@@ -69,6 +69,17 @@ vi.mock('@tauri-apps/api/webviewWindow', () => ({
 
 beforeEach(() => {
   invoke.mockReset();
+  // Issue #922: re-install the default `detach_pane` handler after every
+  // reset — `mockReset` clears the implementation as well as the call
+  // history, and the detach store relies on it.
+  invoke.mockImplementation(async (cmd: string) => {
+    if (cmd === 'detach_pane') {
+      const win = new FakeWebviewWindow();
+      winState.win = win as unknown as FakeWindow;
+      return undefined;
+    }
+    return undefined;
+  });
   winState.win = null;
   winState.created = 0;
   winState.closed = 0;
@@ -199,7 +210,8 @@ describe('detach store runtime (#422)', () => {
       setFocus: async () => {
         throw new Error('stale handle');
       },
-      close: async () => {}
+      close: async () => {},
+      once: () => {}
     };
     await d.popOut('logs');
     // Fell through to creation (not stuck on the zombie handle).
