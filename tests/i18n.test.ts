@@ -97,6 +97,7 @@ describe('i18n key coverage (#488)', () => {
   it('uses the typographic apostrophe and a non-breaking space before French punctuation (#907)', () => {
     // U+00A0, spelled out: an invisible literal in the source is a trap.
     const NBSP = '\u00a0';
+    const offenders: string[] = [];
     for (const { key, value } of dictEntries(frSrc)) {
       if (/[A-Za-zÀ-ÿ]'[A-Za-zÀ-ÿ]/.test(value)) {
         offenders.push(`${key}: ASCII apostrophe between letters`);
@@ -112,6 +113,7 @@ describe('i18n key coverage (#488)', () => {
   });
 
   it('renders the French punctuation without breaking placeholders (#907)', () => {
+    void i18n.set('fr');
     // The sweep is mechanical: `{seconds}` still interpolates, and the colon
     // that introduces it now carries the non-breaking space.
     const label = t('settings.defaultIntervalLabel', { seconds: 30 });
