@@ -683,6 +683,6 @@ export const fr: Dict = {
   'tray.profilesMenuActivateBase': 'Utiliser la configuration de base',
   'cli.profileFlag': 'Basculer vers un profil de présence nommé et quitter.',
   'cli.profileActive': 'Le profil actif est désormais « {name} ».',
-  'cli.profileUnknown': 'Aucun profil nommé « {name} » — la configuration de base reste active.',
+  'cli.profileUnknown': 'Aucun profil nommé « {name} » — la configuration de base reste active.',
   'settings.shortcutToggleProfile': 'Faire défiler les profils de présence',
 };
