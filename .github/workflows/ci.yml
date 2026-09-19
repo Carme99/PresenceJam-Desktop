@@ -421,29 +421,44 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # Dependency-vulnerability gate (issue #357): surfaces new advisories on
-  # the introducing PR. Non-blocking (`continue-on-error`) until the two
-  # accepted quick-xml RUSTSEC-2026-0194/-0195 advisories clear upstream
-  # (see SECURITY.md "Accepted transitive risks"); then remove the flag to
-  # enforce. The npm audit leg stays advisory-only: `npm audit` exits
-  # non-zero on any finding, so it reports without gating.
-
+  # Dependency-vulnerability gate (issues #357, #844): surfaces new advisories on
+  # the introducing PR.
+  #
+  # Enforcement split, measured rather than assumed — re-measured 2026-09-19 on
+  # this tree: `npm audit` reports exactly one advisory (moderate `devalue`,
+  # GHSA-9rgm-9g3h-6x36) and it is dev-only, so the production-tree gate below
+  # exits 0 today while the full-tree step still reports it.
+  #  - npm half GATES on the production tree (`--omit=dev`), which is what a
+  #    shipped binary actually links: a high or critical advisory there fails
+  #    the run instead of reporting green.
+  #  - cargo half stays advisory-only (`continue-on-error` scoped to that step,
+  #    not the job) until the two accepted quick-xml RUSTSEC-2026-0194/-0195
+  #    advisories clear upstream (SECURITY.md "Accepted transitive risks").
   dep-audit:
     name: Dependency audit (cargo + npm)
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    continue-on-error: true
+    permissions:
+      contents: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
 
+      # Advisory-only whenever the accepted quick-xml IDs below are in play:
+      # `continue-on-error` lives on this step so the npm gate can still fail
+      # the job (#844).
       - name: Cargo audit (advisory)
+        continue-on-error: true
         uses: RustSec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998  # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           working-directory: src-tauri
+          # Owner: @Carme99. Expiry: 2026-12-31 — on that date re-measure
+          # `cargo audit` in src-tauri and, if a fixed quick-xml has shipped,
+          # delete these two IDs together with this step's `continue-on-error`.
+          # Tracking issue for the remaining accepted advisories: #642.
           ignore: RUSTSEC-2026-0194,RUSTSEC-2026-0195
 
       - name: Setup Node
@@ -452,13 +467,20 @@ jobs:
           node-version: 24
           cache: 'npm'
 
-      - name: npm audit (advisory)
+      # The gate (#844): production tree only, high and above. A dev-only
+      # advisory cannot block a merge, and nothing is silently swallowed — the
+      # full-tree step below still reports every advisory.
+      - name: npm audit (production tree, blocking)
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: npm audit (full tree, advisory)
         # `run` is a block scalar on purpose: a plain scalar cannot contain
         # " #", so the `#357` reference used to end the YAML value early
         # ("unexpected EOF while looking for matching \"" — the npm leg never
         # ran at all). Keep the value on its own line if it cites an issue.
+        continue-on-error: true
         run: |
-          npm audit --audit-level=high || echo "::warning::npm audit found advisories (advisory-only, see issue #357)"
+          npm audit --audit-level=high || echo "::warning::npm audit found advisories (advisory-only, see #357/#844)"
 
   # Licence + source policy gate (issue #776): src-tauri/deny.toml allow-lists
   # the licences this tree may ship — measured from the 609 registry crates
