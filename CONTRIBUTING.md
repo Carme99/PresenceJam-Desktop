@@ -74,7 +74,7 @@ Types: `feat`, `fix`, `docs`, `test`, `refactor`, `chore`
 
 ### Screenshots
 
-If your change affects the UI, please include a screenshot in the PR. Screenshots help reviewers verify the change and are added to the README as needed.
+If your change affects the UI, please include a screenshot in the PR. Screenshots help reviewers verify the change and are added to the README as needed. Captures that belong in the repo live in [`docs/screenshots/`](./docs/screenshots) — never drop a pasted image at the repository root (`.gitignore` rejects `/image_0*.*`, but the review is the real gate).
 
 ## Project Structure
 

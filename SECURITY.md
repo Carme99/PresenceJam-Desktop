@@ -260,8 +260,9 @@ All API communication happens over **HTTPS/TLS**:
 | Spotify Web API | `https://api.spotify.com` |
 | Microsoft Auth | `https://login.microsoftonline.com` |
 | Microsoft Graph | `https://graph.microsoft.com` |
+| GitHub Releases (update check) | `https://github.com/Carme99/PresenceJam-Desktop/releases/latest/download/latest.json` — the beta channel uses `latest-beta.json` in the same directory |
 
-No data is sent to any third-party server other than Spotify and Microsoft Graph APIs.
+No data is sent to any third-party server other than Spotify and Microsoft Graph APIs and the GitHub Releases update check listed above — the update request carries no user data beyond the app version and this machine's IP address.
 
 ## No Telemetry
 
@@ -272,7 +273,7 @@ PresenceJam does **not** collect or transmit:
 - Personal identifying information
 - Your music listening history
 
-The only external network requests are the Spotify and Microsoft Graph API calls required for the app to function.
+The only external network requests are the Spotify and Microsoft Graph API calls required for the app to function, plus the silent update check at startup and roughly every 24 hours. That check sends the app version and this machine's IP to `github.com` and nothing else; blocking `github.com` disables update discovery only — syncing keeps working. See README's auto-update bullet for the user-facing behaviour.
 
 ## Third-Party APIs
 

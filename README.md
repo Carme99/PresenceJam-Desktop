@@ -176,6 +176,7 @@ details and the exact exit conditions.
 | --- | --- |
 | [Docs index](./docs/README.md) | What to read for what — every guide, by task |
 | [Setup](./SETUP.md) | Installing the app, Spotify app registration, Teams auth |
+| [Supported platforms](./docs/PLATFORMS.md) | OS and architecture matrix, packages and update paths |
 | [Usage](./USAGE.md) | Day-to-day guide — tray, dashboard, settings |
 | [Architecture](./ARCHITECTURE.md) | How it works under the hood |
 | [Troubleshooting](./TROUBLESHOOTING.md) | Common problems and fixes |

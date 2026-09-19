@@ -7,9 +7,23 @@ Common problems and how to fix them.
 Before diving in, check these basics:
 
 - The app is minimized to **system tray**, not closed — right-click tray icon to quit
-- Your Windows user profile has **write access** to `%APPDATA%\PresenceJam\`
+- Your user profile has **write access** to the config folder — `%APPDATA%\PresenceJam\` (Windows), `~/Library/Application Support/PresenceJam/` (macOS), `$XDG_CONFIG_HOME/PresenceJam/` (Linux)
 - You're connected to the **same network** (no corporate proxy blocking Spotify/Teams APIs)
 - Both **Spotify Premium** and **Microsoft 365 Teams** accounts are active
+
+## First run on macOS and Linux
+
+### macOS: the app is blocked as an unidentified developer
+
+**Cause:** the DMG is unsigned (Apple Developer Program enrollment is out of scope — see issue #90), so Gatekeeper refuses the first launch.
+
+**Fix:** right-click the app → **Open**, or System Settings → Privacy & Security → **Open Anyway**. Subsequent opens work without the prompt. The same applies after an update, because updated `.app` builds are unsigned too.
+
+### Linux: no tray icon and no window
+
+**Cause:** the app is tray-only, so on a desktop that cannot show tray icons it looks like nothing started. GNOME needs the AppIndicator extension, and the tray library (`libayatana-appindicator3`) must be installed; a Wayland session without the extension shows nothing at all.
+
+**Fix:** install `libayatana-appindicator3` for your distro and enable the GNOME AppIndicator extension (or use a desktop with a native tray), then re-launch the binary — a running instance is raised rather than a second one started. If the launch fails without a tray library, the app now reports an error instead of panicking. See **Linux: System Keyring Required** in SETUP.md for the other Linux prerequisite.
 
 ## Spotify
 
@@ -141,8 +155,8 @@ Settings shows the same state on the credential row ("System keychain unavailabl
 Closing the window is not an exit: the close button only hides the app to the
 tray, where it keeps polling Spotify and keeps writing your Teams status.
 
-**To prevent it from starting with Windows:**
-- Settings → disable **Launch at Login**
+**To prevent it from starting automatically:**
+- Turn off **Launch at Login** in Settings. The login entry it writes is the Windows/macOS login item or `~/.config/autostart/PresenceJam.desktop` on Linux; delete that file if the app is already uninstalled.
 
 ### A detached Logs/Settings window disappeared
 
@@ -316,7 +330,7 @@ If you're on a corporate network that blocks these domains, the app won't work. 
 **Fix:**
 1. Try disabling VPN temporarily
 2. Verify you can reach Spotify.com in your browser
-3. Check Windows Firewall hasn't blocked the app
+3. Check your firewall hasn't blocked the app — Windows Defender Firewall, the macOS firewall, or a distro firewall (ufw/firewalld)
 
 ## Uninstalling
 

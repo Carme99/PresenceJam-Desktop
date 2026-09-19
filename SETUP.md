@@ -4,7 +4,7 @@ Get PresenceJam running on your machine.
 
 ## Prerequisites
 
-- **Windows 10/11** (64-bit), **macOS** (Apple Silicon), or **Linux** (64-bit)
+- **Windows 10/11** (64-bit), **macOS** (Apple Silicon), or **Linux** (64-bit, glibc) — the full matrix, including what is *not* supported, is in [`docs/PLATFORMS.md`](./docs/PLATFORMS.md)
 - On **Linux**, a running Secret Service keyring daemon is required — see
   **Linux: System Keyring Required** below
 - A **Spotify Premium** account (required for the Web API)
