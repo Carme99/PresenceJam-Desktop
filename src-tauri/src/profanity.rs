@@ -268,6 +268,62 @@ fn normalize(text: &str) -> Vec<NormChar> {
     collapse_repeated_chars(&result)
 }
 
+/// Memo of the matcher states one search has already explored (#880).
+///
+/// `match_from` drives the same `(si, wi, stretched, sep_skipped)` state from
+/// several branches, so without a memo a failing match re-explores the same
+/// sub-tree two to three times per position and the cost doubles about every
+/// two extra characters — `"tit" + "71"x12` took 231 ms and a 60-character
+/// adversarial title is minutes of CPU, all of it on the poll thread, which
+/// nothing can interrupt. One bit per state; the table is sized for one
+/// `(text, word)` pair and reused across the scan of that pair, so nothing
+/// survives the call that built it.
+#[derive(Default)]
+struct MatchMemo {
+    seen: Vec<u64>,
+    steps: usize,
+}
+
+impl MatchMemo {
+    /// Ceiling on states explored by one [`matches_at_pos`] call. Memoisation
+    /// already bounds the search at four states per `(si, wi)` pair, so this is
+    /// only a backstop should a future edit reintroduce unbounded branching:
+    /// past it every state reads as explored and the search prunes.
+    const STEP_BUDGET: usize = 1 << 18;
+
+    /// Sizes the table for one `(text, word)` pair and forgets everything.
+    fn reset(&mut self, text_len: usize, word_len: usize) {
+        self.seen.clear();
+        self.seen.resize((4 * (text_len + 1) * (word_len + 1)).div_ceil(64), 0);
+        self.steps = 0;
+    }
+
+    /// Marks `(si, wi, stretched, sep_skipped)` as explored and reports whether
+    /// the search has already been there. Only failed states are ever revisited
+    /// — a successful exploration unwinds the entire search — so treating a
+    /// visited state as failed repeats the memo-free outcome exactly.
+    fn visit(
+        &mut self,
+        word_len: usize,
+        si: usize,
+        wi: usize,
+        stretched: bool,
+        sep_skipped: bool,
+    ) -> bool {
+        if self.steps >= Self::STEP_BUDGET {
+            return true;
+        }
+        self.steps += 1;
+        let flags = (stretched as usize) * 2 + sep_skipped as usize;
+        let idx = (si * (word_len + 1) + wi) * 4 + flags;
+        let slot = &mut self.seen[idx / 64];
+        let bit = 1u64 << (idx % 64);
+        let seen = *slot & bit != 0;
+        *slot |= bit;
+        seen
+    }
+}
+
 /// Recursive matcher with backtracking. At a mismatch the matcher may:
 /// - skip a separator (insertion reading, e.g. `f.u.c.k`), or consume it
 ///   as a single-char wildcard (substitution reading, e.g. `f*ck`);
@@ -280,6 +336,8 @@ fn normalize(text: &str) -> Vec<NormChar> {
 /// consumption) also sets `sep_skipped`, which callers must gate on
 /// original-string word boundaries on BOTH sides (`Push It` joins to
 /// `pushit`, which fabricates `shit`).
+///
+/// `memo` short-circuits states this search has already explored (#880).
 fn match_from(
     text: &[NormChar],
     word: &[char],
@@ -287,6 +345,7 @@ fn match_from(
     wi: usize,
     stretched: bool,
     sep_skipped: bool,
+    memo: &mut MatchMemo,
 ) -> Option<(usize, bool, bool)> {
     if wi == word.len() {
         return Some((si, stretched, sep_skipped));
@@ -294,39 +353,49 @@ fn match_from(
     if si == text.len() {
         return None;
     }
+
+    if memo.visit(word.len(), si, wi, stretched, sep_skipped) {
+        return None;
+    }
     let t = text[si];
     if t.ch == word[wi] {
-        return match_from(text, word, si + 1, wi + 1, stretched, sep_skipped);
+        return match_from(text, word, si + 1, wi + 1, stretched, sep_skipped, memo);
     }
     if !t.ch.is_alphanumeric() {
-        if let Some(found) = match_from(text, word, si + 1, wi, stretched, true) {
+        if let Some(found) = match_from(text, word, si + 1, wi, stretched, true, memo) {
             return Some(found);
         }
-        if let Some((end, _, _)) = match_from(text, word, si + 1, wi + 1, true, true) {
+        if let Some((end, _, _)) = match_from(text, word, si + 1, wi + 1, true, true, memo) {
             return Some((end, true, true));
         }
         return None;
     }
     if si > 0 && t.ch == text[si - 1].ch {
-        if let Some(found) = match_from(text, word, si + 1, wi, true, sep_skipped) {
+        if let Some(found) = match_from(text, word, si + 1, wi, true, sep_skipped, memo) {
             return Some(found);
         }
     }
     if t.leet {
-        if let Some(found) = match_from(text, word, si + 1, wi, true, sep_skipped) {
+        if let Some(found) = match_from(text, word, si + 1, wi, true, sep_skipped, memo) {
             return Some(found);
         }
     }
     if word[..wi].contains(&t.ch) {
-        if let Some(found) = match_from(text, word, si + 1, wi, true, sep_skipped) {
+        if let Some(found) = match_from(text, word, si + 1, wi, true, sep_skipped, memo) {
             return Some(found);
         }
     }
     None
 }
 
-fn matches_at_pos(text: &[NormChar], word: &[char], start: usize) -> Option<(usize, bool, bool)> {
-    match_from(text, word, start, 0, false, false)
+fn matches_at_pos(
+    text: &[NormChar],
+    word: &[char],
+    start: usize,
+    memo: &mut MatchMemo,
+) -> Option<(usize, bool, bool)> {
+    memo.reset(text.len(), word.len());
+    match_from(text, word, start, 0, false, false, memo)
 }
 
 /// Whitelist scoped per stem: only `cock` + `tail` is a known-clean
@@ -398,6 +467,9 @@ fn first_token(chars: &[NormChar], mut idx: usize) -> String {
 fn contains_profanity(text: &str, extra_words: &[String]) -> bool {
     let chars = normalize(text);
 
+    // One memo for the whole scan, reset per start position (#880).
+    let mut memo = MatchMemo::default();
+
     // Issue #538 / CfgDiag#3(b): the user's own lexicon is matched against the
     // SAME normalized text with the same evasion machinery (separator skipping,
     // leet folding, stretch collapsing, span checks) — only the stem-scoped
@@ -416,7 +488,8 @@ fn contains_profanity(text: &str, extra_words: &[String]) -> bool {
         }
 
         for start in 0..=(chars.len() - word_len) {
-            let Some((end, stretched, sep_skipped)) = matches_at_pos(&chars, &word_chars, start)
+            let Some((end, stretched, sep_skipped)) =
+                matches_at_pos(&chars, &word_chars, start, &mut memo)
             else {
                 continue;
             };
@@ -544,6 +617,8 @@ fn contains_profanity(text: &str, extra_words: &[String]) -> bool {
 /// given stem are profane (`shitpost`, `fuckboy`) and would flag the innocent
 /// inflections of an arbitrary user word (`not` + `ing`).
 fn contains_extra_word(text: &[NormChar], extra_words: &[String]) -> bool {
+    // One memo for the whole scan, reset per start position (#880).
+    let mut memo = MatchMemo::default();
     for raw in extra_words {
         let word_chars = extra_word_chars(raw);
         let word_len = word_chars.len();
@@ -552,7 +627,8 @@ fn contains_extra_word(text: &[NormChar], extra_words: &[String]) -> bool {
         }
 
         for start in 0..=(text.len() - word_len) {
-            let Some((end, stretched, sep_skipped)) = matches_at_pos(text, &word_chars, start)
+            let Some((end, stretched, sep_skipped)) =
+                matches_at_pos(text, &word_chars, start, &mut memo)
             else {
                 continue;
             };
@@ -1128,5 +1204,120 @@ mod tests {
         assert!(!contains_profanity("", &junk));
         assert!(!contains_profanity("Daft Punk - One More Time", &junk));
         assert!(!contains_profanity("hello", &junk));
+    }
+
+    // -----------------------------------------------------------------
+    // Issue #880: the matcher memo.
+    // -----------------------------------------------------------------
+
+    /// The pre-#880 matcher: it explores every branch and keeps no memo. Kept
+    /// verbatim as the differential reference for `matches_at_pos`.
+    fn match_from_unmemoized(
+        text: &[NormChar],
+        word: &[char],
+        si: usize,
+        wi: usize,
+        stretched: bool,
+        sep_skipped: bool,
+    ) -> Option<(usize, bool, bool)> {
+        if wi == word.len() {
+            return Some((si, stretched, sep_skipped));
+        }
+        if si == text.len() {
+            return None;
+        }
+        let t = text[si];
+        if t.ch == word[wi] {
+            return match_from_unmemoized(text, word, si + 1, wi + 1, stretched, sep_skipped);
+        }
+        if !t.ch.is_alphanumeric() {
+            if let Some(found) = match_from_unmemoized(text, word, si + 1, wi, stretched, true) {
+                return Some(found);
+            }
+            if let Some((end, _, _)) = match_from_unmemoized(text, word, si + 1, wi + 1, true, true)
+            {
+                return Some((end, true, true));
+            }
+            return None;
+        }
+        if si > 0 && t.ch == text[si - 1].ch {
+            if let Some(found) = match_from_unmemoized(text, word, si + 1, wi, true, sep_skipped) {
+                return Some(found);
+            }
+        }
+        if t.leet {
+            if let Some(found) = match_from_unmemoized(text, word, si + 1, wi, true, sep_skipped) {
+                return Some(found);
+            }
+        }
+        if word[..wi].contains(&t.ch) {
+            if let Some(found) = match_from_unmemoized(text, word, si + 1, wi, true, sep_skipped) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    /// #880: memoisation is a pure speed-up — the memoized matcher must return
+    /// the same `(end, stretched, sep_skipped)` as the unmemoized reference for
+    /// every word at every start position, on plain titles and on each evasion
+    /// path the matcher has (leet, stretch, separator, `x`/`(` folds).
+    #[test]
+    fn test_issue_880_memo_matches_the_unmemoized_matcher() {
+        let corpus = [
+            "",
+            "fuck",
+            "shit",
+            "bitch",
+            "Spices",
+            "Dix's",
+            "dixhead",
+            "f.u.c.k",
+            "f*ck",
+            "fuu1uck",
+            "tit717171",
+            "ｆｕｃｋ",
+            "sh1t and bitchez",
+            "Push It",
+            "Song (Uncut)",
+            "niggaz",
+            "motherfucker",
+            "cocktail",
+            "s.h.i.t",
+        ];
+        let mut memo = MatchMemo::default();
+        for text in corpus {
+            let chars = normalize(text);
+            for &word in PROFANITY_LIST {
+                let word_chars: Vec<char> = word.chars().collect();
+                for start in 0..=chars.len() {
+                    assert_eq!(
+                        matches_at_pos(&chars, &word_chars, start, &mut memo),
+                        match_from_unmemoized(&chars, &word_chars, start, 0, false, false),
+                        "memo diverged for {text:?} / {word} at {start}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// #880: `"tit" + "71"x28` (59 chars) is exactly the shape that doubled the
+    /// matcher's cost every two characters — 231 ms at `x12` in release, minutes
+    /// of CPU at this length — on the polling thread, which nothing interrupts.
+    /// The title holds no list word (its text is only `t`/`i`), so the memoized
+    /// search must still answer clean.
+    #[test]
+    fn test_issue_880_adversarial_title_is_classified_promptly() {
+        let title = format!("tit{}", "71".repeat(28));
+        assert_eq!(title.len(), 59);
+        let started = std::time::Instant::now();
+        let flagged = contains_profanity(&title, &[]);
+        let elapsed = started.elapsed();
+        assert!(!flagged, "no list word is spellable from a `t`/`i`-only title");
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "matcher took {elapsed:?} on a {}-char title",
+            title.len()
+        );
     }
 }
