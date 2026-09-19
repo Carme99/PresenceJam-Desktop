@@ -263,15 +263,12 @@ jobs:
             bundle_path: |
               PresenceJam-macos.dmg
               PresenceJam-${{ needs.resolve-tag.outputs.tag }}.app.tar.gz
-              PresenceJam-${{ needs.resolve-tag.outputs.tag }}.app.tar.gz.sig
           - os: windows-latest
             target: ''
             artifact_name: PresenceJam-${{ needs.resolve-tag.outputs.tag }}-windows
             bundle_path: |
               PresenceJam-${{ needs.resolve-tag.outputs.tag }}-setup.exe
-              PresenceJam-${{ needs.resolve-tag.outputs.tag }}-setup.exe.sig
               PresenceJam-${{ needs.resolve-tag.outputs.tag }}.msi
-              PresenceJam-${{ needs.resolve-tag.outputs.tag }}.msi.sig
           - os: ubuntu-latest
             target: ''
             artifact_name: PresenceJam-${{ needs.resolve-tag.outputs.tag }}-linux-amd64
@@ -279,7 +276,6 @@ jobs:
               PresenceJam-linux-amd64.deb
               PresenceJam-linux-amd64.rpm
               PresenceJam-linux-amd64.AppImage
-              PresenceJam-${{ needs.resolve-tag.outputs.tag }}.AppImage.sig
 
     steps:
       - name: Checkout repository
@@ -318,21 +314,27 @@ jobs:
       - name: Build frontend
         run: npm run build
 
+      # SECURITY (issue #828): these three steps compile far more than this
+      # crate — `beforeBuildCommand` runs `npm run build` (Vite plus every
+      # plugin under node_modules) and the cargo build executes build scripts
+      # for the whole dependency tree, all inheriting this step's environment.
+      # The updater signing key is the only trust anchor an installed client
+      # has, so it is NOT here: the build runs with createUpdaterArtifacts
+      # disabled (which is also what stops `tauri build` from signing) and
+      # uploads unsigned payloads. The `sign` job signs them afterwards and is
+      # the only place the key is exported. The --config override deep-merges,
+      # so it touches nothing else in tauri.conf.json.
       - name: Build Tauri (macOS)
         if: matrix.os == 'macos-latest'
         env:
           CARGO_INCREMENTAL: 0
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npx tauri build --target ${{ matrix.target }}
+        run: npx tauri build --target ${{ matrix.target }} --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
       - name: Build Tauri (Windows)
         if: matrix.os == 'windows-latest'
         env:
           CARGO_INCREMENTAL: 0
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npx tauri build
+        run: npx tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
       # Tauri on Linux pulls in glib-sys/webkit2gtk-sys/etc. via FFI
       # bindings, so the Ubuntu runner needs the GTK + webkit2gtk system
@@ -384,9 +386,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         env:
           CARGO_INCREMENTAL: 0
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npx tauri build
+        run: npx tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
       - name: Debug macOS bundle
         if: matrix.os == 'macos-latest'
@@ -403,24 +403,27 @@ jobs:
           echo "Found dmg: $dmg_path"
           cp "$dmg_path" "PresenceJam-macos.dmg"
 
-      # The updater plugin consumes the signed .app.tar.gz (+ .sig) from
-      # the bundle; copy them to the deterministic release names so the
-      # latest.json URLs are stable across versions.
-      - name: Package macOS updater artifacts
+      # The updater payload for macOS is the .app.tar.gz, and tauri's updater
+      # bundler is what used to create it — with createUpdaterArtifacts
+      # disabled (issue #828) this leg tar.gz's the bundle itself. The layout
+      # is the one tauri would have produced: a single PresenceJam.app root
+      # entry (tauri-bundler appends src_dir.file_name() / the same directory,
+      # `tar -C <bundle/macos> PresenceJam.app`), so the updater's extraction
+      # and the in-app install are unchanged. It is unsigned here on purpose;
+      # the `sign` job signs it after the compile.
+      - name: Package macOS updater payload
         if: matrix.os == 'macos-latest'
         run: |
           set -euo pipefail
-          TARGZ=$(find src-tauri/target/${{ matrix.target }}/release/bundle/macos -name "*.app.tar.gz" 2>/dev/null | head -1)
-          SIG="${TARGZ}.sig"
-          if [ -z "$TARGZ" ] || [ ! -f "$SIG" ]; then
-            echo "::error::Expected .app.tar.gz and .sig in bundle/macos/"
+          APP=$(find src-tauri/target/${{ matrix.target }}/release/bundle/macos -maxdepth 1 -name "*.app" 2>/dev/null | head -1)
+          if [ -z "$APP" ] || [ ! -d "$APP" ]; then
+            echo "::error::Expected the .app bundle in bundle/macos/"
             ls -la src-tauri/target/${{ matrix.target }}/release/bundle/macos/ 2>&1 || echo "(missing)"
             exit 1
           fi
-          cp "$TARGZ" "PresenceJam-$RELEASE_TAG.app.tar.gz"
-          cp "$SIG" "PresenceJam-$RELEASE_TAG.app.tar.gz.sig"
-          echo "Packaged updater artifacts:"
-          ls -la PresenceJam-$RELEASE_TAG.app.tar.gz*
+          tar -czf "PresenceJam-$RELEASE_TAG.app.tar.gz" -C "$(dirname "$APP")" "$(basename "$APP")"
+          echo "Packaged updater payload:"
+          ls -la PresenceJam-$RELEASE_TAG.app.tar.gz
 
       # Two installers, deliberately (issue #897). The NSIS setup is the
       # updater payload: it honours bundle.windows.nsis.installMode =
@@ -448,26 +451,8 @@ jobs:
           Copy-Item $msi.FullName "PresenceJam-$env:RELEASE_TAG.msi"
           Get-ChildItem "PresenceJam-$env:RELEASE_TAG-setup.exe", "PresenceJam-$env:RELEASE_TAG.msi"
 
-      # Both installers are updater payloads in principle, so both carry a
-      # .sig: latest.json points at the setup.exe, and the MSI keeps its
-      # signature for anyone verifying a manual download (issue #897).
-      - name: Package Windows updater signatures
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          $setupSig = Get-ChildItem "src-tauri/target/release/bundle/nsis" -Filter "*-setup.exe.sig" | Select-Object -First 1
-          if (-not $setupSig) {
-            Write-Error "Expected *-setup.exe.sig in bundle/nsis/"
-            exit 1
-          }
-          Copy-Item $setupSig.FullName "PresenceJam-$env:RELEASE_TAG-setup.exe.sig"
-          $msiSig = Get-ChildItem "src-tauri/target/release/bundle/msi" -Filter "*.msi.sig" | Select-Object -First 1
-          if (-not $msiSig) {
-            Write-Error "Expected .msi.sig in bundle/msi/"
-            exit 1
-          }
-          Copy-Item $msiSig.FullName "PresenceJam-$env:RELEASE_TAG.msi.sig"
-          Get-ChildItem "PresenceJam-$env:RELEASE_TAG-setup.exe.sig", "PresenceJam-$env:RELEASE_TAG.msi.sig"
+      # The .sig files for both installers are produced by the `sign` job
+      # (issue #828): the private key must not be in this job's environment.
 
       # Linux artifacts are named like `presence-jam_2.7.2_amd64.deb` by
       # Tauri's bundler. Rename to the project-standard format used by
@@ -493,13 +478,7 @@ jobs:
           cp "$DEB" "PresenceJam-linux-amd64.deb"
           cp "$RPM" "PresenceJam-linux-amd64.rpm"
           cp "$APPIMAGE" "PresenceJam-linux-amd64.AppImage"
-          APPIMAGE_SIG="${APPIMAGE}.sig"
-          if [ ! -f "$APPIMAGE_SIG" ]; then
-            echo "::error::Expected .AppImage.sig in bundle/appimage/"
-            ls -la src-tauri/target/release/bundle/appimage/ 2>&1 || echo "(missing)"
-            exit 1
-          fi
-          cp "$APPIMAGE_SIG" "PresenceJam-$RELEASE_TAG.AppImage.sig"
+          # The AppImage's .sig comes from the `sign` job (issue #828).
 
           # The metainfo has to be INSIDE the packages: the files map in
           # tauri.conf.json is what puts it there, and a typo in that map is
@@ -515,7 +494,7 @@ jobs:
             exit 1
           fi
           echo "Packaged:"
-          ls -la PresenceJam-linux-amd64.* PresenceJam-$RELEASE_TAG.AppImage.sig
+          ls -la PresenceJam-linux-amd64.*
 
       # Artefact sizes (issue #899): a profile change is unmeasurable without a
       # printed number, and the run log is where the next one gets compared to
@@ -548,8 +527,112 @@ jobs:
         with:
           subject-path: ${{ matrix.bundle_path }}
 
-  release:
+  # ------------------------------------------------------------------
+  # Updater signing (issue #828)
+  # ------------------------------------------------------------------
+  # The updater signing key is the only trust anchor an installed client has:
+  # whoever holds it can sign a bundle every copy accepts as an official
+  # update, so its blast radius is every user rather than this repository.
+  # It must not sit in the environment of `npx tauri build` — that step runs
+  # `npm run build` (Vite plus every plugin under node_modules) and a cargo
+  # build whose build scripts execute for the whole dependency tree, all
+  # inheriting the step environment — so the key is exported here instead, in
+  # one step, after the compile has finished.
+  #
+  # Gated behind the `release-signing` GitHub environment: add required
+  # reviewers to it (Settings -> Environments -> release-signing) so a tag
+  # push cannot sign and publish without a human. Until those reviewers are
+  # configured the environment exists but gates nothing.
+  sign:
     needs: [resolve-tag, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: release-signing
+    # id-token + attestations are for the signature attestation below, which
+    # keeps the provenance property the build job's attestation had while the
+    # .sig files were still produced inside the build legs.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      RELEASE_TAG: ${{ needs.resolve-tag.outputs.tag }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.resolve-tag.outputs.tag }}
+
+      # Only for the pinned Tauri CLI. The secrets are NOT in this step's
+      # environment, so the install and its lifecycle scripts never see them.
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6.5.0
+        with:
+          node-version: 24
+          cache: 'npm'
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Download unsigned artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          path: dist
+          digest-mismatch: error
+
+      # The payload set is what latest.json advertises plus the MSI that stays
+      # published for managed machines. Each one is signed with
+      # `tauri signer sign`, which is standalone (it takes no project config),
+      # and its .sig is copied out under the flat release name latest.json and
+      # the release assets use. A missing payload fails here rather than
+      # shipping an install nobody can update.
+      - name: Sign updater payloads
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY is not set — refusing to publish unsigned updater payloads"
+            exit 1
+          fi
+          mkdir -p sig
+          sign() {
+            src="$1"
+            if [ ! -f "$src" ]; then
+              echo "::error::missing updater payload: $src"
+              exit 1
+            fi
+            npx tauri signer sign "$src"
+            if [ ! -s "${src}.sig" ]; then
+              echo "::error::tauri signer produced no signature for $src"
+              exit 1
+            fi
+            cp "${src}.sig" "sig/$(basename "${src}").sig"
+            echo "Signed $(basename "$src")"
+          }
+          sign "dist/PresenceJam-${RELEASE_TAG}-macos.dmg/PresenceJam-${RELEASE_TAG}.app.tar.gz"
+          sign "dist/PresenceJam-${RELEASE_TAG}-windows/PresenceJam-${RELEASE_TAG}-setup.exe"
+          sign "dist/PresenceJam-${RELEASE_TAG}-windows/PresenceJam-${RELEASE_TAG}.msi"
+          sign "dist/PresenceJam-${RELEASE_TAG}-linux-amd64/PresenceJam-linux-amd64.AppImage"
+          echo "=== signatures ==="
+          ls -l sig
+
+      - name: Upload signatures
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: signatures
+          path: sig/*.sig
+          if-no-files-found: error
+
+      - name: Attest updater signatures
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-path: sig/*.sig
+
+  release:
+    needs: [resolve-tag, build, sign]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -648,10 +731,13 @@ jobs:
           PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
           # Downloaded artifacts keep the upload-artifact name as a
-          # subdirectory under artifacts/ (download-artifact v4+ layout).
-          MAC_SIG="artifacts/PresenceJam-${RELEASE_TAG}-macos.dmg/PresenceJam-${RELEASE_TAG}.app.tar.gz.sig"
-          WIN_SIG="artifacts/PresenceJam-${RELEASE_TAG}-windows/PresenceJam-${RELEASE_TAG}-setup.exe.sig"
-          LINUX_SIG="artifacts/PresenceJam-${RELEASE_TAG}-linux-amd64/PresenceJam-${RELEASE_TAG}.AppImage.sig"
+          # The .sig files come from the `sign` job's artifacts, which land as
+          # artifacts/signatures/<flat name> (issue #828); they are the
+          # minisign output the updater verifies, uploaded to the Release
+          # alongside the payloads by the release action's artifacts glob.
+          MAC_SIG="artifacts/signatures/PresenceJam-${RELEASE_TAG}.app.tar.gz.sig"
+          WIN_SIG="artifacts/signatures/PresenceJam-${RELEASE_TAG}-setup.exe.sig"
+          LINUX_SIG="artifacts/signatures/PresenceJam-${RELEASE_TAG}.AppImage.sig"
 
           for f in "$MAC_SIG" "$WIN_SIG" "$LINUX_SIG"; do
             if [ ! -s "$f" ]; then

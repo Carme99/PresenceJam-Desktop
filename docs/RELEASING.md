@@ -164,9 +164,9 @@ behind the tag-push run.
 
    | OS | Target | Artifact (upload) | Packaged files |
    | --- | --- | --- | --- |
-   | `macos-latest` | `aarch64-apple-darwin` | `PresenceJam-<tag>-macos.dmg` | `PresenceJam-macos.dmg`, `PresenceJam-<tag>.app.tar.gz`, `PresenceJam-<tag>.app.tar.gz.sig` |
-   | `windows-latest` | default | `PresenceJam-<tag>-windows` | `PresenceJam-<tag>-setup.exe`, `PresenceJam-<tag>-setup.exe.sig`, `PresenceJam-<tag>.msi`, `PresenceJam-<tag>.msi.sig` |
-   | `ubuntu-latest` | default | `PresenceJam-<tag>-linux-amd64` | `PresenceJam-linux-amd64.deb`, `PresenceJam-linux-amd64.rpm`, `PresenceJam-linux-amd64.AppImage`, `PresenceJam-<tag>.AppImage.sig` |
+   | `macos-latest` | `aarch64-apple-darwin` | `PresenceJam-<tag>-macos.dmg` | `PresenceJam-macos.dmg`, `PresenceJam-<tag>.app.tar.gz` |
+   | `windows-latest` | default | `PresenceJam-<tag>-windows` | `PresenceJam-<tag>-setup.exe`, `PresenceJam-<tag>.msi` |
+   | `ubuntu-latest` | default | `PresenceJam-<tag>-linux-amd64` | `PresenceJam-linux-amd64.deb`, `PresenceJam-linux-amd64.rpm`, `PresenceJam-linux-amd64.AppImage` |
 
    The macOS leg builds **aarch64 only** (Intel Macs never receive updates).
    The Windows leg ships both installers: the per-user NSIS `setup.exe` (what
@@ -174,9 +174,18 @@ behind the tag-push run.
    managed machines. Uploads fail on missing files (`if-no-files-found: error`),
    the build job prints every packaged file with its byte count, and each
    packaged artifact also gets a SLSA attestation
-   (`actions/attest-build-provenance`, `subject-path: matrix.bundle_path`) —
-   supplementary to, not a replacement for, the minisign `.sig` files the
-   updater verifies.
+   (`actions/attest-build-provenance`, `subject-path: matrix.bundle_path`).
+
+   **Everything this job produces is unsigned, deliberately** (issue #828): the
+   three `npx tauri build` steps run with an inline
+   `--config '{"bundle":{"createUpdaterArtifacts":false}}'` and no signing
+   secrets in their environment, because the compile executes far more than
+   this crate — `npm run build` (Vite plus every plugin under `node_modules`)
+   and build scripts for the whole dependency tree all inherit that
+   environment, and anyone who can read it can sign an update every installed
+   client accepts. The `.app.tar.gz` is tar.gz'd by the macOS leg itself for
+   the same reason: with updater artifacts disabled, tauri's own updater
+   bundler — the thing that used to create it and sign it — no longer runs.
 
    The Linux leg also runs `appstreamcli validate` over
    `src-tauri/linux/com.presencejam.app.metainfo.xml` before the compile,
@@ -185,7 +194,18 @@ behind the tag-push run.
    `.rpm` — a package without it never appears in GNOME Software or KDE
    Discover.
 
-4. **`release`** (`needs: [resolve-tag, build]`) — checks the tag out (it needs
+4. **`sign`** (`needs: [resolve-tag, build]`, `environment: release-signing`) —
+   the only job holding `TAURI_SIGNING_PRIVATE_KEY` and its password, exported
+   to one step (`Sign updater payloads`) rather than the job, so `npm ci` and
+   its lifecycle scripts never see them. It downloads the unsigned payloads and
+   runs `npx tauri signer sign` over each: the macOS `.app.tar.gz`, the Windows
+   `setup.exe` and `.msi`, and the Linux `AppImage`. Signatures land in a flat
+   `signatures` artifact (the release job reads them from there) and are
+   attested too, which is the provenance the build job used to give them while
+   it produced them. Add required reviewers to the `release-signing`
+   environment in the repository settings, or a tag push can sign and publish
+   without a human — until then the environment exists but gates nothing.
+5. **`release`** (`needs: [resolve-tag, build, sign]`) — checks the tag out (it needs
    `CHANGELOG.md`), downloads all artifacts (`digest-mismatch: error`), writes
    `SHA256SUMS.txt` (one `"<sha256>  <filename>"` line per file; unsigned, and
    deliberately not covered by the build attestation), extracts this version's
@@ -203,26 +223,29 @@ behind the tag-push run.
      "pub_date": "<UTC RFC3339>",
      "platforms": {
        "darwin-aarch64": { "url": "…/PresenceJam-<tag>.app.tar.gz", "signature": "<.sig contents>" },
-       "windows-x86_64": { "url": "…/PresenceJam-<tag>.msi", "signature": "<.sig contents>" },
+       "windows-x86_64": { "url": "…/PresenceJam-<tag>-setup.exe", "signature": "<.sig contents>" },
        "linux-x86_64":   { "url": "…/PresenceJam-linux-amd64.AppImage", "signature": "<.sig contents>" }
      }
    }
    ```
 
    Signature values are the **contents** of the `.sig` files (minisign output),
-   not paths; a missing or empty `.sig` fails the job. `latest.json` is uploaded
+   not paths, and they come from the `sign` job's `signatures` artifact; a
+   missing or empty `.sig` fails the job. `latest.json` is uploaded
    with `gh release upload --clobber`, then "Verify latest.json assets in
-   release" lists the published assets and requires all three basenames to be
-   present — the updater has no GitHub auto-discovery and treats a 404 on a
+   release" requires every URL the manifest advertises to be a published
+   asset, pins the `.deb`/`.rpm`/`AppImage`/`setup.exe`/`.app.tar.gz` payload
+   names on top of that, and (on a beta tag) resolves the rolling beta
+   manifest — the updater has no GitHub auto-discovery and treats a 404 on a
    platform URL as "no update" **silently**, so a missing asset would strand
    every client (the v3.1.0 → v3.2.0 Windows incident, see
    [`archive/windows-update-chain-v3.2.md`](./archive/windows-update-chain-v3.2.md)).
-5. **`homebrew`** (`needs: [resolve-tag, release]`) — downloads the macOS DMG
+6. **`homebrew`** (`needs: [resolve-tag, release]`) — downloads the macOS DMG
    artifact, computes its SHA-256, and updates `presence-jam.rb` in
    `carme99/homebrew-tap` (version/url/sha256), creating the formula if absent
    and no-oping if the version already matches. Requires `HOMEBREW_TAP_TOKEN`
    with `contents:write` on the tap.
-6. **`winget`** (`needs: [resolve-tag, release]`) — `vedantmgoyal2009/winget-releaser`
+7. **`winget`** (`needs: [resolve-tag, release]`) — `vedantmgoyal2009/winget-releaser`
    for `PresenceJam.PresenceJam`, submitting through the fork
    `Carme99/winget-pkgs` (`fork-user`). Requires `WINGET_TOKEN`: a **classic**
    PAT with `public_repo` **and** `workflow` scopes (fine-grained is
