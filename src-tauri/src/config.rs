@@ -1474,8 +1474,7 @@ impl Default for TeamsConfig {
             profanity_extra_words: Vec::new(),
             respect_manual_status: default_respect_manual_status(),
             gate_when_out_of_office: default_gate_when_out_of_office(),
-<<<<<<< HEAD
-            gate_when_presenting: default_gate_when_presenting(),
+gate_when_presenting: default_gate_when_presenting(),
             // Issue #873: `0` = off (the default; an untouched config
             // behaves exactly as today). The clamp runs through
             // `clamp_teams` so any non-zero value lands in 60..=3600.

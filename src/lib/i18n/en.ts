@@ -567,11 +567,7 @@ export const en = {
   'dashboard.volumeAria': 'Spotify volume slider',
   'dashboard.seekAria': 'Click to seek',
   'dashboard.seekUnavailableAria': 'This device does not support seeking',
-<<<<<<< HEAD
 
-  // --- 5.0 wave3 features-gating ---
-
-=======
   // --- 5.0 wave3 features-outlook ---
   'rules.importWorkingHours': 'Import Outlook working hours',
   'rules.importWorkingHoursHint': 'Reads your Work hours tab and turns each off-block into a quiet-hours rule. Preview before applying.',
@@ -582,7 +578,8 @@ export const en = {
   'rules.importWorkingHoursReplaceHint': 'Replaces your existing quiet-hours rules with the imported set. Uncheck to keep both.',
   'rules.importWorkingHoursDaysLabel': 'Outlook reports {days} working on {start}–{end}',
   'rules.importWorkingHoursDaysAllOff': 'Outlook reports no working days — nothing to import',
->>>>>>> 8c75992 (feat(settings): import Outlook working hours into quiet-hours rules (#876))
+
+  // --- 5.0 wave3 features-gating ---
 };
 
 export type Dict = { readonly [K in keyof typeof en]: string };

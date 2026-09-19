@@ -591,11 +591,7 @@ export const fr: Dict = {
   'dashboard.volumeAria': 'Curseur de volume Spotify',
   'dashboard.seekAria': 'Cliquer pour chercher',
   'dashboard.seekUnavailableAria': 'Cet appareil ne prend pas en charge la recherche',
-<<<<<<< HEAD
 
-  // --- 5.0 wave3 features-gating ---
-
-=======
   // --- 5.0 wave3 features-outlook ---
   'rules.importWorkingHours': 'Importer les horaires Outlook',
   'rules.importWorkingHoursHint': 'Lit votre onglet Horaires de travail et transforme chaque plage hors travail en règle de plage calme. Aperçu avant application.',
@@ -606,5 +602,6 @@ export const fr: Dict = {
   'rules.importWorkingHoursReplaceHint': 'Remplace vos règles de plages calmes existantes par le jeu importé. Décochez pour conserver les deux.',
   'rules.importWorkingHoursDaysLabel': 'Outlook indique {days} jours travaillés de {start} à {end}',
   'rules.importWorkingHoursDaysAllOff': 'Outlook n’indique aucun jour travaillé — rien à importer',
->>>>>>> 8c75992 (feat(settings): import Outlook working hours into quiet-hours rules (#876))
+
+  // --- 5.0 wave3 features-gating ---
 };
