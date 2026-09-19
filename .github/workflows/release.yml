@@ -665,7 +665,7 @@ jobs:
   # ------------------------------------------------------------------
   # Runs after the GitHub Release is published so the DMG is available
   # at a stable URL. Pulls the artifact, computes its SHA256, and
-  # updates the presence-jam formula in the tap.
+  # updates the presence-jam cask in the tap.
   #
   # Required GitHub Actions secret (must be set in the repo's secrets
   # before the next v* tag push):
@@ -674,9 +674,9 @@ jobs:
   #                         (A fine-grained PAT scoped only to that
   #                         repo is the safer choice.)
   #
-  # The job is self-bootstrapping: if presence-jam.rb doesn't exist
+  # The job is self-bootstrapping: if Casks/presence-jam.rb doesn't exist
   # in the tap yet, it creates it. If it does, it updates version /
-  # url / sha256. A no-op if the formula is already at the same
+  # url / sha256. A no-op if the cask is already at the same
   # version (so re-running the workflow doesn't churn git history).
   homebrew:
     needs: [resolve-tag, release]
@@ -717,7 +717,7 @@ jobs:
           sha256sum PresenceJam-macos.dmg | tee sha256.txt
           echo "Computed SHA256 for $RELEASE_TAG"
 
-      - name: Update Homebrew formula in carme99/homebrew-tap
+      - name: Update Homebrew cask in carme99/homebrew-tap
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
@@ -730,11 +730,11 @@ jobs:
           VERSION="${RELEASE_TAG#v}"  # strip leading 'v'
           DMG_URL="https://github.com/Carme99/PresenceJam-Desktop/releases/download/${RELEASE_TAG}/PresenceJam-macos.dmg"
           SHA=$(awk '{print $1}' dist/sha256.txt)
-          echo "Updating tap formula to v${VERSION} (sha256=${SHA})"
+          echo "Updating tap cask to v${VERSION} (sha256=${SHA})"
 
-          # Render the formula from the template in homebrew/presence-jam.rb
+          # Render the cask from the template in homebrew/presence-jam.rb
           # by substituting the placeholders. The template is checked in
-          # so the formula content is reviewable in normal diffs and doesn't
+          # so the cask content is reviewable in normal diffs and doesn't
           # live inside the workflow YAML.
           sed -e "s|__URL__|${DMG_URL}|g" \
               -e "s|__SHA256__|${SHA}|g" \
@@ -759,31 +759,48 @@ jobs:
           # Sanity-check the credential helper works before any commit/push.
           git ls-remote --heads origin main >/dev/null
 
-          # A no-op only when the formula already describes this exact
+          # The cask lives under Casks/ (issue #898). The tap used to carry a
+          # formula at its root; a tap holding both a formula and a cask of the
+          # same name is ambiguous, so the stale root formula is removed in the
+          # same commit that writes the cask.
+          CASK_PATH="Casks/presence-jam.rb"
+          STALE_FORMULA="presence-jam.rb"
+
+          # A no-op only when the cask already describes this exact
           # artifact: same version AND same sha256. The version alone is
           # not enough — a re-cut can republish a byte-different DMG
           # under the same version (see the winget job's note below), and
           # exiting early here would leave the tap pinned to a dead
-          # digest while CI reports success.
-          if [ -f presence-jam.rb ]; then
-            CURRENT_VERSION=$(grep -E '^  version ' presence-jam.rb | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
-            CURRENT_SHA=$(grep -E '^  sha256 ' presence-jam.rb | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
-            if [ "${CURRENT_VERSION}" = "${VERSION}" ] && [ "${CURRENT_SHA}" = "${SHA}" ]; then
-              echo "Formula is already at v${VERSION} (sha256=${SHA}), no change"
+          # digest while CI reports success. A leftover formula is also
+          # work, so its presence forces the commit below.
+          if [ -f "$CASK_PATH" ]; then
+            CURRENT_VERSION=$(grep -E '^  version ' "$CASK_PATH" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+            CURRENT_SHA=$(grep -E '^  sha256 ' "$CASK_PATH" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+            if [ "${CURRENT_VERSION}" = "${VERSION}" ] && [ "${CURRENT_SHA}" = "${SHA}" ] && [ ! -f "$STALE_FORMULA" ]; then
+              echo "Cask is already at v${VERSION} (sha256=${SHA}) and no stale formula remains, no change"
               exit 0
             fi
-            echo "Formula currently at v${CURRENT_VERSION} (sha256=${CURRENT_SHA}), updating to v${VERSION} (sha256=${SHA})"
+            echo "Cask currently at v${CURRENT_VERSION} (sha256=${CURRENT_SHA}), updating to v${VERSION} (sha256=${SHA})"
           else
-            echo "Formula does not exist yet, creating it"
+            echo "Cask does not exist yet, creating it"
           fi
 
-          cp ../presence-jam.rb.rendered presence-jam.rb
+          if [ -f "$STALE_FORMULA" ]; then
+            git rm -q "$STALE_FORMULA"
+            echo "Removed stale formula ${STALE_FORMULA} (formula -> cask migration, issue #898)"
+          fi
+          mkdir -p Casks
+          cp ../presence-jam.rb.rendered "$CASK_PATH"
           git config user.name "Nova"
           git config user.email "nova@lee-lab.local"
-          git add presence-jam.rb
-          git commit -m "presence-jam: bump to v${VERSION}"
+          git add "$CASK_PATH"
+          if git diff --cached --quiet; then
+            echo "Tap already matches v${VERSION}, nothing to commit"
+            exit 0
+          fi
+          git commit -m "presence-jam: cask to v${VERSION}"
           git push origin main
-          echo "Tap updated: carme99/homebrew-tap presence-jam.rb -> v${VERSION}"
+          echo "Tap updated: carme99/homebrew-tap ${CASK_PATH} -> v${VERSION}"
 
   winget:
     needs: [resolve-tag, release]
