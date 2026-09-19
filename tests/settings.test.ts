@@ -1312,3 +1312,64 @@ describe('Settings Spotify waiting-state escape (#964)', () => {
     });
   });
 });
+
+/**
+ * #965 — the connection row's `{#if} … {:else if waiting}` chain had no final
+ * `{:else}`, so a disconnected Spotify account rendered the red "Not connected"
+ * badge and no action at all, while the Teams card beside it falls through to
+ * its own reconnect.
+ *
+ * Fails pre-fix: the disconnected row renders no control.
+ */
+describe('Settings disconnected Spotify card (#965)', () => {
+  /** `get_sync_status` with Spotify down and Teams up. */
+  function spotifyDisconnected() {
+    const base = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) =>
+      cmd === 'get_sync_status'
+        ? {
+            is_syncing: false,
+            current_track: null,
+            spotify_connected: false,
+            teams_connected: true
+          }
+        : base(cmd, args)
+    );
+  }
+
+  it('offers a reconnect when the account is disconnected', async () => {
+    const cfg = configuredConfig();
+    cfg.spotify.client_secret_state = 'present';
+    configStore.set(cfg);
+    spotifyDisconnected();
+    const { container } = await mountSettings();
+
+    // The first `.connection-row` is the Spotify card's.
+    const row = container.querySelector('.connection-row') as HTMLElement;
+    const action = row.querySelector('.btn-secondary') as HTMLButtonElement;
+    expect(action?.textContent?.trim()).toBe(t('settings.reconnectSpotify'));
+
+    await fireEvent.click(action);
+    await waitFor(() =>
+      expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'reconnect_spotify_session')).toBe(true)
+    );
+  });
+
+  it('points at onboarding instead when no client secret is stored', async () => {
+    const cfg = configuredConfig();
+    cfg.spotify.client_secret_state = 'absent';
+    configStore.set(cfg);
+    spotifyDisconnected();
+    const { container } = await mountSettings();
+
+    const row = container.querySelector('.connection-row') as HTMLElement;
+    const action = row.querySelector('.btn-secondary') as HTMLButtonElement;
+    // A reconnect would open a browser flow that cannot finish: the secret it
+    // starts from is not there.
+    expect(action?.textContent?.trim()).toBe(t('settings.runOnboarding'));
+
+    await fireEvent.click(action);
+    await waitFor(() => expect(get(currentView)).toBe('onboarding'));
+    expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'reconnect_spotify_session')).toBe(false);
+  });
+});

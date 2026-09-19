@@ -1151,6 +1151,16 @@
               <p class="error-message" role="alert">{manualUrlError}</p>
             {/if}
           </div>
+        {:else if spotifySecretState === 'absent'}
+          <!-- #965: a reconnect cannot succeed without a stored client secret
+               (the flow starts from the one in the keychain), so the card
+               points at onboarding instead of a button that cannot work. -->
+          <button class="btn-secondary" onclick={goToOnboarding}>{t('settings.runOnboarding')}</button>
+        {:else}
+          <!-- #965: disconnected with no flow running had no action at all —
+               the card said "Not connected" and offered nothing, while the
+               Teams row beside it falls through to its own reconnect. -->
+          <button class="btn-secondary" onclick={reconnectSpotify} disabled={spotifyAuthWaiting}>{t('settings.reconnectSpotify')}</button>
         {/if}
       </div>
       {#if authFlow.spotify.error}
