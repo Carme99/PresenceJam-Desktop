@@ -266,8 +266,10 @@ jobs:
               PresenceJam-${{ needs.resolve-tag.outputs.tag }}.app.tar.gz.sig
           - os: windows-latest
             target: ''
-            artifact_name: PresenceJam-${{ needs.resolve-tag.outputs.tag }}.msi
+            artifact_name: PresenceJam-${{ needs.resolve-tag.outputs.tag }}-windows
             bundle_path: |
+              PresenceJam-${{ needs.resolve-tag.outputs.tag }}-setup.exe
+              PresenceJam-${{ needs.resolve-tag.outputs.tag }}-setup.exe.sig
               PresenceJam-${{ needs.resolve-tag.outputs.tag }}.msi
               PresenceJam-${{ needs.resolve-tag.outputs.tag }}.msi.sig
           - os: ubuntu-latest
@@ -391,27 +393,52 @@ jobs:
           echo "Packaged updater artifacts:"
           ls -la PresenceJam-$RELEASE_TAG.app.tar.gz*
 
-      - name: Rename Windows MSI
+      # Two installers, deliberately (issue #897). The NSIS setup is the
+      # updater payload: it honours bundle.windows.nsis.installMode =
+      # currentUser, so it installs per-user with no elevation — the MSI
+      # installs per-machine under Program Files and cannot be installed (or
+      # updated) by a non-admin user, which left those users with no way in.
+      # The MSI stays published for managed machines. Tauri names the pair
+      # PresenceJam_<version>_x64-setup.exe / PresenceJam_<version>_x64_en-US.msi;
+      # both are republished under version-stable names.
+      - name: Package Windows installers
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
+          $setup = Get-ChildItem "src-tauri/target/release/bundle/nsis" -Filter "*-setup.exe" | Select-Object -First 1
+          if (-not $setup) {
+            Write-Error "Expected a NSIS *-setup.exe in bundle/nsis/ (is nsis still in bundle.targets?)"
+            exit 1
+          }
+          Copy-Item $setup.FullName "PresenceJam-$env:RELEASE_TAG-setup.exe"
           $msi = Get-ChildItem "src-tauri/target/release/bundle/msi" -Filter "*.msi" | Select-Object -First 1
+          if (-not $msi) {
+            Write-Error "Expected a .msi in bundle/msi/"
+            exit 1
+          }
           Copy-Item $msi.FullName "PresenceJam-$env:RELEASE_TAG.msi"
+          Get-ChildItem "PresenceJam-$env:RELEASE_TAG-setup.exe", "PresenceJam-$env:RELEASE_TAG.msi"
 
-      # The MSI itself is the updater artifact; ship its .sig alongside
-      # under the deterministic release name (the .msi is already renamed
-      # above and uploaded via bundle_path).
-      - name: Package Windows updater signature
+      # Both installers are updater payloads in principle, so both carry a
+      # .sig: latest.json points at the setup.exe, and the MSI keeps its
+      # signature for anyone verifying a manual download (issue #897).
+      - name: Package Windows updater signatures
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
-          $sig = Get-ChildItem "src-tauri/target/release/bundle/msi" -Filter "*.msi.sig" | Select-Object -First 1
-          if (-not $sig) {
+          $setupSig = Get-ChildItem "src-tauri/target/release/bundle/nsis" -Filter "*-setup.exe.sig" | Select-Object -First 1
+          if (-not $setupSig) {
+            Write-Error "Expected *-setup.exe.sig in bundle/nsis/"
+            exit 1
+          }
+          Copy-Item $setupSig.FullName "PresenceJam-$env:RELEASE_TAG-setup.exe.sig"
+          $msiSig = Get-ChildItem "src-tauri/target/release/bundle/msi" -Filter "*.msi.sig" | Select-Object -First 1
+          if (-not $msiSig) {
             Write-Error "Expected .msi.sig in bundle/msi/"
             exit 1
           }
-          Copy-Item $sig.FullName "PresenceJam-$env:RELEASE_TAG.msi.sig"
-          Get-ChildItem "PresenceJam-$env:RELEASE_TAG.msi.sig"
+          Copy-Item $msiSig.FullName "PresenceJam-$env:RELEASE_TAG.msi.sig"
+          Get-ChildItem "PresenceJam-$env:RELEASE_TAG-setup.exe.sig", "PresenceJam-$env:RELEASE_TAG.msi.sig"
 
       # Linux artifacts are named like `presence-jam_2.7.2_amd64.deb` by
       # Tauri's bundler. Rename to the project-standard format used by
@@ -557,7 +584,7 @@ jobs:
           # Downloaded artifacts keep the upload-artifact name as a
           # subdirectory under artifacts/ (download-artifact v4+ layout).
           MAC_SIG="artifacts/PresenceJam-${RELEASE_TAG}-macos.dmg/PresenceJam-${RELEASE_TAG}.app.tar.gz.sig"
-          WIN_SIG="artifacts/PresenceJam-${RELEASE_TAG}.msi/PresenceJam-${RELEASE_TAG}.msi.sig"
+          WIN_SIG="artifacts/PresenceJam-${RELEASE_TAG}-windows/PresenceJam-${RELEASE_TAG}-setup.exe.sig"
           LINUX_SIG="artifacts/PresenceJam-${RELEASE_TAG}-linux-amd64/PresenceJam-${RELEASE_TAG}.AppImage.sig"
 
           for f in "$MAC_SIG" "$WIN_SIG" "$LINUX_SIG"; do
@@ -572,7 +599,7 @@ jobs:
             --arg pub_date "$PUB_DATE" \
             --arg mac_url "https://github.com/Carme99/PresenceJam-Desktop/releases/download/${RELEASE_TAG}/PresenceJam-${RELEASE_TAG}.app.tar.gz" \
             --arg mac_sig "$(cat "$MAC_SIG")" \
-            --arg win_url "https://github.com/Carme99/PresenceJam-Desktop/releases/download/${RELEASE_TAG}/PresenceJam-${RELEASE_TAG}.msi" \
+            --arg win_url "https://github.com/Carme99/PresenceJam-Desktop/releases/download/${RELEASE_TAG}/PresenceJam-${RELEASE_TAG}-setup.exe" \
             --arg win_sig "$(cat "$WIN_SIG")" \
             --arg linux_url "https://github.com/Carme99/PresenceJam-Desktop/releases/download/${RELEASE_TAG}/PresenceJam-linux-amd64.AppImage" \
             --arg linux_sig "$(cat "$LINUX_SIG")" \
@@ -591,6 +618,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # The comment above is now the implementation: the URLs come from
+      # latest.json itself, so a payload-flavour switch (issue #897 moved
+      # windows-x86_64 from the per-machine MSI to the per-user NSIS
+      # setup.exe) cannot silently point users at an asset the build legs no
+      # longer produce. The explicit list below additionally pins which
+      # artefact each platform must ship.
       - name: Verify latest.json assets in release
         run: |
           set -euo pipefail
@@ -602,7 +635,21 @@ jobs:
           gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq '.assets[].name' > /tmp/assets.txt
           echo "=== Release assets ==="
           cat /tmp/assets.txt
-          for expected in "PresenceJam-${RELEASE_TAG}.app.tar.gz" "PresenceJam-${RELEASE_TAG}.msi" "PresenceJam-linux-amd64.AppImage"; do
+          # (a) every URL the manifest advertises must exist on the release.
+          for url in $(jq -r '.platforms[].url' latest.json); do
+            asset="${url##*/}"
+            if ! grep -Fxq "$asset" /tmp/assets.txt; then
+              echo "::error::latest.json points at ${asset} but release ${RELEASE_TAG} does not carry it — the updater would 404"
+              exit 1
+            fi
+            echo "Found manifest asset: ${asset}"
+          done
+          # (b) the payload each platform must be shipping, independent of
+          # whatever the manifest currently says.
+          for expected in \
+            "PresenceJam-${RELEASE_TAG}.app.tar.gz" \
+            "PresenceJam-${RELEASE_TAG}-setup.exe" \
+            "PresenceJam-linux-amd64.AppImage"; do
             if ! grep -Fxq "$expected" /tmp/assets.txt; then
               echo "::error::Missing expected asset $expected in release ${RELEASE_TAG} — latest.json URL would 404"
               exit 1
