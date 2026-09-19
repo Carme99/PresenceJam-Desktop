@@ -565,10 +565,18 @@
      buttons were unclickable while an update was offered. The bottom edge
      follows the `.playback-toast` convention in `+layout.svelte` — no layout
      space reserved, no chrome covered — and the z-index stays below that
-     toast so a playback error still wins. */
+     toast so a playback error still wins.
+     The inset is one step above the band the app's own bottom-centre
+     controls occupy: `LogViewer`'s `.jump-latest` sits at `bottom: 12px` and
+     is 33px tall (26px in compact density), so docking at `--sp-3` put the
+     banner straight over its hit target. Measured in a browser at 600x750
+     and 400x500, en and de, default and compact density: the banner clears
+     the jump-latest by 11px (default) / 4px (compact), and the centre of
+     that button hit-tests to the button itself in all four window/density
+     combinations. */
   .update-banner--docked {
     position: fixed;
-    bottom: var(--sp-3);
+    bottom: calc(var(--sp-10) + var(--sp-1));
     left: 50%;
     transform: translateX(-50%);
     z-index: 1000;
