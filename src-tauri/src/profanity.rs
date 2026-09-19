@@ -17,6 +17,9 @@ pub fn safe_placeholder_default() -> &'static str {
 struct NormChar {
     ch: char,
     leet: bool,
+    /// True for the `c`/`k` pair the `x`-for-`ck` fold fabricates (#827):
+    /// a match that consumed one needs a profane continuation.
+    via_x_fold: bool,
 }
 
 fn collapse_repeated_chars(text: &[NormChar]) -> Vec<NormChar> {
@@ -171,6 +174,7 @@ fn normalize(text: &str) -> Vec<NormChar> {
             result.push(NormChar {
                 ch: 'v',
                 leet: true,
+                via_x_fold: false,
             });
             continue;
         }
@@ -181,6 +185,7 @@ fn normalize(text: &str) -> Vec<NormChar> {
             result.push(NormChar {
                 ch: 'f',
                 leet: true,
+                via_x_fold: false,
             });
             continue;
         }
@@ -202,10 +207,12 @@ fn normalize(text: &str) -> Vec<NormChar> {
             result.push(NormChar {
                 ch: 'c',
                 leet: true,
+                via_x_fold: true,
             });
             result.push(NormChar {
                 ch: 'k',
                 leet: true,
+                via_x_fold: true,
             });
             continue;
         }
@@ -218,11 +225,13 @@ fn normalize(text: &str) -> Vec<NormChar> {
                 result.push(NormChar {
                     ch: 'c',
                     leet: true,
+                    via_x_fold: false,
                 });
             } else {
                 result.push(NormChar {
                     ch: '(',
                     leet: false,
+                    via_x_fold: false,
                 });
             }
             continue;
@@ -234,6 +243,7 @@ fn normalize(text: &str) -> Vec<NormChar> {
                 result.push(NormChar {
                     ch: mapped,
                     leet: true,
+                    via_x_fold: false,
                 });
             }
             continue;
@@ -245,11 +255,13 @@ fn normalize(text: &str) -> Vec<NormChar> {
             result.push(NormChar {
                 ch: 'c',
                 leet: true,
+                via_x_fold: false,
             });
         }
         result.push(NormChar {
             ch: mapped,
             leet: leet || folded_is_lossy,
+            via_x_fold: false,
         });
     }
 
@@ -412,6 +424,23 @@ fn contains_profanity(text: &str, extra_words: &[String]) -> bool {
             let right_clean = end >= chars.len() || !chars[end].ch.is_alphanumeric();
             if stretched && !right_clean {
                 continue;
+            }
+
+            // #827: the `x`-for-`ck` fold fabricates `dick` out of the surname
+            // `Dix`, so a match that consumed a fold character is only accepted
+            // when the text runs on into a profane continuation glued to it
+            // (`dixs`, `dixhead`); `Dix`, `Dix's`, `Dixon` and `Dixie Chicks`
+            // stay clean. The strong stems keep their #377 coverage (`fux`),
+            // being unambiguous even when glued (see `is_strong_stem`).
+            let x_folded = chars[start..end].iter().any(|n| n.via_x_fold);
+            if x_folded && !is_strong_stem(word) {
+                if end >= chars.len()
+                    || !chars[end].ch.is_alphanumeric()
+                    || !is_profane_continuation(word, &first_token(&chars, end))
+                {
+                    continue;
+                }
+                return true;
             }
 
             // Separator-spanning matches join across formatting (`Push It`
@@ -966,6 +995,13 @@ mod tests {
         assert!(!contains_profanity("Lynx", &[]));
         assert!(!contains_profanity("Sphinx", &[]));
         assert!(!contains_profanity("Song (Uncut)", &[]));
+        // #827: `di` stays in the fold list — the fabricated `dick` just needs
+        // a profane continuation, so the surname and its neighbours are clean.
+        assert!(!contains_profanity("Dix", &[]));
+        assert!(!contains_profanity("Dix's", &[]));
+        assert!(!contains_profanity("Dixon", &[]));
+        assert!(!contains_profanity("Dixie Chicks", &[]));
+        assert!(!contains_profanity("Dickens", &[]));
         // The evasions the folds exist for are untouched.
         assert!(contains_profanity("fux", &[]));
         assert!(contains_profanity("Fux", &[]));
@@ -973,6 +1009,9 @@ mod tests {
         assert!(contains_profanity("(ock", &[]));
         assert!(contains_profanity("(unt", &[]));
         assert!(contains_profanity("(0ck", &[]));
+        // ... while a glued dix-spelled evasion still flags (#827).
+        assert!(contains_profanity("dixs", &[]));
+        assert!(contains_profanity("dixhead", &[]));
     }
 
     // issue #579: the glued-right continuation list stopped at
