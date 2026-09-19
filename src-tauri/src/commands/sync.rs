@@ -473,9 +473,27 @@ pub async fn app_exit(
 /// (never `teams` before `spotify`, never `config` before `current_track`)
 /// or risk a lock-ordering deadlock with this critical section.
 #[tauri::command]
-pub fn get_sync_status(state: tauri::State<'_, Arc<AppState>>) -> Result<SyncStatus, String> {
+pub async fn get_sync_status(state: tauri::State<'_, Arc<AppState>>) -> Result<SyncStatus, String> {
     log::debug!("{CMD} get_sync_status: ENTRY");
-    Ok(sync_status_from_state(state.inner()))
+    sync_status_offloaded(Arc::clone(state.inner())).await
+}
+
+/// Issue #879: `get_sync_status`'s snapshot, handed to the blocking pool.
+///
+/// The snapshot takes four read guards, and the token writers hold theirs
+/// ACROSS the HTTPS refresh — `cas_refresh_or_discard` is given
+/// `&mut *state.tokens.teams_mut()` (poller) or
+/// `&mut *state.tokens.spotify_mut()` (boot gate) before it runs its refresh
+/// closure. As a synchronous command this ran on the main thread, so the
+/// Dashboard's mount-time and post-event calls parked the webview's UI thread
+/// until the in-flight refresh completed: a frozen window rather than a late
+/// status. `SyncStatus` is plain data with no frontend change needed, so the
+/// assembly moves off the UI thread and the caller only awaits. Lifted out of
+/// the command (not inlined) so the offload itself is covered by a test.
+async fn sync_status_offloaded(state: Arc<AppState>) -> Result<SyncStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || sync_status_from_state(&state))
+        .await
+        .map_err(|e| format!("get_sync_status spawn_blocking panicked: {:?}", e))
 }
 
 /// Assemble the status snapshot from `state`.
@@ -651,9 +669,17 @@ mod tests {
             prod_source.contains("Single critical section"),
             "the lock-ordering contract must stay documented (issue #398)"
         );
+        // Issue #879: the assembly is reached through the offload, so the
+        // command must still return the shared derivation and nothing else.
+        let command_body = fn_body(prod_source, "pub async fn get_sync_status(");
         assert!(
-            fn_body(prod_source, "pub fn get_sync_status(").contains("sync_status_from_state("),
-            "the command must return the shared derivation, never a second copy of it (issue #679)"
+            command_body.contains("sync_status_offloaded("),
+            "the command must return the shared derivation through the blocking-pool offload, never a second copy of it (issues #679, #879)"
+        );
+        assert!(
+            fn_body(prod_source, "async fn sync_status_offloaded(")
+                .contains("sync_status_from_state("),
+            "the offload must assemble the snapshot through sync_status_from_state (issue #879)"
         );
     }
 
@@ -787,6 +813,59 @@ mod tests {
             !state.polling.is_syncing(Ordering::Acquire),
             "an ownerless flag must still be cleared so a future start is not \
              permanently wedged (issue #395/#941)"
+        );
+    }
+
+    /// Issue #879: with a token refresh in flight (a writer holding the Teams
+    /// guard, as `cas_refresh_or_discard` does across its HTTPS call) the
+    /// status command must hand the snapshot to the blocking pool and yield
+    /// its own thread — the UI thread — instead of parking on the read guard
+    /// until the refresh commits. Before the fix the command was synchronous
+    /// and assembled the snapshot inline, so it could not yield at all.
+    #[test]
+    fn test_sync_status_offload_yields_instead_of_parking_the_command_thread() {
+        use super::{sync_status_offloaded, AppState};
+        use std::sync::mpsc;
+        use std::sync::Arc;
+        use std::task::{Context, Poll, Waker};
+
+        let state = Arc::new(AppState::new());
+
+        // The in-flight refresh: another thread holds the Teams write guard
+        // until the test releases it.
+        let writer_state = Arc::clone(&state);
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let (held_tx, held_rx) = mpsc::channel::<()>();
+        let writer = std::thread::spawn(move || {
+            let _guard = writer_state.tokens.teams_mut();
+            let _ = held_tx.send(());
+            let _ = release_rx.recv();
+        });
+        held_rx
+            .recv()
+            .expect("the simulated refresh must take the write guard");
+
+        let mut snapshot = Box::pin(sync_status_offloaded(Arc::clone(&state)));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(
+            matches!(snapshot.as_mut().poll(&mut cx), Poll::Pending),
+            "the command must yield to the blocking pool while a refresh holds \
+             the token lock, not assemble the snapshot on the caller's own \
+             thread (issue #879)"
+        );
+
+        // The refresh commits, and the snapshot still lands — internally
+        // consistent, reporting the slot it actually read.
+        release_tx
+            .send(())
+            .expect("the simulated refresh must still be waiting");
+        writer.join().expect("the simulated refresh must finish");
+        let status = tauri::async_runtime::block_on(snapshot)
+            .expect("the offloaded snapshot must be produced");
+        assert!(
+            !status.teams_connected && !status.spotify_connected,
+            "an empty token slot must report disconnected, not a torn snapshot \
+             (issues #398, #879)"
         );
     }
 }
