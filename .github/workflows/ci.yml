@@ -149,6 +149,23 @@ jobs:
       - name: Frontend unit tests + coverage ratchet (npm run test:coverage)
         run: npm run test:coverage
 
+      # Workspace hygiene (#753): a build or doc-render step that drops a path
+      # at the repo root must be either tracked on purpose or covered by
+      # .gitignore, otherwise the next `git add -A` stages it. The case that
+      # prompted this is chrome-headless-shell/ (a headless-Chromium download);
+      # `git status` hides ignored paths, so anything still listed here as
+      # untracked is by definition unignored. Runs after the build steps above
+      # because those are what create such paths in the first place.
+      - name: Root-level paths are tracked or ignored
+        run: |
+          stray=$(git status --porcelain --untracked-files=all | sed -n 's/^?? //p' | grep -v / || true)
+          if [ -n "$stray" ]; then
+            echo "::error::untracked and unignored at the repository root:"
+            echo "$stray"
+            echo "Ignore it in .gitignore (anchored with a leading /) or commit it on purpose."
+            exit 1
+          fi
+
   # Rust: cargo check + cargo test on all targets (lib + bins + tests + benches) catches
   # type errors, borrow errors, missing imports, and broken test code.
   # Runs cargo check + cargo test + clippy (clippy in separate job).

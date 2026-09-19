@@ -8,6 +8,10 @@ build/
 .svelte-kit/
 node_modules/
 
+# Headless-Chromium download of the local doc-render step (#753). Anchored so a
+# future source path of the same name is not caught accidentally.
+/chrome-headless-shell/
+
 # OS
 .DS_Store
 Thumbs.db
