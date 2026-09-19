@@ -200,7 +200,11 @@ matrix builds **aarch64 macOS only** — Intel Macs never receive updates
   retry. The tray menu *build* still snapshots `state.tokens.spotify()` for the
   Devices/Queue listings; those are display fetches, not playback commands.
 - **Refresh cadence:** the polling loop calls `update_tray_menu` after every
-  iteration, behind a dedup key of `(is_syncing, window_visible,
-  "artist|title|is_playing")`. The key is deliberately track-scoped, so a mode
-  changed from another Spotify client is picked up at the next rebuild rather
-  than forcing one.
+  iteration, behind a dedup key built by `tray_snapshot_for`
+  (`src-tauri/src/tray.rs:535`) from `(is_syncing, is_window_visible,
+  "artist|title|is_playing", shuffle, repeat, snooze deadline + minute bucket)`.
+  The mode atoms and the snooze key are in the key on purpose: a Shuffle/Repeat
+  change made from another Spotify client has to force a rebuild, otherwise the
+  marks stayed on the previous mode (#691), and the snooze bucket keeps the
+  countdown repainting rather than freezing at the minute it was set (#677).
+  The `mode_change_forces_a_tray_rebuild` test pins that behaviour.

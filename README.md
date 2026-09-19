@@ -66,6 +66,8 @@ Download the installer for your platform from the [latest release](https://githu
 - **macOS (Apple Silicon)** — `PresenceJam-macos.dmg`
 - **Debian / Ubuntu / Mint / popOS (64-bit)** — `PresenceJam-linux-amd64.deb`
 - **Any modern Linux (64-bit, no install required)** — `PresenceJam-linux-amd64.AppImage`
+- **macOS via Homebrew** — `brew install carme99/tap/presence-jam` (Apple Silicon only: the formula declares `depends_on arch: :arm64` and refuses an Intel install rather than copying a bundle that cannot run)
+- **Windows 10/11 via winget** — `winget install PresenceJam.PresenceJam`
 
 <!-- canonical post-fix asset names verified via `gh release view v4.0.0` → PresenceJam-macos.dmg, PresenceJam-linux-amd64.deb, PresenceJam-linux-amd64.AppImage, PresenceJam-v4.0.0.msi (+ .msi.sig), PresenceJam-v4.0.0.app.tar.gz (+ .sig), PresenceJam-v4.0.0.AppImage.sig, SHA256SUMS.txt, latest.json -->
 

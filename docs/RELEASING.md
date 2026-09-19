@@ -24,7 +24,7 @@ Five files, **six literals**:
 | 5 | [`src-tauri/Cargo.toml`](../src-tauri/Cargo.toml) | `version = "…"` under `[package]` | crate `presence-jam` |
 | 6 | [`src-tauri/Cargo.lock`](../src-tauri/Cargo.lock) | `version = "…"` in the `[[package]] name = "presence-jam"` block | the workspace member's locked version |
 
-Find them all (replace `4.6.0` with the version you are leaving):
+Find them all (replace `<old-version>` with the version you are leaving):
 
 ```bash
 grep -n '"version"' package.json package-lock.json src-tauri/tauri.conf.json
@@ -34,16 +34,16 @@ grep -n -A2 '^name = "presence-jam"' src-tauri/Cargo.lock
 
 ### The `package-lock.json` trap
 
-`package-lock.json` also contains **`"version": "4.6.0"` for the `cssstyle`
-dependency** (`node_modules/cssstyle`, resolved from
-`https://registry.npmjs.org/cssstyle/-/cssstyle-4.6.0.tgz`). It is an ordinary
-dependency version that only happens to match the app's for this release — never
-touch it. Confirm you are editing the project's own literals by checking that
-your grep hits lines 3 and 9 (the top-level and `packages[""]` entries), not the
-`node_modules/cssstyle` block:
+`package-lock.json` also carries a `"version"` for every dependency entry, and a
+dependency's version is free to coincide with the app's — `cssstyle` did exactly
+that at the 4.6.0 cut. Only **two** literals in that file are ours: the top-level
+`version` and `packages[""].version`. Never touch a dependency block. Check the
+pair against `package.json` rather than grepping for a version string, which
+cannot tell the two apart:
 
 ```bash
-grep -n '4\.6\.0' package-lock.json    # lines 3 and 9 are ours; the rest are deps
+jq -r '.version, .packages[""].version' package-lock.json   # both must be the new version
+jq -r .version package.json                                 # and must match this
 ```
 
 ### Why the two lockfiles are manual
