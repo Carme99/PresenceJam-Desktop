@@ -117,6 +117,18 @@ jobs (the Name column is the check context shown on the PR's checks list):
 | `secret-scan` | Secret scan (gitleaks) | gitleaks over the history |
 | `dep-audit` | Dependency audit (cargo + npm) | **advisory only** — `continue-on-error: true` |
 
+The Rust test suite runs on **all three** platforms, not just Linux:
+`rust-platform-check` executes `cargo test --all-targets` on the macOS and
+Windows legs straight after its `cargo check` (that job's `timeout-minutes` was
+raised from 20 to 45 for the added compile and link work). Compiling
+platform-gated code is not running it — `cargo check` alone would pass while a
+regression sat inside the macOS `ActivationPolicy` branch in
+`commands/config.rs`, the dock-badge path in `tray.rs`, the macOS deep-link
+registration in `lib.rs` or the Windows tray and notification paths. The ubuntu
+leg keeps `--all-targets`. If a macOS/Windows leg is ever reduced to
+`cargo test --lib` to save runner minutes, record that reduced scope here
+rather than leaving it implied.
+
 ## 4. The tag → publish chain (`release.yml`)
 
 Trigger: a push of a `v*` tag, **or** `workflow_dispatch` with the `tag` input
