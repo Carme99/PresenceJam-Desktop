@@ -328,6 +328,27 @@ jobs:
           done
           exit $missing
 
+  # Relative-link audit (issue #831): docs/README.md states the convention and
+  # docs/link-audit.py exits 1 on a broken relative target or an unresolvable
+  # `#anchor`, but nothing invoked it. The neighbouring `changelog-links` job is
+  # the only other link-shaped gate and it merely pairs `## [X]` headers with
+  # their `[X]:` definitions in CHANGELOG.md. The script is standard-library
+  # only, so this job needs neither npm ci nor setup-node.
+  docs-links:
+    name: Docs relative links
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Audit relative markdown links (docs/link-audit.py)
+        run: python3 docs/link-audit.py
+
   # Version consistency (issue #605): the release tag decides the version
   # written into latest.json, while the shipped binary self-reports
   # whatever tauri.conf.json says (Cargo.toml and package.json are two more
