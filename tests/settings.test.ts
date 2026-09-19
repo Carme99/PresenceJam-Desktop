@@ -41,7 +41,7 @@ import Settings from '$lib/components/Settings.svelte';
 import { currentView } from '$lib/stores/app';
 import { configStore, defaultConfig } from '$lib/stores/config';
 import { notificationPreferences } from '$lib/stores/notifications';
-import { resetSpotifyAuthFlow, resetTeamsAuthFlow } from '$lib/stores/authFlow.svelte';
+import { authFlow, resetSpotifyAuthFlow, resetTeamsAuthFlow, setTeamsPhase } from '$lib/stores/authFlow.svelte';
 import { theme } from '$lib/stores/theme';
 import { t } from '$lib/i18n';
 
@@ -1175,5 +1175,32 @@ describe('Settings status preview announcements (#748)', () => {
     expect(preview.getAttribute('role')).toBeNull();
     // The sample itself is still in the reading order next to its label.
     expect(preview.previousElementSibling?.textContent?.trim()).toBe(t('settings.livePreview'));
+  });
+});
+
+/**
+ * #816 — every Teams failure path calls `setTeamsPhase('error', …)`, which is
+ * exactly what clears `teamsAuthWaiting`; the block that rendered the message
+ * lived inside the waiting branch, so the card reverted to a green Connected
+ * badge and the same button with no reason shown.
+ *
+ * Fails pre-fix: with the phase at `error` nothing in the tree renders it.
+ */
+describe('Settings Teams reconnect failure (#816)', () => {
+  it('shows the failure on the card and clears it on a fresh attempt', async () => {
+    setTeamsPhase('error', 'device code rejected');
+    const { container, getByRole } = await mountSettings();
+
+    const teamsCard = [...container.querySelectorAll('section.card')].find(
+      (card) => card.querySelector('h2')?.textContent?.trim() === t('settings.sectionTeams')
+    ) as HTMLElement;
+    // The badge is the pre-condition of the defect: still Connected.
+    expect(teamsCard.querySelector('.badge')?.textContent).toContain(t('common.connected'));
+    expect(teamsCard.querySelector('.error-message')?.textContent).toBe('device code rejected');
+
+    // The retry the card offers clears the reason and starts a new attempt.
+    await fireEvent.click(getByRole('button', { name: t('reconnect.reconnectTeams') }));
+    await waitFor(() => expect(authFlow.teams.error).toBeNull());
+    expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'reconnect_teams')).toBe(true);
   });
 });

@@ -1116,13 +1116,19 @@
               <button class="btn-secondary" onclick={pollTeamsAuth} disabled={teamsPollMutex.inFlight}>{t('common.checkNow')}</button>
             {/if}
           </div>
-          {#if authFlow.teams.error}
-            <p class="error-message" role="alert">{authFlow.teams.error}</p>
-          {/if}
         {:else}
           <button class="btn-secondary" onclick={reconnectTeams}>{t('reconnect.reconnectTeams')}</button>
         {/if}
       </div>
+      <!-- #816: the failure belongs to the card, not to the waiting branch.
+           `setTeamsPhase('error', …)` is what clears `teamsAuthWaiting`, so a
+           block nested inside that branch unmounted the moment the error
+           arrived and the card fell back to a green Connected badge with the
+           same button and no reason shown. `reconnectTeams` calls
+           `resetTeamsAuthFlow()` on entry, so the next attempt clears it. -->
+      {#if authFlow.teams.error}
+        <p class="error-message" role="alert">{authFlow.teams.error}</p>
+      {/if}
       {#if teamsScopesMissing}
         <div class="scope-banner">
           <span class="hint">{t('settings.presenceScopeBanner')}</span>
