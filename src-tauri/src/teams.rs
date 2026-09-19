@@ -77,6 +77,39 @@ impl std::fmt::Display for TeamsApiError {
     }
 }
 
+impl TeamsApiError {
+    /// One actionable sentence for the UI (issue #974).
+    ///
+    /// `Display` stays the raw form for LOGS — bodies included, which is what
+    /// makes a rejected Graph call diagnosable — while this is what the
+    /// Dashboard banner, Onboarding, Reconnect and Settings show. Each variant
+    /// names what the user can do about it: a Graph 403 in particular is a
+    /// permission/licence problem that re-authenticating cannot fix, so the
+    /// generic "try again" text would send the user round a loop.
+    pub fn user_message(&self) -> String {
+        match self {
+            TeamsApiError::ExpiredToken(_) | TeamsApiError::InvalidGrant => {
+                "Your Microsoft Teams sign-in has expired. Reconnect Teams in Settings.".to_string()
+            }
+            TeamsApiError::Forbidden(_, _) => "Microsoft Teams refused the request: the account may be missing the Teams presence permission (Presence.ReadWrite) or a Microsoft 365 licence that includes Teams. Reconnecting will not fix this — check the account's licence and admin consent.".to_string(),
+            TeamsApiError::RateLimited(Some(secs)) => format!(
+                "Microsoft Teams is temporarily limiting requests. Retrying in {} seconds.",
+                secs
+            ),
+            TeamsApiError::RateLimited(None) => {
+                "Microsoft Teams is temporarily limiting requests. Retrying shortly.".to_string()
+            }
+            TeamsApiError::Transient(_) => {
+                "Microsoft Teams is temporarily unavailable. Retrying shortly.".to_string()
+            }
+            TeamsApiError::Other(status, _) => format!(
+                "Microsoft Teams returned an unexpected error (HTTP {}).",
+                status
+            ),
+        }
+    }
+}
+
 /// Creates a reqwest blocking client with standard config (user agent +
 /// `timeout`). Ensures consistent HTTP client settings across all Teams API
 /// calls.
@@ -316,11 +349,7 @@ enum PollAction {
 /// retries, bounded by the caller's overall deadline; only a real verdict on
 /// the device code ends the flow. Split out from the network loop so the whole
 /// matrix is unit-testable without HTTP.
-fn classify_device_code_response(
-    status: u16,
-    retry_after: Option<u64>,
-    body: &str,
-) -> PollAction {
+fn classify_device_code_response(status: u16, retry_after: Option<u64>, body: &str) -> PollAction {
     if (500..=599).contains(&status) || status == 429 || status == 408 {
         return PollAction::Retry {
             server_wait: retry_after,
@@ -1200,7 +1229,11 @@ pub fn get_teams_presence(access_token: &str) -> Result<PresenceInfo, TeamsApiEr
         .unwrap_or_else(|_| "Unknown error".to_string());
 
     if !status.is_success() {
-        log::error!("{TAG} Failed to get Teams presence: {} - {}", status, body_text);
+        log::error!(
+            "{TAG} Failed to get Teams presence: {} - {}",
+            status,
+            body_text
+        );
         return Err(classify_teams_status(status_code, retry_after, &body_text));
     }
 
@@ -1917,10 +1950,14 @@ mod tests {
     fn set_teams_status_message_info_line_uses_the_byte_count_helper() {
         let src = include_str!("teams.rs");
         let body = fn_body(src, "pub fn set_teams_status_message(");
+        // Assembled with `concat!` so this test's own source never contains
+        // the macro-opener literal the #777 tag guard scans for — an inline
+        // copy of it here leaves that guard's region scan unbalanced.
+        let macro_name = concat!("log::", "info!(");
         let at = body
-            .find("log::info!(")
+            .find(macro_name)
             .expect("the success line must stay at info level");
-        let region = macro_arg_region(body, at + "log::info!(".len() - 1)
+        let region = macro_arg_region(body, at + macro_name.len() - 1)
             .expect("the info macro arguments must be balanced");
         assert!(
             region.contains("status_set_log_line("),
@@ -2030,8 +2067,12 @@ mod tests {
                     "must name the cause: {message}"
                 );
                 assert!(
-                    __omp_shell("message.contains('{') && !message.contains("raw body"),")
-                    "the raw body must never reach the user: {message}"
+                    !message.contains('{'),
+                    "a raw JSON body must never reach the user: {message}"
+                );
+                assert!(
+                    !message.contains("raw body"),
+                    "the old (raw body: …) suffix must be gone: {message}"
                 );
             }
             other => panic!("expired_token must end the flow, got {other:?}"),
@@ -2055,8 +2096,12 @@ mod tests {
                     "got: {message}"
                 );
                 assert!(
-                    __omp_shell("message.contains('{') && !message.contains("raw body"),")
-                    "got: {message}"
+                    !message.contains('{'),
+                    "a raw JSON body must never reach the user: {message}"
+                );
+                assert!(
+                    !message.contains("raw body"),
+                    "the old (raw body: …) suffix must be gone: {message}"
                 );
             }
             other => panic!("bad_verification_code must end the flow, got {other:?}"),
@@ -2088,5 +2133,85 @@ mod tests {
             super::sleep_within_deadline(start, Duration::from_millis(1), 300),
             Err(super::AUTH_TIMEOUT_MSG.to_string())
         );
+    }
+
+    // Issue #974: the UI shows `user_message()`, never `Display`. Display keeps
+    // the raw Graph body for logs, but a 403 must reach the user as a sentence
+    // naming the permission/licence cause — re-auth cannot fix that one — and
+    // no body may leak into a Dashboard banner, an Onboarding error or a
+    // Reconnect/Settings message. This test fails while the UI-facing text is
+    // the body-printing `Display`.
+    #[test]
+    fn user_message_is_a_sentence_and_never_a_raw_body() {
+        use super::TeamsApiError;
+        let body = r#"{"error":{"code":"Forbidden","message":"Insufficient privileges"}}"#;
+        let variants = [
+            TeamsApiError::ExpiredToken(401),
+            TeamsApiError::Forbidden(403, body.to_string()),
+            TeamsApiError::RateLimited(Some(120)),
+            TeamsApiError::RateLimited(None),
+            TeamsApiError::InvalidGrant,
+            TeamsApiError::Transient("server error 503: <html>".to_string()),
+            TeamsApiError::Other(418, body.to_string()),
+        ];
+        for variant in &variants {
+            let message = variant.user_message();
+            assert!(
+                !message.contains('{'),
+                "raw JSON must never reach the UI ({variant:?}): {message}"
+            );
+            assert!(
+                !message.contains('}'),
+                "raw JSON must never reach the UI ({variant:?}): {message}"
+            );
+            assert!(
+                message.ends_with('.'),
+                "must read as a sentence ({variant:?}): {message}"
+            );
+        }
+
+        // The contrast with Display is the point: the body survives for logs…
+        for variant in [
+            TeamsApiError::Forbidden(403, body.to_string()),
+            TeamsApiError::Other(418, body.to_string()),
+        ] {
+            assert!(
+                format!("{variant}").contains("Insufficient privileges"),
+                "Display must stay the raw log form: {variant}"
+            );
+        }
+        // …and is absent from what the user reads.
+        assert!(!TeamsApiError::Forbidden(403, body.to_string())
+            .user_message()
+            .contains("Insufficient privileges"));
+        assert!(!TeamsApiError::Other(418, body.to_string())
+            .user_message()
+            .contains("Insufficient privileges"));
+
+        // The 403 remedy names the permission AND the licence, and says why
+        // re-authenticating is not the answer.
+        let forbidden = TeamsApiError::Forbidden(403, body.to_string()).user_message();
+        assert!(
+            forbidden.contains("Presence.ReadWrite"),
+            "the permission must be named: {forbidden}"
+        );
+        assert!(
+            forbidden.to_lowercase().contains("licen"),
+            "the licence must be named: {forbidden}"
+        );
+        assert!(
+            forbidden.contains("Reconnecting will not fix this"),
+            "the 403 must rule out re-auth: {forbidden}"
+        );
+
+        // Both dead-token variants share the re-auth sentence, and `Other`
+        // keeps the status code for diagnosis.
+        assert_eq!(
+            TeamsApiError::ExpiredToken(401).user_message(),
+            TeamsApiError::InvalidGrant.user_message()
+        );
+        assert!(TeamsApiError::Other(418, body.to_string())
+            .user_message()
+            .contains("418"));
     }
 }
