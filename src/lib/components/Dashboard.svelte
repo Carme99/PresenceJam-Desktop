@@ -174,7 +174,12 @@
       const snapshot = await invoke<{
         manual_status: typeof manualStatus;
         recent: typeof recentManualStatuses;
-      }>('load_manual_status_command');
+      } | null>('load_manual_status_command');
+      if (!snapshot) {
+        manualStatus = null;
+        recentManualStatuses = [];
+        return;
+      }
       manualStatus = snapshot.manual_status;
       recentManualStatuses = snapshot.recent ?? [];
     } catch (e) {
@@ -301,7 +306,7 @@
 
   async function refreshActivity(): Promise<void> {
     try {
-      activityEntries = await invoke<
+      const entries = await invoke<
         Array<{
           at: string;
           kind: string;
@@ -309,8 +314,9 @@
           track_fingerprint?: { title: string; artist: string } | null;
           posted_status?: string | null;
           gate_reason?: string | null;
-        }>
+        }> | null
       >('get_presence_history');
+      activityEntries = entries ?? [];
     } catch (e) {
       console.error('[DASHBOARD] refreshActivity: FAILED:', e);
     }
