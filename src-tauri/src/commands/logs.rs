@@ -49,6 +49,7 @@ const MAX_LOG_LINES: usize = 500;
 /// i.e. 10 MB — `config::default_max_file_size_mb`), so this is a safety
 /// net for a hand-grown file rather than the normal case; the line clamp
 /// above is what bounds the payload.
+const LOG_TAIL_MAX_BYTES: u64 = 256 * 1024;
 
 /// Read up to `limit` trailing lines of `path`, oldest first.
 ///
@@ -255,7 +256,12 @@ mod tests {
         let tail = read_log_tail(&path, 500, 244).expect("read tail");
         assert_eq!(
             tail,
-            vec![all[6].clone(), all[7].clone(), all[8].clone(), all[9].clone()],
+            vec![
+                all[6].clone(),
+                all[7].clone(),
+                all[8].clone(),
+                all[9].clone()
+            ],
             "a boundary seek keeps the line at the offset"
         );
     }
