@@ -27,7 +27,15 @@ import { devLog } from '$lib/utils/dev';
 
 export type Locale = 'en' | 'de' | 'fr';
 
-const STORAGE_KEY = 'locale';
+const STORAGE_KEY = 'presencejam:locale';
+/**
+ * #909: the pre-4.7 mirror lived under a bare `locale` key while every other
+ * frontend mirror is namespaced (`presencejam:theme`, `presencejam:density`).
+ * A generic key is the likeliest one to collide with anything else writing to
+ * the origin, so it is read once, folded into [`STORAGE_KEY`] and dropped —
+ * never consulted again.
+ */
+const LEGACY_STORAGE_KEY = 'locale';
 const KNOWN: readonly Locale[] = ['en', 'de', 'fr'];
 /**
  * The locale both sides fall back to. Mirrors Rust's `i18n::resolve_tag`,
@@ -39,6 +47,27 @@ const DEFAULT_LOCALE: Locale = 'en';
 function isLocale(value: unknown): value is Locale {
   return typeof value === 'string' && (KNOWN as readonly string[]).includes(value);
 }
+
+/**
+ * Fold the legacy mirror into the namespaced key (issue #909). Runs once, at
+ * module load, before the first frame picks a locale; a value the app cannot
+ * use is dropped rather than copied, and the legacy key is always removed so a
+ * later write cannot resurrect it.
+ */
+function migrateLegacyStorageKey(): void {
+  try {
+    const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
+    if (legacy === null) return;
+    if (isLocale(legacy) && localStorage.getItem(STORAGE_KEY) === null) {
+      localStorage.setItem(STORAGE_KEY, legacy);
+    }
+    localStorage.removeItem(LEGACY_STORAGE_KEY);
+  } catch {
+    // localStorage unavailable — there is nothing to migrate.
+  }
+}
+
+migrateLegacyStorageKey();
 
 /**
  * The locale the first frame renders in: the localStorage mirror when present,

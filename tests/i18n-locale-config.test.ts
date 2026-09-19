@@ -53,7 +53,9 @@ describe('locale source of truth (#674)', () => {
   });
 
   it('a persisted locale survives the boot-time defaults and the legacy mirror', async () => {
-    localStorage.setItem('locale', 'fr'); // legacy mirror, painted before the load
+    // Pre-4.7 bare mirror: the store folds it into the namespaced key at load,
+    // so this case also pins that the legacy value still paints and survives.
+    localStorage.setItem('locale', 'fr');
     const { config, i18n, setLocaleCalls } = await loadStores();
     expect(i18n.locale).toBe('fr');
 
@@ -62,13 +64,14 @@ describe('locale source of truth (#674)', () => {
     config.configHydrated.set(true);
 
     expect(i18n.locale).toBe('de');
-    expect(localStorage.getItem('locale')).toBe('de');
+    expect(localStorage.getItem('presencejam:locale')).toBe('de');
+    expect(localStorage.getItem('locale')).toBeNull();
     expect(document.documentElement.lang).toBe('de');
     expect(setLocaleCalls()).toEqual([]);
   });
 
   it('does not migrate before the config has hydrated', async () => {
-    localStorage.setItem('locale', 'fr');
+    localStorage.setItem('presencejam:locale', 'fr');
     const { config, i18n, setLocaleCalls } = await loadStores();
 
     // The mirror still paints the first frame...
@@ -82,7 +85,7 @@ describe('locale source of truth (#674)', () => {
   });
 
   it('does not migrate English — it is already the default of an absent field', async () => {
-    localStorage.setItem('locale', 'en');
+    localStorage.setItem('presencejam:locale', 'en');
     const { config, setLocaleCalls } = await loadStores();
 
     config.configHydrated.set(true);
@@ -102,7 +105,7 @@ describe('locale source of truth (#674)', () => {
     config.configStore.set({ ...defaultConfig, locale: 'fr' });
     expect(i18n.locale).toBe('fr');
     expect(document.documentElement.lang).toBe('fr');
-    expect(localStorage.getItem('locale')).toBe('fr');
+    expect(localStorage.getItem('presencejam:locale')).toBe('fr');
     expect(setLocaleCalls()).toEqual([]);
   });
 
@@ -113,7 +116,7 @@ describe('locale source of truth (#674)', () => {
     expect(i18n.locale).toBe('de');
     expect(setLocaleCalls()).toEqual([['set_locale', { locale: 'de' }]]);
     expect(get(config.configStore).locale).toBe('de');
-    expect(localStorage.getItem('locale')).toBe('de');
+    expect(localStorage.getItem('presencejam:locale')).toBe('de');
   });
 
   it('an unknown locale is ignored: no persistence, no retag', async () => {
@@ -125,7 +128,7 @@ describe('locale source of truth (#674)', () => {
   });
 
   it('falls back to English for a tag the app does not know', async () => {
-    localStorage.setItem('locale', 'de');
+    localStorage.setItem('presencejam:locale', 'de');
     const { config, i18n, setLocaleCalls } = await loadStores();
     expect(i18n.locale).toBe('de');
 

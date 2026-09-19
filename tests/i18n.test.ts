@@ -278,30 +278,44 @@ describe('<html lang> and cross-webview convergence (#620)', () => {
   it('converges on a locale another webview wrote to localStorage', () => {
     // A detached Logs/Settings window owns its own store instance; the main
     // window's switch reaches it only through the `storage` event.
-    window.dispatchEvent(new StorageEvent('storage', { key: 'locale', newValue: 'de' }));
+    window.dispatchEvent(
+      new StorageEvent('storage', { key: 'presencejam:locale', newValue: 'de' })
+    );
     expect(i18n.locale).toBe('de');
     expect(document.documentElement.lang).toBe('de');
 
-    // Same value, unknown value, unrelated key: all no-ops.
-    window.dispatchEvent(new StorageEvent('storage', { key: 'locale', newValue: 'de' }));
-    window.dispatchEvent(new StorageEvent('storage', { key: 'locale', newValue: 'zz' }));
+    // Same value, unknown value, unrelated key, and the pre-4.7 bare key —
+    // which is no longer a channel at all — are all no-ops.
+    window.dispatchEvent(
+      new StorageEvent('storage', { key: 'presencejam:locale', newValue: 'de' })
+    );
+    window.dispatchEvent(
+      new StorageEvent('storage', { key: 'presencejam:locale', newValue: 'zz' })
+    );
+    window.dispatchEvent(new StorageEvent('storage', { key: 'locale', newValue: 'fr' }));
     window.dispatchEvent(new StorageEvent('storage', { key: 'presencejam:theme', newValue: 'fr' }));
     expect(i18n.locale).toBe('de');
 
     i18n.set('en');
-    expect(localStorage.getItem('locale')).toBe('en');
+    expect(localStorage.getItem('presencejam:locale')).toBe('en');
   });
 
-  it('tags the document with the stored locale on module load', async () => {
-    // The one path the other tests cannot reach: the store tags `lang` when
-    // it is first imported. `vi.resetModules` + a dynamic import is the only
-    // way to re-run that load (module-init boundary), so this test is last.
+  it('seeds the pre-4.7 bare key into the namespaced one on module load (#909)', async () => {
+    // The one path the other tests cannot reach: the store tags `lang` and
+    // migrates the legacy mirror when it is first imported. `vi.resetModules`
+    // + a dynamic import is the only way to re-run that load (module-init
+    // boundary), so this test is last.
     localStorage.setItem('locale', 'de');
+    localStorage.removeItem('presencejam:locale');
     document.documentElement.lang = 'en';
     vi.resetModules();
 
     await import('$lib/i18n/store.svelte');
+    // A returning user keeps the language the bare key carried…
     expect(document.documentElement.lang).toBe('de');
+    expect(localStorage.getItem('presencejam:locale')).toBe('de');
+    // …and the bare key is gone, so nothing reads it again.
+    expect(localStorage.getItem('locale')).toBeNull();
 
     i18n.set('en');
     expect(document.documentElement.lang).toBe('en');

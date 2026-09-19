@@ -76,7 +76,7 @@ describe('boot hydration (#674)', () => {
   beforeEach(() => {
     listeners.length = 0;
     // A mirror that disagrees with the backend: the config must win.
-    localStorage.setItem('locale', 'fr');
+    localStorage.setItem('presencejam:locale', 'fr');
     currentView.set('dashboard');
     invokeMock.mockReset();
     invokeMock.mockImplementation(async (cmd: string) => {
@@ -115,7 +115,7 @@ describe('boot hydration (#674)', () => {
     // …and the pre-paint mirror is rewritten to match instead of being written
     // back over the persisted locale: `config.locale` is what the tray and the
     // app menu render (`set_locale` is the only writer of that field).
-    expect(localStorage.getItem('locale')).toBe('de');
+    expect(localStorage.getItem('presencejam:locale')).toBe('de');
     expect(setLocaleCalls()).toEqual([]);
   });
 });
