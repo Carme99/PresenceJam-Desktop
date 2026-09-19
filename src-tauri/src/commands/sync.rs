@@ -13,6 +13,31 @@ use tauri::{AppHandle, Emitter};
 /// Log tag prefix for this submodule (issue #79 item 3).
 const CMD: &str = "[CMD.SYNC]";
 
+/// Issue #809: the explicit-start session guard.
+///
+/// `start_syncing_with` used to gate only on `is_syncing`, so a user whose
+/// tokens had just been cleared — the poller's `invalid_grant` path clears
+/// them mid-session, and `reconnect_spotify_session` clears them too — could
+/// press Resume sync and get "Syncing" plus a "Pause Sync" tray entry while
+/// the poller slept in its tolerant no-token branch
+/// (`poll_once`: "No Spotify tokens available, waiting...") and nothing ever
+/// reached Teams. That tolerant sleep is the right answer to a mid-session
+/// loss a later reconnect heals; it is the wrong answer to an explicit user
+/// request nothing can satisfy.
+///
+/// Returns the machine-readable code naming the missing side, so the
+/// Dashboard toggle, the tray toggle and the sync hotkey can all prompt the
+/// right sign-in; `None` means both sessions are present.
+fn missing_session_code(state: &AppState) -> Option<&'static str> {
+    if state.tokens.spotify().is_none() {
+        return Some("spotify_not_connected");
+    }
+    if state.tokens.teams().is_none() {
+        return Some("teams_not_connected");
+    }
+    None
+}
+
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct SyncStatus {
@@ -59,6 +84,17 @@ pub async fn start_syncing(
 /// implementation of the lifecycle.
 pub async fn start_syncing_with(state: Arc<AppState>, app: &AppHandle) -> Result<(), String> {
     log::debug!("{CMD} start_syncing: ENTRY");
+
+    // Issue #809: refuse an explicit start that no session can satisfy,
+    // before the drain, so a refusal never tears down a running poller.
+    // The typed code names the side the user has to reconnect; leaving
+    // `is_syncing` untouched keeps the flag honest (it is still false).
+    if let Some(missing) = missing_session_code(&state) {
+        log::warn!(
+            "{CMD} start_syncing: refusing to start ({missing}) - no session to sync; is_syncing left false"
+        );
+        return Err(missing.to_string());
+    }
 
     // Issue #69: drain any previous polling thread BEFORE claiming the
     // is_syncing flag. Without this, a fast Stop+Start cycle (within the
@@ -571,6 +607,71 @@ mod tests {
         assert!(
             fn_body(prod_source, "pub fn get_sync_status(").contains("sync_status_from_state("),
             "the command must return the shared derivation, never a second copy of it (issue #679)"
+        );
+    }
+
+    /// Issue #809: an explicit start with a session missing must be refused
+    /// by name instead of claiming the polling flag and sleeping in the
+    /// poller's tolerant no-token branch.
+    #[test]
+    fn test_start_syncing_refuses_without_both_sessions() {
+        use super::{missing_session_code, AppState};
+        use std::sync::atomic::Ordering;
+
+        let state = AppState::new();
+        assert_eq!(
+            missing_session_code(&state),
+            Some("spotify_not_connected"),
+            "with no session at all the guard must name Spotify first (issue #809)"
+        );
+        assert!(
+            !state.polling.is_syncing(Ordering::Acquire),
+            "a refused start must leave the polling flag false (issue #809)"
+        );
+
+        *state.tokens.spotify_mut() = Some(crate::spotify::SpotifyTokens {
+            access_token: "access".to_string(),
+            refresh_token: "refresh".to_string(),
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+        });
+        assert_eq!(
+            missing_session_code(&state),
+            Some("teams_not_connected"),
+            "a Spotify-only session must name Teams as the missing side (issue #809)"
+        );
+
+        *state.tokens.teams_mut() = Some(crate::teams::TeamsTokens {
+            access_token: "teams-access".to_string(),
+            refresh_token: Some("teams-refresh".to_string()),
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+        });
+        assert_eq!(
+            missing_session_code(&state),
+            None,
+            "with both sessions present the start must proceed (issue #809)"
+        );
+    }
+
+    /// Issue #809 acceptance: the guard runs before the flag is claimed, so a
+    /// refusal can never leave a claimed `is_syncing` behind.
+    #[test]
+    fn test_start_syncing_guard_runs_before_the_claim() {
+        let source = include_str!("sync.rs");
+        let prod_source = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("sync.rs has no #[cfg(test)] mod tests block");
+        let body = fn_body(prod_source, "pub async fn start_syncing_with(");
+        let guard = body
+            .find("missing_session_code(")
+            .expect("start_syncing_with must run the session guard (issue #809)");
+        let claim = body
+            .find("try_claim()")
+            .expect("start_syncing_with must claim the polling flag");
+        assert!(
+            guard < claim,
+            "the session guard must run before try_claim, so a refused start \
+             never claims the flag (issue #809)"
         );
     }
 }
