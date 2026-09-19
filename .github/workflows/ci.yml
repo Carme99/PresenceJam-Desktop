@@ -566,6 +566,35 @@ jobs:
           done
           exit "$drift"
 
+  # Guards over release.yml (#830, #925, #828): it runs only on a tag or a
+  # manual re-cut, so a defect there — an unbounded job that burns up to six
+  # hours per matrix leg before failing, a job that silently inherits the
+  # workflow's `contents: write`, or the updater signing key exported into the
+  # environment of a step running `npx tauri build` — surfaces when the release
+  # is already due. These three static checks read release.yml at PR time; the
+  # assertions live in ci.yml because ci.yml is the workflow that runs on every
+  # pull request. Each prints `::error::` lines naming the job and its line.
+  release-workflow-guards:
+    name: Release workflow guards
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Every release job declares timeout-minutes (#830)
+        run: python3 .github/scripts/release-workflow-guards.py timeouts
+
+      - name: Every release job but `release` declares permissions (#925)
+        run: python3 .github/scripts/release-workflow-guards.py permissions
+
+      - name: No signing key in a `tauri build` step's env (#828)
+        run: python3 .github/scripts/release-workflow-guards.py signing-env
+
   # Secret scan (issue #356): read-only gitleaks detect over all commits.
   # No SARIF upload (needs security-events:write); findings surface as
   # step output. contents:read is already the workflow default.
