@@ -10,6 +10,7 @@ describes; if a page contradicts the tree, the tree wins — open an issue.
 | Install the app, register a Spotify Developer app, connect Teams | [`../SETUP.md`](../SETUP.md) |
 | Use the app day to day — tray, dashboard, settings, status formats | [`../USAGE.md`](../USAGE.md) |
 | Fix something that is not working | [`../TROUBLESHOOTING.md`](../TROUBLESHOOTING.md) |
+| Check whether your OS and architecture is supported | [`PLATFORMS.md`](./PLATFORMS.md) |
 | Know which features are shipped and verified, row by row | [`STATE-OF-FEATURES.md`](./STATE-OF-FEATURES.md) |
 | Understand how it works under the hood | [`../ARCHITECTURE.md`](../ARCHITECTURE.md) (index) |
 | Contribute code — dev setup, conventions, PR process | [`../CONTRIBUTING.md`](../CONTRIBUTING.md) |

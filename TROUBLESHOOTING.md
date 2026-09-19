@@ -7,9 +7,23 @@ Common problems and how to fix them.
 Before diving in, check these basics:
 
 - The app is minimized to **system tray**, not closed — right-click tray icon to quit
-- Your Windows user profile has **write access** to `%APPDATA%\PresenceJam\`
+- Your user profile has **write access** to the config folder — `%APPDATA%\PresenceJam\` (Windows), `~/Library/Application Support/PresenceJam/` (macOS), `$XDG_CONFIG_HOME/PresenceJam/` (Linux)
 - You're connected to the **same network** (no corporate proxy blocking Spotify/Teams APIs)
 - Both **Spotify Premium** and **Microsoft 365 Teams** accounts are active
+
+## First run on macOS and Linux
+
+### macOS: the app is blocked as an unidentified developer
+
+**Cause:** the DMG is unsigned (Apple Developer Program enrollment is out of scope — see issue #90), so Gatekeeper refuses the first launch.
+
+**Fix:** right-click the app → **Open**, or System Settings → Privacy & Security → **Open Anyway**. Subsequent opens work without the prompt. The same applies after an update, because updated `.app` builds are unsigned too.
+
+### Linux: no tray icon and no window
+
+**Cause:** the app is tray-only, so on a desktop that cannot show tray icons it looks like nothing started. GNOME needs the AppIndicator extension, and the tray library (`libayatana-appindicator3`) must be installed; a Wayland session without the extension shows nothing at all.
+
+**Fix:** install `libayatana-appindicator3` for your distro and enable the GNOME AppIndicator extension (or use a desktop with a native tray), then re-launch the binary — a running instance is raised rather than a second one started. If the launch fails without a tray library, the app now reports an error instead of panicking. See **Linux: System Keyring Required** in SETUP.md for the other Linux prerequisite.
 
 ## Spotify
 
@@ -137,10 +151,12 @@ Settings shows the same state on the credential row ("System keychain unavailabl
 
 **To fully quit:**
 - Right-click the tray icon → **Quit**
-- Or right-click → **Show Window** → close from within the app
 
-**To prevent it from starting with Windows:**
-- Settings → disable **Launch at Login**
+Closing the window is not an exit: the close button only hides the app to the
+tray, where it keeps polling Spotify and keeps writing your Teams status.
+
+**To prevent it from starting automatically:**
+- Turn off **Launch at Login** in Settings. The login entry it writes is the Windows/macOS login item or `~/.config/autostart/PresenceJam.desktop` on Linux; delete that file if the app is already uninstalled.
 
 ### A detached Logs/Settings window disappeared
 
@@ -150,9 +166,9 @@ Settings shows the same state on the credential row ("System keychain unavailabl
 
 ### The interface is in the wrong language
 
-**Cause:** The language picker (Settings → General → Language) defaults to your browser/OS language and persists the choice.
+**Cause:** The language picker (Settings → Appearance → Language) defaults to your browser/OS language and persists the choice.
 
-**Fix:** Pick **English**, **Deutsch**, or **Français** in Settings → General. The choice applies immediately and persists across restarts. Rust-side error strings surfaced by the backend remain English by design — only UI strings are localized.
+**Fix:** Pick **English**, **Deutsch**, or **Français** in Settings → Appearance. The choice applies immediately and persists across restarts. Rust-side error strings surfaced by the backend remain English by design — only UI strings are localized.
 
 ### "Install on quit" seemed to do nothing
 
@@ -314,7 +330,7 @@ If you're on a corporate network that blocks these domains, the app won't work. 
 **Fix:**
 1. Try disabling VPN temporarily
 2. Verify you can reach Spotify.com in your browser
-3. Check Windows Firewall hasn't blocked the app
+3. Check your firewall hasn't blocked the app — Windows Defender Firewall, the macOS firewall, or a distro firewall (ufw/firewalld)
 
 ## Uninstalling
 
@@ -322,18 +338,30 @@ To fully remove PresenceJam:
 
 1. **Quit the app** (right-click tray → Quit)
 2. **Delete the app:**
-   - Windows Settings → Apps → PresenceJam → Uninstall
+   - Windows: Settings → Apps → PresenceJam → Uninstall
+   - macOS: Drag PresenceJam from Applications to Trash
+   - Linux (deb): `sudo apt remove presence-jam` (or `sudo dpkg -r presence-jam`)
+   - Linux (AppImage): delete the AppImage file
 3. **Delete user data** (optional — removes all tokens and config).
-   `config.json` and `tokens.json` are NOT in the same folder (issue #300),
-   so delete both directories:
+   `config.json`, `tokens.json` and the logs are NOT in the same folder (issue #300),
+   so delete all three:
    ```
-   %APPDATA%\PresenceJam\
-   %APPDATA%\com.presencejam.app\PresenceJam\
+   %APPDATA%\PresenceJam\                          (Windows — config.json)
+   %APPDATA%\com.presencejam.app\PresenceJam\      (Windows — tokens.json)
+   %LOCALAPPDATA%\com.presencejam.app\logs\        (Windows — logs)
+   ~/Library/Application Support/PresenceJam/                    (macOS — config.json)
+   ~/Library/Application Support/com.presencejam.app/PresenceJam/ (macOS — tokens.json)
+   ~/Library/Logs/com.presencejam.app/                            (macOS — logs)
+   ${XDG_CONFIG_HOME:-$HOME/.config}/PresenceJam/                 (Linux — config.json)
+   ${XDG_CONFIG_HOME:-$HOME/.config}/com.presencejam.app/PresenceJam/ (Linux — tokens.json)
+   ~/.local/share/com.presencejam.app/logs/                       (Linux — logs)
    ```
    You can also use PowerShell:
    ```powershell
    Remove-Item -Recurse -Force "$env:APPDATA\PresenceJam"
    Remove-Item -Recurse -Force "$env:APPDATA\com.presencejam.app\PresenceJam"
+   Remove-Item -Recurse -Force "$env:LOCALAPPDATA\com.presencejam.app\logs"
    ```
+4. **Remove the login entry** if **Launch at Login** was on — delete `~/.config/autostart/PresenceJam.desktop` on Linux; Windows and macOS remove it with the app. `~/.local/share/applications/presencejam.desktop` exists only if you created one for an AppImage install.
 
 Note: Your Spotify app credentials in the Spotify Developer Dashboard are unaffected.

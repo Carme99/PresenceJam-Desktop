@@ -41,3 +41,7 @@ src/lib/types-generated/
 
 # Worktree reports (never commit)
 /REPORT.md
+
+# Pasted screenshots land here by accident — real captures live in docs/screenshots/ (#774)
+/image_0*.*
+/tmp-screenshots/

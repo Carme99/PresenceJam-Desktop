@@ -25,18 +25,21 @@ The app lives in your system tray, syncs while you work, and stays out of the wa
 - **Profanity filter** — replaces profane track names with a safe placeholder.
 - **Customisable status template** — `{artist}`, `{track}`, `{album}`, `{emoji}`, `{device}`, `{playlist}` (or `{context}`), `{progress}`, `{shuffle}` and `{repeat}` placeholders, substituted in a single pass.
 - **Podcasts & audiobooks** — episodes get their own `🎙️ {show} - {episode}` template instead of being reported as "nothing playing" (adverts still clear the status).
-- **Light & dark themes** — pick whichever matches your desktop.
+- **Dark / Light / System themes** — pick whichever matches your desktop, or follow the OS live; a compact-density toggle tightens the spacing and type scale ([USAGE](USAGE.md#appearance)).
 - **System tray** — runs silently in the background.
 - **Tray playback controls** — Play/Pause, Previous, Next, Shuffle and Repeat toggles, plus Devices and Up Next submenus, straight from the tray icon.
+- **Tray snooze** — pause syncing for 30 minutes, 1 hour, or until tomorrow from the tray menu, with a Dashboard chip and a **Resume now** button ([USAGE](USAGE.md#the-system-tray)).
+- **Global shortcuts** — `CmdOrCtrl+Alt+P` toggles playback on your active Spotify device and `CmdOrCtrl+Alt+S` starts or stops the poller; both are rebindable in Settings ([USAGE](USAGE.md#global-shortcuts)).
 - **Diagnostics page** — one-click local support snapshot (versions, sanitized config, token expiry metadata, redacted log tail). Never leaves your machine.
 - **Detachable Logs & Settings** — pop Logs or Settings out into their own window and back in again.
 - **Interface languages** — English, German (Deutsch), and French (Français) via an in-app language picker.
 - **Availability sync (opt-in)** — optionally show yourself as **Available** in Teams while you listen, with the requested session bounded to the remaining listening time (Microsoft's `PT5M`–`PT4H` window) and cleared when you quit.
 - **Meeting/call-aware gating** — skips status writes while you're busy, in a meeting, on a call, or presenting, with optionals for **out-of-office** and for never overwriting a status you set by hand. The Dashboard chip names which one fired.
 - **Status rules (quiet hours & track rules)** — suppress the Teams status write during chosen hours/days or for matching tracks, post an optional replacement status, and set your Teams availability/activity while the rule applies.
-- **Desktop notifications (opt-in)** — a toast on track change, throttled to one per 5 s and replaced in place where the OS supports it.
+- **Desktop notifications (opt-in)** — four independent classes: track change (throttled to one per 5 s, replaced in place where the OS supports it), sync stopped, Teams sign-in required, and update staged ([USAGE](USAGE.md#notifications)).
 - **Auto-update** — silent update checks at startup and every ~24h; install immediately in-app, or defer with *Install on quit*, which stages the verified payload with live progress and a Cancel action and applies it as the app exits.
 - **Launch at login** — optional auto-start on boot.
+- **Settings export/import** — back up or restore your settings from a file; the export never contains your Spotify client secret or any token material ([USAGE](USAGE.md#backup)).
 - **Secure auth** — Authorization Code + PKCE OAuth for Spotify (confidential client), Device Code flow for Teams.
 
 ## Screenshots
@@ -63,6 +66,8 @@ Download the installer for your platform from the [latest release](https://githu
 - **macOS (Apple Silicon)** — `PresenceJam-macos.dmg`
 - **Debian / Ubuntu / Mint / popOS (64-bit)** — `PresenceJam-linux-amd64.deb`
 - **Any modern Linux (64-bit, no install required)** — `PresenceJam-linux-amd64.AppImage`
+- **macOS via Homebrew** — `brew install carme99/tap/presence-jam` (Apple Silicon only: the formula declares `depends_on arch: :arm64` and refuses an Intel install rather than copying a bundle that cannot run)
+- **Windows 10/11 via winget** — `winget install PresenceJam.PresenceJam`
 
 <!-- canonical post-fix asset names verified via `gh release view v4.0.0` → PresenceJam-macos.dmg, PresenceJam-linux-amd64.deb, PresenceJam-linux-amd64.AppImage, PresenceJam-v4.0.0.msi (+ .msi.sig), PresenceJam-v4.0.0.app.tar.gz (+ .sig), PresenceJam-v4.0.0.AppImage.sig, SHA256SUMS.txt, latest.json -->
 
@@ -85,7 +90,32 @@ chmod +x PresenceJam-linux-amd64.AppImage
 ./PresenceJam-linux-amd64.AppImage
 ```
 
-For autostart with an AppImage, see the [Tauri Linux docs](https://v2.tauri.app/distribute/) — a `.desktop` file in `~/.local/share/applications/` plus the binary in `~/.local/bin/` is the standard pattern.
+To get a launcher entry and an icon for the AppImage — without one, a hidden
+window is only reachable by re-running the file from a terminal — copy it into
+place and write a desktop entry:
+
+```bash
+mkdir -p ~/.local/bin ~/.local/share/applications ~/.local/share/icons
+install -m755 PresenceJam-linux-amd64.AppImage ~/.local/bin/PresenceJam-linux-amd64.AppImage
+cat > ~/.local/share/applications/presencejam.desktop <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=PresenceJam
+Exec=/home/<you>/.local/bin/PresenceJam-linux-amd64.AppImage
+Icon=presencejam
+Terminal=false
+Categories=Utility;
+StartupWMClass=presencejam
+EOF
+update-desktop-database ~/.local/share/applications
+```
+
+Replace `/home/<you>` in `Exec=` with your real home path — desktop entries do not
+expand `~` or `$HOME`. Name an icon at `~/.local/share/icons/presencejam.png` (or a
+stock icon name in `Icon=`) so the launcher has artwork. Launch at Login does not
+depend on this: the autostart plugin writes its own
+`~/.config/autostart/PresenceJam.desktop` pointing at the AppImage. The recipe
+copies the file, so the "no install required" description still holds.
 
 ### macOS first-run note
 
@@ -146,6 +176,7 @@ details and the exact exit conditions.
 | --- | --- |
 | [Docs index](./docs/README.md) | What to read for what — every guide, by task |
 | [Setup](./SETUP.md) | Installing the app, Spotify app registration, Teams auth |
+| [Supported platforms](./docs/PLATFORMS.md) | OS and architecture matrix, packages and update paths |
 | [Usage](./USAGE.md) | Day-to-day guide — tray, dashboard, settings |
 | [Architecture](./ARCHITECTURE.md) | How it works under the hood |
 | [Troubleshooting](./TROUBLESHOOTING.md) | Common problems and fixes |

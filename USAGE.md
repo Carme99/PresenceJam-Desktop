@@ -44,7 +44,7 @@ PresenceJam lives in your **system tray** (Windows taskbar or macOS menu bar). T
 The main screen showing your current sync status.
 
 **Connection status badges:**
-- Green — connected and authenticated
+- Green — signed in — credentials are stored; the next poll re-checks them
 - Red — not connected or token expired — follow the Reconnect view to sign in again
 
 **Sync toggle:**
@@ -56,7 +56,7 @@ The main screen showing your current sync status.
 - Updates in real-time as tracks change
 - Shows ⏸️ when nothing is playing, including during adverts, which are never treated as "listening"
 
-**Suppressed chip:** when a write is being held back, the card shows a chip saying why. The wording is reason-specific for the four rules/policies — *quiet hours are active*, *a track rule matched*, *you set a status message by hand*, *you are out of office* — and falls back to a generic *busy, in a call, or presenting* line for a presence-based verdict (busy / Do Not Disturb / focusing / in a meeting / in a call / presenting). The chip reappears after a view switch, but it renders the generic line until the next `presence-gated` event arrives, since only the reason is carried live.
+**Suppressed chip:** when a write is being held back, the card shows a chip saying why. The wording is reason-specific for the four rules/policies — *quiet hours are active*, *a track rule matched*, *you set a status message by hand*, *you are out of office* — and falls back to a generic *busy, in a call, or presenting* line for a presence-based verdict (busy / Do Not Disturb / focusing / in a meeting / in a call / presenting). The reason survives a view switch, because it is part of the shared presence state rather than a one-off event payload, so the chip keeps its reason-specific wording.
 
 **Snooze chip:** while a tray snooze is active the Dashboard shows a countdown chip — *Snoozed — 12:34 left (until 14:30)* — with a **Resume now** button, so a snooze started from the tray is visible (and cancellable) in the window too. The tray tooltip leads with its status line and states the remaining time for the same reason.
 
@@ -138,7 +138,7 @@ New track rules are added **disabled**, so a half-filled rule can't suppress you
 
 **Quiet hours win over track rules.** If a quiet-hours row covers the current time and day, it decides the iteration — the matching track rule is not consulted at all, so its replacement text and its presence pair do not apply.
 
-**Replacement text is capped at 160 characters** and your quiet-hours replacement is posted from both the playing path *and* the stop/pause clear, so a rule you set is what ends up in Teams either way.
+**Replacement text is capped at 128 characters** and your quiet-hours replacement is posted from both the playing path *and* the stop/pause clear, so a rule you set is what ends up in Teams either way.
 
 **Pause and stop status text.** The two texts posted when playback pauses (`Paused` by default) and when nothing is playing (`Nothing playing on Spotify`) are editable at the bottom of this card — `teams.paused_status_format` / `teams.stopped_status_format` in `config.json`. The 🎵 prefix is added for you, and clearing a field restores the shipped default, so the rendered text is unchanged unless you change it. A matching rule's replacement status still takes precedence over both.
 
@@ -166,25 +166,22 @@ All four are clamped by the backend (`config.rs::clamp_polling`): default 5–30
 
 All four classes are stored in `config.json` under `notifications` (`track_change`, `sync_stopped`, `auth_required`, `update_staged`); an install that still carries the pre-4.7 `notificationsEnabled` flag migrates it into `track_change` once, on the first save. Track changes keep their 5 s throttle and replace-in-place id; the other three notify at most once per occurrence. The track-change toast is dispatched by the Dashboard, the other three by the always-mounted layout, so they arrive whichever view is on screen — and the first one you enable may ask your OS for notification permission.
 
-### General
-
-| Launch at login | Start PresenceJam automatically when your OS boots |
-| Language | Interface language: English, Deutsch (German), or Français (French). Defaults to your OS/browser language. The choice is stored in `config.json` (`locale`) and is the single source of truth for the window, the tray menu and the native application menu — an unknown value falls back to English. Switching it also retags `<html lang>` for screen readers and applies the locale's number and plural rules (French counts `0` as singular). Detached Logs and Settings windows follow the switch. |
-| Start minimized | Open the app minimized to the tray (window hidden on launch). There is no Settings toggle — set `teams.start_minimized` to `true` in `config.json` (consumed at `src-tauri/src/lib.rs`). On macOS, it also switches the app's activation policy to `Accessory`, removing the dock icon and menu-bar app menu — the app becomes a pure tray-resident app. The dock icon reappears when you set the field back to `false` (no restart needed). |
-
 ### Appearance
 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | Theme | Dark | **Dark**, **Light** or **System**. *System* follows your operating system's appearance live — switching the desktop between light and dark repaints the app immediately, with no restart — while an explicit Dark or Light stays pinned and is never overridden by the OS. The pre-paint bootstrap resolves the stored preference, so a System user never sees a flash of the wrong theme on launch. |
 | Compact spacing | Off | Tightens the spacing and type scale (a token-scale override applied before first paint, not a set of component variants). It is independent of the theme, including the System option. |
+| Launch at login | Off | Start PresenceJam automatically when your OS boots |
+| Language | System | Interface language: English, Deutsch (German), or Français (French). Defaults to your OS/browser language. The choice is stored in `config.json` (`locale`) and is the single source of truth for the window, the tray menu and the native application menu — an unknown value falls back to English. Switching it also retags `<html lang>` for screen readers and applies the locale's number and plural rules (French counts `0` as singular). Detached Logs and Settings windows follow the switch. |
+| Start minimized | Off | Open the app minimized to the tray (window hidden on launch). There is no Settings toggle — set `teams.start_minimized` to `true` in `config.json` (consumed at `src-tauri/src/lib.rs`). On macOS, it also switches the app's activation policy to `Accessory`, removing the dock icon and menu-bar app menu — the app becomes a pure tray-resident app. The dock icon reappears when you set the field back to `false` (no restart needed). |
 
 ### Logging
 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | Write a log file | On | Turns the on-disk log off entirely; the in-app Log Viewer still works from the live buffer. Takes effect immediately. |
-| Log level | Info | `Error`, `Warn`, `Info` or `Debug`. Takes effect immediately. |
+| Log level | Info | `Off`, `Error`, `Warn`, `Info`, `Debug` or `Trace`. Takes effect immediately. |
 | Maximum log file size (MB) | 10 | The live file rotates once it reaches this size. Accepted range 1–500 MB. |
 | Archived log files to keep | 3 | How many rotated files are kept. Accepted range 1–20. The live log is kept **in addition** to the archives, so the folder holds at most `keep_files + 1` files — one more than the number in the field. |
 
@@ -271,6 +268,8 @@ The **Log Viewer** in-app lets you browse these logs without opening the filesys
 | `WARN` | Unexpected but recoverable (e.g., slow network) |
 | `INFO` | Normal operations (track changed, status updated) |
 | `DEBUG` | Verbose — every polling iteration logged |
+| `TRACE` | Very verbose — adds the per-iteration detail a support report needs |
+| `OFF` | Silences the logger (nothing is recorded), exactly like clearing **Write a log file** |
 
 The current log level is set in **Settings → Logging** (the same value lives in `config.json` under `logging.log_level`), and that card also turns file logging off entirely and sets the size/retention fields above.
 

@@ -198,6 +198,7 @@ PresenceJam-Desktop/
 ├── src-tauri/
 │   ├── src/
 │   │   ├── lib.rs                          # Tauri entry, command registration, AppState
+│   │   ├── main.rs                         # Binary entry point — calls `presence_jam_lib::run()`
 │   │   ├── commands/                       # Split from commands.rs (PR #76)
 │   │   │   ├── mod.rs                      #   re-exports + tests
 │   │   │   ├── config.rs                   #   save_config / load_config
@@ -208,7 +209,8 @@ PresenceJam-Desktop/
 │   │   │   ├── onboarding.rs                #   is_onboarding_complete / complete / reconnect
 │   │   │   ├── playback.rs                 #   playback_play / pause / next / previous / transfer + devices / queue (v3.0)
 │   │   │   ├── misc.rs                     #   preview_status / update_tray_menu_state / relaunch_app
-│   │   │   └── logs.rs                     #   get_recent_logs — bounded on-disk tail for the Logs pane (v4.6, #595)
+│   │   │   ├── logs.rs                     #   get_recent_logs — bounded on-disk tail for the Logs pane (v4.6, #595)
+│   │   │   └── shortcuts.rs                #   global-hotkey registration, validation and rebinding (v4.7, #676)
 │   │   ├── polling/                        # Split from polling.rs (PR #72)
 │   │   │   ├── mod.rs                      #   re-exports + ErrorSeverity + emit_error
 │   │   │   ├── loop.rs                     #   driver (mpsc channel, ~50 lines)
@@ -225,6 +227,7 @@ PresenceJam-Desktop/
 │   │   ├── updater_bg.rs                  # Background update checks + stage_deferred_update / PendingUpdate (v4.0)
 │   │   ├── diagnostics.rs                 # Telemetry-free get_diagnostics_snapshot (v4.0)
 │   │   ├── menu.rs                        # macOS / Windows app menu bar
+│   │   ├── i18n.rs                        # Rust-side UI string table for the native surfaces (v4.7, #674)
 │   │   └── macos_deeplink.rs              # CoreServices re-claim of presencejam:// on macOS (v4.6, #66/#628)
 │   ├── Cargo.toml                         # Rust deps + `ts-rs = { version = "12", features = ["chrono-impl"] }`
 │   ├── Cargo.lock                         # Commit-locked for reproducible builds
@@ -236,12 +239,21 @@ PresenceJam-Desktop/
 │   ├── ci.yml                             # PR-time: cargo check/clippy/test, npm check
 │   └── release.yml                        # Tag-triggered: 3-OS matrix + homebrew + winget
 ├── homebrew/presence-jam.rb               # Homebrew tap formula template
+├── tests/                                 # vitest suite (*.test.ts) — stores, views, boot routing, log backfill
+├── vitest.config.js                       # vitest + coverage ratchet (four thresholds)
+├── rust-toolchain.toml                    # pinned Rust toolchain, used by CI and local builds
+├── src/app.css                            # global stylesheet: design tokens, themes, densities
+├── docs/                                  # architecture, setup, release and state-of-features docs
 ├── package.json                           # Node deps + scripts
 ├── package-lock.json                       # npm lockfile (committed)
 ├── svelte.config.js                       # SvelteKit SPA config (adapter-static)
 ├── vite.config.js                         # Vite + Tauri dev server
 └── jsconfig.json                          # TypeScript config
 ```
+
+The tree is a curated map of entry points, not an exhaustive listing — it names the
+files a contributor is most likely to need, so a new module can exist without
+appearing here.
 
 **ts-rs generated types** — `src/lib/types.ts` re-exports `SpotifyTokens`,
 `TrackInfo`, `TeamsTokens`, `DeviceCodeResponse`, `SyncStatus`, and `AppConfig`

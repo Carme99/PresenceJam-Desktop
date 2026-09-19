@@ -4,7 +4,7 @@ Get PresenceJam running on your machine.
 
 ## Prerequisites
 
-- **Windows 10/11** (64-bit), **macOS** (Apple Silicon), or **Linux** (64-bit)
+- **Windows 10/11** (64-bit), **macOS** (Apple Silicon), or **Linux** (64-bit, glibc) — the full matrix, including what is *not* supported, is in [`docs/PLATFORMS.md`](./docs/PLATFORMS.md)
 - On **Linux**, a running Secret Service keyring daemon is required — see
   **Linux: System Keyring Required** below
 - A **Spotify Premium** account (required for the Web API)
@@ -20,6 +20,37 @@ Download the latest release from the [GitHub Releases page](https://github.com/C
 | Windows | see [Releases page](https://github.com/Carme99/PresenceJam-Desktop/releases/latest) | Run the installer, follow the prompts |
 | Linux | `PresenceJam-linux-amd64.deb` / `.AppImage` | Install the `.deb` with `sudo apt install ./PresenceJam-linux-amd64.deb`, or run the `.AppImage` directly; requires a running keyring daemon (see **Linux: System Keyring Required** below) |
 | macOS | see [Releases page](https://github.com/Carme99/PresenceJam-Desktop/releases/latest) | Drag PresenceJam to Applications |
+| Windows (winget) | `winget install PresenceJam.PresenceJam` | Windows 10/11 package-manager install |
+| macOS (Homebrew) | `brew install carme99/tap/presence-jam` | Apple Silicon only — the formula refuses an Intel install |
+
+#### AppImage launcher entry (Linux, optional)
+
+The `.deb` gets a launcher entry and icon from the package manager; an AppImage
+does not, and without one a hidden window is only reachable by re-running the
+file from a terminal. To add the same integration:
+
+```bash
+mkdir -p ~/.local/bin ~/.local/share/applications ~/.local/share/icons
+install -m755 PresenceJam-linux-amd64.AppImage ~/.local/bin/PresenceJam-linux-amd64.AppImage
+cat > ~/.local/share/applications/presencejam.desktop <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=PresenceJam
+Exec=/home/<you>/.local/bin/PresenceJam-linux-amd64.AppImage
+Icon=presencejam
+Terminal=false
+Categories=Utility;
+StartupWMClass=presencejam
+EOF
+update-desktop-database ~/.local/share/applications
+```
+
+Replace `/home/<you>` in `Exec=` with your real home path (desktop entries do not
+expand `~`), and point `Icon=` at artwork you installed (e.g.
+`~/.local/share/icons/presencejam.png`). This copies the file rather than
+installing a package, so the "no install required" description still holds.
+**Launch at Login does not need this** — the autostart plugin writes its own
+`~/.config/autostart/PresenceJam.desktop` pointing at the AppImage.
 
 Windows and macOS filenames carry the version (`PresenceJam-<version>.msi`, `PresenceJam-<version>.app.tar.gz`); the Linux artifacts do not (`PresenceJam-linux-amd64.deb` / `.AppImage`). See the [latest release](https://github.com/Carme99/PresenceJam-Desktop/releases/latest) for the current values.
 
@@ -158,17 +189,28 @@ No data is sent to any third-party server — all tokens stay on your machine.
 2. **Delete the app:**
    - Windows: Settings → Apps → PresenceJam → Uninstall
    - macOS: Drag PresenceJam from Applications to Trash
-3. **Delete user data** (optional):
+   - Linux (deb): `sudo apt remove presence-jam` (or `sudo dpkg -r presence-jam`)
+   - Linux (AppImage): just delete the AppImage file (and the `~/.local/bin` copy if you followed the launcher recipe in the README)
+3. **Delete user data** (optional) — `config.json`, `tokens.json` and the logs live in three different folders:
    ```powershell
    # Windows
    Remove-Item -Recurse -Force "$env:APPDATA\PresenceJam"
    Remove-Item -Recurse -Force "$env:APPDATA\com.presencejam.app\PresenceJam"
+   Remove-Item -Recurse -Force "$env:LOCALAPPDATA\com.presencejam.app\logs"
    ```
    ```bash
    # macOS
    rm -rf ~/Library/Application\ Support/PresenceJam
    rm -rf ~/Library/Application\ Support/com.presencejam.app/PresenceJam
+   rm -rf ~/Library/Logs/com.presencejam.app
    ```
+   ```bash
+   # Linux
+   rm -rf "${XDG_CONFIG_HOME:-$HOME/.config}/PresenceJam"
+   rm -rf "${XDG_CONFIG_HOME:-$HOME/.config}/com.presencejam.app/PresenceJam"
+   rm -rf ~/.local/share/com.presencejam.app/logs
+   ```
+4. **Remove the login entry** if **Launch at Login** was on: Windows and macOS remove it with the app; on Linux delete `~/.config/autostart/PresenceJam.desktop`. A `~/.local/share/applications/presencejam.desktop` exists only if you wrote one for an AppImage install — the app never creates it.
 
 Your Spotify app credentials (Client ID/Secret) in the Spotify Developer Dashboard are unaffected — revoke them separately if you want to fully disconnect.
 
