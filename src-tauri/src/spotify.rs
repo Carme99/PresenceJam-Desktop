@@ -133,6 +133,29 @@ fn is_no_active_device_404(status: u16, body: &str) -> bool {
     status == 404 && parse_error_reason(body).as_deref() == Some("NO_ACTIVE_DEVICE")
 }
 
+/// Longest prefix of a response body kept for logging (issue #796).
+const LOG_BODY_LIMIT_CHARS: usize = 512;
+
+/// Truncates a response body to [`LOG_BODY_LIMIT_CHARS`] characters on a char
+/// boundary and appends the original byte length, so a truncated body is
+/// recognisable as truncated in the log. Mirrors `teams.rs::truncate_for_log`
+/// (issue #796): the body is diagnostic evidence for `PresenceJam.log`, never
+/// user-facing text.
+fn truncate_for_log(body: &str) -> String {
+    if body.chars().count() > LOG_BODY_LIMIT_CHARS {
+        // The byte index of the limit-th char, so the slice never splits a
+        // multi-byte character.
+        let cut = body
+            .char_indices()
+            .nth(LOG_BODY_LIMIT_CHARS)
+            .map(|(i, _)| i)
+            .unwrap_or(body.len());
+        format!("{}(…{} bytes total)", &body[..cut], body.len())
+    } else {
+        body.to_string()
+    }
+}
+
 /// Classifies a non-success Spotify response into the typed error every
 /// endpoint shares (issue #749).
 ///
@@ -163,12 +186,12 @@ fn classify_spotify_status(
         500..=599 => SpotifyApiError::Transient {
             status,
             context,
-            body: body.to_string(),
+            body: truncate_for_log(body),
         },
         _ => SpotifyApiError::Http {
             status,
             context,
-            body: body.to_string(),
+            body: truncate_for_log(body),
         },
     }
 }
@@ -192,6 +215,20 @@ fn map_player_error(
     // the poller that reads `retry_after()` off the error.
     if let SpotifyApiError::RateLimited(secs) = err {
         note_rate_limit(secs);
+    }
+    // Issue #796: an unclassified response body is logged here instead of being
+    // rendered — a CDN error page or a raw JSON envelope in a toast is not
+    // actionable, and the user-facing text names the HTTP status instead.
+    if matches!(
+        err,
+        SpotifyApiError::Transient { .. } | SpotifyApiError::Http { .. }
+    ) {
+        log::warn!(
+            "[SPOTIFY] {} request failed (HTTP {}): {}",
+            context,
+            status,
+            truncate_for_log(&body)
+        );
     }
     err
 }
@@ -521,9 +558,16 @@ pub fn complete_spotify_auth(
         .map_err(|e| format!("Failed to send token request: {}", e))?;
 
     if !response.status().is_success() {
-        let status = response.status();
+        let status = response.status().as_u16();
         let body = response.text().unwrap_or_default();
-        return Err(format!("Token request failed: {} - {}", status, body));
+        // Issue #796: this string is rendered by Onboarding/Reconnect, so it
+        // names the status only — the body goes to the log, truncated.
+        log::warn!(
+            "[SPOTIFY] token exchange failed (HTTP {}): {}",
+            status,
+            truncate_for_log(&body)
+        );
+        return Err(format!("Token request failed (HTTP {})", status));
     }
 
     // Issue #350: the exchange body is parsed by `parse_exchange_token_response`
@@ -689,7 +733,8 @@ fn request_refreshed_token(
         .map_err(|e| SpotifyApiError::Other(format!("Failed to send refresh request: {}", e)))?;
 
     if !response.status().is_success() {
-        let status = response.status();
+        let status = response.status().as_u16();
+        let retry_after = parse_retry_after(&response);
         let body = response.text().unwrap_or_default();
         // Spotify returns `{"error":"invalid_grant"}` when the refresh token
         // is expired, revoked, or otherwise invalid. The docs say to discard
@@ -701,10 +746,28 @@ fn request_refreshed_token(
         if error_field.as_deref() == Some("invalid_grant") {
             return Err(SpotifyApiError::InvalidGrant);
         }
-        return Err(SpotifyApiError::Other(format!(
-            "Refresh request failed: {} - {}",
-            status, body
-        )));
+        // Issue #796: the body is logged, truncated; the error the caller
+        // renders carries the status instead of the raw response.
+        let body = truncate_for_log(&body);
+        log::warn!("[SPOTIFY] token refresh failed (HTTP {}): {}", status, body);
+        return Err(match status {
+            // Issue #945: a 429 here is the same server-wide window every other
+            // Spotify caller consults, so record it before returning.
+            429 => {
+                note_rate_limit(retry_after);
+                SpotifyApiError::RateLimited(retry_after)
+            }
+            500..=599 => SpotifyApiError::Transient {
+                status,
+                context: "Token refresh",
+                body,
+            },
+            _ => SpotifyApiError::Http {
+                status,
+                context: "Token refresh",
+                body,
+            },
+        });
     }
 
     let token_resp: TokenResponse = response
@@ -2683,5 +2746,81 @@ mod tests {
             note_rate_limit(None);
             check_rate_limit().expect("a header-less 429 must not block other callers");
         });
+    }
+
+    // Issue #796: the body a failed response carries is diagnostic evidence for
+    // the log, not a user-facing string — and it must not be retained unbounded
+    // either. `truncate_for_log` mirrors the Teams helper.
+    #[test]
+    fn truncate_for_log_caps_a_body_on_a_char_boundary() {
+        let short = "{\"error\":\"invalid_grant\"}";
+        assert_eq!(
+            truncate_for_log(short),
+            short,
+            "a body inside the limit must pass through untouched"
+        );
+
+        let long = "x".repeat(LOG_BODY_LIMIT_CHARS * 3);
+        let kept = truncate_for_log(&long);
+        assert!(
+            kept.len() < long.len(),
+            "an oversized body must be cut down"
+        );
+        assert!(
+            kept.starts_with(&"x".repeat(64)),
+            "the head of the body is what a support snapshot needs"
+        );
+        assert!(
+            kept.contains(&format!("(…{} bytes total)", long.len())),
+            "the marker must carry the true byte length, got {}",
+            kept
+        );
+        assert_eq!(
+            kept.chars().filter(|c| *c == 'x').count(),
+            LOG_BODY_LIMIT_CHARS,
+            "exactly the first {LOG_BODY_LIMIT_CHARS} characters are kept"
+        );
+
+        // Multi-byte input must not panic on the slice — the cut is a byte
+        // index that has to land on a char boundary.
+        let multi = "é".repeat(LOG_BODY_LIMIT_CHARS * 2);
+        let kept = truncate_for_log(&multi);
+        assert!(kept.starts_with('é'));
+        assert!(kept.ends_with(&format!("(…{} bytes total)", multi.len())));
+    }
+
+    // Acceptance criterion for issue #796, at the type's boundary: the body is
+    // logged, the user-facing text names the HTTP status and carries no body
+    // bytes, however large the response was.
+    #[test]
+    fn an_oversized_error_body_never_reaches_display() {
+        // The marker sits past the truncation limit, so a body that leaked
+        // anywhere outside the truncated log line would be detectable.
+        let body = format!("{}EDGE-PAGE-MARKER", "y".repeat(LOG_BODY_LIMIT_CHARS * 4));
+        let err = classify_spotify_status(500, None, "Currently playing", &body);
+
+        let text = err.to_string();
+        assert!(
+            text.contains("500"),
+            "the message must name the HTTP status, got {}",
+            text
+        );
+        assert!(
+            !text.contains("EDGE-PAGE-MARKER"),
+            "no response-body byte may reach user-facing text, got {}",
+            text
+        );
+
+        match err {
+            SpotifyApiError::Transient { body: kept, .. } => {
+                assert!(!kept.contains("EDGE-PAGE-MARKER"));
+                assert!(
+                    kept.contains(&format!("(…{} bytes total)", body.len())),
+                    "the logged body must say it was truncated, got {}",
+                    kept
+                );
+            }
+            other => panic!("a 5xx must map to Transient for logging, got {:?}", other),
+        }
     }
 }
