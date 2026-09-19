@@ -82,8 +82,13 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
     // tray never renders a state the config no longer holds, and only writes
     // when there is actually something to clear.
     clear_expired_snooze_at_startup(app.handle());
-    // Build initial menu
-    let menu = build_initial_menu(app)?;
+    // Issue #768: the tray is built WITHOUT a menu and `update_tray_menu` below
+    // sets the real one. The transient initial menu this used to build was a
+    // second, already-diverged layout (no status row, no now-playing row,
+    // hardcoded Pause/Show labels) that the immediate rebuild replaced
+    // microseconds later — and that a FAILED rebuild left on screen. An empty
+    // tray can only be empty; it is reachable for the first moments of
+    // startup, while the window is not yet interactive.
 
     let tray = TrayIconBuilder::new()
         .tooltip("PresenceJam")
@@ -92,7 +97,6 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
                 .cloned()
                 .ok_or("No default icon")?,
         )
-        .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             ID_SHOW_HIDE => {
@@ -386,9 +390,13 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
         consume_playback_state_changed(event.payload());
     });
 
-    // Immediately update tray menu to reflect actual state (Bug 11 fix).
-    // Without this, the initial menu always shows "Pause Sync" regardless of actual
-    // sync state, and the menu doesn't show the current track if one is cached.
+    // Immediately set the real menu to reflect actual state (Bug 11 fix).
+    // Without this the tray would stay menu-less until the first poll, and a
+    // track cached from the previous session would not be shown.
+    // Issue #768: there is no throwaway menu underneath this any more, so a
+    // failure here cannot leave a "Pause Sync"-labelled stale layout behind.
+    // The dedup snapshot is only committed by a successful rebuild, so the
+    // next poll retries this paint.
     let state = app.state::<std::sync::Arc<crate::AppState>>();
     let is_syncing = state.polling.is_syncing(Ordering::Acquire);
     let current_track = state.polling.current_track().clone();
@@ -401,91 +409,6 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
 
     log::info!("[TRAY] setup_tray: system tray initialized successfully");
     Ok(())
-}
-
-/// Builds the initial tray menu. Transient — `setup_tray` calls
-/// `update_tray_menu` with real state immediately after — but every label
-/// still comes from the installed i18n table (issue #674).
-fn build_initial_menu(app: &tauri::App) -> Result<tauri::menu::Menu<tauri::Wry>, String> {
-    let s = i18n::current();
-    let show_hide = MenuItemBuilder::with_id(ID_SHOW_HIDE, s.show_window)
-        .build(app)
-        .map_err(|e| e.to_string())?;
-
-    let pause_sync = MenuItemBuilder::with_id(ID_PAUSE_SYNC, s.pause_sync)
-        .build(app)
-        .map_err(|e| e.to_string())?;
-
-    let separator = PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?;
-
-    let open_settings = MenuItemBuilder::with_id(ID_OPEN_SETTINGS, s.open_settings)
-        .build(app)
-        .map_err(|e| e.to_string())?;
-
-    let open_logs = MenuItemBuilder::with_id(ID_OPEN_LOGS, s.open_logs_folder)
-        .build(app)
-        .map_err(|e| e.to_string())?;
-
-    let quit = MenuItemBuilder::with_id(ID_QUIT, s.quit)
-        .build(app)
-        .map_err(|e| e.to_string())?;
-
-    // Spotify playback controls (issue #3.0-P3). This initial menu is
-    // transient — `setup_tray` immediately calls `update_tray_menu` with
-    // real state — so the Play/Pause toggle starts unchecked and the
-    // Devices/Up Next submenus start as placeholders (no network at
-    // startup).
-    let play_pause = CheckMenuItemBuilder::with_id(ID_PLAY_PAUSE, s.play_pause)
-        .checked(false)
-        .build(app)
-        .map_err(|e| e.to_string())?;
-    let previous = MenuItemBuilder::with_id(ID_PREVIOUS, s.previous)
-        .build(app)
-        .map_err(|e| e.to_string())?;
-    let next = MenuItemBuilder::with_id(ID_NEXT, s.next)
-        .build(app)
-        .map_err(|e| e.to_string())?;
-    // Issue #582: the two playback-mode toggles. They start off here (this
-    // menu is transient — `update_tray_menu` follows immediately) and take
-    // their real marks from the poll body thereafter.
-    let shuffle = CheckMenuItemBuilder::with_id(ID_SHUFFLE, s.shuffle)
-        .checked(false)
-        .build(app)
-        .map_err(|e| e.to_string())?;
-    let repeat = CheckMenuItemBuilder::with_id(ID_REPEAT, repeat_menu_label(s, RepeatState::Off))
-        .checked(false)
-        .build(app)
-        .map_err(|e| e.to_string())?;
-    let playback_separator = PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?;
-    let devices_submenu = build_devices_submenu(app.handle(), None)?;
-    let queue_submenu = build_queue_submenu(app.handle(), None)?;
-    // 4.7.0 (S9 / issue #677): the snooze submenu. Built with no active snooze
-    // here — this menu is transient (`setup_tray` calls `update_tray_menu` with
-    // real state immediately after), exactly like the unchecked Play/Pause and
-    // mode items above.
-    let snooze_submenu = build_snooze_submenu(app.handle(), s, None)?;
-
-    MenuBuilder::new(app)
-        .items(&[
-            &show_hide,
-            &pause_sync,
-            &snooze_submenu,
-            &separator,
-            &play_pause,
-            &previous,
-            &next,
-            &shuffle,
-            &repeat,
-            &playback_separator,
-            &devices_submenu,
-            &queue_submenu,
-            &open_settings,
-            &open_logs,
-            &separator,
-            &quit,
-        ])
-        .build()
-        .map_err(|e| e.to_string())
 }
 
 /// Snapshot of the last tray-menu state, used for the dedup guard in
@@ -938,20 +861,6 @@ fn resolve_device_id(app: &AppHandle, selected: &DeviceMenuSelection) -> Option<
     }
 }
 
-/// Builds the Devices submenu. `access_token` is `None` before the app has
-/// Spotify tokens (initial menu build) — the submenu then shows a single
-/// disabled "(no devices)" placeholder.
-fn build_devices_submenu(
-    app: &AppHandle,
-    access_token: Option<&str>,
-) -> Result<Submenu<tauri::Wry>, String> {
-    let devices = match access_token {
-        Some(token) => cached_devices(token),
-        None => Vec::new(),
-    };
-    build_devices_submenu_from_devices(app, &devices)
-}
-
 /// Builds the Devices submenu from an already-fetched slice. No HTTP is
 /// performed here — the caller must have fetched outside any tray lock.
 /// See issue #217.
@@ -990,19 +899,6 @@ fn build_devices_submenu_from_devices(
         }
     }
     Ok(submenu)
-}
-
-/// Builds the Up Next submenu from the cached queue, showing at most 3
-/// upcoming tracks as disabled items and "(queue empty)" when none.
-fn build_queue_submenu(
-    app: &AppHandle,
-    access_token: Option<&str>,
-) -> Result<Submenu<tauri::Wry>, String> {
-    let queue = match access_token {
-        Some(token) => cached_queue(token),
-        None => None,
-    };
-    build_queue_submenu_from_queue(app, queue.as_ref())
 }
 
 /// Builds the Up Next submenu from an already-fetched queue snapshot.
@@ -2729,7 +2625,7 @@ mod tests {
         let cleanup = setup
             .find("clear_expired_snooze_at_startup(")
             .expect("call site");
-        let menu = setup.find("build_initial_menu(").expect("menu build");
+        let menu = setup.find("update_tray_menu(").expect("tray paint");
         assert!(
             cleanup < menu,
             "the cleanup must precede the first menu build, so the tray never \
