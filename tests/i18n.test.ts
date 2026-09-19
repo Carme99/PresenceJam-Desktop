@@ -36,6 +36,19 @@ function dictKeys(source: string): string[] {
   return keys;
 }
 
+// Key/value pairs parsed from a dictionary source. Values are either
+// single-quoted (the common case) or double-quoted when the copy itself
+// contains an apostrophe; prettier wraps the long ones onto the next line.
+function dictEntries(source: string): { key: string; value: string }[] {
+  const out: { key: string; value: string }[] = [];
+  const re = /^  '([^']+)':\s*(?:'([^']*)'|"([^"]*)"),$/gm;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(source)) !== null) {
+    out.push({ key: m[1], value: m[2] ?? m[3] });
+  }
+  return out;
+}
+
 describe('i18n key coverage (#488)', () => {
   const enSrc = read('src/lib/i18n/en.ts');
   const deSrc = read('src/lib/i18n/de.ts');
@@ -47,6 +60,34 @@ describe('i18n key coverage (#488)', () => {
     const fr = dictKeys(frSrc).sort();
     expect(de).toEqual(en);
     expect(fr).toEqual(en);
+  });
+
+  // #906: the wait-state copy uses the ellipsis character (U+2026). Three
+  // ASCII dots occupy a different width, so a `common.loading` label and the
+  // `common.reconnecting` sibling rendered in the same region wrap at
+  // different points — and every new key copies whichever form it sits next
+  // to. Fail on the ASCII sequence in ANY dictionary value.
+  it('spells the ellipsis with U+2026 in every dictionary value (#906)', () => {
+    const offenders: string[] = [];
+    for (const [file, source] of [
+      ['en.ts', enSrc],
+      ['de.ts', deSrc],
+      ['fr.ts', frSrc],
+    ] as const) {
+      for (const { key, value } of dictEntries(source)) {
+        if (value.includes('...')) offenders.push(`${file}: ${key}`);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it('renders the same ellipsis for loading and reconnecting in en/de/fr (#906)', () => {
+    for (const locale of ['en', 'de', 'fr'] as const) {
+      void i18n.set(locale);
+      expect(t('common.loading')).toContain('…');
+      expect(t('common.reconnecting')).toContain('…');
+    }
+    void i18n.set('en');
   });
 
   it('real t() resolves known keys and substitutes params', () => {

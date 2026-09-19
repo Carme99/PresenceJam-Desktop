@@ -16,7 +16,7 @@ export const fr: Dict = {
   'common.enterCodeWhenAsked': 'Saisissez ce code quand on vous le demande :',
   'common.moreActions': 'Plus d’actions',
   'common.launchAtLogin': "Lancer à l'ouverture de session",
-  'common.loading': 'Chargement...',
+  'common.loading': 'Chargement…',
   'common.notConnected': 'Non connecté',
   'common.reconnecting': 'Reconnexion…',
   'common.reconnect': 'Reconnecter',

@@ -28,7 +28,7 @@ export const en = {
   'common.enterCodeWhenAsked': 'Enter this code when asked:',
   'common.moreActions': 'More actions',
   'common.launchAtLogin': 'Launch at login',
-  'common.loading': 'Loading...',
+  'common.loading': 'Loading…',
   'common.notConnected': 'Not connected',
   'common.reconnecting': 'Reconnecting…',
   'common.reconnect': 'Reconnect',
