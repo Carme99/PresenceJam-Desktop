@@ -314,6 +314,143 @@ jobs:
           CARGO_INCREMENTAL: 0
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
+  # Rust coverage ratchet (issue #838): the frontend has had a measured coverage
+  # gate since #443/#681, the backend had none — so a PR that deletes a module's
+  # tests, or the `token_io.rs` ones, produced no signal at all while the v5
+  # refactors touch polling/poll_once.rs, config.rs and token_io.rs hardest.
+  #
+  # Floors are the values MEASURED on the merged head (2026-09-19, cargo-llvm-cov
+  # 0.9.1, `--lib`, 491 tests), rounded DOWN to a whole percent so a re-run cannot
+  # fail on rounding noise. Raise a floor only in the PR that raises the measured
+  # number, and never above what the job prints — the frontend ratchet's rule:
+  #   whole library         62.76 % -> --fail-under-lines 62
+  #   polling/poll_once.rs  66.68 % -> 66
+  #   commands/config.rs    18.47 % -> 18
+  #   config.rs             87.59 % -> 87
+  #   token_io.rs           74.11 % -> 74
+  rust-coverage:
+    name: Rust coverage ratchet
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6.5.0
+        with:
+          node-version: 24
+          cache: 'npm'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e  # 1.96
+        with:
+          # cargo-llvm-cov shells out to llvm-profdata/llvm-cov from here.
+          components: llvm-tools-preview
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            pkg-config \
+            build-essential
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      # Pinned to the version the floors were measured with: a tool upgrade can
+      # move a percentage, so the floors are re-measured in the PR that bumps it.
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3  # v2.87.16
+        with:
+          tool: cargo-llvm-cov@0.9.1
+
+      # One instrumented run feeds both the published lcov artifact and the
+      # per-file floors below. `--fail-under-lines` is the whole-library floor;
+      # it fails this step (exit 1) rather than letting the run report green.
+      - name: Rust line coverage (whole-library floor 62 %)
+        env:
+          CARGO_INCREMENTAL: 0
+        run: |
+          cargo llvm-cov --manifest-path src-tauri/Cargo.toml --lib \
+            --lcov --output-path lcov.info \
+            --fail-under-lines 62
+
+      # The three files the v5 refactors touch most, plus commands/config.rs,
+      # whose measured number is the lowest in the tree (issue #838 item 4). A PR
+      # that drops a file's tests — or the file itself — fails here instead of
+      # hiding inside the library-wide average. Reads the lcov the step above
+      # wrote, so no second instrumented run is needed.
+      - name: Per-file coverage floors
+        run: |
+          python3 - <<'PY'
+          import sys
+
+          # suffix -> (floor % rounded down, measured % on the merged head 2026-09-19)
+          FLOORS = {
+              "src-tauri/src/polling/poll_once.rs": (66, 66.68),
+              "src-tauri/src/commands/config.rs": (18, 18.47),
+              "src-tauri/src/config.rs": (87, 87.59),
+              "src-tauri/src/token_io.rs": (74, 74.11),
+          }
+
+          hits = {}
+          current = None
+          with open("lcov.info") as fh:
+              for raw in fh:
+                  line = raw.strip()
+                  if line.startswith("SF:"):
+                      current = line[3:]
+                      hits.setdefault(current, [0, 0])
+                  elif line.startswith("DA:") and current is not None:
+                      parts = line[3:].split(",")
+                      hits[current][1] += 1
+                      if len(parts) > 1 and int(parts[1]) > 0:
+                          hits[current][0] += 1
+
+          failed = []
+          for suffix, (floor, measured) in sorted(FLOORS.items()):
+              matches = [path for path in hits if path.endswith(suffix)]
+              if len(matches) != 1:
+                  failed.append(f"{suffix}: expected 1 lcov record, found {len(matches)}")
+                  continue
+              hit, total = hits[matches[0]]
+              percent = 100.0 * hit / total if total else 0.0
+              print(f"{suffix}: {percent:.2f} % lines ({hit}/{total}) — floor {floor} % (measured {measured} %)")
+              if percent < floor:
+                  failed.append(f"{suffix}: {percent:.2f} % < floor {floor} %")
+
+          if failed:
+              print("::error::Rust per-file coverage floor missed:")
+              for item in failed:
+                  print(f"  {item}")
+              sys.exit(1)
+          PY
+
+      - name: Upload lcov artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: rust-lcov
+          path: lcov.info
+          if-no-files-found: error
+
   # CHANGELOG: every `## [X]` section header must have a matching `[X]:`
   # link definition at the bottom of the file, otherwise the version link
   # renders dead (see #437, #438). Fails the run on the first missing def.
