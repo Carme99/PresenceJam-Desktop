@@ -99,6 +99,52 @@ pub async fn start_teams_auth_device_code(
     Ok(response)
 }
 
+/// Clamp the server-supplied device-code poll interval to the RFC 8628 range
+/// of 1..=15 seconds.
+///
+/// The value arrives in the token endpoint's device-authorization response,
+/// i.e. from outside the app (devtools can inject `u64::MAX`), and it is used
+/// as a sleep inside `spawn_blocking`'s poll loop. Named so the bound is a
+/// function a test can drive, instead of an inline call that only a live
+/// command could exercise (issue #761).
+fn clamped_poll_interval(interval: u64) -> u64 {
+    interval.clamp(1, 15)
+}
+
+/// What committing a freshly polled session reported about the disk copy.
+///
+/// Expressed as an outcome rather than a `Result` so the command cannot
+/// accidentally `?`-propagate the persistence failure (issue #562): only the
+/// caller's arm decides what to emit, and "the write failed" is a warning, not
+/// a failed sign-in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SessionCommitOutcome {
+    /// Tokens are in `AppState` and the encrypted file was rewritten.
+    Persisted,
+    /// Tokens are in `AppState`; the write to disk failed (keychain locked,
+    /// full or read-only disk). The session is live until restart.
+    PersistFailed(String),
+}
+
+/// Commit a polled session: store the tokens first, then persist them.
+///
+/// The store runs before the persist by construction, so the in-memory
+/// session exists whatever the write does — the invariant issue #562 turns
+/// into "report the gap, never fail the sign-in". The effects are injected so
+/// the policy is testable without a live `AppHandle` (the style
+/// `commands/onboarding.rs` uses for its boot gate).
+fn commit_polled_tokens(
+    tokens: crate::teams::TeamsTokens,
+    store: impl FnOnce(crate::teams::TeamsTokens),
+    persist: impl FnOnce() -> Result<(), String>,
+) -> SessionCommitOutcome {
+    store(tokens);
+    match persist() {
+        Ok(()) => SessionCommitOutcome::Persisted,
+        Err(e) => SessionCommitOutcome::PersistFailed(e),
+    }
+}
+
 #[tauri::command]
 pub async fn poll_teams_auth(
     device_code: String,
@@ -108,7 +154,7 @@ pub async fn poll_teams_auth(
 ) -> Result<(), String> {
     // Security: server interval is untrusted (devtools can inject u64::MAX).
     // Clamp before any use so spawn_blocking cannot sleep for hours.
-    let interval = interval.clamp(1, 15);
+    let interval = clamped_poll_interval(interval);
     log::info!(
         "{CMD} poll_teams_auth: ENTRY - device_code.len={}, interval={}",
         device_code.len(),
@@ -142,11 +188,11 @@ pub async fn poll_teams_auth(
                 tokens.access_token.len()
             );
 
-            {
-                let mut guard = state.tokens.teams_mut();
-                *guard = Some(tokens);
+            let store = |tokens| {
+                *state.tokens.teams_mut() = Some(tokens);
                 log::info!("{CMD} poll_teams_auth: tokens stored in AppState");
-            }
+            };
+            let persist = || token_io::persist_tokens(state.inner(), &app);
             // Issue #562: the sign-in already succeeded — the token endpoint
             // returned tokens and they are live in AppState. A persist failure
             // (keychain, full/read-only disk) must NOT be `?`-propagated: the
@@ -155,9 +201,11 @@ pub async fn poll_teams_auth(
             // a brand-new code even though sync works until restart. Keep the
             // in-memory commit and surface the persistence gap on its own
             // event, mirroring the polling loop's policy (poll_once.rs).
-            match token_io::persist_tokens(state.inner(), &app) {
-                Ok(()) => log::info!("{CMD} poll_teams_auth: tokens persisted atomically"),
-                Err(e) => {
+            match commit_polled_tokens(tokens, store, persist) {
+                SessionCommitOutcome::Persisted => {
+                    log::info!("{CMD} poll_teams_auth: tokens persisted atomically");
+                }
+                SessionCommitOutcome::PersistFailed(e) => {
                     log::warn!(
                         "{CMD} poll_teams_auth: sign-in succeeded but tokens could not be persisted (session is live until restart): {}",
                         e
@@ -459,5 +507,69 @@ mod tests {
             "the supersession gate must run before the token slot is written, or \
              the stale commit has already clobbered the newer flow's tokens"
         );
+
+    use super::{clamped_poll_interval, commit_polled_tokens, SessionCommitOutcome};
+    use crate::teams::TeamsTokens;
+
+    fn teams_tokens() -> TeamsTokens {
+        TeamsTokens {
+            access_token: "teams-access-token".to_string(),
+            refresh_token: None,
+            expires_at: chrono::Utc::now(),
+        }
+    }
+
+    /// Issue #761: the device-code poll interval is server-supplied, and the
+    /// command uses it as a sleep — so every out-of-range value has to land on
+    /// the 1..=15 s bounds. Widening the clamp is hours of a blocked
+    /// `spawn_blocking` thread, which the test catches on the two edges.
+    #[test]
+    fn poll_interval_is_clamped_to_the_device_code_range() {
+        assert_eq!(clamped_poll_interval(0), 1);
+        assert_eq!(clamped_poll_interval(1), 1);
+        assert_eq!(clamped_poll_interval(7), 7);
+        assert_eq!(clamped_poll_interval(15), 15);
+        assert_eq!(clamped_poll_interval(16), 15);
+        assert_eq!(clamped_poll_interval(u64::MAX), 15);
+    }
+
+    /// Issue #562: the poll already succeeded, so a failed write is a warning
+    /// about the disk copy — never a failed sign-in. An Entra device code is
+    /// single-use, so propagating the write error would send the user back to
+    /// fetch a new code even though the session works until restart. The test
+    /// drives the decision function the command delegates to, with the store
+    /// and persist effects injected, and pins the order that makes the claim
+    /// true: the tokens are in `AppState` before the write is attempted.
+    #[test]
+    fn a_failed_persist_keeps_the_session_and_reports_the_gap() {
+        let stored = std::cell::Cell::new(false);
+        let order = std::cell::RefCell::new(Vec::new());
+
+        let outcome = commit_polled_tokens(
+            teams_tokens(),
+            |tokens| {
+                order.borrow_mut().push("store");
+                stored.set(tokens.access_token == "teams-access-token");
+            },
+            || {
+                order.borrow_mut().push("persist");
+                Err("keychain is locked".to_string())
+            },
+        );
+
+        assert!(stored.get(), "the session must be live in AppState");
+        assert_eq!(order.into_inner(), vec!["store", "persist"]);
+        assert_eq!(
+            outcome,
+            SessionCommitOutcome::PersistFailed("keychain is locked".to_string())
+        );
+    }
+
+    /// The success half of the same decision: a written session reports no
+    /// gap, so the caller emits no `teams-auth-persist-warning`.
+    #[test]
+    fn a_successful_persist_reports_no_gap() {
+        let outcome = commit_polled_tokens(teams_tokens(), |_| {}, || Ok(()));
+        assert_eq!(outcome, SessionCommitOutcome::Persisted);
     }
 }
