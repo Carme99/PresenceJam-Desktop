@@ -109,9 +109,10 @@ fn cached_verdict(state: &Arc<AppState>, why: &str) -> Option<bool> {
 /// refresh token. `cas_refresh_or_discard` refreshes before it compares, so
 /// against a provider that rotated the token the loser's `invalid_grant` arm
 /// clears and persists a session that is alive: a full re-auth for a healthy
-/// user. A plain `std::sync` mutex is the right shape here — every caller
-/// reaches it on a blocking thread (`spawn_blocking`), so waiting parks a pool
-/// thread instead of stalling the async runtime.
+/// user. A plain blocking mutex (parking_lot's, which has no poisoning error
+/// path to unwrap) is the right shape here — every caller reaches it on a
+/// blocking thread (`spawn_blocking`), so waiting parks a pool thread instead
+/// of stalling the async runtime.
 static BOOT_GATE_FLIGHT: Mutex<()> = Mutex::new(());
 
 /// Single-flight core of the boot gate: while one check runs, a second caller
@@ -980,5 +981,56 @@ mod tests {
             "both slots empty: both codes, Spotify first, so the wizard can \
              route to the first step and surface the other on the next finish"
         );
+    }
+
+    /// Issue #942: the single-flight lock is only worth anything if the command
+    /// actually routes through it — a direct `is_onboarding_complete_impl` call
+    /// in the command body is the pre-#942 shape, where two overlapping callers
+    /// each refreshed from the same token. Structural because the command needs
+    /// a live `AppHandle` and a real refresh round-trip.
+    #[test]
+    fn the_command_routes_through_the_single_flight_lock() {
+        let body = crate::token_io::test_scan::fn_body(
+            include_str!("onboarding.rs"),
+            "fn is_onboarding_complete(",
+        );
+        let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            flat.contains("single_flight( &BOOT_GATE_FLIGHT,"),
+            "the command must take the process-wide flight lock, or a Retry can \
+             start a second gate run"
+        );
+        assert!(
+            flat.contains("is_onboarding_complete_impl(&state_clone, &app_clone)"),
+            "the gate body must run as the single-flight payload"
+        );
+    }
+
+    /// Issue #760: the boot gate reads the client secret exactly once. The
+    /// presence probe plus the fetch are what the typed island replaced, and
+    /// re-introducing either restores the TOCTOU window between them.
+    #[test]
+    fn the_spotify_gate_reads_the_secret_once() {
+        let body = crate::token_io::test_scan::fn_body(
+            include_str!("onboarding.rs"),
+            "fn spotify_session_verdict(",
+        );
+        assert_eq!(
+            body.matches("keychain::read_spotify_client_secret()")
+                .count(),
+            1,
+            "the gate must perform exactly one keychain read"
+        );
+        for gone in [
+            "spotify_client_secret_presence",
+            "get_spotify_client_secret",
+            "peek_spotify_client_secret",
+        ] {
+            assert!(
+                !body.contains(gone),
+                "`{gone}` must not return to the boot gate: it is the second probe \
+                 the typed read replaced"
+            );
+        }
     }
 }
