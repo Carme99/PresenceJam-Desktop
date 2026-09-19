@@ -55,6 +55,12 @@ impl RateLimitWindow {
     /// passed.
     fn remaining_secs(&self, now: Instant) -> Option<u64> {
         let remaining = self.until?.checked_duration_since(now)?;
+        // `checked_duration_since` answers `Some(0)` for the instant that
+        // *is* the deadline, which would report "retry after 0s" and read as an
+        // open window; the deadline is inclusive, so treat it as closed.
+        if remaining.is_zero() {
+            return None;
+        }
         Some(remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0))
     }
 
@@ -586,7 +592,12 @@ pub fn complete_spotify_auth(
 /// Shortest access-token lifetime the app accepts from the token endpoint,
 /// in seconds. Spotify documents 3600 s; anything below this floor is treated
 /// as malformed rather than believed (issue #931).
-const MIN_TOKEN_LIFETIME_SECS: u64 = 30;
+///
+/// The floor must stay above the 60 s refresh margin in [`is_token_expired`]:
+/// that margin is what makes a token "expired" early, so a shorter clamp would
+/// still hand out a token that is expired the moment it is stored — the exact
+/// failure issue #931 describes.
+const MIN_TOKEN_LIFETIME_SECS: u64 = 300;
 
 /// Longest access-token lifetime the app accepts from the token endpoint, in
 /// seconds (24 h). Anything above is treated as malformed (issue #931).
@@ -2531,6 +2542,22 @@ mod tests {
                 label,
                 expires_at
             );
+
+            // The acceptance criterion through the app's own predicate, not
+            // just the bounds above: `is_token_expired` fires 60 s early, so a
+            // clamp that ignores that margin still hands out a token the app
+            // treats as expired the moment it is stored.
+            let tokens = SpotifyTokens {
+                access_token: "at-931".to_string(),
+                refresh_token: "rt-931".to_string(),
+                expires_at: token_expiry(expires_in, Utc::now()),
+            };
+            assert!(
+                !is_token_expired(&tokens),
+                "expires_in={} ({}) must not yield an already-expired token",
+                expires_in,
+                label
+            );
         }
 
         assert_eq!(
@@ -2549,14 +2576,32 @@ mod tests {
         let tokens =
             parse_exchange_token_response(body).expect("a huge expires_in must still parse");
         assert!(
+            !is_token_expired(&tokens),
+            "the stored token must be usable, not expired on arrival, got {}",
+            tokens.expires_at
+        );
+        assert!(
             tokens.expires_at > Utc::now(),
-            "the stored token must not already be expired, got {}",
+            "the stored expiry must be in the future, got {}",
             tokens.expires_at
         );
         assert!(
             tokens.expires_at
                 <= Utc::now() + chrono::Duration::seconds(MAX_TOKEN_LIFETIME_SECS as i64 + 1),
             "the stored expiry must stay inside the accepted range, got {}",
+            tokens.expires_at
+        );
+
+        // `expires_in: 0` is the other malformed shape the old cast accepted:
+        // it stored an `expires_at` that `is_token_expired` already reads as
+        // expired, so every poll iteration and tray click refreshed again.
+        let zero =
+            r#"{"access_token":"at","refresh_token":"rt","token_type":"Bearer","expires_in":0}"#;
+        let tokens =
+            parse_exchange_token_response(zero).expect("a zero expires_in must still parse");
+        assert!(
+            !is_token_expired(&tokens),
+            "a zero lifetime must not produce an expired token, got {}",
             tokens.expires_at
         );
     }
