@@ -825,6 +825,7 @@ mod tests {
     #[test]
     fn test_sync_status_offload_yields_instead_of_parking_the_command_thread() {
         use super::{sync_status_offloaded, AppState};
+        use std::future::Future;
         use std::sync::mpsc;
         use std::sync::Arc;
         use std::task::{Context, Poll, Waker};
