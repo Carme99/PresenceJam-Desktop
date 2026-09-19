@@ -742,6 +742,7 @@ mod tests {
         ShortcutsConfig {
             toggle_playback: playback.map(str::to_string),
             toggle_sync: sync.map(str::to_string),
+            ..ShortcutsConfig::default()
         }
     }
 

@@ -953,6 +953,15 @@ pub struct StatusRulesConfig {
     pub quiet_hours: Vec<QuietHoursEntry>,
     #[serde(default)]
     pub track_rules: Vec<TrackRuleEntry>,
+    /// Unknown / future keys NESTED inside this section, retained across
+    /// load→save so a section written by a newer binary is not silently
+    /// stripped by an older one (issue #938 — the section-level companion of
+    /// [`AppConfig::extra`]). Omitted from JSON while empty and skipped in the
+    /// TypeScript export, so an untouched config gains no bytes and the
+    /// generated TypeScript is unchanged.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[ts(skip)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 /// Which desktop-notification classes the app may show (4.7.0 / issue #675).
@@ -1031,6 +1040,15 @@ pub struct ShortcutsConfig {
     pub toggle_playback: Option<String>,
     #[serde(default = "default_toggle_sync_shortcut")]
     pub toggle_sync: Option<String>,
+    /// Unknown / future keys NESTED inside this section, retained across
+    /// load→save so a section written by a newer binary is not silently
+    /// stripped by an older one (issue #938 — the section-level companion of
+    /// [`AppConfig::extra`]). Omitted from JSON while empty and skipped in the
+    /// TypeScript export, so an untouched config gains no bytes and the
+    /// generated TypeScript is unchanged.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[ts(skip)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 fn default_toggle_playback_shortcut() -> Option<String> {
@@ -1046,6 +1064,7 @@ impl Default for ShortcutsConfig {
         Self {
             toggle_playback: default_toggle_playback_shortcut(),
             toggle_sync: default_toggle_sync_shortcut(),
+            extra: BTreeMap::new(),
         }
     }
 }
@@ -2402,9 +2421,6 @@ fn strip_client_secret_from_extra(extra: &mut BTreeMap<String, serde_json::Value
 /// [`strip_client_secret_from_extra`] over every unknown-key bucket a config
 /// carries: the document's own top-level map and each section's (issue #916;
 /// the section maps are themselves issue #938).
-///
-/// Status rules and shortcuts have no such map yet, which is the whole reason
-/// they cannot be stripped here — see W1-NOTES.md.
 fn strip_client_secret_from_extras(config: &mut AppConfig) -> usize {
     let mut removed = strip_client_secret_from_extra(&mut config.extra);
     for extra in [
@@ -2414,6 +2430,8 @@ fn strip_client_secret_from_extras(config: &mut AppConfig) -> usize {
         &mut config.logging.extra,
         &mut config.updates.extra,
         &mut config.notifications.extra,
+        &mut config.status_rules.extra,
+        &mut config.shortcuts.extra,
     ] {
         removed += strip_client_secret_from_extra(extra);
     }
@@ -5450,7 +5468,13 @@ mod tests {
                 "teams": {"status_format": "🎧 {track}", "future_flag": true,
                           "future_block": {"a": [1, 2]}},
                 "spotify": {"client_id": "abc", "future_spotify": "x"},
-                "logging": {"future_logging": 1}}"#,
+                "logging": {"future_logging": 1},
+                "polling": {"future_polling": 2},
+                "updates": {"future_updates": "u"},
+                "notifications": {"future_notifications": false},
+                "status_rules": {"quiet_hours": [], "track_rules": [],
+                                 "future_rule_flag": "r"},
+                "shortcuts": {"future_shortcut": "s"}}"#,
         );
         let cfg = load_config_from(&path).expect("must load");
         assert_eq!(
@@ -5464,6 +5488,26 @@ mod tests {
         assert_eq!(
             cfg.logging.extra.get("future_logging"),
             Some(&serde_json::json!(1))
+        );
+        assert_eq!(
+            cfg.polling.extra.get("future_polling"),
+            Some(&serde_json::json!(2))
+        );
+        assert_eq!(
+            cfg.updates.extra.get("future_updates"),
+            Some(&serde_json::json!("u"))
+        );
+        assert_eq!(
+            cfg.notifications.extra.get("future_notifications"),
+            Some(&serde_json::json!(false))
+        );
+        assert_eq!(
+            cfg.status_rules.extra.get("future_rule_flag"),
+            Some(&serde_json::json!("r"))
+        );
+        assert_eq!(
+            cfg.shortcuts.extra.get("future_shortcut"),
+            Some(&serde_json::json!("s"))
         );
 
         save_config_to(&path, &cfg).expect("save must succeed");
@@ -5480,6 +5524,14 @@ mod tests {
         );
         assert_eq!(written["spotify"]["future_spotify"], "x");
         assert_eq!(written["logging"]["future_logging"], 1);
+        assert_eq!(written["polling"]["future_polling"], 2);
+        assert_eq!(written["updates"]["future_updates"], "u");
+        assert_eq!(written["notifications"]["future_notifications"], false);
+        assert_eq!(
+            written["status_rules"]["future_rule_flag"], "r",
+            "a nested key in the rules section survives too"
+        );
+        assert_eq!(written["shortcuts"]["future_shortcut"], "s");
         assert_eq!(written["teams"]["status_format"], "🎧 {track}");
         assert_eq!(written["autostart"], true);
         let _ = std::fs::remove_dir_all(&dir);
@@ -5551,7 +5603,10 @@ mod tests {
             r#"{"autostart": true,
                 "client_secret": "TOP-LEVEL-SENTINEL",
                 "future": {"client_secret": "NESTED-SENTINEL", "kept": 1},
-                "spotify": {"client_id": "abc", "client_secret": "SPOTIFY-SENTINEL"}}"#,
+                "spotify": {"client_id": "abc", "client_secret": "SPOTIFY-SENTINEL"},
+                "status_rules": {"quiet_hours": [], "track_rules": [],
+                                 "client_secret": "RULES-SENTINEL"},
+                "shortcuts": {"client_secret": "SHORTCUT-SENTINEL"}}"#,
         );
         let cfg = load_config_from(&path).expect("must load");
 
@@ -5599,6 +5654,14 @@ mod tests {
         cfg.teams.extra.insert(
             "client_secret".to_string(),
             serde_json::json!("SECTION-SENTINEL"),
+        );
+        cfg.status_rules.extra.insert(
+            "client_secret".to_string(),
+            serde_json::json!("RULES-SENTINEL"),
+        );
+        cfg.shortcuts.extra.insert(
+            "client_secret".to_string(),
+            serde_json::json!("SHORTCUT-SENTINEL"),
         );
 
         save_config_to(&path, &cfg).expect("save must succeed");
