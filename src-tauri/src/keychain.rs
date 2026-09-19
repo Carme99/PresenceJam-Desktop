@@ -1070,7 +1070,7 @@ mod tests {
         // so the cached key is kept rather than failing the persist.
         let unavailable =
             || -> Result<String, keyring::Error> { Err(platform_failure("no secret service")) };
-        let kept = get_or_create_tokens_aes_key_with(Some(fresh), &unavailable, store, || {
+        let kept = get_or_create_tokens_aes_key_with(Some(fresh), unavailable, store, || {
             panic!("an unreadable slot must not trigger a regeneration")
         })
         .expect("an unreadable keychain must not discard a confirmed key");
