@@ -871,6 +871,17 @@ jobs:
     needs: [resolve-tag, release]
     runs-on: windows-latest
     timeout-minutes: 30
+    # Blast-radius gate (issue #914). WINGET_TOKEN has to be a CLASSIC PAT
+    # (the releaser action does not support fine-grained ones), and a classic
+    # PAT's public_repo scope reaches every public repository the account can
+    # push to — the fork in the comment below is where the manifest is
+    # SUBMITTED, not the limit of what the token can do. With its `workflow`
+    # scope it can also rewrite .github/workflows, i.e. this workflow and the
+    # signing secrets it uses. Submitting a winget manifest therefore needs a
+    # human approval: add required reviewers to this environment in the
+    # repository settings (Settings -> Environments -> winget-publish). Until
+    # that is configured the environment exists but gates nothing.
+    environment: winget-publish
     permissions:
       contents: read
     steps:
@@ -898,7 +909,14 @@ jobs:
       # action pushes the manifest branch to the fork and opens the PR
       # fork -> microsoft/winget-pkgs. Keep the
       # fork alive; komac syncs it with upstream before each run.
-      # Rotate the PAT on a 90-day cadence.
+      # Rotate the PAT every 30 days, not 90 (issue #914): SECURITY.md accepts
+      # 30 days where rotation can be automated, and a token this reachy does
+      # not deserve a quarter. It is account-wide — `public_repo` reaches
+      # every public repository the account can push to, `workflow` reaches
+      # .github/workflows here (the repository holding
+      # TAURI_SIGNING_PRIVATE_KEY) — so a leaked token is a
+      # full-repository compromise: revoke it first, then review recent
+      # workflow runs and the branch/tag history before anything else.
       # See docs: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens
       # HEAD after v2 (only tag is v2 = 4ffc7888): adds the `komac
       # sync-fork` step, which is REQUIRED for the fork path — komac

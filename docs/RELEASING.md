@@ -227,7 +227,12 @@ behind the tag-push run.
    `Carme99/winget-pkgs` (`fork-user`). Requires `WINGET_TOKEN`: a **classic**
    PAT with `public_repo` **and** `workflow` scopes (fine-grained is
    unsupported; the fork must be synced with upstream before the manifest branch
-   is created). Rotate it on a ~90-day cadence.
+   is created). The job runs behind the `winget-publish` GitHub environment —
+   configure required reviewers for it, or the gate is decorative. The token is
+   account-wide (`public_repo` reaches every public repository the account can
+   push to, `workflow` reaches `.github/workflows` in this repository), so
+   rotate it every 30 days and treat a leak as a full-repository compromise:
+   revoke first, then review recent workflow runs and branch/tag history.
 
 ### Linux install channels
 
