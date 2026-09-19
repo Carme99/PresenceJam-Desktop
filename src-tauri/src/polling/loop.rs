@@ -298,6 +298,8 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
             &mut first_iteration,
             &mut clocks.last_posted_status,
             &mut clocks.last_gate_check,
+            &mut clocks.last_idle_verdict,
+            &mut clocks.force_resume_write,
         );
         super::poll_once::store_write_clocks(&clocks);
 

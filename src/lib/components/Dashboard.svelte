@@ -39,6 +39,16 @@
         return t('dashboard.presenceGatedManualStatus');
       case 'out of office':
         return t('dashboard.presenceGatedOutOfOffice');
+      // Issue #872: the OS-level presentation signal — full-screen app,
+      // slide deck, or Windows Focus Assist Quiet Time.
+      case 'presenting':
+        return t('dashboard.presenceGatedPresenting');
+      case 'quiet-time':
+        return t('dashboard.presenceGatedQuietTime');
+      // Issue #873: the desktop has been idle past the configured
+      // threshold, so the app is no longer advertising listening.
+      case 'idle':
+        return t('dashboard.presenceGatedIdle');
       default:
         return t('dashboard.presenceGated');
     }

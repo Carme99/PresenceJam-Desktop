@@ -403,6 +403,19 @@ export const en = {
   'settings.gateOutOfOfficeLabel': 'Pause while I am out of office',
   'settings.gateOutOfOfficeHint':
     'Skips the status update while your Teams out-of-office setting is on. A track rule with its own presence action overrides this.',
+  // Issue #872: the OS-level presentation gate (full-screen app, slide
+  // deck, Windows Focus Assist Quiet Time). OFF by default, matching how
+  // `availabilitySync` and `gateWhenOutOfOffice` shipped — 4.7 behaviour
+  // is unchanged until the user opts in.
+  'settings.gateWhenPresentingLabel': 'Pause while I am presenting',
+  'settings.gateWhenPresentingHint':
+    'Skips writing your Spotify status while the OS reports a full-screen app, slide deck, or Quiet Time. Linux/macOS never report this signal, so the toggle is a no-op there.',
+  // Issue #873: the desktop-idle gate. `0` (the default) keeps 4.7
+  // behaviour — the app keeps advertising listening until the user
+  // explicitly opts in.
+  'settings.idleAwayLabel': 'Pause when my desktop is idle',
+  'settings.idleAwayHint':
+    'Stops advertising your Spotify status once the desktop has had no keyboard/mouse input for this many seconds. 60–3600; 0 disables. Linux/macOS never report this signal.',
   'settings.extraWordsLabel': 'Custom words to filter',
   'settings.extraWordsHint':
     'One word or phrase per line. Applied with the same boundaries as the built-in list.',
@@ -417,6 +430,10 @@ export const en = {
   'dashboard.presenceGatedManualStatus':
     'Status paused — you set a status message by hand',
   'dashboard.presenceGatedOutOfOffice': 'Status paused — you are out of office',
+  'dashboard.presenceGatedPresenting':
+    'Status paused — you are presenting or in a full-screen app',
+  'dashboard.presenceGatedQuietTime': 'Status paused — Focus Assist is on',
+  'dashboard.presenceGatedIdle': 'Status paused — desktop is idle',
   // 4.7.0 — S6 (tray localization): `config.locale` is the single source of
   // truth, so the picker also drives the tray and the native app menu.
   'settings.languageHint':
@@ -549,6 +566,9 @@ export const en = {
   'dashboard.volumeAria': 'Spotify volume slider',
   'dashboard.seekAria': 'Click to seek',
   'dashboard.seekUnavailableAria': 'This device does not support seeking',
+
+  // --- 5.0 wave3 features-gating ---
+
 };
 
 export type Dict = { readonly [K in keyof typeof en]: string };

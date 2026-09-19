@@ -87,6 +87,11 @@
     // Findings #635/#637: both new presence policies reset with the card.
     localConfig.teams.respect_manual_status = defaultConfig.teams.respect_manual_status;
     localConfig.teams.gate_when_out_of_office = defaultConfig.teams.gate_when_out_of_office;
+    // Issues #872/#873: the OS-level presentation gate and the
+    // desktop-idle gate reset with the card, exactly like the OOO
+    // opt-in — an untouched config is identical byte-for-byte to 4.7.
+    localConfig.teams.gate_when_presenting = defaultConfig.teams.gate_when_presenting;
+    localConfig.teams.idle_away_after_seconds = defaultConfig.teams.idle_away_after_seconds;
     markDirty();
   }
   function resetStatusFormatDefaults() {
@@ -1305,6 +1310,39 @@
       </div>
       <p class="hint">
         {t('settings.gateOutOfOfficeHint')}
+      </p>
+      <!-- Issue #872: OS-level presentation gate (full-screen app, slide
+           deck, Windows Focus Assist Quiet Time). OFF by default; the
+           toggle is a no-op on Linux/macOS where the probe always
+           returns `Unknown`. -->
+      <div class="toggle-row">
+        <label for="gate-when-presenting">{t('settings.gateWhenPresentingLabel')}</label>
+        <input
+          id="gate-when-presenting"
+          type="checkbox"
+          bind:checked={localConfig.teams.gate_when_presenting}
+        />
+      </div>
+      <p class="hint">
+        {t('settings.gateWhenPresentingHint')}
+      </p>
+      <!-- Issue #873: desktop-idle gate. `0` (the default) keeps 4.7
+           behaviour; non-zero values are clamped to 60–3600 by the
+           Rust loader. The number field sits next to the toggle so the
+           reason the gate fires is clear from the form. -->
+      <div class="toggle-row">
+        <label for="idle-away-after-seconds">{t('settings.idleAwayLabel')}</label>
+        <input
+          id="idle-away-after-seconds"
+          type="number"
+          min="0"
+          max="3600"
+          step="60"
+          bind:value={localConfig.teams.idle_away_after_seconds}
+        />
+      </div>
+      <p class="hint">
+        {t('settings.idleAwayHint')}
       </p>
     </section>
     <section class="card pane-card">
