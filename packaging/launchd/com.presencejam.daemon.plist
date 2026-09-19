@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+        "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Issue #896: macOS launchd supervised unit.
+
+  Installed at:
+      ~/Library/LaunchAgents/com.presencejam.daemon.plist   (per-user)
+      /Library/LaunchDaemons/com.presencejam.daemon.plist   (system-wide)
+
+  The per-user `LaunchAgent` path runs the daemon in the user's
+  GUI session so the Keychain is reachable; the system-wide
+  `LaunchDaemon` path requires a different `UserName`/`GroupName`
+  and a keychain ACL grant (see SETUP.md).
+
+  `SuccessfulExit` in `KeepAlive` (true) means launchd only restarts
+  the daemon on a non-zero exit — exactly the policy the issue
+  asks for: SIGTERM → exit 0 (the daemon's documented clean stop)
+  does NOT trigger a restart loop, but a panic, a keychain boot
+  failure, or any other failure path DOES.
+
+  `RunAtLoad` (true) launches the daemon at the next `launchd`
+  reload — the install script's `launchctl load -w` lands here, and
+  `launchctl bootstrap` (10.15+) does the same on a fresh boot.
+
+  `StandardOutPath` / `StandardErrorPath` route to the operator's
+  log directory; the daemon's tauri-plugin-log target is also
+  active so the file there carries the same lines.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.presencejam.daemon</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/presencejam</string>
+        <string>--daemon</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>StandardOutPath</key>
+    <string>/usr/local/var/log/presencejam/daemon.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/usr/local/var/log/presencejam/daemon.err.log</string>
+
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>1024</integer>
+    </dict>
+</dict>
+</plist>
