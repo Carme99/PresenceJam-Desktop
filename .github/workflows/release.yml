@@ -35,6 +35,7 @@ jobs:
   # Fails fast if the resolved name is not an existing v* tag.
   resolve-tag:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     # Least privilege (issue #925): this job only probes a public tag over
     # unauthenticated HTTPS and checks out with persist-credentials: false,
     # so it needs no write access. Declaring the block stops it inheriting
@@ -187,6 +188,11 @@ jobs:
   build:
     needs: [resolve-tag, verify]
     runs-on: ${{ matrix.os }}
+    # The macOS leg is the long pole: the job's own note below puts a cold
+    # compile at ~50 minutes. 90 leaves headroom for a cold runner without
+    # allowing a wedged npm ci or linker to burn GitHub's 360-minute
+    # default on each of the three legs (issue #830).
+    timeout-minutes: 90
     # Least privilege for the build matrix: read-only repo access plus
     # the OIDC (id-token) and attestations scopes consumed by
     # actions/attest-build-provenance below. The publishing jobs keep
@@ -408,6 +414,7 @@ jobs:
   release:
     needs: [resolve-tag, build]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       RELEASE_TAG: ${{ needs.resolve-tag.outputs.tag }}
     steps:
@@ -543,6 +550,7 @@ jobs:
   homebrew:
     needs: [resolve-tag, release]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # Least privilege (issue #359): this job pushes to carme99/homebrew-tap
     # via HOMEBREW_TAP_TOKEN, so it must not inherit the workflow-level
     # contents:write grant (mirrors the winget job below).
@@ -649,6 +657,7 @@ jobs:
   winget:
     needs: [resolve-tag, release]
     runs-on: windows-latest
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
