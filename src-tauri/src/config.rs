@@ -2658,6 +2658,15 @@ pub fn export_document(cfg: &AppConfig) -> Result<String, String> {
     // the import flow says a pause came with the file.
     if let Some(root) = value.as_object_mut() {
         root.remove("snooze_until");
+        // An export is a document this app wrote, so it carries the schema
+        // floor the binary is authoritative for (`stamp_schema_version`): the
+        // floor only ever raises the value, so a newer source is left alone.
+        let floor = root
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+            .max(u64::from(SCHEMA_VERSION));
+        root.insert("schema_version".into(), serde_json::json!(floor));
     }
     serde_json::to_string_pretty(&value)
         .map_err(|e| format!("Failed to serialize config to JSON: {}", e))
@@ -2732,8 +2741,19 @@ pub fn prepare_import(raw: &str) -> Result<PreparedImport, String> {
     // carries a future one would silence this machine's polling until it
     // passed, with nothing in the UI explaining why.
     config.snooze_until = None;
+    // Same floor as the export path: raising an older document to this binary's
+    // schema is the migration the loader would apply anyway; a newer document is
+    // never relabelled (`stamp_schema_version` only ever raises).
+    stamp_schema_version(&mut config);
 
-    let document = serde_json::to_string_pretty(&config)
+    // The rewritten document must not carry the key at all (the issue asserts on
+    // its absence, not on a null value), exactly as the export path does.
+    let mut value = serde_json::to_value(&config)
+        .map_err(|e| format!("Failed to serialize imported config to JSON: {}", e))?;
+    if let Some(root) = value.as_object_mut() {
+        root.remove("snooze_until");
+    }
+    let document = serde_json::to_string_pretty(&value)
         .map_err(|e| format!("Failed to serialize imported config to JSON: {}", e))?;
     Ok(PreparedImport { config, document })
 }
