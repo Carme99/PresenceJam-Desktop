@@ -97,6 +97,9 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
                 .cloned()
                 .ok_or("No default icon")?,
         )
+        // Issue #971: Tauri documents this flag as unsupported on Linux, where
+        // a left click opens the AppIndicator menu unconditionally. It only
+        // ever changes behaviour on Windows and macOS.
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             ID_SHOW_HIDE => {
@@ -111,6 +114,11 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
                         let _ = window.unminimize();
                         let _ = window.set_focus();
                     }
+                } else {
+                    // Residual of #826: this arm is the tray's second window-raise
+                    // path, and it must not stay silent about the same condition
+                    // `commands::window::show_window` warns about.
+                    log::warn!("[TRAY] show/hide: main window not found");
                 }
                 // Issue #587: the repaint performs blocking Spotify HTTP
                 // (devices/queue fetches, 10 s timeout each) whenever the
@@ -357,6 +365,11 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
             }
             _ => {}
         })
+        // Issue #971: Linux delivers no tray click events at all (Tauri lists
+        // `TrayIconEvent::Click` as unsupported there), so the `tray-click`
+        // emit below — and the frontend listener for it — are inert on that
+        // platform. Nothing may depend on that event: the window is raised from
+        // the menu's Show/Hide item, which every platform has.
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
@@ -1842,6 +1855,17 @@ fn rebuild_tray_menu(
         log::warn!("[TRAY] update_tray_menu: failed to set tooltip: {}", e);
     }
 
+    // Issue #971: `set_tooltip` is a documented no-op on Linux, which has no
+    // hover surface for an AppIndicator — so the same summary rides as the
+    // indicator's title, which Linux renders beside the icon. That closes the
+    // gap where the status line, the current track and the snooze countdown
+    // were only visible after opening the menu. Windows and macOS keep the
+    // tooltip and set no title (the call is a no-op there anyway).
+    #[cfg(target_os = "linux")]
+    if let Err(e) = tray.set_title(Some(status_line.clone())) {
+        log::warn!("[TRAY] update_tray_menu: failed to set tray title: {}", e);
+    }
+
     // Commit the snapshot only after a successful set_menu. A failed
     // set_menu above left the snapshot at the previous value, so the
     // next call with the same state will retry rather than no-op.
@@ -2942,6 +2966,42 @@ mod tests {
         assert!(
             !tip.contains(".is_playing"),
             "the tooltip must not read the stored track's playing flag (issue #956)"
+        );
+    }
+
+    /// Issue #971: on Linux Tauri supports neither tray click events nor
+    /// `set_tooltip`, so the status summary — which the tooltip carries on
+    /// Windows and macOS — must ride as the AppIndicator's title there, or the
+    /// sync state, the current track and the snooze countdown are only visible
+    /// after opening the menu.
+    #[test]
+    fn linux_tray_title_carries_the_status_line() {
+        let prod = prod_source(include_str!("tray.rs"));
+        let body = body_of(prod, "fn rebuild_tray_menu(");
+        let tooltip_pos = body
+            .find("tray.set_tooltip(")
+            .expect("the rebuild must still write the tooltip");
+        let after = &body[tooltip_pos..];
+        assert!(
+            after.contains("#[cfg(target_os = \"linux\")]"),
+            "the title mirror must be Linux-only (issue #971)"
+        );
+        assert!(
+            after.contains("tray.set_title(Some(status_line.clone()))"),
+            "the Linux title must carry the status line the tooltip carries (issue #971)"
+        );
+
+        // The build site names the behaviours that are inert on Linux: the
+        // left-click flag, the click handler it belongs to, and the tooltip
+        // above. The flag itself must stay (it is what Windows/macOS need).
+        let setup = body_of(prod, "pub fn setup_tray(");
+        assert!(
+            setup.contains(".show_menu_on_left_click(false)"),
+            "the tray must keep the documented left-click behaviour (issue #971)"
+        );
+        assert!(
+            setup.contains(".on_tray_icon_event(|tray, event|"),
+            "the click handler must stay for Windows and macOS (issue #971)"
         );
     }
 }
