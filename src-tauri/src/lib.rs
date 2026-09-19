@@ -771,7 +771,8 @@ fn log_rotation_strategy(keep_files: u32) -> tauri_plugin_log::RotationStrategy 
 // `--sync-once` builds one only once it has credentials to poll with (see
 // [`cli_sync_once_preflight`]) and then builds it in CLI mode: no window
 // (`context.config_mut()` clears `create`), no tray icon, no app menu, no
-// deep-link registration, no single-instance lock and no quit-time cleanup.
+// deep-link registration, no global-shortcut grabs (issue #769), no
+// single-instance lock and no quit-time cleanup.
 //
 // Unknown arguments keep the pre-#679 behaviour — ignored, GUI launches — the
 // same treatment `--minimized` and a `presencejam://` URL already get.
@@ -1281,21 +1282,6 @@ pub fn run() {
                     *config_guard = Some(cfg.clone());
                     log::info!("[APP] setup: config loaded into AppState");
 
-                    // Global shortcuts (issue #676): register the bindings from
-                    // the config just loaded. Deliberately NOT inline: every
-                    // grab goes through the plugin's `run_on_main_thread`,
-                    // which blocks until the event loop runs the task — and the
-                    // event loop starts only once this setup hook returns, so
-                    // registering here would deadlock the app before its first
-                    // paint (observed under Xvfb: startup stopped right after
-                    // `config loaded into AppState`). The worker blocks on that
-                    // hop instead of the main thread; per-slot failures are
-                    // reported to Settings and are never fatal.
-                    let shortcut_handle = app.handle().clone();
-                    tauri::async_runtime::spawn_blocking(move || {
-                        commands::shortcuts::register_from_config(&shortcut_handle);
-                    });
-
                     // Handle start_minimized setting. On macOS, also switch
                     // the app's activation policy to `Accessory` so the
                     // dock icon and menu-bar app menu disappear when the
@@ -1389,6 +1375,33 @@ pub fn run() {
             if sync_once {
                 return cli_sync_once_iteration(app, state.clone());
             }
+            // Global shortcuts (issue #676): register the bindings from the
+            // config loaded above. This sits BELOW the `--sync-once` early
+            // return since issue #769: a CLI one-shot runs windowless and must
+            // touch no GUI surface — which includes taking OS-level
+            // accelerator grabs — so the registration belongs to the GUI path
+            // only. Deliberately NOT inline: every grab goes through the
+            // plugin's `run_on_main_thread`, which blocks until the event loop
+            // runs the task — and the event loop starts only once this setup
+            // hook returns, so registering here would deadlock the app before
+            // its first paint (observed under Xvfb: startup stopped right
+            // after `config loaded into AppState`). The worker blocks on that
+            // hop instead of the main thread; per-slot failures are reported
+            // to Settings and are never fatal.
+            //
+            // Gated on a loaded config for the reason the block used to live
+            // inside the `Ok(cfg)` arm: `register_from_config` falls back to
+            // the default bindings when AppState holds no config, so an
+            // unguarded call after a failed load would grab accelerators the
+            // user never configured.
+            let shortcuts_config_loaded = app.state::<Arc<AppState>>().config.get().is_some();
+            if shortcuts_config_loaded {
+                let shortcut_handle = app.handle().clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    commands::shortcuts::register_from_config(&shortcut_handle);
+                });
+            }
+
             #[cfg(desktop)]
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
@@ -2326,6 +2339,17 @@ mod tests {
         assert!(
             !setup_body[..one_shot].contains("register_all()"),
             "a CLI run must not re-register the deep-link scheme (issue #679)"
+        );
+        // Issue #769: the global-shortcut registration is a GUI surface as
+        // well — it takes OS-level accelerator grabs — so it must sit below
+        // the `--sync-once` early return too, not merely below the tray.
+        let shortcuts = setup_body
+            .find("commands::shortcuts::register_from_config(")
+            .expect("setup must still register the configured shortcuts for the GUI");
+        assert!(
+            one_shot < shortcuts,
+            "the --sync-once early return must come before the global-shortcut \
+             registration so a CLI run grabs no accelerator (issue #769)"
         );
     }
 
