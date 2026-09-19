@@ -216,7 +216,10 @@ const EXPORT_SIDECAR_ATTEMPTS: u32 = 8;
 /// shared with whatever else the user keeps in the directory, and
 /// `atomic_write_json` pre-clears it.
 fn export_sidecar_path(dest: &Path, pid: u32, attempt: u32) -> PathBuf {
-    let mut name = dest.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    let mut name = dest
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
     name.push(format!(".{}.{}.pj-export.tmp", pid, attempt));
     dest.with_file_name(name)
 }
@@ -721,11 +724,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let dir = std::env::temp_dir().join(format!(
-            "pj-test-export-{}-{}",
-            std::process::id(),
-            nanos
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("pj-test-export-{}-{}", std::process::id(), nanos));
         std::fs::create_dir_all(&dir).unwrap();
         let json = "{\"schema_version\":1}";
 
@@ -733,7 +733,7 @@ mod tests {
         let dest = dir.join("notes.json");
         let sibling = dir.join("notes.tmp");
         std::fs::write(&sibling, b"SENTINEL").unwrap();
-        write_export_file(&dest, json).unwrap();
+        super::write_export_file(&dest, json).unwrap();
         assert_eq!(
             std::fs::read(&sibling).unwrap(),
             b"SENTINEL",
@@ -745,7 +745,7 @@ mod tests {
         let dest2 = dir.join("journal.json");
         let sibling_dir = dir.join("journal.tmp");
         std::fs::create_dir(&sibling_dir).unwrap();
-        write_export_file(&dest2, json).unwrap();
+        super::write_export_file(&dest2, json).unwrap();
         assert!(
             sibling_dir.is_dir(),
             "a directory at the sibling path must not be removed"
