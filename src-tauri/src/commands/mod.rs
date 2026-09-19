@@ -312,9 +312,9 @@ mod tests {
     /// every `#[tauri::command]` in the tree. Scanning the tree from this
     /// branch would fail on files owned by other slices that are not converted
     /// here, so the three files this slice owns are scanned in full and the
-    /// remainder is tracked in `W1-NOTES.md` (`commands/config.rs::load_config`;
+    /// remainder is named here instead: `commands/config.rs::load_config`;
     /// `commands/spotify_auth.rs::refresh_spotify`, `start_spotify_reconnect`,
-    /// `reconnect_spotify_session`). Wave 2 tightens this to the whole tree
+    /// `reconnect_spotify_session`. Wave 2 tightens this to the whole tree
     /// once that remainder is off the main thread.
     #[test]
     fn test_commands_touching_io_are_async_and_offloaded() {
