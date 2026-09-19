@@ -86,15 +86,48 @@ fn map_keychain_err<T>(result: Result<T, keyring::Error>) -> Result<T, String> {
 /// Persist the Spotify `client_secret` in the OS keychain.
 ///
 /// Overwrites any existing entry for `(KEYRING_SERVICE, SPOTIFY_CLIENT_SECRET_USER)`
-/// and updates the in-process cache.
+/// and updates the in-process cache. The legacy unnamespaced slot used through
+/// v2.7.2 is deleted best-effort afterwards: this is the one place that knows a
+/// new value has superseded the old one, so a rotated secret must not stay
+/// retrievable under the previous name (issue #917). See audit M2.
 pub fn store_spotify_client_secret(secret: &str) -> Result<(), String> {
-    let entry = map_keychain_err(keyring::Entry::new(
-        KEYRING_SERVICE,
-        SPOTIFY_CLIENT_SECRET_USER,
-    ))?;
-    map_keychain_err(entry.set_password(secret))?;
+    store_spotify_client_secret_with(
+        secret,
+        |s: &str| -> Result<(), String> {
+            let entry = map_keychain_err(keyring::Entry::new(
+                KEYRING_SERVICE,
+                SPOTIFY_CLIENT_SECRET_USER,
+            ))?;
+            map_keychain_err(entry.set_password(s))
+        },
+        || delete_keychain_entry(SPOTIFY_CLIENT_SECRET_USER_LEGACY),
+    )?;
+    // The cache assignment stays last, so the cache never serves a value a
+    // preceding step just superseded.
     *cache().write() = Some(secret.to_string());
     log::info!("[KEYCHAIN] Stored Spotify client_secret in OS keychain (cache updated)");
+    Ok(())
+}
+
+/// Core of [`store_spotify_client_secret`] with the keychain operations
+/// injected, so the store-supersedes-legacy ordering is unit-testable without
+/// an OS keychain (issue #917).
+///
+/// `drop_legacy` is best-effort, mirroring [`delete_spotify_client_secret`]: the
+/// credential the user just saved is already in the namespaced slot, so a failed
+/// (or absent) legacy delete must not fail the store.
+fn store_spotify_client_secret_with(
+    secret: &str,
+    store_namespaced: impl FnOnce(&str) -> Result<(), String>,
+    drop_legacy: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    store_namespaced(secret)?;
+    if let Err(e) = drop_legacy() {
+        log::warn!(
+            "[KEYCHAIN] legacy spotify_client_secret delete after store failed: {} (continuing)",
+            e
+        );
+    }
     Ok(())
 }
 
@@ -102,78 +135,102 @@ pub fn store_spotify_client_secret(secret: &str) -> Result<(), String> {
 /// cache without touching the keychain. Slow path: reads from the OS
 /// keychain and populates the cache for subsequent calls.
 ///
-/// Returns an error if the entry is missing — the caller should treat
-/// this as a "user must re-onboard" signal, not a fatal error.
+/// String-presenting wrapper over [`read_spotify_client_secret`], for the
+/// callers that only need the user-facing text. Both messages are unchanged
+/// from before #801.
 pub fn get_spotify_client_secret() -> Result<String, String> {
+    read_spotify_client_secret().map_err(|e| e.into_message(SPOTIFY_CLIENT_SECRET_NOT_FOUND_MSG))
+}
+
+/// Read the Spotify `client_secret` with a typed failure (issues #760/#801).
+///
+/// Fast path: the in-process cache. Slow path: the OS keychain, with the
+/// legacy v2.7.2 unnamespaced slot as a fallback that forwards the value to the
+/// namespaced slot and deletes the legacy one (audit M2).
+///
+/// The failure category is load-bearing: [`KeychainReadError::Absent`] is the
+/// only outcome that means "the user never configured a secret". A locked
+/// vault, a denied access prompt or an unreadable item arrives as
+/// [`KeychainReadError::Unavailable`], so callers that start onboarding on an
+/// absent secret cannot make the user re-enter a working credential (and
+/// overwrite it) just because the keychain was briefly unreadable (issue #801).
+pub fn read_spotify_client_secret() -> Result<String, KeychainReadError> {
     // Fast path: cache hit
-    {
-        let r = cache().read();
-        if let Some(s) = r.as_ref() {
-            return Ok(s.clone());
-        }
+    if let Some(cached) = peek_spotify_client_secret() {
+        return Ok(cached);
     }
-    // Slow path: read from OS keychain (namespaced slot — see audit M2).
-    let entry = map_keychain_err(keyring::Entry::new(
-        KEYRING_SERVICE,
-        SPOTIFY_CLIENT_SECRET_USER,
-    ))?;
-    let secret = match entry.get_password() {
-        Ok(s) => s,
-        Err(keyring::Error::NoEntry) => {
-            // Legacy fallback for v2.7.2 and earlier users who onboarded
-            // under the unnamespaced key. Read the legacy slot, write it
-            // forward to the namespaced slot, delete the legacy slot, and
-            // return the value. Best-effort migration: if the
-            // forward-write or legacy-delete fails, still return the
-            // legacy secret so the caller isn't blocked. See audit M2.
-            let legacy_entry = match keyring::Entry::new(
-                KEYRING_SERVICE,
-                SPOTIFY_CLIENT_SECRET_USER_LEGACY,
-            ) {
-                Ok(e) => e,
-                Err(_) => {
-                    return Err(
-                        "Spotify client secret not found in keychain. Please re-enter via Onboarding."
-                            .to_string(),
-                    );
-                }
-            };
-            let legacy_secret = match legacy_entry.get_password() {
-                Ok(s) => s,
-                Err(_) => {
-                    return Err(
-                        "Spotify client secret not found in keychain. Please re-enter via Onboarding."
-                            .to_string(),
-                    );
-                }
-            };
-            if let Ok(forward_entry) =
-                keyring::Entry::new(KEYRING_SERVICE, SPOTIFY_CLIENT_SECRET_USER)
-            {
-                if let Err(e) = forward_entry.set_password(&legacy_secret) {
-                    log::warn!(
-                        "[KEYCHAIN] legacy→namespaced forward-write failed: {} (continuing with legacy value)",
-                        e
-                    );
-                } else {
-                    let _ = legacy_entry.delete_credential();
-                    log::info!(
-                        "[KEYCHAIN] migrated legacy spotify_client_secret to namespaced slot"
-                    );
-                }
-            }
-            legacy_secret
-        }
-        Err(e) => {
-            return Err(keychain_error_help(&e).unwrap_or_else(|| {
-                format!("Failed to read Spotify client secret from keychain: {}", e)
-            }));
-        }
-    };
+    let (secret, slot) = lookup_spotify_client_secret(probe_keychain_entry)?;
+    if slot == SecretSlot::Legacy {
+        // Best-effort forward migration: the caller already holds the value, so
+        // a failed migration must not block it (audit M2).
+        forward_migrate_legacy_secret(&secret);
+    }
     // Populate cache for next call
     *cache().write() = Some(secret.clone());
     log::info!("[KEYCHAIN] Loaded Spotify client_secret from OS keychain (cache populated)");
     Ok(secret)
+}
+
+/// Which keychain slot a `client_secret` read resolved to (audit M2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SecretSlot {
+    /// The namespaced slot current installs write to.
+    Namespaced,
+    /// The unnamespaced slot used through v2.7.2. The value is still returned,
+    /// but it must be forwarded to the namespaced slot.
+    Legacy,
+}
+
+/// Core of [`read_spotify_client_secret`] with the slot lookup injected, so the
+/// failure classification is unit-testable without an OS keychain (issue #801).
+///
+/// The legacy fallback mirrors the pre-#801 read: the namespaced slot is tried
+/// first and, only on `NoEntry`, the unnamespaced one. A failure on *either*
+/// slot is classified — `NoEntry` on both means the secret was never
+/// configured, while a locked vault, a denied access prompt or an unreadable
+/// item on the legacy slot is the same platform problem it is on the namespaced
+/// slot, and must not be reported as "please re-enter".
+fn lookup_spotify_client_secret(
+    probe: impl Fn(&str) -> Result<String, keyring::Error>,
+) -> Result<(String, SecretSlot), KeychainReadError> {
+    match probe(SPOTIFY_CLIENT_SECRET_USER) {
+        Ok(secret) => Ok((secret, SecretSlot::Namespaced)),
+        Err(keyring::Error::NoEntry) => {
+            let legacy_secret =
+                probe(SPOTIFY_CLIENT_SECRET_USER_LEGACY).map_err(classify_read_failure)?;
+            Ok((legacy_secret, SecretSlot::Legacy))
+        }
+        Err(e) => Err(classify_read_failure(e)),
+    }
+}
+
+/// Forward-migrate a secret read from the legacy unnamespaced slot: write it to
+/// the namespaced slot and, on success, delete the legacy slot.
+///
+/// Entirely best-effort — the caller already holds the value and must not be
+/// blocked by a failed migration. See audit M2.
+fn forward_migrate_legacy_secret(secret: &str) {
+    let Ok(forward_entry) = keyring::Entry::new(KEYRING_SERVICE, SPOTIFY_CLIENT_SECRET_USER) else {
+        log::warn!(
+            "[KEYCHAIN] could not open the namespaced slot for the legacy→namespaced \
+             migration (continuing with the legacy value)"
+        );
+        return;
+    };
+    if let Err(e) = forward_entry.set_password(secret) {
+        log::warn!(
+            "[KEYCHAIN] legacy→namespaced forward-write failed: {} (continuing with legacy value)",
+            e
+        );
+        return;
+    }
+    if let Err(e) = delete_keychain_entry(SPOTIFY_CLIENT_SECRET_USER_LEGACY) {
+        log::warn!(
+            "[KEYCHAIN] legacy spotify_client_secret delete after migration failed: {} (continuing)",
+            e
+        );
+    }
+    log::info!("[KEYCHAIN] migrated legacy spotify_client_secret to namespaced slot");
 }
 
 /// Read the Spotify `client_secret` from the cache only — no OS keychain
@@ -263,6 +320,64 @@ fn combine_presence(probes: impl IntoIterator<Item = KeychainPresence>) -> Keych
         None => KeychainPresence::Absent,
     }
 }
+
+/// Typed outcome of a keychain read (issues #760/#801/#935).
+///
+/// Exists so callers can tell three situations apart that a single `String`
+/// error collapses into one: the credential was never configured, the OS
+/// keychain could not answer at that moment (locked vault, no Secret Service
+/// daemon, a denied access prompt), and an entry is present but unusable. Only
+/// the first is a reason to ask the user to re-enter anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeychainReadError {
+    /// No entry in any slot the credential may legitimately live in — the user
+    /// has never configured it, or explicitly removed it.
+    Absent,
+    /// The OS keychain could not answer. Recoverable without the user
+    /// re-entering the credential; the payload is the actionable help text from
+    /// [`keychain_error_help`].
+    Unavailable(String),
+    /// An entry exists but its value cannot be used (e.g. a truncated or
+    /// undecodable stored tokens key). The payload carries the recovery text.
+    Corrupt(String),
+}
+
+impl KeychainReadError {
+    /// Collapse to the user-facing string, using `absent_msg` for the
+    /// [`KeychainReadError::Absent`] case. The `Unavailable` and `Corrupt`
+    /// cases already carry their own actionable text (from
+    /// [`keychain_error_help`] / [`corrupt_tokens_aes_key_help`]), so each
+    /// credential names its own not-configured message without the enum having
+    /// to know which credential it came from.
+    pub fn into_message(self, absent_msg: &str) -> String {
+        match self {
+            KeychainReadError::Absent => absent_msg.to_string(),
+            KeychainReadError::Unavailable(help) | KeychainReadError::Corrupt(help) => help,
+        }
+    }
+}
+
+/// Classify one failed keychain read. Mirrors [`classify_keychain_lookup`]'s
+/// table — `NoEntry` is the only error that means "absent", every other
+/// `keyring::Error` is a platform problem worth the setup help — while keeping
+/// the caller's own absent text available instead of discarding the failure
+/// into a `Present`/`Absent` pair (issue #801).
+fn classify_read_failure(err: keyring::Error) -> KeychainReadError {
+    match err {
+        keyring::Error::NoEntry => KeychainReadError::Absent,
+        // `keychain_error_help` returns `Some` for every non-`NoEntry` error;
+        // the fallback is defensive only.
+        other => KeychainReadError::Unavailable(
+            keychain_error_help(&other).unwrap_or_else(|| format!("OS keychain error: {}", other)),
+        ),
+    }
+}
+
+/// The "user must re-onboard" text for an absent Spotify client secret. Kept
+/// byte-identical to the pre-#801 message: Onboarding and the boot probe branch
+/// on it.
+const SPOTIFY_CLIENT_SECRET_NOT_FOUND_MSG: &str =
+    "Spotify client secret not found in keychain. Please re-enter via Onboarding.";
 
 /// Tri-state presence of the Spotify `client_secret`, consulting the OS
 /// keychain directly (never the in-process cache) exactly like
@@ -358,9 +473,11 @@ static TOKENS_KEY_CREATE_LOCK: LazyLock<parking_lot::Mutex<()>> =
     LazyLock::new(|| parking_lot::Mutex::new(()));
 
 /// Process-wide cache of the tokens AES key, mirroring the client-secret
-/// [`CACHE`]. The key is immutable for the life of an install, so the cache
-/// cannot go stale except through [`delete_tokens_aes_key`] (the corrupt-key
-/// recovery path), which clears it.
+/// [`CACHE`]. It is a *hint* for the write path rather than the truth: the
+/// keychain slot can be deleted or replaced while the app runs — including by
+/// the recovery step this module's own corrupt-key error text recommends — so
+/// [`get_or_create_tokens_aes_key`] revalidates the cached key against the slot
+/// before using it (issue #936), and [`delete_tokens_aes_key`] clears it.
 static TOKENS_KEY_CACHE: LazyLock<parking_lot::Mutex<Option<[u8; 32]>>> =
     LazyLock::new(|| parking_lot::Mutex::new(None));
 
@@ -403,35 +520,43 @@ fn corrupt_tokens_aes_key_help(detail: String) -> String {
     )
 }
 
-/// Read the tokens.json AES-256-GCM key from the OS keychain.
+/// Read the tokens.json AES-256-GCM key from the OS keychain, with a typed
+/// failure (issue #935).
 ///
 /// The key is stored base64-encoded under
-/// `(KEYRING_SERVICE, TOKENS_AES_KEY_USER)`. The in-process cache is
-/// consulted first (the key cannot change except via
-/// [`delete_tokens_aes_key`]).
+/// `(KEYRING_SERVICE, TOKENS_AES_KEY_USER)`. The in-process cache is consulted
+/// first: this is the *read* path, whose callers only decrypt. A stale cached
+/// key is caught on the write path ([`get_or_create_tokens_aes_key`]), which
+/// revalidates the cache before encrypting (issue #936).
 ///
-/// Returns an error when the entry is missing — the caller
-/// (`token_io::read_tokens_at`) treats that as a re-auth signal: the
-/// ciphertext on disk cannot be decrypted without this key, so the safest
-/// recovery is to discard the tokens and re-onboard (same path as a corrupt
-/// file). This is a pure read: it never creates the key.
-pub fn get_tokens_aes_key() -> Result<[u8; 32], String> {
+/// The categories are what let the token store tell a *locked keychain* apart
+/// from *corrupt ciphertext* at launch: `Absent`/`Unavailable` mean the file on
+/// disk may still be perfectly recoverable once the keychain answers again,
+/// while only a present-but-undecodable key is genuinely `Corrupt`. This is a
+/// pure read: it never creates the key.
+pub fn read_tokens_aes_key() -> Result<[u8; 32], KeychainReadError> {
     if let Some(key) = cached_tokens_aes_key() {
         return Ok(key);
     }
-    let entry = map_keychain_err(keyring::Entry::new(KEYRING_SERVICE, TOKENS_AES_KEY_USER))?;
-    let b64 = entry.get_password().map_err(|e| match e {
-        keyring::Error::NoEntry => {
-            "Tokens encryption key not found in OS keychain; cannot decrypt tokens.json (re-authentication required).".to_string()
-        }
-        other => keychain_error_help(&other).unwrap_or_else(|| {
-            format!("Failed to read tokens encryption key from keychain: {}", other)
-        }),
-    })?;
-    let key = decode_tokens_aes_key(&b64).map_err(corrupt_tokens_aes_key_help)?;
+    let b64 = probe_keychain_entry(TOKENS_AES_KEY_USER).map_err(classify_read_failure)?;
+    let key = decode_tokens_aes_key(&b64)
+        .map_err(|detail| KeychainReadError::Corrupt(corrupt_tokens_aes_key_help(detail)))?;
     *tokens_key_cache().lock() = Some(key);
     Ok(key)
 }
+
+/// String-presenting wrapper over [`read_tokens_aes_key`], for the callers that
+/// report the failure to the user. Both messages are unchanged from before
+/// #935.
+pub fn get_tokens_aes_key() -> Result<[u8; 32], String> {
+    read_tokens_aes_key().map_err(|e| e.into_message(TOKENS_AES_KEY_NOT_FOUND_MSG))
+}
+
+/// The re-auth text for an absent tokens key: without it the ciphertext on disk
+/// cannot be decrypted, so the safest recovery is to discard the tokens and
+/// re-onboard. Kept byte-identical to the pre-#935 message.
+const TOKENS_AES_KEY_NOT_FOUND_MSG: &str =
+    "Tokens encryption key not found in OS keychain; cannot decrypt tokens.json (re-authentication required).";
 
 /// Read the tokens.json AES-256-GCM key, generating and storing a fresh
 /// random 256-bit key on first use.
@@ -450,18 +575,70 @@ pub fn get_tokens_aes_key() -> Result<[u8; 32], String> {
 /// ([`create_or_adopt_tokens_key`], issue #563), and a present-but-corrupt
 /// entry is reported through [`corrupt_tokens_aes_key_help`] instead of
 /// dead-ending the user (issue #566).
+///
+/// The cached key is revalidated against the keychain slot before it is used
+/// (issue #936): a slot deleted or replaced while the app runs — including by
+/// the recovery step [`corrupt_tokens_aes_key_help`] recommends, or an OS
+/// keychain UI — would otherwise make every later persist encrypt with a key
+/// the keychain no longer holds, so tokens.json fails GCM authentication at the
+/// next launch and the user is pushed through onboarding with no explanation.
 pub fn get_or_create_tokens_aes_key() -> Result<[u8; 32], String> {
-    if let Some(key) = cached_tokens_aes_key() {
-        return Ok(key);
-    }
-    let entry = map_keychain_err(keyring::Entry::new(KEYRING_SERVICE, TOKENS_AES_KEY_USER))?;
-    let key = create_or_adopt_tokens_key(
-        || entry.get_password(),
-        |b64| entry.set_password(b64),
+    // The slot is opened lazily, inside the closures: a keychain that cannot be
+    // opened at all must not defeat the revalidation below, which deliberately
+    // keeps a cached key when the keychain does not answer.
+    let key = get_or_create_tokens_aes_key_with(
+        cached_tokens_aes_key(),
+        || probe_keychain_entry(TOKENS_AES_KEY_USER),
+        |b64| {
+            let entry = keyring::Entry::new(KEYRING_SERVICE, TOKENS_AES_KEY_USER)?;
+            entry.set_password(b64)
+        },
         generate_tokens_aes_key,
     )?;
     *tokens_key_cache().lock() = Some(key);
     Ok(key)
+}
+
+/// Core of [`get_or_create_tokens_aes_key`]: cached-key revalidation (issue
+/// #936) followed by one locked read-or-create
+/// ([`create_or_adopt_tokens_key`]). The keychain access is injected so the
+/// decision table is unit-testable without an OS keychain.
+///
+/// The cache is a hint here, not the truth. A cached key is used only while the
+/// slot still holds it; persists happen at token-refresh frequency rather than
+/// on the polling hot path, so the extra read is affordable. When the slot is
+/// gone, replaced or undecodable the decision is delegated to
+/// [`create_or_adopt_tokens_key`], which regenerates on `NoEntry`, adopts a
+/// different stored key, and hard-errors on a corrupt one.
+///
+/// When the keychain merely cannot *answer* (locked vault, no Secret Service
+/// daemon, denied access prompt) the cached key is kept: that is not a
+/// deletion, the cached key is still this install's key, and failing a persist
+/// the keychain cannot answer for would lose the session on disk.
+fn get_or_create_tokens_aes_key_with(
+    cached: Option<[u8; 32]>,
+    read: impl Fn() -> Result<String, keyring::Error>,
+    store: impl Fn(&str) -> Result<(), keyring::Error>,
+    generate: impl FnOnce() -> Result<[u8; 32], String>,
+) -> Result<[u8; 32], String> {
+    if let Some(cached) = cached {
+        match read() {
+            Ok(b64) if decode_tokens_aes_key(&b64) == Ok(cached) => return Ok(cached),
+            Ok(_) | Err(keyring::Error::NoEntry) => log::warn!(
+                "[KEYCHAIN] cached tokens AES key is no longer the keychain's; \
+                 re-resolving from the keychain"
+            ),
+            Err(e) => {
+                log::warn!(
+                    "[KEYCHAIN] could not revalidate the cached tokens AES key ({}); \
+                     using the cached key",
+                    e
+                );
+                return Ok(cached);
+            }
+        }
+    }
+    create_or_adopt_tokens_key(read, store, generate)
 }
 
 /// Core of [`get_or_create_tokens_aes_key`]: one locked read-or-create.
@@ -713,5 +890,190 @@ mod tests {
                 "corrupt-key error must carry a recovery pointer, got: {err}"
             );
         }
+    }
+
+    /// Issue #801: the legacy-slot fallback must classify its failures. Only
+    /// `NoEntry` means "the user never configured a secret"; a locked vault, a
+    /// denied access prompt or an unreadable item on the legacy slot is the
+    /// same platform problem it is on the namespaced slot. Reporting it as
+    /// "not found" pushed users through a full re-onboarding that overwrote a
+    /// working credential. Pre-fix the legacy arm matched `Err(_)` and returned
+    /// the re-enter message for every error.
+    #[test]
+    fn legacy_lookup_failures_are_classified_not_reported_as_absent() {
+        // Namespaced slot empty (as on a v2.7.2 install), legacy slot locked.
+        let err = lookup_spotify_client_secret(|user| {
+            if user == SPOTIFY_CLIENT_SECRET_USER {
+                Err(keyring::Error::NoEntry)
+            } else {
+                Err(platform_failure("no secret service"))
+            }
+        })
+        .expect_err("an unreadable legacy slot must not yield a secret");
+
+        assert!(
+            matches!(err, KeychainReadError::Unavailable(_)),
+            "a platform failure on the legacy slot must classify as Unavailable, got {err:?}"
+        );
+        let message = err.into_message(SPOTIFY_CLIENT_SECRET_NOT_FOUND_MSG);
+        assert!(
+            !message.contains("Please re-enter via Onboarding"),
+            "an unreadable credential must not be reported as never configured, got: {message}"
+        );
+        assert!(
+            message.contains(LINUX_KEYRING_DOC),
+            "the unavailable message must carry the actionable setup help, got: {message}"
+        );
+
+        // Both slots empty is the one genuine "never configured" outcome, and it
+        // must keep the onboarding message that Onboarding branches on.
+        let absent = lookup_spotify_client_secret(|_| Err(keyring::Error::NoEntry))
+            .expect_err("two empty slots must be Absent");
+        assert_eq!(absent, KeychainReadError::Absent);
+        assert!(
+            absent
+                .into_message(SPOTIFY_CLIENT_SECRET_NOT_FOUND_MSG)
+                .contains("Please re-enter via Onboarding"),
+            "a never-configured secret must still prompt for onboarding"
+        );
+    }
+
+    /// Issue #801: the fallback still reads the legacy value, and reports which
+    /// slot it came from so the caller can forward-migrate it. The migration
+    /// itself is deliberately not part of this core: that is what keeps the
+    /// classification unit-testable without touching an OS keychain.
+    #[test]
+    fn legacy_slot_value_is_returned_and_tagged_for_migration() {
+        let (secret, slot) = lookup_spotify_client_secret(|user| {
+            if user == SPOTIFY_CLIENT_SECRET_USER {
+                Err(keyring::Error::NoEntry)
+            } else {
+                Ok("legacy-secret".to_string())
+            }
+        })
+        .expect("a legacy value must be returned");
+        assert_eq!(secret, "legacy-secret");
+        assert_eq!(slot, SecretSlot::Legacy);
+
+        let (secret, slot) = lookup_spotify_client_secret(|_| Ok("current".to_string()))
+            .expect("a namespaced value must be returned");
+        assert_eq!(secret, "current");
+        assert_eq!(slot, SecretSlot::Namespaced);
+    }
+
+    /// Issue #917: after a store, the superseded legacy slot must hold nothing —
+    /// a secret rotated because of a suspected exposure must not stay
+    /// retrievable under the pre-v2.7.2 name. The legacy delete is attempted on
+    /// every store, and a failure of it must not fail the store (the new value
+    /// is already in the namespaced slot).
+    #[test]
+    fn store_supersedes_the_legacy_slot() {
+        let stored = parking_lot::Mutex::new(None::<String>);
+        let legacy_deletes = parking_lot::Mutex::new(0u32);
+
+        store_spotify_client_secret_with(
+            "new-secret",
+            |s: &str| -> Result<(), String> {
+                *stored.lock() = Some(s.to_string());
+                Ok(())
+            },
+            || -> Result<(), String> {
+                *legacy_deletes.lock() += 1;
+                Ok(())
+            },
+        )
+        .expect("a store must succeed");
+
+        assert_eq!(stored.lock().clone().as_deref(), Some("new-secret"));
+        assert_eq!(
+            *legacy_deletes.lock(),
+            1,
+            "the legacy slot delete must be attempted on every store"
+        );
+
+        store_spotify_client_secret_with(
+            "newer",
+            |_: &str| -> Result<(), String> { Ok(()) },
+            || -> Result<(), String> { Err("locked".to_string()) },
+        )
+        .expect("a failed legacy delete must not fail the store");
+    }
+
+    /// Issue #936: the cached tokens AES key is a hint, not the truth — it must
+    /// be revalidated against the keychain slot before it is used to encrypt a
+    /// write. Deleting the slot at runtime (exactly the recovery step the
+    /// corrupt-key error text recommends, and what an OS keychain UI can do) has
+    /// to regenerate and store a fresh key; otherwise tokens.json is written
+    /// under a key the keychain no longer holds and fails GCM authentication at
+    /// the next launch. Pre-fix the cached key was returned without consulting
+    /// the keychain at all.
+    #[test]
+    fn cached_tokens_key_is_revalidated_against_the_slot() {
+        let slot = parking_lot::Mutex::new(None::<String>);
+        let store_calls = parking_lot::Mutex::new(0u32);
+        let read = || -> Result<String, keyring::Error> {
+            match slot.lock().clone() {
+                Some(b64) => Ok(b64),
+                None => Err(keyring::Error::NoEntry),
+            }
+        };
+        let store = |b64: &str| -> Result<(), keyring::Error> {
+            *store_calls.lock() += 1;
+            *slot.lock() = Some(b64.to_string());
+            Ok(())
+        };
+        let stale = [0xAAu8; 32];
+        let fresh = [0xBBu8; 32];
+
+        // The slot is gone: the stale cached key must be replaced by a fresh one
+        // that the keychain really holds, i.e. the key the next write uses.
+        let regenerated = get_or_create_tokens_aes_key_with(Some(stale), read, store, || Ok(fresh))
+            .expect("a deleted slot must be regenerated, not reused");
+        assert_eq!(
+            regenerated, fresh,
+            "the stale cached key must not be reused"
+        );
+        assert_eq!(*store_calls.lock(), 1, "the fresh key must be stored");
+        let stored_b64 = slot.lock().clone().expect("the fresh key must be stored");
+        assert_eq!(
+            decode_tokens_aes_key(&stored_b64).unwrap(),
+            fresh,
+            "the keychain must hold the key the write will encrypt with"
+        );
+
+        // The slot still holds the cached key: no keychain write, no
+        // regeneration.
+        *slot.lock() = Some(STANDARD.encode(fresh));
+        let confirmed = get_or_create_tokens_aes_key_with(Some(fresh), read, store, || {
+            panic!("a key the slot still holds must never be regenerated")
+        })
+        .expect("a confirmed cached key must be used");
+        assert_eq!(confirmed, fresh);
+        assert_eq!(
+            *store_calls.lock(),
+            1,
+            "a confirmed cached key must not write to the keychain"
+        );
+
+        // The slot holds a *different* key: the keychain's key wins, because the
+        // ciphertext written by whoever installed it must stay decryptable.
+        let replaced = [0xCCu8; 32];
+        *slot.lock() = Some(STANDARD.encode(replaced));
+        let adopted = get_or_create_tokens_aes_key_with(Some(fresh), read, store, || {
+            panic!("a replaced slot must be adopted, not overwritten")
+        })
+        .expect("a replaced slot must be adopted");
+        assert_eq!(adopted, replaced);
+        assert_eq!(*store_calls.lock(), 1);
+
+        // The keychain cannot answer at all: a locked vault is not a deletion,
+        // so the cached key is kept rather than failing the persist.
+        let unavailable =
+            || -> Result<String, keyring::Error> { Err(platform_failure("no secret service")) };
+        let kept = get_or_create_tokens_aes_key_with(Some(fresh), unavailable, store, || {
+            panic!("an unreadable slot must not trigger a regeneration")
+        })
+        .expect("an unreadable keychain must not discard a confirmed key");
+        assert_eq!(kept, fresh);
     }
 }

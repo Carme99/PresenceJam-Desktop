@@ -412,8 +412,18 @@ fn temp_tokens_path(path: &Path) -> PathBuf {
 /// Remove stale temp sidecars for `path` — crash leftovers from this or a
 /// previous process, plus the fixed-name `.json.tmp` used by ≤ 4.5 and the
 /// stale *plaintext* sidecar a ≤ v2.10.0 crash could have left next to the
-/// live file. `keep` (this write's own sidecar) is left alone. A missing
-/// directory is not an error: callers create it before writing.
+/// live file. `keep` (this write's own sidecar, which a concurrent writer in
+/// this process may be using) is left alone. A missing directory is not an
+/// error: callers create it before writing.
+///
+/// Issue #934: a per-pid candidate is only removed when its owner is *provably*
+/// gone. `presencejam --sync-once` deliberately runs without the single-instance
+/// lock while the GUI polls and persists, so removing that writer's in-flight
+/// sidecar makes its rename fail with ENOENT (POSIX) or a sharing violation
+/// (Windows) and the refreshed token pair is never saved — see
+/// [`sidecar_owner_is_provably_gone`] for what "provably" means per platform.
+/// The non-pid names (the ≤ 4.5 fixed name and the ≤ v2.10.0 plaintext sidecar)
+/// carry no owner and are always swept, so no plaintext remnant survives.
 fn remove_stale_tokens_sidecars(path: &Path, keep: &Path) -> Result<(), String> {
     let Some(dir) = path.parent() else {
         return Ok(());
@@ -445,6 +455,17 @@ fn remove_stale_tokens_sidecars(path: &Path, keep: &Path) -> Result<(), String> 
         if !matches {
             continue;
         }
+        // Issue #934: never remove another process's in-flight sidecar.
+        if let Some(pid) = sidecar_owner_pid(&candidate, &prefix) {
+            if !sidecar_owner_is_provably_gone(pid) {
+                log::debug!(
+                    "[TOKEN_IO] leaving sidecar '{}' alone: pid {} may still be writing",
+                    candidate.display(),
+                    pid
+                );
+                continue;
+            }
+        }
         if let Err(e) = fs::remove_file(&candidate) {
             if e.kind() != std::io::ErrorKind::NotFound {
                 return Err(format!(
@@ -456,6 +477,47 @@ fn remove_stale_tokens_sidecars(path: &Path, keep: &Path) -> Result<(), String> 
         }
     }
     Ok(())
+}
+
+/// The pid encoded in a per-process sidecar name (`tokens.json.tmp.<pid>`), if
+/// the candidate carries one. The ≤ 4.5 fixed name and the ≤ v2.10.0 plaintext
+/// sidecar have no pid suffix and yield `None`.
+fn sidecar_owner_pid(candidate: &Path, prefix: &str) -> Option<u32> {
+    candidate
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.strip_prefix(prefix))
+        .and_then(|suffix| suffix.strip_prefix('.'))
+        .and_then(|pid| pid.parse().ok())
+}
+
+/// May a per-pid sidecar be removed — i.e. is its owner provably gone?
+///
+/// There is no portable std primitive for "does this pid exist", and a wrong
+/// answer is only safe in one direction: leaving an unreclaimed sidecar costs a
+/// few hundred bytes in the config directory, whereas removing a live writer's
+/// sidecar loses that writer's refreshed token pair (issue #934). So this
+/// answers `false` unless the platform can positively prove the pid is gone:
+///
+/// * Linux exposes every live pid as `/proc/<pid>`, so a missing entry is proof;
+/// * elsewhere the sweep declines to remove a per-pid sidecar at all. Adding
+///   `kill(pid, 0)` / `OpenProcess` probes needs a `libc` / `windows-sys`
+///   dependency, which this module does not have.
+fn sidecar_owner_is_provably_gone(pid: u32) -> bool {
+    match platform_pid_exists(pid) {
+        Some(exists) => !exists,
+        None => false,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn platform_pid_exists(pid: u32) -> Option<bool> {
+    Some(Path::new("/proc").join(pid.to_string()).exists())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn platform_pid_exists(_pid: u32) -> Option<bool> {
+    None
 }
 
 /// Atomic write: serialize, AES-256-GCM encrypt, write the *ciphertext*
@@ -590,13 +652,17 @@ fn write_tokens_atomic_with_key(
 pub fn persist_tokens(state: &Arc<crate::AppState>, app: &tauri::AppHandle) -> Result<(), String> {
     let path = tokens_file_path(app)?;
     with_tokens_write_lock(|| {
-        let contents = {
-            let spotify_tokens = state.tokens.spotify().clone();
-            let teams_tokens = state.tokens.teams().clone();
-            TokensFile {
-                spotify_tokens,
-                teams_tokens,
-            }
+        // Issue #800: bind BOTH slot guards before either clone. Cloning one
+        // slot guard at a time left a window in which a commit landing on the
+        // second slot stayed in memory while the older value was written to
+        // disk — a torn pair (stale access token + fresh refresh token) on the
+        // next launch. `Tokens` holds two independent `RwLock`s and nothing
+        // takes them in the opposite order, so holding both cannot deadlock.
+        let spotify = state.tokens.spotify();
+        let teams = state.tokens.teams();
+        let contents = TokensFile {
+            spotify_tokens: spotify.clone(),
+            teams_tokens: teams.clone(),
         };
         write_tokens_atomic(&path, &contents)
     })
@@ -1229,9 +1295,21 @@ mod tests {
             !legacy_sidecar.exists(),
             "the ≤ 4.5 fixed-name sidecar must be swept"
         );
+        // Issue #934: a per-pid leftover is swept only when its owner is
+        // provably gone. `FOREIGN_PID` is above every platform's pid ceiling,
+        // so it is dead wherever a liveness probe exists (`/proc` on Linux);
+        // where the sweep cannot tell, it declines to remove and the leftover
+        // stays.
+        #[cfg(target_os = "linux")]
         assert!(
             !foreign_sidecar.exists(),
-            "another process's crashed sidecar must be swept"
+            "a dead process's crashed sidecar must be swept"
+        );
+        #[cfg(not(target_os = "linux"))]
+        assert!(
+            foreign_sidecar.exists(),
+            "without a pid-liveness probe the sweep must not remove another \
+             process's sidecar (issue #934)"
         );
         assert!(
             own_sidecar.exists(),
@@ -1249,9 +1327,54 @@ mod tests {
             .expect("write must succeed with a foreign-pid sidecar present");
         assert!(path.exists());
         assert!(!own_sidecar.exists(), "rename must consume the sidecar");
+        #[cfg(target_os = "linux")]
         assert!(
             !foreign_sidecar.exists(),
-            "the write's own pre-clear must consume the foreign sidecar"
+            "the write's own pre-clear must consume the dead process's sidecar"
+        );
+        #[cfg(not(target_os = "linux"))]
+        assert!(
+            foreign_sidecar.exists(),
+            "the write must not consume a per-pid sidecar it cannot attribute \
+             to a dead process (issue #934)"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // Issue #934 (behavioral): a sidecar whose owning pid is still alive must
+    // survive the sweep. `presencejam --sync-once` deliberately runs without the
+    // single-instance lock while the GUI polls and persists, so a persist that
+    // removed the CLI's in-flight sidecar made its rename fail with ENOENT
+    // (POSIX) or a sharing violation (Windows) and the refreshed token pair was
+    // never saved.
+    //
+    // This process stands in for the live owner: its pid is alive by
+    // construction. `keep` is deliberately a path that does not match the
+    // candidate, so the sweep really evaluates it instead of skipping it as this
+    // write's own sidecar.
+    #[test]
+    fn a_live_owners_sidecar_survives_the_sweep() {
+        let dir = unique_tmp_dir("live-sidecar");
+        let path = dir.join("tokens.json");
+        let live_sidecar = path.with_extension(format!("json.tmp.{}", std::process::id()));
+        let dead_sidecar = path.with_extension(format!("json.tmp.{}", u32::MAX));
+        let keep = dir.join("tokens.json.tmp.keep");
+        for sidecar in [&live_sidecar, &dead_sidecar, &keep] {
+            fs::write(sidecar, b"{\"leaked\":\"PLAINTEXT\"}").unwrap();
+        }
+
+        remove_stale_tokens_sidecars(&path, &keep).unwrap();
+
+        assert!(
+            live_sidecar.exists(),
+            "a sidecar owned by a running process must never be removed"
+        );
+        assert!(keep.exists(), "the `keep` path must be left alone");
+        #[cfg(target_os = "linux")]
+        assert!(
+            !dead_sidecar.exists(),
+            "an owner that is provably gone must still be swept"
         );
 
         let _ = fs::remove_dir_all(&dir);
@@ -1338,5 +1461,36 @@ mod tests {
             "the headless reader must not create the tokens directory"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // Issue #800 (wiring guard): `persist_tokens` must bind BOTH slot guards
+    // before cloning either slot, so the pair written to disk is a consistent
+    // cut. A behavioral test cannot deterministically interleave a Teams commit
+    // between the two clones without test-only plumbing inside the production
+    // function, so the ordering is pinned by a source scan of the isolated body
+    // (the shared literal-aware scanner `test_scan`, which isolates a body by
+    // depth-counting instead of a next-function anchor — this body holds a
+    // closure and a `TokensFile { .. }` literal). Pre-fix the body cloned the
+    // Spotify slot before the Teams guard was even bound, and this assertion
+    // fails on that shape.
+    #[test]
+    fn persist_binds_both_slot_guards_before_cloning() {
+        let src = include_str!("token_io.rs");
+        let body = test_scan::fn_body(src, "fn persist_tokens(");
+        let spotify_guard = body
+            .find("state.tokens.spotify()")
+            .expect("persist_tokens must bind the Spotify slot guard");
+        let teams_guard = body
+            .find("state.tokens.teams()")
+            .expect("persist_tokens must bind the Teams slot guard");
+        let first_clone = body
+            .find(".clone()")
+            .expect("persist_tokens must clone at least one slot");
+        assert!(
+            spotify_guard < first_clone && teams_guard < first_clone,
+            "both slot guards must be bound before either slot is cloned, so a \
+             commit landing on the second slot cannot be dropped from the file \
+             (issue #800)"
+        );
     }
 }
