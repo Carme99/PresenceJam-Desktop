@@ -397,15 +397,25 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
     // failure here cannot leave a "Pause Sync"-labelled stale layout behind.
     // The dedup snapshot is only committed by a successful rebuild, so the
     // next poll retries this paint.
+    // Issue #882: this paint is CACHE-ONLY. It runs on the main thread inside
+    // Tauri's `setup()`, before the event loop starts and while the dedup
+    // snapshot is still empty — so a normal rebuild would issue the devices
+    // and queue GETs right here (10 s timeout each) with no window on screen
+    // to explain the wait, and could never take the "nothing changed" early
+    // return.
     let state = app.state::<std::sync::Arc<crate::AppState>>();
     let is_syncing = state.polling.is_syncing(Ordering::Acquire);
     let current_track = state.polling.current_track().clone();
-    if let Err(e) = update_tray_menu(app.handle(), is_syncing, current_track) {
+    if let Err(e) = update_tray_menu_startup(app.handle(), is_syncing, current_track) {
         log::warn!(
             "[TRAY] setup_tray: failed to update initial tray menu: {}",
             e
         );
     }
+    // Issue #882: the real devices/queue fetch belongs to the worker refresh,
+    // off the setup thread, so the startup paint costs no network at all and
+    // the submenus still converge to the full content a moment later.
+    refresh_tray_from_state(app.handle());
 
     log::info!("[TRAY] setup_tray: system tray initialized successfully");
     Ok(())
@@ -515,6 +525,30 @@ static TRAY_WRITE_LOCK: std::sync::OnceLock<parking_lot::Mutex<()>> = std::sync:
 
 fn tray_write_lock() -> &'static parking_lot::Mutex<()> {
     TRAY_WRITE_LOCK.get_or_init(|| parking_lot::Mutex::new(()))
+}
+
+/// Which entry point a rebuild came through (issue #882).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrayPaint {
+    /// An ordinary rebuild: the dedup key decides whether the menu is rebuilt,
+    /// and a successful rebuild commits the snapshot.
+    Deduped,
+    /// The startup paint. Built on the main thread before the event loop runs:
+    /// it renders the throttled caches without touching the network, and it
+    /// does not commit the snapshot (see `update_tray_menu_startup`).
+    Startup,
+}
+
+/// The fetch mode a rebuild runs under (issues #677, #882).
+///
+/// Pure, so "the startup paint performs no request" and "a snooze performs no
+/// request" are asserted directly rather than through the rebuild's source.
+fn paint_fetch_mode(paint: TrayPaint, snoozed: bool) -> TrayFetch {
+    match paint {
+        // Issue #882: no network before the event loop exists.
+        TrayPaint::Startup => TrayFetch::CacheOnly,
+        TrayPaint::Deduped => tray_fetch_mode(snoozed),
+    }
 }
 
 /// Throttle window for the tray's Spotify devices/queue fetches
@@ -1356,6 +1390,32 @@ pub fn update_tray_menu(
     is_syncing: bool,
     current_track: Option<crate::spotify::TrackInfo>,
 ) -> Result<(), String> {
+    rebuild_tray_menu(app, is_syncing, current_track.as_ref(), TrayPaint::Deduped)
+}
+
+/// The menu the tray shows before the event loop is running (issue #882).
+///
+/// Two differences from a normal rebuild, both consequences of running on the
+/// main thread inside `setup()`: it never touches the network (the throttled
+/// caches are rendered as they stand — empty on a cold start), and it does NOT
+/// commit the dedup snapshot. This paint shows the caches only, so recording it
+/// would make the first honest rebuild look like a no-op and the Devices/Up
+/// Next submenus would stay empty for the rest of the session.
+fn update_tray_menu_startup(
+    app: &AppHandle,
+    is_syncing: bool,
+    current_track: Option<crate::spotify::TrackInfo>,
+) -> Result<(), String> {
+    rebuild_tray_menu(app, is_syncing, current_track.as_ref(), TrayPaint::Startup)
+}
+
+/// The rebuild both entry points above share, so the tray has one layout.
+fn rebuild_tray_menu(
+    app: &AppHandle,
+    is_syncing: bool,
+    current_track: Option<&crate::spotify::TrackInfo>,
+    paint: TrayPaint,
+) -> Result<(), String> {
     let tray = match get_tray() {
         Some(t) => t,
         None => {
@@ -1390,11 +1450,11 @@ pub fn update_tray_menu(
     let config: Option<crate::config::AppConfig> = state.config.get().clone();
     let snooze = resolve_snooze(config.as_ref());
     let snooze_key = snooze.as_ref().map(|sn| snooze_dedup_key(&sn.status));
-    let fetch = tray_fetch_mode(snooze.is_some());
+    let fetch = paint_fetch_mode(paint, snooze.is_some());
     let snapshot = tray_snapshot_for(
         is_syncing,
         is_window_visible,
-        current_track.as_ref(),
+        current_track,
         snooze_key,
     );
     {
@@ -1542,7 +1602,7 @@ pub fn update_tray_menu(
     // and naming a track would describe work the app is deliberately not doing.
     let status_line = match &snooze {
         Some(sn) => snooze_status_line(s, sn),
-        None => sync_status_line(s, is_syncing, is_playing, current_track.as_ref()),
+        None => sync_status_line(s, is_syncing, is_playing, current_track),
     };
     let sync_status = MenuItemBuilder::with_id(ID_SYNC_STATUS, status_line.clone())
         .enabled(false)
@@ -1720,7 +1780,11 @@ pub fn update_tray_menu(
     // Commit the snapshot only after a successful set_menu. A failed
     // set_menu above left the snapshot at the previous value, so the
     // next call with the same state will retry rather than no-op.
-    *last_tray_state().lock() = Some(snapshot);
+    // Issue #882: the startup paint never commits — it renders the caches
+    // only, so recording it would dedup away the first real rebuild.
+    if paint == TrayPaint::Deduped {
+        *last_tray_state().lock() = Some(snapshot);
+    }
 
     log::info!(
         "[TRAY] update_tray_menu: tray menu updated - is_syncing={}, visible={}, track={:?}",
@@ -2456,10 +2520,18 @@ mod tests {
         // hands it to BOTH submenu sources — a literal `Refresh` in either call
         // would re-fetch devices/queue every throttle window while snoozed.
         let prod = prod_source(include_str!("tray.rs"));
-        let body = body_of(prod, "pub fn update_tray_menu(");
+        let body = body_of(prod, "fn rebuild_tray_menu(");
         assert!(
-            body.contains("tray_fetch_mode(snooze.is_some())"),
-            "the rebuild's fetch mode must come from the snooze (issue #677)"
+            body.contains("paint_fetch_mode(paint, snooze.is_some())"),
+            "the rebuild's fetch mode must come from the paint and the snooze"
+        );
+        // …and the snooze rule itself is unchanged: an ordinary rebuild while
+        // snoozed is cache-only (issue #677), while the startup paint is
+        // cache-only whatever the snooze says (issue #882).
+        let decider = body_of(prod, "fn paint_fetch_mode(");
+        assert!(
+            decider.contains("tray_fetch_mode(snoozed)"),
+            "an ordinary rebuild must take its fetch mode from the snooze (issue #677)"
         );
         for call in [
             "devices_for_menu(access_token.as_deref(), fetch)",
@@ -2482,7 +2554,7 @@ mod tests {
     #[test]
     fn snooze_is_resolved_before_the_dedup_guard() {
         let prod = prod_source(include_str!("tray.rs"));
-        let body = body_of(prod, "pub fn update_tray_menu(");
+        let body = body_of(prod, "fn rebuild_tray_menu(");
         let resolve = body
             .find("resolve_snooze(")
             .expect("update_tray_menu must resolve the snooze");
@@ -2625,11 +2697,66 @@ mod tests {
         let cleanup = setup
             .find("clear_expired_snooze_at_startup(")
             .expect("call site");
-        let menu = setup.find("update_tray_menu(").expect("tray paint");
+        let menu = setup.find("update_tray_menu_startup(").expect("tray paint");
         assert!(
             cleanup < menu,
             "the cleanup must precede the first menu build, so the tray never \
              renders a state the config no longer holds"
+        );
+    }
+
+    /// Issue #882: `setup_tray` runs on the main thread inside Tauri's
+    /// `setup()`, before the event loop exists, so its paint must not perform
+    /// the devices/queue GETs (10 s timeout each, with no window on screen to
+    /// explain the wait). It renders the throttled caches and hands the real
+    /// fetch to the worker refresh.
+    #[test]
+    fn startup_paint_is_cache_only_and_fetches_nothing() {
+        // The decision itself: the startup paint renders the caches whether or
+        // not a snooze is active, while an ordinary rebuild still follows the
+        // snooze rule (issue #677).
+        assert_eq!(
+            paint_fetch_mode(TrayPaint::Startup, false),
+            TrayFetch::CacheOnly
+        );
+        assert_eq!(
+            paint_fetch_mode(TrayPaint::Startup, true),
+            TrayFetch::CacheOnly
+        );
+        assert_eq!(
+            paint_fetch_mode(TrayPaint::Deduped, false),
+            TrayFetch::Refresh
+        );
+        assert_eq!(
+            paint_fetch_mode(TrayPaint::Deduped, true),
+            TrayFetch::CacheOnly
+        );
+
+        // The wiring: setup_tray must paint through the cache-only entry point
+        // and must not run a fetching rebuild inline, and the devices/queue
+        // fetch must be handed to the off-thread refresh instead.
+        let prod = prod_source(include_str!("tray.rs"));
+        let setup = body_of(prod, "pub fn setup_tray(");
+        assert!(
+            setup.contains("update_tray_menu_startup("),
+            "setup_tray must paint through the cache-only entry point (issue #882)"
+        );
+        assert!(
+            !setup.contains("update_tray_menu(app.handle()"),
+            "setup_tray must not run a fetching rebuild on the setup thread"
+        );
+        assert!(
+            setup.contains("refresh_tray_from_state(app.handle())"),
+            "the startup paint must hand the real fetch to the worker refresh"
+        );
+        // The startup paint must not record the dedup snapshot: it renders the
+        // caches only, so recording it would make the first honest rebuild —
+        // the worker refresh just spawned — look like a no-op and leave the
+        // Devices/Up Next submenus empty.
+        let rebuild = body_of(prod, "fn rebuild_tray_menu(");
+        assert!(
+            rebuild.contains("if paint == TrayPaint::Deduped"),
+            "only an ordinary rebuild may commit the dedup snapshot (issue #882)"
         );
     }
 }
