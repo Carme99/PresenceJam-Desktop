@@ -3891,6 +3891,7 @@ mod tests {
     #[test]
     fn test_clamp_rules_normalizes_the_track_rule_window() {
         let mut rules = StatusRulesConfig {
+            extra: Default::default(),
             quiet_hours: Vec::new(),
             track_rules: vec![
                 TrackRuleEntry {
@@ -4076,6 +4077,7 @@ mod tests {
     #[test]
     fn test_clamp_rules_normalizes_pairs_and_bounds_text() {
         let mut rules = StatusRulesConfig {
+            extra: Default::default(),
             quiet_hours: vec![QuietHoursEntry {
                 enabled: true,
                 presence_availability: "donotdisturb".to_string(),
@@ -5191,6 +5193,7 @@ mod tests {
     #[test]
     fn shortcut_bindings_round_trip_through_json() {
         let cfg = ShortcutsConfig {
+            extra: Default::default(),
             toggle_playback: Some("CmdOrCtrl+Shift+P".to_string()),
             toggle_sync: Some("  ".to_string()),
         };
@@ -5574,6 +5577,7 @@ mod tests {
     #[test]
     fn test_clamp_rules_normalizes_the_quiet_hours_window() {
         let mut rules = StatusRulesConfig {
+            extra: Default::default(),
             quiet_hours: vec![
                 QuietHoursEntry {
                     enabled: true,
