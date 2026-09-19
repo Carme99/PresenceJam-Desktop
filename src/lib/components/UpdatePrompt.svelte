@@ -222,6 +222,22 @@
       : null
   );
 
+  // #737: which byte-level position is on screen, if any. The deferred stage
+  // keeps the precedence the banner's single status chain gave it, and the
+  // rows those branches used to shadow stay suppressed so the strip never
+  // shows two conflicting lines.
+  const stageProgress = $derived(staging && !stageAborted);
+  const downloadProgress = $derived(
+    downloading && !stageProgress && !stagedVersion && !confirming && !isStaleSkipped
+  );
+
+  // #737: the progressbar's accessible name — the update it belongs to.
+  // Deliberately independent of the percentage so assistive tech reads the
+  // position on demand instead of being told on every emitted tick.
+  const progressLabel = $derived(
+    update ? t('update.available', { version: update.version }) : ''
+  );
+
   async function downloadAndInstall() {
     if (!update || downloading) return;
     downloading = true;
@@ -376,12 +392,11 @@
   >
     <div class="update-info" role="status">
       <span class="update-title">{t('update.available', { version: update.version })}</span>
-      {#if staging && !stageAborted}
-        <span class="update-progress">
-          {stagePercent === null
-            ? t('update.preparing')
-            : t('update.stagingProgress', { percent: stagePercent })}
-        </span>
+      {#if stageProgress}
+        <!-- #737: the deferred stage's byte position is carried by the
+             progressbar below, outside this live region, so the polite queue
+             is not rewritten on every emitted tick. What stays here is the
+             discrete stage transitions — staged, declined as stale, failed. -->
       {:else if stagedVersion}
         <span class="update-staged">
           {currentVersion
@@ -400,12 +415,9 @@
             ? t('update.staleSkipped', { staged: staleSkippedVersion, current: currentVersion })
             : t('update.staleSkippedUnknown', { staged: staleSkippedVersion })}
         </span>
-      {:else if downloading}
-        <span class="update-progress">
-          {Math.round(progress * 100)}%{totalBytes > 0
-            ? ` (${Math.round(downloadedBytes / 1024 / 1024)}/${Math.round(totalBytes / 1024 / 1024)} MB)`
-            : ''}
-        </span>
+      {:else if downloadProgress}
+        <!-- #982: the immediate download's position lives in the progressbar
+             below as well. -->
       {:else if error}
         <span class="update-error">{t('update.downloadFailed', { error })}</span>
       {/if}
@@ -413,6 +425,37 @@
         <span class="update-beta">{t('update.betaOnQuitOnly')}</span>
       {/if}
     </div>
+    {#if stageProgress}
+      <span
+        class="update-progress"
+        role="progressbar"
+        aria-label={progressLabel}
+        aria-valuemin="0"
+        aria-valuemax="100"
+        aria-valuenow={stagePercent ?? undefined}
+      >
+        {stagePercent === null
+          ? t('update.preparing')
+          : t('update.stagingProgress', { percent: stagePercent })}
+      </span>
+    {:else if downloadProgress}
+      <!-- #982: without a `Content-Length` there is no position to report, so
+           the row says so instead of holding a frozen "0%" for the whole
+           download — the rule `stagePercent` already follows for the
+           deferred path. -->
+      <span
+        class="update-progress"
+        role="progressbar"
+        aria-label={progressLabel}
+        aria-valuemin="0"
+        aria-valuemax="100"
+        aria-valuenow={totalBytes > 0 ? Math.round(progress * 100) : undefined}
+      >
+        {totalBytes > 0
+          ? `${Math.round(progress * 100)}% (${Math.round(downloadedBytes / 1024 / 1024)}/${Math.round(totalBytes / 1024 / 1024)} MB)`
+          : t('update.preparing')}
+      </span>
+    {/if}
     <div class="update-actions">
       {#if channelResolved && !isBeta}
         <button
