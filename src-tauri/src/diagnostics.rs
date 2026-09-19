@@ -776,10 +776,18 @@ fn tail_log_file(log_dir: Option<std::path::PathBuf>, keep_files: u32) -> (Vec<S
     let total = merged.len();
     // Keep chronological (oldest-first) order; take only the last
     // LOG_TAIL_LINES lines when the merged window is longer.
+    //
+    // Both hygiene passes the failed-update error gets (issues #603/#409)
+    // apply here too (issue #913): `redact_sensitive` alone leaves every
+    // absolute path intact — its opaque-run mask needs 32 characters with no
+    // separator, so Windows paths split at each backslash and a short
+    // `/home/<user>/…` falls under the threshold. `strip_absolute_paths`
+    // trims each path to its bare last component, which is what the log line
+    // still needs to be useful ("Created config directory at 'PresenceJam'").
     let start = total.saturating_sub(LOG_TAIL_LINES);
     let tail: Vec<String> = merged[start..]
         .iter()
-        .map(|l| redact_sensitive(l))
+        .map(|l| strip_absolute_paths(&redact_sensitive(l)))
         .collect();
     let status = format!(
         "ok: last {} of {} lines ({})",
@@ -2097,5 +2105,80 @@ mod tests {
         // The token must be the on-disk spelling, not a Debug rendering.
         assert_eq!(update_channel_token(UpdateChannel::Stable), "stable");
         assert_eq!(update_channel_token(UpdateChannel::Beta), "beta");
+    }
+
+    // ---------------------------------------------------------------
+    // U10 (#913): no log line may carry an absolute path into the snapshot.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_snapshot_log_tail_carries_no_absolute_path_or_username() {
+        let dir = std::env::temp_dir().join(format!("pj-diag-hyg-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        // The two shapes the app really logs (`[CFG]` at startup and
+        // `commands/window.rs` on the Logs button) plus a control line.
+        std::fs::write(
+            dir.join(LOG_FILE_NAME),
+            concat!(
+                "[CFG] Loaded configuration from 'C:\\Users\\jack\\AppData\\Roaming\\PresenceJam\\config.json'\n",
+                "[CFG] Created config directory at '/home/jack/.config/PresenceJam'\n",
+                "[CFG] window open ok\n",
+                "[CMD.WINDOW] open_logs_folder: log path=/home/jack/.local/share/com.presencejam.app/logs\n",
+            ),
+        )
+        .expect("write log");
+
+        let snapshot = build_snapshot(
+            &crate::AppState::default(),
+            Some(dir.clone()),
+            inert_keychain(),
+            None,
+            ConfigQuarantine::default(),
+        );
+        let json = serde_json::to_string(&snapshot).expect("serialize snapshot");
+
+        // Neither username may survive, on either separator convention.
+        assert!(
+            !json.contains("jack"),
+            "snapshot leaked the OS username: {json}"
+        );
+        assert!(!json.contains("Users"), "{json}");
+        assert!(!json.contains("AppData"), "{json}");
+        assert!(!json.contains("/home/"), "{json}");
+        assert!(
+            !json.contains(dir.to_str().expect("utf-8 dir")),
+            "snapshot leaked the absolute log path: {json}"
+        );
+        // ...while the bare last component keeps the line useful and the
+        // unrelated control line is untouched.
+        assert!(
+            snapshot
+                .recent_logs
+                .iter()
+                .any(|l| l == "[CFG] window open ok"),
+            "the control line changed: {:?}",
+            snapshot.recent_logs
+        );
+        assert!(
+            json.contains("config.json"),
+            "the file name still tells support what failed: {json}"
+        );
+        let lines = &snapshot.recent_logs;
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "[CFG] Loaded configuration from 'config.json'"),
+            "the Windows path is trimmed to its bare file name: {lines:?}"
+        );
+        // 30 characters, so pass 2's >= 32-char opaque-run mask never fires:
+        // this is the line that reached the snapshot verbatim before #913.
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "[CFG] Created config directory at 'PresenceJam'"),
+            "a short Unix path survives redaction and needs the hygiene pass: {lines:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
