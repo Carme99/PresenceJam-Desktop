@@ -17,11 +17,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Cross-platform compile gate (issue #355): the `rust` job below checks
-  # Linux only; this leg runs `cargo check` on macOS + Windows so
-  # platform-gated code (e.g. tray.rs macOS dock-badge cfg) compiles in CI.
-  # Deliberately check-only (no fmt/clippy/test): the ubuntu legs remain the
-  # enforcing gates; a full triple-OS test matrix is future work.
+  # Cross-platform compile + test gate (issues #355, #836): the `rust` job
+  # below executes Linux only; this leg runs `cargo check` AND `cargo test
+  # --lib` on macOS + Windows so platform-gated code (the macOS
+  # `ActivationPolicy` branch in commands/config.rs, the dock-badge path in
+  # tray.rs, the macOS deep-link registration, the Windows tray and
+  # notification paths) is executed in CI rather than merely compiled.
+  # Still no fmt/clippy — the ubuntu legs remain the enforcing gates for
+  # those — and `--lib` rather than `--all-targets` bounds the billed
+  # macOS/Windows minutes; that reduced scope is stated in
+  # docs/RELEASING.md §3.
   rust-platform-check:
     name: Rust check (macOS + Windows)
     strategy:
@@ -29,7 +34,7 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 45
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -59,7 +64,17 @@ jobs:
       - name: Cargo check (all targets)
         env:
           CARGO_INCREMENTAL: 0
-        run: cargo check --manifest-path src-tauri/Cargo.toml --all-targets
+        run: cargo check --locked --manifest-path src-tauri/Cargo.toml --all-targets
+
+      # Platform-gated behaviour (#836): the check above proves these branches
+      # compile, this proves they run, which is the gap that let a regression
+      # inside a `#[cfg(target_os = "macos")]` or `#[cfg(windows)]` branch ship
+      # green. `--lib` (not the ubuntu `rust` job's `--all-targets`) keeps the
+      # billed macOS/Windows minutes sane; see docs/RELEASING.md §3.
+      - name: Cargo test (lib)
+        env:
+          CARGO_INCREMENTAL: 0
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
 
   # Frontend: catches Svelte/TS build errors. Mirrors the npm ci + npm run build
   # steps from release.yml. Cached via actions/setup-node cache: 'npm'.
@@ -127,7 +142,7 @@ jobs:
         run: |
           rm -rf src/lib/types-generated/
           mkdir -p src/lib/types-generated/
-          cargo test --manifest-path src-tauri/Cargo.toml --lib
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
 
       # Type-check Svelte/TS via svelte-check. Runs after Build frontend
       # and the cargo test step above so the generated $types,
@@ -148,6 +163,29 @@ jobs:
       # `continue-on-error` — a ratchet that cannot fail the job is not one.
       - name: Frontend unit tests + coverage ratchet (npm run test:coverage)
         run: npm run test:coverage
+
+      # Workspace hygiene (#753): a build or doc-render step that drops a path
+      # at the repo root must be either tracked on purpose or covered by
+      # .gitignore, otherwise the next `git add -A` stages it. The case that
+      # prompted this is chrome-headless-shell/ (a headless-Chromium download);
+      # `git status` hides ignored paths, so anything still listed here as
+      # untracked is by definition unignored. Runs after the build steps above
+      # because those are what create such paths in the first place.
+      - name: Root-level paths are tracked or ignored
+        run: |
+          # `--untracked-files=normal` (the default) collapses a wholly
+          # untracked directory into ONE `dir/` entry, which is what this guard
+          # needs: a dropped tree has to be caught here rather than listed file
+          # by file, and every path inside it contains a `/`. The trailing slash
+          # is stripped before the root-level test so a directory and a file are
+          # judged alike.
+          stray=$(git status --porcelain | sed -n 's/^?? //p' | sed 's:/$::' | grep -v / || true)
+          if [ -n "$stray" ]; then
+            echo "::error::untracked and unignored at the repository root:"
+            echo "$stray"
+            echo "Ignore it in .gitignore (anchored with a leading /) or commit it on purpose."
+            exit 1
+          fi
 
   # Rust: cargo check + cargo test on all targets (lib + bins + tests + benches) catches
   # type errors, borrow errors, missing imports, and broken test code.
@@ -213,7 +251,7 @@ jobs:
       - name: Cargo check (all targets)
         env:
           CARGO_INCREMENTAL: 0
-        run: cargo check --manifest-path src-tauri/Cargo.toml --all-targets
+        run: cargo check --locked --manifest-path src-tauri/Cargo.toml --all-targets
 
       # Runs the Rust unit-test suite. `cargo check` above only emits
       # metadata (.rmeta); `cargo test` needs codegen'd rlib/bin artifacts,
@@ -224,7 +262,7 @@ jobs:
       - name: Cargo test (all targets)
         env:
           CARGO_INCREMENTAL: 0
-        run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --all-targets
 
   # Clippy: same scope as cargo check but with lint enforcement.
   # Treats warnings as errors so noisy/deprecated lints can't sneak in.
@@ -280,7 +318,144 @@ jobs:
       - name: Cargo clippy (deny warnings)
         env:
           CARGO_INCREMENTAL: 0
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+        run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+  # Rust coverage ratchet (issue #838): the frontend has had a measured coverage
+  # gate since #443/#681, the backend had none — so a PR that deletes a module's
+  # tests, or the `token_io.rs` ones, produced no signal at all while the v5
+  # refactors touch polling/poll_once.rs, config.rs and token_io.rs hardest.
+  #
+  # Floors are the values MEASURED on the merged head (2026-09-19, cargo-llvm-cov
+  # 0.9.1, `--lib`, 491 tests), rounded DOWN to a whole percent so a re-run cannot
+  # fail on rounding noise. Raise a floor only in the PR that raises the measured
+  # number, and never above what the job prints — the frontend ratchet's rule:
+  #   whole library         62.76 % -> --fail-under-lines 62
+  #   polling/poll_once.rs  66.68 % -> 66
+  #   commands/config.rs    18.47 % -> 18
+  #   config.rs             87.59 % -> 87
+  #   token_io.rs           74.11 % -> 74
+  rust-coverage:
+    name: Rust coverage ratchet
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6.5.0
+        with:
+          node-version: 24
+          cache: 'npm'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e  # 1.96
+        with:
+          # cargo-llvm-cov shells out to llvm-profdata/llvm-cov from here.
+          components: llvm-tools-preview
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            pkg-config \
+            build-essential
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      # Pinned to the version the floors were measured with: a tool upgrade can
+      # move a percentage, so the floors are re-measured in the PR that bumps it.
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@9114bf4d891761788c546334fd37538eae1bf8b3  # v2.87.16
+        with:
+          tool: cargo-llvm-cov@0.9.1
+
+      # One instrumented run feeds both the published lcov artifact and the
+      # per-file floors below. `--fail-under-lines` is the whole-library floor;
+      # it fails this step (exit 1) rather than letting the run report green.
+      - name: Rust line coverage (whole-library floor 62 %)
+        env:
+          CARGO_INCREMENTAL: 0
+        run: |
+          cargo llvm-cov --locked --manifest-path src-tauri/Cargo.toml --lib \
+            --lcov --output-path lcov.info \
+            --fail-under-lines 62
+
+      # The three files the v5 refactors touch most, plus commands/config.rs,
+      # whose measured number is the lowest in the tree (issue #838 item 4). A PR
+      # that drops a file's tests — or the file itself — fails here instead of
+      # hiding inside the library-wide average. Reads the lcov the step above
+      # wrote, so no second instrumented run is needed.
+      - name: Per-file coverage floors
+        run: |
+          python3 - <<'PY'
+          import sys
+
+          # suffix -> (floor % rounded down, measured % on the merged head 2026-09-19)
+          FLOORS = {
+              "src-tauri/src/polling/poll_once.rs": (66, 66.68),
+              "src-tauri/src/commands/config.rs": (18, 18.47),
+              "src-tauri/src/config.rs": (87, 87.59),
+              "src-tauri/src/token_io.rs": (74, 74.11),
+          }
+
+          hits = {}
+          current = None
+          with open("lcov.info") as fh:
+              for raw in fh:
+                  line = raw.strip()
+                  if line.startswith("SF:"):
+                      current = line[3:]
+                      hits.setdefault(current, [0, 0])
+                  elif line.startswith("DA:") and current is not None:
+                      parts = line[3:].split(",")
+                      hits[current][1] += 1
+                      if len(parts) > 1 and int(parts[1]) > 0:
+                          hits[current][0] += 1
+
+          failed = []
+          for suffix, (floor, measured) in sorted(FLOORS.items()):
+              matches = [path for path in hits if path.endswith(suffix)]
+              if len(matches) != 1:
+                  failed.append(f"{suffix}: expected 1 lcov record, found {len(matches)}")
+                  continue
+              hit, total = hits[matches[0]]
+              percent = 100.0 * hit / total if total else 0.0
+              print(f"{suffix}: {percent:.2f} % lines ({hit}/{total}) — floor {floor} % (measured {measured} %)")
+              if percent < floor:
+                  failed.append(f"{suffix}: {percent:.2f} % < floor {floor} %")
+
+          if failed:
+              print("::error::Rust per-file coverage floor missed:")
+              for item in failed:
+                  print(f"  {item}")
+              sys.exit(1)
+          PY
+
+      - name: Upload lcov artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: rust-lcov
+          path: lcov.info
+          if-no-files-found: error
 
   # CHANGELOG: every `## [X]` section header must have a matching `[X]:`
   # link definition at the bottom of the file, otherwise the version link
@@ -311,14 +486,42 @@ jobs:
           done
           exit $missing
 
-  # Version consistency (issue #605): the release tag decides the version
-  # written into latest.json, while the shipped binary self-reports
-  # whatever tauri.conf.json says (Cargo.toml and package.json are two more
-  # copies). A partial bump ships a binary whose self-reported version never
-  # matches latest.json, so tauri-plugin-updater re-offers the same update
-  # on every check and the prompt never goes away. release.yml gates the
-  # tag against all three sources; this leg catches the drift at PR time,
-  # before a tag exists to disagree with.
+  # Relative-link audit (issue #831): docs/README.md states the convention and
+  # docs/link-audit.py exits 1 on a broken relative target or an unresolvable
+  # `#anchor`, but nothing invoked it. The neighbouring `changelog-links` job is
+  # the only other link-shaped gate and it merely pairs `## [X]` headers with
+  # their `[X]:` definitions in CHANGELOG.md. The script is standard-library
+  # only, so this job needs neither npm ci nor setup-node.
+  docs-links:
+    name: Docs relative links
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Audit relative markdown links (docs/link-audit.py)
+        run: python3 docs/link-audit.py
+
+  # Version consistency (issues #605, #832): the release tag decides the version
+  # written into latest.json, while the shipped binary self-reports whatever
+  # tauri.conf.json says — and package.json, package-lock.json (twice),
+  # Cargo.toml and Cargo.lock (the `presence-jam` entry) are five more copies of
+  # it. A partial bump ships a binary whose self-reported version never matches
+  # latest.json, so tauri-plugin-updater re-offers the same update on every check
+  # and the prompt never goes away. All six literals are gated here and by
+  # release.yml's tag check, and every source is read from the repository, so the
+  # `node_modules/cssstyle` version that coincidentally matches cannot satisfy
+  # this leg.
+  #
+  # Every cargo invocation in this workflow passes `--locked` (#832): a
+  # Cargo.lock that no longer matches Cargo.toml must fail loudly rather than be
+  # rewritten in the runner and committed stale by the next `cargo update`-free
+  # change.
   version-consistency:
     name: Version consistency
     runs-on: ubuntu-latest
@@ -329,25 +532,74 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Check the three version sources agree
+      - name: Check the six version sources agree
         run: |
           set -euo pipefail
           CONFIG_VERSION=$(jq -r .version src-tauri/tauri.conf.json)
           PKG_VERSION=$(jq -r .version package.json)
+          LOCK_VERSION=$(jq -r .version package-lock.json)
+          LOCK_ROOT_VERSION=$(jq -r '.packages[""].version' package-lock.json)
           CARGO_VERSION=$(sed -nE 's/^version = "(.*)"/\1/p' src-tauri/Cargo.toml | head -1)
-          echo "src-tauri/tauri.conf.json : ${CONFIG_VERSION}"
-          echo "package.json              : ${PKG_VERSION}"
-          echo "src-tauri/Cargo.toml      : ${CARGO_VERSION}"
+          # The workspace crate's own lockfile entry: `name = "presence-jam"`
+          # followed by its `version` line, not a dependency of the same name.
+          CARGO_LOCK_VERSION=$(awk '/^name = "presence-jam"$/ { found = 1; next } found && /^version = / { gsub(/[",]/, "", $3); print $3; exit }' src-tauri/Cargo.lock)
+          echo "src-tauri/tauri.conf.json          : ${CONFIG_VERSION}"
+          echo "package.json                       : ${PKG_VERSION}"
+          echo "package-lock.json                  : ${LOCK_VERSION}"
+          echo "package-lock.json packages[\"\"]    : ${LOCK_ROOT_VERSION}"
+          echo "src-tauri/Cargo.toml               : ${CARGO_VERSION}"
+          echo "src-tauri/Cargo.lock (presence-jam): ${CARGO_LOCK_VERSION}"
           drift=0
-          for entry in "package.json:${PKG_VERSION}" "src-tauri/Cargo.toml:${CARGO_VERSION}"; do
+          for entry in \
+            "package.json:${PKG_VERSION}" \
+            "package-lock.json:${LOCK_VERSION}" \
+            "package-lock.json (packages[\"\"]):${LOCK_ROOT_VERSION}" \
+            "src-tauri/Cargo.toml:${CARGO_VERSION}" \
+            "src-tauri/Cargo.lock (presence-jam):${CARGO_LOCK_VERSION}"; do
             file="${entry%:*}"
             version="${entry##*:}"
-            if [ "$version" != "$CONFIG_VERSION" ]; then
+            # An unreadable literal is its own failure: `jq` prints `null` and a
+            # missed awk prints nothing, and both would otherwise read as drift.
+            if [ -z "${version}" ] || [ "${version}" = "null" ]; then
+              echo "::error::could not read a version from ${file} (got '${version}')"
+              drift=1
+              continue
+            fi
+            if [ "${version}" != "${CONFIG_VERSION}" ]; then
               echo "::error::version drift: ${file} says '${version}' but src-tauri/tauri.conf.json says '${CONFIG_VERSION}'"
               drift=1
             fi
           done
           exit "$drift"
+
+  # Guards over release.yml (#830, #925, #828): it runs only on a tag or a
+  # manual re-cut, so a defect there — an unbounded job that burns up to six
+  # hours per matrix leg before failing, a job that silently inherits the
+  # workflow's `contents: write`, or the updater signing key exported into the
+  # environment of a step running `npx tauri build` — surfaces when the release
+  # is already due. These three static checks read release.yml at PR time; the
+  # assertions live in ci.yml because ci.yml is the workflow that runs on every
+  # pull request. Each prints `::error::` lines naming the job and its line.
+  release-workflow-guards:
+    name: Release workflow guards
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Every release job declares timeout-minutes (#830)
+        run: python3 .github/scripts/release-workflow-guards.py timeouts
+
+      - name: Every release job but `release` declares permissions (#925)
+        run: python3 .github/scripts/release-workflow-guards.py permissions
+
+      - name: No signing key in a `tauri build` step's env (#828)
+        run: python3 .github/scripts/release-workflow-guards.py signing-env
 
   # Secret scan (issue #356): read-only gitleaks detect over all commits.
   # No SARIF upload (needs security-events:write); findings surface as
@@ -368,28 +620,44 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # Dependency-vulnerability gate (issue #357): surfaces new advisories on
-  # the introducing PR. Non-blocking (`continue-on-error`) until the two
-  # accepted quick-xml RUSTSEC-2026-0194/-0195 advisories clear upstream
-  # (see SECURITY.md "Accepted transitive risks"); then remove the flag to
-  # enforce. The npm audit leg stays advisory-only: `npm audit` exits
-  # non-zero on any finding, so it reports without gating.
+  # Dependency-vulnerability gate (issues #357, #844): surfaces new advisories on
+  # the introducing PR.
+  #
+  # Enforcement split, measured rather than assumed — re-measured 2026-09-19 on
+  # this tree: `npm audit` reports exactly one advisory (moderate `devalue`,
+  # GHSA-9rgm-9g3h-6x36) and it is dev-only, so the production-tree gate below
+  # exits 0 today while the full-tree step still reports it.
+  #  - npm half GATES on the production tree (`--omit=dev`), which is what a
+  #    shipped binary actually links: a high or critical advisory there fails
+  #    the run instead of reporting green.
+  #  - cargo half stays advisory-only (`continue-on-error` scoped to that step,
+  #    not the job) until the two accepted quick-xml RUSTSEC-2026-0194/-0195
+  #    advisories clear upstream (SECURITY.md "Accepted transitive risks").
   dep-audit:
     name: Dependency audit (cargo + npm)
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    continue-on-error: true
+    permissions:
+      contents: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
 
+      # Advisory-only whenever the accepted quick-xml IDs below are in play:
+      # `continue-on-error` lives on this step so the npm gate can still fail
+      # the job (#844).
       - name: Cargo audit (advisory)
+        continue-on-error: true
         uses: RustSec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998  # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           working-directory: src-tauri
+          # Owner: @Carme99. Expiry: 2026-12-31 — on that date re-measure
+          # `cargo audit` in src-tauri and, if a fixed quick-xml has shipped,
+          # delete these two IDs together with this step's `continue-on-error`.
+          # Tracking issue for the remaining accepted advisories: #642.
           ignore: RUSTSEC-2026-0194,RUSTSEC-2026-0195
 
       - name: Setup Node
@@ -398,10 +666,50 @@ jobs:
           node-version: 24
           cache: 'npm'
 
-      - name: npm audit (advisory)
+      # The gate (#844): production tree only, high and above. A dev-only
+      # advisory cannot block a merge, and nothing is silently swallowed — the
+      # full-tree step below still reports every advisory.
+      - name: npm audit (production tree, blocking)
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: npm audit (full tree, advisory)
         # `run` is a block scalar on purpose: a plain scalar cannot contain
         # " #", so the `#357` reference used to end the YAML value early
         # ("unexpected EOF while looking for matching \"" — the npm leg never
         # ran at all). Keep the value on its own line if it cites an issue.
+        continue-on-error: true
         run: |
-          npm audit --audit-level=high || echo "::warning::npm audit found advisories (advisory-only, see issue #357)"
+          npm audit --audit-level=high || echo "::warning::npm audit found advisories (advisory-only, see #357/#844)"
+
+  # Licence + source policy gate (issue #776): src-tauri/deny.toml allow-lists
+  # the licences this tree may ship — measured from the 609 registry crates
+  # resolved in src-tauri/Cargo.lock — and denies every source but crates.io, so
+  # a copyleft licence or a path/git dependency cannot enter the tree unnoticed.
+  # That is the failure mode that made ACKNOWLEDGEMENTS.md's hand-maintained
+  # inventory drift twice (#281, #626). Duplicate crate versions are reported by
+  # `bans` at warn level, not denied: the list carries nothing a reviewer must act
+  # on, so the whole check set can stay in the job from the start.
+  cargo-deny:
+    name: Cargo deny (licences + sources)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # `arguments` is passed BEFORE the subcommand, which is where cargo-deny
+      # takes its global flags. The policy path is named explicitly so it cannot
+      # be picked up from somewhere else (cargo-deny's own discovery starts at
+      # the manifest it is given); the whole command is:
+      #   cargo deny --manifest-path src-tauri/Cargo.toml --all-features \
+      #     --config src-tauri/deny.toml check licenses bans sources
+      - name: Cargo deny (licences, bans, sources)
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25  # v2.1.1
+        with:
+          manifest-path: src-tauri/Cargo.toml
+          arguments: --all-features --config src-tauri/deny.toml
+          command: check licenses bans sources

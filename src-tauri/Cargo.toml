@@ -3,6 +3,7 @@ name = "presence-jam"
 version = "4.7.0"
 description = "Syncs Spotify playback to Microsoft Teams status"
 authors = ["Jack Lee"]
+license = "MIT"
 edition = "2021"
 rust-version = "1.96"
 
