@@ -36,6 +36,19 @@ function dictKeys(source: string): string[] {
   return keys;
 }
 
+// Key/value pairs parsed from a dictionary source. Values are either
+// single-quoted (the common case) or double-quoted when the copy itself
+// contains an apostrophe; prettier wraps the long ones onto the next line.
+function dictEntries(source: string): { key: string; value: string }[] {
+  const out: { key: string; value: string }[] = [];
+  const re = /^  '([^']+)':\s*(?:'([^']*)'|"([^"]*)"),$/gm;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(source)) !== null) {
+    out.push({ key: m[1], value: m[2] ?? m[3] });
+  }
+  return out;
+}
+
 describe('i18n key coverage (#488)', () => {
   const enSrc = read('src/lib/i18n/en.ts');
   const deSrc = read('src/lib/i18n/de.ts');
@@ -47,6 +60,66 @@ describe('i18n key coverage (#488)', () => {
     const fr = dictKeys(frSrc).sort();
     expect(de).toEqual(en);
     expect(fr).toEqual(en);
+  });
+
+  // #906: the wait-state copy uses the ellipsis character (U+2026). Three
+  // ASCII dots occupy a different width, so a `common.loading` label and the
+  // `common.reconnecting` sibling rendered in the same region wrap at
+  // different points — and every new key copies whichever form it sits next
+  // to. Fail on the ASCII sequence in ANY dictionary value.
+  it('spells the ellipsis with U+2026 in every dictionary value (#906)', () => {
+    const offenders: string[] = [];
+    for (const [file, source] of [
+      ['en.ts', enSrc],
+      ['de.ts', deSrc],
+      ['fr.ts', frSrc],
+    ] as const) {
+      for (const { key, value } of dictEntries(source)) {
+        if (value.includes('...')) offenders.push(`${file}: ${key}`);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it('renders the same ellipsis for loading and reconnecting in en/de/fr (#906)', () => {
+    for (const locale of ['en', 'de', 'fr'] as const) {
+      void i18n.set(locale);
+      expect(t('common.loading')).toContain('…');
+      expect(t('common.reconnecting')).toContain('…');
+    }
+    void i18n.set('en');
+  });
+
+  // #907: fr.ts mixed ASCII apostrophes with the typographic U+2019, and used
+  // a plain space before `: ? ! ;` — a legal line-break opportunity in French
+  // typesetting, which is the defect the non-breaking space exists to prevent
+  // (a wrapped toast can otherwise start a line with a bare `:`).
+  it('uses the typographic apostrophe and a non-breaking space before French punctuation (#907)', () => {
+    // U+00A0, spelled out: an invisible literal in the source is a trap.
+    const NBSP = '\u00a0';
+    const offenders: string[] = [];
+    for (const { key, value } of dictEntries(frSrc)) {
+      if (/[A-Za-zÀ-ÿ]'[A-Za-zÀ-ÿ]/.test(value)) {
+        offenders.push(`${key}: ASCII apostrophe between letters`);
+      }
+      for (const m of value.matchAll(/\s([:?!;])/g)) {
+        if (m[0][0] !== NBSP) offenders.push(`${key}: plain space before '${m[1]}'`);
+      }
+      if (/«(?!\u00a0)/.test(value) || /(?<!\u00a0)»/.test(value)) {
+        offenders.push(`${key}: guillemet without a non-breaking space`);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it('renders the French punctuation without breaking placeholders (#907)', () => {
+    void i18n.set('fr');
+    // The sweep is mechanical: `{seconds}` still interpolates, and the colon
+    // that introduces it now carries the non-breaking space.
+    const label = t('settings.defaultIntervalLabel', { seconds: 30 });
+    expect(label).toContain('30s');
+    expect(label).toMatch(/\u00a0: 30s$/);
+    void i18n.set('en');
   });
 
   it('real t() resolves known keys and substitutes params', () => {
@@ -91,19 +164,6 @@ describe('i18n key coverage (#488)', () => {
     for (const token of ['{show}', '{episode}']) {
       expect(t('settings.episodeFormatHint')).toContain(token);
     }
-    for (const src of [enSrc, deSrc, frSrc]) {
-      expect(src).toContain("'settings.episodeFormatHint'");
-    }
-  });
-
-  it('settings.reconnectSpotify stays live (Reconnect view uses it)', () => {
-    // #426 delete itself is ux-owned; this slice only guards the live
-    // sibling the Reconnect view renders.
-    expect(enSrc).toContain("'settings.reconnectSpotify'");
-    for (const s of [enSrc, deSrc, frSrc]) {
-      expect(s).toContain("'common.back'");
-      expect(s).toContain("'settings.formatTemplatePlaceholder'");
-    }
   });
 
   it('every static t() call-site resolves against the en key set', () => {
@@ -136,9 +196,13 @@ describe('i18n key coverage (#488)', () => {
     expect(missing).toEqual([]);
   });
 
-  it('no dictionary carries the duplicated reconnect status key (#619)', () => {
+  it('no dictionary carries a duplicated status key (#619, #905)', () => {
     for (const source of [enSrc, deSrc, frSrc]) {
+      // #619: one key for the reconnect status message.
       expect(dictKeys(source)).not.toContain('reconnect.needsReconnect');
+      // #905: both rule cards post the same replacement, so they read the
+      // same key — the quiet-hours copy had already drifted in French.
+      expect(dictKeys(source)).not.toContain('rules.quietReplacementPlaceholder');
     }
   });
 });
@@ -201,32 +265,48 @@ describe('<html lang> and cross-webview convergence (#620)', () => {
   it('converges on a locale another webview wrote to localStorage', () => {
     // A detached Logs/Settings window owns its own store instance; the main
     // window's switch reaches it only through the `storage` event.
-    window.dispatchEvent(new StorageEvent('storage', { key: 'locale', newValue: 'de' }));
+    window.dispatchEvent(
+      new StorageEvent('storage', { key: 'presencejam:locale', newValue: 'de' })
+    );
     expect(i18n.locale).toBe('de');
     expect(document.documentElement.lang).toBe('de');
 
-    // Same value, unknown value, unrelated key: all no-ops.
-    window.dispatchEvent(new StorageEvent('storage', { key: 'locale', newValue: 'de' }));
-    window.dispatchEvent(new StorageEvent('storage', { key: 'locale', newValue: 'zz' }));
+    // Same value, unknown value, unrelated key, and the pre-4.7 bare key —
+    // which is no longer a channel at all — are all no-ops.
+    window.dispatchEvent(
+      new StorageEvent('storage', { key: 'presencejam:locale', newValue: 'de' })
+    );
+    window.dispatchEvent(
+      new StorageEvent('storage', { key: 'presencejam:locale', newValue: 'zz' })
+    );
+    window.dispatchEvent(new StorageEvent('storage', { key: 'locale', newValue: 'fr' }));
     window.dispatchEvent(new StorageEvent('storage', { key: 'presencejam:theme', newValue: 'fr' }));
     expect(i18n.locale).toBe('de');
 
     i18n.set('en');
-    expect(localStorage.getItem('locale')).toBe('en');
+    expect(localStorage.getItem('presencejam:locale')).toBe('en');
   });
 
-  it('tags the document with the stored locale on module load', async () => {
-    // The one path the other tests cannot reach: the store tags `lang` when
-    // it is first imported. `vi.resetModules` + a dynamic import is the only
-    // way to re-run that load (module-init boundary), so this test is last.
+  it('seeds the pre-4.7 bare key into the namespaced one on module load (#909)', async () => {
+    // The one path the other tests cannot reach: the store tags `lang` and
+    // migrates the legacy mirror when it is first imported. `vi.resetModules`
+    // + a dynamic import is the only way to re-run that load (module-init
+    // boundary), so this test is last.
     localStorage.setItem('locale', 'de');
+    localStorage.removeItem('presencejam:locale');
     document.documentElement.lang = 'en';
     vi.resetModules();
 
-    await import('$lib/i18n/store.svelte');
+    const reloaded = await import('$lib/i18n/store.svelte');
+    // A returning user keeps the language the bare key carried…
     expect(document.documentElement.lang).toBe('de');
+    expect(localStorage.getItem('presencejam:locale')).toBe('de');
+    // …and the bare key is gone, so nothing reads it again.
+    expect(localStorage.getItem('locale')).toBeNull();
 
-    i18n.set('en');
+    // The reloaded instance owns the document now: #892's guard means the
+    // statically imported store (already English) would not retag it.
+    await reloaded.i18n.set('en');
     expect(document.documentElement.lang).toBe('en');
   });
 });

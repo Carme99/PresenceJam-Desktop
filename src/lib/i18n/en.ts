@@ -28,7 +28,7 @@ export const en = {
   'common.enterCodeWhenAsked': 'Enter this code when asked:',
   'common.moreActions': 'More actions',
   'common.launchAtLogin': 'Launch at login',
-  'common.loading': 'Loading...',
+  'common.loading': 'Loading…',
   'common.notConnected': 'Not connected',
   'common.reconnecting': 'Reconnecting…',
   'common.reconnect': 'Reconnect',
@@ -393,7 +393,6 @@ export const en = {
   // 4.6 additions (presence rules #634/#635/#636/#637 + #538 consumption sites)
   'rules.replacementClampHint':
     'Replacement status is capped at {max} characters — {kept} will be posted.',
-  'rules.quietReplacementPlaceholder': 'Post this instead (empty = suppress)',
   'rules.presenceLabel': 'Presence while this rule applies',
   'rules.presenceNone': "Don't change my presence",
   'rules.presenceHint':
@@ -518,7 +517,12 @@ export const en = {
     '“System” follows your operating system’s appearance; Dark and Light stay pinned.',
   'settings.densityCompactLabel': 'Compact spacing',
   'settings.densityHint': 'Tightens the spacing and type scale. Independent of the theme.',
-  // --- 5.0 wave1 settings ---
+  // --- 5.0 wave1 i18n-lib ---
+  // Key requests routed through this slice's dictionaries (the owning slice
+  // cannot edit them).
+  'onboarding.pollIntervalClamped':
+    'Your saved interval is {stored}s, outside this step’s {min}–{max}s range — {seconds}s will be used.',
+  'update.stagingProgressLabel': 'Update preparing',
   'rules.presenceAvailable': 'Available',
   'rules.presenceBusyCall': 'Busy — In a call',
   'rules.presenceBusyConference': 'Busy — In a conference call',

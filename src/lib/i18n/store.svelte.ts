@@ -8,14 +8,15 @@
  * 4.7.0 (issue #674): `AppConfig::locale` is the single source of truth.
  * The tray and the native application menu render from the same field, so the
  * webview and the native surfaces can never disagree about the language.
- * `localStorage.locale` survives as a pre-paint mirror only: it is read at
- * module load (the config load is an async IPC round-trip and the first frame
- * must already be in the right language), it still converges across webviews
- * through the #620 `storage` listener below, and a value found there while the
- * config carries none is migrated into the config exactly once — after the
- * config has actually been hydrated from the backend, never on the boot-time
- * defaults. When both exist, the config wins and the mirror is rewritten to
- * match.
+ * `localStorage['presencejam:locale']` survives as a pre-paint mirror only: it
+ * is read at module load (the config load is an async IPC round-trip and the
+ * first frame must already be in the right language), it still converges across
+ * webviews through the #620 `storage` listener below, and a value found there
+ * while the config carries none is migrated into the config exactly once —
+ * after the config has actually been hydrated from the backend, never on the
+ * boot-time defaults. The pre-4.7 bare `locale` key is folded into it once, at
+ * module load (#909). When both exist, the config wins and the mirror is
+ * rewritten to match.
  *
  * Switching also retags `<html lang>`.
  */
@@ -27,7 +28,15 @@ import { devLog } from '$lib/utils/dev';
 
 export type Locale = 'en' | 'de' | 'fr';
 
-const STORAGE_KEY = 'locale';
+const STORAGE_KEY = 'presencejam:locale';
+/**
+ * #909: the pre-4.7 mirror lived under a bare `locale` key while every other
+ * frontend mirror is namespaced (`presencejam:theme`, `presencejam:density`).
+ * A generic key is the likeliest one to collide with anything else writing to
+ * the origin, so it is read once, folded into [`STORAGE_KEY`] and dropped —
+ * never consulted again.
+ */
+const LEGACY_STORAGE_KEY = 'locale';
 const KNOWN: readonly Locale[] = ['en', 'de', 'fr'];
 /**
  * The locale both sides fall back to. Mirrors Rust's `i18n::resolve_tag`,
@@ -39,6 +48,27 @@ const DEFAULT_LOCALE: Locale = 'en';
 function isLocale(value: unknown): value is Locale {
   return typeof value === 'string' && (KNOWN as readonly string[]).includes(value);
 }
+
+/**
+ * Fold the legacy mirror into the namespaced key (issue #909). Runs once, at
+ * module load, before the first frame picks a locale; a value the app cannot
+ * use is dropped rather than copied, and the legacy key is always removed so a
+ * later write cannot resurrect it.
+ */
+function migrateLegacyStorageKey(): void {
+  try {
+    const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
+    if (legacy === null) return;
+    if (isLocale(legacy) && localStorage.getItem(STORAGE_KEY) === null) {
+      localStorage.setItem(STORAGE_KEY, legacy);
+    }
+    localStorage.removeItem(LEGACY_STORAGE_KEY);
+  } catch {
+    // localStorage unavailable — there is nothing to migrate.
+  }
+}
+
+migrateLegacyStorageKey();
 
 /**
  * The locale the first frame renders in: the localStorage mirror when present,
@@ -84,6 +114,10 @@ applyDocumentLang(initialLocale);
  * write and the migration note on the subscription below.
  */
 function applyLocale(next: Locale): void {
+  // #892: every config emission lands here, and an unchanged locale must cost
+  // nothing — the mirror write is synchronous and the `lang` write can force
+  // style/layout work. Mirrors the same-value guard on the listener below.
+  if (next === current) return;
   current = next;
   applyDocumentLang(next);
   try {
@@ -145,7 +179,9 @@ function migrateLegacyLocale(): void {
  */
 function reconcile(cfg: AppConfig, hydrated: boolean): void {
   if (isLocale(cfg.locale)) {
-    applyLocale(cfg.locale);
+    // #892: an unrelated config write (a Settings save, a toggle, a snooze)
+    // carries the same locale — no locale work at all for it.
+    if (cfg.locale !== current) applyLocale(cfg.locale);
     return;
   }
   if (typeof cfg.locale === 'string' && cfg.locale.length > 0) {
