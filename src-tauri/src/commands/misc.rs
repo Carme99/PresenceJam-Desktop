@@ -143,3 +143,102 @@ pub async fn relaunch_app(window: tauri::Window, app: AppHandle) -> Result<(), S
     .await
     .map_err(|e| format!("relaunch_app spawn_blocking panicked: {:?}", e))?
 }
+
+#[cfg(test)]
+mod tests {
+    use super::preview_status;
+
+    /// The canonical fallback the frontend shows when the status text is
+    /// filtered (`profanity::SAFE_PLACEHOLDER_DEFAULT`) — user-visible copy,
+    /// so it is spelled out here rather than borrowed from the constant.
+    const CANONICAL: &str = "Currently Listening to Spotify";
+    const ON: Option<bool> = Some(true);
+    const OFF: Option<bool> = None;
+
+    /// Drive `preview_status` the way the Settings page does: the format plus
+    /// its four optional knobs.
+    fn preview(
+        format: &str,
+        filter: Option<bool>,
+        placeholder: Option<&str>,
+        profane: Option<bool>,
+        extra: Option<Vec<String>>,
+    ) -> String {
+        preview_status(
+            format.to_string(),
+            filter,
+            placeholder.map(|p| p.to_string()),
+            profane,
+            extra,
+        )
+    }
+
+    /// Issue #74/#761: the live preview must render exactly what the poller
+    /// would post, so every placeholder the format editor advertises resolves
+    /// against the sample. This executes the command itself — the
+    /// substitution rules live in `spotify::format_status`, but the command
+    /// owns which sample and which branch the preview uses.
+    #[test]
+    fn preview_renders_every_advertised_placeholder() {
+        let table = "{emoji} {artist} — {track} ({album})";
+        assert_eq!(
+            preview(table, OFF, None, OFF, None),
+            "🎵 Sample Artist — Sample Track (Sample Album)"
+        );
+
+        // The shipped default template renders as-is with the filter off,
+        // even when the caller asks for the profane sample: the toggle, not
+        // the sample, is what selects the branch.
+        let shipped = "🎵 {artist} - {track} 🎧";
+        assert_eq!(
+            preview(shipped, Some(false), None, ON, None),
+            "🎵 Sample Artist - Sample Track 🎧"
+        );
+    }
+
+    /// Issue #342: with the filter enabled the preview has to demonstrate the
+    /// fallback the runtime applies, so the user is never shown a status the
+    /// poller would refuse to post.
+    #[test]
+    fn preview_shows_the_filtered_fallback_for_a_profane_sample() {
+        // `{track}` renders the profane sample title; no placeholder was
+        // configured, so the canonical default stands in.
+        let profane = "{track}";
+        assert_eq!(preview(profane, ON, None, ON, None), CANONICAL);
+
+        // #342: a whitespace-only placeholder is not a placeholder — the same
+        // canonical default renders instead of blank status text.
+        assert_eq!(preview(profane, ON, Some("   "), ON, None), CANONICAL);
+
+        // A real placeholder is used, and its `{emoji}` token is substituted
+        // with the sample's playing state — the branch the runtime fallback
+        // shares, so the preview shows what would really be posted.
+        assert_eq!(
+            preview(profane, ON, Some("{emoji} Hidden"), ON, None),
+            "🎵 Hidden"
+        );
+
+        // A clean sample passes through the enabled filter untouched.
+        let clean = "{artist} - {track}";
+        assert_eq!(
+            preview(clean, ON, None, OFF, None),
+            "Sample Artist - Sample Track"
+        );
+    }
+
+    /// Issue #538: the caller hands the preview the user's own lexicon, so a
+    /// hint that claims extra words are applied is never previewed against a
+    /// matcher that ignores them. The same text has to flip between the
+    /// filtered fallback and the raw render depending on that lexicon.
+    #[test]
+    fn preview_applies_the_users_extra_words() {
+        let format = "{artist} - {track} darn";
+        let extra = Some(vec!["darn".to_string()]);
+
+        assert_eq!(preview(format, ON, None, OFF, extra.clone()), CANONICAL);
+        assert_eq!(
+            preview(format, ON, None, OFF, None),
+            "Sample Artist - Sample Track darn"
+        );
+    }
+}
