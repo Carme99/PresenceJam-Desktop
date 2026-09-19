@@ -665,7 +665,9 @@ mod tests {
         }
         for (module, src) in modules {
             for literal in hard_coded_copy(src) {
-                offenders.push(format!("{module} hard-codes {literal:?} (no table carries it)"));
+                offenders.push(format!(
+                    "{module} hard-codes {literal:?} (no table carries it)"
+                ));
             }
         }
         assert!(

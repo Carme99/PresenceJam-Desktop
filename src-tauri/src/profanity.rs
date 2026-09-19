@@ -294,7 +294,8 @@ impl MatchMemo {
     /// Sizes the table for one `(text, word)` pair and forgets everything.
     fn reset(&mut self, text_len: usize, word_len: usize) {
         self.seen.clear();
-        self.seen.resize((4 * (text_len + 1) * (word_len + 1)).div_ceil(64), 0);
+        self.seen
+            .resize((4 * (text_len + 1) * (word_len + 1)).div_ceil(64), 0);
         self.steps = 0;
     }
 
@@ -1313,7 +1314,10 @@ mod tests {
         let started = std::time::Instant::now();
         let flagged = contains_profanity(&title, &[]);
         let elapsed = started.elapsed();
-        assert!(!flagged, "no list word is spellable from a `t`/`i`-only title");
+        assert!(
+            !flagged,
+            "no list word is spellable from a `t`/`i`-only title"
+        );
         assert!(
             elapsed < std::time::Duration::from_secs(1),
             "matcher took {elapsed:?} on a {}-char title",
