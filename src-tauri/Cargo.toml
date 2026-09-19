@@ -8,7 +8,7 @@ rust-version = "1.96"
 
 [lib]
 name = "presence_jam_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "~2.6", features = [] }
@@ -76,3 +76,21 @@ aes-gcm = "0.11.0"
 # `TeamsTokens.expires_at` are `chrono::DateTime<Utc>`. See issue #78.
 ts-rs = { version = "12", features = ["chrono-impl"] }
 tauri-plugin-global-shortcut = "~2.3"
+
+# Release profile (issue #899). Cargo builds release artefacts with 16 codegen
+# units, no cross-crate LTO and a full symbol table by default, and every
+# shipped artefact — MSI, NSIS setup, DMG, .app.tar.gz, deb, AppImage — paid
+# for it. `thin` LTO keeps the compile in the same order of magnitude as the
+# previous profile while still cutting across crates.
+#
+# `panic = "abort"` removes unwinding, so the crash path has to be checked:
+# the panic hook in lib.rs logs `[PANIC] ...` through tauri-plugin-log, whose
+# file target is a fern Output::writer — fern flushes the writer after every
+# record (fern 0.7.1, writer_log_impl), and tauri-plugin-log's
+# RotatingFile::flush writes the buffer to the file and flushes it. abort()
+# skips destructors, not the hook, so the line still reaches the log file.
+[profile.release]
+codegen-units = 1
+lto = "thin"
+panic = "abort"
+strip = true

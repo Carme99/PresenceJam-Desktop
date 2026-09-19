@@ -35,6 +35,14 @@ jobs:
   # Fails fast if the resolved name is not an existing v* tag.
   resolve-tag:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Least privilege (issue #925): this job only probes a public tag over
+    # unauthenticated HTTPS and checks out with persist-credentials: false,
+    # so it needs no write access. Declaring the block stops it inheriting
+    # the workflow-level contents:write grant — and drifting into a
+    # privileged state as steps get added.
+    permissions:
+      contents: read
     outputs:
       tag: ${{ steps.resolve.outputs.tag }}
     steps:
@@ -75,6 +83,11 @@ jobs:
           persist-credentials: false
           ref: ${{ steps.resolve.outputs.tag }}
 
+      # All six version literals (issue #832): the three manifests plus
+      # package-lock.json's two literals and Cargo.lock's `presence-jam`
+      # entry. A partial bump that skips a lockfile shipped a release whose
+      # npm/cargo metadata disagreed with the binary it published; the
+      # manifests alone cannot catch that.
       - name: Verify version consistency
         env:
           RELEASE_TAG: ${{ steps.resolve.outputs.tag }}
@@ -83,13 +96,28 @@ jobs:
           EXPECTED="${RELEASE_TAG#v}"
           CONFIG_VERSION=$(jq -r .version src-tauri/tauri.conf.json)
           PKG_VERSION=$(jq -r .version package.json)
+          PKG_LOCK_VERSION=$(jq -r .version package-lock.json)
+          PKG_LOCK_ROOT_VERSION=$(jq -r '.packages[""].version' package-lock.json)
           CARGO_VERSION=$(sed -nE 's/^version = "(.*)"/\1/p' src-tauri/Cargo.toml | head -1)
+          # The `presence-jam` [[package]] block in the lock: match the name
+          # line exactly (a dependency edge reads `"presence-jam",`, never
+          # `name = ...`) and take the version line that follows it.
+          CARGO_LOCK_VERSION=$(awk -F'"' '$0 == "name = \"presence-jam\"" {found=1} found && /^version = / {print $2; exit}' src-tauri/Cargo.lock)
           echo "Tag ${RELEASE_TAG} implies version ${EXPECTED}"
           echo "src-tauri/tauri.conf.json : ${CONFIG_VERSION}"
           echo "package.json              : ${PKG_VERSION}"
+          echo "package-lock.json         : ${PKG_LOCK_VERSION}"
+          echo "package-lock.json (root)  : ${PKG_LOCK_ROOT_VERSION}"
           echo "src-tauri/Cargo.toml      : ${CARGO_VERSION}"
+          echo "src-tauri/Cargo.lock      : ${CARGO_LOCK_VERSION}"
           drift=0
-          for entry in "src-tauri/tauri.conf.json:${CONFIG_VERSION}" "package.json:${PKG_VERSION}" "src-tauri/Cargo.toml:${CARGO_VERSION}"; do
+          for entry in \
+            "src-tauri/tauri.conf.json:${CONFIG_VERSION}" \
+            "package.json:${PKG_VERSION}" \
+            "package-lock.json:${PKG_LOCK_VERSION}" \
+            "package-lock.json packages[\"\"]:${PKG_LOCK_ROOT_VERSION}" \
+            "src-tauri/Cargo.toml:${CARGO_VERSION}" \
+            "src-tauri/Cargo.lock presence-jam:${CARGO_LOCK_VERSION}"; do
             file="${entry%:*}"
             version="${entry##*:}"
             if [ "$version" != "$EXPECTED" ]; then
@@ -98,6 +126,29 @@ jobs:
             fi
           done
           exit "$drift"
+
+      # Changelog gate (issue #834): changelog-links only pairs headers that
+      # already exist with their link definitions, so a tag for a version with
+      # no section at all passed every job. A beta tag (vX.Y.Z-beta.N) is gated
+      # against the section of the version it will become: the note is written
+      # once for the release, not per beta.
+      - name: Verify CHANGELOG section and STATE-OF-FEATURES header
+        env:
+          RELEASE_TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          EXPECTED="${RELEASE_TAG#v}"
+          EXPECTED_BASE="${EXPECTED%%-*}"
+          missing=0
+          if ! grep -q "^## \[${EXPECTED_BASE}\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [${EXPECTED_BASE}]' section for tag ${RELEASE_TAG}"
+            missing=1
+          fi
+          if ! grep -q "^# State of Features — v${EXPECTED_BASE}" docs/STATE-OF-FEATURES.md; then
+            echo "::error::docs/STATE-OF-FEATURES.md has no '# State of Features — v${EXPECTED_BASE}' header for tag ${RELEASE_TAG}"
+            missing=1
+          fi
+          exit "$missing"
 
   # Verification gate (issue #606): ci.yml enforces fmt, clippy, the test
   # suites and the Svelte/TS type check on pull_request / push-to-main
@@ -161,7 +212,7 @@ jobs:
       - name: Cargo clippy (deny warnings)
         env:
           CARGO_INCREMENTAL: 0
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+        run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
       # Runs before the type check on purpose: the ts-rs `#[ts(export)]`
       # tests materialise src/lib/types-generated/, which src/lib/types.ts
@@ -169,17 +220,29 @@ jobs:
       - name: Cargo test (all targets)
         env:
           CARGO_INCREMENTAL: 0
-        run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --all-targets
 
       - name: Svelte/TS type check (npm run check)
         run: npm run check
 
-      - name: Frontend unit tests (npm test)
-        run: npm test
+      # The coverage variant, not bare `npm test` (issue #833): this job
+      # exists to rerun the ci.yml gate set on the exact commit that produces
+      # the shipped binaries, and ci.yml's frontend job gates on the four
+      # thresholds in vitest.config.js. Running the fast variant here applied
+      # one gate fewer than the PR path — a tag cut on a re-cut commit that
+      # never saw CI would publish a coverage regression. Same command, same
+      # step name and same position (after the type check) as ci.yml.
+      - name: Frontend unit tests + coverage ratchet (npm run test:coverage)
+        run: npm run test:coverage
 
   build:
     needs: [resolve-tag, verify]
     runs-on: ${{ matrix.os }}
+    # The macOS leg is the long pole: the job's own note below puts a cold
+    # compile at ~50 minutes. 90 leaves headroom for a cold runner without
+    # allowing a wedged npm ci or linker to burn GitHub's 360-minute
+    # default on each of the three legs (issue #830).
+    timeout-minutes: 90
     # Least privilege for the build matrix: read-only repo access plus
     # the OIDC (id-token) and attestations scopes consumed by
     # actions/attest-build-provenance below. The publishing jobs keep
@@ -200,20 +263,19 @@ jobs:
             bundle_path: |
               PresenceJam-macos.dmg
               PresenceJam-${{ needs.resolve-tag.outputs.tag }}.app.tar.gz
-              PresenceJam-${{ needs.resolve-tag.outputs.tag }}.app.tar.gz.sig
           - os: windows-latest
             target: ''
-            artifact_name: PresenceJam-${{ needs.resolve-tag.outputs.tag }}.msi
+            artifact_name: PresenceJam-${{ needs.resolve-tag.outputs.tag }}-windows
             bundle_path: |
+              PresenceJam-${{ needs.resolve-tag.outputs.tag }}-setup.exe
               PresenceJam-${{ needs.resolve-tag.outputs.tag }}.msi
-              PresenceJam-${{ needs.resolve-tag.outputs.tag }}.msi.sig
           - os: ubuntu-latest
             target: ''
             artifact_name: PresenceJam-${{ needs.resolve-tag.outputs.tag }}-linux-amd64
             bundle_path: |
               PresenceJam-linux-amd64.deb
+              PresenceJam-linux-amd64.rpm
               PresenceJam-linux-amd64.AppImage
-              PresenceJam-${{ needs.resolve-tag.outputs.tag }}.AppImage.sig
 
     steps:
       - name: Checkout repository
@@ -252,26 +314,32 @@ jobs:
       - name: Build frontend
         run: npm run build
 
+      # SECURITY (issue #828): these three steps compile far more than this
+      # crate — `beforeBuildCommand` runs `npm run build` (Vite plus every
+      # plugin under node_modules) and the cargo build executes build scripts
+      # for the whole dependency tree, all inheriting this step's environment.
+      # The updater signing key is the only trust anchor an installed client
+      # has, so it is NOT here: the build runs with createUpdaterArtifacts
+      # disabled (which is also what stops `tauri build` from signing) and
+      # uploads unsigned payloads. The `sign` job signs them afterwards and is
+      # the only place the key is exported. The --config override deep-merges,
+      # so it touches nothing else in tauri.conf.json.
       - name: Build Tauri (macOS)
         if: matrix.os == 'macos-latest'
         env:
           CARGO_INCREMENTAL: 0
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npx tauri build --target ${{ matrix.target }}
+        run: npx tauri build --target ${{ matrix.target }} --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
       - name: Build Tauri (Windows)
         if: matrix.os == 'windows-latest'
         env:
           CARGO_INCREMENTAL: 0
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npx tauri build
+        run: npx tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
       # Tauri on Linux pulls in glib-sys/webkit2gtk-sys/etc. via FFI
       # bindings, so the Ubuntu runner needs the GTK + webkit2gtk system
       # headers and pkg-config. Mirrors the pr-time ci.yml setup. The
-      # Linux build produces both .deb (Debian package) and .AppImage
+      # Linux build produces the .deb, the .rpm and the .AppImage
       # (universal single-file binary) in one `tauri build` invocation.
       - name: Install Linux system dependencies
         if: matrix.os == 'ubuntu-latest'
@@ -286,13 +354,39 @@ jobs:
             pkg-config \
             build-essential
 
+      # AppStream gate (issue #900): the metainfo is shipped inside the .deb
+      # and the .rpm through bundle.linux.deb.files / bundle.linux.rpm.files,
+      # and a package without it is invisible to GNOME Software and KDE
+      # Discover. Validate the source file before the compile so a broken one
+      # fails in seconds, and require its newest <release> entry to name the
+      # version being cut — otherwise the package advertises a release that is
+      # several versions old. appstreamcli's network checks are off so the gate
+      # is hermetic.
+      - name: Verify AppStream metainfo
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends appstream rpm cpio
+          METAINFO="src-tauri/linux/com.presencejam.app.metainfo.xml"
+          if [ ! -f "$METAINFO" ]; then
+            echo "::error::$METAINFO is missing — the deb and rpm would ship without AppStream data"
+            exit 1
+          fi
+          appstreamcli validate --no-net "$METAINFO"
+          BLOCK_VERSION="${RELEASE_TAG#v}"
+          BLOCK_VERSION="${BLOCK_VERSION%%-*}"
+          TOP_RELEASE=$(grep -oE '<release version="[^"]+"' "$METAINFO" | head -1 | sed -E 's/.*"(.*)"/\1/')
+          if [ "$TOP_RELEASE" != "$BLOCK_VERSION" ]; then
+            echo "::error::$METAINFO's newest release entry says '${TOP_RELEASE}' but this tag builds '${BLOCK_VERSION}' — add the release entry"
+            exit 1
+          fi
+          echo "AppStream metainfo validates; newest release ${TOP_RELEASE}"
+
       - name: Build Tauri (Linux)
         if: matrix.os == 'ubuntu-latest'
         env:
           CARGO_INCREMENTAL: 0
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npx tauri build
+        run: npx tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
       - name: Debug macOS bundle
         if: matrix.os == 'macos-latest'
@@ -309,76 +403,111 @@ jobs:
           echo "Found dmg: $dmg_path"
           cp "$dmg_path" "PresenceJam-macos.dmg"
 
-      # The updater plugin consumes the signed .app.tar.gz (+ .sig) from
-      # the bundle; copy them to the deterministic release names so the
-      # latest.json URLs are stable across versions.
-      - name: Package macOS updater artifacts
+      # The updater payload for macOS is the .app.tar.gz, and tauri's updater
+      # bundler is what used to create it — with createUpdaterArtifacts
+      # disabled (issue #828) this leg tar.gz's the bundle itself. The layout
+      # is the one tauri would have produced: a single PresenceJam.app root
+      # entry (tauri-bundler appends src_dir.file_name() / the same directory,
+      # `tar -C <bundle/macos> PresenceJam.app`), so the updater's extraction
+      # and the in-app install are unchanged. It is unsigned here on purpose;
+      # the `sign` job signs it after the compile.
+      - name: Package macOS updater payload
         if: matrix.os == 'macos-latest'
         run: |
           set -euo pipefail
-          TARGZ=$(find src-tauri/target/${{ matrix.target }}/release/bundle/macos -name "*.app.tar.gz" 2>/dev/null | head -1)
-          SIG="${TARGZ}.sig"
-          if [ -z "$TARGZ" ] || [ ! -f "$SIG" ]; then
-            echo "::error::Expected .app.tar.gz and .sig in bundle/macos/"
+          APP=$(find src-tauri/target/${{ matrix.target }}/release/bundle/macos -maxdepth 1 -name "*.app" 2>/dev/null | head -1)
+          if [ -z "$APP" ] || [ ! -d "$APP" ]; then
+            echo "::error::Expected the .app bundle in bundle/macos/"
             ls -la src-tauri/target/${{ matrix.target }}/release/bundle/macos/ 2>&1 || echo "(missing)"
             exit 1
           fi
-          cp "$TARGZ" "PresenceJam-$RELEASE_TAG.app.tar.gz"
-          cp "$SIG" "PresenceJam-$RELEASE_TAG.app.tar.gz.sig"
-          echo "Packaged updater artifacts:"
-          ls -la PresenceJam-$RELEASE_TAG.app.tar.gz*
+          tar -czf "PresenceJam-$RELEASE_TAG.app.tar.gz" -C "$(dirname "$APP")" "$(basename "$APP")"
+          echo "Packaged updater payload:"
+          ls -la PresenceJam-$RELEASE_TAG.app.tar.gz
 
-      - name: Rename Windows MSI
+      # Two installers, deliberately (issue #897). The NSIS setup is the
+      # updater payload: it honours bundle.windows.nsis.installMode =
+      # currentUser, so it installs per-user with no elevation — the MSI
+      # installs per-machine under Program Files and cannot be installed (or
+      # updated) by a non-admin user, which left those users with no way in.
+      # The MSI stays published for managed machines. Tauri names the pair
+      # PresenceJam_<version>_x64-setup.exe / PresenceJam_<version>_x64_en-US.msi;
+      # both are republished under version-stable names.
+      - name: Package Windows installers
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
-          $msi = Get-ChildItem "src-tauri/target/release/bundle/msi" -Filter "*.msi" | Select-Object -First 1
-          Copy-Item $msi.FullName "PresenceJam-$env:RELEASE_TAG.msi"
-
-      # The MSI itself is the updater artifact; ship its .sig alongside
-      # under the deterministic release name (the .msi is already renamed
-      # above and uploaded via bundle_path).
-      - name: Package Windows updater signature
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          $sig = Get-ChildItem "src-tauri/target/release/bundle/msi" -Filter "*.msi.sig" | Select-Object -First 1
-          if (-not $sig) {
-            Write-Error "Expected .msi.sig in bundle/msi/"
+          $setup = Get-ChildItem "src-tauri/target/release/bundle/nsis" -Filter "*-setup.exe" | Select-Object -First 1
+          if (-not $setup) {
+            Write-Error "Expected a NSIS *-setup.exe in bundle/nsis/ (is nsis still in bundle.targets?)"
             exit 1
           }
-          Copy-Item $sig.FullName "PresenceJam-$env:RELEASE_TAG.msi.sig"
-          Get-ChildItem "PresenceJam-$env:RELEASE_TAG.msi.sig"
+          Copy-Item $setup.FullName "PresenceJam-$env:RELEASE_TAG-setup.exe"
+          $msi = Get-ChildItem "src-tauri/target/release/bundle/msi" -Filter "*.msi" | Select-Object -First 1
+          if (-not $msi) {
+            Write-Error "Expected a .msi in bundle/msi/"
+            exit 1
+          }
+          Copy-Item $msi.FullName "PresenceJam-$env:RELEASE_TAG.msi"
+          Get-ChildItem "PresenceJam-$env:RELEASE_TAG-setup.exe", "PresenceJam-$env:RELEASE_TAG.msi"
+
+      # The .sig files for both installers are produced by the `sign` job
+      # (issue #828): the private key must not be in this job's environment.
 
       # Linux artifacts are named like `presence-jam_2.7.2_amd64.deb` by
       # Tauri's bundler. Rename to the project-standard format used by
-      # the macOS and Windows steps (PresenceJam-<version>-<os>.ext) and
-      # drop the .AppImage alongside.
+      # the macOS and Windows steps (PresenceJam-<version>-<os>.ext), drop
+      # the .AppImage alongside and pick up the .rpm (issue #900: Fedora,
+      # RHEL and openSUSE users had no native install path — only the deb and
+      # the AppImage were packaged).
       - name: Package Linux artifacts
         if: matrix.os == 'ubuntu-latest'
         run: |
           set -euo pipefail
           DEB=$(find src-tauri/target/release/bundle/deb -name "*.deb" | head -1)
+          RPM=$(find src-tauri/target/release/bundle/rpm -name "*.rpm" | head -1)
           APPIMAGE=$(find src-tauri/target/release/bundle/appimage -name "*.AppImage" | head -1)
-          if [ -z "$DEB" ] || [ -z "$APPIMAGE" ]; then
-            echo "::error::Expected one .deb in bundle/deb/ and one .AppImage in bundle/appimage/"
-            echo "bundle/deb/:"
-            ls -la src-tauri/target/release/bundle/deb/ 2>&1 || echo "(missing)"
-            echo "bundle/appimage/:"
-            ls -la src-tauri/target/release/bundle/appimage/ 2>&1 || echo "(missing)"
+          if [ -z "$DEB" ] || [ -z "$RPM" ] || [ -z "$APPIMAGE" ]; then
+            echo "::error::Expected one .deb in bundle/deb/, one .rpm in bundle/rpm/ and one .AppImage in bundle/appimage/"
+            for d in deb rpm appimage; do
+              echo "bundle/$d/:"
+              ls -la "src-tauri/target/release/bundle/$d/" 2>&1 || echo "(missing)"
+            done
             exit 1
           fi
           cp "$DEB" "PresenceJam-linux-amd64.deb"
+          cp "$RPM" "PresenceJam-linux-amd64.rpm"
           cp "$APPIMAGE" "PresenceJam-linux-amd64.AppImage"
-          APPIMAGE_SIG="${APPIMAGE}.sig"
-          if [ ! -f "$APPIMAGE_SIG" ]; then
-            echo "::error::Expected .AppImage.sig in bundle/appimage/"
-            ls -la src-tauri/target/release/bundle/appimage/ 2>&1 || echo "(missing)"
+          # The AppImage's .sig comes from the `sign` job (issue #828).
+
+          # The metainfo has to be INSIDE the packages: the files map in
+          # tauri.conf.json is what puts it there, and a typo in that map is
+          # invisible until a software centre refuses to index the package.
+          # Assert the packaged payload, not the source file.
+          METAINFO_PATH="usr/share/metainfo/com.presencejam.app.metainfo.xml"
+          if ! dpkg-deb --fsys-tarfile "PresenceJam-linux-amd64.deb" | tar -t | grep -Fqx "./${METAINFO_PATH}"; then
+            echo "::error::${METAINFO_PATH} is not in PresenceJam-linux-amd64.deb — check bundle.linux.deb.files"
             exit 1
           fi
-          cp "$APPIMAGE_SIG" "PresenceJam-$RELEASE_TAG.AppImage.sig"
+          if ! rpm2cpio "PresenceJam-linux-amd64.rpm" | cpio -t --quiet | grep -Fqx "./${METAINFO_PATH}"; then
+            echo "::error::${METAINFO_PATH} is not in PresenceJam-linux-amd64.rpm — check bundle.linux.rpm.files"
+            exit 1
+          fi
           echo "Packaged:"
-          ls -la PresenceJam-linux-amd64.* PresenceJam-$RELEASE_TAG.AppImage.sig
+          ls -la PresenceJam-linux-amd64.*
+
+      # Artefact sizes (issue #899): a profile change is unmeasurable without a
+      # printed number, and the run log is where the next one gets compared to
+      # it. shell: bash explicitly, because the default shell on the Windows
+      # leg is pwsh and this uses the same command on all three.
+      - name: Report artifact sizes
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in PresenceJam-*; do
+            [ -f "$f" ] || continue
+            printf '%s  %s bytes\n' "$f" "$(wc -c < "$f" | tr -d '[:space:]')"
+          done
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -398,12 +527,126 @@ jobs:
         with:
           subject-path: ${{ matrix.bundle_path }}
 
-  release:
+  # ------------------------------------------------------------------
+  # Updater signing (issue #828)
+  # ------------------------------------------------------------------
+  # The updater signing key is the only trust anchor an installed client has:
+  # whoever holds it can sign a bundle every copy accepts as an official
+  # update, so its blast radius is every user rather than this repository.
+  # It must not sit in the environment of `npx tauri build` — that step runs
+  # `npm run build` (Vite plus every plugin under node_modules) and a cargo
+  # build whose build scripts execute for the whole dependency tree, all
+  # inheriting the step environment — so the key is exported here instead, in
+  # one step, after the compile has finished.
+  #
+  # Gated behind the `release-signing` GitHub environment: add required
+  # reviewers to it (Settings -> Environments -> release-signing) so a tag
+  # push cannot sign and publish without a human. Until those reviewers are
+  # configured the environment exists but gates nothing.
+  sign:
     needs: [resolve-tag, build]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: release-signing
+    # id-token + attestations are for the signature attestation below, which
+    # keeps the provenance property the build job's attestation had while the
+    # .sig files were still produced inside the build legs.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     env:
       RELEASE_TAG: ${{ needs.resolve-tag.outputs.tag }}
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.resolve-tag.outputs.tag }}
+
+      # Only for the pinned Tauri CLI. The secrets are NOT in this step's
+      # environment, so the install and its lifecycle scripts never see them.
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6.5.0
+        with:
+          node-version: 24
+          cache: 'npm'
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Download unsigned artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          path: dist
+          digest-mismatch: error
+
+      # The payload set is what latest.json advertises plus the MSI that stays
+      # published for managed machines. Each one is signed with
+      # `tauri signer sign`, which is standalone (it takes no project config),
+      # and its .sig is copied out under the flat release name latest.json and
+      # the release assets use. A missing payload fails here rather than
+      # shipping an install nobody can update.
+      - name: Sign updater payloads
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY is not set — refusing to publish unsigned updater payloads"
+            exit 1
+          fi
+          mkdir -p sig
+          sign() {
+            src="$1"
+            if [ ! -f "$src" ]; then
+              echo "::error::missing updater payload: $src"
+              exit 1
+            fi
+            npx tauri signer sign "$src"
+            if [ ! -s "${src}.sig" ]; then
+              echo "::error::tauri signer produced no signature for $src"
+              exit 1
+            fi
+            cp "${src}.sig" "sig/$(basename "${src}").sig"
+            echo "Signed $(basename "$src")"
+          }
+          sign "dist/PresenceJam-${RELEASE_TAG}-macos.dmg/PresenceJam-${RELEASE_TAG}.app.tar.gz"
+          sign "dist/PresenceJam-${RELEASE_TAG}-windows/PresenceJam-${RELEASE_TAG}-setup.exe"
+          sign "dist/PresenceJam-${RELEASE_TAG}-windows/PresenceJam-${RELEASE_TAG}.msi"
+          sign "dist/PresenceJam-${RELEASE_TAG}-linux-amd64/PresenceJam-linux-amd64.AppImage"
+          echo "=== signatures ==="
+          ls -l sig
+
+      - name: Upload signatures
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: signatures
+          path: sig/*.sig
+          if-no-files-found: error
+
+      - name: Attest updater signatures
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-path: sig/*.sig
+
+  release:
+    needs: [resolve-tag, build, sign]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RELEASE_TAG: ${{ needs.resolve-tag.outputs.tag }}
+    steps:
+      # Needed for CHANGELOG.md: the published body is the changelog section
+      # (issue #834) and this job otherwise works only from downloaded
+      # artifacts. Same tag as every other job; no persisted credentials.
+      - name: Checkout repository at the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.resolve-tag.outputs.tag }}
+
       - name: Download all artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
@@ -429,6 +672,28 @@ jobs:
           echo "=== SHA256SUMS.txt ==="
           cat artifacts/SHA256SUMS.txt
 
+      # The Release body is the hand-written changelog section for this
+      # version, not GitHub's auto-generated PR list (issue #834). resolve-tag
+      # has already failed the run if the section is missing, so this awk only
+      # delimits it: from the '## [VERSION]' header to the next '## [' header.
+      # An empty result fails here rather than publishing a blank body.
+      - name: Extract CHANGELOG section for the release body
+        run: |
+          set -euo pipefail
+          VERSION="${RELEASE_TAG#v}"
+          BLOCK_VERSION="${VERSION%%-*}"
+          awk -v v="$BLOCK_VERSION" '
+            index($0, "## [" v "]") == 1 { in_section = 1; next }
+            in_section && /^## \[/ { exit }
+            in_section
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "::error::CHANGELOG section for ${BLOCK_VERSION} produced an empty release body"
+            exit 1
+          fi
+          echo "=== notes.md ==="
+          head -40 notes.md
+
       - name: Create GitHub Release
         uses: ncipollo/release-action@339a81892b84b4eeb0f6e744e4574d79d0d9b8dd  # v1.21.0
         with:
@@ -439,9 +704,18 @@ jobs:
           tag: ${{ needs.resolve-tag.outputs.tag }}
           artifacts: artifacts/**/*
           draft: false
-          prerelease: false
+          # A beta tag publishes a prerelease (issue #895), so GitHub's
+          # /releases/latest/ — which resolves to the newest release that is
+          # neither a draft nor a prerelease — keeps pointing at the newest
+          # STABLE release and its latest.json. The action compares the input
+          # to the literal string "true", which is what this expression
+          # renders.
+          prerelease: ${{ contains(needs.resolve-tag.outputs.tag, '-beta') }}
           allowUpdates: true
-          generateReleaseNotes: true
+          # bodyFile, not generateReleaseNotes (issue #834): the curated
+          # section is what users are meant to read, and the generated PR list
+          # buried it. allowUpdates stays so a re-cut replaces the body.
+          bodyFile: notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -457,10 +731,13 @@ jobs:
           PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
           # Downloaded artifacts keep the upload-artifact name as a
-          # subdirectory under artifacts/ (download-artifact v4+ layout).
-          MAC_SIG="artifacts/PresenceJam-${RELEASE_TAG}-macos.dmg/PresenceJam-${RELEASE_TAG}.app.tar.gz.sig"
-          WIN_SIG="artifacts/PresenceJam-${RELEASE_TAG}.msi/PresenceJam-${RELEASE_TAG}.msi.sig"
-          LINUX_SIG="artifacts/PresenceJam-${RELEASE_TAG}-linux-amd64/PresenceJam-${RELEASE_TAG}.AppImage.sig"
+          # The .sig files come from the `sign` job's artifacts, which land as
+          # artifacts/signatures/<flat name> (issue #828); they are the
+          # minisign output the updater verifies, uploaded to the Release
+          # alongside the payloads by the release action's artifacts glob.
+          MAC_SIG="artifacts/signatures/PresenceJam-${RELEASE_TAG}.app.tar.gz.sig"
+          WIN_SIG="artifacts/signatures/PresenceJam-${RELEASE_TAG}-setup.exe.sig"
+          LINUX_SIG="artifacts/signatures/PresenceJam-${RELEASE_TAG}.AppImage.sig"
 
           for f in "$MAC_SIG" "$WIN_SIG" "$LINUX_SIG"; do
             if [ ! -s "$f" ]; then
@@ -474,7 +751,7 @@ jobs:
             --arg pub_date "$PUB_DATE" \
             --arg mac_url "https://github.com/Carme99/PresenceJam-Desktop/releases/download/${RELEASE_TAG}/PresenceJam-${RELEASE_TAG}.app.tar.gz" \
             --arg mac_sig "$(cat "$MAC_SIG")" \
-            --arg win_url "https://github.com/Carme99/PresenceJam-Desktop/releases/download/${RELEASE_TAG}/PresenceJam-${RELEASE_TAG}.msi" \
+            --arg win_url "https://github.com/Carme99/PresenceJam-Desktop/releases/download/${RELEASE_TAG}/PresenceJam-${RELEASE_TAG}-setup.exe" \
             --arg win_sig "$(cat "$WIN_SIG")" \
             --arg linux_url "https://github.com/Carme99/PresenceJam-Desktop/releases/download/${RELEASE_TAG}/PresenceJam-linux-amd64.AppImage" \
             --arg linux_sig "$(cat "$LINUX_SIG")" \
@@ -493,6 +770,41 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # Beta channel manifest (issue #895). BETA_ENDPOINT in
+      # src-tauri/src/updater_bg.rs must NOT go through /releases/latest/:
+      # GitHub resolves that path to the newest release that is neither a
+      # draft nor a prerelease, so a beta can never be published under it —
+      # the only release that satisfied the old URL was a normal one, which
+      # then served the beta manifest to every stable user. The pipeline
+      # serves it from a rolling prerelease tagged `beta` instead, which each
+      # beta cut overwrites with --clobber:
+      #   https://github.com/Carme99/PresenceJam-Desktop/releases/download/beta/latest-beta.json
+      - name: Publish beta channel manifest
+        if: contains(needs.resolve-tag.outputs.tag, '-beta')
+        run: |
+          set -euo pipefail
+          # Same body as latest.json: its URLs already point at this beta
+          # release's own artefacts, and its version is the beta's version,
+          # which is what the Beta channel compares against the running one.
+          cp latest.json latest-beta.json
+          if ! gh release view beta --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create beta --repo "$GITHUB_REPOSITORY" \
+              --prerelease \
+              --latest=false \
+              --title "Beta channel" \
+              --notes "Rolling prerelease carrying latest-beta.json for the updater's Beta channel. It must stay a prerelease (so /releases/latest/ keeps resolving to the newest stable) and must not be deleted: the Beta channel endpoint downloads latest-beta.json from this tag."
+          fi
+          gh release upload --clobber --repo "$GITHUB_REPOSITORY" beta latest-beta.json
+          echo "Beta manifest published at https://github.com/${GITHUB_REPOSITORY}/releases/download/beta/latest-beta.json"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # The comment above is now the implementation: the URLs come from
+      # latest.json itself, so a payload-flavour switch (issue #897 moved
+      # windows-x86_64 from the per-machine MSI to the per-user NSIS
+      # setup.exe) cannot silently point users at an asset the build legs no
+      # longer produce. The explicit list below additionally pins which
+      # artefact each platform must ship.
       - name: Verify latest.json assets in release
         run: |
           set -euo pipefail
@@ -504,13 +816,52 @@ jobs:
           gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" --jq '.assets[].name' > /tmp/assets.txt
           echo "=== Release assets ==="
           cat /tmp/assets.txt
-          for expected in "PresenceJam-${RELEASE_TAG}.app.tar.gz" "PresenceJam-${RELEASE_TAG}.msi" "PresenceJam-linux-amd64.AppImage"; do
+          # (a) every URL the manifest advertises must exist on the release.
+          for url in $(jq -r '.platforms[].url' latest.json); do
+            asset="${url##*/}"
+            if ! grep -Fxq "$asset" /tmp/assets.txt; then
+              echo "::error::latest.json points at ${asset} but release ${RELEASE_TAG} does not carry it — the updater would 404"
+              exit 1
+            fi
+            echo "Found manifest asset: ${asset}"
+          done
+          # (b) the payload each platform must be shipping, independent of
+          # whatever the manifest currently says. The .deb and the .rpm are
+          # not updater payloads, but a run that quietly stopped producing
+          # them (issue #900 added the rpm to bundle.targets) would leave
+          # Fedora/RHEL/openSUSE users with nothing to install.
+          for expected in \
+            "PresenceJam-${RELEASE_TAG}.app.tar.gz" \
+            "PresenceJam-${RELEASE_TAG}-setup.exe" \
+            "PresenceJam-linux-amd64.deb" \
+            "PresenceJam-linux-amd64.rpm" \
+            "PresenceJam-linux-amd64.AppImage"; do
             if ! grep -Fxq "$expected" /tmp/assets.txt; then
               echo "::error::Missing expected asset $expected in release ${RELEASE_TAG} — latest.json URL would 404"
               exit 1
             fi
             echo "Found expected asset: $expected"
           done
+          # (c) a beta must be reachable through the Beta channel: resolve the
+          # rolling manifest URL and check it names this build. A 404 there is
+          # the failure the issue describes — every Beta-channel check silently
+          # falling through to stable.
+          case "$RELEASE_TAG" in
+            *-beta*)
+              BETA_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/beta/latest-beta.json"
+              BETA_CODE=$(curl -sSL -o /tmp/latest-beta.json -w '%{http_code}' "$BETA_URL")
+              if [ "$BETA_CODE" != "200" ]; then
+                echo "::error::Beta manifest ${BETA_URL} returned ${BETA_CODE} — the Beta channel would fall through to stable"
+                exit 1
+              fi
+              BETA_VERSION=$(jq -r .version /tmp/latest-beta.json)
+              if [ "$BETA_VERSION" != "${RELEASE_TAG#v}" ]; then
+                echo "::error::Beta manifest ${BETA_URL} reports version '${BETA_VERSION}', expected '${RELEASE_TAG#v}'"
+                exit 1
+              fi
+              echo "Beta manifest verified: ${BETA_URL} -> ${BETA_VERSION}"
+              ;;
+          esac
           echo "All expected updater assets verified"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -520,7 +871,7 @@ jobs:
   # ------------------------------------------------------------------
   # Runs after the GitHub Release is published so the DMG is available
   # at a stable URL. Pulls the artifact, computes its SHA256, and
-  # updates the presence-jam formula in the tap.
+  # updates the presence-jam cask in the tap.
   #
   # Required GitHub Actions secret (must be set in the repo's secrets
   # before the next v* tag push):
@@ -529,13 +880,14 @@ jobs:
   #                         (A fine-grained PAT scoped only to that
   #                         repo is the safer choice.)
   #
-  # The job is self-bootstrapping: if presence-jam.rb doesn't exist
+  # The job is self-bootstrapping: if Casks/presence-jam.rb doesn't exist
   # in the tap yet, it creates it. If it does, it updates version /
-  # url / sha256. A no-op if the formula is already at the same
+  # url / sha256. A no-op if the cask is already at the same
   # version (so re-running the workflow doesn't churn git history).
   homebrew:
     needs: [resolve-tag, release]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # Least privilege (issue #359): this job pushes to carme99/homebrew-tap
     # via HOMEBREW_TAP_TOKEN, so it must not inherit the workflow-level
     # contents:write grant (mirrors the winget job below).
@@ -571,7 +923,7 @@ jobs:
           sha256sum PresenceJam-macos.dmg | tee sha256.txt
           echo "Computed SHA256 for $RELEASE_TAG"
 
-      - name: Update Homebrew formula in carme99/homebrew-tap
+      - name: Update Homebrew cask in carme99/homebrew-tap
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
@@ -584,11 +936,11 @@ jobs:
           VERSION="${RELEASE_TAG#v}"  # strip leading 'v'
           DMG_URL="https://github.com/Carme99/PresenceJam-Desktop/releases/download/${RELEASE_TAG}/PresenceJam-macos.dmg"
           SHA=$(awk '{print $1}' dist/sha256.txt)
-          echo "Updating tap formula to v${VERSION} (sha256=${SHA})"
+          echo "Updating tap cask to v${VERSION} (sha256=${SHA})"
 
-          # Render the formula from the template in homebrew/presence-jam.rb
+          # Render the cask from the template in homebrew/presence-jam.rb
           # by substituting the placeholders. The template is checked in
-          # so the formula content is reviewable in normal diffs and doesn't
+          # so the cask content is reviewable in normal diffs and doesn't
           # live inside the workflow YAML.
           sed -e "s|__URL__|${DMG_URL}|g" \
               -e "s|__SHA256__|${SHA}|g" \
@@ -613,35 +965,64 @@ jobs:
           # Sanity-check the credential helper works before any commit/push.
           git ls-remote --heads origin main >/dev/null
 
-          # A no-op only when the formula already describes this exact
+          # The cask lives under Casks/ (issue #898). The tap used to carry a
+          # formula at its root; a tap holding both a formula and a cask of the
+          # same name is ambiguous, so the stale root formula is removed in the
+          # same commit that writes the cask.
+          CASK_PATH="Casks/presence-jam.rb"
+          STALE_FORMULA="presence-jam.rb"
+
+          # A no-op only when the cask already describes this exact
           # artifact: same version AND same sha256. The version alone is
           # not enough — a re-cut can republish a byte-different DMG
           # under the same version (see the winget job's note below), and
           # exiting early here would leave the tap pinned to a dead
-          # digest while CI reports success.
-          if [ -f presence-jam.rb ]; then
-            CURRENT_VERSION=$(grep -E '^  version ' presence-jam.rb | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
-            CURRENT_SHA=$(grep -E '^  sha256 ' presence-jam.rb | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
-            if [ "${CURRENT_VERSION}" = "${VERSION}" ] && [ "${CURRENT_SHA}" = "${SHA}" ]; then
-              echo "Formula is already at v${VERSION} (sha256=${SHA}), no change"
+          # digest while CI reports success. A leftover formula is also
+          # work, so its presence forces the commit below.
+          if [ -f "$CASK_PATH" ]; then
+            CURRENT_VERSION=$(grep -E '^  version ' "$CASK_PATH" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+            CURRENT_SHA=$(grep -E '^  sha256 ' "$CASK_PATH" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+            if [ "${CURRENT_VERSION}" = "${VERSION}" ] && [ "${CURRENT_SHA}" = "${SHA}" ] && [ ! -f "$STALE_FORMULA" ]; then
+              echo "Cask is already at v${VERSION} (sha256=${SHA}) and no stale formula remains, no change"
               exit 0
             fi
-            echo "Formula currently at v${CURRENT_VERSION} (sha256=${CURRENT_SHA}), updating to v${VERSION} (sha256=${SHA})"
+            echo "Cask currently at v${CURRENT_VERSION} (sha256=${CURRENT_SHA}), updating to v${VERSION} (sha256=${SHA})"
           else
-            echo "Formula does not exist yet, creating it"
+            echo "Cask does not exist yet, creating it"
           fi
 
-          cp ../presence-jam.rb.rendered presence-jam.rb
+          if [ -f "$STALE_FORMULA" ]; then
+            git rm -q "$STALE_FORMULA"
+            echo "Removed stale formula ${STALE_FORMULA} (formula -> cask migration, issue #898)"
+          fi
+          mkdir -p Casks
+          cp ../presence-jam.rb.rendered "$CASK_PATH"
           git config user.name "Nova"
           git config user.email "nova@lee-lab.local"
-          git add presence-jam.rb
-          git commit -m "presence-jam: bump to v${VERSION}"
+          git add "$CASK_PATH"
+          if git diff --cached --quiet; then
+            echo "Tap already matches v${VERSION}, nothing to commit"
+            exit 0
+          fi
+          git commit -m "presence-jam: cask to v${VERSION}"
           git push origin main
-          echo "Tap updated: carme99/homebrew-tap presence-jam.rb -> v${VERSION}"
+          echo "Tap updated: carme99/homebrew-tap ${CASK_PATH} -> v${VERSION}"
 
   winget:
     needs: [resolve-tag, release]
     runs-on: windows-latest
+    timeout-minutes: 30
+    # Blast-radius gate (issue #914). WINGET_TOKEN has to be a CLASSIC PAT
+    # (the releaser action does not support fine-grained ones), and a classic
+    # PAT's public_repo scope reaches every public repository the account can
+    # push to — the fork in the comment below is where the manifest is
+    # SUBMITTED, not the limit of what the token can do. With its `workflow`
+    # scope it can also rewrite .github/workflows, i.e. this workflow and the
+    # signing secrets it uses. Submitting a winget manifest therefore needs a
+    # human approval: add required reviewers to this environment in the
+    # repository settings (Settings -> Environments -> winget-publish). Until
+    # that is configured the environment exists but gates nothing.
+    environment: winget-publish
     permissions:
       contents: read
     steps:
@@ -669,7 +1050,14 @@ jobs:
       # action pushes the manifest branch to the fork and opens the PR
       # fork -> microsoft/winget-pkgs. Keep the
       # fork alive; komac syncs it with upstream before each run.
-      # Rotate the PAT on a 90-day cadence.
+      # Rotate the PAT every 30 days, not 90 (issue #914): SECURITY.md accepts
+      # 30 days where rotation can be automated, and a token this reachy does
+      # not deserve a quarter. It is account-wide — `public_repo` reaches
+      # every public repository the account can push to, `workflow` reaches
+      # .github/workflows here (the repository holding
+      # TAURI_SIGNING_PRIVATE_KEY) — so a leaked token is a
+      # full-repository compromise: revoke it first, then review recent
+      # workflow runs and the branch/tag history before anything else.
       # See docs: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens
       # HEAD after v2 (only tag is v2 = 4ffc7888): adds the `komac
       # sync-fork` step, which is REQUIRED for the fork path — komac
