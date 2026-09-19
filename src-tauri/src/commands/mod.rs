@@ -221,4 +221,153 @@ mod tests {
             );
         }
     }
+
+    /// Issue #215/#928: the only commands in this slice's files that may stay
+    /// synchronous. Each carries a documented "no disk, network or keychain
+    /// IO" decision at its definition, so a fast window-manager call or a
+    /// pure string substitution is not pushed onto the blocking pool. A new
+    /// synchronous command must be added here with its rationale (it is a
+    /// deliberate decision, not a default) or made `async`.
+    const SYNC_EXCEPTIONS: &[&str] = &["preview_status", "show_window"];
+
+    /// Issue #928: a `#[tauri::command]` body that does network, disk or
+    /// keychain work. Comment text is included in the haystack, so the cost
+    /// is an occasional false positive — never a false negative (the guard
+    /// exists to catch an unconverted command, not to bless one).
+    fn touches_blocking_io(body: &str) -> bool {
+        ["keychain::", "persist_tokens", "reqwest"]
+            .iter()
+            .any(|needle| body.contains(needle))
+    }
+
+    /// Parse every `#[tauri::command]` item out of a command module's source
+    /// into `(name, is_async, body)`. Bodies are brace-counted from the first
+    /// `{` after the signature (house style: never boundary anchors), and the
+    /// attribute marker means plain helper fns are skipped.
+    fn commands_in(src: &str) -> Vec<(String, bool, String)> {
+        let mut found = Vec::new();
+        let mut rest = src;
+        while let Some(attr) = rest.find("#[tauri::command]") {
+            let after_attr = &rest[attr..];
+            let Some(fn_rel) = after_attr.find("fn ") else {
+                break;
+            };
+            let is_async = after_attr[..fn_rel].contains("async ");
+            let after_fn = &after_attr[fn_rel + "fn ".len()..];
+            let Some(paren_rel) = after_fn.find('(') else {
+                break;
+            };
+            let name = after_fn[..paren_rel].trim().to_string();
+            let Some(brace_rel) = after_fn.find('{') else {
+                break;
+            };
+            let mut depth = 0usize;
+            let mut end = None;
+            for (i, ch) in after_fn[brace_rel..].char_indices() {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = Some(brace_rel + i + 1);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let Some(end) = end else {
+                break;
+            };
+            found.push((name, is_async, after_fn[brace_rel..end].to_string()));
+            rest = &after_fn[end..];
+        }
+        found
+    }
+
+    /// Issue #928: Tauri runs a non-async `#[tauri::command]` on the main/UI
+    /// thread, so a synchronous command that reads the keychain, does an HTTPS
+    /// round trip or fsyncs freezes the window, the tray menu and window
+    /// events for the whole call — the class #215 fixed elsewhere and left its
+    /// "all commands touching network/disk/keychain declared async" item
+    /// unchecked for.
+    ///
+    /// Scope (orchestrator ruling, 2026-09-19): #928 asked this guard to scan
+    /// every `#[tauri::command]` in the tree. Scanning the tree from this
+    /// branch would fail on files owned by other slices that are not converted
+    /// here, so the three files this slice owns are scanned in full and the
+    /// remainder is tracked in `W1-NOTES.md` (`commands/config.rs::load_config`;
+    /// `commands/spotify_auth.rs::refresh_spotify`, `start_spotify_reconnect`,
+    /// `reconnect_spotify_session`). Wave 2 tightens this to the whole tree
+    /// once that remainder is off the main thread.
+    #[test]
+    fn test_commands_touching_io_are_async_and_offloaded() {
+        // Positive control: the detector must fire on a body that does exactly
+        // the work this guard is about, or the guard would pass forever.
+        let fixture = concat!(
+            "#[tauri::command]\n",
+            "pub fn probe(state: tauri::State<'_, ()>) -> Result<(), String> {\n",
+            "    let _ = keychain::get_spotify_client_secret();\n",
+            "    Ok(())\n",
+            "}\n",
+        );
+        let parsed = commands_in(fixture);
+        assert_eq!(parsed.len(), 1, "the scanner must find one command");
+        assert!(
+            !parsed[0].1,
+            "the fixture must parse as a synchronous command"
+        );
+        assert!(
+            touches_blocking_io(&parsed[0].2),
+            "the detector must fire on a keychain read (issue #928)"
+        );
+
+        let mut scanned: Vec<String> = Vec::new();
+        for (file, src) in [
+            ("commands/sync.rs", include_str!("sync.rs")),
+            ("commands/window.rs", include_str!("window.rs")),
+            ("commands/misc.rs", include_str!("misc.rs")),
+        ] {
+            for (name, is_async, body) in commands_in(src) {
+                if touches_blocking_io(&body) {
+                    assert!(
+                        is_async,
+                        "{file}::{name} does network/disk/keychain work in a \
+                         synchronous command, so Tauri runs it on the main \
+                         thread and freezes the UI — make it async and offload \
+                         the body (issue #928)"
+                    );
+                    assert!(
+                        body.contains("spawn_blocking"),
+                        "{file}::{name} is async but does not offload its \
+                         blocking work to the blocking pool (issue #928)"
+                    );
+                } else {
+                    assert!(
+                        is_async || SYNC_EXCEPTIONS.contains(&name.as_str()),
+                        "{file}::{name} is a new synchronous command: make it \
+                         async with a blocking offload, or add it to \
+                         SYNC_EXCEPTIONS with its no-IO rationale (issue #928)"
+                    );
+                }
+                scanned.push(name);
+            }
+        }
+
+        // Scanner sanity + no stale exceptions: both prove the parse above
+        // really walked these files rather than finding nothing.
+        for expected in ["show_window", "preview_status", "relaunch_app", "get_sync_status"] {
+            assert!(
+                scanned.iter().any(|name| name.as_str() == expected),
+                "the scanner must see `{expected}` (issue #928)"
+            );
+        }
+        for allowed in SYNC_EXCEPTIONS {
+            assert!(
+                scanned.iter().any(|name| name.as_str() == *allowed),
+                "SYNC_EXCEPTIONS lists `{allowed}`, which no longer exists — \
+                 drop the stale exception (issue #928)"
+            );
+        }
+    }
 }
