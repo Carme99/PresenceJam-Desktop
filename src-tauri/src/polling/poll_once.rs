@@ -5679,6 +5679,9 @@ mod tests {
                 is_playing: true,
                 progress_ms: Some(0),
                 duration_ms: 0,
+                volume_percent: None,
+                supports_volume: None,
+                actions: None,
             },
             episode: None,
             context: crate::spotify::PlaybackContext {
@@ -5736,6 +5739,9 @@ mod tests {
             is_playing: true,
             progress_ms: Some(0),
             duration_ms: 0,
+            volume_percent: None,
+            supports_volume: None,
+            actions: None,
         };
         let as_track = status_track_key(
             &crate::spotify::NowPlaying {
@@ -5769,6 +5775,9 @@ mod tests {
                     is_playing: true,
                     progress_ms: Some(0),
                     duration_ms: 0,
+                    volume_percent: None,
+                    supports_volume: None,
+                    actions: None,
                 },
                 episode: Some(crate::spotify::EpisodeInfo {
                     show_name: "The Deep Work Show".to_string(),

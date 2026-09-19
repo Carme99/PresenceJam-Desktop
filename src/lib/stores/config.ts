@@ -63,7 +63,17 @@ export const defaultConfig: AppConfig = {
     // texts. Rust keeps the emoji prefix out of the field, so these mirror
     // the serde defaults verbatim.
     paused_status_format: 'Paused',
-    stopped_status_format: 'Nothing playing on Spotify'
+    stopped_status_format: 'Nothing playing on Spotify',
+    // Issue #866: the user-opt-in preferred-presence feature. OFF by
+    // default — the user opts in through Settings — and the pair is the
+    // empty string (the Rust clamp normalizes an unsupported pair to the
+    // empty form). Expiry defaults to 60 minutes on the Rust side.
+    preferred_presence: {
+      enabled: false,
+      availability: '',
+      activity: '',
+      expiry_minutes: 60
+    }
   },
   polling: {
     default_interval_seconds: BigInt(30),

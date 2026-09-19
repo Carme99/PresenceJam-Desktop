@@ -1919,6 +1919,8 @@ pub fn run() {
             commands::status::set_manual_status,
             commands::status::clear_manual_status_command,
             commands::status::load_manual_status_command,
+            commands::playback::set_volume,
+            commands::playback::seek,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

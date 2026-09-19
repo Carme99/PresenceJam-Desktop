@@ -558,4 +558,8 @@ export const de: Dict = {
   'dashboard.manualStatusFiltered': 'Status wurde durch deinen Profanity-Filter umgeschrieben',
   'dashboard.activityTitle': 'Aktivität',
   'dashboard.activityEmpty': 'Noch keine Entscheidungen — starte die Synchronisierung, um zu sehen, was deine App gewählt hat',
+  'dashboard.volumeLabel': 'Lautstärke',
+  'dashboard.volumeAria': 'Spotify-Lautstärkeregler',
+  'dashboard.seekAria': 'Zum Springen klicken',
+  'dashboard.seekUnavailableAria': 'Dieses Gerät unterstützt kein Springen',
 };

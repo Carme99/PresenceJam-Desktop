@@ -153,6 +153,135 @@
     if (stopped) currentTrack = null;
   });
 
+  // ── 5.0 wave3 (#870) — manual status composer ────────────────────────────
+  //
+  // The composer round-trips through `set_manual_status` /
+  // `clear_manual_status_command`, the same Rust functions the tray's
+  // "Recent statuses" submenu and the `--set-status` / `--clear-status`
+  // CLI flags use. The local mirror (`manualStatus` /
+  // `recentManualStatuses`) is re-hydrated from the `SyncStatus` snapshot
+  // and from a `manual-status-updated` listener so a pick on another
+  // surface lands here without a remount.
+  let manualStatus = $state<{ message: string; expires_at: string; set_at: string } | null>(null);
+  let recentManualStatuses = $state<{ message: string; used_at: string }[]>([]);
+  let composerDraft = $state('');
+  let composerExpiryMinutes = $state<number>(60);
+  let isSubmittingManualStatus = $state(false);
+  let manualStatusError = $state('');
+
+  async function refreshManualStatus(): Promise<void> {
+    try {
+      const snapshot = await invoke<{
+        manual_status: typeof manualStatus;
+        recent: typeof recentManualStatuses;
+      }>('load_manual_status_command');
+      manualStatus = snapshot.manual_status;
+      recentManualStatuses = snapshot.recent ?? [];
+    } catch (e) {
+      console.error('[DASHBOARD] refreshManualStatus: FAILED:', e);
+    }
+  }
+
+  async function submitManualStatus(): Promise<void> {
+    if (isSubmittingManualStatus) return;
+    isSubmittingManualStatus = true;
+    manualStatusError = '';
+    try {
+      const result = await invoke<typeof manualStatus>('set_manual_status', {
+        message: composerDraft,
+        expiryMinutes: composerExpiryMinutes
+      });
+      manualStatus = result;
+      await refreshManualStatus();
+      composerDraft = '';
+    } catch (e) {
+      manualStatusError = String(e);
+      console.error('[DASHBOARD] submitManualStatus: FAILED:', e);
+    } finally {
+      isSubmittingManualStatus = false;
+    }
+  }
+
+  async function clearManualStatus(): Promise<void> {
+    if (isSubmittingManualStatus) return;
+    isSubmittingManualStatus = true;
+    manualStatusError = '';
+    try {
+      await invoke('clear_manual_status_command');
+      manualStatus = null;
+      await refreshManualStatus();
+    } catch (e) {
+      manualStatusError = String(e);
+      console.error('[DASHBOARD] clearManualStatus: FAILED:', e);
+    } finally {
+      isSubmittingManualStatus = false;
+    }
+  }
+
+  function pickRecentStatus(message: string): void {
+    composerDraft = message;
+  }
+
+  let manualStatusExpiryLabel = $derived.by(() => {
+    if (!manualStatus) return '';
+    const parsed = Date.parse(manualStatus.expires_at);
+    if (!Number.isFinite(parsed)) return t('dashboard.manualStatusActiveEmpty');
+    return new Date(parsed).toLocaleTimeString(undefined, {
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  });
+
+  // ── 5.0 wave3 (#871) — volume slider + click-to-seek progress bar ─────────
+  //
+  // `currentTrack.volume_percent` is `Option<number>` in Rust; the slider
+  // gates on `currentTrack?.actions?.setting_volume` so a stale-capabilities
+  // click is rejected (the Rust side enforces the same gate inside
+  // `commands/playback::set_volume`).
+  let sliderVolume = $state<number | null>(null);
+  let isSeeking = false;
+
+  $effect(() => {
+    // Only seed the slider from a non-stale value — once the user drags it,
+    // we don't want the next poll to yank the position back mid-drag.
+    const incoming = currentTrack?.volume_percent ?? null;
+    if (!isSeeking && incoming !== null) {
+      sliderVolume = incoming;
+    }
+  });
+
+  let supportsVolume = $derived(currentTrack?.supports_volume ?? false);
+  let settingVolume = $derived(currentTrack?.actions?.setting_volume ?? false);
+  let volumeSliderEnabled = $derived(supportsVolume && settingVolume);
+
+  async function commitVolume(value: number): Promise<void> {
+    try {
+      await invoke('set_volume', { percent: value });
+    } catch (e) {
+      console.error('[DASHBOARD] set_volume: FAILED:', e);
+    }
+  }
+
+  async function seekTo(percent: number): Promise<void> {
+    if (!currentTrack?.progress_ms || !currentTrack?.duration_ms) return;
+    const target = Math.round((percent / 100) * currentTrack.duration_ms);
+    try {
+      await invoke('seek', { positionMs: target });
+    } catch (e) {
+      console.error('[DASHBOARD] seek: FAILED:', e);
+    }
+  }
+
+  function onProgressBarClick(event: MouseEvent): void {
+    const target = event.currentTarget as HTMLElement;
+    const rect = target.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+    void seekTo(ratio * 100);
+  }
+
+  let supportsSeeking = $derived(currentTrack?.actions?.seeking ?? false);
+
   // #551: `availabilityListening` is the shared condition and is applied as
   // "listening"; the "cleared" chip is a one-shot transition, so it only shows
   // when this mount observes the flip — a mount that starts out cleared has
@@ -227,6 +356,27 @@
     } catch (e) {
       console.error('[DASHBOARD] onMount: get_sync_status FAILED:', e);
     }
+
+    // Issue #870: hydrate the manual status snapshot. The SyncStatus
+    // payload already carries it; we read the dedicated helper so a
+    // re-mount after the user clears a status sees `manual_status: null`
+    // even if the cached SyncStatus is stale.
+    await refreshManualStatus();
+
+    // Issue #870: listen for manual-status-updated so a pick on the tray
+    // or the CLI flag lands here without a remount. The event carries
+    // the new ManualStatus (or `{ cleared: true }`); the listener
+    // hydrates the local mirror and triggers the next-tick refresh
+    // of the recent ring.
+    teardown.add(listen('manual-status-updated', (event: any) => {
+      const payload = event.payload ?? {};
+      if (payload.cleared === true || payload.expired === true) {
+        manualStatus = null;
+      } else if (payload.manual_status) {
+        manualStatus = payload.manual_status;
+      }
+      void refreshManualStatus();
+    }));
 
     devLog('[DASHBOARD] onMount: setting up spotify-track-changed listener');
     teardown.add(listen('spotify-track-changed', (event: any) => {
@@ -617,9 +767,19 @@
             <div class="paused-indicator"><span aria-hidden="true">⏸</span> {t('dashboard.paused')}</div>
           {/if}
 
-          <div class="progress-bar" aria-hidden="true">
+          <!-- Issue #871: the click-to-seek progress bar. Disabled when
+               the active device refuses the seek capability; the click
+               handler is no-op in that case. -->
+          <button
+            type="button"
+            class="progress-bar"
+            class:progress-bar-disabled={!supportsSeeking}
+            disabled={!supportsSeeking}
+            onclick={onProgressBarClick}
+            aria-label={supportsSeeking ? t('dashboard.seekAria') : t('dashboard.seekUnavailableAria')}
+          >
             <div class="progress-fill" style="width: {progressPercent}%"></div>
-          </div>
+          </button>
           <div class="progress-time">
             {#if currentTrack.progress_ms != null}
               {formatDuration(currentTrack.progress_ms)} / {formatDuration(currentTrack.duration_ms)}
@@ -627,6 +787,27 @@
               <span class="live-label" aria-label={t('dashboard.liveStreamAria')}>{t('dashboard.live')}</span>
             {/if}
           </div>
+          <!-- Issue #871: the volume slider. Gated on
+               supports_volume + actions.setting_volume so a stale-capabilities
+               drag does not POST to Graph. The slider is the documented
+               Spotify range (0..=100); the click handler commits the value
+               after a drag finishes (issue #407-style debouncing — one POST
+               per drag, not per pixel). -->
+          <label class="volume-slider-label">
+            <span class="volume-slider-title">{t('dashboard.volumeLabel')}</span>
+            <input
+              type="range"
+              min="0"
+              max="100"
+              step="1"
+              value={sliderVolume ?? currentTrack?.volume_percent ?? 0}
+              disabled={!volumeSliderEnabled}
+              oninput={(e) => { sliderVolume = Number((e.currentTarget as HTMLInputElement).value); }}
+              onchange={(e) => { void commitVolume(Number((e.currentTarget as HTMLInputElement).value)); }}
+              aria-label={t('dashboard.volumeAria')}
+            />
+            <span class="volume-slider-value">{sliderVolume ?? currentTrack?.volume_percent ?? 0}%</span>
+          </label>
           <button
             class="btn-refresh"
             onclick={refreshStatus}
@@ -635,6 +816,73 @@
             aria-busy={isRefreshing}
           >⟳ {isRefreshing ? t('dashboard.refreshing') : t('dashboard.refreshStatus')}</button>
         </div>
+      </div>
+
+      <!-- Issue #870: the manual-status composer. The card renders the
+           user's draft + an expiry select + Set / Clear buttons. The
+           "Recent statuses" quick-pick list reads the same ring the
+           tray's "Recent statuses" submenu reads, so a pick on either
+           surface lands here without a remount. -->
+      <div class="manual-status card">
+        <h3>{t('dashboard.manualStatusTitle')}</h3>
+        {#if manualStatus}
+          <p class="manual-status-active" role="status">
+            {t('dashboard.manualStatusActive', { expiry: manualStatusExpiryLabel })}
+          </p>
+        {/if}
+        <input
+          type="text"
+          class="manual-status-input"
+          placeholder={t('dashboard.manualStatusPlaceholder')}
+          maxlength={128}
+          bind:value={composerDraft}
+          disabled={isSubmittingManualStatus}
+        />
+        <div class="manual-status-row">
+          <label class="manual-status-expiry">
+            <span>{t('dashboard.manualStatusExpiryLabel')}</span>
+            <select
+              bind:value={composerExpiryMinutes}
+              disabled={isSubmittingManualStatus}
+            >
+              <option value={15}>{t('dashboard.manualStatusExpiry15')}</option>
+              <option value={30}>{t('dashboard.manualStatusExpiry30')}</option>
+              <option value={60}>{t('dashboard.manualStatusExpiry60')}</option>
+              <option value={120}>{t('dashboard.manualStatusExpiry120')}</option>
+            </select>
+          </label>
+          <button
+            class="btn-primary"
+            onclick={submitManualStatus}
+            disabled={isSubmittingManualStatus || composerDraft.trim().length === 0}
+          >{t('dashboard.manualStatusSet')}</button>
+          {#if manualStatus}
+            <button
+              class="btn-secondary"
+              onclick={clearManualStatus}
+              disabled={isSubmittingManualStatus}
+            >{t('dashboard.manualStatusClear')}</button>
+          {/if}
+        </div>
+        {#if manualStatusError}
+          <p class="manual-status-error" role="alert">{manualStatusError}</p>
+        {/if}
+        {#if recentManualStatuses.length > 0}
+          <div class="manual-status-recent">
+            <h4>{t('dashboard.manualStatusRecentTitle')}</h4>
+            <ul>
+              {#each recentManualStatuses.slice(0, 5) as entry (entry.message + entry.used_at)}
+                <li>
+                  <button
+                    type="button"
+                    class="recent-pick"
+                    onclick={() => pickRecentStatus(entry.message)}
+                  >{entry.message}</button>
+                </li>
+              {/each}
+            </ul>
+          </div>
+        {/if}
       </div>
 
       <div class="status-preview card">

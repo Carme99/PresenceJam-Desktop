@@ -545,6 +545,10 @@ export const en = {
   'dashboard.manualStatusFiltered': 'Status was rewritten by your profanity filter',
   'dashboard.activityTitle': 'Activity',
   'dashboard.activityEmpty': 'No decisions yet — start sync to see what your app chose',
+  'dashboard.volumeLabel': 'Volume',
+  'dashboard.volumeAria': 'Spotify volume slider',
+  'dashboard.seekAria': 'Click to seek',
+  'dashboard.seekUnavailableAria': 'This device does not support seeking',
 };
 
 export type Dict = { readonly [K in keyof typeof en]: string };

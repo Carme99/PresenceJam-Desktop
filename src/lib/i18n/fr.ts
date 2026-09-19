@@ -568,4 +568,8 @@ export const fr: Dict = {
   'dashboard.activityTitle': 'Activité',
   'dashboard.activityEmpty':
     'Aucune décision pour l’instant — lancez la synchronisation pour voir ce que votre application a choisi',
+  'dashboard.volumeLabel': 'Volume',
+  'dashboard.volumeAria': 'Curseur de volume Spotify',
+  'dashboard.seekAria': 'Cliquer pour chercher',
+  'dashboard.seekUnavailableAria': 'Cet appareil ne prend pas en charge la recherche',
 };

@@ -264,9 +264,88 @@ pub struct TrackInfo {
     pub progress_ms: Option<u64>,
     #[ts(type = "number")]
     pub duration_ms: u64,
+    /// Issue #871: the active device's current volume (0..=100). Carried
+    /// alongside the track so the Dashboard's slider can mirror the live
+    /// value without a separate `/devices` request. `null` when the
+    /// active device does not report `volume_percent` (the documented
+    /// shape for some Web-Player sessions).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "number | null")]
+    pub volume_percent: Option<u32>,
+    /// Issue #871: the active device's `supports_volume` flag. Mirrored
+    /// here so the Dashboard's slider can gate without a second IPC
+    /// round-trip. Skipped from JSON when `None` so an older pre-#871
+    /// `TrackInfo` deserializes cleanly on the frontend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_volume: Option<bool>,
+    /// Issue #871: the active device's documented capability flags.
+    /// The Dashboard slider reads `actions.setting_volume`, the
+    /// click-to-seek progress bar reads `actions.seeking`, and a future
+    /// "next/prev" wiring reads `actions.skipping_*`. Skipped when `None`
+    /// so the Dashboard's `$derived` defaults (`false`) stay correct
+    /// against pre-#871 backends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actions: Option<DeviceActions>,
 }
 
 /// A Spotify playback device (GET /v1/me/player/devices).
+/// The capabilities Spotify documents for a playback device, surfaced
+/// through the `device.actions` object in `GET /v1/me/player/devices`. Each
+/// field defaults to `false` so a hand-edited or older response that omits
+/// the field does not silently claim a capability the device never
+/// advertised. Issue #871 wires every member to the corresponding tray
+/// submenu disable rule; a future Spotify-added field cannot sneak a
+/// tray-level "this works" toggle past this struct.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS, PartialEq, Eq)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
+pub struct DeviceActions {
+    /// Whether `PUT /v1/me/player/seek` is accepted by the active device.
+    /// The Dashboard's click-to-seek progress bar and the tray's "Seek
+    /// +/- 30 s" submenu both read this flag.
+    #[serde(default)]
+    pub seeking: bool,
+    /// Whether `PUT /v1/me/player/volume` is accepted. The Dashboard's
+    /// volume slider and the tray's "Volume" submenu both read this flag.
+    #[serde(default)]
+    pub setting_volume: bool,
+    /// Whether the device supports `PUT /v1/me/player/shuffle`.
+    /// The tray's shuffle toggle already gates on `is_restricted`; this
+    /// flag is the Spotify-official twin (issue #871 — the official
+    /// capability flag is the source of truth for "can I do this?").
+    #[serde(default)]
+    pub toggling_shuffle: bool,
+    /// Whether the device supports `PUT /v1/me/player/repeat`. Same shape
+    /// as `toggling_shuffle` — the tray's repeat toggle reads it.
+    #[serde(default)]
+    pub toggling_repeat_context: bool,
+    /// Whether the device supports `repeat=track`. Spotify documents the
+    /// repeat flag as two distinct toggles — `toggling_repeat_context` for
+    /// the off/context pair and and `toggling_repeat_track` for the
+    /// off/context/track pair.
+    #[serde(default)]
+    pub toggling_repeat_track: bool,
+    /// Whether the device supports `POST /v1/me/player/{next,previous}`.
+    /// The tray's Previous/Next items already gate on `is_restricted`; this
+    /// flag is the Spotify-official twin.
+    #[serde(default)]
+    pub skipping_prev: bool,
+    #[serde(default)]
+    pub skipping_next: bool,
+    /// Whether the device supports `PUT /v1/me/player/play` (resume).
+    /// The tray's Play/Pause item reads it.
+    #[serde(default)]
+    pub resuming: bool,
+    /// Whether the device supports `PUT /v1/me/player/pause`. Same shape
+    /// as `resuming` — the tray's Play/Pause item reads it.
+    #[serde(default)]
+    pub pausing: bool,
+    /// Whether the device supports `PUT /v1/me/player` (transfer). The
+    /// Devices submenu already gates on `is_active`; this flag is the
+    /// Spotify-official twin.
+    #[serde(default)]
+    pub transferring_playback: bool,
+}
+
 /// `id` is `Option` because Spotify documents it as "Can be `null`" for
 /// some devices; such devices cannot be targeted by transfer/playback
 /// commands. See issue #3.0-P3.
@@ -281,6 +360,18 @@ pub struct DeviceInfo {
     pub is_private_session: bool,
     pub is_restricted: bool,
     pub supports_volume: bool,
+    /// Issue #871: the device's current volume (0..=100). `#[serde(default)]`
+    /// so older responses that omit the field still deserialize cleanly —
+    /// the Dashboard slider falls back to its last-known value when the
+    /// current device's `volume_percent` is absent.
+    #[serde(default)]
+    pub volume_percent: Option<u32>,
+    /// Issue #871: the Spotify-documented per-device capability flags
+    /// (see [`DeviceActions`]). The Dashboard composer and the tray's
+    /// playback submenu both read these to disable the controls the
+    /// device refuses.
+    #[serde(default)]
+    pub actions: DeviceActions,
 }
 
 /// The user's playback queue (GET /v1/me/player/queue), mapped down to the
@@ -943,6 +1034,16 @@ fn map_media_item(
             is_playing,
             progress_ms,
             duration_ms: item.duration_ms,
+            // Issue #871: the device shape is the same as the `actions`
+            // fields Spotify documents on `/me/player/devices`. We carry
+            // it onto the TrackInfo so the Dashboard's slider + click-to-seek
+            // bar can gate without a second IPC round-trip. `None` is the
+            // legacy shape (issue #871 — pre-#871 backends omit it; the
+            // Dashboard's `$derived` defaults to `false` and the slider
+            // disables itself).
+            volume_percent: None,
+            supports_volume: None,
+            actions: None,
         },
         episode,
     ))
@@ -994,6 +1095,22 @@ struct ContextObject {
 struct DeviceName {
     #[serde(default)]
     name: String,
+    /// Issue #871: the active device's current volume (the
+    /// currently-playing body surfaces `device.volume_percent` alongside
+    /// the rest of the device info; the older `DeviceName` struct only
+    /// read `name`). The Dashboard's slider reads this value without
+    /// hitting `/me/player/devices` separately.
+    #[serde(default)]
+    volume_percent: Option<u32>,
+    /// Issue #871: the documented `supports_volume` flag. Mirrors the
+    /// field on the full `DeviceInfo`; the currently-playing body has it.
+    #[serde(default)]
+    supports_volume: Option<bool>,
+    /// Issue #871: the documented capability flags. Mirrors
+    /// [`DeviceInfo::actions`]; the currently-playing body has the
+    /// object too.
+    #[serde(default)]
+    actions: Option<DeviceActions>,
 }
 
 /// Parses a 200 body of `GET /me/player/currently-playing`.
@@ -1039,12 +1156,24 @@ fn parse_currently_playing_body(body: &str) -> Result<Option<NowPlaying>, String
     // Resolved before `item` is moved into the mapper (needs both halves).
     let playlist = context_display_name(playing.context.as_ref(), playing.item.as_ref());
 
-    let Some((media, episode)) = playing
+    let Some((mut media, episode)) = playing
         .item
         .and_then(|item| map_media_item(item, playing.is_playing, playing.progress_ms))
     else {
         return Ok(None);
     };
+
+    // Issue #871: lift the device capability fields from the
+    // currently-playing body onto the `TrackInfo` so the Dashboard
+    // slider + click-to-seek bar can gate without a second IPC call. The
+    // fields default to `None` (the legacy shape, #871 pre-#871 backends
+    // omit them), and the Dashboard's `$derived` defaults translate the
+    // `None` into a safe disabled control.
+    if let Some(device) = playing.device.as_ref() {
+        media.volume_percent = device.volume_percent;
+        media.supports_volume = device.supports_volume;
+        media.actions = device.actions.clone();
+    }
 
     Ok(Some(NowPlaying {
         media,
@@ -1326,6 +1455,51 @@ pub fn player_set_repeat(
     )
 }
 
+/// Issue #871: drive the device's volume (`PUT /me/player/volume`,
+/// documented `{"volume_percent": <0..=100>}`). The Dashboard's slider
+/// and the tray's Volume submenu both reach this through the
+/// `player_with_refresh` policy, so a token refresh retries once
+/// automatically. `percent` is clamped to `0..=100`; an out-of-range
+/// value would 400 from the API, which the caller would surface to the
+/// tray without ever leaving this function.
+pub fn player_set_volume(
+    access_token: &str,
+    percent: u32,
+    device_id: Option<&str>,
+) -> Result<(), SpotifyApiError> {
+    let clamped = percent.min(100);
+    send_player_command(
+        reqwest::Method::PUT,
+        "/me/player/volume",
+        access_token,
+        device_id,
+        Some(serde_json::json!({ "volume_percent": clamped })),
+        "volume",
+    )
+}
+
+/// Issue #871: seek to a position on the current track. Spotify documents
+/// `PUT /me/player/seek` with a single `position_ms` integer body; the
+/// click-to-seek progress bar in the Dashboard and the tray's +/- 30 s
+/// submenu both go through here. Negative seeks (replay-last-30s) are
+/// passed through unchanged — Spotify clamps the position to the current
+/// track's duration on its side, so a Dashboard seek that lands past the
+/// end is the Spotify API's problem, not ours.
+pub fn player_seek(
+    access_token: &str,
+    position_ms: i64,
+    device_id: Option<&str>,
+) -> Result<(), SpotifyApiError> {
+    send_player_command(
+        reqwest::Method::PUT,
+        "/me/player/seek",
+        access_token,
+        device_id,
+        Some(serde_json::json!({ "position_ms": position_ms })),
+        "seek",
+    )
+}
+
 /// Lists the user's available playback devices.
 /// GET /v1/me/player/devices. See issue #3.0-P3.
 pub fn get_devices(access_token: &str) -> Result<Vec<DeviceInfo>, SpotifyApiError> {
@@ -1588,6 +1762,12 @@ fn sample_track() -> TrackInfo {
         // both sides of that toggle instead of disagreeing.
         progress_ms: Some(0),
         duration_ms: 0,
+        // Issue #871: the device capability fields default to `None`
+        // so the legacy `TrackInfo` shape (and the format-status tests
+        // that read it) stay unchanged.
+        volume_percent: None,
+        supports_volume: None,
+        actions: None,
     }
 }
 
@@ -1616,6 +1796,12 @@ mod tests {
             is_playing,
             progress_ms: Some(0),
             duration_ms: 0,
+            // Issue #871: the device capability fields default to `None`
+            // so the existing format-status tests are unchanged (the
+            // legacy `TrackInfo` shape had no fields here).
+            volume_percent: None,
+            supports_volume: None,
+            actions: None,
         }
     }
 
@@ -1685,6 +1871,12 @@ mod tests {
             is_playing: true,
             progress_ms: Some(0),
             duration_ms: 0,
+            // Issue #871: the device capability fields default to `None`
+            // so the legacy `TrackInfo` shape (and the existing
+            // format-status tests) stays unchanged.
+            volume_percent: None,
+            supports_volume: None,
+            actions: None,
         };
         assert_eq!(
             format_status(&filter_branch_sample, format),
@@ -2146,6 +2338,9 @@ mod tests {
             is_playing: true,
             progress_ms: Some(123_456),
             duration_ms: 240_000,
+            volume_percent: None,
+            supports_volume: None,
+            actions: None,
         };
         let json: serde_json::Value = serde_json::to_value(&track).expect("to_value");
         // u64 must round-trip as a JSON number, not a string. `Some(v)`

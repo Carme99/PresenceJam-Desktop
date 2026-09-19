@@ -90,6 +90,23 @@ pub struct Strings {
     pub manual_status_recent_empty: &'static str,
     /// "Clear manual status" entry, only present while a manual status is armed.
     pub manual_status_clear: &'static str,
+    // ── Volume / Seek submenus (issue #871) ─────────────────────────────────
+    /// Title of the tray's "Volume" submenu (issue #871). The entries
+    /// themselves use the documented Spotify percentage (`{percent}` is
+    /// substituted at build time).
+    pub volume_menu: &'static str,
+    /// Per-entry label of the Volume submenu (issue #871). The
+    /// `{percent}` placeholder is replaced with the literal Spotify
+    /// percentage at build time (0 / 25 / 50 / 75 / 100).
+    pub volume_percent_label: &'static str,
+    /// Title of the tray's "Seek" submenu (issue #871).
+    pub seek_menu: &'static str,
+    /// Label of the "seek back N seconds" entry (issue #871). The
+    /// `{seconds}` placeholder is replaced with the literal second
+    /// count (30 by default).
+    pub seek_back_30s_label: &'static str,
+    /// Label of the "seek forward N seconds" entry (issue #871).
+    pub seek_forward_30s_label: &'static str,
 }
 
 /// English table — the source of truth the other two mirror.
@@ -135,6 +152,11 @@ pub const EN: Strings = Strings {
     manual_status_recent_menu: "Recent statuses",
     manual_status_recent_empty: "(no recent statuses)",
     manual_status_clear: "Clear manual status",
+    volume_menu: "Volume",
+    volume_percent_label: "{percent}%",
+    seek_menu: "Seek",
+    seek_back_30s_label: "Back {seconds} s",
+    seek_forward_30s_label: "Forward {seconds} s",
 };
 
 /// German table.
@@ -180,6 +202,11 @@ pub const DE: Strings = Strings {
     manual_status_recent_menu: "Letzte Status",
     manual_status_recent_empty: "(keine letzten Status)",
     manual_status_clear: "Manuellen Status löschen",
+    volume_menu: "Lautstärke",
+    volume_percent_label: "{percent} %",
+    seek_menu: "Spulen",
+    seek_back_30s_label: "{seconds} s zurück",
+    seek_forward_30s_label: "{seconds} s vor",
 };
 
 /// French table.
@@ -225,6 +252,11 @@ pub const FR: Strings = Strings {
     manual_status_recent_menu: "Statuts récents",
     manual_status_recent_empty: "(aucun statut récent)",
     manual_status_clear: "Effacer le statut manuel",
+    volume_menu: "Volume sonore",
+    volume_percent_label: "{percent} %",
+    seek_menu: "Position",
+    seek_back_30s_label: "Reculer de {seconds} s",
+    seek_forward_30s_label: "Avancer de {seconds} s",
 };
 
 /// Canonical locale tags, in table order. The value persisted in
@@ -377,6 +409,11 @@ impl Strings {
                 self.manual_status_recent_empty,
             ),
             ("manual_status_clear", self.manual_status_clear),
+            ("volume_menu", self.volume_menu),
+            ("volume_percent_label", self.volume_percent_label),
+            ("seek_menu", self.seek_menu),
+            ("seek_back_30s_label", self.seek_back_30s_label),
+            ("seek_forward_30s_label", self.seek_forward_30s_label),
         ]
     }
 }

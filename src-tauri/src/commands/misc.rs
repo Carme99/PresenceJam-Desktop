@@ -56,6 +56,11 @@ pub fn preview_status(
             is_playing: true,
             progress_ms: Some(0),
             duration_ms: 0,
+            // Issue #871: the device capability fields default to `None`
+            // so the format-status preview shape is unchanged.
+            volume_percent: None,
+            supports_volume: None,
+            actions: None,
         };
         let formatted = crate::spotify::format_status(&sample, &format);
         let effective_placeholder = placeholder

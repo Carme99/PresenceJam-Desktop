@@ -72,6 +72,15 @@ const SNOOZE_RESUME_SUFFIX: &str = "resume";
 const MANUAL_STATUS_ITEM_PREFIX: &str = "manualstatus|";
 const ID_MANUAL_STATUS_CLEAR: &str = "manualstatus|clear";
 
+// Issue #871: the Volume submenu entries carry `{VOLUME_ITEM_PREFIX}|{n}`
+// where `n` is the literal Spotify volume percentage. The Seek submenu
+// entries carry `{SEEK_ITEM_PREFIX}|{+|-}{ms}` (the sign is in the id so
+// the click handler cannot mistake a seek-back for a seek-forward).
+const VOLUME_ITEM_PREFIX: &str = "volume|";
+const SEEK_ITEM_PREFIX: &str = "seek|";
+const SEEK_BACK_30_MS: u64 = 30_000;
+const SEEK_FORWARD_30_MS: u64 = 30_000;
+
 static TRAY: OnceLock<TrayIcon> = OnceLock::new();
 
 /// Get the global TrayIcon instance.
@@ -397,6 +406,79 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
                         log::error!("[TRAY] manual status pick: {}", e);
                     }
                     repaint_tray_from_state(&app_handle, "manual status pick");
+                });
+            }
+            id if id.starts_with(VOLUME_ITEM_PREFIX) => {
+                // Issue #871: the tray's Volume submenu picked a percentage.
+                // The click handler offloads the Spotify HTTP and records the
+                // new volume so the Dashboard slider mirrors the new value
+                // on its next SyncStatus fetch. A stale id (an old build's
+                // menu) is logged and ignored.
+                let raw = id.to_string();
+                let selection = parse_volume_menu_id(&raw);
+                let app_handle = app.clone();
+                std::thread::spawn(move || {
+                    let Some(VolumeMenuSelection::Percent(percent)) = selection else {
+                        log::warn!("[TRAY] volume: unrecognized menu id '{}'", raw);
+                        repaint_tray_from_state(&app_handle, "volume (stale)");
+                        return;
+                    };
+                    run_player_action(
+                        &app_handle,
+                        "volume",
+                        None,
+                        None,
+                        |token| crate::spotify::player_set_volume(token, percent, None),
+                    );
+                });
+            }
+            id if id.starts_with(SEEK_ITEM_PREFIX) => {
+                // Issue #871: the tray's Seek submenu picked a delta. The
+                // click handler reads the stored progress + duration from
+                // the AppState, computes the new position, and dispatches
+                // through `commands/playback::seek` so the same token
+                // refresh + retry-once policy applies. A stale id (an old
+                // build's menu) is logged and ignored.
+                let raw = id.to_string();
+                let selection = parse_seek_menu_id(&raw);
+                let app_handle = app.clone();
+                std::thread::spawn(move || {
+                    let Some(SeekMenuSelection::Delta(delta)) = selection else {
+                        log::warn!("[TRAY] seek: unrecognized menu id '{}'", raw);
+                        repaint_tray_from_state(&app_handle, "seek (stale)");
+                        return;
+                    };
+                    let state = app_handle.state::<std::sync::Arc<crate::AppState>>();
+                    let current = state
+                        .polling
+                        .current_track()
+                        .as_ref()
+                        .map(|t| (t.progress_ms, t.duration_ms));
+                    let Some((progress, duration)) = current else {
+                        log::warn!("[TRAY] seek: no current track, cannot seek");
+                        repaint_tray_from_state(&app_handle, "seek (no track)");
+                        return;
+                    };
+                    // Spotify reports `progress_ms` as `Option` (issue #3.0-P3
+                    // — the documented "Can be `null`"); the duration is
+                    // always present. A missing `progress` defaults to 0 so
+                    // the user still gets a forward-30s jump from the
+                    // beginning of the track.
+                    let progress = progress.unwrap_or(0);
+                    let new_position = if delta >= 0 {
+                        progress.saturating_add(delta as u64).min(duration)
+                    } else {
+                        progress.saturating_sub((-delta) as u64)
+                    };
+                    run_player_action(
+                        &app_handle,
+                        "seek",
+                        None,
+                        None,
+                        |token| {
+                            crate::spotify::player_seek(token, new_position as i64, None)
+                        },
+                    );
                 });
             }
             id if id.starts_with(DEVICE_ITEM_PREFIX) => {
@@ -1329,6 +1411,118 @@ enum SnoozeMenuSelection {
     Resume,
 }
 
+/// Issue #871: the tray's Volume submenu. Five discrete picks (0/25/50/75/100)
+/// ride through `commands/playback::set_volume`, the same path the
+/// Dashboard's slider uses. The whole submenu is disabled when the active
+/// device refuses the volume capability, so a stale-capabilities click
+/// never reaches the click handler.
+fn build_volume_submenu(
+    app: &AppHandle,
+    s: &Strings,
+    enabled: bool,
+) -> Result<Submenu<tauri::Wry>, String> {
+    let submenu = SubmenuBuilder::new(app, s.volume_menu)
+        .enabled(enabled)
+        .build()
+        .map_err(|e| e.to_string())?;
+    for percent in [0u32, 25, 50, 75, 100] {
+        let label = s
+            .volume_percent_label
+            .replace("{percent}", &percent.to_string());
+        let item = MenuItemBuilder::with_id(format!("{VOLUME_ITEM_PREFIX}{percent}"), label)
+            .build(app)
+            .map_err(|e| e.to_string())?;
+        submenu.append(&item).map_err(|e| e.to_string())?;
+    }
+    Ok(submenu)
+}
+
+/// Issue #871: the tray's Seek submenu (back / forward 30 s). Both
+/// directions ride through `commands/playback::seek` — Spotify clamps the
+/// position to the current track's duration on its side, so a "forward
+/// 30 s" pick near the end of the track is a no-op rather than an error.
+fn build_seek_submenu(
+    app: &AppHandle,
+    s: &Strings,
+    enabled: bool,
+) -> Result<Submenu<tauri::Wry>, String> {
+    let submenu = SubmenuBuilder::new(app, s.seek_menu)
+        .enabled(enabled)
+        .build()
+        .map_err(|e| e.to_string())?;
+    let back_label = s
+        .seek_back_30s_label
+        .replace("{seconds}", &(SEEK_BACK_30_MS / 1000).to_string());
+    let back =
+        MenuItemBuilder::with_id(format!("{SEEK_ITEM_PREFIX}-{SEEK_BACK_30_MS}"), back_label)
+            .build(app)
+            .map_err(|e| e.to_string())?;
+    submenu.append(&back).map_err(|e| e.to_string())?;
+    let forward_label = s
+        .seek_forward_30s_label
+        .replace("{seconds}", &(SEEK_FORWARD_30_MS / 1000).to_string());
+    let forward = MenuItemBuilder::with_id(
+        format!("{SEEK_ITEM_PREFIX}+{SEEK_FORWARD_30_MS}"),
+        forward_label,
+    )
+    .build(app)
+    .map_err(|e| e.to_string())?;
+    submenu.append(&forward).map_err(|e| e.to_string())?;
+    Ok(submenu)
+}
+
+/// Issue #871: the volume menu id parsed into the documented Spotify
+/// `volume_percent`. `None` for any id that is not one of the five known
+/// percentages so a stale menu from an older build cannot drive a
+/// volume slider to a number Spotify would reject.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VolumeMenuSelection {
+    Percent(u32),
+}
+
+/// Parses a volume menu-item id. The strict bounds (`0..=100`) match the
+/// documented Spotify range, so a malicious or stale id cannot push the
+/// device's volume past Spotify's own ceiling.
+fn parse_volume_menu_id(id: &str) -> Option<VolumeMenuSelection> {
+    let raw = id.strip_prefix(VOLUME_ITEM_PREFIX)?;
+    let percent: u32 = raw.parse().ok()?;
+    if percent <= 100 {
+        Some(VolumeMenuSelection::Percent(percent))
+    } else {
+        None
+    }
+}
+
+/// Issue #871: the seek menu id parsed into a signed millisecond delta.
+/// The click handler applies the delta to the current `progress_ms`,
+/// clamped at zero and the track's `duration_ms` so a forward jump past
+/// the end of the track is a no-op rather than an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeekMenuSelection {
+    Delta(i64),
+}
+
+fn parse_seek_menu_id(id: &str) -> Option<SeekMenuSelection> {
+    let raw = id.strip_prefix(SEEK_ITEM_PREFIX)?;
+    // The sign lives in the first character; `+30` is forward, `-30` is
+    // back. Anything else is refused.
+    if let Some(rest) = raw.strip_prefix('+') {
+        let ms: u64 = rest.parse().ok()?;
+        // Cap at a sensible upper bound so a typo cannot jump 1000 minutes
+        // forward. The tray only ever mints `+/- 30000` (30 s) but the
+        // parser must defend against a menu snapshot from a future build.
+        if ms <= 10 * 60 * 1000 {
+            return Some(SeekMenuSelection::Delta(ms as i64));
+        }
+    } else if let Some(rest) = raw.strip_prefix('-') {
+        let ms: u64 = rest.parse().ok()?;
+        if ms <= 10 * 60 * 1000 {
+            return Some(SeekMenuSelection::Delta(-(ms as i64)));
+        }
+    }
+    None
+}
+
 /// Parses a snooze menu-item id. `None` for anything that is not one of the
 /// four known ids — a stale menu from an older build must not snooze by
 /// accident.
@@ -1846,6 +2040,21 @@ fn rebuild_tray_menu(
     }
     let devices: Vec<crate::spotify::DeviceInfo> = devices_for_menu(access_token.as_deref(), fetch);
     let queue: Option<crate::spotify::QueueInfo> = queue_for_menu(access_token.as_deref(), fetch);
+    // Issue #871: the active device's capability flags gate the playback
+    // submenu — Volume disabled when `actions.setting_volume` is false,
+    // Seek disabled when `actions.seeking` is false, Shuffle disabled when
+    // the device is restricted or `actions.toggling_shuffle` is false,
+    // Repeat the same. A device list that lacks the active device (e.g.
+    // a freshly-restarted Spotify session that has not yet published
+    // devices) returns `None`; the playback submenu then disables the
+    // capability-gated items by default so a stale-capabilities click
+    // cannot reach Graph with a 403.
+    let active_capabilities = devices
+        .iter()
+        .find(|d| d.is_active)
+        .map(|d| (d.supports_volume, d.is_restricted, d.actions.clone()));
+    let (active_supports_volume, active_is_restricted, active_actions) =
+        active_capabilities.unwrap_or((false, true, crate::spotify::DeviceActions::default()));
 
     // Build menu items without holding the tray write lock. Only the final
     // tray.set_menu call needs serialising — everything above is pure data
@@ -1962,8 +2171,15 @@ fn rebuild_tray_menu(
             );
             e.to_string()
         })?;
+    // Issue #871: the playback items gate on the active device's documented
+    // capabilities. The Dashboard composer and the slider share the same
+    // gate (`commands/playback::set_volume` / `seek` refuse to issue the
+    // Graph call when the device refuses it; here the tray items are
+    // disabled for the same reason so a stale-capabilities click never
+    // even reaches the click handler).
     let play_pause = CheckMenuItemBuilder::with_id(ID_PLAY_PAUSE, s.play_pause)
         .checked(is_playing)
+        .enabled(active_actions.resuming || active_actions.pausing)
         .build(app)
         .map_err(|e| {
             log::warn!(
@@ -1973,6 +2189,7 @@ fn rebuild_tray_menu(
             e.to_string()
         })?;
     let previous = MenuItemBuilder::with_id(ID_PREVIOUS, s.previous)
+        .enabled(!active_is_restricted && active_actions.skipping_prev)
         .build(app)
         .map_err(|e| {
             log::warn!(
@@ -1982,6 +2199,7 @@ fn rebuild_tray_menu(
             e.to_string()
         })?;
     let next = MenuItemBuilder::with_id(ID_NEXT, s.next)
+        .enabled(!active_is_restricted && active_actions.skipping_next)
         .build(app)
         .map_err(|e| {
             log::warn!("[TRAY] update_tray_menu: failed to build next item: {}", e);
@@ -1995,8 +2213,14 @@ fn rebuild_tray_menu(
     // changed from another client forces the rebuild that repaints the
     // mark; a click on these items rebuilds through `force_tray_refresh`
     // and is reflected immediately.
+    //
+    // Issue #871: the existing `is_restricted` gate stays; the Spotify
+    // capability flags are the documented twin (issue #871 — Spotify
+    // documents both as sources of truth for "can I do this?"; the
+    // capability flag wins when the device reports it).
     let shuffle = CheckMenuItemBuilder::with_id(ID_SHUFFLE, s.shuffle)
         .checked(LAST_SHUFFLE_STATE.load(Ordering::Acquire))
+        .enabled(!active_is_restricted && active_actions.toggling_shuffle)
         .build(app)
         .map_err(|e| {
             log::warn!(
@@ -2008,10 +2232,44 @@ fn rebuild_tray_menu(
     let repeat_state = last_repeat_state();
     let repeat = CheckMenuItemBuilder::with_id(ID_REPEAT, repeat_menu_label(s, repeat_state))
         .checked(repeat_state.is_on())
+        .enabled(
+            !active_is_restricted
+                && (active_actions.toggling_repeat_context || active_actions.toggling_repeat_track),
+        )
         .build(app)
         .map_err(|e| {
             log::warn!(
                 "[TRAY] update_tray_menu: failed to build repeat item: {}",
+                e
+            );
+            e.to_string()
+        })?;
+    // Issue #871: the Volume submenu. The 0/25/50/75/100 picks are the
+    // documented Spotify boundaries (`PUT /me/player/volume` clamps to
+    // 0..=100). Disabled when the active device refuses the volume
+    // capability — `supports_volume` is the older twin, the new
+    // `actions.setting_volume` flag is the documented source of truth.
+    let volume_submenu = build_volume_submenu(
+        app,
+        s,
+        active_supports_volume && active_actions.setting_volume,
+    )
+    .map_err(|e| {
+        log::warn!(
+            "[TRAY] update_tray_menu: failed to build volume submenu: {}",
+            e
+        );
+        e.to_string()
+    })?;
+    // Issue #871: the Seek submenu. The +/- 30 s picks are the documented
+    // surface for `PUT /me/player/seek`; the Dashboard's click-to-seek
+    // progress bar reaches the same endpoint through
+    // `commands/playback::seek`. Disabled when the device refuses the
+    // seek capability.
+    let seek_submenu = build_seek_submenu(app, s, !active_is_restricted && active_actions.seeking)
+        .map_err(|e| {
+            log::warn!(
+                "[TRAY] update_tray_menu: failed to build seek submenu: {}",
                 e
             );
             e.to_string()
@@ -2077,7 +2335,15 @@ fn rebuild_tray_menu(
             &manual_status_submenu,
             &separator1,
         ])
-        .items(&[&play_pause, &previous, &next, &shuffle, &repeat])
+        .items(&[
+            &play_pause,
+            &previous,
+            &next,
+            &shuffle,
+            &repeat,
+            &volume_submenu,
+            &seek_submenu,
+        ])
         .item(&playback_separator)
         .items(&[&devices_submenu, &queue_submenu]);
 
@@ -2620,6 +2886,9 @@ mod tests {
             is_playing: true,
             progress_ms: None,
             duration_ms: 0,
+            volume_percent: None,
+            supports_volume: None,
+            actions: None,
         };
         assert_eq!(
             sync_status_line(&EN, false, true, Some(&track)),
@@ -2741,6 +3010,9 @@ mod tests {
             is_playing,
             progress_ms: None,
             duration_ms: 0,
+            volume_percent: None,
+            supports_volume: None,
+            actions: None,
         };
         let key = |sync: bool, visible: bool| {
             tray_snapshot_for(sync, visible, Some(&track(true)), None, 0, 0)
@@ -2811,6 +3083,9 @@ mod tests {
             is_playing: true,
             progress_ms: None,
             duration_ms: 0,
+            volume_percent: None,
+            supports_volume: None,
+            actions: None,
         };
         let mark = |playing: bool| sync_status_line(&EN, true, playing, Some(&track));
 
@@ -2987,6 +3262,9 @@ mod tests {
             is_playing: true,
             progress_ms: None,
             duration_ms: 0,
+            volume_percent: None,
+            supports_volume: None,
+            actions: None,
         };
         let at = |snooze: Option<String>| tray_snapshot_for(true, true, Some(&track), snooze, 0, 0);
 
@@ -3333,6 +3611,9 @@ mod tests {
             is_playing: true,
             progress_ms: None,
             duration_ms: 0,
+            volume_percent: None,
+            supports_volume: None,
+            actions: None,
         };
         let at = |devices: u64, queue: u64| {
             tray_snapshot_for(true, true, Some(&track), None, devices, queue)
