@@ -318,14 +318,24 @@ pub fn normalize_presence_pair(availability: &str, activity: &str) -> Option<Pre
 /// never silent.
 pub const MAX_RULE_STATUS_CHARS: usize = 128;
 
-/// S4 (issue #672): minutes in a track rule's day. `end_minutes` may be
+/// S4 (issue #672): minutes in a rule's day. `end_minutes` may be
 /// `TRACK_RULE_DAY_MINUTES` (= the end of the day), which is why the track-rule
-/// window uses `u32` while [`QuietHoursEntry`] clamps to `0..=1439`.
+/// window uses `u32` while [`QuietHoursEntry`] carries the same value in the
+/// `u16` [`QUIET_HOURS_DAY_MINUTES`].
 pub const TRACK_RULE_DAY_MINUTES: u32 = 1440;
 
+/// The same 24-hour day as [`TRACK_RULE_DAY_MINUTES`], in the `u16` width
+/// [`QuietHoursEntry`]'s minute fields carry (issue #821). One value written
+/// twice, once per field width; both schedule windows draw their bounds from it,
+/// so the two halves of the rules model cannot disagree about where the day
+/// ends.
+const QUIET_HOURS_DAY_MINUTES: u16 = 1440;
+
 /// Normalize the rule model (finding #634, issue #634): canonicalize every
-/// presence pair and bound every replacement text. Mirrors `clamp_polling` /
-/// `clamp_teams`, so it runs on load and on every save through
+/// presence pair, bound every replacement text, and normalize both schedule
+/// windows ([`clamp_quiet_hours_window`] for quiet hours, issue #821;
+/// [`clamp_track_rule_window`] for track rules, issue #672). Mirrors
+/// `clamp_polling` / `clamp_teams`, so it runs on load and on every save through
 /// [`clamped_config`].
 fn clamp_rules(cfg: &mut StatusRulesConfig) {
     for entry in &mut cfg.quiet_hours {
@@ -334,6 +344,7 @@ fn clamp_rules(cfg: &mut StatusRulesConfig) {
             &mut entry.presence_activity,
         );
         clamp_rule_text(&mut entry.replacement_status);
+        clamp_quiet_hours_window(entry);
     }
     for rule in &mut cfg.track_rules {
         clamp_presence_pair(&mut rule.presence_availability, &mut rule.presence_activity);
@@ -365,12 +376,27 @@ fn clamp_rule_text(text: &mut String) {
     }
 }
 
+/// Normalize a rule's weekday list in place (issue #821): keep only the
+/// documented ISO range `1..=7`, then sort and deduplicate.
+///
+/// The ONE normalization of `days` for both halves of the rules model — the
+/// quiet-hours window and the track rule — so the two cannot drift on what
+/// load-time normalization means. A list that ends up empty means "every day",
+/// so dropping an out-of-range value can only widen a rule, never leave it
+/// matching nothing.
+fn normalize_rule_days(days: &mut Vec<u8>) {
+    days.retain(|day| (1..=7).contains(day));
+    days.sort_unstable();
+    days.dedup();
+}
+
 /// S4 (issue #672): normalize a track rule's schedule in place.
 ///
 /// Minutes are clamped into `0..=TRACK_RULE_DAY_MINUTES`, so a hand-edited
-/// config cannot wedge the comparison, and the weekday filter is reduced to the
-/// documented ISO range `1..=7` (deduplicated, so `days` matches the `days`
-/// invariant [`QuietHoursEntry`] relies on). The window itself keeps
+/// config cannot wedge the comparison, and `days` goes through
+/// [`normalize_rule_days`] — the documented ISO range `1..=7`, sorted and
+/// deduplicated — so it matches the invariant [`QuietHoursEntry`] relies on.
+/// The window itself keeps
 /// [`QuietHoursEntry`]'s semantics: `[start, end)` with a wrap-around pair
 /// (`start > end`, e.g. 22:00→07:00) honoured, and `start == end` matching
 /// nothing.
@@ -381,9 +407,28 @@ fn clamp_track_rule_window(rule: &mut TrackRuleEntry) {
     // the day (1440), which IS reachable as "until midnight".
     rule.start_minutes = rule.start_minutes.min(TRACK_RULE_DAY_MINUTES - 1);
     rule.end_minutes = rule.end_minutes.min(TRACK_RULE_DAY_MINUTES);
-    rule.days.retain(|day| (1..=7).contains(day));
-    rule.days.sort_unstable();
-    rule.days.dedup();
+    normalize_rule_days(&mut rule.days);
+}
+
+/// Normalize a quiet-hours window in place (issue #821), mirroring
+/// [`clamp_track_rule_window`]: the minutes into the range [`QuietHoursEntry`]
+/// documents, and `days` through [`normalize_rule_days`].
+///
+/// Without this, an out-of-range weekday loaded unchanged and matched NO weekday
+/// at all, so a hand-edited or other-build `days: [0]` window — its
+/// `pause_polling` arm included — silently never fired, with no error anywhere.
+/// The Settings day picker only ever writes `1..=7`, so the trigger is exactly
+/// the hand-edited/foreign document this load-time normalizer exists for.
+///
+/// The window itself keeps [`QuietHoursEntry`]'s semantics: `[start, end)` with
+/// a wrap-around pair (`start > end`, e.g. 22:00→07:00) honoured, and
+/// `start == end` matching nothing.
+fn clamp_quiet_hours_window(entry: &mut QuietHoursEntry) {
+    // Same reasoning as the track rule above: a START of 1440 is unreachable
+    // (`now` never exceeds 1439), while an END of 1440 is the end of the day.
+    entry.start_minutes = entry.start_minutes.min(QUIET_HOURS_DAY_MINUTES - 1);
+    entry.end_minutes = entry.end_minutes.min(QUIET_HOURS_DAY_MINUTES);
+    normalize_rule_days(&mut entry.days);
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
@@ -708,19 +753,25 @@ fn migrate_config(cfg: &mut AppConfig, from: u32) {
 /// since midnight; wrap-around ranges like 22:00→07:00 are supported).
 /// `days` holds ISO weekday numbers 1 (Mon)..=7 (Sun); empty means every
 /// day. All fields `#[serde(default)]` individually so a hand-edited
-/// config missing one still loads.
+/// config missing one still loads, and load-time normalization of `days` and
+/// the two minutes lives in one place: [`clamp_quiet_hours_window`].
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct QuietHoursEntry {
     #[serde(default)]
     pub enabled: bool,
-    /// Minutes since midnight, clamped to 0..=1439 on read.
+    /// Minutes since midnight, normalized into `0..=1439` by
+    /// [`clamp_quiet_hours_window`] (a start of 1440 is unreachable — the
+    /// clock never reads it).
     #[serde(default)]
     pub start_minutes: u16,
-    /// Minutes since midnight, clamped to 0..=1439 on read.
+    /// Minutes since midnight, normalized into `0..=1440` by
+    /// [`clamp_quiet_hours_window`]; `1440` is the end of the day.
     #[serde(default = "default_quiet_end")]
     pub end_minutes: u16,
-    /// ISO weekday numbers 1..=7; empty = every day.
+    /// ISO weekday numbers 1..=7; empty = every day. Normalized by
+    /// [`clamp_quiet_hours_window`] (out-of-range days dropped, then sorted and
+    /// deduplicated) exactly like [`TrackRuleEntry::days`].
     #[serde(default)]
     pub days: Vec<u8>,
     /// Optional fixed status posted while this window is active instead of
@@ -5086,6 +5137,76 @@ mod tests {
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600,
             "the #135 tightening must still run"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------
+    // Issue #821: quiet hours normalize their schedule like track rules.
+    // -----------------------------------------------------------------
+
+    /// Issue #821: a quiet-hours window normalizes its schedule the way the
+    /// track-rule half already did. `days: [0, 9, 2, 2]` used to load unchanged
+    /// and match NO weekday at all, so the window — its `pause_polling` arm
+    /// included — silently never fired.
+    #[test]
+    fn test_clamp_rules_normalizes_the_quiet_hours_window() {
+        let mut rules = StatusRulesConfig {
+            quiet_hours: vec![
+                QuietHoursEntry {
+                    enabled: true,
+                    start_minutes: 60000,
+                    end_minutes: 60000,
+                    days: vec![0, 9, 2, 2],
+                    ..QuietHoursEntry::default()
+                },
+                QuietHoursEntry {
+                    enabled: true,
+                    start_minutes: 1320,
+                    end_minutes: 420,
+                    days: vec![7, 3, 3],
+                    ..QuietHoursEntry::default()
+                },
+            ],
+            track_rules: Vec::new(),
+        };
+        clamp_rules(&mut rules);
+
+        assert_eq!(
+            rules.quiet_hours[0].days,
+            vec![2],
+            "out-of-range weekdays are dropped, then sorted and deduplicated"
+        );
+        assert_eq!(rules.quiet_hours[0].start_minutes, 1439);
+        assert_eq!(rules.quiet_hours[0].end_minutes, 1440);
+        // A window already inside the day is untouched: the wrap-around pair,
+        // both minutes and the out-of-order duplicates survive as documented.
+        assert_eq!(rules.quiet_hours[1].days, vec![3, 7]);
+        assert_eq!(rules.quiet_hours[1].start_minutes, 1320);
+        assert_eq!(rules.quiet_hours[1].end_minutes, 420);
+    }
+
+    /// Issue #821, through the loader: the same normalization runs on load, so a
+    /// hand-edited `days` cannot reach the evaluator as "no weekday matches" —
+    /// an emptied list means EVERY day, which is why dropping the out-of-range
+    /// values can only widen the window.
+    #[test]
+    fn test_quiet_hours_window_is_normalized_on_load() {
+        let (dir, path) = temp_config_file(
+            "quiet-window",
+            r#"{"status_rules": {"quiet_hours": [
+                {"enabled": true, "days": [0, 9, 2, 2], "start_minutes": 60000, "end_minutes": 60000},
+                {"enabled": true, "days": [0]}
+            ]}}"#,
+        );
+        let cfg = load_config_from(&path).expect("must load");
+        let first = &cfg.status_rules.quiet_hours[0];
+        assert_eq!(first.days, vec![2]);
+        assert_eq!(first.start_minutes, 1439);
+        assert_eq!(first.end_minutes, 1440);
+        assert!(
+            cfg.status_rules.quiet_hours[1].days.is_empty(),
+            "an all-out-of-range list becomes empty, which means every day"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
