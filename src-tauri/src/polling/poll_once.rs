@@ -4989,6 +4989,7 @@ mod tests {
                     end_minutes: 1020,
                     ..Default::default()
                 }],
+                ..crate::config::StatusRulesConfig::default()
             },
             ..Default::default()
         };
@@ -5358,6 +5359,7 @@ mod tests {
         let rules = |entries: Vec<QuietHoursEntry>| StatusRulesConfig {
             quiet_hours: entries,
             track_rules: Vec::new(),
+            ..StatusRulesConfig::default()
         };
         let entry = |enabled: bool, start: u16, end: u16, days: Vec<u8>| QuietHoursEntry {
             replacement_status: String::new(),
@@ -5429,6 +5431,7 @@ mod tests {
             // First rule disabled (never hits even though empty matches
             // all) so the enabled second rule wins for artist "b".
             track_rules: vec![rule(false, "", ""), rule(true, "b", "")],
+            ..StatusRulesConfig::default()
         };
         // S4: the schedule is part of the match — 10:00 on a Monday is inside
         // the default (every day, 0..1440) window, so the substring result is
@@ -5514,6 +5517,7 @@ mod tests {
                 status_rules: StatusRulesConfig {
                     quiet_hours: Vec::new(),
                     track_rules: rules,
+                    ..StatusRulesConfig::default()
                 },
                 ..AppConfig::default()
             })
@@ -5580,6 +5584,7 @@ mod tests {
                     ..QuietHoursEntry::default()
                 }],
                 track_rules: Vec::new(),
+                ..StatusRulesConfig::default()
             },
             ..AppConfig::default()
         };
@@ -6370,6 +6375,7 @@ mod tests {
                 status_rules: StatusRulesConfig {
                     quiet_hours: Vec::new(),
                     track_rules: rules,
+                    ..StatusRulesConfig::default()
                 },
                 ..AppConfig::default()
             })

@@ -54,6 +54,12 @@ impl From<&crate::keychain::KeychainPresence> for ClientSecretState {
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct SpotifyConfig {
+    /// Spotify app client id. `#[serde(default)]` since issue #926: this was
+    /// the only persisted field without one, so a spotify section that omitted
+    /// it — or spelled it `null` — failed the whole document, which
+    /// `load_config` answered by quarantining the file and booting on
+    /// defaults, costing the user every other setting too.
+    #[serde(default)]
     pub client_id: String,
     /// True iff the Spotify `client_secret` is currently stored in the OS
     /// keychain. This is a derived/display field — it is populated by
@@ -69,6 +75,15 @@ pub struct SpotifyConfig {
     pub client_secret_state: ClientSecretState,
     #[serde(default = "default_redirect_uri")]
     pub redirect_uri: String,
+    /// Unknown / future keys NESTED inside this section, retained across
+    /// load→save so a section written by a newer binary is not silently
+    /// stripped by an older one (issue #938 — the section-level companion of
+    /// [`AppConfig::extra`]). Omitted from JSON while empty and skipped in the
+    /// TypeScript export, so an untouched config gains no bytes and the
+    /// generated TypeScript is unchanged.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[ts(skip)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 fn default_redirect_uri() -> String {
@@ -130,6 +145,15 @@ pub struct TeamsConfig {
     /// `"🎵 Nothing playing on Spotify"`. Defaults to that literal's text.
     #[serde(default = "default_stopped_status_format")]
     pub stopped_status_format: String,
+    /// Unknown / future keys NESTED inside this section, retained across
+    /// load→save so a section written by a newer binary is not silently
+    /// stripped by an older one (issue #938 — the section-level companion of
+    /// [`AppConfig::extra`]). Omitted from JSON while empty and skipped in the
+    /// TypeScript export, so an untouched config gains no bytes and the
+    /// generated TypeScript is unchanged.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[ts(skip)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 fn default_status_format() -> String {
@@ -193,6 +217,15 @@ pub struct PollingConfig {
     /// and the value is clamped into 60..=3600 by `clamp_polling`.
     #[serde(default = "default_pause_backoff_max")]
     pub pause_backoff_max_seconds: u64,
+    /// Unknown / future keys NESTED inside this section, retained across
+    /// load→save so a section written by a newer binary is not silently
+    /// stripped by an older one (issue #938 — the section-level companion of
+    /// [`AppConfig::extra`]). Omitted from JSON while empty and skipped in the
+    /// TypeScript export, so an untouched config gains no bytes and the
+    /// generated TypeScript is unchanged.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[ts(skip)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 fn default_interval_seconds() -> u64 {
@@ -312,14 +345,24 @@ pub fn normalize_presence_pair(availability: &str, activity: &str) -> Option<Pre
 /// never silent.
 pub const MAX_RULE_STATUS_CHARS: usize = 128;
 
-/// S4 (issue #672): minutes in a track rule's day. `end_minutes` may be
+/// S4 (issue #672): minutes in a rule's day. `end_minutes` may be
 /// `TRACK_RULE_DAY_MINUTES` (= the end of the day), which is why the track-rule
-/// window uses `u32` while [`QuietHoursEntry`] clamps to `0..=1439`.
+/// window uses `u32` while [`QuietHoursEntry`] carries the same value in the
+/// `u16` [`QUIET_HOURS_DAY_MINUTES`].
 pub const TRACK_RULE_DAY_MINUTES: u32 = 1440;
 
+/// The same 24-hour day as [`TRACK_RULE_DAY_MINUTES`], in the `u16` width
+/// [`QuietHoursEntry`]'s minute fields carry (issue #821). One value written
+/// twice, once per field width; both schedule windows draw their bounds from it,
+/// so the two halves of the rules model cannot disagree about where the day
+/// ends.
+const QUIET_HOURS_DAY_MINUTES: u16 = 1440;
+
 /// Normalize the rule model (finding #634, issue #634): canonicalize every
-/// presence pair and bound every replacement text. Mirrors `clamp_polling` /
-/// `clamp_teams`, so it runs on load and on every save through
+/// presence pair, bound every replacement text, and normalize both schedule
+/// windows ([`clamp_quiet_hours_window`] for quiet hours, issue #821;
+/// [`clamp_track_rule_window`] for track rules, issue #672). Mirrors
+/// `clamp_polling` / `clamp_teams`, so it runs on load and on every save through
 /// [`clamped_config`].
 fn clamp_rules(cfg: &mut StatusRulesConfig) {
     for entry in &mut cfg.quiet_hours {
@@ -328,6 +371,7 @@ fn clamp_rules(cfg: &mut StatusRulesConfig) {
             &mut entry.presence_activity,
         );
         clamp_rule_text(&mut entry.replacement_status);
+        clamp_quiet_hours_window(entry);
     }
     for rule in &mut cfg.track_rules {
         clamp_presence_pair(&mut rule.presence_availability, &mut rule.presence_activity);
@@ -359,12 +403,27 @@ fn clamp_rule_text(text: &mut String) {
     }
 }
 
+/// Normalize a rule's weekday list in place (issue #821): keep only the
+/// documented ISO range `1..=7`, then sort and deduplicate.
+///
+/// The ONE normalization of `days` for both halves of the rules model — the
+/// quiet-hours window and the track rule — so the two cannot drift on what
+/// load-time normalization means. A list that ends up empty means "every day",
+/// so dropping an out-of-range value can only widen a rule, never leave it
+/// matching nothing.
+fn normalize_rule_days(days: &mut Vec<u8>) {
+    days.retain(|day| (1..=7).contains(day));
+    days.sort_unstable();
+    days.dedup();
+}
+
 /// S4 (issue #672): normalize a track rule's schedule in place.
 ///
 /// Minutes are clamped into `0..=TRACK_RULE_DAY_MINUTES`, so a hand-edited
-/// config cannot wedge the comparison, and the weekday filter is reduced to the
-/// documented ISO range `1..=7` (deduplicated, so `days` matches the `days`
-/// invariant [`QuietHoursEntry`] relies on). The window itself keeps
+/// config cannot wedge the comparison, and `days` goes through
+/// [`normalize_rule_days`] — the documented ISO range `1..=7`, sorted and
+/// deduplicated — so it matches the invariant [`QuietHoursEntry`] relies on.
+/// The window itself keeps
 /// [`QuietHoursEntry`]'s semantics: `[start, end)` with a wrap-around pair
 /// (`start > end`, e.g. 22:00→07:00) honoured, and `start == end` matching
 /// nothing.
@@ -375,9 +434,28 @@ fn clamp_track_rule_window(rule: &mut TrackRuleEntry) {
     // the day (1440), which IS reachable as "until midnight".
     rule.start_minutes = rule.start_minutes.min(TRACK_RULE_DAY_MINUTES - 1);
     rule.end_minutes = rule.end_minutes.min(TRACK_RULE_DAY_MINUTES);
-    rule.days.retain(|day| (1..=7).contains(day));
-    rule.days.sort_unstable();
-    rule.days.dedup();
+    normalize_rule_days(&mut rule.days);
+}
+
+/// Normalize a quiet-hours window in place (issue #821), mirroring
+/// [`clamp_track_rule_window`]: the minutes into the range [`QuietHoursEntry`]
+/// documents, and `days` through [`normalize_rule_days`].
+///
+/// Without this, an out-of-range weekday loaded unchanged and matched NO weekday
+/// at all, so a hand-edited or other-build `days: [0]` window — its
+/// `pause_polling` arm included — silently never fired, with no error anywhere.
+/// The Settings day picker only ever writes `1..=7`, so the trigger is exactly
+/// the hand-edited/foreign document this load-time normalizer exists for.
+///
+/// The window itself keeps [`QuietHoursEntry`]'s semantics: `[start, end)` with
+/// a wrap-around pair (`start > end`, e.g. 22:00→07:00) honoured, and
+/// `start == end` matching nothing.
+fn clamp_quiet_hours_window(entry: &mut QuietHoursEntry) {
+    // Same reasoning as the track rule above: a START of 1440 is unreachable
+    // (`now` never exceeds 1439), while an END of 1440 is the end of the day.
+    entry.start_minutes = entry.start_minutes.min(QUIET_HOURS_DAY_MINUTES - 1);
+    entry.end_minutes = entry.end_minutes.min(QUIET_HOURS_DAY_MINUTES);
+    normalize_rule_days(&mut entry.days);
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
@@ -398,6 +476,15 @@ pub struct LoggingConfig {
     /// `keep_files + 1` log files. Clamped to 1..=20 by [`clamp_logging`].
     #[serde(default = "default_keep_files")]
     pub keep_files: u32,
+    /// Unknown / future keys NESTED inside this section, retained across
+    /// load→save so a section written by a newer binary is not silently
+    /// stripped by an older one (issue #938 — the section-level companion of
+    /// [`AppConfig::extra`]). Omitted from JSON while empty and skipped in the
+    /// TypeScript export, so an untouched config gains no bytes and the
+    /// generated TypeScript is unchanged.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[ts(skip)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 fn default_logging_enabled() -> bool {
@@ -670,11 +757,17 @@ fn default_schema_version() -> u32 {
 }
 
 /// Make the binary — never the client — authoritative for `schema_version`
-/// (CfgDiag#1, issue #536). A stale frontend payload (or a wizard literal
-/// that still sends `1`) can no longer erase the record that a migration
-/// already ran.
+/// (CfgDiag#1, issue #536; issue #938 for the newer-document half).
+///
+/// A stale frontend payload (or a wizard literal that still sends `1`) can no
+/// longer erase the record that a migration already ran: the marker never goes
+/// below [`SCHEMA_VERSION`]. It never goes DOWN at all — a document written by a
+/// NEWER binary keeps its own version, because this build cannot know which of
+/// that version's migrations have already run, and relabelling it would make the
+/// newer build's dispatcher skip them on its next launch. [`save_config`]
+/// refuses such a document outright rather than writing over it.
 pub fn stamp_schema_version(cfg: &mut AppConfig) {
-    cfg.schema_version = SCHEMA_VERSION;
+    cfg.schema_version = cfg.schema_version.max(SCHEMA_VERSION);
 }
 
 /// Version-directed fixups run by `load_config` BEFORE the clamps (issue
@@ -702,19 +795,25 @@ fn migrate_config(cfg: &mut AppConfig, from: u32) {
 /// since midnight; wrap-around ranges like 22:00→07:00 are supported).
 /// `days` holds ISO weekday numbers 1 (Mon)..=7 (Sun); empty means every
 /// day. All fields `#[serde(default)]` individually so a hand-edited
-/// config missing one still loads.
+/// config missing one still loads, and load-time normalization of `days` and
+/// the two minutes lives in one place: [`clamp_quiet_hours_window`].
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct QuietHoursEntry {
     #[serde(default)]
     pub enabled: bool,
-    /// Minutes since midnight, clamped to 0..=1439 on read.
+    /// Minutes since midnight, normalized into `0..=1439` by
+    /// [`clamp_quiet_hours_window`] (a start of 1440 is unreachable — the
+    /// clock never reads it).
     #[serde(default)]
     pub start_minutes: u16,
-    /// Minutes since midnight, clamped to 0..=1439 on read.
+    /// Minutes since midnight, normalized into `0..=1440` by
+    /// [`clamp_quiet_hours_window`]; `1440` is the end of the day.
     #[serde(default = "default_quiet_end")]
     pub end_minutes: u16,
-    /// ISO weekday numbers 1..=7; empty = every day.
+    /// ISO weekday numbers 1..=7; empty = every day. Normalized by
+    /// [`clamp_quiet_hours_window`] (out-of-range days dropped, then sorted and
+    /// deduplicated) exactly like [`TrackRuleEntry::days`].
     #[serde(default)]
     pub days: Vec<u8>,
     /// Optional fixed status posted while this window is active instead of
@@ -854,6 +953,15 @@ pub struct StatusRulesConfig {
     pub quiet_hours: Vec<QuietHoursEntry>,
     #[serde(default)]
     pub track_rules: Vec<TrackRuleEntry>,
+    /// Unknown / future keys NESTED inside this section, retained across
+    /// load→save so a section written by a newer binary is not silently
+    /// stripped by an older one (issue #938 — the section-level companion of
+    /// [`AppConfig::extra`]). Omitted from JSON while empty and skipped in the
+    /// TypeScript export, so an untouched config gains no bytes and the
+    /// generated TypeScript is unchanged.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[ts(skip)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 /// Which desktop-notification classes the app may show (4.7.0 / issue #675).
@@ -881,6 +989,15 @@ pub struct NotificationsConfig {
     /// An update finished staging and will install on quit.
     #[serde(default = "default_notification_class")]
     pub update_staged: bool,
+    /// Unknown / future keys NESTED inside this section, retained across
+    /// load→save so a section written by a newer binary is not silently
+    /// stripped by an older one (issue #938 — the section-level companion of
+    /// [`AppConfig::extra`]). Omitted from JSON while empty and skipped in the
+    /// TypeScript export, so an untouched config gains no bytes and the
+    /// generated TypeScript is unchanged.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[ts(skip)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 /// Mirrors the serde defaults field-by-field ([`QuietHoursEntry`]'s pattern):
@@ -893,6 +1010,7 @@ impl Default for NotificationsConfig {
             sync_stopped: default_notification_class(),
             auth_required: default_notification_class(),
             update_staged: default_notification_class(),
+            extra: BTreeMap::new(),
         }
     }
 }
@@ -922,6 +1040,15 @@ pub struct ShortcutsConfig {
     pub toggle_playback: Option<String>,
     #[serde(default = "default_toggle_sync_shortcut")]
     pub toggle_sync: Option<String>,
+    /// Unknown / future keys NESTED inside this section, retained across
+    /// load→save so a section written by a newer binary is not silently
+    /// stripped by an older one (issue #938 — the section-level companion of
+    /// [`AppConfig::extra`]). Omitted from JSON while empty and skipped in the
+    /// TypeScript export, so an untouched config gains no bytes and the
+    /// generated TypeScript is unchanged.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[ts(skip)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 fn default_toggle_playback_shortcut() -> Option<String> {
@@ -937,6 +1064,7 @@ impl Default for ShortcutsConfig {
         Self {
             toggle_playback: default_toggle_playback_shortcut(),
             toggle_sync: default_toggle_sync_shortcut(),
+            extra: BTreeMap::new(),
         }
     }
 }
@@ -974,6 +1102,15 @@ pub struct UpdatesConfig {
     /// is read leniently — see [`deserialize_update_channel`].
     #[serde(default, deserialize_with = "deserialize_update_channel")]
     pub channel: UpdateChannel,
+    /// Unknown / future keys NESTED inside this section, retained across
+    /// load→save so a section written by a newer binary is not silently
+    /// stripped by an older one (issue #938 — the section-level companion of
+    /// [`AppConfig::extra`]). Omitted from JSON while empty and skipped in the
+    /// TypeScript export, so an untouched config gains no bytes and the
+    /// generated TypeScript is unchanged.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[ts(skip)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 /// Lenient read of one `updates.channel` value (4.7.0, issue #678): the
@@ -1083,6 +1220,27 @@ pub struct AppConfig {
     /// no such key and load as version 1.
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
+    /// The document's revision, raised once per accepted save (issue #943).
+    ///
+    /// Settings renders in both the main window and the detached pane, each
+    /// webview holding its own copy loaded once, so two writers can be a save
+    /// apart. A save whose payload is OLDER than the revision on disk is
+    /// rejected instead of silently reverting the other window's change (see
+    /// [`STALE_REVISION_MARKER`]), and [`emit_config_changed`] carries the new
+    /// revision so every window can adopt the document that was actually
+    /// persisted.
+    ///
+    /// `0` for a fresh install, for every file written before this field
+    /// existed, and for a client that does not send the field yet — which is why
+    /// `0` is stamped upward rather than treated as stale. The first save from
+    /// such a payload stores `1`.
+    ///
+    /// Skipped in the TS export: the field is the Rust-side guard until the
+    /// store half of #943 ships, and exporting it would make the generated
+    /// `AppConfig` require a member the frontend does not construct yet.
+    #[serde(default)]
+    #[ts(skip)]
+    pub revision: u64,
     /// Unknown / future top-level keys, retained across load→save so a newer
     /// config file is never silently stripped by an older binary (issue #379).
     /// Skipped in the TS export (and omitted from JSON while empty) so
@@ -1101,6 +1259,7 @@ impl Default for SpotifyConfig {
             client_secret_set: false,
             client_secret_state: ClientSecretState::Absent,
             redirect_uri: default_redirect_uri(),
+            extra: BTreeMap::new(),
         }
     }
 }
@@ -1120,6 +1279,7 @@ impl Default for TeamsConfig {
             gate_when_out_of_office: default_gate_when_out_of_office(),
             paused_status_format: default_paused_status_format(),
             stopped_status_format: default_stopped_status_format(),
+            extra: BTreeMap::new(),
         }
     }
 }
@@ -1132,6 +1292,7 @@ impl Default for PollingConfig {
             max_interval_seconds: default_max_interval_seconds(),
             expiry_buffer_seconds: default_expiry_buffer_seconds(),
             pause_backoff_max_seconds: default_pause_backoff_max(),
+            extra: BTreeMap::new(),
         }
     }
 }
@@ -1143,6 +1304,7 @@ impl Default for LoggingConfig {
             log_level: default_log_level(),
             max_file_size_mb: default_max_file_size_mb(),
             keep_files: default_keep_files(),
+            extra: BTreeMap::new(),
         }
     }
 }
@@ -1168,6 +1330,7 @@ impl Default for AppConfig {
             shortcuts: ShortcutsConfig::default(),
             extra: BTreeMap::new(),
             schema_version: default_schema_version(),
+            revision: 0,
         }
     }
 }
@@ -1472,61 +1635,228 @@ fn quarantine_corrupt_config(path: &std::path::Path, parse_err: impl std::fmt::D
     backup
 }
 
-pub fn load_config() -> Result<AppConfig, String> {
-    let path = get_config_path()?;
+/// Every top-level key [`AppConfig`] has a typed field for (issue #926).
+///
+/// [`config_from_sections`] reads these one at a time and everything else lands
+/// in [`AppConfig::extra`] — the same partition `#[serde(flatten)]` performs
+/// when serde parses the document in one call, written out so that one bad
+/// section can be replaced by its default without rejecting the rest.
+/// `typed_config_keys_match_the_serialized_schema` fails if this list and the
+/// struct ever disagree.
+const TYPED_CONFIG_KEYS: [&str; 13] = [
+    "spotify",
+    "teams",
+    "polling",
+    "logging",
+    "updates",
+    "autostart",
+    "notifications",
+    "locale",
+    "snooze_until",
+    "status_rules",
+    "shortcuts",
+    "schema_version",
+    "revision",
+];
 
+/// The JSON type of `value`, for a log line that names the shape of a bad root
+/// without echoing a whole (possibly multi-megabyte) document.
+fn json_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "an object",
+    }
+}
+
+/// Deserialize ONE typed field out of a config document, falling back to
+/// `fallback` when that field alone does not match the schema (issue #926).
+///
+/// Per-field, not per-document. A key the file omits takes `fallback`
+/// silently — what `#[serde(default)]` has always done — while a key that is
+/// PRESENT but invalid takes it with a `[CFG]` warning naming the key, which is
+/// the observable replacement for the old all-or-nothing parse. A `null` value
+/// is "present but invalid" for every non-`Option` field and a value for an
+/// `Option` one, so the field's own type decides, not a special case here.
+fn field_or_fallback<T: serde::de::DeserializeOwned>(
+    root: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    fallback: T,
+) -> T {
+    let Some(raw) = root.get(key) else {
+        return fallback;
+    };
+    match serde_json::from_value::<T>(raw.clone()) {
+        Ok(value) => value,
+        Err(e) => {
+            log::warn!(
+                "[CFG] config field '{}' is invalid ({}) — using its default, the rest of the config is kept",
+                key,
+                e
+            );
+            fallback
+        }
+    }
+}
+
+/// Build an [`AppConfig`] from a config document's root object, one typed field
+/// at a time (issue #926).
+///
+/// A section that no longer matches the schema costs exactly that section — its
+/// default, warned about by [`field_or_fallback`] — instead of the whole
+/// document, which is what one wrong-typed, out-of-range or misspelled value
+/// used to cost (the file was quarantined and the app booted on defaults). The
+/// document's scalar fields take the same route, so `"autostart": "yes"` cannot
+/// take quiet hours down with it either.
+///
+/// Unknown top-level keys are still retained in [`AppConfig::extra`] (issue
+/// #379), exactly as the `#[serde(flatten)]` field collected them under the
+/// single-pass parse.
+fn config_from_sections(root: serde_json::Map<String, serde_json::Value>) -> AppConfig {
+    let mut config = AppConfig {
+        spotify: field_or_fallback(&root, "spotify", Default::default()),
+        teams: field_or_fallback(&root, "teams", Default::default()),
+        polling: field_or_fallback(&root, "polling", Default::default()),
+        logging: field_or_fallback(&root, "logging", Default::default()),
+        updates: field_or_fallback(&root, "updates", Default::default()),
+        autostart: field_or_fallback(&root, "autostart", Default::default()),
+        notifications: field_or_fallback(&root, "notifications", Default::default()),
+        locale: field_or_fallback(&root, "locale", Default::default()),
+        snooze_until: field_or_fallback(&root, "snooze_until", Default::default()),
+        status_rules: field_or_fallback(&root, "status_rules", Default::default()),
+        shortcuts: field_or_fallback(&root, "shortcuts", Default::default()),
+        schema_version: field_or_fallback(&root, "schema_version", default_schema_version()),
+        revision: field_or_fallback(&root, "revision", 0),
+        extra: BTreeMap::new(),
+    };
+    for (key, value) in root {
+        if !TYPED_CONFIG_KEYS.contains(&key.as_str()) {
+            config.extra.insert(key, value);
+        }
+    }
+    config
+}
+
+/// Tighten a loose `config.json` to 0600 (issue #135 path A), best-effort
+/// since issue #802.
+///
+/// Idempotent on a file that is already 0600. Unix-only: Windows' default ACL
+/// is already user-only, so there is nothing to tighten there.
+///
+/// Best-effort, NOT a precondition: a mode that cannot be READ (EROFS on a
+/// read-only or ostree mount, EPERM on a file owned by another user, an
+/// ACL-managed path) or cannot be CHANGED is logged and ignored. Both used to
+/// be `?`-propagated, so `load_config` failed outright on a perfectly readable
+/// file — startup logged "no config found", `AppState.config` stayed `None`,
+/// the Settings and Dashboard stores fell back to built-in defaults, and
+/// because a Settings save posts the whole document, the next save persisted
+/// those defaults over the user's real file. Hardening a file we can already
+/// read is a courtesy; refusing to read it is a data-loss path.
+#[cfg(unix)]
+fn tighten_config_permissions(path: &std::path::Path) {
+    let current = match fs::metadata(path) {
+        Ok(metadata) => metadata.permissions(),
+        Err(e) => {
+            log::warn!(
+                "[CFG] Could not read the mode of config file '{}': {} — loading it anyway",
+                path.display(),
+                e
+            );
+            return;
+        }
+    };
+    let current_mode = current.mode() & 0o777;
+    if current_mode == 0o600 {
+        return;
+    }
+    log::warn!(
+        "[CFG] Tightening config.json mode from {:o} to 0600 (issue #135)",
+        current_mode
+    );
+    let mut tightened = current;
+    tightened.set_mode(0o600);
+    if let Err(e) = fs::set_permissions(path, tightened) {
+        log::warn!(
+            "[CFG] Could not chmod config file '{}' to 0600: {} — loading it anyway",
+            path.display(),
+            e
+        );
+    }
+}
+
+pub fn load_config() -> Result<AppConfig, String> {
+    load_config_from(&get_config_path()?).map(with_keychain_flags)
+}
+
+/// Path-taking core of [`load_config`]: the file I/O, the section-by-section
+/// parse and the normalization, with the keychain stamping left to the public
+/// entry point — so this half is testable against real files with no keychain
+/// probe, the same shape [`import_config_document`] uses.
+fn load_config_from(path: &std::path::Path) -> Result<AppConfig, String> {
     if !path.exists() {
         log::info!(
             "[CFG] Config file not found at '{}', using defaults",
             path.display()
         );
-        return Ok(with_keychain_flags(AppConfig::default()));
+        return Ok(AppConfig::default());
     }
 
-    // Issue #135 path A: tighten mode of any pre-existing config.json that
-    // was created loose by an older PresenceJam version (default umask 022
-    // → 0644). Idempotent on a file that is already 0600. Windows default
-    // ACL is user-only, so this is a no-op there.
+    // Issue #135 path A: tighten the mode of any pre-existing config.json that
+    // was created loose by an older PresenceJam version (default umask 022 →
+    // 0644). Best-effort since issue #802 — see `tighten_config_permissions`.
     #[cfg(unix)]
-    {
-        let current = fs::metadata(&path)
-            .map_err(|e| format!("Failed to stat config file '{}': {}", path.display(), e))?
-            .permissions();
-        let current_mode = current.mode() & 0o777;
-        if current_mode != 0o600 {
-            log::warn!(
-                "[CFG] Tightening config.json mode from {:o} to 0600 (issue #135)",
-                current_mode
-            );
-            let mut tightened = current;
-            tightened.set_mode(0o600);
-            fs::set_permissions(&path, tightened).map_err(|e| {
-                format!(
-                    "Failed to chmod config file '{}' to 0600: {}",
-                    path.display(),
-                    e
-                )
-            })?;
-        }
-    }
+    tighten_config_permissions(path);
 
-    let mut file = fs::File::open(&path)
+    let mut file = fs::File::open(path)
         .map_err(|e| format!("Failed to open config file '{}': {}", path.display(), e))?;
 
     let mut contents = String::new();
     file.read_to_string(&mut contents)
         .map_err(|e| format!("Failed to read config file '{}': {}", path.display(), e))?;
 
-    let mut config: AppConfig = match serde_json::from_str(&contents) {
-        Ok(cfg) => cfg,
+    let mut config = match serde_json::from_str::<serde_json::Value>(&contents) {
+        // Issue #926: the document IS an object — load it field by field, so a
+        // section that no longer matches the schema costs exactly that
+        // section's default and nothing else.
+        Ok(serde_json::Value::Object(root)) => config_from_sections(root),
+        // Anything else is not a config: a bare array/string/number/null
+        // root, or text that is not JSON at all. Quarantine, exactly as the
+        // single-pass parse answered those two shapes before.
+        Ok(other) => {
+            quarantine_corrupt_config(
+                path,
+                format!("expected a JSON object, found {}", json_kind(&other)),
+            );
+            return Ok(AppConfig::default());
+        }
         Err(e) => {
             // Issue #379: never lose the evidence — quarantine the corrupt
             // file to `<config>.bak` alongside the original and boot on
             // defaults. Observable via `config_was_quarantined()`.
-            quarantine_corrupt_config(&path, &e);
-            return Ok(with_keychain_flags(AppConfig::default()));
+            quarantine_corrupt_config(path, &e);
+            return Ok(AppConfig::default());
         }
     };
+    // Issue #916: an unknown-key bucket is `#[serde(flatten)]` with no
+    // entry-level filter, so a `client_secret` a hand-edit or another tool left
+    // at any level was deserialized, handed to the webview by the `load_config`
+    // command and re-serialized on the next save — a credential crossing the
+    // IPC boundary in plaintext, in a file SECURITY.md promises is
+    // keychain-only. The legacy migration owns the DISK copy (it moves the
+    // value into the keychain, or deliberately leaves it on a conflict); this
+    // keeps the value out of the document the webview receives. Every load path
+    // funnels through here — the startup load and the `load_config` command
+    // alike — so there is no second place to remember.
+    let stripped_secrets = strip_client_secret_from_extras(&mut config);
+    if stripped_secrets > 0 {
+        log::warn!(
+            "[CFG] config: stripped {} client_secret key(s) from unknown keys — the Spotify client secret is keychain-only (issue #9)",
+            stripped_secrets
+        );
+    }
     // CfgDiag#1 (#536): the version dispatcher runs BEFORE the clamps, so a
     // migration can never have its rewritten values re-clamped away, and
     // `schema_version` is raised even for a file that was never saved by
@@ -1555,7 +1885,7 @@ pub fn load_config() -> Result<AppConfig, String> {
     }
 
     log::info!("[CFG] Loaded configuration from '{}'", path.display());
-    Ok(with_keychain_flags(config))
+    Ok(config)
 }
 
 /// The persisted `logging` section, read without a full config load
@@ -1709,6 +2039,54 @@ fn emit_spotify_secret_conflict_once(app: &tauri::AppHandle) -> bool {
     );
     true
 }
+
+/// Bare file name of the sidecar that keeps a conflicting legacy plaintext
+/// (issue #803): `config.json.legacy-secret`, beside `config.json`.
+const LEGACY_SECRET_SIDECAR_NAME: &str = "config.json.legacy-secret";
+
+/// Write a copy of a conflicting legacy `client_secret` beside `config.json`
+/// and return the sidecar's BARE file name (issue #803).
+///
+/// The migration deliberately leaves the plaintext in `config.json` when the
+/// keychain already holds a different value — but `save_config` serialises
+/// `AppConfig`, which has no `client_secret` field, so the next save from
+/// anywhere (a Settings toggle, a tray snooze, the poller's snooze cleanup)
+/// removed the only remaining copy while the app kept authenticating with the
+/// stale keychain value. The user could not recover it afterwards: it was shown
+/// nowhere in the UI and the file no longer held it. The sidecar is a copy the
+/// app never rewrites, so the "the plaintext is not deleted" promise holds past
+/// the next write.
+///
+/// The document holds exactly the one key plus a note, and is never read back
+/// by the app — it is the user's copy, for Settings → Reconnect Spotify — which
+/// is why this logs the FILE NAME and never the value.
+///
+/// The write goes through the same atomic-replace, fsync-the-directory helper
+/// the config writer uses, so the sidecar is created 0600 on Unix (create_new +
+/// mode) and user-only by default ACL on Windows, with no window in which it is
+/// world-readable.
+fn write_legacy_secret_sidecar(
+    config_path: &std::path::Path,
+    secret: &str,
+) -> Result<String, String> {
+    let sidecar = config_path.with_file_name(LEGACY_SECRET_SIDECAR_NAME);
+    let document = serde_json::to_string_pretty(&serde_json::json!({
+        "client_secret": secret,
+        "note": "Legacy Spotify client secret kept from config.json: the OS keychain already held a different value. Resolve via Settings → Reconnect Spotify, then delete this file.",
+    }))
+    .map_err(|e| format!("Failed to serialize the legacy-secret sidecar: {}", e))?;
+    atomic_write_json(&sidecar, &document)?;
+    let name = sidecar
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .ok_or_else(|| "Legacy-secret sidecar has no file name".to_string())?;
+    log::warn!(
+        "[CFG] migrate_legacy_client_secret: the conflicting plaintext is kept in '{}' as well — resolve it via Settings → Reconnect Spotify, then delete that file",
+        name
+    );
+    Ok(name)
+}
+
 /// Executes the migration IO and returns its observable outcome.
 fn run_legacy_secret_migration() -> LegacySecretOutcome {
     let path = match get_config_path() {
@@ -1731,12 +2109,11 @@ fn run_legacy_secret_migration() -> LegacySecretOutcome {
             return LegacySecretOutcome::NoLegacyField;
         }
     };
-    // Parse as raw Value so we can inspect the pre-v2.6.0 nested
-    // `spotify.client_secret` field. (`SpotifyConfig` declares no such
-    // field, so `serde_json::from_str::<AppConfig>` would discard it
-    // before we got a chance to migrate. Top-level unknown keys are
-    // retained in `AppConfig::extra` since issue #379, but nested unknown
-    // keys are still dropped — hence the raw `Value` here.)
+    // Parse as raw Value so the pre-v2.6.0 nested `spotify.client_secret` field
+    // can be inspected and removed BEFORE the typed parse. (`SpotifyConfig`
+    // declares no such field, so `serde_json::from_str::<AppConfig>` would drop
+    // the value into the section's unknown-key bucket — see issue #938 — and
+    // leave it in the file the migration is supposed to clean.)
     let mut root: serde_json::Value = match serde_json::from_str(&contents) {
         Ok(v) => v,
         Err(e) => {
@@ -1744,11 +2121,7 @@ fn run_legacy_secret_migration() -> LegacySecretOutcome {
             return LegacySecretOutcome::NoLegacyField;
         }
     };
-    let plaintext = root
-        .get("spotify")
-        .and_then(|s| s.get("client_secret"))
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
+    let plaintext = legacy_client_secret(&root);
     let keychain_read = crate::keychain::get_spotify_client_secret();
     let outcome = decide_legacy_secret_outcome(plaintext.as_deref(), &keychain_read);
     match (&outcome, &keychain_read) {
@@ -1770,6 +2143,16 @@ fn run_legacy_secret_migration() -> LegacySecretOutcome {
                 plaintext.len(),
                 existing.len()
             );
+            // Issue #803: the plaintext stays in `config.json` (that is the
+            // documented promise), but a copy also goes into a sidecar the app
+            // never rewrites, because the next unrelated save would otherwise be
+            // its last appearance anywhere.
+            if let Err(e) = write_legacy_secret_sidecar(&path, &plaintext) {
+                log::warn!(
+                    "[CFG] migrate_legacy_client_secret: could not write the legacy-secret sidecar: {}",
+                    e
+                );
+            }
             return outcome;
         }
         _ => {
@@ -1795,10 +2178,11 @@ fn run_legacy_secret_migration() -> LegacySecretOutcome {
             }
         }
     }
-    // Strip the plaintext field and re-serialise.
-    if let Some(spotify_obj) = root.get_mut("spotify").and_then(|v| v.as_object_mut()) {
-        spotify_obj.remove("client_secret");
-    }
+    // Strip EVERY `client_secret` key, not only the documented pre-v2.6.0
+    // `spotify.client_secret`: a hand-edited or third-party file can nest the
+    // same credential under any path, and the migration has just taken
+    // responsibility for the value it read (issue #916).
+    strip_client_secret_keys(&mut root);
     let new_contents = match serde_json::to_string_pretty(&root) {
         Ok(s) => s,
         Err(e) => {
@@ -1912,23 +2296,166 @@ pub fn clamped_config(config: &AppConfig) -> AppConfig {
     // its own deadline) normalizes it away, so the in-memory copy, the file on
     // disk and the tray can never disagree about a snooze being active.
     clamp_snooze(&mut cfg, chrono::Utc::now());
+    // Issue #916: the write path strips too, so a payload that carries a
+    // `client_secret` in an unknown-key bucket cannot put a credential back
+    // into `config.json` (or into an export) on the way out.
+    strip_client_secret_from_extras(&mut cfg);
     cfg
 }
 
+/// The persisted document's markers, read once (issues #938 and #943): the
+/// stored `schema_version` and the stored `revision`.
+///
+/// A missing, unreadable, unparsable or non-object file yields `(None, 0)`:
+/// there is no version to protect and no revision to be behind, and a corrupt
+/// file is about to be replaced by the save this is guarding anyway. A stored
+/// `schema_version` that is not a `u32` is `None` for the same reason.
+fn stored_document_markers(path: &std::path::Path) -> (Option<u32>, u64) {
+    let Ok(contents) = fs::read_to_string(path) else {
+        return (None, 0);
+    };
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        return (None, 0);
+    };
+    (
+        root.get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|version| u32::try_from(version).ok()),
+        root.get("revision")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+    )
+}
+
+/// Marker the stale-revision error starts with (issue #943), so the webview's
+/// config store can tell "the settings changed in another window" apart from
+/// any other save failure and re-load the document instead of retrying the same
+/// payload.
+pub const STALE_REVISION_MARKER: &str = "stale-config-revision";
+
+/// Emitted after every accepted save (issue #943): `{"revision": u64,
+/// "config": <persisted document>}`.
+///
+/// The config-writing commands call [`emit_config_changed`] once a persist has
+/// succeeded, so a second Settings webview adopts the stored state instead of
+/// writing its own stale copy over it — the same shape the presence and tray
+/// mirrors use. A tray snooze released this way reaches the Dashboard with no
+/// remount.
+pub const CONFIG_CHANGED_EVENT: &str = "config-changed";
+
+/// Emit [`CONFIG_CHANGED_EVENT`] for the document that was just persisted,
+/// returning its revision (issue #943).
+///
+/// `persisted` is what [`save_config_persisted`] returned — the clamped,
+/// revision-stamped document that is on disk — so what the other window renders
+/// matches the file. Emission is best-effort, like every other app-level emit in
+/// this codebase: a window that is not listening loses nothing, it reads the
+/// same document on its next load.
+pub fn emit_config_changed(app: &tauri::AppHandle, persisted: &AppConfig) -> u64 {
+    match serde_json::to_value(persisted) {
+        Ok(document) => {
+            let _ = app.emit(
+                CONFIG_CHANGED_EVENT,
+                serde_json::json!({ "revision": persisted.revision, "config": document }),
+            );
+        }
+        Err(e) => log::warn!(
+            "[CFG] config-changed: the persisted document could not be serialized ({}); not emitting",
+            e
+        ),
+    }
+    persisted.revision
+}
+
 pub fn save_config(config: &AppConfig) -> Result<(), String> {
-    let path = get_config_path()?;
+    save_config_persisted(config).map(|_| ())
+}
+
+/// Persist `config` and return the document that was written (issue #943).
+///
+/// [`save_config`] is this function with the returned document dropped, for
+/// callers that do not keep the config in memory. A caller that DOES — the
+/// commands layer stores the persisted value in `AppState`, see #297 — should
+/// use this one: the written document carries the next `revision`, and a caller
+/// still holding the pre-save copy would be rejected as stale by its own next
+/// save once it starts sending that revision.
+pub fn save_config_persisted(config: &AppConfig) -> Result<AppConfig, String> {
+    save_config_to(&get_config_path()?, config)
+}
+
+/// Path-taking core of [`save_config_persisted`]: the normalization, the
+/// stale-revision rejection, the newer-document refusal and the atomic write —
+/// so the write path is testable against real files, the same shape
+/// [`import_config_document`] uses.
+fn save_config_to(path: &std::path::Path, config: &AppConfig) -> Result<AppConfig, String> {
+    let (stored_version, stored_revision_of_file) = stored_document_markers(path);
+
+    // Issue #943: a payload behind the document on disk is a second webview
+    // writing its own stale copy — the write that silently reverted the other
+    // window's change. Reject it instead: the caller re-loads, the user is told
+    // which window moved, and the newer document survives.
+    //
+    // `revision == 0` means the payload carries no revision at all (a frontend
+    // that does not send the field yet, or a fresh install), so it is stamped
+    // upward rather than rejected: rejecting it would make every save from such
+    // a client fail as soon as the first one succeeded, which is a worse failure
+    // than the one being fixed. The guard applies the moment a client sends the
+    // revision it loaded.
+    if config.revision != 0 && config.revision < stored_revision_of_file {
+        log::warn!(
+            "[CFG] refusing a stale config write to '{}': the stored document is at revision {} and this copy is at {}",
+            path.display(),
+            stored_revision_of_file,
+            config.revision
+        );
+        return Err(format!(
+            "{STALE_REVISION_MARKER}: the settings were changed in another window (stored revision {stored_revision_of_file}, this copy is at revision {})",
+            config.revision
+        ));
+    }
+
+    // Issue #938: never rewrite a document a NEWER binary wrote. The marker is
+    // the only record of which migrations have run, and this build sees none of
+    // that document's unknown keys: writing back would relabel it at this
+    // build's version — so the newer build's dispatcher skips its own
+    // migrations on the next launch — and drop the keys those migrations read.
+    // Leaving the file alone loses nothing, and the caller surfaces the error.
+    if let Some(stored) = stored_version {
+        if stored > SCHEMA_VERSION {
+            log::warn!(
+                "[CFG] refusing to overwrite config '{}': schema_version {} was written by a newer PresenceJam (this build writes {})",
+                path.display(),
+                stored,
+                SCHEMA_VERSION
+            );
+            return Err(format!(
+                "The stored configuration was written by a newer version of PresenceJam (schema {stored}); leaving it untouched"
+            ));
+        }
+    }
 
     let mut cfg = clamped_config(config);
-    // CfgDiag#1 (#536): the client's `schema_version` is a suggestion, not
-    // an instruction — a stale payload can never lower the version.
+    // CfgDiag#1 (#536): the client's `schema_version` is a suggestion, not an
+    // instruction — a stale payload can never lower the version, and since
+    // issue #938 it cannot raise one above a newer document's either.
     stamp_schema_version(&mut cfg);
+    // Issue #943: strictly increasing, and never below either side's value, so
+    // two windows saving in sequence hand each other a rising token.
+    cfg.revision = stored_revision_of_file
+        .max(config.revision)
+        .saturating_add(1);
+
     let json = serde_json::to_string_pretty(&cfg)
         .map_err(|e| format!("Failed to serialize config to JSON: {}", e))?;
 
-    atomic_write_json(&path, &json)?;
+    atomic_write_json(path, &json)?;
 
-    log::info!("[CFG] Saved configuration to '{}'", path.display());
-    Ok(())
+    log::info!(
+        "[CFG] Saved configuration to '{}' (revision {})",
+        path.display(),
+        cfg.revision
+    );
+    Ok(cfg)
 }
 
 // ---------------------------------------------------------------------------
@@ -1955,14 +2482,24 @@ pub fn export_file_name(version: &str, at: chrono::DateTime<chrono::Utc>) -> Str
     )
 }
 
-/// Collect the dotted paths of every `client_secret` key anywhere in `value`.
+/// Walk every `client_secret` key in `value`, calling `visit(dotted_path, value)`
+/// for each (issue #916).
 ///
-/// Walks nested objects and arrays: a secret cannot hide inside `extra`
-/// (the unknown-top-level-key retention map) or a hand-written nested object
-/// just because the typed schema has no such field. Only keys are matched —
-/// values are irrelevant to the decision.
-fn client_secret_paths(value: &serde_json::Value) -> Vec<String> {
-    fn walk(value: &serde_json::Value, prefix: &str, out: &mut Vec<String>) {
+/// The ONE traversal behind [`client_secret_paths`] (export/import refusal) and
+/// [`legacy_client_secret`] (the legacy-plaintext migration), so the two cannot
+/// disagree about where a credential may hide. Nested objects AND arrays are
+/// walked: a secret cannot escape by sitting inside the unknown-key retention
+/// map, or inside a hand-written nested object, merely because the typed schema
+/// has no such field.
+fn walk_client_secret_keys(
+    value: &serde_json::Value,
+    visit: &mut impl FnMut(&str, &serde_json::Value),
+) {
+    fn walk(
+        value: &serde_json::Value,
+        prefix: &str,
+        visit: &mut impl FnMut(&str, &serde_json::Value),
+    ) {
         match value {
             serde_json::Value::Object(map) => {
                 for (key, child) in map {
@@ -1972,22 +2509,52 @@ fn client_secret_paths(value: &serde_json::Value) -> Vec<String> {
                         format!("{}.{}", prefix, key)
                     };
                     if key == "client_secret" {
-                        out.push(path.clone());
+                        visit(&path, child);
                     }
-                    walk(child, &path, out);
+                    walk(child, &path, visit);
                 }
             }
             serde_json::Value::Array(items) => {
                 for (index, child) in items.iter().enumerate() {
-                    walk(child, &format!("{}[{}]", prefix, index), out);
+                    walk(child, &format!("{}[{}]", prefix, index), visit);
                 }
             }
             _ => {}
         }
     }
+    walk(value, "", visit);
+}
+
+/// Collect the dotted paths of every `client_secret` key anywhere in `value`.
+///
+/// Only keys are matched — values are irrelevant to the decision, which is why
+/// an explicit `null` or a nested object counts here (the import refusal wants
+/// every shape) while [`legacy_client_secret`] wants a string.
+fn client_secret_paths(value: &serde_json::Value) -> Vec<String> {
     let mut out = Vec::new();
-    walk(value, "", &mut out);
+    walk_client_secret_keys(value, &mut |path, _| out.push(path.to_string()));
     out
+}
+
+/// The plaintext credential the legacy migration acts on (issue #916): the
+/// documented pre-v2.6.0 `spotify.client_secret` when the document has one,
+/// otherwise the first `client_secret` key anywhere that holds a non-empty
+/// string.
+///
+/// Before this, only `spotify.client_secret` was read, so a credential at any
+/// other path was neither migrated to the keychain nor removed from disk — it
+/// was silently dropped. `None` means there is genuinely nothing to migrate.
+fn legacy_client_secret(root: &serde_json::Value) -> Option<String> {
+    let mut found: Vec<(String, String)> = Vec::new();
+    walk_client_secret_keys(root, &mut |path, value| {
+        if let Some(text) = value.as_str().filter(|text| !text.is_empty()) {
+            found.push((path.to_string(), text.to_string()));
+        }
+    });
+    let documented = found
+        .iter()
+        .find(|(path, _)| path == "spotify.client_secret");
+    documented.or(found.first()).map(|(_, text)| text.clone())
 }
 
 /// Remove every `client_secret` key anywhere in the tree; returns how many
@@ -2009,6 +2576,46 @@ fn strip_client_secret_keys(value: &mut serde_json::Value) -> usize {
             }
         }
         _ => {}
+    }
+    removed
+}
+
+/// Remove `client_secret` keys from ONE unknown-key map (issue #916): the
+/// top-level entry, plus any nested inside a retained unknown value. Returns how
+/// many keys were removed, so the caller logs a single line.
+///
+/// An unknown-key bucket is `#[serde(flatten)]` with no entry-level filter, so a
+/// key the codebase treats as a credential everywhere else would otherwise be
+/// deserialized, handed to the webview by the `load_config` command and
+/// re-serialized on the next save.
+fn strip_client_secret_from_extra(extra: &mut BTreeMap<String, serde_json::Value>) -> usize {
+    let mut removed = if extra.remove("client_secret").is_some() {
+        1
+    } else {
+        0
+    };
+    for value in extra.values_mut() {
+        removed += strip_client_secret_keys(value);
+    }
+    removed
+}
+
+/// [`strip_client_secret_from_extra`] over every unknown-key bucket a config
+/// carries: the document's own top-level map and each section's (issue #916;
+/// the section maps are themselves issue #938).
+fn strip_client_secret_from_extras(config: &mut AppConfig) -> usize {
+    let mut removed = strip_client_secret_from_extra(&mut config.extra);
+    for extra in [
+        &mut config.spotify.extra,
+        &mut config.teams.extra,
+        &mut config.polling.extra,
+        &mut config.logging.extra,
+        &mut config.updates.extra,
+        &mut config.notifications.extra,
+        &mut config.status_rules.extra,
+        &mut config.shortcuts.extra,
+    ] {
+        removed += strip_client_secret_from_extra(extra);
     }
     removed
 }
@@ -2042,6 +2649,24 @@ pub fn export_document(cfg: &AppConfig) -> Result<String, String> {
     {
         spotify.remove("client_secret_set");
         spotify.remove("client_secret_state");
+    }
+    // S9 (issue #975): the snooze deadline is RUNTIME state — "pause sync until
+    // then" on THIS machine — not a setting. An export is advertised as a
+    // shareable settings copy, so a file exported while sync was paused would
+    // otherwise hand the recipient the exporter's still-future deadline: that
+    // install performs no Spotify or Graph work until it passes, and nothing in
+    // the import flow says a pause came with the file.
+    if let Some(root) = value.as_object_mut() {
+        root.remove("snooze_until");
+        // An export is a document this app wrote, so it carries the schema
+        // floor the binary is authoritative for (`stamp_schema_version`): the
+        // floor only ever raises the value, so a newer source is left alone.
+        let floor = root
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+            .max(u64::from(SCHEMA_VERSION));
+        root.insert("schema_version".into(), serde_json::json!(floor));
     }
     serde_json::to_string_pretty(&value)
         .map_err(|e| format!("Failed to serialize config to JSON: {}", e))
@@ -2110,7 +2735,25 @@ pub fn prepare_import(raw: &str) -> Result<PreparedImport, String> {
     config.spotify.client_secret_set = false;
     config.spotify.client_secret_state = ClientSecretState::Absent;
 
-    let document = serde_json::to_string_pretty(&config)
+    // Issue #975: an imported document must never start life paused. The
+    // deadline belongs to the exporting machine's runtime state — the export
+    // above no longer writes it — and an older or hand-edited file that still
+    // carries a future one would silence this machine's polling until it
+    // passed, with nothing in the UI explaining why.
+    config.snooze_until = None;
+    // Same floor as the export path: raising an older document to this binary's
+    // schema is the migration the loader would apply anyway; a newer document is
+    // never relabelled (`stamp_schema_version` only ever raises).
+    stamp_schema_version(&mut config);
+
+    // The rewritten document must not carry the key at all (the issue asserts on
+    // its absence, not on a null value), exactly as the export path does.
+    let mut value = serde_json::to_value(&config)
+        .map_err(|e| format!("Failed to serialize imported config to JSON: {}", e))?;
+    if let Some(root) = value.as_object_mut() {
+        root.remove("snooze_until");
+    }
+    let document = serde_json::to_string_pretty(&value)
         .map_err(|e| format!("Failed to serialize imported config to JSON: {}", e))?;
     Ok(PreparedImport { config, document })
 }
@@ -2658,6 +3301,7 @@ mod tests {
             max_interval_seconds: 30,
             expiry_buffer_seconds: 10,
             pause_backoff_max_seconds: 300,
+            ..PollingConfig::default()
         };
         clamp_polling(&mut polling);
         assert_eq!(polling.max_interval_seconds, 30);
@@ -2674,6 +3318,7 @@ mod tests {
             max_interval_seconds: 60,
             expiry_buffer_seconds: 10,
             pause_backoff_max_seconds: 300,
+            ..PollingConfig::default()
         };
         clamp_polling(&mut polling);
         assert_eq!(polling.default_interval_seconds, 20);
@@ -2686,6 +3331,7 @@ mod tests {
             max_interval_seconds: 9999,
             expiry_buffer_seconds: 9999,
             pause_backoff_max_seconds: 9999,
+            ..PollingConfig::default()
         };
         clamp_polling(&mut polling);
         assert!(polling.minimum_interval_seconds <= polling.default_interval_seconds);
@@ -3265,6 +3911,7 @@ mod tests {
     #[test]
     fn test_clamp_rules_normalizes_the_track_rule_window() {
         let mut rules = StatusRulesConfig {
+            extra: Default::default(),
             quiet_hours: Vec::new(),
             track_rules: vec![
                 TrackRuleEntry {
@@ -3450,6 +4097,7 @@ mod tests {
     #[test]
     fn test_clamp_rules_normalizes_pairs_and_bounds_text() {
         let mut rules = StatusRulesConfig {
+            extra: Default::default(),
             quiet_hours: vec![QuietHoursEntry {
                 enabled: true,
                 presence_availability: "donotdisturb".to_string(),
@@ -3707,6 +4355,7 @@ mod tests {
                 log_level: "Info".into(),
                 max_file_size_mb,
                 keep_files,
+                ..LoggingConfig::default()
             };
             clamp_logging(&mut logging);
             (logging.max_file_size_mb, logging.keep_files)
@@ -4564,6 +5213,7 @@ mod tests {
     #[test]
     fn shortcut_bindings_round_trip_through_json() {
         let cfg = ShortcutsConfig {
+            extra: Default::default(),
             toggle_playback: Some("CmdOrCtrl+Shift+P".to_string()),
             toggle_sync: Some("  ".to_string()),
         };
@@ -4687,5 +5337,819 @@ mod tests {
             warned.contains("[CFG]"),
             "the logged line carries the module tag: {warned}"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Issue #926: the config document loads field by field, so one bad
+    // section cannot take the rest of the document down with it.
+    // -----------------------------------------------------------------
+
+    /// Create a unique temp config directory holding a `config.json` with
+    /// `contents`; returns `(dir, path)`. The caller removes the dir.
+    fn temp_config_file(tag: &str, contents: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "pj-test-{tag}-{}-{}",
+            std::process::id(),
+            chrono_like_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(&path, contents).unwrap();
+        (dir, path)
+    }
+
+    /// The list `config_from_sections` partitions on has to match the schema:
+    /// a key missing from it would be read BOTH as its typed field and into
+    /// `extra`, so a save would write the file's own value back twice.
+    #[test]
+    fn typed_config_keys_match_the_serialized_schema() {
+        let serialized = serde_json::to_value(AppConfig::default()).expect("must serialize");
+        let mut keys: Vec<&str> = serialized
+            .as_object()
+            .expect("the schema serializes to an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        let mut known = TYPED_CONFIG_KEYS.to_vec();
+        known.sort_unstable();
+        assert_eq!(
+            keys, known,
+            "TYPED_CONFIG_KEYS must list exactly the top-level keys AppConfig owns"
+        );
+    }
+
+    /// Issue #926: sections are independent. One wrong-typed field used to fail
+    /// the single `serde_json::from_str::<AppConfig>` call, which `load_config`
+    /// answered by quarantining the file and booting on defaults — so a
+    /// hand-edited `teams` value cost the user their client id, quiet hours,
+    /// polling tuning and everything else too.
+    #[test]
+    fn test_one_bad_section_keeps_every_other_section() {
+        let _guard = QUARANTINE_TEST_LOCK.lock();
+        LOGGER.call_once(|| {
+            // Best-effort: another test may have installed a logger first.
+            let _ = log::set_boxed_logger(Box::new(CapturingLogger));
+            log::set_max_level(log::LevelFilter::Warn);
+        });
+        LOG_LINES.lock().clear();
+        let prev = CONFIG_QUARANTINED.load(Ordering::SeqCst);
+        CONFIG_QUARANTINED.store(false, Ordering::SeqCst);
+
+        let (dir, path) = temp_config_file(
+            "sections",
+            r#"{
+                "spotify": {"client_id": "abc"},
+                "teams": {"status_format": 5},
+                "polling": {"default_interval_seconds": 42, "max_interval_seconds": 55},
+                "logging": {"log_level": "Debug", "max_file_size_mb": 7},
+                "updates": {"channel": "beta"},
+                "autostart": true,
+                "notifications": {"track_change": false},
+                "status_rules": {"quiet_hours": [{"enabled": true, "start_minutes": 1320, "end_minutes": 420, "days": [2]}]},
+                "future_top_level": {"kept": true}
+            }"#,
+        );
+
+        let cfg = load_config_from(&path).expect("a partially invalid document must still load");
+
+        assert_eq!(
+            cfg.teams.status_format,
+            default_status_format(),
+            "the invalid section takes its default"
+        );
+        assert_eq!(cfg.spotify.client_id, "abc", "a sibling section is kept");
+        assert_eq!(cfg.polling.default_interval_seconds, 42);
+        assert_eq!(cfg.polling.max_interval_seconds, 55);
+        assert_eq!(cfg.logging.log_level, "Debug");
+        assert_eq!(cfg.logging.max_file_size_mb, 7);
+        assert_eq!(cfg.updates.channel, UpdateChannel::Beta);
+        assert!(cfg.autostart);
+        assert!(!cfg.notifications.track_change);
+        assert_eq!(cfg.status_rules.quiet_hours.len(), 1);
+        assert_eq!(cfg.status_rules.quiet_hours[0].start_minutes, 1320);
+        assert_eq!(
+            cfg.extra.get("future_top_level"),
+            Some(&serde_json::json!({"kept": true})),
+            "unknown top-level keys still land in `extra`"
+        );
+
+        assert!(
+            !quarantine_backup_path(&path).exists(),
+            "one bad section must not quarantine the whole file"
+        );
+        assert!(!config_was_quarantined());
+        let logged = LOG_LINES.lock().clone();
+        assert!(
+            logged
+                .iter()
+                .any(|line| line.contains("[CFG]") && line.contains("teams")),
+            "the fallback must name the field it replaced: {logged:?}"
+        );
+
+        CONFIG_QUARANTINED.store(prev, Ordering::SeqCst);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #926: `client_id` was the only persisted field without a serde
+    /// default, so `{"spotify": {}}` — and equally `"client_id": null` — failed
+    /// the whole document. Neither quarantines the file now: the first loads as
+    /// the section's defaults, the second as those defaults plus a warning.
+    #[test]
+    fn test_empty_or_null_client_id_loads_without_quarantining() {
+        let _guard = QUARANTINE_TEST_LOCK.lock();
+        let prev = CONFIG_QUARANTINED.load(Ordering::SeqCst);
+        CONFIG_QUARANTINED.store(false, Ordering::SeqCst);
+        for contents in [
+            r#"{"spotify": {}, "autostart": true}"#,
+            r#"{"spotify": {"client_id": null}, "autostart": true}"#,
+        ] {
+            let (dir, path) = temp_config_file("client-id", contents);
+            let cfg = load_config_from(&path).expect("must load");
+            assert_eq!(cfg.spotify.client_id, "", "{contents}");
+            assert_eq!(
+                cfg.spotify.redirect_uri,
+                default_redirect_uri(),
+                "{contents}"
+            );
+            assert!(
+                cfg.autostart,
+                "the rest of the document is kept: {contents}"
+            );
+            assert!(!quarantine_backup_path(&path).exists(), "{contents}");
+            assert!(!config_was_quarantined(), "{contents}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        CONFIG_QUARANTINED.store(prev, Ordering::SeqCst);
+    }
+
+    /// Issue #926: the field-by-field loader is for documents that ARE an
+    /// object. Anything else is not a config — a bare array/string/null root,
+    /// or text that is not JSON — and is still quarantined to `config.json.bak`
+    /// with the app booting on defaults.
+    #[test]
+    fn test_non_object_root_is_still_quarantined() {
+        let _guard = QUARANTINE_TEST_LOCK.lock();
+        let prev = CONFIG_QUARANTINED.load(Ordering::SeqCst);
+        for contents in ["[1, 2, 3]", "\"spotify\"", "null", "{ NOT VALID JSON !!!"] {
+            CONFIG_QUARANTINED.store(false, Ordering::SeqCst);
+            let (dir, path) = temp_config_file("non-object", contents);
+            let cfg = load_config_from(&path).expect("quarantine still yields defaults");
+            assert_eq!(cfg.schema_version, default_schema_version());
+            assert!(cfg.spotify.client_id.is_empty());
+            assert!(
+                quarantine_backup_path(&path).exists(),
+                "{contents} must be quarantined"
+            );
+            assert!(!path.exists(), "{contents}");
+            assert!(config_was_quarantined(), "{contents}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        CONFIG_QUARANTINED.store(prev, Ordering::SeqCst);
+    }
+
+    // -----------------------------------------------------------------
+    // Issue #802: the 0600 hardening is best-effort.
+    // -----------------------------------------------------------------
+
+    /// The body of the function `signature` starts — from its opening `{` to
+    /// the matching `}` — found by brace counting, so a guard over it survives
+    /// reordering / splitting / renaming of the code around it. Panics when the
+    /// function itself is gone, which is a failure of the guard's premise.
+    fn fn_body<'a>(src: &'a str, signature: &str) -> &'a str {
+        let sig_idx = src
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} must exist"));
+        let brace_open_rel = src[sig_idx..]
+            .find('{')
+            .unwrap_or_else(|| panic!("{signature} must have an opening brace"));
+        let body_start = sig_idx + brace_open_rel;
+        let mut depth: u32 = 0;
+        let mut i = body_start;
+        let body_end = loop {
+            match src.as_bytes()[i] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break i;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+            if i >= src.len() {
+                panic!("{signature} has unbalanced braces");
+            }
+        };
+        &src[body_start + 1..body_end]
+    }
+
+    /// Issue #802: tightening the mode is a courtesy, never a precondition for
+    /// reading a config the user's account can open. Both errors on that path
+    /// were `?`-propagated, so an unreadable or unwritable mode failed the whole
+    /// load — startup logged "no config found", `AppState.config` stayed `None`,
+    /// the stores fell back to built-in defaults, and the next whole-document
+    /// save persisted those defaults over the real file.
+    ///
+    /// A `?` cannot appear in a function that has no `Result` to return, so the
+    /// guard is exact rather than stylistic. It cannot be replaced by a real
+    /// failing `chmod`: that needs a file the test does not own (or an immutable
+    /// / read-only mount), and `chmod` is gated on ownership of the file, not on
+    /// write access to its directory — so the "0o555 temp dir" shape suggested
+    /// in the issue does not deny it, for an unprivileged user or for root.
+    #[test]
+    fn test_config_mode_tightening_cannot_abort_the_load() {
+        let body = fn_body(include_str!("config.rs"), "fn tighten_config_permissions(");
+        assert!(
+            !body.contains('?'),
+            "tighten_config_permissions must not propagate an error: a mode that \
+             cannot be read or set must not stop load_config from reading a file it \
+             can open (issue #802)"
+        );
+    }
+
+    /// Issue #802, the happy path: a loose `config.json` is still tightened to
+    /// 0600 while it loads, and its stored values come back.
+    #[cfg(unix)]
+    #[test]
+    fn test_loose_config_is_still_tightened_on_load() {
+        let (dir, path) = temp_config_file("tighten", r#"{"autostart": true}"#);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let cfg = load_config_from(&path).expect("a readable config must load");
+        assert!(cfg.autostart);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "the #135 tightening must still run"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------
+    // Issue #821: quiet hours normalize their schedule like track rules.
+    // -----------------------------------------------------------------
+
+    /// Issue #821: a quiet-hours window normalizes its schedule the way the
+    /// track-rule half already did. `days: [0, 9, 2, 2]` used to load unchanged
+    /// and match NO weekday at all, so the window — its `pause_polling` arm
+    /// included — silently never fired.
+    #[test]
+    fn test_clamp_rules_normalizes_the_quiet_hours_window() {
+        let mut rules = StatusRulesConfig {
+            extra: Default::default(),
+            quiet_hours: vec![
+                QuietHoursEntry {
+                    enabled: true,
+                    start_minutes: 60000,
+                    end_minutes: 60000,
+                    days: vec![0, 9, 2, 2],
+                    ..QuietHoursEntry::default()
+                },
+                QuietHoursEntry {
+                    enabled: true,
+                    start_minutes: 1320,
+                    end_minutes: 420,
+                    days: vec![7, 3, 3],
+                    ..QuietHoursEntry::default()
+                },
+            ],
+            track_rules: Vec::new(),
+        };
+        clamp_rules(&mut rules);
+
+        assert_eq!(
+            rules.quiet_hours[0].days,
+            vec![2],
+            "out-of-range weekdays are dropped, then sorted and deduplicated"
+        );
+        assert_eq!(rules.quiet_hours[0].start_minutes, 1439);
+        assert_eq!(rules.quiet_hours[0].end_minutes, 1440);
+        // A window already inside the day is untouched: the wrap-around pair,
+        // both minutes and the out-of-order duplicates survive as documented.
+        assert_eq!(rules.quiet_hours[1].days, vec![3, 7]);
+        assert_eq!(rules.quiet_hours[1].start_minutes, 1320);
+        assert_eq!(rules.quiet_hours[1].end_minutes, 420);
+    }
+
+    /// Issue #821, through the loader: the same normalization runs on load, so a
+    /// hand-edited `days` cannot reach the evaluator as "no weekday matches" —
+    /// an emptied list means EVERY day, which is why dropping the out-of-range
+    /// values can only widen the window.
+    #[test]
+    fn test_quiet_hours_window_is_normalized_on_load() {
+        let (dir, path) = temp_config_file(
+            "quiet-window",
+            r#"{"status_rules": {"quiet_hours": [
+                {"enabled": true, "days": [0, 9, 2, 2], "start_minutes": 60000, "end_minutes": 60000},
+                {"enabled": true, "days": [0]}
+            ]}}"#,
+        );
+        let cfg = load_config_from(&path).expect("must load");
+        let first = &cfg.status_rules.quiet_hours[0];
+        assert_eq!(first.days, vec![2]);
+        assert_eq!(first.start_minutes, 1439);
+        assert_eq!(first.end_minutes, 1440);
+        assert!(
+            cfg.status_rules.quiet_hours[1].days.is_empty(),
+            "an all-out-of-range list becomes empty, which means every day"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------
+    // Issue #938: a section's unknown keys survive, and `schema_version`
+    // is a floor that never comes back down.
+    // -----------------------------------------------------------------
+
+    /// Issue #938: a key a NEWER build nested inside a section used to be
+    /// dropped by the next save from this build — `AppConfig::extra` retained
+    /// only the top level. The nested case now rides through the same load→save
+    /// path the app uses.
+    #[test]
+    fn test_nested_unknown_keys_survive_load_then_save() {
+        let (dir, path) = temp_config_file(
+            "nested-extra",
+            r#"{"autostart": true,
+                "teams": {"status_format": "🎧 {track}", "future_flag": true,
+                          "future_block": {"a": [1, 2]}},
+                "spotify": {"client_id": "abc", "future_spotify": "x"},
+                "logging": {"future_logging": 1},
+                "polling": {"future_polling": 2},
+                "updates": {"future_updates": "u"},
+                "notifications": {"future_notifications": false},
+                "status_rules": {"quiet_hours": [], "track_rules": [],
+                                 "future_rule_flag": "r"},
+                "shortcuts": {"future_shortcut": "s"}}"#,
+        );
+        let cfg = load_config_from(&path).expect("must load");
+        assert_eq!(
+            cfg.teams.extra.get("future_flag"),
+            Some(&serde_json::json!(true))
+        );
+        assert_eq!(
+            cfg.spotify.extra.get("future_spotify"),
+            Some(&serde_json::json!("x"))
+        );
+        assert_eq!(
+            cfg.logging.extra.get("future_logging"),
+            Some(&serde_json::json!(1))
+        );
+        assert_eq!(
+            cfg.polling.extra.get("future_polling"),
+            Some(&serde_json::json!(2))
+        );
+        assert_eq!(
+            cfg.updates.extra.get("future_updates"),
+            Some(&serde_json::json!("u"))
+        );
+        assert_eq!(
+            cfg.notifications.extra.get("future_notifications"),
+            Some(&serde_json::json!(false))
+        );
+        assert_eq!(
+            cfg.status_rules.extra.get("future_rule_flag"),
+            Some(&serde_json::json!("r"))
+        );
+        assert_eq!(
+            cfg.shortcuts.extra.get("future_shortcut"),
+            Some(&serde_json::json!("s"))
+        );
+
+        save_config_to(&path, &cfg).expect("save must succeed");
+
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            written["teams"]["future_flag"], true,
+            "a nested unknown key must survive a load-then-save round trip"
+        );
+        assert_eq!(
+            written["teams"]["future_block"],
+            serde_json::json!({"a": [1, 2]})
+        );
+        assert_eq!(written["spotify"]["future_spotify"], "x");
+        assert_eq!(written["logging"]["future_logging"], 1);
+        assert_eq!(written["polling"]["future_polling"], 2);
+        assert_eq!(written["updates"]["future_updates"], "u");
+        assert_eq!(written["notifications"]["future_notifications"], false);
+        assert_eq!(
+            written["status_rules"]["future_rule_flag"], "r",
+            "a nested key in the rules section survives too"
+        );
+        assert_eq!(written["shortcuts"]["future_shortcut"], "s");
+        assert_eq!(written["teams"]["status_format"], "🎧 {track}");
+        assert_eq!(written["autostart"], true);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #938: `save_config` refuses to rewrite a document a newer binary
+    /// wrote. The marker is the only record of which migrations have run, and
+    /// this build cannot see the keys those migrations read — so the file is
+    /// left byte-identical and the caller gets the error to surface.
+    #[test]
+    fn test_save_refuses_a_newer_document_and_never_lowers_the_marker() {
+        let contents = r#"{"schema_version": 99, "future_key": {"kept": true}, "autostart": true}"#;
+        let (dir, path) = temp_config_file("newer-than-us", contents);
+        let cfg = load_config_from(&path).expect("a newer document must still load");
+        assert_eq!(
+            cfg.schema_version, 99,
+            "a newer document keeps its own version instead of being relabelled"
+        );
+        assert!(
+            cfg.extra.contains_key("future_key"),
+            "its unknown keys are read"
+        );
+
+        let err =
+            save_config_to(&path, &cfg).expect_err("saving over a newer document must be refused");
+        assert!(err.contains("newer"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            contents,
+            "the newer document must be left byte-identical"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #938: stamping is a FLOOR, not an assignment — a document already
+    /// at a higher version must not be relabelled downward, while a stale
+    /// client payload still cannot lower the running build's own marker.
+    #[test]
+    fn test_stamp_schema_version_never_lowers_a_newer_document() {
+        let mut newer = AppConfig {
+            schema_version: SCHEMA_VERSION + 1,
+            ..AppConfig::default()
+        };
+        stamp_schema_version(&mut newer);
+        assert_eq!(newer.schema_version, SCHEMA_VERSION + 1);
+
+        let mut stale = AppConfig {
+            schema_version: 1,
+            ..AppConfig::default()
+        };
+        stamp_schema_version(&mut stale);
+        assert_eq!(stale.schema_version, SCHEMA_VERSION);
+    }
+
+    // -----------------------------------------------------------------
+    // Issue #916: a `client_secret` in an unknown-key bucket never crosses
+    // the IPC boundary and leaves the file on the next save.
+    // -----------------------------------------------------------------
+
+    /// Issue #916: a `client_secret` an outside writer left at the top level —
+    /// or nested inside a section, which #938's retention map would otherwise
+    /// carry — must not appear anywhere in the `AppConfig` a load returns (that
+    /// document goes straight to the webview), and must be gone from the file
+    /// after the next save.
+    #[test]
+    fn test_client_secret_keys_never_reach_ipc_and_leave_the_file() {
+        let (dir, path) = temp_config_file(
+            "top-level-secret",
+            r#"{"autostart": true,
+                "client_secret": "TOP-LEVEL-SENTINEL",
+                "future": {"client_secret": "NESTED-SENTINEL", "kept": 1},
+                "spotify": {"client_id": "abc", "client_secret": "SPOTIFY-SENTINEL"},
+                "status_rules": {"quiet_hours": [], "track_rules": [],
+                                 "client_secret": "RULES-SENTINEL"},
+                "shortcuts": {"client_secret": "SHORTCUT-SENTINEL"}}"#,
+        );
+        let cfg = load_config_from(&path).expect("must load");
+
+        let serialized = serde_json::to_string(&cfg).expect("must serialize");
+        assert!(
+            !serialized.contains("SENTINEL"),
+            "no client_secret may reach the webview: {serialized}"
+        );
+        assert_eq!(
+            cfg.extra.get("future"),
+            Some(&serde_json::json!({"kept": 1})),
+            "a sibling key of a stripped secret is kept"
+        );
+        assert_eq!(cfg.spotify.client_id, "abc");
+        assert!(cfg.autostart);
+
+        save_config_to(&path, &cfg).expect("save must succeed");
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !written.contains("SENTINEL"),
+            "the next save must not write a credential back: {written}"
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&written).unwrap()["autostart"],
+            true
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #916, write side: a payload POSTed back by a script in the webview
+    /// can carry whatever it likes in an unknown-key bucket, so the write path
+    /// strips as well — nothing a caller hands `save_config` can put a
+    /// credential into `config.json`.
+    #[test]
+    fn test_save_strips_a_client_secret_a_payload_carries() {
+        let (dir, path) = temp_config_file("save-secret", r#"{"autostart": true}"#);
+        let mut cfg = AppConfig {
+            autostart: true,
+            ..AppConfig::default()
+        };
+        cfg.extra.insert(
+            "client_secret".to_string(),
+            serde_json::json!("PAYLOAD-SENTINEL"),
+        );
+        cfg.teams.extra.insert(
+            "client_secret".to_string(),
+            serde_json::json!("SECTION-SENTINEL"),
+        );
+        cfg.status_rules.extra.insert(
+            "client_secret".to_string(),
+            serde_json::json!("RULES-SENTINEL"),
+        );
+        cfg.shortcuts.extra.insert(
+            "client_secret".to_string(),
+            serde_json::json!("SHORTCUT-SENTINEL"),
+        );
+
+        save_config_to(&path, &cfg).expect("save must succeed");
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !written.contains("SENTINEL"),
+            "a save must never write a caller-supplied credential: {written}"
+        );
+        assert!(written.contains("\"autostart\": true"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #916: the migration reads the documented pre-2.6.0 path when the
+    /// document has one, and any other `client_secret` path otherwise. Reading
+    /// only `spotify.client_secret` meant a credential at another path was
+    /// neither migrated nor stripped, just dropped.
+    #[test]
+    fn test_legacy_client_secret_reads_every_path() {
+        assert_eq!(
+            legacy_client_secret(&serde_json::json!({"spotify": {"client_secret": "A"}}))
+                .as_deref(),
+            Some("A")
+        );
+        assert_eq!(
+            legacy_client_secret(&serde_json::json!({"future": {"client_secret": "B"}})).as_deref(),
+            Some("B")
+        );
+        assert_eq!(
+            legacy_client_secret(&serde_json::json!({"items": [{"client_secret": "C"}]}))
+                .as_deref(),
+            Some("C")
+        );
+        // The documented path wins when several are present (`serde_json`'s map
+        // order is what makes this a preference rather than an accident).
+        assert_eq!(
+            legacy_client_secret(&serde_json::json!({
+                "spotify": {"client_secret": "A"}, "other": {"client_secret": "B"}
+            }))
+            .as_deref(),
+            Some("A")
+        );
+        // Not a credential: an empty string, a null, a non-string, or no key.
+        for absent in [
+            serde_json::json!({"spotify": {"client_secret": ""}}),
+            serde_json::json!({"client_secret": null, "spotify": {}}),
+            serde_json::json!({"future": {"client_secret": {"nested": 1}}}),
+            serde_json::json!({"spotify": {}}),
+        ] {
+            assert_eq!(legacy_client_secret(&absent), None, "{absent}");
+        }
+    }
+
+    /// Issue #916 (the traversal both readers share): every `client_secret` key
+    /// is found, at any depth, including one inside an array element — the
+    /// import refusal and the migration must never disagree about where a
+    /// credential can hide.
+    #[test]
+    fn test_client_secret_paths_walks_objects_and_arrays() {
+        let paths = |value: &serde_json::Value| {
+            let mut sorted = client_secret_paths(value);
+            sorted.sort();
+            sorted
+        };
+        assert_eq!(
+            paths(&serde_json::json!({"a": {"client_secret": 1}, "client_secret": 2})),
+            vec!["a.client_secret".to_string(), "client_secret".to_string()]
+        );
+        assert_eq!(
+            paths(&serde_json::json!({"list": [{"client_secret": 1}]})),
+            vec!["list[0].client_secret".to_string()]
+        );
+        assert!(paths(&serde_json::json!({"spotify": {"client_id": "abc"}})).is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // Issue #975: the snooze deadline is runtime state, never a setting.
+    // -----------------------------------------------------------------
+
+    /// Issue #975: an export is advertised as a shareable settings copy, so it
+    /// must not carry "pause sync until then" from the exporting machine — the
+    /// recipient reads a live deadline as "sync is broken".
+    #[test]
+    fn test_export_never_carries_the_snooze_deadline() {
+        let cfg = AppConfig {
+            snooze_until: Some("2999-01-01T00:00:00Z".to_string()),
+            ..AppConfig::default()
+        };
+        let document = export_document(&cfg).expect("must export");
+        assert!(
+            !document.contains("snooze_until"),
+            "an export must not carry the deadline: {document}"
+        );
+        assert!(!document.contains("2999"), "{document}");
+        // Still a settings copy.
+        let value: serde_json::Value = serde_json::from_str(&document).unwrap();
+        assert!(value.get("teams").is_some(), "{document}");
+        assert_eq!(value["schema_version"], SCHEMA_VERSION);
+    }
+
+    /// Issue #975, the other direction: a document that still carries a FUTURE
+    /// deadline (an older export, a hand-edit) must leave the importing machine
+    /// syncing, and the rewritten document must not carry the key either.
+    #[test]
+    fn test_import_clears_a_future_snooze_deadline() {
+        let prepared = prepare_import(
+            r#"{"snooze_until": "2999-01-01T00:00:00Z", "autostart": true,
+                "teams": {"status_format": "🎧 {track}"}}"#,
+        )
+        .expect("must import");
+        assert_eq!(
+            prepared.config.snooze_until, None,
+            "an imported document must never start life paused"
+        );
+        assert!(
+            !prepared.document.contains("snooze_until"),
+            "{}",
+            prepared.document
+        );
+        let written: serde_json::Value = serde_json::from_str(&prepared.document).unwrap();
+        assert_eq!(written["autostart"], true);
+        assert_eq!(written["teams"]["status_format"], "🎧 {track}");
+    }
+
+    // -----------------------------------------------------------------
+    // Issue #803: a conflicting legacy plaintext is kept in a sidecar the
+    // app never rewrites.
+    // -----------------------------------------------------------------
+
+    /// Issue #803: the conflict arm leaves the plaintext in `config.json`
+    /// because the keychain already holds a different secret — but
+    /// `save_config` serialises `AppConfig`, which has no such field, so the
+    /// next unrelated save deleted the only remaining copy while the app kept
+    /// authenticating with the stale keychain value. The sidecar is what makes
+    /// the documented "the plaintext is not deleted" promise outlive that save,
+    /// and the value itself never reaches the log.
+    #[test]
+    fn test_legacy_secret_sidecar_survives_a_later_save() {
+        let _guard = QUARANTINE_TEST_LOCK.lock();
+        LOGGER.call_once(|| {
+            let _ = log::set_boxed_logger(Box::new(CapturingLogger));
+            log::set_max_level(log::LevelFilter::Warn);
+        });
+        LOG_LINES.lock().clear();
+
+        let (dir, path) = temp_config_file(
+            "legacy-sidecar",
+            r#"{"autostart": true,
+                "spotify": {"client_id": "abc", "client_secret": "LEGACY-SENTINEL"}}"#,
+        );
+        // The conflict arm itself needs a real keychain read and the real config
+        // path, so the sidecar writer is exercised directly here.
+        let name = write_legacy_secret_sidecar(&path, "LEGACY-SENTINEL").expect("sidecar");
+        assert_eq!(name, LEGACY_SECRET_SIDECAR_NAME);
+        let sidecar = path.with_file_name(LEGACY_SECRET_SIDECAR_NAME);
+        let sidecar_json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sidecar).unwrap()).unwrap();
+        assert_eq!(sidecar_json["client_secret"], "LEGACY-SENTINEL");
+
+        #[cfg(unix)]
+        assert_eq!(
+            std::fs::metadata(&sidecar).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "the sidecar must be user-only from the moment it exists"
+        );
+
+        // Any later save replaces `config.json` wholesale — the #803 premise —
+        // and the sidecar is what keeps the user's copy.
+        let mut cfg = load_config_from(&path).expect("must load");
+        cfg.autostart = false;
+        save_config_to(&path, &cfg).expect("save must succeed");
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("LEGACY-SENTINEL"),
+            "a later save drops the plaintext from config.json"
+        );
+        assert!(
+            std::fs::read_to_string(&sidecar)
+                .unwrap()
+                .contains("LEGACY-SENTINEL"),
+            "…and the sidecar still holds the user's copy"
+        );
+
+        let logged = LOG_LINES.lock().clone();
+        assert!(
+            logged
+                .iter()
+                .any(|line| line.contains(LEGACY_SECRET_SIDECAR_NAME)),
+            "the user must be told which file holds the copy: {logged:?}"
+        );
+        assert!(
+            !logged.iter().any(|line| line.contains("LEGACY-SENTINEL")),
+            "a client secret must never reach the log: {logged:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------
+    // Issue #943: a monotonic revision, and a stale write is refused.
+    // -----------------------------------------------------------------
+
+    /// Issue #943: Settings renders in both the main window and the detached
+    /// pane, each holding its own copy loaded once — so the second window's save
+    /// used to revert the first window's change silently. A payload behind the
+    /// document on disk is refused instead, and the file is left untouched.
+    #[test]
+    fn test_save_rejects_a_stale_revision_and_leaves_the_file_alone() {
+        let contents = r#"{"autostart": true, "revision": 5}"#;
+        let (dir, path) = temp_config_file("stale-revision", contents);
+        let mut stale = load_config_from(&path).expect("must load");
+        assert_eq!(stale.revision, 5);
+
+        stale.revision = 4; // the other window saved in between
+        stale.autostart = false;
+        let err = save_config_to(&path, &stale).expect_err("a stale revision must be refused");
+        assert!(
+            err.starts_with(STALE_REVISION_MARKER),
+            "the store has to be able to tell this failure apart: {err}"
+        );
+        assert!(err.contains("another window"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            contents,
+            "the newer document must be left byte-identical"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #943: the revision rises on every accepted save, the document a
+    /// save returns is the one on disk, and that returned document is accepted
+    /// by its own next save — the write-back the commands layer needs so a
+    /// window is never stale against itself.
+    #[test]
+    fn test_save_advances_the_revision_monotonically() {
+        let (dir, path) = temp_config_file("revision", r#"{"autostart": true}"#);
+        let cfg = load_config_from(&path).expect("must load");
+        assert_eq!(cfg.revision, 0, "a pre-#943 file reads as revision 0");
+
+        let first = save_config_to(&path, &cfg).expect("first save");
+        assert_eq!(first.revision, 1, "a save advances the revision");
+        let on_disk: AppConfig =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            on_disk.revision, first.revision,
+            "the returned document is the one that was written"
+        );
+
+        let second = save_config_to(&path, &first).expect("the returned document saves again");
+        assert_eq!(second.revision, 2);
+
+        let err = save_config_to(&path, &first)
+            .expect_err("a copy from before the second save is now behind the file");
+        assert!(err.starts_with(STALE_REVISION_MARKER), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #943, the compatibility half: `revision: 0` means "this payload
+    /// carries no revision" — a frontend that does not send the field yet, or a
+    /// fresh install. It is stamped above the stored revision rather than
+    /// refused, because refusing it would make every save from such a client
+    /// fail as soon as the first one succeeded.
+    #[test]
+    fn test_a_payload_without_a_revision_is_stamped_not_refused() {
+        let (dir, path) = temp_config_file("no-revision", r#"{"autostart": true, "revision": 7}"#);
+        let mut payload = load_config_from(&path).expect("must load");
+        payload.revision = 0;
+        payload.autostart = false;
+
+        let persisted =
+            save_config_to(&path, &payload).expect("a revision-less payload must still save");
+        assert_eq!(persisted.revision, 8, "stamped above the stored revision");
+        assert!(!persisted.autostart, "the write itself still happened");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The frontend switches on both literals, so their spelling is part of the
+    /// wire contract — the same guard `SPOTIFY_SECRET_CONFLICT_EVENT` has.
+    #[test]
+    fn test_config_changed_event_name_contract() {
+        assert_eq!(CONFIG_CHANGED_EVENT, "config-changed");
+        assert_eq!(STALE_REVISION_MARKER, "stale-config-revision");
     }
 }
