@@ -1220,6 +1220,27 @@ pub struct AppConfig {
     /// no such key and load as version 1.
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
+    /// The document's revision, raised once per accepted save (issue #943).
+    ///
+    /// Settings renders in both the main window and the detached pane, each
+    /// webview holding its own copy loaded once, so two writers can be a save
+    /// apart. A save whose payload is OLDER than the revision on disk is
+    /// rejected instead of silently reverting the other window's change (see
+    /// [`STALE_REVISION_MARKER`]), and [`emit_config_changed`] carries the new
+    /// revision so every window can adopt the document that was actually
+    /// persisted.
+    ///
+    /// `0` for a fresh install, for every file written before this field
+    /// existed, and for a client that does not send the field yet — which is why
+    /// `0` is stamped upward rather than treated as stale. The first save from
+    /// such a payload stores `1`.
+    ///
+    /// Skipped in the TS export: the field is the Rust-side guard until the
+    /// store half of #943 ships, and exporting it would make the generated
+    /// `AppConfig` require a member the frontend does not construct yet.
+    #[serde(default)]
+    #[ts(skip)]
+    pub revision: u64,
     /// Unknown / future top-level keys, retained across load→save so a newer
     /// config file is never silently stripped by an older binary (issue #379).
     /// Skipped in the TS export (and omitted from JSON while empty) so
@@ -1309,6 +1330,7 @@ impl Default for AppConfig {
             shortcuts: ShortcutsConfig::default(),
             extra: BTreeMap::new(),
             schema_version: default_schema_version(),
+            revision: 0,
         }
     }
 }
@@ -1621,7 +1643,7 @@ fn quarantine_corrupt_config(path: &std::path::Path, parse_err: impl std::fmt::D
 /// section can be replaced by its default without rejecting the rest.
 /// `typed_config_keys_match_the_serialized_schema` fails if this list and the
 /// struct ever disagree.
-const TYPED_CONFIG_KEYS: [&str; 12] = [
+const TYPED_CONFIG_KEYS: [&str; 13] = [
     "spotify",
     "teams",
     "polling",
@@ -1634,6 +1656,7 @@ const TYPED_CONFIG_KEYS: [&str; 12] = [
     "status_rules",
     "shortcuts",
     "schema_version",
+    "revision",
 ];
 
 /// The JSON type of `value`, for a log line that names the shape of a bad root
@@ -1706,6 +1729,7 @@ fn config_from_sections(root: serde_json::Map<String, serde_json::Value>) -> App
         status_rules: field_or_fallback(&root, "status_rules", Default::default()),
         shortcuts: field_or_fallback(&root, "shortcuts", Default::default()),
         schema_version: field_or_fallback(&root, "schema_version", default_schema_version()),
+        revision: field_or_fallback(&root, "revision", 0),
         extra: BTreeMap::new(),
     };
     for (key, value) in root {
@@ -2279,31 +2303,116 @@ pub fn clamped_config(config: &AppConfig) -> AppConfig {
     cfg
 }
 
-/// The `schema_version` recorded in the document at `path` (issue #938).
+/// The persisted document's markers, read once (issues #938 and #943): the
+/// stored `schema_version` and the stored `revision`.
 ///
-/// `None` for a missing, unreadable, unparsable or non-object file, and for a
-/// document whose `schema_version` is not a `u32` — every one of which this
-/// build is free to overwrite, so the caller reads `None` as "no reason to
-/// refuse".
-fn stored_schema_version(path: &std::path::Path) -> Option<u32> {
-    let contents = fs::read_to_string(path).ok()?;
-    let root: serde_json::Value = serde_json::from_str(&contents).ok()?;
-    u32::try_from(root.get("schema_version")?.as_u64()?).ok()
+/// A missing, unreadable, unparsable or non-object file yields `(None, 0)`:
+/// there is no version to protect and no revision to be behind, and a corrupt
+/// file is about to be replaced by the save this is guarding anyway. A stored
+/// `schema_version` that is not a `u32` is `None` for the same reason.
+fn stored_document_markers(path: &std::path::Path) -> (Option<u32>, u64) {
+    let Ok(contents) = fs::read_to_string(path) else {
+        return (None, 0);
+    };
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        return (None, 0);
+    };
+    (
+        root.get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|version| u32::try_from(version).ok()),
+        root.get("revision")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+    )
+}
+
+/// Marker the stale-revision error starts with (issue #943), so the webview's
+/// config store can tell "the settings changed in another window" apart from
+/// any other save failure and re-load the document instead of retrying the same
+/// payload.
+pub const STALE_REVISION_MARKER: &str = "stale-config-revision";
+
+/// Emitted after every accepted save (issue #943): `{"revision": u64,
+/// "config": <persisted document>}`.
+///
+/// The config-writing commands call [`emit_config_changed`] once a persist has
+/// succeeded, so a second Settings webview adopts the stored state instead of
+/// writing its own stale copy over it — the same shape the presence and tray
+/// mirrors use. A tray snooze released this way reaches the Dashboard with no
+/// remount.
+pub const CONFIG_CHANGED_EVENT: &str = "config-changed";
+
+/// Emit [`CONFIG_CHANGED_EVENT`] for the document that was just persisted,
+/// returning its revision (issue #943).
+///
+/// `persisted` is what [`save_config_persisted`] returned — the clamped,
+/// revision-stamped document that is on disk — so what the other window renders
+/// matches the file. Emission is best-effort, like every other app-level emit in
+/// this codebase: a window that is not listening loses nothing, it reads the
+/// same document on its next load.
+pub fn emit_config_changed(app: &tauri::AppHandle, persisted: &AppConfig) -> u64 {
+    match serde_json::to_value(persisted) {
+        Ok(document) => {
+            let _ = app.emit(
+                CONFIG_CHANGED_EVENT,
+                serde_json::json!({ "revision": persisted.revision, "config": document }),
+            );
+        }
+        Err(e) => log::warn!(
+            "[CFG] config-changed: the persisted document could not be serialized ({}); not emitting",
+            e
+        ),
+    }
+    persisted.revision
 }
 
 pub fn save_config(config: &AppConfig) -> Result<(), String> {
+    save_config_persisted(config).map(|_| ())
+}
+
+/// Persist `config` and return the document that was written (issue #943).
+///
+/// [`save_config`] is this function with the returned document dropped, for
+/// callers that do not keep the config in memory. A caller that DOES — the
+/// commands layer stores the persisted value in `AppState`, see #297 — should
+/// use this one: the written document carries the next `revision`, and a caller
+/// still holding the pre-save copy would be rejected as stale by its own next
+/// save once it starts sending that revision.
+pub fn save_config_persisted(config: &AppConfig) -> Result<AppConfig, String> {
     save_config_to(&get_config_path()?, config)
 }
 
-/// Path-taking core of [`save_config`]: the normalization, the newer-document
-/// refusal and the atomic write — so the write path is testable against real
-/// files, the same shape [`import_config_document`] uses.
-fn save_config_to(path: &std::path::Path, config: &AppConfig) -> Result<(), String> {
-    let mut cfg = clamped_config(config);
-    // CfgDiag#1 (#536): the client's `schema_version` is a suggestion, not an
-    // instruction — a stale payload can never lower the version, and since
-    // issue #938 it cannot raise one above a newer document's either.
-    stamp_schema_version(&mut cfg);
+/// Path-taking core of [`save_config_persisted`]: the normalization, the
+/// stale-revision rejection, the newer-document refusal and the atomic write —
+/// so the write path is testable against real files, the same shape
+/// [`import_config_document`] uses.
+fn save_config_to(path: &std::path::Path, config: &AppConfig) -> Result<AppConfig, String> {
+    let (stored_version, stored_revision_of_file) = stored_document_markers(path);
+
+    // Issue #943: a payload behind the document on disk is a second webview
+    // writing its own stale copy — the write that silently reverted the other
+    // window's change. Reject it instead: the caller re-loads, the user is told
+    // which window moved, and the newer document survives.
+    //
+    // `revision == 0` means the payload carries no revision at all (a frontend
+    // that does not send the field yet, or a fresh install), so it is stamped
+    // upward rather than rejected: rejecting it would make every save from such
+    // a client fail as soon as the first one succeeded, which is a worse failure
+    // than the one being fixed. The guard applies the moment a client sends the
+    // revision it loaded.
+    if config.revision != 0 && config.revision < stored_revision_of_file {
+        log::warn!(
+            "[CFG] refusing a stale config write to '{}': the stored document is at revision {} and this copy is at {}",
+            path.display(),
+            stored_revision_of_file,
+            config.revision
+        );
+        return Err(format!(
+            "{STALE_REVISION_MARKER}: the settings were changed in another window (stored revision {stored_revision_of_file}, this copy is at revision {})",
+            config.revision
+        ));
+    }
 
     // Issue #938: never rewrite a document a NEWER binary wrote. The marker is
     // the only record of which migrations have run, and this build sees none of
@@ -2311,7 +2420,7 @@ fn save_config_to(path: &std::path::Path, config: &AppConfig) -> Result<(), Stri
     // build's version — so the newer build's dispatcher skips its own
     // migrations on the next launch — and drop the keys those migrations read.
     // Leaving the file alone loses nothing, and the caller surfaces the error.
-    if let Some(stored) = stored_schema_version(path) {
+    if let Some(stored) = stored_version {
         if stored > SCHEMA_VERSION {
             log::warn!(
                 "[CFG] refusing to overwrite config '{}': schema_version {} was written by a newer PresenceJam (this build writes {})",
@@ -2325,13 +2434,28 @@ fn save_config_to(path: &std::path::Path, config: &AppConfig) -> Result<(), Stri
         }
     }
 
+    let mut cfg = clamped_config(config);
+    // CfgDiag#1 (#536): the client's `schema_version` is a suggestion, not an
+    // instruction — a stale payload can never lower the version, and since
+    // issue #938 it cannot raise one above a newer document's either.
+    stamp_schema_version(&mut cfg);
+    // Issue #943: strictly increasing, and never below either side's value, so
+    // two windows saving in sequence hand each other a rising token.
+    cfg.revision = stored_revision_of_file
+        .max(config.revision)
+        .saturating_add(1);
+
     let json = serde_json::to_string_pretty(&cfg)
         .map_err(|e| format!("Failed to serialize config to JSON: {}", e))?;
 
     atomic_write_json(path, &json)?;
 
-    log::info!("[CFG] Saved configuration to '{}'", path.display());
-    Ok(())
+    log::info!(
+        "[CFG] Saved configuration to '{}' (revision {})",
+        path.display(),
+        cfg.revision
+    );
+    Ok(cfg)
 }
 
 // ---------------------------------------------------------------------------
@@ -5917,5 +6041,91 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------
+    // Issue #943: a monotonic revision, and a stale write is refused.
+    // -----------------------------------------------------------------
+
+    /// Issue #943: Settings renders in both the main window and the detached
+    /// pane, each holding its own copy loaded once — so the second window's save
+    /// used to revert the first window's change silently. A payload behind the
+    /// document on disk is refused instead, and the file is left untouched.
+    #[test]
+    fn test_save_rejects_a_stale_revision_and_leaves_the_file_alone() {
+        let contents = r#"{"autostart": true, "revision": 5}"#;
+        let (dir, path) = temp_config_file("stale-revision", contents);
+        let mut stale = load_config_from(&path).expect("must load");
+        assert_eq!(stale.revision, 5);
+
+        stale.revision = 4; // the other window saved in between
+        stale.autostart = false;
+        let err = save_config_to(&path, &stale).expect_err("a stale revision must be refused");
+        assert!(
+            err.starts_with(STALE_REVISION_MARKER),
+            "the store has to be able to tell this failure apart: {err}"
+        );
+        assert!(err.contains("another window"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            contents,
+            "the newer document must be left byte-identical"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #943: the revision rises on every accepted save, the document a
+    /// save returns is the one on disk, and that returned document is accepted
+    /// by its own next save — the write-back the commands layer needs so a
+    /// window is never stale against itself.
+    #[test]
+    fn test_save_advances_the_revision_monotonically() {
+        let (dir, path) = temp_config_file("revision", r#"{"autostart": true}"#);
+        let cfg = load_config_from(&path).expect("must load");
+        assert_eq!(cfg.revision, 0, "a pre-#943 file reads as revision 0");
+
+        let first = save_config_to(&path, &cfg).expect("first save");
+        assert_eq!(first.revision, 1, "a save advances the revision");
+        let on_disk: AppConfig =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            on_disk.revision, first.revision,
+            "the returned document is the one that was written"
+        );
+
+        let second = save_config_to(&path, &first).expect("the returned document saves again");
+        assert_eq!(second.revision, 2);
+
+        let err = save_config_to(&path, &first)
+            .expect_err("a copy from before the second save is now behind the file");
+        assert!(err.starts_with(STALE_REVISION_MARKER), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #943, the compatibility half: `revision: 0` means "this payload
+    /// carries no revision" — a frontend that does not send the field yet, or a
+    /// fresh install. It is stamped above the stored revision rather than
+    /// refused, because refusing it would make every save from such a client
+    /// fail as soon as the first one succeeded.
+    #[test]
+    fn test_a_payload_without_a_revision_is_stamped_not_refused() {
+        let (dir, path) = temp_config_file("no-revision", r#"{"autostart": true, "revision": 7}"#);
+        let mut payload = load_config_from(&path).expect("must load");
+        payload.revision = 0;
+        payload.autostart = false;
+
+        let persisted =
+            save_config_to(&path, &payload).expect("a revision-less payload must still save");
+        assert_eq!(persisted.revision, 8, "stamped above the stored revision");
+        assert!(!persisted.autostart, "the write itself still happened");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The frontend switches on both literals, so their spelling is part of the
+    /// wire contract — the same guard `SPOTIFY_SECRET_CONFLICT_EVENT` has.
+    #[test]
+    fn test_config_changed_event_name_contract() {
+        assert_eq!(CONFIG_CHANGED_EVENT, "config-changed");
+        assert_eq!(STALE_REVISION_MARKER, "stale-config-revision");
     }
 }
