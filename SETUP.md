@@ -30,7 +30,7 @@ does not, and without one a hidden window is only reachable by re-running the
 file from a terminal. To add the same integration:
 
 ```bash
-mkdir -p ~/.local/bin ~/.local/share/applications
+mkdir -p ~/.local/bin ~/.local/share/applications ~/.local/share/icons
 install -m755 PresenceJam-linux-amd64.AppImage ~/.local/bin/PresenceJam-linux-amd64.AppImage
 cat > ~/.local/share/applications/presencejam.desktop <<'EOF'
 [Desktop Entry]

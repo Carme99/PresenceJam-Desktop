@@ -36,7 +36,7 @@ grep -n -A2 '^name = "presence-jam"' src-tauri/Cargo.lock
 
 `package-lock.json` also carries a `"version"` for every dependency entry, and a
 dependency's version is free to coincide with the app's — `cssstyle` did exactly
-that at the 4.6.0 cut. Only **two** literals in that file are ours: the top-level
+that at an earlier cut. Only **two** literals in that file are ours: the top-level
 `version` and `packages[""].version`. Never touch a dependency block. Check the
 pair against `package.json` rather than grepping for a version string, which
 cannot tell the two apart:
@@ -66,8 +66,8 @@ go under `## [Unreleased]`.
 At release time, **in one commit**:
 
 1. rename `## [Unreleased]` → `## [X.Y.Z] - YYYY-MM-DD`,
-2. add a fresh, empty `## [Unreleased]` section on top for the next cycle (the
-   4.6.0 cut left `Added` / `Changed` / … headings behind it, as the file does
+2. add a fresh, empty `## [Unreleased]` section on top for the next cycle (each
+   cut leaves `Added` / `Changed` / … headings behind it, as the file does
    today), and
 3. add the new section's link definition:
 
@@ -192,8 +192,8 @@ behind the tag-push run.
    header).
 4. Open the release PR and wait for `version-consistency`, `changelog-links`,
    `rust`, `rust-clippy`, `rust-platform-check`, `frontend` and `secret-scan`.
-5. Merge, then tag the **merge commit on `main`** (precedent: `v4.6.0` →
-   `4e9c6f1d`):
+5. Merge, then tag the **merge commit on `main`** — tag the commit that is on the
+   branch, never the local pre-merge commit:
 
    ```bash
    git checkout main && git pull --ff-only

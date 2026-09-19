@@ -29,7 +29,7 @@ The app lives in your system tray, syncs while you work, and stays out of the wa
 - **System tray** — runs silently in the background.
 - **Tray playback controls** — Play/Pause, Previous, Next, Shuffle and Repeat toggles, plus Devices and Up Next submenus, straight from the tray icon.
 - **Tray snooze** — pause syncing for 30 minutes, 1 hour, or until tomorrow from the tray menu, with a Dashboard chip and a **Resume now** button ([USAGE](USAGE.md#the-system-tray)).
-- **Global shortcuts** — `CmdOrCtrl+Alt+P` and `CmdOrCtrl+Alt+S` toggle sync and open the snooze menu; both are rebindable in Settings ([USAGE](USAGE.md#global-shortcuts)).
+- **Global shortcuts** — `CmdOrCtrl+Alt+P` toggles playback on your active Spotify device and `CmdOrCtrl+Alt+S` starts or stops the poller; both are rebindable in Settings ([USAGE](USAGE.md#global-shortcuts)).
 - **Diagnostics page** — one-click local support snapshot (versions, sanitized config, token expiry metadata, redacted log tail). Never leaves your machine.
 - **Detachable Logs & Settings** — pop Logs or Settings out into their own window and back in again.
 - **Interface languages** — English, German (Deutsch), and French (Français) via an in-app language picker.
