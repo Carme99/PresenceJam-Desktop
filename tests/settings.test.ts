@@ -1439,3 +1439,79 @@ describe('Settings dirty flag (#890)', () => {
     expect(container.querySelector('.dirty-banner')).toBeNull();
   });
 });
+
+/**
+ * Issue #973: the reconnect banner exists for a *missing* playback scope, and
+ * must stay away when the scopes are simply unknown — an access token whose JWT
+ * payload cannot be decoded (opaque format, truncation, a future Spotify token
+ * change, or a failed lookup). Reconnecting cannot change any of those, so
+ * showing "your account is missing a permission" sends the user through a
+ * browser round-trip that lands back on the same banner.
+ *
+ * Fails pre-fix: an empty scope list was indistinguishable from an undecodable
+ * token, so all three cases rendered the banner.
+ */
+describe('Settings Spotify playback-scope banner (#973)', () => {
+  const hasScopeBanner = (container: HTMLElement) =>
+    Array.from(container.querySelectorAll('.scope-banner')).some((el) =>
+      el.textContent?.includes(t('settings.playbackScopeBanner'))
+    );
+
+  /**
+   * Answers the scope command from a promise the test releases itself, so the
+   * render that follows the fetch is observed instead of racing onMount.
+   */
+  function gateScopeFetch() {
+    let release!: (scopes: string[] | null) => void;
+    const gated = new Promise<string[] | null>((resolve) => {
+      release = resolve;
+    });
+    const base = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) =>
+      cmd === 'get_spotify_granted_scopes' ? gated : base(cmd, args)
+    );
+    return release;
+  }
+
+  it('shows the banner when the decoded scopes lack playback control', async () => {
+    const release = gateScopeFetch();
+    const { container } = await mountSettings();
+    expect(hasScopeBanner(container)).toBe(false);
+
+    release(['user-read-currently-playing']);
+    await waitFor(() => expect(hasScopeBanner(container)).toBe(true));
+  });
+
+  it('shows no banner when the access token cannot be decoded', async () => {
+    const release = gateScopeFetch();
+    const { container } = await mountSettings();
+
+    release(null);
+    await tick();
+    await tick();
+
+    expect(
+      invokeMock.mock.calls.some(([cmd]) => cmd === 'get_spotify_granted_scopes')
+    ).toBe(true);
+    expect(hasScopeBanner(container)).toBe(false);
+  });
+
+  it('shows no banner when the scope lookup itself fails', async () => {
+    const base = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'get_spotify_granted_scopes') throw new Error('ipc down');
+      return base(cmd, args);
+    });
+    const { container } = await mountSettings();
+
+    await waitFor(() =>
+      expect(
+        invokeMock.mock.calls.some(([cmd]) => cmd === 'get_spotify_granted_scopes')
+      ).toBe(true)
+    );
+    await tick();
+    await tick();
+
+    expect(hasScopeBanner(container)).toBe(false);
+  });
+});
