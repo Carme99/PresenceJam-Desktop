@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Parse the `Retry-After` header from a 429 response, supporting both
 /// delta-seconds (`120`) and HTTP-date (`Wed, 21 Aug 2026 12:00:00 GMT`)
@@ -30,6 +30,85 @@ fn parse_retry_after(response: &reqwest::blocking::Response) -> Option<u64> {
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|v| v.to_str().ok())
         .and_then(parse_retry_after_value)
+}
+
+/// The process-wide 429 window (issue #945).
+///
+/// `RateLimited(Some(secs))` used to reach only the poller: `retry_after()` is
+/// consumed by `poll_once::spotify_backoff_secs`, which sleeps that one
+/// iteration. Every other caller — tray playback/device/queue actions, the
+/// playback commands, the onboarding session check — still fired a fresh
+/// request inside the window: another toast for the user, more of an exhausted
+/// quota spent, and a window more likely to be extended than to end. Holding
+/// the deadline here lets every caller fail fast with the remaining wait.
+///
+/// Pure, with `now` injected, so the window arithmetic is unit-testable without
+/// sleeping and without touching the process-wide clock.
+#[derive(Debug, Default)]
+struct RateLimitWindow {
+    until: Option<Instant>,
+}
+
+impl RateLimitWindow {
+    /// Seconds left in the window, rounded up so a caller is never told
+    /// "retry after 0s"; `None` when no window is open or the deadline has
+    /// passed.
+    fn remaining_secs(&self, now: Instant) -> Option<u64> {
+        let remaining = self.until?.checked_duration_since(now)?;
+        Some(remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0))
+    }
+
+    /// Opens the window from a parsed `Retry-After`, extending an existing one
+    /// when the new deadline is later. A `None` or zero header leaves the state
+    /// untouched: with no server-supplied wait there is nothing to honour, and
+    /// the poller's own backoff still applies.
+    fn note(&mut self, now: Instant, retry_after: Option<u64>) {
+        let Some(secs) = retry_after.filter(|secs| *secs > 0) else {
+            return;
+        };
+        let until = now + Duration::from_secs(secs);
+        if self.until.is_none_or(|current| until > current) {
+            log::warn!(
+                "[SPOTIFY] rate limited: holding Spotify calls for {}s",
+                secs
+            );
+            self.until = Some(until);
+        }
+    }
+
+    /// Closes the window — its deadline has passed, so normal traffic resumes.
+    fn clear(&mut self) {
+        self.until = None;
+    }
+}
+
+/// The shared 429 deadline every Spotify caller consults and updates.
+static RATE_LIMIT: LazyLock<parking_lot::Mutex<RateLimitWindow>> =
+    LazyLock::new(|| parking_lot::Mutex::new(RateLimitWindow::default()));
+
+/// Fails fast while the shared 429 window is open, without touching the
+/// network (issue #945). Every request helper starts with this, so a tray click
+/// during a rate-limit window reports the server's own remaining wait instead
+/// of spending more quota on a request that will be refused again.
+///
+/// The window is closed here on the first call after its deadline, so traffic
+/// resumes without any background timer.
+fn check_rate_limit() -> Result<(), SpotifyApiError> {
+    let mut window = RATE_LIMIT.lock();
+    match window.remaining_secs(Instant::now()) {
+        Some(secs) => Err(SpotifyApiError::RateLimited(Some(secs))),
+        None => {
+            window.clear();
+            Ok(())
+        }
+    }
+}
+
+/// Records a 429's `Retry-After` in the shared window (issue #945), called
+/// wherever a rate-limited response is mapped so every thread sees the same
+/// deadline.
+fn note_rate_limit(retry_after: Option<u64>) {
+    RATE_LIMIT.lock().note(Instant::now(), retry_after);
 }
 
 /// Extracts the `reason` field from a Spotify API error body. The player
@@ -108,7 +187,13 @@ fn map_player_error(
     let status = response.status().as_u16();
     let retry_after = parse_retry_after(&response);
     let body = response.text().unwrap_or_default();
-    classify_spotify_status(status, retry_after, context, &body)
+    let err = classify_spotify_status(status, retry_after, context, &body);
+    // Issue #945: record the deadline for every other Spotify caller, not just
+    // the poller that reads `retry_after()` off the error.
+    if let SpotifyApiError::RateLimited(secs) = err {
+        note_rate_limit(secs);
+    }
+    err
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
@@ -957,6 +1042,9 @@ pub fn get_currently_playing(
     access_token: &str,
     if_none_match: Option<&str>,
 ) -> Result<CurrentlyPlaying, SpotifyApiError> {
+    // Issue #945: fail fast while a 429 window is open — the poller's own
+    // backoff does not stop a tray click from spending the same budget.
+    check_rate_limit()?;
     let client = build_spotify_client().map_err(SpotifyApiError::Other)?;
 
     // Issue #581: `additional_types=episode` makes the endpoint return the
@@ -1022,6 +1110,8 @@ fn send_player_command(
     body: Option<serde_json::Value>,
     context: &'static str,
 ) -> Result<(), SpotifyApiError> {
+    // Issue #945: see `get_currently_playing`.
+    check_rate_limit()?;
     let client = build_spotify_client().map_err(SpotifyApiError::Other)?;
     let mut url = format!("https://api.spotify.com/v1{}", path);
     if let Some(id) = device_id {
@@ -1165,6 +1255,8 @@ pub fn player_set_repeat(
 /// Lists the user's available playback devices.
 /// GET /v1/me/player/devices. See issue #3.0-P3.
 pub fn get_devices(access_token: &str) -> Result<Vec<DeviceInfo>, SpotifyApiError> {
+    // Issue #945: see `get_currently_playing`.
+    check_rate_limit()?;
     let client = build_spotify_client().map_err(SpotifyApiError::Other)?;
     let response = client
         .get("https://api.spotify.com/v1/me/player/devices")
@@ -1195,6 +1287,8 @@ pub fn get_devices(access_token: &str) -> Result<Vec<DeviceInfo>, SpotifyApiErro
 /// dropped (issue #583); ads and unknown item types are still gated out
 /// (issue #161). GET /v1/me/player/queue. See issue #3.0-P3.
 pub fn get_queue(access_token: &str) -> Result<QueueInfo, SpotifyApiError> {
+    // Issue #945: see `get_currently_playing`.
+    check_rate_limit()?;
     let client = build_spotify_client().map_err(SpotifyApiError::Other)?;
     let response = client
         .get("https://api.spotify.com/v1/me/player/queue")
@@ -2477,5 +2571,117 @@ mod tests {
                 text
             );
         }
+    }
+
+    // Issue #945: the parsed `Retry-After` reached only the poller, so a tray
+    // click inside the window fired another request and produced another toast.
+    // The window arithmetic is pure, with `now` injected, so the deadline is
+    // pinned without sleeping.
+    #[test]
+    fn rate_limit_window_tracks_and_expires_the_shared_deadline() {
+        let now = Instant::now();
+        let mut window = RateLimitWindow::default();
+        assert_eq!(
+            window.remaining_secs(now),
+            None,
+            "no window is open until a 429 is mapped"
+        );
+
+        window.note(now, Some(45));
+        assert_eq!(window.remaining_secs(now), Some(45));
+        assert_eq!(
+            window.remaining_secs(now + Duration::from_secs(20)),
+            Some(25),
+            "the remaining wait must count down"
+        );
+        assert_eq!(
+            window.remaining_secs(now + Duration::from_secs(45)),
+            None,
+            "the deadline is inclusive: normal traffic resumes as it passes"
+        );
+        assert_eq!(window.remaining_secs(now + Duration::from_secs(60)), None);
+
+        // Rounded up: a caller must never be told "retry after 0s".
+        let mut window = RateLimitWindow::default();
+        window.note(now, Some(30));
+        assert_eq!(
+            window.remaining_secs(now + Duration::from_millis(29_500)),
+            Some(1)
+        );
+
+        // A header the server did not send (or sent as 0) opens nothing.
+        let mut window = RateLimitWindow::default();
+        window.note(now, None);
+        window.note(now, Some(0));
+        assert_eq!(window.remaining_secs(now), None);
+
+        // A later, longer `Retry-After` extends the window; a shorter one must
+        // not cut it short — the server asked for the longer wait.
+        window.note(now, Some(30));
+        window.note(now, Some(10));
+        assert_eq!(window.remaining_secs(now), Some(30));
+        window.note(now, Some(90));
+        assert_eq!(window.remaining_secs(now), Some(90));
+    }
+
+    /// Serializes the tests that touch the process-wide window, and leaves it
+    /// closed afterwards so the rest of the suite is unaffected.
+    fn with_rate_limit_window<T>(f: impl FnOnce() -> T) -> T {
+        static LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+        let _guard = LOCK.lock();
+        *RATE_LIMIT.lock() = RateLimitWindow::default();
+        let out = f();
+        *RATE_LIMIT.lock() = RateLimitWindow::default();
+        out
+    }
+
+    // Acceptance criterion for issue #945: the second call after a 429 is
+    // refused with the remaining seconds and never reaches the network — this
+    // is the guard every request helper starts with.
+    #[test]
+    fn a_call_inside_the_shared_window_fails_fast_with_the_remaining_wait() {
+        with_rate_limit_window(|| {
+            note_rate_limit(Some(120));
+
+            let err = check_rate_limit()
+                .expect_err("a call inside the Retry-After window must be rejected");
+            assert!(
+                matches!(err, SpotifyApiError::RateLimited(Some(secs)) if secs > 0 && secs <= 120),
+                "the rejection must carry the remaining seconds, got {:?}",
+                err
+            );
+            assert!(
+                err.retry_after().is_some(),
+                "the caller's existing wording needs the header value"
+            );
+        });
+    }
+
+    // The other half of the same criterion: once the deadline has passed,
+    // normal requests resume (and the stale window is closed on the way out).
+    #[test]
+    fn normal_traffic_resumes_once_the_shared_window_has_passed() {
+        with_rate_limit_window(|| {
+            *RATE_LIMIT.lock() = RateLimitWindow {
+                until: Some(Instant::now()),
+            };
+            check_rate_limit().expect("an elapsed window must let requests through");
+            assert_eq!(
+                RATE_LIMIT.lock().remaining_secs(Instant::now()),
+                None,
+                "the elapsed window must be closed by the check that observed it"
+            );
+        });
+    }
+
+    // A 429 without a parseable `Retry-After` must not wedge the app: there is
+    // no server-supplied wait to honour, so the poller's own backoff applies
+    // and everyone else keeps working.
+    #[test]
+    fn a_429_without_a_retry_after_header_opens_no_window() {
+        with_rate_limit_window(|| {
+            note_rate_limit(None);
+            check_rate_limit().expect("a header-less 429 must not block other callers");
+        });
     }
 }
