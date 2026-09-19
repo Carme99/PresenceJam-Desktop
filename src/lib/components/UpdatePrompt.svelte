@@ -113,6 +113,11 @@
     [update?.notes, update?.pub_date].filter((part): part is string => Boolean(part)).join('\n\n')
   );
 
+  // Generation of the newest update check (see `checkForUpdate`): a response
+  // that arrives after a newer check started belongs to a candidate the
+  // banner has already moved on from.
+  let checkGen = 0;
+
   function checkForUpdate() {
     // #977: remember the channel this check runs against so the effect below
     // can tell a Settings switch apart from the hydration flip. Before
@@ -121,11 +126,16 @@
     // backend reads the channel from disk, so this check's candidate already
     // belongs to the persisted channel.
     if (channelResolved) checkedChannel = $configStore.updates.channel;
+    // The channel switch starts a second check while the first is still in
+    // flight, and the older response can land last — it must not overwrite
+    // the candidate that replaced it (#977 review).
+    const gen = ++checkGen;
     // The backend resolves the configured channel into the endpoint list —
     // the plugin's JS `check()` cannot take endpoints and is hard-wired to
     // the static stable entry (issue #678).
     invoke<UpdateInfo | null>('check_for_update')
       .then((u) => {
+        if (gen !== checkGen) return;
         if (u) {
           // A new candidate deserves its own verdict — forget a stale
           // skip recorded for a previous version.
@@ -406,33 +416,30 @@
   >
     <div class="update-info" role="status">
       <span class="update-title">{t('update.available', { version: update.version })}</span>
-      {#if stageProgress}
-        <!-- #737: the deferred stage's byte position is carried by the
-             progressbar below, outside this live region, so the polite queue
-             is not rewritten on every emitted tick. What stays here is the
-             discrete stage transitions — staged, declined as stale, failed. -->
-      {:else if stagedVersion}
+      <!-- #737: only the discrete stage transitions live here — staged,
+           declined as stale, failed. The per-tick byte position is the
+           progressbar below, outside this live region, so the polite queue
+           is not rewritten on every emitted tick; the discrete rows stay
+           suppressed while a position is on screen. -->
+      {#if stagedVersion && !stageProgress}
         <span class="update-staged">
           {currentVersion
             ? t('update.stagedVsCurrent', { staged: stagedVersion, current: currentVersion })
             : t('update.stagedQuit', { version: stagedVersion })}
         </span>
-      {:else if confirming}
+      {:else if confirming && !stageProgress}
         <span class="update-confirm">
           {currentVersion
             ? t('update.confirmQuitInstall', { staged: update.version, current: currentVersion })
             : t('update.confirmQuitInstallUnknown', { staged: update.version })}
         </span>
-      {:else if isStaleSkipped}
+      {:else if isStaleSkipped && !stageProgress}
         <span class="update-stale">
           {currentVersion
             ? t('update.staleSkipped', { staged: staleSkippedVersion, current: currentVersion })
             : t('update.staleSkippedUnknown', { staged: staleSkippedVersion })}
         </span>
-      {:else if downloadProgress}
-        <!-- #982: the immediate download's position lives in the progressbar
-             below as well. -->
-      {:else if error}
+      {:else if error && !stageProgress && !downloadProgress}
         <span class="update-error">{t('update.downloadFailed', { error })}</span>
       {/if}
       {#if isBeta}
