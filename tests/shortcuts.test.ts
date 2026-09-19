@@ -43,12 +43,12 @@ import { resetSpotifyAuthFlow, resetTeamsAuthFlow } from '$lib/stores/authFlow.s
 import { presence, INITIAL_PRESENCE } from '$lib/stores/presence';
 import { theme } from '$lib/stores/theme';
 import { t } from '$lib/i18n';
+// #784: one definition of the registration shapes. These are ts-rs output
+// (re-exported from `$lib/types`), so the fixture cannot drift from the Rust
+// struct the way a hand-copied local type could.
+import type { ShortcutsStatus, SlotRegistration } from '$lib/types';
 
 const invokeMock = invoke as unknown as Mock;
-
-/** One slot as the backend reports it (mirrors the Rust `SlotRegistration`). */
-type SlotStatus = { accelerator: string | null; registered: boolean; error: string | null };
-type Status = { toggle_playback: SlotStatus; toggle_sync: SlotStatus };
 
 /** The bindings the backend has persisted — what registration reads from. */
 let persisted: ShortcutBindings;
@@ -65,8 +65,8 @@ function configWith(bindings: ShortcutBindings) {
 }
 
 /** The status a registration pass would report for the persisted bindings. */
-function registrationStatus(): Status {
-  const slot = (accelerator: string | null): SlotStatus => {
+function registrationStatus(): ShortcutsStatus {
+  const slot = (accelerator: string | null): SlotRegistration => {
     if (accelerator === null) return { accelerator: null, registered: false, error: null };
     const error = refusals[accelerator] ?? null;
     return { accelerator, registered: error === null, error };

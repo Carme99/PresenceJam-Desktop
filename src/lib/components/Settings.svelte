@@ -11,8 +11,8 @@
   // redirect forwards the navigation to the main window first.
   let { detached = false }: { detached?: boolean } = $props();
   import { configStore, saveConfig, loadConfig, defaultConfig, clientSecretStateOf, SHORTCUT_SLOTS, shortcutBindingsOf, setShortcutBindings, type ShortcutSlot } from '$lib/stores/config';
-  import type { AppConfig, SyncStatus } from '$lib/types';
-  import { authFlow, setSpotifyPhase, setTeamsPhase, resetSpotifyAuthFlow, resetTeamsAuthFlow, teamsPollMutex, pollTeamsAuth } from '$lib/stores/authFlow.svelte';
+import type { AppConfig, SyncStatus, SlotRegistration, ShortcutsStatus } from '$lib/types';
+  import { authFlow, setSpotifyPhase, setTeamsPhase, formatCountdownMs, resetSpotifyAuthFlow, resetTeamsAuthFlow, isCurrentTeamsPoll, teamsPollMutex, tryAcquireTeamsPoll, releaseTeamsPoll, isSafeHttpUrl } from '$lib/stores/authFlow.svelte';
   import DeviceCodeBox from './DeviceCodeBox.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
   import PageHeader from './PageHeader.svelte';
@@ -429,9 +429,9 @@
   // unsaved-changes banner cover them too. Registration is a separate step:
   // only the OS can say whether a grab was accepted.
 
-  /** What the backend reported for one slot's last registration pass. */
-  type SlotRegistration = { accelerator: string | null; registered: boolean; error: string | null };
-  type ShortcutStatus = Record<ShortcutSlot, SlotRegistration>;
+  // `SlotRegistration` / `ShortcutsStatus` are the ts-rs-generated shapes
+  // (re-exported from `$lib/types`), so a Rust-side field rename breaks
+  // `npm run check` here instead of silently degrading to "not registered".
 
   const SHORTCUT_LABEL_KEYS: Record<ShortcutSlot, TKey> = {
     toggle_playback: 'settings.shortcutTogglePlayback',
@@ -439,7 +439,7 @@
   };
 
   const NO_REGISTRATION: SlotRegistration = { accelerator: null, registered: false, error: null };
-  let shortcutStatus = $state<ShortcutStatus>({
+  let shortcutStatus = $state<ShortcutsStatus>({
     toggle_playback: { ...NO_REGISTRATION },
     toggle_sync: { ...NO_REGISTRATION }
   });
@@ -579,7 +579,7 @@
   }
 
   /** Both slots' status from one IPC payload. */
-  function statusFrom(raw: unknown): ShortcutStatus {
+  function statusFrom(raw: unknown): ShortcutsStatus {
     return {
       toggle_playback: registrationFrom(raw, 'toggle_playback'),
       toggle_sync: registrationFrom(raw, 'toggle_sync')

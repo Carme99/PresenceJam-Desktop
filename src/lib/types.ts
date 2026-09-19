@@ -31,6 +31,11 @@ export type {
   AppConfig,
 } from './types-generated/AppConfig';
 export type { DiagnosticsSnapshot } from './types-generated/DiagnosticsSnapshot';
+// The global-shortcut registration shapes (issue #676) are ts-rs output
+// too: Settings renders them and the shortcut tests fixture them, so both
+// import the generated definition instead of hand-copying its fields.
+export type { SlotRegistration } from './types-generated/SlotRegistration';
+export type { ShortcutsStatus } from './types-generated/ShortcutsStatus';
 /**
  * Payload of the `error` event emitted by the Rust polling loop. The
  * `severity` field was added in #79 part 1; the Dashboard.svelte
