@@ -392,7 +392,7 @@ export const en = {
     'Both files live in the PresenceJam folder inside your user configuration folder — the backup sits next to config.json.',
   // 4.6 additions (presence rules #634/#635/#636/#637 + #538 consumption sites)
   'rules.replacementClampHint':
-    'Replacement status is capped at {max} characters — {kept} will be posted.',
+    'Replacement status is capped at {max} characters; the rest is not posted.',
   'rules.presenceLabel': 'Presence while this rule applies',
   'rules.presenceNone': "Don't change my presence",
   'rules.presenceHint':

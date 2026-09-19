@@ -405,7 +405,7 @@ export const de: Dict = {
     'Beide Dateien liegen im Ordner PresenceJam in Ihrem Benutzer-Konfigurationsordner – die Sicherung neben config.json.',
   // 4.6 additions (presence rules #634/#635/#636/#637 + #538 consumption sites)
   'rules.replacementClampHint':
-    'Der Ersatzstatus ist auf {max} Zeichen begrenzt — {kept} werden gepostet.',
+    'Der Ersatzstatus ist auf {max} Zeichen begrenzt; der Rest wird nicht gepostet.',
   'rules.presenceLabel': 'Präsenz, solange diese Regel gilt',
   'rules.presenceNone': 'Präsenz nicht ändern',
   'rules.presenceHint':
