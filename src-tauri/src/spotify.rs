@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Parse the `Retry-After` header from a 429 response, supporting both
 /// delta-seconds (`120`) and HTTP-date (`Wed, 21 Aug 2026 12:00:00 GMT`)
@@ -32,6 +32,91 @@ fn parse_retry_after(response: &reqwest::blocking::Response) -> Option<u64> {
         .and_then(parse_retry_after_value)
 }
 
+/// The process-wide 429 window (issue #945).
+///
+/// `RateLimited(Some(secs))` used to reach only the poller: `retry_after()` is
+/// consumed by `poll_once::spotify_backoff_secs`, which sleeps that one
+/// iteration. Every other caller — tray playback/device/queue actions, the
+/// playback commands, the onboarding session check — still fired a fresh
+/// request inside the window: another toast for the user, more of an exhausted
+/// quota spent, and a window more likely to be extended than to end. Holding
+/// the deadline here lets every caller fail fast with the remaining wait.
+///
+/// Pure, with `now` injected, so the window arithmetic is unit-testable without
+/// sleeping and without touching the process-wide clock.
+#[derive(Debug, Default)]
+struct RateLimitWindow {
+    until: Option<Instant>,
+}
+
+impl RateLimitWindow {
+    /// Seconds left in the window, rounded up so a caller is never told
+    /// "retry after 0s"; `None` when no window is open or the deadline has
+    /// passed.
+    fn remaining_secs(&self, now: Instant) -> Option<u64> {
+        let remaining = self.until?.checked_duration_since(now)?;
+        // `checked_duration_since` answers `Some(0)` for the instant that
+        // *is* the deadline, which would report "retry after 0s" and read as an
+        // open window; the deadline is inclusive, so treat it as closed.
+        if remaining.is_zero() {
+            return None;
+        }
+        Some(remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0))
+    }
+
+    /// Opens the window from a parsed `Retry-After`, extending an existing one
+    /// when the new deadline is later. A `None` or zero header leaves the state
+    /// untouched: with no server-supplied wait there is nothing to honour, and
+    /// the poller's own backoff still applies.
+    fn note(&mut self, now: Instant, retry_after: Option<u64>) {
+        let Some(secs) = retry_after.filter(|secs| *secs > 0) else {
+            return;
+        };
+        let until = now + Duration::from_secs(secs);
+        if self.until.is_none_or(|current| until > current) {
+            log::warn!(
+                "[SPOTIFY] rate limited: holding Spotify calls for {}s",
+                secs
+            );
+            self.until = Some(until);
+        }
+    }
+
+    /// Closes the window — its deadline has passed, so normal traffic resumes.
+    fn clear(&mut self) {
+        self.until = None;
+    }
+}
+
+/// The shared 429 deadline every Spotify caller consults and updates.
+static RATE_LIMIT: LazyLock<parking_lot::Mutex<RateLimitWindow>> =
+    LazyLock::new(|| parking_lot::Mutex::new(RateLimitWindow::default()));
+
+/// Fails fast while the shared 429 window is open, without touching the
+/// network (issue #945). Every request helper starts with this, so a tray click
+/// during a rate-limit window reports the server's own remaining wait instead
+/// of spending more quota on a request that will be refused again.
+///
+/// The window is closed here on the first call after its deadline, so traffic
+/// resumes without any background timer.
+fn check_rate_limit() -> Result<(), SpotifyApiError> {
+    let mut window = RATE_LIMIT.lock();
+    match window.remaining_secs(Instant::now()) {
+        Some(secs) => Err(SpotifyApiError::RateLimited(Some(secs))),
+        None => {
+            window.clear();
+            Ok(())
+        }
+    }
+}
+
+/// Records a 429's `Retry-After` in the shared window (issue #945), called
+/// wherever a rate-limited response is mapped so every thread sees the same
+/// deadline.
+fn note_rate_limit(retry_after: Option<u64>) {
+    RATE_LIMIT.lock().note(Instant::now(), retry_after);
+}
+
 /// Extracts the `reason` field from a Spotify API error body. The player
 /// endpoints return `{"error":{"status":404,"message":"...","reason":
 /// "NO_ACTIVE_DEVICE"}}` when no device is active — see issue #3.0-P3.
@@ -54,31 +139,104 @@ fn is_no_active_device_404(status: u16, body: &str) -> bool {
     status == 404 && parse_error_reason(body).as_deref() == Some("NO_ACTIVE_DEVICE")
 }
 
-/// Maps a non-success Spotify response to `SpotifyApiError`. Shared by the
-/// player control/query functions so the mapping lives in one place:
+/// Longest prefix of a response body kept for logging (issue #796).
+const LOG_BODY_LIMIT_CHARS: usize = 512;
+
+/// Truncates a response body to [`LOG_BODY_LIMIT_CHARS`] characters on a char
+/// boundary and appends the original byte length, so a truncated body is
+/// recognisable as truncated in the log. Mirrors `teams.rs::truncate_for_log`
+/// (issue #796): the body is diagnostic evidence for `PresenceJam.log`, never
+/// user-facing text.
+fn truncate_for_log(body: &str) -> String {
+    if body.chars().count() > LOG_BODY_LIMIT_CHARS {
+        // The byte index of the limit-th char, so the slice never splits a
+        // multi-byte character.
+        let cut = body
+            .char_indices()
+            .nth(LOG_BODY_LIMIT_CHARS)
+            .map(|(i, _)| i)
+            .unwrap_or(body.len());
+        format!("{}(…{} bytes total)", &body[..cut], body.len())
+    } else {
+        body.to_string()
+    }
+}
+
+/// Classifies a non-success Spotify response into the typed error every
+/// endpoint shares (issue #749).
+///
+/// Split out of [`map_player_error`] so variant selection is unit-testable
+/// without a live `reqwest::blocking::Response`, exactly like
+/// [`is_no_active_device_404`]:
 /// - 401 → `ExpiredToken` (re-auth required)
 /// - 403 → `NotPremium` (playback control requires Premium)
-/// - 429 → `RateLimited` honouring the `Retry-After` header (issue #159)
+/// - 429 → `RateLimited` honouring the parsed `Retry-After` (issue #159)
 /// - 404 with `reason: "NO_ACTIVE_DEVICE"` → `NoActiveDevice` (callers can
 ///   offer device transfer)
-/// - anything else → `Other` with the response body for diagnosis
+/// - 5xx → `Transient` (the request is worth retrying)
+/// - anything else → `Http` carrying the status
 ///
-/// Takes the response by value because `Response::text` consumes it; each
-/// arm reads the response exactly once.
-fn map_player_error(response: reqwest::blocking::Response, context: &str) -> SpotifyApiError {
-    let status = response.status().as_u16();
+/// `context` names the endpoint in the user-facing message; `body` is kept on
+/// the error for logging only (issue #796).
+fn classify_spotify_status(
+    status: u16,
+    retry_after: Option<u64>,
+    context: &'static str,
+    body: &str,
+) -> SpotifyApiError {
     match status {
         401 => SpotifyApiError::ExpiredToken,
         403 => SpotifyApiError::NotPremium,
-        429 => SpotifyApiError::RateLimited(parse_retry_after(&response)),
-        _ => {
-            let body = response.text().unwrap_or_default();
-            if is_no_active_device_404(status, &body) {
-                return SpotifyApiError::NoActiveDevice;
-            }
-            SpotifyApiError::Other(format!("{} request failed: {}", context, body))
-        }
+        429 => SpotifyApiError::RateLimited(retry_after),
+        _ if is_no_active_device_404(status, body) => SpotifyApiError::NoActiveDevice,
+        500..=599 => SpotifyApiError::Transient {
+            status,
+            context,
+            body: truncate_for_log(body),
+        },
+        _ => SpotifyApiError::Http {
+            status,
+            context,
+            body: truncate_for_log(body),
+        },
     }
+}
+
+/// Maps a non-success Spotify response to `SpotifyApiError` through
+/// [`classify_spotify_status`]. Shared by every endpoint — the player
+/// commands, devices, queue and the currently-playing GET — so one HTTP status
+/// yields one variant and one user-facing message everywhere.
+///
+/// Takes the response by value because `Response::text` consumes it; the
+/// status and the `Retry-After` header are read before the body.
+fn map_player_error(
+    response: reqwest::blocking::Response,
+    context: &'static str,
+) -> SpotifyApiError {
+    let status = response.status().as_u16();
+    let retry_after = parse_retry_after(&response);
+    let body = response.text().unwrap_or_default();
+    let err = classify_spotify_status(status, retry_after, context, &body);
+    // Issue #945: record the deadline for every other Spotify caller, not just
+    // the poller that reads `retry_after()` off the error.
+    if let SpotifyApiError::RateLimited(secs) = err {
+        note_rate_limit(secs);
+    }
+    // Issue #796: an unclassified response body is logged here instead of being
+    // rendered — a CDN error page or a raw JSON envelope in a toast is not
+    // actionable, and the user-facing text names the HTTP status instead.
+    if matches!(
+        err,
+        SpotifyApiError::Transient { .. } | SpotifyApiError::Http { .. }
+    ) {
+        log::warn!(
+            "[SPOTIFY] {} request failed (HTTP {}): {}",
+            context,
+            status,
+            truncate_for_log(&body)
+        );
+    }
+    err
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
@@ -274,9 +432,29 @@ pub enum SpotifyApiError {
     /// device must be selected (transfer) before playback commands work.
     /// See issue #3.0-P3.
     NoActiveDevice,
-    /// The player endpoint returned 403 — playback control requires Spotify
+    /// The endpoint returned 403 — playback control requires Spotify
     /// Premium, which this account does not have.
     NotPremium,
+    /// A 5xx response: the service failed on its side, so the same request is
+    /// worth retrying — the Spotify counterpart of `TeamsApiError::Transient`
+    /// (issue #749). `context` names the endpoint that failed; `body` is the
+    /// response body **for logging only** and never reaches `Display`
+    /// (issue #796).
+    Transient {
+        status: u16,
+        context: &'static str,
+        body: String,
+    },
+    /// Any other status the client does not classify (issue #749). Carrying
+    /// the status is what lets a caller tell a permanent 4xx from a transient
+    /// 5xx; `Other(String)` alone could not. `body` is for logging only.
+    Http {
+        status: u16,
+        context: &'static str,
+        body: String,
+    },
+    /// A failure with no HTTP status at all: client construction, transport
+    /// errors and response-parse errors raised inside this module.
     Other(String),
 }
 
@@ -312,6 +490,19 @@ impl std::fmt::Display for SpotifyApiError {
                 f,
                 "Playback control requires Spotify Premium"
             ),
+            // The response body is deliberately not interpolated (issue #796):
+            // a raw CDN error page or JSON envelope in a toast is not
+            // actionable, and the same string is written to the log.
+            SpotifyApiError::Transient {
+                status, context, ..
+            } => write!(
+                f,
+                "{} request failed (HTTP {}) - Spotify reported a temporary problem, try again shortly",
+                context, status
+            ),
+            SpotifyApiError::Http {
+                status, context, ..
+            } => write!(f, "{} request failed (HTTP {})", context, status),
             SpotifyApiError::Other(s) => write!(f, "{}", s),
         }
     }
@@ -373,9 +564,16 @@ pub fn complete_spotify_auth(
         .map_err(|e| format!("Failed to send token request: {}", e))?;
 
     if !response.status().is_success() {
-        let status = response.status();
+        let status = response.status().as_u16();
         let body = response.text().unwrap_or_default();
-        return Err(format!("Token request failed: {} - {}", status, body));
+        // Issue #796: this string is rendered by Onboarding/Reconnect, so it
+        // names the status only — the body goes to the log, truncated.
+        log::warn!(
+            "[SPOTIFY] token exchange failed (HTTP {}): {}",
+            status,
+            truncate_for_log(&body)
+        );
+        return Err(format!("Token request failed (HTTP {})", status));
     }
 
     // Issue #350: the exchange body is parsed by `parse_exchange_token_response`
@@ -391,26 +589,62 @@ pub fn complete_spotify_auth(
     parse_exchange_token_response(&body)
 }
 
+/// Shortest access-token lifetime the app accepts from the token endpoint,
+/// in seconds. Spotify documents 3600 s; anything below this floor is treated
+/// as malformed rather than believed (issue #931).
+///
+/// The floor must stay above the 60 s refresh margin in [`is_token_expired`]:
+/// that margin is what makes a token "expired" early, so a shorter clamp would
+/// still hand out a token that is expired the moment it is stored — the exact
+/// failure issue #931 describes.
+const MIN_TOKEN_LIFETIME_SECS: u64 = 300;
+
+/// Longest access-token lifetime the app accepts from the token endpoint, in
+/// seconds (24 h). Anything above is treated as malformed (issue #931).
+const MAX_TOKEN_LIFETIME_SECS: u64 = 86_400;
+
+/// The shared shape of Spotify's token-endpoint success body, used by both the
+/// authorization_code exchange and the refresh_token grant (issue #931; the two
+/// paths previously carried byte-identical local copies of this struct).
+#[derive(Deserialize)]
+struct TokenResponse {
+    access_token: String,
+    refresh_token: Option<String>,
+    expires_in: u64,
+    #[allow(dead_code)]
+    token_type: String,
+}
+
+/// `expires_at` for a token whose response claimed a lifetime of `expires_in`
+/// seconds, clamped to
+/// [`MIN_TOKEN_LIFETIME_SECS`]..=[`MAX_TOKEN_LIFETIME_SECS`] (issue #931).
+///
+/// `expires_in` is server-controlled. Casting it straight through `as i64` and
+/// `chrono::Duration::seconds` panicked for values above `i64::MAX / 1000` and
+/// wrapped to a negative offset for values that overflow the cast, producing an
+/// `expires_at` in the past — an instantly-expired token that made
+/// `is_token_expired()` permanently true, so every poll iteration and every tray
+/// click refreshed again. `try_seconds` cannot panic; the clamp keeps a
+/// malformed response inside the range the app can reason about, falling back to
+/// one hour if the duration is somehow still out of range.
+fn token_expiry(expires_in: u64, now: DateTime<Utc>) -> DateTime<Utc> {
+    let lifetime = expires_in.clamp(MIN_TOKEN_LIFETIME_SECS, MAX_TOKEN_LIFETIME_SECS);
+    let offset = chrono::Duration::try_seconds(lifetime as i64)
+        .unwrap_or_else(|| chrono::Duration::hours(1));
+    now + offset
+}
+
 /// Parse an OAuth authorization_code exchange body into [`SpotifyTokens`].
 /// Split out of `complete_spotify_auth` so the mapping is unit-testable
 /// without a live `reqwest::blocking::Response` (issue #350).
 fn parse_exchange_token_response(body: &str) -> Result<SpotifyTokens, String> {
-    #[derive(Deserialize)]
-    struct TokenResponse {
-        access_token: String,
-        refresh_token: Option<String>,
-        expires_in: u64,
-        #[allow(dead_code)]
-        token_type: String,
-    }
-
     let token_resp: TokenResponse =
         serde_json::from_str(body).map_err(|e| format!("Failed to parse token response: {}", e))?;
     let refresh_token = token_resp.refresh_token.ok_or_else(|| {
         "token response omitted refresh_token - please try signing in again.".to_string()
     })?;
 
-    let expires_at = Utc::now() + chrono::Duration::seconds(token_resp.expires_in as i64);
+    let expires_at = token_expiry(token_resp.expires_in, Utc::now());
 
     Ok(SpotifyTokens {
         access_token: token_resp.access_token,
@@ -419,7 +653,78 @@ fn parse_exchange_token_response(body: &str) -> Result<SpotifyTokens, String> {
     })
 }
 
+/// Process-wide serialization for the Spotify token refresh (issue #930).
+///
+/// The poll thread and every tray/playback command refresh independently, so a
+/// tray click landing while the poller refreshes the same expired token put two
+/// POSTs carrying the same refresh token in flight at once: duplicated load on
+/// the endpoint that rate-limits, plus a second failure path (`invalid_grant`,
+/// HTTP 429) that can still reach the user even though the other caller
+/// succeeded. This mutex allows one refresh POST at a time; the cache behind it
+/// lets the callers that waited on the lock reuse the fresh token the winner
+/// just obtained instead of POSTing again.
+static REFRESH_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+/// The last successful refresh, keyed by the refresh token it was performed
+/// with — both the token that went in and the one that came back, since Spotify
+/// may rotate the refresh token. See [`REFRESH_LOCK`].
+static REFRESHED: LazyLock<parking_lot::Mutex<Option<(String, SpotifyTokens)>>> =
+    LazyLock::new(|| parking_lot::Mutex::new(None));
+
+/// The cached token pair for `refresh_token`, when a previous refresh used the
+/// same credential and the cached access token is still fresh.
+///
+/// Callers hold [`REFRESH_LOCK`] for the whole read-modify-write, so the only
+/// lock order in the process is `REFRESH_LOCK` → `REFRESHED`.
+fn cached_refresh(refresh_token: &str, now: DateTime<Utc>) -> Option<SpotifyTokens> {
+    let guard = REFRESHED.lock();
+    let (key, tokens) = guard.as_ref()?;
+    if key != refresh_token && tokens.refresh_token != refresh_token {
+        return None;
+    }
+    (tokens.expires_at > now).then(|| tokens.clone())
+}
+
+/// Runs `fetch` under [`REFRESH_LOCK`], returning the cached token pair for
+/// `refresh_token` when another caller already refreshed it while this caller
+/// waited for the lock. Exactly one `fetch` runs per burst of concurrent
+/// refreshes of the same credential (issue #930).
+///
+/// Split out of [`refresh_spotify_token`] so the one-POST-per-burst contract is
+/// unit-testable without a live token endpoint.
+fn refresh_serialized<F>(
+    refresh_token: &str,
+    now: DateTime<Utc>,
+    fetch: F,
+) -> Result<SpotifyTokens, SpotifyApiError>
+where
+    F: FnOnce() -> Result<SpotifyTokens, SpotifyApiError>,
+{
+    let _guard = REFRESH_LOCK.lock();
+    if let Some(tokens) = cached_refresh(refresh_token, now) {
+        log::debug!(
+            "[SPOTIFY] refresh_spotify_token: reusing the token another caller just refreshed"
+        );
+        return Ok(tokens);
+    }
+    let tokens = fetch()?;
+    *REFRESHED.lock() = Some((refresh_token.to_string(), tokens.clone()));
+    Ok(tokens)
+}
+
 pub fn refresh_spotify_token(
+    tokens: &SpotifyTokens,
+    client_id: &str,
+    client_secret: &str,
+) -> Result<SpotifyTokens, SpotifyApiError> {
+    refresh_serialized(&tokens.refresh_token, Utc::now(), || {
+        request_refreshed_token(tokens, client_id, client_secret)
+    })
+}
+
+/// The single refresh POST behind [`refresh_spotify_token`]. Never call this
+/// directly: it has no serialization and is not idempotent for the caller.
+fn request_refreshed_token(
     tokens: &SpotifyTokens,
     client_id: &str,
     client_secret: &str,
@@ -439,7 +744,8 @@ pub fn refresh_spotify_token(
         .map_err(|e| SpotifyApiError::Other(format!("Failed to send refresh request: {}", e)))?;
 
     if !response.status().is_success() {
-        let status = response.status();
+        let status = response.status().as_u16();
+        let retry_after = parse_retry_after(&response);
         let body = response.text().unwrap_or_default();
         // Spotify returns `{"error":"invalid_grant"}` when the refresh token
         // is expired, revoked, or otherwise invalid. The docs say to discard
@@ -451,26 +757,35 @@ pub fn refresh_spotify_token(
         if error_field.as_deref() == Some("invalid_grant") {
             return Err(SpotifyApiError::InvalidGrant);
         }
-        return Err(SpotifyApiError::Other(format!(
-            "Refresh request failed: {} - {}",
-            status, body
-        )));
-    }
-
-    #[derive(Deserialize)]
-    struct TokenResponse {
-        access_token: String,
-        refresh_token: Option<String>,
-        expires_in: u64,
-        #[allow(dead_code)]
-        token_type: String,
+        // Issue #796: the body is logged, truncated; the error the caller
+        // renders carries the status instead of the raw response.
+        let body = truncate_for_log(&body);
+        log::warn!("[SPOTIFY] token refresh failed (HTTP {}): {}", status, body);
+        return Err(match status {
+            // Issue #945: a 429 here is the same server-wide window every other
+            // Spotify caller consults, so record it before returning.
+            429 => {
+                note_rate_limit(retry_after);
+                SpotifyApiError::RateLimited(retry_after)
+            }
+            500..=599 => SpotifyApiError::Transient {
+                status,
+                context: "Token refresh",
+                body,
+            },
+            _ => SpotifyApiError::Http {
+                status,
+                context: "Token refresh",
+                body,
+            },
+        });
     }
 
     let token_resp: TokenResponse = response
         .json()
         .map_err(|e| SpotifyApiError::Other(format!("Failed to parse refresh response: {}", e)))?;
 
-    let expires_at = Utc::now() + chrono::Duration::seconds(token_resp.expires_in as i64);
+    let expires_at = token_expiry(token_resp.expires_in, Utc::now());
 
     Ok(SpotifyTokens {
         access_token: token_resp.access_token,
@@ -801,6 +1116,9 @@ pub fn get_currently_playing(
     access_token: &str,
     if_none_match: Option<&str>,
 ) -> Result<CurrentlyPlaying, SpotifyApiError> {
+    // Issue #945: fail fast while a 429 window is open — the poller's own
+    // backoff does not stop a tray click from spending the same budget.
+    check_rate_limit()?;
     let client = build_spotify_client().map_err(SpotifyApiError::Other)?;
 
     // Issue #581: `additional_types=episode` makes the endpoint return the
@@ -848,21 +1166,7 @@ pub fn get_currently_playing(
             now: None,
             etag: read_etag(&response),
         }),
-        401 => Err(SpotifyApiError::ExpiredToken),
-        429 => {
-            // Spotify's rate-limit docs: the 429 response normally includes a
-            // `Retry-After` header in seconds — honor it instead of a fixed
-            // backoff. `None` when the header is absent/unparseable. See
-            // issue #159.
-            Err(SpotifyApiError::RateLimited(parse_retry_after(&response)))
-        }
-        _ => {
-            let body = response.text().unwrap_or_default();
-            Err(SpotifyApiError::Other(format!(
-                "Currently playing request failed: {}",
-                body
-            )))
-        }
+        _ => Err(map_player_error(response, "Currently playing")),
     }
 }
 
@@ -878,8 +1182,10 @@ fn send_player_command(
     access_token: &str,
     device_id: Option<&str>,
     body: Option<serde_json::Value>,
-    context: &str,
+    context: &'static str,
 ) -> Result<(), SpotifyApiError> {
+    // Issue #945: see `get_currently_playing`.
+    check_rate_limit()?;
     let client = build_spotify_client().map_err(SpotifyApiError::Other)?;
     let mut url = format!("https://api.spotify.com/v1{}", path);
     if let Some(id) = device_id {
@@ -1023,6 +1329,8 @@ pub fn player_set_repeat(
 /// Lists the user's available playback devices.
 /// GET /v1/me/player/devices. See issue #3.0-P3.
 pub fn get_devices(access_token: &str) -> Result<Vec<DeviceInfo>, SpotifyApiError> {
+    // Issue #945: see `get_currently_playing`.
+    check_rate_limit()?;
     let client = build_spotify_client().map_err(SpotifyApiError::Other)?;
     let response = client
         .get("https://api.spotify.com/v1/me/player/devices")
@@ -1053,6 +1361,8 @@ pub fn get_devices(access_token: &str) -> Result<Vec<DeviceInfo>, SpotifyApiErro
 /// dropped (issue #583); ads and unknown item types are still gated out
 /// (issue #161). GET /v1/me/player/queue. See issue #3.0-P3.
 pub fn get_queue(access_token: &str) -> Result<QueueInfo, SpotifyApiError> {
+    // Issue #945: see `get_currently_playing`.
+    check_rate_limit()?;
     let client = build_spotify_client().map_err(SpotifyApiError::Other)?;
     let response = client
         .get("https://api.spotify.com/v1/me/player/queue")
@@ -1110,11 +1420,15 @@ fn parse_queue_body(body: &str) -> Result<QueueInfo, String> {
 
 /// Base64url-decodes the payload (middle segment) of a Spotify access
 /// token JWT and returns the granted `scope` claim split on spaces.
-/// Informational only — no signature verification. Returns an empty Vec
-/// when the token isn't a decodable JWT with a `scope` claim. Used by the
-/// Settings page to detect whether `user-modify-playback-state` is missing
-/// (one-time-reconnect banner, issue #3.0-P3).
-pub fn decode_spotify_granted_scopes(access_token: &str) -> Vec<String> {
+/// Informational only — no signature verification.
+///
+/// `None` means "the granted scopes could not be determined": the token is not
+/// a decodable JWT payload, or it decodes to JSON without a `scope` claim.
+/// `Some(vec![])` means the claim was present and empty. Settings must keep
+/// those apart (issue #973): deriving "your account is missing a permission"
+/// from `None` sent the user through a full browser reconnect that could not
+/// change anything, because the failure was a decode, not a missing scope.
+pub fn decode_spotify_granted_scopes(access_token: &str) -> Option<Vec<String>> {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine as _;
     let payload = access_token.split('.').nth(1).unwrap_or_default();
@@ -1122,13 +1436,14 @@ pub fn decode_spotify_granted_scopes(access_token: &str) -> Vec<String> {
         .decode(payload)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .and_then(|v| v.get("scope").and_then(|s| s.as_str()).map(str::to_owned))
-        .unwrap_or_default();
-    if scopes.is_empty() {
-        Vec::new()
-    } else {
-        scopes.split(' ').map(str::to_owned).collect()
-    }
+        .and_then(|v| v.get("scope").and_then(|s| s.as_str()).map(str::to_owned))?;
+    Some(
+        scopes
+            .split(' ')
+            .filter(|scope| !scope.is_empty())
+            .map(str::to_owned)
+            .collect(),
+    )
 }
 
 /// Substitutes one `{token}` per pass and never re-scans what it inserted
@@ -1896,24 +2211,48 @@ mod tests {
         let token = format!("header.{}.signature", payload);
         assert_eq!(
             decode_spotify_granted_scopes(&token),
-            vec![
+            Some(vec![
                 "user-read-currently-playing".to_string(),
                 "user-read-playback-state".to_string(),
                 "user-modify-playback-state".to_string(),
-            ]
+            ])
         );
     }
 
-    // Guard: tokens that aren't JWTs (or whose payload has no scope claim)
-    // must yield an empty list — the Settings banner treats that as
-    // "scope missing" rather than crashing.
+    // Acceptance criterion for issue #973: an undecodable token is `None`
+    // ("unknown"), which the Settings banner must NOT read as a missing
+    // permission — the user cannot fix a decode failure by reconnecting. A
+    // decodable payload whose `scope` claim is empty is still `Some(vec![])`:
+    // the claim was read, it just grants nothing.
     #[test]
-    fn decode_spotify_granted_scopes_empty_when_not_decodable() {
-        assert!(decode_spotify_granted_scopes("not-a-jwt").is_empty());
-        assert!(decode_spotify_granted_scopes("a.b.c").is_empty());
+    fn decode_spotify_granted_scopes_distinguishes_undecodable_from_absent_scope() {
+        assert_eq!(decode_spotify_granted_scopes("not-a-jwt"), None);
+        assert_eq!(decode_spotify_granted_scopes("a.b.c"), None);
+        assert_eq!(decode_spotify_granted_scopes(""), None);
+
         let no_scope =
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"sub":"user123"}"#);
-        assert!(decode_spotify_granted_scopes(&format!("h.{}.s", no_scope)).is_empty());
+        assert_eq!(
+            decode_spotify_granted_scopes(&format!("h.{}.s", no_scope)),
+            None,
+            "a payload without a scope claim says nothing about the granted scopes"
+        );
+
+        let empty_scope =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"scope":""}"#);
+        assert_eq!(
+            decode_spotify_granted_scopes(&format!("h.{}.s", empty_scope)),
+            Some(Vec::new()),
+            "an empty scope claim is known-and-empty, not unknown"
+        );
+
+        // The case the banner exists for: decoded, and the playback scope is
+        // genuinely absent from the list.
+        let read_only = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(r#"{"scope":"user-read-currently-playing"}"#);
+        let granted = decode_spotify_granted_scopes(&format!("h.{}.s", read_only))
+            .expect("a decodable scope claim must be Some");
+        assert!(!granted.iter().any(|s| s == "user-modify-playback-state"));
     }
 
     #[test]
@@ -2056,5 +2395,519 @@ mod tests {
             body.contains(".map(|c| c.clone())"),
             "callers must receive a refcount-bumped clone of the one cached client (issue #576)"
         );
+    }
+
+    // Issue #930: the poll thread and every tray/playback command refreshed
+    // independently, so a tray click landing during a poller refresh put two
+    // token POSTs carrying the same refresh token in flight at once.
+    // `refresh_serialized` is the lock + cache core of `refresh_spotify_token`
+    // with the POST injected, so the contract — one request per burst, and the
+    // callers that waited get the fresh token — is asserted without a live
+    // token endpoint. The count is interleaving-independent: whichever thread
+    // takes the lock first does the one fetch and the other reads the cache.
+    #[test]
+    fn concurrent_refreshes_of_the_same_token_make_exactly_one_request() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Barrier};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let start = Arc::new(Barrier::new(2));
+        let now = Utc::now();
+
+        let spawn = |n: usize| {
+            let calls = Arc::clone(&calls);
+            let start = Arc::clone(&start);
+            std::thread::spawn(move || {
+                start.wait();
+                refresh_serialized("refresh-930-concurrent", Utc::now(), || {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(SpotifyTokens {
+                        access_token: format!("access-930-{}", n),
+                        refresh_token: "refresh-930-concurrent".to_string(),
+                        expires_at: now + chrono::Duration::hours(1),
+                    })
+                })
+                .expect("the stub fetch cannot fail")
+            })
+        };
+
+        let a = spawn(1);
+        let b = spawn(2);
+        let a = a.join().expect("refresh thread a must not panic");
+        let b = b.join().expect("refresh thread b must not panic");
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "two concurrent refreshes of the same token must produce one token request (issue #930)"
+        );
+        assert_eq!(
+            a.access_token, b.access_token,
+            "the caller that waited on the lock must receive the token the winner fetched"
+        );
+    }
+
+    // The cache is keyed by the refresh token: a *different* credential must
+    // never be served the cached pair, or a re-auth (or account switch) would
+    // hand the caller the previous session's access token.
+    #[test]
+    fn refresh_cache_does_not_serve_a_different_refresh_token() {
+        let now = Utc::now();
+        let mut calls = 0usize;
+        for (key, expected) in [
+            ("refresh-930-a", "access-930-a"),
+            ("refresh-930-b", "access-930-b"),
+        ] {
+            let tokens = refresh_serialized(key, now, || {
+                calls += 1;
+                Ok(SpotifyTokens {
+                    access_token: expected.to_string(),
+                    refresh_token: key.to_string(),
+                    expires_at: now + chrono::Duration::hours(1),
+                })
+            })
+            .expect("the stub fetch cannot fail");
+            assert_eq!(tokens.access_token, expected);
+        }
+        assert_eq!(
+            calls, 2,
+            "a second refresh token must not be served the first one's cached access token (issue #930)"
+        );
+    }
+
+    // The cache is a convenience, not a source of truth: once the stored access
+    // token has expired the next caller must POST again.
+    #[test]
+    fn refresh_cache_is_not_used_once_the_stored_token_expires() {
+        let now = Utc::now();
+        let mut calls = 0usize;
+        let stale = refresh_serialized("refresh-930-stale", now, || {
+            calls += 1;
+            Ok(SpotifyTokens {
+                access_token: "stale-930".to_string(),
+                refresh_token: "refresh-930-stale".to_string(),
+                expires_at: now - chrono::Duration::seconds(5),
+            })
+        })
+        .expect("the stub fetch cannot fail");
+        assert_eq!(stale.access_token, "stale-930");
+
+        let fresh = refresh_serialized("refresh-930-stale", now, || {
+            calls += 1;
+            Ok(SpotifyTokens {
+                access_token: "fresh-930".to_string(),
+                refresh_token: "refresh-930-stale".to_string(),
+                expires_at: now + chrono::Duration::hours(1),
+            })
+        })
+        .expect("the stub fetch cannot fail");
+
+        assert_eq!(
+            fresh.access_token, "fresh-930",
+            "an expired cached token must not be handed to a later caller"
+        );
+        assert_eq!(calls, 2, "the expired entry must not suppress the request");
+    }
+
+    // Issue #931: `expires_in` is server-controlled and was cast straight
+    // through `as i64` into `chrono::Duration::seconds`, which panics for
+    // absurd lifetimes and wraps negative for values that overflow the cast —
+    // the wrap stored an `expires_at` in the past, so the token was expired the
+    // moment it was saved and every poll iteration refreshed again.
+    #[test]
+    fn token_expiry_clamps_a_malformed_expires_in_to_a_sane_future_instant() {
+        let now = Utc::now();
+        let floor = now + chrono::Duration::seconds(MIN_TOKEN_LIFETIME_SECS as i64);
+        let ceiling = now + chrono::Duration::seconds(MAX_TOKEN_LIFETIME_SECS as i64);
+
+        for (expires_in, label) in [
+            (u64::MAX, "u64::MAX panicked the old cast"),
+            (0, "zero must not expire instantly"),
+            (1, "below the floor"),
+            (u64::MAX / 1000 + 1, "the old panic threshold"),
+            (MAX_TOKEN_LIFETIME_SECS * 2, "above the ceiling"),
+        ] {
+            let expires_at = token_expiry(expires_in, now);
+            assert!(
+                expires_at >= floor,
+                "expires_in={} ({}) must expire no sooner than the floor, got {}",
+                expires_in,
+                label,
+                expires_at
+            );
+            assert!(
+                expires_at <= ceiling,
+                "expires_in={} ({}) must expire no later than the ceiling, got {}",
+                expires_in,
+                label,
+                expires_at
+            );
+
+            // The acceptance criterion through the app's own predicate, not
+            // just the bounds above: `is_token_expired` fires 60 s early, so a
+            // clamp that ignores that margin still hands out a token the app
+            // treats as expired the moment it is stored.
+            let tokens = SpotifyTokens {
+                access_token: "at-931".to_string(),
+                refresh_token: "rt-931".to_string(),
+                expires_at: token_expiry(expires_in, Utc::now()),
+            };
+            assert!(
+                !is_token_expired(&tokens),
+                "expires_in={} ({}) must not yield an already-expired token",
+                expires_in,
+                label
+            );
+        }
+
+        assert_eq!(
+            token_expiry(3600, now),
+            now + chrono::Duration::hours(1),
+            "the lifetime Spotify documents must pass through unchanged"
+        );
+    }
+
+    // Same contract through the real parse path: a hostile or broken token
+    // endpoint answering with a huge `expires_in` must leave the app with a
+    // usable token, not a panic and not an already-expired one.
+    #[test]
+    fn exchange_parse_survives_a_malformed_expires_in() {
+        let body = r#"{"access_token":"at","refresh_token":"rt","token_type":"Bearer","expires_in":18446744073709551615}"#;
+        let tokens =
+            parse_exchange_token_response(body).expect("a huge expires_in must still parse");
+        assert!(
+            !is_token_expired(&tokens),
+            "the stored token must be usable, not expired on arrival, got {}",
+            tokens.expires_at
+        );
+        assert!(
+            tokens.expires_at > Utc::now(),
+            "the stored expiry must be in the future, got {}",
+            tokens.expires_at
+        );
+        assert!(
+            tokens.expires_at
+                <= Utc::now() + chrono::Duration::seconds(MAX_TOKEN_LIFETIME_SECS as i64 + 1),
+            "the stored expiry must stay inside the accepted range, got {}",
+            tokens.expires_at
+        );
+
+        // `expires_in: 0` is the other malformed shape the old cast accepted:
+        // it stored an `expires_at` that `is_token_expired` already reads as
+        // expired, so every poll iteration and tray click refreshed again.
+        let zero =
+            r#"{"access_token":"at","refresh_token":"rt","token_type":"Bearer","expires_in":0}"#;
+        let tokens =
+            parse_exchange_token_response(zero).expect("a zero expires_in must still parse");
+        assert!(
+            !is_token_expired(&tokens),
+            "a zero lifetime must not produce an expired token, got {}",
+            tokens.expires_at
+        );
+    }
+
+    // Issue #749: `Other(String)` could not tell a retryable 5xx from a
+    // permanent 4xx, and 403 mapped to `NotPremium` on the player commands
+    // while the currently-playing GET sent the same status into the generic
+    // body arm — one status, two messages. `classify_spotify_status` is the pure
+    // mapping every endpoint now shares.
+    #[test]
+    fn classify_spotify_status_selects_the_variant_for_each_status() {
+        const NO_DEVICE: &str = r#"{"error":{"status":404,"reason":"NO_ACTIVE_DEVICE"}}"#;
+        const OTHER_404: &str = r#"{"error":{"status":404,"reason":"NOT_FOUND"}}"#;
+        let err =
+            |status, retry_after, body| classify_spotify_status(status, retry_after, "play", body);
+
+        assert!(matches!(
+            err(401, None, "{}"),
+            SpotifyApiError::ExpiredToken
+        ));
+        assert!(matches!(err(403, None, "{}"), SpotifyApiError::NotPremium));
+        assert!(matches!(
+            err(429, Some(7), "{}"),
+            SpotifyApiError::RateLimited(Some(7))
+        ));
+        assert!(matches!(
+            err(429, None, "{}"),
+            SpotifyApiError::RateLimited(None)
+        ));
+        assert!(matches!(
+            err(404, None, NO_DEVICE),
+            SpotifyApiError::NoActiveDevice
+        ));
+        assert!(matches!(
+            err(503, None, "{}"),
+            SpotifyApiError::Transient { status: 503, .. }
+        ));
+        assert!(matches!(
+            err(500, None, "{}"),
+            SpotifyApiError::Transient { status: 500, .. }
+        ));
+        assert!(matches!(
+            err(400, None, "{}"),
+            SpotifyApiError::Http { status: 400, .. }
+        ));
+        assert!(
+            matches!(
+                err(404, None, OTHER_404),
+                SpotifyApiError::Http { status: 404, .. }
+            ),
+            "a 404 without NO_ACTIVE_DEVICE is not a device problem"
+        );
+    }
+
+    // The distinction a 5xx/4xx-blind `Other(String)` could not express.
+    #[test]
+    fn a_5xx_is_distinguishable_from_a_4xx_at_the_type_level() {
+        let transient = classify_spotify_status(500, None, "play", "upstream boom");
+        let permanent = classify_spotify_status(400, None, "play", "upstream boom");
+
+        assert!(matches!(transient, SpotifyApiError::Transient { .. }));
+        assert!(!matches!(permanent, SpotifyApiError::Transient { .. }));
+        assert!(transient.to_string().contains("500"), "got {}", transient);
+        assert!(permanent.to_string().contains("400"), "got {}", permanent);
+        assert_ne!(transient.to_string(), permanent.to_string());
+    }
+
+    // Acceptance criterion for issue #749: the same status must yield the same
+    // variant and the same user-facing message regardless of which endpoint
+    // produced it. The player commands and the currently-playing GET both map
+    // through `map_player_error` now, so their contexts differ while the
+    // message does not.
+    #[test]
+    fn a_403_reads_the_same_on_a_player_command_and_on_currently_playing() {
+        let player = classify_spotify_status(403, None, "pause", "{}");
+        let currently_playing = classify_spotify_status(403, None, "Currently playing", "{}");
+
+        assert!(matches!(player, SpotifyApiError::NotPremium));
+        assert!(matches!(currently_playing, SpotifyApiError::NotPremium));
+        assert_eq!(player.to_string(), currently_playing.to_string());
+        assert_eq!(
+            player.to_string(),
+            "Playback control requires Spotify Premium"
+        );
+    }
+
+    // Issue #796's contract, pinned at the type's own boundary: whatever the
+    // endpoint, an unclassified status names the HTTP status and never leaks the
+    // response body into text the UI renders.
+    #[test]
+    fn unclassified_statuses_never_leak_the_response_body_into_display() {
+        const BODY: &str = "<html>edge refused: request blocked by CDN rule 12345</html>";
+
+        for status in [400u16, 404, 500, 503] {
+            let text = classify_spotify_status(status, None, "Currently playing", BODY).to_string();
+            assert!(
+                text.contains(&status.to_string()),
+                "the message must name the status, got {}",
+                text
+            );
+            assert!(
+                !text.contains("CDN rule") && !text.contains("<html>") && !text.contains(BODY),
+                "the response body must not reach user-facing text, got {}",
+                text
+            );
+        }
+    }
+
+    // Issue #945: the parsed `Retry-After` reached only the poller, so a tray
+    // click inside the window fired another request and produced another toast.
+    // The window arithmetic is pure, with `now` injected, so the deadline is
+    // pinned without sleeping.
+    #[test]
+    fn rate_limit_window_tracks_and_expires_the_shared_deadline() {
+        let now = Instant::now();
+        let mut window = RateLimitWindow::default();
+        assert_eq!(
+            window.remaining_secs(now),
+            None,
+            "no window is open until a 429 is mapped"
+        );
+
+        window.note(now, Some(45));
+        assert_eq!(window.remaining_secs(now), Some(45));
+        assert_eq!(
+            window.remaining_secs(now + Duration::from_secs(20)),
+            Some(25),
+            "the remaining wait must count down"
+        );
+        assert_eq!(
+            window.remaining_secs(now + Duration::from_secs(45)),
+            None,
+            "the deadline is inclusive: normal traffic resumes as it passes"
+        );
+        assert_eq!(window.remaining_secs(now + Duration::from_secs(60)), None);
+
+        // Rounded up: a caller must never be told "retry after 0s".
+        let mut window = RateLimitWindow::default();
+        window.note(now, Some(30));
+        assert_eq!(
+            window.remaining_secs(now + Duration::from_millis(29_500)),
+            Some(1)
+        );
+
+        // A header the server did not send (or sent as 0) opens nothing.
+        let mut window = RateLimitWindow::default();
+        window.note(now, None);
+        window.note(now, Some(0));
+        assert_eq!(window.remaining_secs(now), None);
+
+        // A later, longer `Retry-After` extends the window; a shorter one must
+        // not cut it short — the server asked for the longer wait.
+        window.note(now, Some(30));
+        window.note(now, Some(10));
+        assert_eq!(window.remaining_secs(now), Some(30));
+        window.note(now, Some(90));
+        assert_eq!(window.remaining_secs(now), Some(90));
+    }
+
+    /// Serializes the tests that touch the process-wide window, and leaves it
+    /// closed afterwards so the rest of the suite is unaffected.
+    fn with_rate_limit_window<T>(f: impl FnOnce() -> T) -> T {
+        static LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+        let _guard = LOCK.lock();
+        *RATE_LIMIT.lock() = RateLimitWindow::default();
+        let out = f();
+        *RATE_LIMIT.lock() = RateLimitWindow::default();
+        out
+    }
+
+    // Acceptance criterion for issue #945: the second call after a 429 is
+    // refused with the remaining seconds and never reaches the network — this
+    // is the guard every request helper starts with.
+    #[test]
+    fn a_call_inside_the_shared_window_fails_fast_with_the_remaining_wait() {
+        with_rate_limit_window(|| {
+            note_rate_limit(Some(120));
+
+            let err = check_rate_limit()
+                .expect_err("a call inside the Retry-After window must be rejected");
+            assert!(
+                matches!(err, SpotifyApiError::RateLimited(Some(secs)) if secs > 0 && secs <= 120),
+                "the rejection must carry the remaining seconds, got {:?}",
+                err
+            );
+            assert!(
+                err.retry_after().is_some(),
+                "the caller's existing wording needs the header value"
+            );
+        });
+    }
+
+    // The other half of the same criterion: once the deadline has passed,
+    // normal requests resume (and the stale window is closed on the way out).
+    #[test]
+    fn normal_traffic_resumes_once_the_shared_window_has_passed() {
+        with_rate_limit_window(|| {
+            *RATE_LIMIT.lock() = RateLimitWindow {
+                until: Some(Instant::now()),
+            };
+            check_rate_limit().expect("an elapsed window must let requests through");
+            assert_eq!(
+                RATE_LIMIT.lock().remaining_secs(Instant::now()),
+                None,
+                "the elapsed window must be closed by the check that observed it"
+            );
+        });
+    }
+
+    // A 429 without a parseable `Retry-After` must not wedge the app: there is
+    // no server-supplied wait to honour, so the poller's own backoff applies
+    // and everyone else keeps working.
+    #[test]
+    fn a_429_without_a_retry_after_header_opens_no_window() {
+        with_rate_limit_window(|| {
+            note_rate_limit(None);
+            check_rate_limit().expect("a header-less 429 must not block other callers");
+
+            // A header-less 429 from a second caller must not disturb a window
+            // that is already open either: the deadline is only ever extended,
+            // never reset by a response that carries no wait.
+            note_rate_limit(Some(60));
+            note_rate_limit(None);
+            assert!(
+                matches!(
+                    check_rate_limit(),
+                    Err(SpotifyApiError::RateLimited(Some(secs))) if secs > 0 && secs <= 60
+                ),
+                "a header-less 429 must leave the open deadline untouched"
+            );
+        });
+    }
+
+    // Issue #796: the body a failed response carries is diagnostic evidence for
+    // the log, not a user-facing string — and it must not be retained unbounded
+    // either. `truncate_for_log` mirrors the Teams helper.
+    #[test]
+    fn truncate_for_log_caps_a_body_on_a_char_boundary() {
+        let short = "{\"error\":\"invalid_grant\"}";
+        assert_eq!(
+            truncate_for_log(short),
+            short,
+            "a body inside the limit must pass through untouched"
+        );
+
+        let long = "x".repeat(LOG_BODY_LIMIT_CHARS * 3);
+        let kept = truncate_for_log(&long);
+        assert!(
+            kept.len() < long.len(),
+            "an oversized body must be cut down"
+        );
+        assert!(
+            kept.starts_with(&"x".repeat(64)),
+            "the head of the body is what a support snapshot needs"
+        );
+        assert!(
+            kept.contains(&format!("(…{} bytes total)", long.len())),
+            "the marker must carry the true byte length, got {}",
+            kept
+        );
+        assert_eq!(
+            kept.chars().filter(|c| *c == 'x').count(),
+            LOG_BODY_LIMIT_CHARS,
+            "exactly the first {LOG_BODY_LIMIT_CHARS} characters are kept"
+        );
+
+        // Multi-byte input must not panic on the slice — the cut is a byte
+        // index that has to land on a char boundary.
+        let multi = "é".repeat(LOG_BODY_LIMIT_CHARS * 2);
+        let kept = truncate_for_log(&multi);
+        assert!(kept.starts_with('é'));
+        assert!(kept.ends_with(&format!("(…{} bytes total)", multi.len())));
+    }
+
+    // Acceptance criterion for issue #796, at the type's boundary: the body is
+    // logged, the user-facing text names the HTTP status and carries no body
+    // bytes, however large the response was.
+    #[test]
+    fn an_oversized_error_body_never_reaches_display() {
+        // The marker sits past the truncation limit, so a body that leaked
+        // anywhere outside the truncated log line would be detectable.
+        let body = format!("{}EDGE-PAGE-MARKER", "y".repeat(LOG_BODY_LIMIT_CHARS * 4));
+        let err = classify_spotify_status(500, None, "Currently playing", &body);
+
+        let text = err.to_string();
+        assert!(
+            text.contains("500"),
+            "the message must name the HTTP status, got {}",
+            text
+        );
+        assert!(
+            !text.contains("EDGE-PAGE-MARKER"),
+            "no response-body byte may reach user-facing text, got {}",
+            text
+        );
+
+        match err {
+            SpotifyApiError::Transient { body: kept, .. } => {
+                assert!(!kept.contains("EDGE-PAGE-MARKER"));
+                assert!(
+                    kept.contains(&format!("(…{} bytes total)", body.len())),
+                    "the logged body must say it was truncated, got {}",
+                    kept
+                );
+            }
+            other => panic!("a 5xx must map to Transient for logging, got {:?}", other),
+        }
     }
 }

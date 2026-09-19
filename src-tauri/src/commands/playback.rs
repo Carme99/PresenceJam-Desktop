@@ -171,7 +171,10 @@ fn friendly_playback_error(err: SpotifyApiError) -> String {
             Some(secs) => format!("Spotify is rate limiting requests (retry after {}s)", secs),
             None => "Spotify is rate limiting requests".to_string(),
         },
-        SpotifyApiError::Other(s) => s,
+        // Issue #749: `Other` (no HTTP status), `Transient` (5xx) and `Http`
+        // (an unclassified 4xx) each render their own wording through
+        // `Display`, which already names the status without the response body.
+        other => other.to_string(),
     }
 }
 
@@ -303,16 +306,22 @@ pub async fn get_playback_queue(
 
 /// Returns the scopes granted on the stored Spotify access token by
 /// base64url-decoding its JWT payload (informational only — no signature
-/// verification). Empty when undecodable. The Settings page uses this to
+/// verification).
+///
+/// `None` means "unknown": the token is not a decodable JWT carrying a `scope`
+/// claim, so a missing permission cannot be concluded from it. `Some(vec![])`
+/// means the scope claim was present and empty. The Settings page uses this to
 /// detect a missing `user-modify-playback-state` and show the one-time
-/// reconnect banner. See issue #3.0-P3.
+/// reconnect banner, and must keep "unknown" apart from "absent" — reconnecting
+/// cannot fix a decode failure (issue #973). See also issue #3.0-P3.
 #[tauri::command]
-pub fn get_spotify_granted_scopes(state: State<'_, Arc<crate::AppState>>) -> Vec<String> {
+pub fn get_spotify_granted_scopes(state: State<'_, Arc<crate::AppState>>) -> Option<Vec<String>> {
     log::debug!("{CMD} get_spotify_granted_scopes: ENTRY");
-    match state.tokens.spotify().as_ref() {
-        Some(tokens) => decode_spotify_granted_scopes(&tokens.access_token),
-        None => Vec::new(),
-    }
+    state
+        .tokens
+        .spotify()
+        .as_ref()
+        .and_then(|tokens| decode_spotify_granted_scopes(&tokens.access_token))
 }
 
 #[cfg(test)]
