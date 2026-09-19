@@ -41,7 +41,7 @@ import Settings from '$lib/components/Settings.svelte';
 import { currentView } from '$lib/stores/app';
 import { configStore, defaultConfig } from '$lib/stores/config';
 import { notificationPreferences } from '$lib/stores/notifications';
-import { authFlow, resetSpotifyAuthFlow, resetTeamsAuthFlow, setTeamsPhase } from '$lib/stores/authFlow.svelte';
+import { authFlow, resetSpotifyAuthFlow, resetTeamsAuthFlow, setSpotifyPhase, setTeamsPhase } from '$lib/stores/authFlow.svelte';
 import { theme } from '$lib/stores/theme';
 import { t, i18n, type TKey, type Locale } from '$lib/i18n';
 // #955: the presence dropdown's labels are dictionary entries, so the test
@@ -1262,5 +1262,53 @@ describe('Settings presence option labels (#955)', () => {
     }
 
     await i18n.set('en');
+  });
+});
+
+/**
+ * #964 — the poller's `spotify-reconnect-required` event lands the user on
+ * Settings with the flow already waiting, and the card offered only "Complete
+ * authentication in the browser": `reconnectSpotify` refuses to restart a
+ * waiting flow, so a lost browser tab was a dead end here (Reconnect has had
+ * both escapes since #558).
+ *
+ * Fails pre-fix: neither control is in the waiting branch.
+ */
+describe('Settings Spotify waiting-state escape (#964)', () => {
+  it('offers Restart sign-in, which begins a fresh flow instead of being refused', async () => {
+    setSpotifyPhase('waiting');
+    const { container, getByRole } = await mountSettings();
+
+    expect(container.querySelector('#spotify-manual-url')).not.toBeNull();
+    await fireEvent.click(getByRole('button', { name: t('reconnect.restartSignIn') }));
+
+    await waitFor(() =>
+      expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'reconnect_spotify_session')).toBe(true)
+    );
+    // The restart put the flow back in the waiting state, i.e. it ran.
+    expect(authFlow.spotify.phase).toBe('waiting');
+  });
+
+  it('completes the flow from a pasted redirect URL, and refuses one without a code', async () => {
+    setSpotifyPhase('waiting');
+    const { container, getByRole } = await mountSettings();
+    const input = container.querySelector('#spotify-manual-url') as HTMLInputElement;
+    const submit = getByRole('button', { name: t('onboarding.submitCode') });
+
+    await fireEvent.input(input, { target: { value: 'presencejam://callback?state=xyz' } });
+    await fireEvent.click(submit);
+    await waitFor(() =>
+      expect(container.querySelector('.error-message')?.textContent).toBe(t('validation.noCodeInUrl'))
+    );
+    expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'complete_spotify_auth_manual')).toBe(false);
+
+    await fireEvent.input(input, {
+      target: { value: 'presencejam://callback?code=abc&state=xyz' }
+    });
+    await fireEvent.click(submit);
+    await waitFor(() => {
+      const call = invokeMock.mock.calls.find(([cmd]) => cmd === 'complete_spotify_auth_manual');
+      expect(call?.[1]).toEqual({ code: 'abc', oauthState: 'xyz' });
+    });
   });
 });

@@ -848,6 +848,62 @@
     }
   }
 
+  // ── #964: the waiting-state escape hatch ────────────────────────────────
+  //
+  // The poller's `spotify-reconnect-required` event lands the user on this
+  // pane with the flow already waiting, so this card is where a lost browser
+  // tab strands them. Reconnect has offered the two ways out since #558; this
+  // is the same pair, reusing its copy.
+  let spotifyManualUrl = $state('');
+  let manualSubmitBusy = $state(false);
+  let manualUrlError = $state('');
+
+  // `reconnectSpotify` refuses a restart while the phase is `waiting`, so the
+  // phase is cleared first and this is not a nested call for its own sake.
+  async function restartSpotifySignIn() {
+    resetSpotifyAuthFlow();
+    await reconnectSpotify();
+  }
+
+  /** Extract `code`/`state` from a pasted Spotify redirect URL. */
+  function extractCodeFromUrl(url: string): { code: string; state: string } | null {
+    try {
+      const parsed = new URL(url);
+      const code = parsed.searchParams.get('code');
+      if (!code) return null;
+      // A missing `state` still passes (empty string) — the backend rejects it,
+      // mirroring the deep-link CSRF check (#162).
+      return { code, state: parsed.searchParams.get('state') ?? '' };
+    } catch {
+      return null;
+    }
+  }
+
+  /** Complete the flow from a pasted redirect URL (the #385 fallback). */
+  async function submitManualUrl() {
+    if (manualSubmitBusy) return;
+    const extracted = extractCodeFromUrl(spotifyManualUrl);
+    if (!extracted) {
+      manualUrlError = t('validation.noCodeInUrl');
+      return;
+    }
+    manualSubmitBusy = true;
+    manualUrlError = '';
+    try {
+      await invoke('complete_spotify_auth_manual', {
+        code: extracted.code,
+        oauthState: extracted.state
+      });
+      setSpotifyPhase('done');
+    } catch (e) {
+      console.error('[SETTINGS] complete_spotify_auth_manual failed:', e);
+      manualUrlError = String(e);
+      setSpotifyPhase('error', String(e));
+    } finally {
+      manualSubmitBusy = false;
+    }
+  }
+
   async function reconnectTeams() {
     if (teamsAuthWaiting) return;
     // #550: same detached-pane guard as reconnectSpotify above — the Teams
@@ -1072,7 +1128,29 @@
         {#if isConnected && !spotifyAuthWaiting}
           <button class="btn-secondary" onclick={reconnectSpotify} disabled={spotifyAuthWaiting}>{t('settings.reconnectSpotify')}</button>
         {:else if spotifyAuthWaiting}
-          <span class="hint">{t('settings.completeAuthInBrowser')}</span>
+          <div class="spotify-waiting">
+            <span class="hint">{t('settings.completeAuthInBrowser')}</span>
+            <!-- #964: both escapes Reconnect offers for a stuck flow — the
+                 browser tab may be gone, or the sign-in may have finished
+                 after the `presencejam://` deep link was lost. -->
+            <button type="button" class="btn-secondary" onclick={restartSpotifySignIn}>{t('reconnect.restartSignIn')}</button>
+            <p class="hint" id="spotify-manual-url-hint">{t('onboarding.manualUrlHint')}</p>
+            <input
+              id="spotify-manual-url"
+              type="text"
+              bind:value={spotifyManualUrl}
+              aria-label={t('onboarding.manualUrlLabel')}
+              placeholder={t('onboarding.manualUrlPlaceholder')}
+              aria-describedby="spotify-manual-url-hint"
+              onkeydown={(e) => e.key === 'Enter' && submitManualUrl()}
+            />
+            <button type="button" class="btn-secondary" onclick={submitManualUrl} disabled={manualSubmitBusy}>
+              {t('onboarding.submitCode')}
+            </button>
+            {#if manualUrlError}
+              <p class="error-message" role="alert">{manualUrlError}</p>
+            {/if}
+          </div>
         {/if}
       </div>
       {#if authFlow.spotify.error}
@@ -1952,6 +2030,18 @@
   .connection-row .device-code-box {
     width: 100%;
   }
+
+  /* #964: the waiting state is the only Spotify state with more than one
+     control, so it stacks instead of sharing the row's baseline. */
+  .connection-row .spotify-waiting {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--sp-2);
+    width: 100%;
+  }
+  .connection-row .spotify-waiting .hint { margin: 0; }
+  .connection-row .spotify-waiting input { width: 100%; }
 
   /* One-time-reconnect banner for the missing tray-playback scope
      (issue #3.0-P3). */
