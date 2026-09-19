@@ -105,6 +105,12 @@ pub struct OsInfo {
     /// `Windows 11 (24H2, build 26100)`. `unknown` when the probe fails;
     /// never the hostname, machine name or a user path.
     pub os_version: String,
+    /// How this copy was installed (issue #786), as a lowercase token:
+    /// `deb`, `rpm`, `appimage`, `msi`, `nsis`, `dmg` or `app` for a Tauri
+    /// bundle, `homebrew` for a Homebrew prefix, else `unknown`. Decides
+    /// whether an in-app update can succeed at all (the deb case fails by
+    /// design); never the executable path.
+    pub install_flavor: String,
 }
 
 /// Non-secret projection of `AppConfig`, flattened field-for-field so a
@@ -722,6 +728,7 @@ fn build_snapshot(
             arch: std::env::consts::ARCH.to_string(),
             family: std::env::consts::FAMILY.to_string(),
             os_version: os_release(),
+            install_flavor: install_flavor(),
         },
         config: config_summary(state, keychain.spotify_client_secret_present, &quarantine),
         tokens: token_metadata(state),
@@ -889,6 +896,43 @@ fn windows_release_token(
         Some(dv) => format!("Windows {generation} ({dv}, build {build})"),
         None => format!("Windows {generation} (build {build})"),
     }
+}
+
+/// Install flavour token for `OsInfo::install_flavor` (issue #786).
+///
+/// [`tauri::utils::platform::bundle_type`] names the Tauri bundles; it cannot
+/// see a Homebrew install, which is not a bundle, so a Cellar/Caskroom/
+/// homebrew prefix on the running executable decides that case. The
+/// executable path itself never leaves these functions.
+fn install_flavor() -> String {
+    let exe = std::env::current_exe().ok();
+    install_flavor_of(tauri::utils::platform::bundle_type(), exe.as_deref())
+}
+
+/// Mapping from the bundle marker plus the executable path, parameterised so
+/// both sources are testable without a real bundle (the marker is a
+/// build-time constant).
+fn install_flavor_of(
+    bundle: Option<tauri::utils::config::BundleType>,
+    exe: Option<&std::path::Path>,
+) -> String {
+    if exe.is_some_and(is_homebrew_path) {
+        return "homebrew".to_string();
+    }
+    match bundle {
+        Some(bundle) => bundle.to_string(),
+        None => "unknown".to_string(),
+    }
+}
+
+/// Homebrew formulae live under `Cellar/`, casks under `Caskroom/`, and the
+/// prefix itself is `/opt/homebrew/` (Apple silicon) or `/usr/local/Homebrew/`
+/// (Intel).
+fn is_homebrew_path(exe: &std::path::Path) -> bool {
+    let path = exe.to_string_lossy().to_lowercase();
+    ["/cellar/", "/caskroom/", "/homebrew/"]
+        .iter()
+        .any(|marker| path.contains(marker))
 }
 
 /// Tauri command backing the Diagnostics page. Read-only, local-only,
@@ -1634,5 +1678,87 @@ mod tests {
                 snapshot.os.os_version
             );
         }
+    }
+
+    // ---------------------------------------------------------------
+    // U22 (#786): the snapshot names how the copy was installed.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_install_flavor_distinguishes_bundles_from_a_homebrew_prefix() {
+        use tauri::utils::config::BundleType;
+        let flavor = |bundle, exe: &str| install_flavor_of(bundle, Some(std::path::Path::new(exe)));
+
+        // The marker decides the bundled cases; the path is irrelevant there.
+        assert_eq!(
+            flavor(Some(BundleType::Deb), "/usr/bin/presence-jam"),
+            "deb"
+        );
+        assert_eq!(
+            flavor(Some(BundleType::AppImage), "/tmp/.mount_pj/presence-jam"),
+            "appimage"
+        );
+        assert_eq!(
+            flavor(
+                Some(BundleType::Msi),
+                r"C:\Program Files\PresenceJam\presence-jam.exe"
+            ),
+            "msi"
+        );
+        assert_eq!(
+            flavor(
+                Some(BundleType::App),
+                "/Applications/PresenceJam.app/Contents/MacOS/presence-jam"
+            ),
+            "app"
+        );
+
+        // Homebrew is not a Tauri bundle: the prefix is the only tell, and it
+        // also catches a .app that Homebrew staged in the Caskroom.
+        assert_eq!(
+            flavor(
+                Some(BundleType::App),
+                "/opt/homebrew/Cellar/presencejam/4.7.0/bin/presence-jam"
+            ),
+            "homebrew"
+        );
+        assert_eq!(
+            flavor(
+                None,
+                "/usr/local/Caskroom/presencejam/4.7.0/PresenceJam.app/Contents/MacOS/presence-jam"
+            ),
+            "homebrew"
+        );
+
+        // An unbundled run and an unreadable executable path are `unknown`,
+        // never a guess (nor a panic).
+        assert_eq!(
+            flavor(None, "/home/jack/dev/target/debug/presence-jam"),
+            "unknown"
+        );
+        assert_eq!(install_flavor_of(None, None), "unknown");
+    }
+
+    #[test]
+    fn test_snapshot_os_install_flavor_matches_this_binary() {
+        // The bundle marker is patched into a real bundle at build time; a
+        // cargo test binary is not one, so the field must hold the documented
+        // fallback for this platform rather than a hardcoded token.
+        let snapshot = build_snapshot(
+            &crate::AppState::default(),
+            None,
+            inert_keychain(),
+            None,
+            ConfigQuarantine::default(),
+        );
+        let expected = if cfg!(target_os = "macos") {
+            "app"
+        } else {
+            "unknown"
+        };
+        assert_eq!(
+            snapshot.os.install_flavor, expected,
+            "an unbundled Linux/Windows binary reports the fallback token"
+        );
     }
 }
