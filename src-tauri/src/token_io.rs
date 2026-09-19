@@ -684,6 +684,86 @@ pub fn reset_tokens_storage(app: &tauri::AppHandle) -> Result<(), String> {
     clear_tokens_file(app)
 }
 
+// ---------------------------------------------------------------------------
+// Issue #865: `--serve` bearer token
+// ---------------------------------------------------------------------------
+//
+// The bearer token is owned by the keychain, not the app's config dir:
+// it must never be persisted to disk in plaintext (tokens.json is
+// already AES-encrypted; the bearer token is a one-process secret that
+// lives for the lifetime of a serve-mode daemon, so its keychain slot
+// is the only storage location). The token is regenerated only by an
+// explicit operator action (`keychain::rotate_serve_token`), so
+// external clients that hold the token (schedulers, dashboards) are not
+// invalidated every time the daemon restarts.
+
+/// Read the existing serve bearer token from the OS keychain, or
+/// generate + persist one if the slot is empty. The "first boot"
+/// rotation is intentional — a fresh install gets a token the operator
+/// can copy once and reuse across restarts.
+///
+/// Locked / unavailable keychains propagate as `Err` so the caller can
+/// retry (the daemon path uses [`read_or_create_serve_token_with_backoff`]
+/// for that). On a keychain-unavailable system the `--serve` mode is
+/// not safe to enable, and the error is what surfaces to the operator.
+pub fn read_or_create_serve_token() -> Result<String, String> {
+    match crate::keychain::read_serve_token() {
+        Ok(Some(token)) => Ok(token),
+        Ok(None) => crate::keychain::rotate_serve_token(),
+        Err(e) => Err(e),
+    }
+}
+
+/// Same as [`read_or_create_serve_token`] but with bounded exponential
+/// backoff for daemon boot (issue #896 — "a locked or missing keychain
+/// at boot must retry with backoff rather than exit").
+///
+/// `attempts` is the maximum number of tries including the first;
+/// `base_delay` is the delay before the *second* try (the first try is
+/// immediate). The schedule is `base_delay`, `2*base_delay`, `4*base_delay`,
+/// … capped by `max_delay`. After the final attempt the last error is
+/// returned. A locked `gnome-keyring` (Linux) or a Credential Manager
+/// awaiting user consent (Windows) typically resolves within a couple
+/// of seconds, so the defaults give the platform room to settle before
+/// the daemon gives up and exits with a non-zero status.
+pub fn read_or_create_serve_token_with_backoff(
+    attempts: u32,
+    base_delay: std::time::Duration,
+    max_delay: std::time::Duration,
+) -> Result<String, String> {
+    if attempts == 0 {
+        return Err("read_or_create_serve_token_with_backoff: attempts must be > 0".to_string());
+    }
+    let mut last_err: Option<String> = None;
+    let mut delay = base_delay;
+    for i in 0..attempts {
+        match read_or_create_serve_token() {
+            Ok(token) => {
+                if i > 0 {
+                    log::info!(
+                        "[TOKEN_IO] read_or_create_serve_token_with_backoff: succeeded on attempt {}",
+                        i + 1
+                    );
+                }
+                return Ok(token);
+            }
+            Err(e) => {
+                log::warn!(
+                    "[TOKEN_IO] read_or_create_serve_token_with_backoff: attempt {} failed: {}",
+                    i + 1,
+                    e
+                );
+                last_err = Some(e);
+                if i + 1 < attempts {
+                    std::thread::sleep(delay);
+                    delay = std::cmp::min(delay.saturating_mul(2), max_delay);
+                }
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| "no attempts made".to_string()))
+}
+
 /// Delete the tokens file. Used by [`reset_tokens_storage`]; reconnect flows
 /// clear state through the empty-`TokensFile` write path instead.
 ///

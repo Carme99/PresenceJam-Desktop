@@ -391,6 +391,7 @@ pub mod pkce;
 pub mod platform;
 pub mod polling;
 pub mod profanity;
+pub mod serve;
 pub mod spotify;
 pub mod teams;
 pub mod token_io;
@@ -890,6 +891,12 @@ const CLEAR_STATUS_FLAG: &str = "--clear-status";
 /// values.
 const PROFILE_FLAG: &str = "--profile";
 
+/// `--serve[=PORT]`: token-guarded localhost control + event API
+/// (issue #865). Optional port is split off the flag, so the parser
+/// sees `--serve`, `--serve=8649`, etc. The default port lives in
+/// [`crate::serve::DEFAULT_PORT`].
+const SERVE_FLAG: &str = "--serve";
+
 /// What the argv asked for. A CLI flag is an *alternative* to launching the
 /// GUI, never a modifier of it — which is why an unrecognised argument still
 /// launches normally.
@@ -915,6 +922,10 @@ enum CliCommand {
     SetActiveProfile {
         name: Option<String>,
     },
+    /// Issue #865: launch the token-guarded localhost HTTP control
+    /// + event API. `port` is `None` for `--serve` (default port from
+    ///   [`crate::serve::DEFAULT_PORT`]) and `Some(p)` for `--serve=p`.
+    Serve(Option<u16>),
 }
 
 /// Parse the CLI intent out of argv; `None` means "launch the GUI".
@@ -995,8 +1006,43 @@ where
             });
             return Some(CliCommand::SetActiveProfile { name });
         }
+        // Issue #865: `--serve[=PORT]`. The port is part of the same argv
+        // token (`--serve=8649`), not a separate arg — a stray `--serve`
+        // followed by a numeric token is the pre-#865 behaviour (unknown
+        // flag, GUI launches) and we don't change it.
+        if let Some(port) = parse_serve_arg(arg) {
+            return Some(CliCommand::Serve(port));
+        }
     }
     None
+}
+
+/// Recognise `--serve` (default port) and `--serve=PORT` (issue #865).
+/// Returns `Some(None)` for the bare flag, `Some(Some(port))` for the
+/// explicit form, and `None` for any other argument.
+///
+/// Valid ports are 1..=65535. Port 0 is the OS-assigned "give me any free
+/// port" sentinel, which the serve path does not bind directly — the
+/// security model is "operator-controlled port" so we reject it and fall
+/// through to the GUI launch (better than a silent rebind). Malformed
+/// port strings (`--serve=abc`, `--serve=99999`) likewise leave the GUI
+/// path alone: a typo is louder than a silent error.
+fn parse_serve_arg(arg: &std::ffi::OsStr) -> Option<Option<u16>> {
+    let bytes = arg.as_encoded_bytes();
+    if bytes == SERVE_FLAG.as_bytes() {
+        return Some(None);
+    }
+    let prefix = SERVE_FLAG.as_bytes();
+    if bytes.len() <= prefix.len() + 1 || !bytes.starts_with(prefix) || bytes[prefix.len()] != b'='
+    {
+        return None;
+    }
+    let port_str = std::str::from_utf8(&bytes[prefix.len() + 1..]).ok()?;
+    let port: u16 = port_str.parse().ok()?;
+    if port == 0 {
+        return None;
+    }
+    Some(Some(port))
 }
 
 /// Usage text for `--help`.
@@ -1035,6 +1081,17 @@ FLAGS:
                 bounds.
   --clear-status                    Clear any manual Teams status (issue #870)
                 and exit 0 on success, or exit 1 on stderr.
+  --serve[=PORT]                    Start the token-guarded localhost HTTP
+                control + event API (issue #865) on 127.0.0.1:PORT (default
+                8649) and run until interrupted. `GET /status` returns the
+                same JSON shape as `--status`; `GET /events` streams the
+                three presence-related Tauri events as SSE. `POST /pause`,
+                `/resume`, `/snooze?minutes=N` and `/profile?id=<id>` are
+                mutating and require `Authorization: Bearer <token>`. The
+                token is 32 random bytes stored in the OS keychain (not
+                on disk in plaintext); an operator retrieves it via
+                `secret-tool`/`security`/`Credential Manager` on first
+                boot. No route writes configuration or token material.
   --help        Print this help and exit 0.
   --minimized   Start with the window hidden. The autostart plugin passes
                 this, and it still launches the GUI.
@@ -1497,14 +1554,20 @@ pub fn run() {
     // token I/O to read the Teams access token (the message is POSTed
     // directly to Graph), but otherwise behave like `--status` — no
     // window, no tray, no single-instance lock.
-    let sync_once = match cli_command(std::env::args_os()) {
+    // Issue #679 / #865: the CLI flags are resolved before anything else.
+    // `sync_once` is `true` for `--sync-once` (still builds the app, but
+    // in CLI mode and exits at the end of one iteration); `serve_port`
+    // is `Some(p)` for `--serve[=p]` (issue #865, builds the app in CLI
+    // mode and keeps the runtime alive serving the HTTP surface). The
+    // GUI builder proceeds with both flags off (the common case).
+    let (sync_once, serve_port) = match cli_command(std::env::args_os()) {
         Some(CliCommand::Help) => {
             println!("{}", cli_help_text());
             std::process::exit(0);
         }
         Some(CliCommand::Status) => std::process::exit(cli_status_exit_code()),
         Some(CliCommand::SyncOnce) => match cli_sync_once_preflight_from_disk() {
-            Ok(()) => true,
+            Ok(()) => (true, None),
             Err(reason) => {
                 eprintln!("presencejam: {SYNC_ONCE_FLAG}: {reason}");
                 std::process::exit(1);
@@ -1549,8 +1612,26 @@ pub fn run() {
                 std::process::exit(1);
             }
         },
-        None => false,
+        // Issue #865: `--serve[=PORT]` needs the same builder as `--sync-once`
+        // (an `AppHandle` to subscribe to Tauri events), but it stays alive
+        // — `sync_once=false`, `serve_port = Some(p)`. The builder stays in
+        // CLI mode (no window/tray/menu/deep-link/single-instance) and the
+        // runtime loop runs until interrupted.
+        Some(CliCommand::Serve(port)) => match cli_sync_once_preflight_from_disk() {
+            Ok(()) => (false, Some(port)),
+            Err(reason) => {
+                eprintln!("presencejam: {SERVE_FLAG}: {reason}");
+                std::process::exit(1);
+            }
+        },
+        None => (false, None),
     };
+    // Issue #865: the two CLI modes share the same "GUI surfaces must stay
+    // off" rule. `sync_once` and `serve_port` are individually readable so
+    // their distinctive setup hooks stay type-safe, but every site that
+    // currently branches on `sync_once` reads `cli_mode` instead, so
+    // adding a third CLI mode in the future is a one-line change.
+    let cli_mode = sync_once || serve_port.is_some();
 
     let mut builder = tauri::Builder::default();
 
@@ -1558,8 +1639,10 @@ pub fn run() {
     // screen for the duration of one poll. The config-declared windows are
     // created by `App::run`, not by `build`, so clearing `create` here keeps
     // this launch windowless without touching the GUI's own config.
+    // Issue #865: `--serve` shares the same windowless rule — the HTTP
+    // surface is the whole point of the launch.
     let mut context = tauri::generate_context!();
-    if sync_once {
+    if cli_mode {
         suppress_config_windows(&mut context);
     }
 
@@ -1570,8 +1653,11 @@ pub fn run() {
         // Issue #679: a `--sync-once` run must not take the single-instance
         // lock. With it registered, a CLI run while the app is already open
         // would be forwarded to the running instance as a "second launch" and
-        // exit 0 without polling anything.
-        if !sync_once {
+        // exit 0 without polling anything. Issue #865: `--serve` must not
+        // take the lock either — a systemd-managed daemon launches via
+        // `ExecStart=` every restart, and stealing the lock from a stale
+        // GUI process would mis-attribute the SIGTERM.
+        if !cli_mode {
             builder = builder.plugin(single_instance_init(forward_launch_to_running_instance));
         }
 
@@ -1707,7 +1793,7 @@ pub fn run() {
                     // Issue #679: CLI mode has no window to hide and must not
                     // switch the macOS activation policy either — the flag it
                     // was asked for has nothing to do with the launch intent.
-                    if !sync_once && (cfg.teams.start_minimized || launched_minimized) {
+                    if !cli_mode && (cfg.teams.start_minimized || launched_minimized) {
                         log::info!(
                             "[APP] setup: starting hidden (config start_minimized={}, {}={})",
                             cfg.teams.start_minimized,
@@ -1784,12 +1870,34 @@ pub fn run() {
             if sync_once {
                 return cli_sync_once_iteration(app, state.clone());
             }
+            // Issue #865: `--serve[=PORT]` builds the same windowless app and
+            // then stays in the event loop. `serve::start_serve` owns the
+            // server thread for the lifetime of the process; the runtime
+            // loop below keeps the process alive until SIGINT/SIGTERM (or
+            // an explicit `app.exit()` from elsewhere — the HTTP layer has
+            // no such endpoint by design).
+            if let Some(port_opt) = serve_port {
+                let port = port_opt.unwrap_or(crate::serve::DEFAULT_PORT);
+                let app_handle = app.handle().clone();
+                let state_for_serve = Arc::clone(&state);
+                if let Err(e) = serve::start_serve(state_for_serve, app_handle, port) {
+                    log::error!("[APP] setup: --serve failed to start: {}", e);
+                    return Err(Box::new(std::io::Error::other(e)));
+                }
+                log::info!(
+                    "[APP] setup: --serve bound; runtime loop will keep the process alive"
+                );
+            }
             // Global shortcuts (issue #676): register the bindings from the
             // config loaded above. This sits BELOW the `--sync-once` early
             // return since issue #769: a CLI one-shot runs windowless and must
             // touch no GUI surface — which includes taking OS-level
             // accelerator grabs — so the registration belongs to the GUI path
-            // only. Deliberately NOT inline: every grab goes through the
+            // only. Issue #865: `--serve` shares the same rule — a
+            // headless daemon running on a CI host must not steal Ctrl+Alt+M
+            // from whatever the operator is using locally.
+            //
+            // Deliberately NOT inline: every grab goes through the
             // plugin's `run_on_main_thread`, which blocks until the event loop
             // runs the task — and the event loop starts only once this setup
             // hook returns, so registering here would deadlock the app before
@@ -1802,17 +1910,21 @@ pub fn run() {
             // inside the `Ok(cfg)` arm: `register_from_config` falls back to
             // the default bindings when AppState holds no config, so an
             // unguarded call after a failed load would grab accelerators the
-            // user never configured.
-            let shortcuts_config_loaded = app.state::<Arc<AppState>>().config.get().is_some();
-            if shortcuts_config_loaded {
-                let shortcut_handle = app.handle().clone();
-                tauri::async_runtime::spawn_blocking(move || {
-                    commands::shortcuts::register_from_config(&shortcut_handle);
-                });
+            // user never configured. Gated on `!cli_mode` so `--serve` and
+            // `--sync-once` skip the registration entirely.
+            if !cli_mode {
+                let shortcuts_config_loaded =
+                    app.state::<Arc<AppState>>().config.get().is_some();
+                if shortcuts_config_loaded {
+                    let shortcut_handle = app.handle().clone();
+                    tauri::async_runtime::spawn_blocking(move || {
+                        commands::shortcuts::register_from_config(&shortcut_handle);
+                    });
+                }
             }
 
             #[cfg(desktop)]
-            {
+            if !cli_mode {
                 use tauri_plugin_deep_link::DeepLinkExt;
 
                 // Issue #66 (further mitigation): re-register the
@@ -1829,6 +1941,10 @@ pub fn run() {
                 // cryptographic mitigation — an interceptor can read the
                 // `code` from the callback URL but cannot exchange it for
                 // tokens.
+                //
+                // Issue #865: skipped under `--serve` (and `--sync-once`),
+                // so a headless daemon never claims the URL scheme away
+                // from a real GUI install on the same machine.
                 log::info!("[APP] setup: registering deep links");
                 if let Err(e) = app.deep_link().register_all() {
                     #[cfg(target_os = "macos")]
@@ -2098,6 +2214,11 @@ pub fn run() {
         // staged update is a GUI decision (and the user is not quitting an
         // app), and the presence cleanup would wipe the very status the
         // one-shot was asked to write.
+        // Issue #865: a `--serve` run skips the staged update (still a GUI
+        // decision) but keeps the presence cleanup — the daemon had an
+        // armed presence session and SIGTERM is a clean exit, so the
+        // status it advertised on Teams needs the same Paused placeholder
+        // every other quit performs.
         #[cfg(desktop)]
         if matches!(event, tauri::RunEvent::Exit) && !sync_once {
             // Order is load-bearing (finding #636, issue #636): the staged
@@ -2108,7 +2229,9 @@ pub fn run() {
             // clears an armed presence session (bounded by its own 3-second
             // client) and replaces a leftover playing status with the
             // short-lived "Paused" placeholder.
-            updater_bg::install_pending_on_exit(app);
+            if serve_port.is_none() {
+                updater_bg::install_pending_on_exit(app);
+            }
             polling::clear_presence_on_exit(app);
         }
     });
@@ -2556,7 +2679,8 @@ mod tests {
     }
 
     /// Issue #679: the three CLI flags are recognised, matched exactly (never
-    /// as a prefix of something else) and nothing else is.
+    /// as a prefix of something else) and nothing else is. Issue #865
+    /// extends the contract with `--serve[=PORT]`.
     #[test]
     fn test_cli_command_matches_only_the_exact_flags() {
         for (argv, expected) in [
@@ -2566,6 +2690,20 @@ mod tests {
                 vec!["presencejam", "--sync-once"],
                 Some(CliCommand::SyncOnce),
             ),
+            // Issue #865: `--serve` defaults the port; `--serve=PORT` carries
+            // it in the same argv token.
+            (
+                vec!["presencejam", "--serve"],
+                Some(CliCommand::Serve(None)),
+            ),
+            (
+                vec!["presencejam", "--serve=8649"],
+                Some(CliCommand::Serve(Some(8649))),
+            ),
+            (
+                vec!["presencejam", "--serve=1"],
+                Some(CliCommand::Serve(Some(1))),
+            ),
             // Exact match only: a longer argument that merely starts with a
             // flag is not that flag (issue #589's rule, applied here too).
             (vec!["presencejam", "--statuses"], None),
@@ -2573,6 +2711,13 @@ mod tests {
             (vec!["presencejam", "--help-me"], None),
             (vec!["presencejam", "-s"], None),
             (vec!["presencejam", "--status=1"], None),
+            // `--serve` typos and edge cases must fall through (GUI launches
+            // — a typo is louder than a silent error).
+            (vec!["presencejam", "--serve="], None),
+            (vec!["presencejam", "--serve=abc"], None),
+            (vec!["presencejam", "--serve=0"], None),
+            (vec!["presencejam", "--serve=99999"], None),
+            (vec!["presencejam", "--server"], None),
             (Vec::<&str>::new(), None),
         ] {
             assert_eq!(
@@ -2647,7 +2792,13 @@ mod tests {
     #[test]
     fn test_cli_help_text_documents_every_flag() {
         let help = cli_help_text();
-        for flag in [STATUS_FLAG, SYNC_ONCE_FLAG, HELP_FLAG, MINIMIZED_FLAG] {
+        for flag in [
+            STATUS_FLAG,
+            SYNC_ONCE_FLAG,
+            HELP_FLAG,
+            MINIMIZED_FLAG,
+            SERVE_FLAG,
+        ] {
             assert!(help.contains(flag), "the usage text must document {}", flag);
         }
         assert!(
@@ -2657,6 +2808,18 @@ mod tests {
         assert!(
             help.to_lowercase().contains("ignored"),
             "the usage text must state that unknown arguments are ignored"
+        );
+        // Issue #865: the serve surface's two load-bearing claims — the
+        // `Authorization: Bearer` requirement and the keychain-stored
+        // token — must both appear, so a future copy edit cannot silently
+        // regress the security model.
+        assert!(
+            help.contains("Bearer"),
+            "the serve flag must call out the bearer-token requirement"
+        );
+        assert!(
+            help.contains("keychain"),
+            "the serve flag must state the token lives in the OS keychain"
         );
     }
 

@@ -85,6 +85,13 @@ aes-gcm = "0.11.0"
 ts-rs = { version = "12", features = ["chrono-impl"] }
 tauri-plugin-global-shortcut = "~2.3"
 
+# Issue #865: `--serve` is a token-guarded localhost HTTP control and event
+# API. `tiny_http` is the smallest HTTP server that supports streaming
+# chunked responses (the `/events` SSE endpoint) without dragging in a
+# full async runtime on top of Tauri's; the daemon's serve thread uses it
+# in blocking mode via `tauri::async_runtime::spawn_blocking`.
+tiny_http = { version = "0.12", default-features = false }
+
 # Release profile (issue #899). Cargo builds release artefacts with 16 codegen
 # units, no cross-crate LTO and a full symbol table by default, and every
 # shipped artefact — MSI, NSIS setup, DMG, .app.tar.gz, deb, AppImage — paid

@@ -28,6 +28,13 @@ const KEYRING_SERVICE: &str = "presencejam";
 /// See audit M2.
 const SPOTIFY_CLIENT_SECRET_USER: &str = "spotify_client_secret:com.presencejam.app";
 
+/// Keychain user field for the `--serve` localhost API bearer token
+/// (issue #865). 32 random bytes, base64url-encoded; required as
+/// `Authorization: Bearer <token>` on every mutating route. Namespaced
+/// the same way as the Spotify secret so dev builds and prod builds
+/// cannot authenticate against each other's running daemon.
+const SERVE_TOKEN_USER: &str = "serve_token:com.presencejam.app";
+
 /// Legacy unnamespaced key used through v2.7.2. New writes go to
 /// [`SPOTIFY_CLIENT_SECRET_USER`]; reads fall back to this constant on
 /// miss and migrate the value forward (write to the namespaced slot,
@@ -710,6 +717,68 @@ pub fn delete_tokens_aes_key() -> Result<(), String> {
     *tokens_key_cache().lock() = None;
     log::info!("[KEYCHAIN] Deleted tokens.json AES key from keychain (cache cleared)");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Issue #865: `--serve` bearer token
+// ---------------------------------------------------------------------------
+//
+// The HTTP server binds 127.0.0.1 only, so the network surface is the local
+// UID — but local UIDs are still untrusted (other apps run as the same user,
+// shared containers, remote desktop sessions, etc.), so every mutating
+// route requires `Authorization: Bearer <token>`. The token is 32 random
+// bytes, base64url-encoded (43 chars, no padding) so it survives HTTP
+// headers and shell arguments unchanged, and lives in the OS keychain —
+// never on disk in plaintext, never in argv, never in env.
+
+/// Read the serve bearer token from the keychain.
+///
+/// `None` means the daemon has never been started in `--serve` mode on
+/// this install; `Err` is reserved for OS keychain failures (locked
+/// vault, denied access prompt, missing Secret Service). The caller is
+/// responsible for distinguishing those via [`crate::token_io`].
+pub fn read_serve_token() -> Result<Option<String>, String> {
+    match keyring::Entry::new(KEYRING_SERVICE, SERVE_TOKEN_USER) {
+        Ok(entry) => match entry.get_password() {
+            Ok(t) => Ok(Some(t)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(map_keychain_err(Err::<String, _>(e)).unwrap_err()),
+        },
+        Err(e) => Err(map_keychain_err(Err::<String, _>(e)).unwrap_err()),
+    }
+}
+
+/// Generate a fresh 32-byte serve token and store it in the OS keychain,
+/// overwriting any prior value. Called by the `--serve` startup path the
+/// first time the daemon boots in serve mode; subsequent boots read the
+/// existing token via [`read_serve_token`] so the bearer credential is
+/// stable across restarts (otherwise every restart would invalidate every
+/// external scheduler / dashboard that holds the token).
+///
+/// The generation is entropy-safe (`rand::rngs::OsRng`), and the storage
+/// path uses the same map-keychain-error plumbing as every other keychain
+/// write here, so a locked vault surfaces the same `SETUP.md`-pointing
+/// help text the Spotify secret does.
+pub fn rotate_serve_token() -> Result<String, String> {
+    let mut bytes = [0u8; 32];
+    rand::rngs::OsRng
+        .try_fill_bytes(&mut bytes)
+        .map_err(|e| format!("OS RNG refused to fill 32 bytes for serve token: {}", e))?;
+    // base64url, no padding — survives HTTP headers and shell args.
+    let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+    let entry = map_keychain_err(keyring::Entry::new(KEYRING_SERVICE, SERVE_TOKEN_USER))?;
+    map_keychain_err(entry.set_password(&token))?;
+    log::info!("[KEYCHAIN] Rotated serve bearer token in OS keychain");
+    Ok(token)
+}
+
+/// Test-only: delete the serve token slot without going through any cache.
+/// Mirrors [`delete_tokens_aes_key`] so the slot can be cleaned up between
+/// tests without leaving a credential behind on the dev keychain.
+#[cfg(test)]
+#[allow(dead_code)]
+fn delete_serve_token() -> Result<(), String> {
+    delete_keychain_entry(SERVE_TOKEN_USER)
 }
 
 #[cfg(test)]
