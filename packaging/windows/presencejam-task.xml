@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-16"?>
+<!--
+  Issue #896: Windows Task Scheduler unit.
+
+  Installed by the package's `install-task.ps1` (or the MSI's
+  custom-action), and registered with:
+
+      schtasks /Create /TN "PresenceJam Daemon" \
+              /XML "%ProgramFiles%\PresenceJam\presencejam-task.xml"
+
+  The task runs `presencejam --daemon` at user logon. The daemon
+  is foreground-only — the task sits in the foreground (the
+  `exec` runs forever) so Task Scheduler treats an unexpected
+  exit (anything other than a clean `taskkill`) as a failure and
+  can be wired to a `RestartCount` history.
+
+  Task Scheduler sends SIGBREAK-equivalent (`WM_CLOSE` on a hidden
+  window we don't have) on End Task; for the daemon, the documented
+  stop path is:
+
+      schtasks /End /TN "PresenceJam Daemon"
+      taskkill /IM presencejam.exe
+
+  Issue #896's "SIGTERM/SIGINT → exit 0" contract applies to Unix;
+  on Windows the daemon does not install signal handlers and a
+  `taskkill` is what stops the process. The `RunLevel=HighestAvailable`
+  + `User=LocalSystem` is the standard headless daemon posture; for a
+  per-user install, switch to `PrincipalType=InteractiveUser` and let
+  the operator's Credential Manager hold the OS keychain.
+-->
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Author>PresenceJam</Author>
+    <Description>Spotify → Teams presence sync daemon (issue #896)</Description>
+    <URI>\PresenceJam\Daemon</URI>
+  </RegistrationInfo>
+
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <!-- Allow a brief delay after logon so the OS keychain is
+           reachable before --daemon tries to read it. -->
+      <Delay><Duration>PT30S</Duration></Delay>
+    </LogonTrigger>
+  </Triggers>
+
+  <Principals>
+    <Principal id="AuthorPresenceJam">
+      <GroupId>S-1-5-18</GroupId> <!-- NT AUTHORITY\SYSTEM -->
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>true</RunOnlyIfNetworkAvailable>
+    <!-- `IdleSettings` deliberately omitted: the daemon is a long
+         poller, not an interactive user task, and idle-stop would
+         be wrong. -->
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit> <!-- unlimited -->
+    <Priority>5</Priority>
+  </Settings>
+
+  <Actions>
+    <Exec>
+      <Command>%ProgramFiles%\PresenceJam\presencejam.exe</Command>
+      <Arguments>--daemon</Arguments>
+      <WorkingDirectory>%ProgramFiles%\PresenceJam</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>

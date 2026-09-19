@@ -92,6 +92,14 @@ tauri-plugin-global-shortcut = "~2.3"
 # in blocking mode via `tauri::async_runtime::spawn_blocking`.
 tiny_http = { version = "0.12", default-features = false }
 
+# Issue #896: `--daemon` waits on SIGTERM/SIGINT so systemd, launchd and
+# Task Scheduler can stop the daemon cleanly. `signal-hook`'s registry API
+# gives us a sync handler that flips an `AtomicBool` the daemon loop
+# polls — no async signal stack on top of the platform ones. Unix-only;
+# on Windows the daemon stops via `taskkill` (see CHANGELOG.md).
+[target."cfg(unix)".dependencies]
+signal-hook = "0.3"
+
 # Release profile (issue #899). Cargo builds release artefacts with 16 codegen
 # units, no cross-crate LTO and a full symbol table by default, and every
 # shipped artefact — MSI, NSIS setup, DMG, .app.tar.gz, deb, AppImage — paid

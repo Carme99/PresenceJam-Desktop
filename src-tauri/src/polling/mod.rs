@@ -1,4 +1,4 @@
-//! Polling subsystem — split into four files:
+//! Polling subsystem — split into five files:
 //!
 //! - [`loop`]      — the polling driver (`polling_loop`).
 //! - [`poll_once`] — the single source of truth for one poll iteration
@@ -6,6 +6,8 @@
 //!   3-branch drift that motivated #72 collapses to one path here.
 //! - [`state`]     — thread-lifecycle glue (`start_polling`,
 //!   `stop_polling`).
+//! - [`daemon`]    — supervised `--daemon` mode (issue #896): SIGTERM/
+//!   SIGINT handlers, bounded join, clean shutdown.
 //!
 //! `token_io` was historically part of `polling.rs` per the #72 issue
 //! body; that surface was already extracted to the top-level
@@ -18,6 +20,7 @@
 
 // `loop` is a Rust keyword so the module identifier is `loop_`; the file is
 // still named `loop.rs` per the #72 issue spec via the `#[path]` attribute.
+mod daemon;
 #[path = "loop.rs"]
 mod loop_;
 mod poll_once;
@@ -39,6 +42,10 @@ pub(crate) use poll_once::{
     track_rule_conditions_match, track_rule_hit, track_rule_schedule_matches, TrackRuleContext,
 };
 pub use state::{start_polling, stop_polling};
+// Issue #896: the supervised `--daemon` mode is a public surface —
+// `lib::run` calls `polling::daemon::run` from the setup hook, and
+// integration tests (when they land) will exercise it directly.
+pub use daemon::run as run_daemon;
 
 use tauri::{AppHandle, Emitter};
 

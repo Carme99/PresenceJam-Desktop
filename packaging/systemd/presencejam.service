@@ -1,0 +1,53 @@
+[Unit]
+# Issue #896: supervised headless daemon unit.
+#
+# Installed by the package's `make install-systemd` (or `dpkg`/`rpm`
+# post-install scriptlet). The unit manages a single long-running
+# `presencejam --daemon` process that polls Spotify and writes the
+# user's presence to Microsoft Teams via the Graph API.
+#
+# The daemon exits 0 on SIGTERM, which `Type=simple` translates into a
+# clean `ExecStop` (systemd sends SIGTERM, waits up to
+# `TimeoutStopSec`, then SIGKILL). `Restart=on-failure` recovers from
+# the daemon's failure paths (keychain lockout at boot, fatal Spotify
+# / Graph outage) without thrashing on a logic bug — a panic that
+# exits non-zero is exactly the kind of transient we want supervised.
+#
+# Adjust `User=` and `Group=` to your distro's per-service user. The
+# default assumes the operator created a `presencejam` user at install
+# time; the `%h` substitution would point at the user's home, but the
+# config + keychain live under `~/.config/com.presencejam.app/` and
+# are easier to reason about when fixed at one UID.
+
+Description=PresenceJam (Spotify → Teams presence sync daemon)
+Documentation=https://github.com/presencejam/presencejam-desktop
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=presencejam
+Group=presencejam
+ExecStart=/usr/local/bin/presencejam --daemon
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+
+# The daemon writes logs to the platform-standard tauri-plugin-log
+# file (Linux: ~/.local/share/com.presencejam.app/logs/). `journalctl`
+# can pick those up via `StandardOutput=journal` if the operator
+# prefers the journal; the default keeps the existing log file.
+StandardOutput=append:/var/log/presencejam/daemon.log
+StandardError=inherit
+
+# Hardening (issue #865 / #896: the daemon's network surface is the
+# local loopback HTTP API; no remote access, no broad FS write).
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/presencejam
+
+[Install]
+WantedBy=default.target

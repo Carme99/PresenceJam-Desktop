@@ -896,6 +896,12 @@ const PROFILE_FLAG: &str = "--profile";
 /// sees `--serve`, `--serve=8649`, etc. The default port lives in
 /// [`crate::serve::DEFAULT_PORT`].
 const SERVE_FLAG: &str = "--serve";
+/// `--daemon`: supervised headless daemon (issue #896). Runs the same
+/// poller the GUI runs, but installs SIGTERM/SIGINT handlers, omits
+/// every GUI surface (window, tray, app menu, deep-link, single-
+/// instance lock), and exits 0 on a clean stop signal. Packaging units
+/// live under `packaging/{systemd,launchd,windows}/`.
+const DAEMON_FLAG: &str = "--daemon";
 
 /// What the argv asked for. A CLI flag is an *alternative* to launching the
 /// GUI, never a modifier of it — which is why an unrecognised argument still
@@ -926,6 +932,10 @@ enum CliCommand {
     /// + event API. `port` is `None` for `--serve` (default port from
     ///   [`crate::serve::DEFAULT_PORT`]) and `Some(p)` for `--serve=p`.
     Serve(Option<u16>),
+    /// Issue #896: supervised headless daemon. Same Tauri runtime as
+    /// `--sync-once` (windowless, no GUI surfaces) plus SIGTERM/SIGINT
+    /// handling and a bounded poller join. Exits 0 on clean stop.
+    Daemon,
 }
 
 /// Parse the CLI intent out of argv; `None` means "launch the GUI".
@@ -1013,6 +1023,10 @@ where
         if let Some(port) = parse_serve_arg(arg) {
             return Some(CliCommand::Serve(port));
         }
+        // Issue #896: `--daemon` is an exact-match bare flag.
+        if arg == std::ffi::OsStr::new(DAEMON_FLAG) {
+            return Some(CliCommand::Daemon);
+        }
     }
     None
 }
@@ -1092,6 +1106,13 @@ FLAGS:
                 on disk in plaintext); an operator retrieves it via
                 `secret-tool`/`security`/`Credential Manager` on first
                 boot. No route writes configuration or token material.
+  --daemon     Run as a supervised headless daemon (issue #896): no
+                window, no tray, no app menu, no deep-link registration,
+                no single-instance lock. The poller starts automatically
+                and exits 0 on SIGTERM (Unix; systemd / launchd) or on a
+                `taskkill` (Windows; Task Scheduler). Packaging units for
+                systemd, launchd and Task Scheduler live under
+                `packaging/`.
   --help        Print this help and exit 0.
   --minimized   Start with the window hidden. The autostart plugin passes
                 this, and it still launches the GUI.
@@ -1624,6 +1645,20 @@ pub fn run() {
                 std::process::exit(1);
             }
         },
+        // Issue #896: `--daemon` shares the `--sync-once` CLI-mode
+        // omissions but stays alive for the SIGTERM/SIGINT supervisor.
+        // We overload `serve_port = Some(None)` so the existing
+        // `cli_mode = sync_once || serve_port.is_some()` gate is the
+        // single source of truth for "GUI surfaces must stay off"; the
+        // setup hook then disambiguates `Some(None)` (daemon) from
+        // `Some(Some(p))` (serve).
+        Some(CliCommand::Daemon) => match cli_sync_once_preflight_from_disk() {
+            Ok(()) => (false, Some(None)),
+            Err(reason) => {
+                eprintln!("presencejam: {DAEMON_FLAG}: {reason}");
+                std::process::exit(1);
+            }
+        },
         None => (false, None),
     };
     // Issue #865: the two CLI modes share the same "GUI surfaces must stay
@@ -1876,17 +1911,59 @@ pub fn run() {
             // loop below keeps the process alive until SIGINT/SIGTERM (or
             // an explicit `app.exit()` from elsewhere — the HTTP layer has
             // no such endpoint by design).
+            //
+            // Issue #896: `--daemon` shares the same "stays alive in CLI
+            // mode" rule but routes to `polling::daemon::run` instead. The
+            // dispatcher overloads `serve_port` as a tri-state: `None` is
+            // "GUI launch", `Some(None)` is "daemon", `Some(Some(p))` is
+            // "serve on port p".
             if let Some(port_opt) = serve_port {
-                let port = port_opt.unwrap_or(crate::serve::DEFAULT_PORT);
-                let app_handle = app.handle().clone();
-                let state_for_serve = Arc::clone(&state);
-                if let Err(e) = serve::start_serve(state_for_serve, app_handle, port) {
-                    log::error!("[APP] setup: --serve failed to start: {}", e);
-                    return Err(Box::new(std::io::Error::other(e)));
+                match port_opt {
+                    Some(port) => {
+                        let app_handle = app.handle().clone();
+                        let state_for_serve = Arc::clone(&state);
+                        if let Err(e) =
+                            serve::start_serve(state_for_serve, app_handle, port)
+                        {
+                            log::error!("[APP] setup: --serve failed to start: {}", e);
+                            return Err(Box::new(std::io::Error::other(e)));
+                        }
+                        log::info!(
+                            "[APP] setup: --serve bound; runtime loop will keep the process alive"
+                        );
+                    }
+                    None => {
+                        // Issue #896: install the supervisor and let the
+                        // runtime loop block on the daemon. The supervisor
+                        // owns its own signal handlers and stops the
+                        // poller on SIGTERM/SIGINT; we exit 0 from
+                        // `RunEvent::Exit` when the supervisor returns.
+                        let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                        let app_handle = app.handle().clone();
+                        let state_for_daemon = Arc::clone(&state);
+                        let shutdown_for_handler = Arc::clone(&shutdown);
+                        // `daemon::run` installs its own SIGTERM/SIGINT
+                        // handlers; the same `shutdown` flag is also
+                        // checked by `RunEvent::Exit` below so a daemon
+                        // exit path that bypasses the supervisor (e.g. a
+                        // self-exiting poller) still exits cleanly.
+                        if let Err(e) = polling::run_daemon(
+                            state_for_daemon,
+                            app_handle,
+                            shutdown_for_handler,
+                        ) {
+                            log::error!("[APP] setup: --daemon supervisor failed: {}", e);
+                            return Err(Box::new(std::io::Error::other(e)));
+                        }
+                        // The supervisor returned without a panic — exit
+                        // 0 immediately; the runtime loop has nothing to
+                        // add. We deliberately do not enter `app.run`,
+                        // which would block on the Tauri event loop with
+                        // no windows / no tray / no menu to drive it.
+                        log::info!("[APP] setup: --daemon supervisor returned; exiting 0");
+                        std::process::exit(0);
+                    }
                 }
-                log::info!(
-                    "[APP] setup: --serve bound; runtime loop will keep the process alive"
-                );
             }
             // Global shortcuts (issue #676): register the bindings from the
             // config loaded above. This sits BELOW the `--sync-once` early
@@ -2704,6 +2781,8 @@ mod tests {
                 vec!["presencejam", "--serve=1"],
                 Some(CliCommand::Serve(Some(1))),
             ),
+            // Issue #896: `--daemon` is a bare flag (no `=PORT` form).
+            (vec!["presencejam", "--daemon"], Some(CliCommand::Daemon)),
             // Exact match only: a longer argument that merely starts with a
             // flag is not that flag (issue #589's rule, applied here too).
             (vec!["presencejam", "--statuses"], None),
@@ -2718,6 +2797,9 @@ mod tests {
             (vec!["presencejam", "--serve=0"], None),
             (vec!["presencejam", "--serve=99999"], None),
             (vec!["presencejam", "--server"], None),
+            // `--daemon` typos and edge cases must fall through too.
+            (vec!["presencejam", "--daemon=8080"], None),
+            (vec!["presencejam", "--daemons"], None),
             (Vec::<&str>::new(), None),
         ] {
             assert_eq!(
@@ -2798,6 +2880,7 @@ mod tests {
             HELP_FLAG,
             MINIMIZED_FLAG,
             SERVE_FLAG,
+            DAEMON_FLAG,
         ] {
             assert!(help.contains(flag), "the usage text must document {}", flag);
         }
@@ -2820,6 +2903,16 @@ mod tests {
         assert!(
             help.contains("keychain"),
             "the serve flag must state the token lives in the OS keychain"
+        );
+        // Issue #896: the daemon's two non-negotiables — SIGTERM → exit 0
+        // and the omission of the GUI surfaces — must both appear.
+        assert!(
+            help.contains("SIGTERM"),
+            "the daemon flag must call out SIGTERM as the clean-stop signal"
+        );
+        assert!(
+            help.contains("single-instance"),
+            "the daemon flag must call out the single-instance-lock omission"
         );
     }
 
