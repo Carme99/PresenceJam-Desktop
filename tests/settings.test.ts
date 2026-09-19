@@ -1487,3 +1487,37 @@ describe('Settings unsaved-changes banner actions (#966)', () => {
     expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'save_config')).toBe(false);
   });
 });
+
+/**
+ * #973 (cross-slice, absorbed here): `get_spotify_granted_scopes` answers
+ * `null` when the stored token's scopes could not be decoded — no token, or a
+ * payload the backend could not read. That is an unknown set, not an empty one,
+ * and rendering it as "the playback scope is missing" tells the user to
+ * reconnect over something the app cannot know.
+ */
+describe('Settings playback-scope banner and an undecodable token (#973)', () => {
+  function scopesAnswer(answer: string[] | null) {
+    const base = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) =>
+      cmd === 'get_spotify_granted_scopes' ? answer : base(cmd, args)
+    );
+  }
+
+  it('stays quiet when the scopes could not be decoded', async () => {
+    scopesAnswer(null);
+    const { container } = await mountSettings();
+    expect(container.textContent).not.toContain(t('settings.playbackScopeBanner'));
+  });
+
+  it('shows the banner for a decoded token that lacks the scope', async () => {
+    scopesAnswer(['playlist-read-private']);
+    const { container } = await mountSettings();
+    expect(container.textContent).toContain(t('settings.playbackScopeBanner'));
+  });
+
+  it('stays quiet when the scope is granted', async () => {
+    scopesAnswer(['user-modify-playback-state']);
+    const { container } = await mountSettings();
+    expect(container.textContent).not.toContain(t('settings.playbackScopeBanner'));
+  });
+});

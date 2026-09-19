@@ -319,9 +319,16 @@
   // from the JWT payload). The tray playback feature needs
   // `user-modify-playback-state`, which existing users don't have until
   // they re-connect once — the banner below nudges them. Issue #3.0-P3.
-  let grantedScopes = $state<string[]>([]);
+  //
+  // #973: `null` is the backend's "could not decode" answer — no stored token,
+  // or a payload it could not read. That is an *unknown* scope set, so it must
+  // not raise a banner telling the user a scope is missing; only a decoded set
+  // that really lacks the scope does.
+  let grantedScopes = $state<string[] | null>(null);
   let playbackScopeMissing = $derived(
-    isConnected && !grantedScopes.includes('user-modify-playback-state')
+    isConnected &&
+      grantedScopes !== null &&
+      !grantedScopes.includes('user-modify-playback-state')
   );
   // Issue #376: set when the setup-path migration emits the one-time
   // `spotify-secret-conflict` event (legacy plaintext in config.json
@@ -344,10 +351,11 @@
 
   async function refreshGrantedScopes() {
     try {
-      grantedScopes = await invoke<string[]>('get_spotify_granted_scopes');
+      grantedScopes = await invoke<string[] | null>('get_spotify_granted_scopes');
     } catch (e) {
       console.error('[SETTINGS] get_spotify_granted_scopes failed:', e);
-      grantedScopes = [];
+      // #973: a failed call is not evidence that the scope is missing.
+      grantedScopes = null;
     }
   }
 
