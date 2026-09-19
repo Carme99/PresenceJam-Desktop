@@ -3,6 +3,12 @@ use serde::{Deserialize, Serialize};
 use std::thread;
 use std::time::Duration as StdDuration;
 
+/// Log tag prefix for this module (mirrors the `[CFG]` / `[CMD.*]` /
+/// `[UPDATER.BG]` pattern). `CLAUDE.md` requires a square-bracket module
+/// tag on every log line; `teams::fn_name:` prefixes are kept where they
+/// aid diagnosis, but never in place of the tag. Issue #777.
+const TAG: &str = "[TEAMS]";
+
 pub const MICROSOFT_GRAPH_CLIENT_ID: &str = "14d82eec-204b-4c2f-b7e8-296a70dab67e";
 pub const MICROSOFT_GRAPH_SCOPES: &str =
     "Presence.ReadWrite Presence.Read openid profile offline_access";
@@ -151,10 +157,10 @@ struct TokenErrorResponse {
 }
 
 pub fn start_teams_auth_device_code() -> Result<DeviceCodeResponse, String> {
-    log::info!("teams::start_teams_auth_device_code: starting");
+    log::info!("{TAG} start_teams_auth_device_code: starting");
 
     let client = build_teams_client()?;
-    log::info!("teams::start_teams_auth_device_code: client created");
+    log::info!("{TAG} start_teams_auth_device_code: client created");
 
     let params = [
         ("client_id", MICROSOFT_GRAPH_CLIENT_ID),
@@ -168,7 +174,7 @@ pub fn start_teams_auth_device_code() -> Result<DeviceCodeResponse, String> {
         // stays dropped: no Graph call uses it (least privilege, #151).
         ("scope", MICROSOFT_GRAPH_SCOPES),
     ];
-    log::info!("teams::start_teams_auth_device_code: calling devicecode endpoint");
+    log::info!("{TAG} start_teams_auth_device_code: calling devicecode endpoint");
 
     let response = client
         .post("https://login.microsoftonline.com/common/oauth2/v2.0/devicecode")
@@ -176,20 +182,20 @@ pub fn start_teams_auth_device_code() -> Result<DeviceCodeResponse, String> {
         .form(&params)
         .send()
         .map_err(|e| {
-            log::error!("teams::start_teams_auth_device_code: send failed: {}", e);
+            log::error!("{TAG} start_teams_auth_device_code: send failed: {}", e);
             format!("Failed to send device code request: {}", e)
         })?;
-    log::info!("teams::start_teams_auth_device_code: send succeeded");
+    log::info!("{TAG} start_teams_auth_device_code: send succeeded");
 
     let status = response.status();
     log::info!(
-        "teams::start_teams_auth_device_code: response status: {}",
+        "{TAG} start_teams_auth_device_code: response status: {}",
         status
     );
 
     let raw_body = response.text().map_err(|e| {
         log::error!(
-            "teams::start_teams_auth_device_code: failed to read body: {}",
+            "{TAG} start_teams_auth_device_code: failed to read body: {}",
             e
         );
         format!("Failed to read response body: {}", e)
@@ -214,7 +220,7 @@ pub fn start_teams_auth_device_code() -> Result<DeviceCodeResponse, String> {
         )
     })?;
     log::info!(
-        "teams::start_teams_auth_device_code: received (expires_in={}s, interval={}s)",
+        "{TAG} start_teams_auth_device_code: received (expires_in={}s, interval={}s)",
         raw.expires_in,
         raw.interval
     );
@@ -228,7 +234,7 @@ pub fn start_teams_auth_device_code() -> Result<DeviceCodeResponse, String> {
     };
 
     log::info!(
-        "Device code flow started. User code: {}, verification URL: {}",
+        "{TAG} Device code flow started. User code: {}, verification URL: {}",
         result.user_code,
         result.verification_url
     );
@@ -319,7 +325,7 @@ pub fn poll_teams_auth(device_code: &str, interval: u64) -> Result<TeamsTokens, 
             .text()
             .map_err(|e| format!("Failed to read response body: {}", e))?;
         log::debug!(
-            "poll_teams_auth: status={}, body={}",
+            "{TAG} poll_teams_auth: status={}, body={}",
             status,
             truncate_for_log(&raw_body)
         );
@@ -336,7 +342,7 @@ pub fn poll_teams_auth(device_code: &str, interval: u64) -> Result<TeamsTokens, 
             let expires_at =
                 chrono::Utc::now() + chrono::Duration::seconds(token_resp.expires_in as i64);
 
-            log::info!("Successfully authenticated with Microsoft Teams");
+            log::info!("{TAG} Successfully authenticated with Microsoft Teams");
 
             return Ok(TeamsTokens {
                 access_token: token_resp.access_token,
@@ -355,7 +361,7 @@ pub fn poll_teams_auth(device_code: &str, interval: u64) -> Result<TeamsTokens, 
 
         match error_resp.error.as_str() {
             "authorization_pending" => {
-                log::debug!("Authorization pending, waiting {} seconds", wait);
+                log::debug!("{TAG} Authorization pending, waiting {} seconds", wait);
                 // Cap each sleep chunk at 30s and re-check timeout between chunks
                 // so an inflated interval (even after slow_down ramps) cannot
                 // block the thread past the 900s overall deadline.
@@ -375,7 +381,7 @@ pub fn poll_teams_auth(device_code: &str, interval: u64) -> Result<TeamsTokens, 
                 // client must increase its polling interval by 5s for
                 // this and all subsequent requests.
                 wait = next_poll_wait(wait, error_resp.error.as_str());
-                log::warn!("Server requested slow down, waiting {} seconds", wait);
+                log::warn!("{TAG} Server requested slow down, waiting {} seconds", wait);
                 let mut remaining = wait;
                 while remaining > 0 {
                     if start_time.elapsed() > timeout {
@@ -455,7 +461,7 @@ pub fn refresh_teams_token(tokens: &TeamsTokens) -> Result<TeamsTokens, TeamsApi
 
     if !status.is_success() {
         log::error!(
-            "refresh_teams_token: refresh request failed with status {}: {}",
+            "{TAG} refresh_teams_token: refresh request failed with status {}: {}",
             status,
             truncate_for_log(&raw_body)
         );
@@ -509,7 +515,7 @@ pub fn refresh_teams_token(tokens: &TeamsTokens) -> Result<TeamsTokens, TeamsApi
 
     let expires_at = chrono::Utc::now() + chrono::Duration::seconds(token_resp.expires_in as i64);
 
-    log::info!("Successfully refreshed Microsoft Teams token");
+    log::info!("{TAG} Successfully refreshed Microsoft Teams token");
 
     Ok(TeamsTokens {
         access_token: token_resp.access_token,
@@ -613,7 +619,7 @@ fn post_status_message_with(
 
     if !status.is_success() {
         log::error!(
-            "Failed to {} Teams status message: {} - {}",
+            "{TAG} Failed to {} Teams status message: {} - {}",
             action,
             status,
             body_text
@@ -637,7 +643,7 @@ pub fn set_teams_status_message(
         "set",
     )?;
 
-    log::info!("Successfully set Teams status message: {}", message);
+    log::info!("{TAG} Successfully set Teams status message: {}", message);
     Ok(())
 }
 
@@ -680,7 +686,7 @@ fn clear_teams_status_message_with(
         "clear",
     )?;
 
-    log::info!("Successfully cleared Teams status message");
+    log::info!("{TAG} Successfully cleared Teams status message");
     Ok(())
 }
 
@@ -953,7 +959,7 @@ fn post_presence<T: Serialize>(
 
     if !status.is_success() {
         log::error!(
-            "Failed to {} Teams presence: {} - {}",
+            "{TAG} Failed to {} Teams presence: {} - {}",
             action,
             status,
             body_text
@@ -1096,7 +1102,7 @@ pub fn get_teams_presence(access_token: &str) -> Result<PresenceInfo, TeamsApiEr
         .unwrap_or_else(|_| "Unknown error".to_string());
 
     if !status.is_success() {
-        log::error!("Failed to get Teams presence: {} - {}", status, body_text);
+        log::error!("{TAG} Failed to get Teams presence: {} - {}", status, body_text);
         return Err(classify_teams_status(status_code, retry_after, &body_text));
     }
 
@@ -1672,6 +1678,107 @@ mod tests {
         assert!(
             body.contains("User code"),
             "user-code line must stay: the user reads it to sign in"
+        );
+    }
+
+    /// Extract the argument region of the macro call whose opening `(` is
+    /// at `open`, i.e. everything up to the matching `)`. String literals,
+    /// char literals and `//` comments are skipped, so a `)` inside a format
+    /// string cannot end the region early (mirrors `config.rs::macro_arg_region`).
+    fn macro_arg_region(src: &str, open: usize) -> Option<&str> {
+        let bytes = src.as_bytes();
+        if bytes.get(open) != Some(&b'(') {
+            return None;
+        }
+        let mut depth: i32 = 0;
+        let mut i = open;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(&src[open + 1..i]);
+                    }
+                }
+                b'"' => {
+                    i += 1;
+                    while i < bytes.len() {
+                        match bytes[i] {
+                            b'\\' => i += 1,
+                            b'"' => break,
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                }
+                b'\'' => {
+                    // A char literal (`'x'`, `'\n'`) — a lifetime never
+                    // appears in a log macro argument.
+                    let mut j = i + 1;
+                    if bytes.get(j) == Some(&b'\\') {
+                        j += 2;
+                    } else {
+                        j += 1;
+                    }
+                    if bytes.get(j) == Some(&b'\'') {
+                        i = j;
+                    }
+                }
+                b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                    while i < bytes.len() && bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        None
+    }
+
+    /// Issue #777: every `log::` macro in this module must carry the
+    /// `[TEAMS]` module tag, the discipline `config.rs` (`[CFG]`) and
+    /// `updater_bg.rs` (`[UPDATER.BG]`) already enforce — a bare
+    /// `teams::fn_name:` prefix or no prefix at all makes a Graph line
+    /// invisible to a tag grep of `PresenceJam.log`.
+    ///
+    /// Macro-aware on purpose (region-based, not per-line): eight of the
+    /// call sites put the format string on the line AFTER the `log::…!`
+    /// opener. The needles are assembled with `concat!` so this test's own
+    /// source never contains the literal it searches for — otherwise the
+    /// `include_str!` scan would match the test itself and pass vacuously.
+    #[test]
+    fn teams_log_tags_use_teams_prefix() {
+        assert_eq!(super::TAG, "[TEAMS]", "the module tag constant drifted");
+        let src = include_str!("teams.rs");
+        let needles = [
+            concat!("log::", "info!("),
+            concat!("log::", "warn!("),
+            concat!("log::", "error!("),
+            concat!("log::", "debug!("),
+            concat!("log::", "trace!("),
+        ];
+        let mut checked = 0usize;
+        for needle in needles {
+            let mut from = 0usize;
+            while let Some(rel) = src[from..].find(needle) {
+                let i = from + rel;
+                let open = i + needle.len() - 1;
+                let region = macro_arg_region(src, open)
+                    .unwrap_or_else(|| panic!("unbalanced macro arguments at byte {i}"));
+                assert!(
+                    region.contains("{TAG}"),
+                    "teams.rs log at byte {i} lacks the [TEAMS] tag: {}",
+                    region.replace('\n', " ")
+                );
+                checked += 1;
+                from = open;
+            }
+        }
+        assert!(
+            checked >= 20,
+            "the scan found only {checked} log macros — the needles are wrong"
         );
     }
 }
