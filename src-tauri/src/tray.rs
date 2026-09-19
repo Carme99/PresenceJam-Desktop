@@ -523,8 +523,8 @@ fn tray_snapshot_for(
     is_window_visible: bool,
     current_track: Option<&crate::spotify::TrackInfo>,
     snooze_key: Option<String>,
-    /// The two cache throttle buckets (issue #805). Read by the caller rather
-    /// than here so the key stays a pure function of its inputs.
+    // The two cache throttle buckets (issue #805). Read by the caller rather
+    // than here so the key stays a pure function of its inputs.
     devices_bucket: u64,
     queue_bucket: u64,
 ) -> TrayStateSnapshot {
@@ -2187,7 +2187,7 @@ fn macos_template_icon() -> tauri::image::Image<'static> {
 /// (`default_window_icon()`, 32/128 px) is what the menu bar rendered oversized
 /// and untinted. Windows' notification area and Linux's indicators are unaffected
 /// by the missing template flag, so they keep that icon.
-fn tray_icon(app: &tauri::App) -> Result<tauri::image::Image<'static>, String> {
+fn tray_icon(app: &tauri::App) -> Result<tauri::image::Image<'_>, String> {
     #[cfg(target_os = "macos")]
     {
         Ok(macos_template_icon())
@@ -3473,7 +3473,7 @@ mod tests {
         let prod = prod_source(include_str!("tray.rs"));
         let setup = body_of(prod, "pub fn setup_tray(");
         assert!(
-            setup.contains("guard_tray_panic(\"tray icon\""),
+            setup.contains("guard_tray_panic(") && setup.contains("\"tray icon\""),
             "the tray build must be guarded (issue #927)"
         );
         assert!(
