@@ -241,6 +241,9 @@ describe('detach store runtime (#422)', () => {
     // Issue #922: a refused creation now comes back through `invoke()`,
     // not a `tauri://error` event on the window. Drive that path instead:
     // when the Rust `detach_pane` command rejects, the badge must clear.
+    // Wipe the live window handle so the store has to call the command
+    // again instead of taking the still-fake "existing window" branch.
+    winState.win = null;
     invoke.mockImplementationOnce(async () => {
       throw new Error('creation failed');
     });
