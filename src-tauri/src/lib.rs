@@ -1583,6 +1583,7 @@ pub fn run() {
             commands::teams_auth::poll_teams_auth,
             commands::teams_auth::refresh_teams,
             commands::teams_auth::get_teams_granted_scopes,
+            commands::teams_auth::cancel_teams_auth_poll,
             commands::sync::start_syncing,
             commands::sync::stop_syncing,
             commands::sync::get_sync_status,

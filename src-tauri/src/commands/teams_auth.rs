@@ -196,16 +196,31 @@ pub async fn poll_teams_auth(
 
 /// Supersede the running device-code poll (issue #933).
 ///
-/// The frontend calls this from `resetTeamsAuthFlow()`: the abandoned poll
-/// keeps its HTTP attempt — the retry loop lives in `teams::poll_teams_auth` —
-/// but its result can no longer commit, persist or navigate, and the same
-/// reset releases the frontend's poll mutex, so a restarted sign-in is not
-/// skipped. No main-window guard: a detached Settings window may abandon the
-/// flow it handed back to the main window.
+/// The frontend calls this from `resetTeamsAuthFlow()` with the code it is
+/// abandoning. Only a slot still holding *that* code is cleared: the reset
+/// fires this fire-and-forget while the restart path immediately fetches a new
+/// device code, so a cancel that lands late must not clear the newer flow's
+/// registration — its own successful poll would then discard itself. The
+/// abandoned poll keeps its HTTP attempt (the retry loop lives in
+/// `teams::poll_teams_auth`), but its result can no longer commit, persist or
+/// navigate, and the same reset releases the frontend's poll mutex, so a
+/// restarted sign-in is not skipped. No main-window guard: a detached Settings
+/// window may abandon the flow it handed back to the main window.
 #[tauri::command]
-pub fn cancel_teams_auth_poll() {
-    let had_flow = CURRENT_FLOW.lock().take().is_some();
-    log::info!("{CMD} cancel_teams_auth_poll: ENTRY - had_flow={had_flow}");
+pub fn cancel_teams_auth_poll(device_code: String) {
+    let cancelled = cancel_flow(&CURRENT_FLOW, &device_code);
+    log::info!("{CMD} cancel_teams_auth_poll: ENTRY - cancelled={cancelled}");
+}
+
+/// Testable core of [`cancel_teams_auth_poll`]: clear the slot only while it
+/// still holds `device_code`, so a late cancel cannot revoke a newer flow.
+fn cancel_flow(current: &Mutex<Option<String>>, device_code: &str) -> bool {
+    let mut slot = current.lock();
+    let is_current = slot.as_deref() == Some(device_code);
+    if is_current {
+        *slot = None;
+    }
+    is_current
 }
 
 #[tauri::command]
@@ -320,7 +335,7 @@ pub fn get_teams_granted_scopes(state: tauri::State<'_, Arc<AppState>>) -> Vec<S
 
 #[cfg(test)]
 mod tests {
-    use super::{may_commit, offload_blocking};
+    use super::{cancel_flow, may_commit, offload_blocking};
     use parking_lot::Mutex;
 
     /// Issue #878: the point of the offload is that the thread which *awaits*
@@ -401,9 +416,26 @@ mod tests {
         assert!(!may_commit(&current, "code-a"));
         assert!(may_commit(&current, "code-b"));
 
-        // Cancelling the abandoned attempt clears the slot outright.
-        *current.lock() = None;
-        assert!(!may_commit(&current, "code-b"));
+        // Cancelling is identity-scoped. The slot now holds the newer flow, so
+        // the late cancel the restarted sign-in's reset fired for the code it
+        // abandoned is a no-op: it must not revoke the flow that replaced it.
+        assert!(
+            !cancel_flow(&current, "code-a"),
+            "a cancel for an abandoned code must not clear the newer flow"
+        );
+        assert!(
+            may_commit(&current, "code-b"),
+            "the newer flow must still be able to commit"
+        );
+        assert!(cancel_flow(&current, "code-b"));
+        assert!(
+            !may_commit(&current, "code-b"),
+            "a cancelled flow may not commit"
+        );
+        assert!(
+            !cancel_flow(&current, "code-b"),
+            "cancelling an already-cleared slot is a no-op"
+        );
     }
 
     /// The gate has to sit before the commit: a check placed after
