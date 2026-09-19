@@ -35,6 +35,13 @@ jobs:
   # Fails fast if the resolved name is not an existing v* tag.
   resolve-tag:
     runs-on: ubuntu-latest
+    # Least privilege (issue #925): this job only probes a public tag over
+    # unauthenticated HTTPS and checks out with persist-credentials: false,
+    # so it needs no write access. Declaring the block stops it inheriting
+    # the workflow-level contents:write grant — and drifting into a
+    # privileged state as steps get added.
+    permissions:
+      contents: read
     outputs:
       tag: ${{ steps.resolve.outputs.tag }}
     steps:
