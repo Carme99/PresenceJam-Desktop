@@ -329,12 +329,31 @@ fn is_clean_compound(stem: &str, token: &str) -> bool {
 /// (`head`) and the glued compounds modern titles use (`boy`/`face`/
 /// `wad`/`post` — #579: `fuckboy`, `fuckface`, `shitposting`). Anything
 /// else (`pit`, `ens`, `ake`) is a distinct clean word (#328).
-fn is_profane_continuation(token: &str) -> bool {
-    [
-        "ing", "er", "ed", "es", "s", "head", "boy", "face", "wad", "post",
-    ]
-    .iter()
-    .any(|p| token.starts_with(p))
+///
+/// The plain inflections must be the WHOLE glued token (#812): matched as
+/// prefixes they flagged `Spices` (`spic` + `es`), `crapes` (`crap` + `es`)
+/// and `Pizzeria` (the `z`-to-`s` fold makes `piss` + `eria`), replacing the
+/// whole status. The compound tails stay prefix-matched, because `headed` and
+/// `posting` really are the inflections of the compounds they stand for.
+fn is_profane_continuation(stem: &str, token: &str) -> bool {
+    /// Inflections that make a stem profane, matched whole.
+    const INFLECTIONS: [&str; 7] = ["s", "es", "ed", "ing", "er", "ers", "ings"];
+    /// Glued compounds (#579), matched as prefixes so their own inflections
+    /// (`headed`, `posting`) count.
+    const COMPOUNDS: [&str; 5] = ["head", "boy", "face", "wad", "post"];
+    /// Stems whose whole inflection is an ordinary word: `spices`/`spiced`
+    /// (`spic`) and `crapes` (`crap`). Their plural still flags.
+    const AMBIGUOUS: [(&str, &[&str]); 2] = [("spic", &["es", "ed"]), ("crap", &["es"])];
+
+    if COMPOUNDS.iter().any(|c| token.starts_with(c)) {
+        return true;
+    }
+    if !INFLECTIONS.contains(&token) {
+        return false;
+    }
+    !AMBIGUOUS
+        .iter()
+        .any(|(s, tails)| *s == stem && tails.contains(&token))
 }
 
 /// `y`-tail scoped per stem: `shitty`/`bitchy`/`fucky` flag, while
@@ -455,7 +474,7 @@ fn contains_profanity(text: &str, extra_words: &[String]) -> bool {
                 if is_y_tail(word, &token) {
                     return true;
                 }
-                if is_profane_continuation(&token) {
+                if is_profane_continuation(word, &token) {
                     return true;
                 }
                 continue;
@@ -474,7 +493,7 @@ fn contains_profanity(text: &str, extra_words: &[String]) -> bool {
             if is_y_tail(word, &token) {
                 return true;
             }
-            if is_profane_continuation(&token) {
+            if is_profane_continuation(word, &token) {
                 return true;
             }
         }
@@ -979,6 +998,35 @@ mod tests {
         assert!(!contains_profanity("Fukushima", &[]));
         assert!(!contains_profanity("cocktail", &[]));
         assert!(!contains_profanity("Push It", &[]));
+    }
+
+    // issue #812: the continuation list was prefix-matched, so a token that
+    // merely STARTED with an inflection flagged the stem behind it — the whole
+    // status was replaced for `Spices` (`spic` + `es`), `Spiced`, `crapes`
+    // (`crap` + `es`) and `Pizzeria` (`piss` + `eria`, via the `z`-to-`s`
+    // fold). The plain inflections now match the whole glued token.
+    #[test]
+    fn test_issue_812_stem_continuations_are_whole_inflections() {
+        assert!(!contains_profanity("Spices", &[]));
+        assert!(!contains_profanity("Spiced", &[]));
+        assert!(!contains_profanity("crapes", &[]));
+        assert!(!contains_profanity("Pizzeria", &[]));
+        assert_eq!(
+            filter_status("Spice Girls - Spices", "Placeholder", true, &[]),
+            "Spice Girls - Spices"
+        );
+        // The inflections the stems really take still flag ...
+        assert!(contains_profanity("spics", &[]));
+        assert!(contains_profanity("craps", &[]));
+        assert!(contains_profanity("pisses", &[]));
+        assert!(contains_profanity("bitches", &[]));
+        assert!(contains_profanity("fucking", &[]));
+        assert!(contains_profanity("fuckers", &[]));
+        assert!(contains_profanity("bitchings", &[]));
+        // ... and the compound tails keep their prefix form (#579).
+        assert!(contains_profanity("fuckboy", &[]));
+        assert!(contains_profanity("shitposting", &[]));
+        assert!(contains_profanity("dickhead", &[]));
     }
 
     /// Issue #538 / CfgDiag#3(b): the user's own lexicon is applied with the
