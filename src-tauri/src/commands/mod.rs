@@ -102,9 +102,10 @@ pub fn require_main_window(window: &tauri::Window) -> Result<(), String> {
 /// get_recent_logs (LogViewer history backfill, issue #595) — the Logs pane
 /// is hosted in either window, and the file it tails is the same local file
 /// `open_logs_folder` already exposes to both, unredacted there and here
-/// alike (only the paste-able snapshot is redacted, #434); set_locale
-/// (issue #770) — the language picker lives in Settings, one of the two
-/// detached-hosting views (`src/lib/i18n/store.svelte.ts`).
+/// alike (only the paste-able snapshot is redacted, #434).
+///
+/// set_locale (issue #770) — the language picker lives in Settings, one of
+/// the two detached-hosting views (`src/lib/i18n/store.svelte.ts`).
 ///
 /// shortcuts: register_shortcuts, unregister_shortcuts, validate_shortcut
 /// (issue #676) — the Settings pane is one of the two detached-hosting views
