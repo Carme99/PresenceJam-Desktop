@@ -92,7 +92,11 @@ export const defaultConfig: AppConfig = {
     // (`number`). Both mirror `config.rs`'s serde defaults and its
     // `clamp_logging` band (1..=500 MB, 1..=20 files).
     max_file_size_mb: BigInt(10),
-    keep_files: 3
+    keep_files: 3,
+    // Issue #877: opt-in JSONL mirror of the bounded decision history.
+    // OFF by default so a noisy rule set does not grow the log
+    // without bound.
+    presence_history: false
   },
   // 4.7.0 (issue #678): release channel the updater reads. Mirrors Rust's
   // `UpdatesConfig::default` (`stable`) — the backend resolves the channel

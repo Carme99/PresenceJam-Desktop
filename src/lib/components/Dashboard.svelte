@@ -282,6 +282,50 @@
 
   let supportsSeeking = $derived(currentTrack?.actions?.seeking ?? false);
 
+  // ── 5.0 wave3 (#877) — bounded decision history, "Activity" card ─────────
+  //
+  // The card fetches the newest 20 entries directly from the Rust
+  // history module. Refreshed on focus / on track-change / on
+  // presence-updated, so a long-running Dashboard does not need a
+  // hard timer.
+  let activityEntries = $state<
+    Array<{
+      at: string;
+      kind: string;
+      note: string;
+      track_fingerprint?: { title: string; artist: string } | null;
+      posted_status?: string | null;
+      gate_reason?: string | null;
+    }>
+  >([]);
+
+  async function refreshActivity(): Promise<void> {
+    try {
+      activityEntries = await invoke<
+        Array<{
+          at: string;
+          kind: string;
+          note: string;
+          track_fingerprint?: { title: string; artist: string } | null;
+          posted_status?: string | null;
+          gate_reason?: string | null;
+        }>
+      >('get_presence_history');
+    } catch (e) {
+      console.error('[DASHBOARD] refreshActivity: FAILED:', e);
+    }
+  }
+
+  function formatActivityTimestamp(at: string): string {
+    const parsed = Date.parse(at);
+    if (!Number.isFinite(parsed)) return at;
+    return new Date(parsed).toLocaleTimeString(undefined, {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit'
+    });
+  }
+
   // #551: `availabilityListening` is the shared condition and is applied as
   // "listening"; the "cleared" chip is a one-shot transition, so it only shows
   // when this mount observes the flip — a mount that starts out cleared has
@@ -377,6 +421,14 @@
       }
       void refreshManualStatus();
     }));
+
+    // Issue #877: hydrate the bounded decision history so the Activity
+    // card renders the newest 20 entries on first paint. The card
+    // re-fetches on every presence-updated / presence-gated /
+    // snooze-start / snooze-end event below.
+    await refreshActivity();
+    teardown.add(listen('presence-updated', () => { void refreshActivity(); }));
+    teardown.add(listen('presence-gated', () => { void refreshActivity(); }));
 
     devLog('[DASHBOARD] onMount: setting up spotify-track-changed listener');
     teardown.add(listen('spotify-track-changed', (event: any) => {
@@ -889,6 +941,33 @@
         <h3>{t('dashboard.yourTeamsStatus')}</h3>
         <p class="status-text" aria-live="polite">{statusPreview}</p>
       </div>
+
+      <!-- Issue #877: the Activity card. Renders the newest 20
+           entries the bounded decision history has recorded, newest
+           first. Each entry shows the timestamp, the kind tag, the
+           note, and (when present) the track fingerprint so the user
+           can correlate a "gated" entry with the song that fired it. -->
+      <div class="activity card">
+        <h3>{t('dashboard.activityTitle')}</h3>
+        {#if activityEntries.length === 0}
+          <p class="activity-empty">{t('dashboard.activityEmpty')}</p>
+        {:else}
+          <ul class="activity-list">
+            {#each activityEntries as entry (entry.at + entry.kind)}
+              <li class="activity-row">
+                <span class="activity-time">{formatActivityTimestamp(entry.at)}</span>
+                <span class="activity-kind" data-kind={entry.kind}>{entry.kind}</span>
+                <span class="activity-note">{entry.note}</span>
+                {#if entry.track_fingerprint}
+                  <span class="activity-track">
+                    {entry.track_fingerprint.title} — {entry.track_fingerprint.artist}
+                  </span>
+                {/if}
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </div>
     {:else}
       <div class="not-playing card">
         <div class="not-playing-icon" aria-hidden="true">
@@ -1221,6 +1300,86 @@
     font-size: var(--fs-md);
     color: var(--fg);
     word-break: break-word;
+  }
+
+  /* Issue #877: the Activity card. The kind tag is a coloured chip
+     so the timeline reads at a glance: green for "posted", amber for
+     "gated", red for "preferred-presence" actions. The exact colours
+     fall back to the dashboard palette's fg-subtle so a missing
+     data-kind attribute does not render an unstyled chip. */
+  .activity {
+    padding: var(--sp-4) var(--sp-5);
+  }
+  .activity h3 {
+    font-size: var(--fs-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--fg-subtle);
+    margin-bottom: var(--sp-2);
+    font-weight: 600;
+  }
+  .activity-empty {
+    color: var(--fg-subtle);
+    font-size: var(--fs-sm);
+  }
+  .activity-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-1);
+  }
+  .activity-row {
+    display: grid;
+    grid-template-columns: auto auto 1fr;
+    align-items: center;
+    gap: var(--sp-2);
+    font-size: var(--fs-sm);
+    padding: var(--sp-1) 0;
+    border-bottom: 1px solid var(--border-subtle, var(--border));
+  }
+  .activity-row:last-child {
+    border-bottom: none;
+  }
+  .activity-time {
+    font-family: var(--font-mono, monospace);
+    font-size: var(--fs-xs);
+    color: var(--fg-subtle);
+  }
+  .activity-kind {
+    font-size: var(--fs-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: var(--bg-subtle, var(--bg-base));
+    color: var(--fg-subtle);
+  }
+  .activity-kind[data-kind="presence-updated"] {
+    background: rgba(72, 187, 120, 0.18);
+    color: rgb(72, 187, 120);
+  }
+  .activity-kind[data-kind="presence-gated"],
+  .activity-kind[data-kind="snooze-start"],
+  .activity-kind[data-kind="snooze-end"] {
+    background: rgba(237, 187, 50, 0.18);
+    color: rgb(237, 187, 50);
+  }
+  .activity-kind[data-kind="preferred-presence-armed"],
+  .activity-kind[data-kind="preferred-presence-cleared"] {
+    background: rgba(220, 90, 90, 0.18);
+    color: rgb(220, 90, 90);
+  }
+  .activity-note {
+    color: var(--fg);
+    word-break: break-word;
+  }
+  .activity-track {
+    grid-column: 1 / -1;
+    font-size: var(--fs-xs);
+    color: var(--fg-subtle);
+    padding-left: var(--sp-2);
   }
 
   .not-playing {

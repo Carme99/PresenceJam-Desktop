@@ -375,6 +375,7 @@ impl Default for AppState {
 pub mod commands;
 pub mod config;
 pub mod diagnostics;
+pub mod history;
 pub mod i18n;
 pub mod keychain;
 pub mod macos_deeplink;
@@ -1921,6 +1922,7 @@ pub fn run() {
             commands::status::load_manual_status_command,
             commands::playback::set_volume,
             commands::playback::seek,
+            history::get_presence_history,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

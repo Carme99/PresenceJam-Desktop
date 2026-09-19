@@ -608,6 +608,14 @@ pub struct LoggingConfig {
     /// `keep_files + 1` log files. Clamped to 1..=20 by [`clamp_logging`].
     #[serde(default = "default_keep_files")]
     pub keep_files: u32,
+    /// Issue #877: opt-in JSONL mirror of the bounded status-decision
+    /// history. OFF by default — a noisy rule set could otherwise grow
+    /// the log without bound — and writes only when the user opts in.
+    /// The mirror lives in the same `app_log_dir()` folder
+    /// `tauri-plugin-log` already targets; the file is `presence-history.jsonl`
+    /// and one line per decision appends.
+    #[serde(default)]
+    pub presence_history: bool,
     /// Unknown / future keys NESTED inside this section, retained across
     /// load→save so a section written by a newer binary is not silently
     /// stripped by an older one (issue #938 — the section-level companion of
@@ -1437,6 +1445,10 @@ impl Default for LoggingConfig {
             log_level: default_log_level(),
             max_file_size_mb: default_max_file_size_mb(),
             keep_files: default_keep_files(),
+            // Issue #877: opt-in. A user with a busy rule set could
+            // otherwise grow the log without bound; the Dashboard's
+            // "Activity" card is the always-on reading surface.
+            presence_history: false,
             extra: BTreeMap::new(),
         }
     }

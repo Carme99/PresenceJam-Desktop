@@ -92,6 +92,16 @@ pub struct DiagnosticsSnapshot {
     /// issue. `None` when the last exit-time install succeeded or none was
     /// attempted.
     pub failed_update_install: Option<crate::updater_bg::FailedUpdateInstall>,
+    /// Issue #877: the bounded status-decision history ring, newest
+    /// first. Each line is a serialised [`crate::history::PresenceHistoryEntry`]
+    /// passed through [`redact_sensitive`] so a credential-shaped run in a
+    /// `note` field cannot reach a public issue. The Dashboard's
+    /// "Activity" card reads the structured form via `get_presence_history`;
+    /// the line form here mirrors the snapshot's `recent_logs` shape so a
+    /// paste-the-dump reproduce-and-triage workflow sees the decisions in
+    /// the same line-oriented format as the rest of the diagnostic.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub presence_history: Vec<String>,
 }
 
 /// OS identity for the snapshot: compile-time constants from
@@ -929,6 +939,14 @@ fn build_snapshot(
             f.error = strip_absolute_paths(&f.error);
             f
         }),
+        // Issue #877: the bounded status-decision history ring,
+        // newest-first. `redacted_lines_for_diagnostics` runs every entry
+        // through `redact_sensitive` so a credential-shaped run in a
+        // `note` field cannot reach a public issue; the result mirrors
+        // the `recent_logs` line-oriented shape so a paste-the-dump
+        // triage workflow sees decisions in the same format as the rest
+        // of the snapshot.
+        presence_history: crate::history::redacted_lines_for_diagnostics(),
     }
 }
 

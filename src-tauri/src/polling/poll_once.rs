@@ -1937,6 +1937,36 @@ fn emit_presence_gated(app: &AppHandle, reason: &str, availability: &str, activi
             "timestamp": Utc::now().to_rfc3339()
         }),
     );
+    // Issue #877: append to the bounded decision history. The gate
+    // reason is the documented wire shape; the track fingerprint is
+    // pulled off the `state.polling.current_track()` snapshot so an
+    // Activity card entry can pin the gate to the track it targeted.
+    let track_fingerprint = super::state::current_track_fingerprint();
+    crate::history::append(
+        crate::history::PresenceHistoryEntry {
+            at: Utc::now(),
+            kind: "presence-gated".to_string(),
+            note: format!(
+                "gated ({} {}/{})",
+                reason,
+                if availability.is_empty() {
+                    "-"
+                } else {
+                    availability
+                },
+                if activity.is_empty() { "-" } else { activity }
+            ),
+            track_fingerprint,
+            posted_status: None,
+            gate_reason: Some(reason.to_string()),
+        },
+        // The poller hands the AppConfig through the call chain; the
+        // helper lives at the call site that owns the snapshot, so the
+        // helper does not have it. `None` is the documented OFF mirror
+        // path — the helper's `Option<&AppConfig>` parameter already
+        // handles it.
+        None,
+    );
 }
 
 /// Arm (or re-arm) a Teams presence session (findings #634/#636, issues #634/
@@ -2120,6 +2150,21 @@ pub(crate) fn arm_preferred_presence_session(
                     "timestamp": now.to_rfc3339()
                 }),
             );
+            // Issue #877: append a "preferred-presence-armed" entry so
+            // the Dashboard's Activity card can correlate a rule-driven
+            // preferred-presence arm with the same track the rule
+            // matched.
+            crate::history::append(
+                crate::history::PresenceHistoryEntry {
+                    at: now,
+                    kind: "preferred-presence-armed".to_string(),
+                    note: format!("armed ({}/{}, {})", pair.availability, pair.activity, label),
+                    track_fingerprint: super::state::current_track_fingerprint(),
+                    posted_status: None,
+                    gate_reason: None,
+                },
+                None,
+            );
             0
         }
         Err(e) => {
@@ -2155,6 +2200,19 @@ pub(crate) fn clear_preferred_presence_session(
                     "label": label,
                     "timestamp": Utc::now().to_rfc3339()
                 }),
+            );
+            // Issue #877: append a "preferred-presence-cleared" entry so
+            // the Activity card can pair each armed entry with its clear.
+            crate::history::append(
+                crate::history::PresenceHistoryEntry {
+                    at: Utc::now(),
+                    kind: "preferred-presence-cleared".to_string(),
+                    note: format!("cleared ({label})"),
+                    track_fingerprint: super::state::current_track_fingerprint(),
+                    posted_status: None,
+                    gate_reason: None,
+                },
+                None,
             );
             0
         }
@@ -3088,6 +3146,14 @@ pub(crate) fn process_track(
         // comparison (issue #3.0-P2).
         *last_track_key = Some(track_key.clone());
         *state.polling.current_track_mut() = Some(track.clone());
+        // Issue #877: mirror the `(title, artist)` pair onto the static
+        // the gate emitter reads. Updated on every track change so a
+        // subsequent gate entry anchors to the track it targeted, not to
+        // the one before it.
+        super::state::record_current_track_fingerprint(Some(crate::history::TrackFingerprint {
+            title: track.title.clone(),
+            artist: track.artist.clone(),
+        }));
         // Issue #581: the config-flip rewrite path (#343) has no body to
         // re-parse, so the full item — episode metadata and playback context
         // included — is kept alongside the stored `TrackInfo`, which carries
@@ -3118,6 +3184,13 @@ pub(crate) fn process_track(
             track.is_playing
         );
         *state.polling.current_track_mut() = Some(track.clone());
+        // Issue #877: same-track pause / resume also re-seeds the
+        // fingerprint mirror so the gate emitter anchors to the track it
+        // targeted even when the gate fires mid-pause.
+        super::state::record_current_track_fingerprint(Some(crate::history::TrackFingerprint {
+            title: track.title.clone(),
+            artist: track.artist.clone(),
+        }));
         *LAST_NOW_PLAYING.lock() = Some(now.clone());
         let _ = app.emit(
             "playback-state-changed",
@@ -3486,6 +3559,29 @@ pub(crate) fn process_track(
                             "status": final_status,
                             "timestamp": Utc::now().to_rfc3339()
                         }),
+                    );
+                    // Issue #877: append to the bounded decision history.
+                    // The track fingerprint pins the entry to the same
+                    // (title, artist) pair the status write key uses, so a
+                    // follow-up rewrite on the same track collapses cleanly
+                    // when the Dashboard renders the Activity card.
+                    crate::history::append(
+                        crate::history::PresenceHistoryEntry {
+                            at: Utc::now(),
+                            kind: "presence-updated".to_string(),
+                            note: if rule.reason.is_some() {
+                                "posted (rule)".to_string()
+                            } else {
+                                "posted".to_string()
+                            },
+                            track_fingerprint: Some(crate::history::TrackFingerprint {
+                                title: track.title.clone(),
+                                artist: track.artist.clone(),
+                            }),
+                            posted_status: Some(final_status.clone()),
+                            gate_reason: rule.reason.map(|s| s.to_string()),
+                        },
+                        config.as_ref(),
                     );
                 }
                 Err(e) => {
@@ -3883,6 +3979,10 @@ pub(crate) fn handle_no_track(
     if first_no_track_attempts_clear(last_track_key, is_first) {
         *last_track_key = None;
         *state.polling.current_track_mut() = None;
+        // Issue #877: clear the fingerprint mirror alongside the live
+        // track — a gate that fires on a "no track" decision must not
+        // anchor to the track the poller just stopped observing.
+        super::state::record_current_track_fingerprint(None);
         // Cleared in lockstep with `current_track` — the #343 rewrite path
         // reads this cache and must not resurrect a cleared track.
         *LAST_NOW_PLAYING.lock() = None;

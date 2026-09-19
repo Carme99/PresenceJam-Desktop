@@ -109,6 +109,32 @@ pub(crate) fn record_manual_status_blocks(blocks: bool) {
     snapshot.manual_status_blocks = blocks;
 }
 
+/// Issue #877: the `(title, artist)` pair the poller currently tracks,
+/// read by the `emit_presence_gated` history emitter so an Activity card
+/// entry can pin the gate to the track it targeted. Updated in lockstep
+/// with [`super::state::current_track`].
+pub(crate) fn current_track_fingerprint() -> Option<crate::history::TrackFingerprint> {
+    CURRENT_TRACK_FINGERPRINT
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+}
+
+/// Issue #877: the writer side of [`current_track_fingerprint`]. The
+/// poller calls this on every track change + same-track pause so the
+/// gate emitter always sees the latest fingerprint without holding an
+/// `AppState` lock across the Graph call.
+pub(crate) fn record_current_track_fingerprint(
+    fingerprint: Option<crate::history::TrackFingerprint>,
+) {
+    if let Ok(mut guard) = CURRENT_TRACK_FINGERPRINT.lock() {
+        *guard = fingerprint;
+    }
+}
+
+static CURRENT_TRACK_FINGERPRINT: Mutex<Option<crate::history::TrackFingerprint>> =
+    Mutex::new(None);
+
 /// Forget the snapshot, once a completed exit cleanup has made it moot (and so
 /// a repeated `RunEvent::Exit` is a no-op). Deliberately NOT called when a
 /// session starts: see the struct docs.

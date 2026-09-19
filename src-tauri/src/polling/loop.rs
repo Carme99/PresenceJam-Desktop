@@ -163,6 +163,21 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
                 // across iterations, and the `Eq` arm there skips the POST
                 // while we are still inside the same expiry window.
                 arm_preferred_for_snooze(&state, &app);
+                // Issue #877: append a "snooze-start" entry to the bounded
+                // decision history so the Dashboard's Activity card can show
+                // a snooze episode as a single decision, not as a series of
+                // suppressed writes.
+                crate::history::append(
+                    crate::history::PresenceHistoryEntry {
+                        at: chrono::Utc::now(),
+                        kind: "snooze-start".to_string(),
+                        note: format!("snoozed for {}s", seconds),
+                        track_fingerprint: super::state::current_track_fingerprint(),
+                        posted_status: None,
+                        gate_reason: Some("snooze".to_string()),
+                    },
+                    state.config.get().as_ref(),
+                );
                 // Repaint the tray so its countdown line and the submenu's
                 // "Resume sync now" entry follow the snooze. The rebuild is
                 // forced into its cache-only fetch mode by the active snooze
@@ -200,6 +215,20 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
                 // `preferred-presence-updated` event lands and the tray
                 // submenu can drop its preferred-state badge.
                 clear_preferred_for_snooze(&state, &app);
+                // Issue #877: append a "snooze-end" entry so the Activity
+                // card's timeline shows the snooze episode as a
+                // self-contained event.
+                crate::history::append(
+                    crate::history::PresenceHistoryEntry {
+                        at: chrono::Utc::now(),
+                        kind: "snooze-end".to_string(),
+                        note: "snooze cleared".to_string(),
+                        track_fingerprint: super::state::current_track_fingerprint(),
+                        posted_status: None,
+                        gate_reason: Some("snooze".to_string()),
+                    },
+                    state.config.get().as_ref(),
+                );
                 // The deadline passed while the thread slept. Clear the stored
                 // value once, so the chip and the tray stop claiming a snooze,
                 // then fall through to a normal iteration.
