@@ -997,3 +997,70 @@ describe('Settings update channel (#678)', () => {
     expect(select.value).toBe('beta');
   });
 });
+
+/**
+ * #733 — the profanity card used to render the "preview profane sample"
+ * toggle twice against the same state and the same DOM id, so one `label[for]`
+ * resolved to two controls and any `getElementById` lookup was ambiguous.
+ *
+ * Fails pre-fix: two elements carry `profanity-preview-sample` in both filter
+ * states, and two labels point at it.
+ */
+describe('Settings profanity card a11y (#733)', () => {
+  function profanityConfig(on: boolean) {
+    const cfg = configuredConfig();
+    cfg.teams.profanity_filter = on;
+    return cfg;
+  }
+
+  /** The name a browser computes: aria-labelledby, aria-label, `label[for]`,
+   * or an ancestor `<label>`. */
+  function accessibleName(el: HTMLElement): string {
+    const labelledBy = el.getAttribute('aria-labelledby');
+    if (labelledBy) {
+      return labelledBy
+        .split(/\s+/)
+        .map((id) => el.ownerDocument.getElementById(id)?.textContent?.trim() ?? '')
+        .join(' ')
+        .trim();
+    }
+    const ariaLabel = el.getAttribute('aria-label');
+    if (ariaLabel) return ariaLabel.trim();
+    if (el.id) {
+      const forLabel = el.ownerDocument.querySelector(`label[for="${el.id}"]`);
+      if (forLabel) return (forLabel.textContent ?? '').trim();
+    }
+    return (el.closest('label')?.textContent ?? '').trim();
+  }
+
+  for (const on of [true, false]) {
+    it(`renders unique ids and names every checkbox (filter ${on ? 'on' : 'off'})`, async () => {
+      configStore.set(profanityConfig(on));
+      const { container } = await mountSettings();
+
+      const ids = [...container.querySelectorAll<HTMLElement>('[id]')].map((el) => el.id);
+      expect(ids.length).toBeGreaterThan(0);
+      expect(new Set(ids).size).toBe(ids.length);
+
+      const checkboxes = [
+        ...container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')
+      ];
+      expect(checkboxes.length).toBeGreaterThan(0);
+      for (const box of checkboxes) {
+        expect(accessibleName(box)).not.toBe('');
+      }
+    });
+  }
+
+  it('associates the preview-sample toggle with exactly one label and one input', async () => {
+    configStore.set(profanityConfig(true));
+    const { container } = await mountSettings();
+
+    const labels = [...container.querySelectorAll('label[for="profanity-preview-sample"]')];
+    const boxes = [...container.querySelectorAll<HTMLInputElement>('#profanity-preview-sample')];
+    expect(labels).toHaveLength(1);
+    expect(boxes).toHaveLength(1);
+    // The pair is the row the user sees, not two rows sharing one id.
+    expect(boxes[0].closest('.toggle-row')?.contains(labels[0])).toBe(true);
+  });
+});

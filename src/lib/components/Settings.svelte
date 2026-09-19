@@ -1506,14 +1506,6 @@
             </p>
           {/if}
         </div>
-        <div class="toggle-row">
-          <label for="profanity-preview-sample">{t('settings.profaneSampleToggle')}</label>
-          <input
-            id="profanity-preview-sample"
-            type="checkbox"
-            bind:checked={previewProfaneSample}
-          />
-        </div>
       {/if}
     </section>
 
