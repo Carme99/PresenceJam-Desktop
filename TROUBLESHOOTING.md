@@ -150,9 +150,9 @@ Settings shows the same state on the credential row ("System keychain unavailabl
 
 ### The interface is in the wrong language
 
-**Cause:** The language picker (Settings → General → Language) defaults to your browser/OS language and persists the choice.
+**Cause:** The language picker (Settings → Appearance → Language) defaults to your browser/OS language and persists the choice.
 
-**Fix:** Pick **English**, **Deutsch**, or **Français** in Settings → General. The choice applies immediately and persists across restarts. Rust-side error strings surfaced by the backend remain English by design — only UI strings are localized.
+**Fix:** Pick **English**, **Deutsch**, or **Français** in Settings → Appearance. The choice applies immediately and persists across restarts. Rust-side error strings surfaced by the backend remain English by design — only UI strings are localized.
 
 ### "Install on quit" seemed to do nothing
 
