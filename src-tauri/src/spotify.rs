@@ -1409,11 +1409,15 @@ fn parse_queue_body(body: &str) -> Result<QueueInfo, String> {
 
 /// Base64url-decodes the payload (middle segment) of a Spotify access
 /// token JWT and returns the granted `scope` claim split on spaces.
-/// Informational only — no signature verification. Returns an empty Vec
-/// when the token isn't a decodable JWT with a `scope` claim. Used by the
-/// Settings page to detect whether `user-modify-playback-state` is missing
-/// (one-time-reconnect banner, issue #3.0-P3).
-pub fn decode_spotify_granted_scopes(access_token: &str) -> Vec<String> {
+/// Informational only — no signature verification.
+///
+/// `None` means "the granted scopes could not be determined": the token is not
+/// a decodable JWT payload, or it decodes to JSON without a `scope` claim.
+/// `Some(vec![])` means the claim was present and empty. Settings must keep
+/// those apart (issue #973): deriving "your account is missing a permission"
+/// from `None` sent the user through a full browser reconnect that could not
+/// change anything, because the failure was a decode, not a missing scope.
+pub fn decode_spotify_granted_scopes(access_token: &str) -> Option<Vec<String>> {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine as _;
     let payload = access_token.split('.').nth(1).unwrap_or_default();
@@ -1421,13 +1425,14 @@ pub fn decode_spotify_granted_scopes(access_token: &str) -> Vec<String> {
         .decode(payload)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .and_then(|v| v.get("scope").and_then(|s| s.as_str()).map(str::to_owned))
-        .unwrap_or_default();
-    if scopes.is_empty() {
-        Vec::new()
-    } else {
-        scopes.split(' ').map(str::to_owned).collect()
-    }
+        .and_then(|v| v.get("scope").and_then(|s| s.as_str()).map(str::to_owned))?;
+    Some(
+        scopes
+            .split(' ')
+            .filter(|scope| !scope.is_empty())
+            .map(str::to_owned)
+            .collect(),
+    )
 }
 
 /// Substitutes one `{token}` per pass and never re-scans what it inserted
@@ -2195,24 +2200,48 @@ mod tests {
         let token = format!("header.{}.signature", payload);
         assert_eq!(
             decode_spotify_granted_scopes(&token),
-            vec![
+            Some(vec![
                 "user-read-currently-playing".to_string(),
                 "user-read-playback-state".to_string(),
                 "user-modify-playback-state".to_string(),
-            ]
+            ])
         );
     }
 
-    // Guard: tokens that aren't JWTs (or whose payload has no scope claim)
-    // must yield an empty list — the Settings banner treats that as
-    // "scope missing" rather than crashing.
+    // Acceptance criterion for issue #973: an undecodable token is `None`
+    // ("unknown"), which the Settings banner must NOT read as a missing
+    // permission — the user cannot fix a decode failure by reconnecting. A
+    // decodable payload whose `scope` claim is empty is still `Some(vec![])`:
+    // the claim was read, it just grants nothing.
     #[test]
-    fn decode_spotify_granted_scopes_empty_when_not_decodable() {
-        assert!(decode_spotify_granted_scopes("not-a-jwt").is_empty());
-        assert!(decode_spotify_granted_scopes("a.b.c").is_empty());
+    fn decode_spotify_granted_scopes_distinguishes_undecodable_from_absent_scope() {
+        assert_eq!(decode_spotify_granted_scopes("not-a-jwt"), None);
+        assert_eq!(decode_spotify_granted_scopes("a.b.c"), None);
+        assert_eq!(decode_spotify_granted_scopes(""), None);
+
         let no_scope =
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"sub":"user123"}"#);
-        assert!(decode_spotify_granted_scopes(&format!("h.{}.s", no_scope)).is_empty());
+        assert_eq!(
+            decode_spotify_granted_scopes(&format!("h.{}.s", no_scope)),
+            None,
+            "a payload without a scope claim says nothing about the granted scopes"
+        );
+
+        let empty_scope =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"scope":""}"#);
+        assert_eq!(
+            decode_spotify_granted_scopes(&format!("h.{}.s", empty_scope)),
+            Some(Vec::new()),
+            "an empty scope claim is known-and-empty, not unknown"
+        );
+
+        // The case the banner exists for: decoded, and the playback scope is
+        // genuinely absent from the list.
+        let read_only = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(r#"{"scope":"user-read-currently-playing"}"#);
+        let granted = decode_spotify_granted_scopes(&format!("h.{}.s", read_only))
+            .expect("a decodable scope claim must be Some");
+        assert!(!granted.iter().any(|s| s == "user-modify-playback-state"));
     }
 
     #[test]
