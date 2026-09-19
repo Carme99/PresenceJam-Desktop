@@ -2015,6 +2015,54 @@ fn emit_spotify_secret_conflict_once(app: &tauri::AppHandle) -> bool {
     );
     true
 }
+
+/// Bare file name of the sidecar that keeps a conflicting legacy plaintext
+/// (issue #803): `config.json.legacy-secret`, beside `config.json`.
+const LEGACY_SECRET_SIDECAR_NAME: &str = "config.json.legacy-secret";
+
+/// Write a copy of a conflicting legacy `client_secret` beside `config.json`
+/// and return the sidecar's BARE file name (issue #803).
+///
+/// The migration deliberately leaves the plaintext in `config.json` when the
+/// keychain already holds a different value — but `save_config` serialises
+/// `AppConfig`, which has no `client_secret` field, so the next save from
+/// anywhere (a Settings toggle, a tray snooze, the poller's snooze cleanup)
+/// removed the only remaining copy while the app kept authenticating with the
+/// stale keychain value. The user could not recover it afterwards: it was shown
+/// nowhere in the UI and the file no longer held it. The sidecar is a copy the
+/// app never rewrites, so the "the plaintext is not deleted" promise holds past
+/// the next write.
+///
+/// The document holds exactly the one key plus a note, and is never read back
+/// by the app — it is the user's copy, for Settings → Reconnect Spotify — which
+/// is why this logs the FILE NAME and never the value.
+///
+/// The write goes through the same atomic-replace, fsync-the-directory helper
+/// the config writer uses, so the sidecar is created 0600 on Unix (create_new +
+/// mode) and user-only by default ACL on Windows, with no window in which it is
+/// world-readable.
+fn write_legacy_secret_sidecar(
+    config_path: &std::path::Path,
+    secret: &str,
+) -> Result<String, String> {
+    let sidecar = config_path.with_file_name(LEGACY_SECRET_SIDECAR_NAME);
+    let document = serde_json::to_string_pretty(&serde_json::json!({
+        "client_secret": secret,
+        "note": "Legacy Spotify client secret kept from config.json: the OS keychain already held a different value. Resolve via Settings → Reconnect Spotify, then delete this file.",
+    }))
+    .map_err(|e| format!("Failed to serialize the legacy-secret sidecar: {}", e))?;
+    atomic_write_json(&sidecar, &document)?;
+    let name = sidecar
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .ok_or_else(|| "Legacy-secret sidecar has no file name".to_string())?;
+    log::warn!(
+        "[CFG] migrate_legacy_client_secret: the conflicting plaintext is kept in '{}' as well — resolve it via Settings → Reconnect Spotify, then delete that file",
+        name
+    );
+    Ok(name)
+}
+
 /// Executes the migration IO and returns its observable outcome.
 fn run_legacy_secret_migration() -> LegacySecretOutcome {
     let path = match get_config_path() {
@@ -2071,6 +2119,16 @@ fn run_legacy_secret_migration() -> LegacySecretOutcome {
                 plaintext.len(),
                 existing.len()
             );
+            // Issue #803: the plaintext stays in `config.json` (that is the
+            // documented promise), but a copy also goes into a sidecar the app
+            // never rewrites, because the next unrelated save would otherwise be
+            // its last appearance anywhere.
+            if let Err(e) = write_legacy_secret_sidecar(&path, &plaintext) {
+                log::warn!(
+                    "[CFG] migrate_legacy_client_secret: could not write the legacy-secret sidecar: {}",
+                    e
+                );
+            }
             return outcome;
         }
         _ => {
@@ -5784,5 +5842,80 @@ mod tests {
         let written: serde_json::Value = serde_json::from_str(&prepared.document).unwrap();
         assert_eq!(written["autostart"], true);
         assert_eq!(written["teams"]["status_format"], "🎧 {track}");
+    }
+
+    // -----------------------------------------------------------------
+    // Issue #803: a conflicting legacy plaintext is kept in a sidecar the
+    // app never rewrites.
+    // -----------------------------------------------------------------
+
+    /// Issue #803: the conflict arm leaves the plaintext in `config.json`
+    /// because the keychain already holds a different secret — but
+    /// `save_config` serialises `AppConfig`, which has no such field, so the
+    /// next unrelated save deleted the only remaining copy while the app kept
+    /// authenticating with the stale keychain value. The sidecar is what makes
+    /// the documented "the plaintext is not deleted" promise outlive that save,
+    /// and the value itself never reaches the log.
+    #[test]
+    fn test_legacy_secret_sidecar_survives_a_later_save() {
+        let _guard = QUARANTINE_TEST_LOCK.lock();
+        LOGGER.call_once(|| {
+            let _ = log::set_boxed_logger(Box::new(CapturingLogger));
+            log::set_max_level(log::LevelFilter::Warn);
+        });
+        LOG_LINES.lock().clear();
+
+        let (dir, path) = temp_config_file(
+            "legacy-sidecar",
+            r#"{"autostart": true,
+                "spotify": {"client_id": "abc", "client_secret": "LEGACY-SENTINEL"}}"#,
+        );
+        // The conflict arm itself needs a real keychain read and the real config
+        // path, so the sidecar writer is exercised directly here.
+        let name = write_legacy_secret_sidecar(&path, "LEGACY-SENTINEL").expect("sidecar");
+        assert_eq!(name, LEGACY_SECRET_SIDECAR_NAME);
+        let sidecar = path.with_file_name(LEGACY_SECRET_SIDECAR_NAME);
+        let sidecar_json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sidecar).unwrap()).unwrap();
+        assert_eq!(sidecar_json["client_secret"], "LEGACY-SENTINEL");
+
+        #[cfg(unix)]
+        assert_eq!(
+            std::fs::metadata(&sidecar).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "the sidecar must be user-only from the moment it exists"
+        );
+
+        // Any later save replaces `config.json` wholesale — the #803 premise —
+        // and the sidecar is what keeps the user's copy.
+        let mut cfg = load_config_from(&path).expect("must load");
+        cfg.autostart = false;
+        save_config_to(&path, &cfg).expect("save must succeed");
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("LEGACY-SENTINEL"),
+            "a later save drops the plaintext from config.json"
+        );
+        assert!(
+            std::fs::read_to_string(&sidecar)
+                .unwrap()
+                .contains("LEGACY-SENTINEL"),
+            "…and the sidecar still holds the user's copy"
+        );
+
+        let logged = LOG_LINES.lock().clone();
+        assert!(
+            logged
+                .iter()
+                .any(|line| line.contains(LEGACY_SECRET_SIDECAR_NAME)),
+            "the user must be told which file holds the copy: {logged:?}"
+        );
+        assert!(
+            !logged.iter().any(|line| line.contains("LEGACY-SENTINEL")),
+            "a client secret must never reach the log: {logged:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
