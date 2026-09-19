@@ -470,6 +470,19 @@ jobs:
           echo "Packaged:"
           ls -la PresenceJam-linux-amd64.* PresenceJam-$RELEASE_TAG.AppImage.sig
 
+      # Artefact sizes (issue #899): a profile change is unmeasurable without a
+      # printed number, and the run log is where the next one gets compared to
+      # it. shell: bash explicitly, because the default shell on the Windows
+      # leg is pwsh and this uses the same command on all three.
+      - name: Report artifact sizes
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in PresenceJam-*; do
+            [ -f "$f" ] || continue
+            printf '%s  %s bytes\n' "$f" "$(wc -c < "$f" | tr -d '[:space:]')"
+          done
+
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
