@@ -25,18 +25,21 @@ The app lives in your system tray, syncs while you work, and stays out of the wa
 - **Profanity filter** — replaces profane track names with a safe placeholder.
 - **Customisable status template** — `{artist}`, `{track}`, `{album}`, `{emoji}`, `{device}`, `{playlist}` (or `{context}`), `{progress}`, `{shuffle}` and `{repeat}` placeholders, substituted in a single pass.
 - **Podcasts & audiobooks** — episodes get their own `🎙️ {show} - {episode}` template instead of being reported as "nothing playing" (adverts still clear the status).
-- **Light & dark themes** — pick whichever matches your desktop.
+- **Dark / Light / System themes** — pick whichever matches your desktop, or follow the OS live; a compact-density toggle tightens the spacing and type scale ([USAGE](USAGE.md#appearance)).
 - **System tray** — runs silently in the background.
 - **Tray playback controls** — Play/Pause, Previous, Next, Shuffle and Repeat toggles, plus Devices and Up Next submenus, straight from the tray icon.
+- **Tray snooze** — pause syncing for 30 minutes, 1 hour, or until tomorrow from the tray menu, with a Dashboard chip and a **Resume now** button ([USAGE](USAGE.md#the-system-tray)).
+- **Global shortcuts** — `CmdOrCtrl+Alt+P` and `CmdOrCtrl+Alt+S` toggle sync and open the snooze menu; both are rebindable in Settings ([USAGE](USAGE.md#global-shortcuts)).
 - **Diagnostics page** — one-click local support snapshot (versions, sanitized config, token expiry metadata, redacted log tail). Never leaves your machine.
 - **Detachable Logs & Settings** — pop Logs or Settings out into their own window and back in again.
 - **Interface languages** — English, German (Deutsch), and French (Français) via an in-app language picker.
 - **Availability sync (opt-in)** — optionally show yourself as **Available** in Teams while you listen, with the requested session bounded to the remaining listening time (Microsoft's `PT5M`–`PT4H` window) and cleared when you quit.
 - **Meeting/call-aware gating** — skips status writes while you're busy, in a meeting, on a call, or presenting, with optionals for **out-of-office** and for never overwriting a status you set by hand. The Dashboard chip names which one fired.
 - **Status rules (quiet hours & track rules)** — suppress the Teams status write during chosen hours/days or for matching tracks, post an optional replacement status, and set your Teams availability/activity while the rule applies.
-- **Desktop notifications (opt-in)** — a toast on track change, throttled to one per 5 s and replaced in place where the OS supports it.
+- **Desktop notifications (opt-in)** — four independent classes: track change (throttled to one per 5 s, replaced in place where the OS supports it), sync stopped, Teams sign-in required, and update staged ([USAGE](USAGE.md#notifications)).
 - **Auto-update** — silent update checks at startup and every ~24h; install immediately in-app, or defer with *Install on quit*, which stages the verified payload with live progress and a Cancel action and applies it as the app exits.
 - **Launch at login** — optional auto-start on boot.
+- **Settings export/import** — back up or restore your settings from a file; the export never contains your Spotify client secret or any token material ([USAGE](USAGE.md#backup)).
 - **Secure auth** — Authorization Code + PKCE OAuth for Spotify (confidential client), Device Code flow for Teams.
 
 ## Screenshots
