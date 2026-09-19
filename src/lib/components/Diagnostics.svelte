@@ -278,11 +278,14 @@
     padding: var(--sp-2) var(--sp-4);
     font-size: var(--fs-sm);
   }
-  .hint {
-    margin-right: auto;
-    font-size: var(--fs-xs);
-    color: var(--fg-subtle);
-  }
+  /* #751: `.hint` is global now. Only its toolbar placement is local — the
+     hint is the flexible item in that flex row, so it absorbs the slack and
+     keeps the two action buttons on the right. */
+  .toolbar .hint { margin-right: auto; }
+  /* The load-error hint sits in the centred empty-state column, where the
+     auto margin is what pinned it left; the other hints are in block
+     containers, where it never had an effect. */
+  .empty-state .hint { margin-right: auto; }
 
   .feedback {
     min-height: 1.2em;

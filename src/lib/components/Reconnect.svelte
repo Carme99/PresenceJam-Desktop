@@ -4,9 +4,10 @@
   import { currentView } from '$lib/stores/app';
   import { configStore, loadConfig, clientSecretStateOf } from '$lib/stores/config';
   import type { AppConfig, DeviceCodeResponse, SyncStatus } from '$lib/types';
-  import { authFlow, setSpotifyPhase, setTeamsPhase, setTeamsDeviceCode, expiresAtFromResponse, formatCountdownMs, resetSpotifyAuthFlow, resetTeamsAuthFlow, teamsPollMutex, tryAcquireTeamsPoll, releaseTeamsPoll, isSafeHttpUrl } from '$lib/stores/authFlow.svelte';
+  import { authFlow, setSpotifyPhase, setTeamsPhase, setTeamsDeviceCode, expiresAtFromResponse, resetSpotifyAuthFlow, resetTeamsAuthFlow, teamsPollMutex, pollTeamsAuth } from '$lib/stores/authFlow.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
   import { devLog } from '$lib/utils/dev';
+  import DeviceCodeBox from './DeviceCodeBox.svelte';
   import PageHeader from './PageHeader.svelte';
   import { t } from '$lib/i18n';
   import { shouldAutoStartSpotifyReconnect } from '$lib/utils/reconnect';
@@ -278,41 +279,24 @@
       } catch (e) {
         console.warn('[RECONNECT] open_external_url failed (non-fatal):', e);
       }
-      await pollTeamsAuth();
+      await checkTeamsSignIn();
     } catch (e) {
       devLog('[RECONNECT] reconnectTeams failed:', e);
       setTeamsPhase('error', String(e));
     }
   }
 
-  async function pollTeamsAuth() {
-    if (!authFlow.teams.deviceCode) return;
-    // Never poll a dead code — the expired box offers a fresh one (#429).
-    if (teamsCodeExpired) {
-      devLog('[RECONNECT] pollTeamsAuth: code expired, refusing to poll');
-      return;
-    }
-    // #396: shared poll mutex — only one poll_teams_auth at a time across
-    // Onboarding/Settings/Reconnect/+layout.
-    if (!tryAcquireTeamsPoll()) {
-      devLog('[RECONNECT] pollTeamsAuth: another poll in flight, skipping');
-      return;
-    }
-    setTeamsPhase('waiting');
-    try {
-      await invoke('poll_teams_auth', {
-        deviceCode: authFlow.teams.deviceCode,
-        interval: authFlow.teams.interval
-      });
-      setTeamsPhase('done');
+  /**
+   * #785: the shared poll (mutex, expiry guard, phase transitions) plus this
+   * view's own post-success state. The callback runs only when the poll
+   * actually succeeded, so a skipped or failed poll cannot claim the user is
+   * reconnected.
+   */
+  async function checkTeamsSignIn() {
+    await pollTeamsAuth(() => {
       needsTeams = false;
       teamsReconnectedThisSession = true;
-    } catch (e) {
-      devLog('[RECONNECT] pollTeamsAuth failed:', e);
-      setTeamsPhase('error', String(e));
-    } finally {
-      releaseTeamsPoll();
-    }
+    });
   }
 
   function goToDashboard() {
@@ -332,7 +316,7 @@
       {t('reconnect.description')}
     </p>
 
-    <section class="card">
+    <section class="card pane-card">
       <header class="section-header">
         <h2>{t('settings.sectionSpotify')}</h2>
         <span class="badge"
@@ -388,7 +372,7 @@
       {/if}
     </section>
 
-        <section class="card">
+        <section class="card pane-card">
       <header class="section-header">
         <h2>{t('settings.sectionTeams')}</h2>
         <span class="badge"
@@ -409,20 +393,18 @@
       {:else if !needsTeams}
         <p class="hint">{t('common.connected')}</p>
       {:else if authFlow.teams.phase === 'waiting'}
-        <p class="hint">{t('common.openSignInPage')}</p>
-        {#if isSafeHttpUrl(authFlow.teams.verificationUrl)}<a href={authFlow.teams.verificationUrl} target="_blank" rel="noopener">{authFlow.teams.verificationUrl}</a>{:else}<span>{authFlow.teams.verificationUrl}</span>{/if}
-        <p class="hint">{t('common.enterCodeWhenAsked')}</p>
-        <strong>{authFlow.teams.userCode}</strong>
-        {#if teamsCodeExpired}
-          <p class="error-message" role="alert">{t('common.codeExpired')}</p>
-          <button class="btn-full" onclick={reconnectTeams}>{t('common.getNewCode')}</button>
-        {:else}
-          {#if teamsRemainingMs != null}
-            <p class="hint" aria-live="polite">{t('common.codeExpiresIn', { time: formatCountdownMs(teamsRemainingMs) })}</p>
-          {/if}
-          <p class="hint">{t('common.waitingForSignIn')}</p>
-          <button class="btn-full" onclick={pollTeamsAuth} disabled={teamsPollMutex.inFlight}>{t('common.checkNow')}</button>
-        {/if}
+        <!-- #952: the same device-code block Settings and the wizard render —
+             monospace select-all code, accent URL pill, secondary actions —
+             instead of the bare `<strong>` this pane used to print. -->
+        <DeviceCodeBox
+          userCode={authFlow.teams.userCode}
+          verificationUrl={authFlow.teams.verificationUrl}
+          remainingMs={teamsRemainingMs}
+          expired={teamsCodeExpired}
+          busy={teamsPollMutex.inFlight}
+          onCheckNow={checkTeamsSignIn}
+          onNewCode={reconnectTeams}
+        />
         {#if authFlow.teams.error}
           <p class="error-message" role="alert">{authFlow.teams.error}</p>
         {/if}
@@ -436,7 +418,7 @@
     </section>
 
     {#if needsSpotify}
-      <div class="info-box card">
+      <div class="info-box card pane-card">
         <div class="info-icon">⚠</div>
         <div>
           <strong>{t('reconnect.missingCredsTitle')}</strong>
@@ -471,26 +453,9 @@
   }
   .description { color: var(--fg-muted); font-size: var(--fs-base); }
 
-  .card {
-    background: var(--bg-surface);
-    border: 1px solid var(--border);
-    border-radius: var(--r-lg);
-    padding: var(--sp-5);
-    display: flex;
-    flex-direction: column;
-    gap: var(--sp-3);
-  }
-
-  .section-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: var(--sp-3);
-  }
-  .section-header h2 {
-    font-size: var(--fs-md);
-    font-weight: 600;
-  }
+  /* #751: `.card`, `.section-header`, `.hint`, `.error-message`, `.sr-only`
+     and `.btn-full` are global now — this view keeps only what is genuinely
+     its own (the info box grid below). */
 
 
   .info-box {
@@ -518,32 +483,4 @@
     white-space: nowrap;
   }
 
-  .hint { font-size: var(--fs-sm); color: var(--fg-subtle); }
-  .error-message {
-    color: var(--danger);
-    background: var(--danger-soft);
-    padding: var(--sp-3);
-    border-radius: var(--r-md);
-    font-size: var(--fs-sm);
-  }
-
-  .btn-full {
-    width: 100%;
-    padding: var(--sp-3) var(--sp-5);
-    font-size: var(--fs-md);
-  }
-
-  /* Visually hidden label for the manual-paste input (same utility the
-     Onboarding wizard defines locally — it is not a global class). */
-  .sr-only {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    padding: 0;
-    margin: -1px;
-    overflow: hidden;
-    clip: rect(0, 0, 0, 0);
-    white-space: nowrap;
-    border: 0;
-  }
 </style>

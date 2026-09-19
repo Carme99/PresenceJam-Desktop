@@ -744,12 +744,6 @@
     gap: var(--sp-4);
   }
 
-  .card {
-    background: var(--bg-surface);
-    border: 1px solid var(--border);
-    border-radius: var(--r-lg);
-    padding: var(--sp-5);
-  }
 
   /* Presence indicators (issue #3.0-P1/P2): the gate chip while the status
      write is suppressed, and the availability-sync bubble state. */

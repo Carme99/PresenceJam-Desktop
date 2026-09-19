@@ -12,7 +12,8 @@
   let { detached = false }: { detached?: boolean } = $props();
   import { configStore, saveConfig, loadConfig, defaultConfig, clientSecretStateOf, SHORTCUT_SLOTS, shortcutBindingsOf, setShortcutBindings, type ShortcutSlot } from '$lib/stores/config';
   import type { AppConfig, SyncStatus } from '$lib/types';
-  import { authFlow, setSpotifyPhase, setTeamsPhase, formatCountdownMs, resetSpotifyAuthFlow, resetTeamsAuthFlow, isCurrentTeamsPoll, teamsPollMutex, tryAcquireTeamsPoll, releaseTeamsPoll, isSafeHttpUrl } from '$lib/stores/authFlow.svelte';
+  import { authFlow, setSpotifyPhase, setTeamsPhase, resetSpotifyAuthFlow, resetTeamsAuthFlow, teamsPollMutex, pollTeamsAuth } from '$lib/stores/authFlow.svelte';
+  import DeviceCodeBox from './DeviceCodeBox.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
   import PageHeader from './PageHeader.svelte';
   import { t, i18n, type Locale, type TKey } from '$lib/i18n';
@@ -964,47 +965,16 @@
       setTeamsPhase('error', String(e));
     }
   }
-
-  // Polls the backend for device-code completion. The cadence is
-  // Rust-side; `interval` (from the DeviceCodeResponse stored in the
-  // authFlow store) is threaded through so the server's requested
-  // polling rate is honored — see issue #152.
-  async function pollTeamsAuth() {
-    if (!authFlow.teams.deviceCode) return;
-    // Never poll a dead code — the expired box offers a fresh one (#429).
-    if (teamsCodeExpired) {
-      console.warn('[SETTINGS] pollTeamsAuth: code expired, refusing to poll');
-      return;
-    }
-    // #396: shared poll mutex — only one poll_teams_auth at a time across
-    // Onboarding/Settings/Reconnect/+layout.
-    if (!tryAcquireTeamsPoll()) {
-      devLog('[SETTINGS] pollTeamsAuth: another poll in flight, skipping');
-      return;
-    }
-    setTeamsPhase('waiting');
-    // Issue #933: capture the flow this poll belongs to before the invoke. The
-    // backend resolves `Ok` even when it *discarded* the polled tokens (a newer
-    // sign-in superseded this one, or the flow was cancelled), so success may
-    // only be adopted while the store still holds that exact device code.
-    const polledDeviceCode = authFlow.teams.deviceCode;
-    try {
-      await invoke('poll_teams_auth', {
-        deviceCode: polledDeviceCode,
-        interval: authFlow.teams.interval
-      });
-      if (!isCurrentTeamsPoll(polledDeviceCode)) {
-        devLog('[SETTINGS] pollTeamsAuth: flow superseded, not adopting the sign-in');
-        return;
-      }
-      setTeamsPhase('done');
+  /**
+   * #785: the shared poll — the #396 mutex, the #429 expiry guard, the phase
+   * transitions and the #933/#978 superseded-flow guard all live in the store
+   * now — plus this pane's own post-success state. The callback runs only on a
+   * real success, so a skipped or failed poll cannot mark Teams connected here.
+   */
+  async function checkTeamsSignIn() {
+    await pollTeamsAuth(() => {
       teamsStatusConnected = true;
-    } catch (e) {
-      console.error('[SETTINGS] poll_teams_auth failed:', e);
-      setTeamsPhase('error', String(e));
-    } finally {
-      releaseTeamsPoll();
-    }
+    });
   }
 
   // #548: unsaved edits must gate navigation, not merely warn. `localConfig`
@@ -1132,7 +1102,7 @@
   {/if}
 
   <div class="sections">
-    <section class="card">
+    <section class="card pane-card">
       <header class="section-header">
         <h2>{t('settings.sectionSpotify')}</h2>
         <span class="badge" class:success={isConnected && !spotifyAuthWaiting}
@@ -1226,7 +1196,7 @@
       {/if}
     </section>
 
-    <section class="card">
+    <section class="card pane-card">
       <header class="section-header">
         <h2>{t('settings.sectionTeams')}</h2>
         <span class="badge" class:success={teamsStatusConnected && !teamsAuthWaiting}
@@ -1241,27 +1211,19 @@
         {#if teamsStatusConnected && !teamsAuthWaiting}
           <button class="btn-secondary" onclick={reconnectTeams} disabled={teamsAuthWaiting}>{t('reconnect.reconnectTeams')}</button>
         {:else if teamsAuthWaiting}
-          <div class="device-code-box">
-            <p class="hint">{t('common.openSignInPage')}</p>
-            {#if isSafeHttpUrl(authFlow.teams.verificationUrl)}
-              <a class="verification-url" href={authFlow.teams.verificationUrl} target="_blank" rel="noopener">{authFlow.teams.verificationUrl}</a>
-            {:else}
-              <span class="verification-url">{authFlow.teams.verificationUrl}</span>
-            {/if}
-            <p class="hint">{t('common.enterCodeWhenAsked')}</p>
-            <div class="code-display" aria-live="polite">{authFlow.teams.userCode}</div>
-            {#if teamsCodeExpired}
-              <p class="error-message" role="alert">{t('common.codeExpired')}</p>
-              <button class="btn-secondary" onclick={reconnectTeams}>{t('common.getNewCode')}</button>
-            {:else}
-              {#if teamsRemainingMs != null}
-                <p class="hint" aria-live="polite">{t('common.codeExpiresIn', { time: formatCountdownMs(teamsRemainingMs) })}</p>
-              {/if}
-              <div class="spinner" aria-hidden="true"></div>
-              <p>{t('common.waitingForSignIn')}</p>
-              <button class="btn-secondary" onclick={pollTeamsAuth} disabled={teamsPollMutex.inFlight}>{t('common.checkNow')}</button>
-            {/if}
-          </div>
+          <!-- #952: the same device-code block Onboarding and Reconnect render
+               — accent URL pill, monospace select-all code, one countdown.
+               #735: that countdown is deliberately not a live region; the code
+               arrives under `aria-live` and the expiry under `role="alert"`. -->
+          <DeviceCodeBox
+            userCode={authFlow.teams.userCode}
+            verificationUrl={authFlow.teams.verificationUrl}
+            remainingMs={teamsRemainingMs}
+            expired={teamsCodeExpired}
+            busy={teamsPollMutex.inFlight}
+            onCheckNow={checkTeamsSignIn}
+            onNewCode={reconnectTeams}
+          />
         {:else}
           <button class="btn-secondary" onclick={reconnectTeams}>{t('reconnect.reconnectTeams')}</button>
         {/if}
@@ -1293,7 +1255,7 @@
         </div>
       {/if}
     </section>
-    <section class="card">
+    <section class="card pane-card">
       <header class="section-header">
         <h2>{t('settings.sectionPresence')}</h2>
         <button type="button" class="btn-link" onclick={resetPresenceDefaults}>{t('common.resetToDefault')}</button>
@@ -1345,7 +1307,7 @@
         {t('settings.gateOutOfOfficeHint')}
       </p>
     </section>
-    <section class="card">
+    <section class="card pane-card">
       <header class="section-header">
         <h2>{t('rules.sectionTitle')}</h2>
         <button type="button" class="btn-link" onclick={resetRulesDefaults}>{t('common.resetToDefault')}</button>
@@ -1587,7 +1549,7 @@
       </div>
       {/if}
     </section>
-    <section class="card">
+    <section class="card pane-card">
       <header class="section-header">
         <h2>{t('settings.sectionStatusFormat')}</h2>
         <button type="button" class="btn-link" onclick={resetStatusFormatDefaults}>{t('common.resetToDefault')}</button>
@@ -1670,7 +1632,7 @@
       {/if}
     </section>
 
-    <section class="card">
+    <section class="card pane-card">
       <header class="section-header">
         <h2>{t('settings.sectionPolling')}</h2>
         <button type="button" class="btn-link" onclick={resetPollingDefaults}>{t('common.resetToDefault')}</button>
@@ -1743,7 +1705,7 @@
       {/if}
     </section>
 
-    <section class="card">
+    <section class="card pane-card">
       <header class="section-header">
         <h2>{t('settings.sectionNotifications')}</h2>
       </header>
@@ -1765,7 +1727,7 @@
       {/if}
     </section>
 
-    <section class="card">
+    <section class="card pane-card">
       <header class="section-header">
         <h2>{t('settings.sectionAppearance')}</h2>
         <button type="button" class="btn-link" onclick={resetAppearanceDefaults}>{t('common.resetToDefault')}</button>
@@ -1869,7 +1831,7 @@
          immediately (config::apply_log_level, CfgDiag#4); size and retention
          are read once when the log plugin is built, i.e. at the next launch —
          the hint says so rather than implying an immediate effect. -->
-    <section class="card">
+    <section class="card pane-card">
       <header class="section-header">
         <h2>{t('settings.sectionLogging')}</h2>
       </header>
@@ -1917,7 +1879,7 @@
          dialogs and the resolved path; the export never carries the Spotify
          client secret (keychain-only) and the import refuses a document that
          does. -->
-    <section class="card">
+    <section class="card pane-card">
       <header class="section-header">
         <h2>{t('settings.sectionBackup')}</h2>
       </header>
@@ -1938,7 +1900,7 @@
     <!-- 4.7.0 (issue #676): global shortcuts. The field records what is
          pressed — the grab is released while it records, otherwise the key
          would fire the binding instead of being captured. -->
-    <section class="card">
+    <section class="card pane-card">
       <header class="section-header">
         <h2>{t('settings.sectionShortcuts')}</h2>
       </header>
@@ -1983,7 +1945,7 @@
     <!-- 4.7.0 (issue #678): release channel the updater reads. The saved
          value is the backend's single source of truth — the banner and the
          deferred staging path both resolve it on every check. -->
-    <section class="card">
+    <section class="card pane-card">
       <header class="section-header">
         <h2>{t('settings.sectionUpdates')}</h2>
       </header>
@@ -2032,27 +1994,6 @@
     gap: var(--sp-4);
   }
 
-  .card {
-    background: var(--bg-surface);
-    border: 1px solid var(--border);
-    border-radius: var(--r-lg);
-    padding: var(--sp-5);
-    display: flex;
-    flex-direction: column;
-    gap: var(--sp-3);
-  }
-
-  .section-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: var(--sp-3);
-    margin-bottom: var(--sp-1);
-  }
-  .section-header h2 {
-    font-size: var(--fs-md);
-    font-weight: 600;
-  }
 
   .form-group { display: flex; flex-direction: column; gap: var(--sp-2); }
   .form-group label,
@@ -2087,10 +2028,6 @@
     padding: var(--sp-2) var(--sp-4);
     font-size: var(--fs-sm);
   }
-  .connection-row .device-code-box {
-    width: 100%;
-  }
-
   /* #964: the waiting state is the only Spotify state with more than one
      control, so it stacks instead of sharing the row's baseline. */
   .connection-row .spotify-waiting {
@@ -2150,63 +2087,6 @@
     line-height: var(--lh-normal);
   }
 
-  /* Device-code box — mirrors Onboarding's (issue #157). */
-  .device-code-box {
-    background: var(--bg-elevated);
-    border: 1px solid var(--border);
-    border-radius: var(--r-md);
-    padding: var(--sp-4);
-    text-align: center;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: var(--sp-3);
-  }
-  .device-code-box .hint { margin: 0; }
-  .verification-url {
-    display: inline-block;
-    padding: var(--sp-2) var(--sp-4);
-    background: var(--accent-soft);
-    color: var(--accent);
-    border-radius: var(--r-md);
-    font-weight: 600;
-    word-break: break-all;
-    text-decoration: none;
-    font-family: var(--font-mono);
-    font-size: var(--fs-sm);
-  }
-  .verification-url:hover { background: var(--bg-base); }
-  .code-display {
-    font-family: var(--font-mono);
-    font-size: var(--fs-2xl);
-    font-weight: 700;
-    letter-spacing: 0.2em;
-    color: var(--fg);
-    background: var(--bg-base);
-    border: 2px dashed var(--border-strong);
-    border-radius: var(--r-md);
-    padding: var(--sp-3);
-    user-select: all;
-    font-variant-numeric: tabular-nums;
-  }
-  .spinner {
-    width: 24px;
-    height: 24px;
-    border: 3px solid var(--border);
-    border-top-color: var(--accent);
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-    margin: 0 auto;
-  }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  .error-message {
-    color: var(--danger);
-    font-size: var(--fs-sm);
-    background: var(--danger-soft);
-    border-radius: var(--r-md);
-    padding: var(--sp-3);
-    font-weight: 500;
-  }
 
   .preview-box {
     background: var(--bg-elevated);
@@ -2219,11 +2099,6 @@
     min-height: 40px;
   }
 
-  .hint {
-    font-size: var(--fs-xs);
-    color: var(--fg-subtle);
-    line-height: var(--lh-normal);
-  }
 
   .row-2 {
     display: grid;
@@ -2340,11 +2215,6 @@
     flex-direction: column;
     gap: var(--sp-3);
     margin-top: var(--sp-3);
-  }
-  .btn-full {
-    width: 100%;
-    padding: var(--sp-3) var(--sp-5);
-    font-size: var(--fs-md);
   }
   .btn-full.btn-secondary { background: var(--bg-elevated); }
 

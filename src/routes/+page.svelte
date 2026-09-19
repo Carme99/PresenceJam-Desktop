@@ -25,6 +25,11 @@
 
   let ready = $state(false);
   let bootError = $state('');
+  // #967: boot's `is_onboarding_complete()` verdict, kept in state so the
+  // navigate listener below can tell a first-run install (nothing behind the
+  // wizard) from a configured one that re-entered it via Settings' "Run
+  // onboarding" or the boot probe's fail-open path.
+  let onboardingComplete = $state(false);
   // #615: one teardown for every `listen()` below — it releases a
   // registration that settles after this component is destroyed, so the
   // per-listener `destroyed` flag is gone.
@@ -58,6 +63,7 @@
       const view = await withBootTimeout(
         (async () => {
           const complete = await invoke<boolean>('is_onboarding_complete');
+          onboardingComplete = complete;
           devLog('[PAGE] boot: is_onboarding_complete SUCCESS, complete=', complete);
           return bootView(complete, await hasStoredSpotifyCredentials());
         })()
@@ -164,7 +170,15 @@
       // Onboarding view is up it owns its own phase transitions — jumping
       // to another view would strand setup half-done — so programmatic
       // navigation is ignored until onboarding yields the view.
-      if (!ready || $currentView === 'onboarding') return;
+      //
+      // #967: the one exception is the Dashboard for an install that is already
+      // configured. The wizard offers that escape hatch itself (its header
+      // control), and without this the app menu's "Show Dashboard" stayed inert
+      // for a returning user who had been routed into the wizard. First-run
+      // installs keep the old one-way behaviour.
+      if (!ready) return;
+      const wantsDashboard = event.payload === 'dashboard' && onboardingComplete;
+      if ($currentView === 'onboarding' && !wantsDashboard) return;
       currentView.set(event.payload as View);
     }));
 
