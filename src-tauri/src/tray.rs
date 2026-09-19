@@ -599,11 +599,23 @@ enum TrayPaint {
 ///
 /// Pure, so "the startup paint performs no request" and "a snooze performs no
 /// request" are asserted directly rather than through the rebuild's source.
-fn paint_fetch_mode(paint: TrayPaint, snoozed: bool) -> TrayFetch {
+fn paint_fetch_mode(paint: TrayPaint, snoozed: bool, action_refresh_due: bool) -> TrayFetch {
     match paint {
         // Issue #882: no network before the event loop exists.
         TrayPaint::Startup => TrayFetch::CacheOnly,
-        TrayPaint::Deduped => tray_fetch_mode(snoozed),
+        TrayPaint::Deduped => {
+            let base = tray_fetch_mode(snoozed);
+            // A snooze outranks an action: "no Spotify request while snoozed" is
+            // that feature's acceptance criterion (issue #677).
+            if base == TrayFetch::CacheOnly {
+                TrayFetch::CacheOnly
+            } else if action_refresh_due {
+                // Issue #883: the action asks for fresh Devices/Up Next lists.
+                TrayFetch::RefreshNow
+            } else {
+                base
+            }
+        }
     }
 }
 
@@ -729,6 +741,48 @@ fn repeat_menu_label(strings: &Strings, state: RepeatState) -> &'static str {
 static DELAYED_REFRESH_IN_FLIGHT: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// Shortest gap between the post-action re-fetches of the Devices/Up Next lists
+/// (issue #883). A player action wants those submenus to mirror what just
+/// happened, but a burst of clicks must share one devices+queue pair: five
+/// seconds is long enough to coalesce a burst, short enough that the menu still
+/// matches the click the user just made.
+const TRAY_POST_ACTION_FETCH_MIN: Duration = Duration::from_secs(5);
+
+/// The most recent tray player action that wants the Devices/Up Next lists
+/// refreshed (issue #883). `force_tray_refresh` records the action here instead
+/// of emptying both caches, which bypassed the fetch throttle for every click.
+static LAST_TRAY_ACTION: std::sync::LazyLock<parking_lot::Mutex<Option<Instant>>> =
+    std::sync::LazyLock::new(|| parking_lot::Mutex::new(None));
+
+/// When the most recent post-action re-fetch was issued (issue #883). Recorded
+/// before the requests run, so a click landing while they are in flight reuses
+/// them instead of paying for a pair of its own.
+static LAST_ACTION_FETCH: std::sync::LazyLock<parking_lot::Mutex<Option<Instant>>> =
+    std::sync::LazyLock::new(|| parking_lot::Mutex::new(None));
+
+/// Whether a rebuild must re-fetch the Devices/Up Next lists on behalf of a
+/// player action (issue #883). Pure in its instants, so the coalescing rule —
+/// ten rapid clicks, one pair of requests — is unit-testable without waiting.
+fn action_fetch_due(
+    last_action: Option<Instant>,
+    last_action_fetch: Option<Instant>,
+    now: Instant,
+    min_interval: Duration,
+) -> bool {
+    match (last_action, last_action_fetch) {
+        // No action has asked for anything.
+        (None, _) => false,
+        // An action nothing has fetched for yet is due immediately.
+        (Some(_), None) => true,
+        // Only an action newer than the last post-action fetch — and far enough
+        // after it — is worth two more requests; a burst inside `min_interval`
+        // shares the pair already issued.
+        (Some(action), Some(fetched)) => {
+            action > fetched && now.duration_since(fetched) >= min_interval
+        }
+    }
+}
+
 /// Returns cached devices when the throttle window hasn't elapsed, else
 /// fetches fresh ones. On a fetch failure the stale cache is returned so
 /// the submenu doesn't flicker to "(no devices)" on a transient error.
@@ -738,14 +792,16 @@ static DELAYED_REFRESH_IN_FLIGHT: std::sync::atomic::AtomicBool =
 /// cache never blocks tray interactions. If two threads race on a stale
 /// cache both will fetch; the last writer wins. This benign double-fetch
 /// wastes one request but cannot corrupt state. See issue #217.
-fn cached_devices(access_token: &str) -> Vec<crate::spotify::DeviceInfo> {
+/// `min_interval` is this fetch's throttle (issue #883): the full window for an
+/// ordinary rebuild, `Duration::ZERO` for the one a player action asks for.
+fn cached_devices(access_token: &str, min_interval: Duration) -> Vec<crate::spotify::DeviceInfo> {
     // Snapshot under short lock, then drop before deciding staleness.
     let snapshot = {
         let cache = DEVICES_CACHE.lock();
         cache.clone()
     };
     let needs_fetch = match &snapshot {
-        Some((fetched_at, _)) => fetched_at.elapsed() >= TRAY_SPOTIFY_FETCH_THROTTLE,
+        Some((fetched_at, _)) => fetched_at.elapsed() >= min_interval,
         None => true,
     };
     if !needs_fetch {
@@ -770,14 +826,14 @@ fn cached_devices(access_token: &str) -> Vec<crate::spotify::DeviceInfo> {
 ///
 /// Same lock discipline as `cached_devices`: snapshot, drop, fetch outside
 /// lock, re-acquire to store. Benign double-fetch on a race. See issue #217.
-fn cached_queue(access_token: &str) -> Option<crate::spotify::QueueInfo> {
+fn cached_queue(access_token: &str, min_interval: Duration) -> Option<crate::spotify::QueueInfo> {
     // Snapshot under short lock, then drop before deciding staleness.
     let snapshot = {
         let cache = QUEUE_CACHE.lock();
         cache.clone()
     };
     let needs_fetch = match &snapshot {
-        Some((fetched_at, _)) => fetched_at.elapsed() >= TRAY_SPOTIFY_FETCH_THROTTLE,
+        Some((fetched_at, _)) => fetched_at.elapsed() >= min_interval,
         None => true,
     };
     if !needs_fetch {
@@ -811,6 +867,10 @@ fn cached_queue(access_token: &str) -> Option<crate::spotify::QueueInfo> {
 enum TrayFetch {
     /// Normal rebuild: reuse the throttled cache, fetching when it lapsed.
     Refresh,
+    /// Issue #883: a player action just changed the playback/device state these
+    /// lists mirror, so this one rebuild bypasses the throttle. A burst of
+    /// clicks still shares one pair of requests — see [`action_fetch_due`].
+    RefreshNow,
     /// A snooze is active: render the last cached lists (or nothing) and issue
     /// no request. The submenus go stale by design until the snooze ends.
     CacheOnly,
@@ -835,7 +895,8 @@ fn devices_for_menu(
     fetch: TrayFetch,
 ) -> Vec<crate::spotify::DeviceInfo> {
     match (access_token, fetch) {
-        (Some(token), TrayFetch::Refresh) => cached_devices(token),
+        (Some(token), TrayFetch::Refresh) => cached_devices(token, TRAY_SPOTIFY_FETCH_THROTTLE),
+        (Some(token), TrayFetch::RefreshNow) => cached_devices(token, Duration::ZERO),
         (_, TrayFetch::CacheOnly) => DEVICES_CACHE
             .lock()
             .clone()
@@ -852,7 +913,8 @@ fn queue_for_menu(
     fetch: TrayFetch,
 ) -> Option<crate::spotify::QueueInfo> {
     match (access_token, fetch) {
-        (Some(token), TrayFetch::Refresh) => cached_queue(token),
+        (Some(token), TrayFetch::Refresh) => cached_queue(token, TRAY_SPOTIFY_FETCH_THROTTLE),
+        (Some(token), TrayFetch::RefreshNow) => cached_queue(token, Duration::ZERO),
         (_, TrayFetch::CacheOnly) => QUEUE_CACHE.lock().clone().map(|(_, queue)| queue),
         (None, _) => None,
     }
@@ -1349,12 +1411,13 @@ fn await_sync_toggle(app: &AppHandle, before: bool) -> bool {
     false
 }
 
-/// Forces the next `update_tray_menu` call to rebuild: clears both throttled
-/// caches (so devices/queue are re-fetched), nudges the dedup snapshot so
-/// the rebuild can't early-return, then rebuilds immediately. User-initiated
-/// tray actions call this so the menu reflects the new playback/device
-/// state right away — the dedup key alone wouldn't change on e.g. a pause
-/// or a transfer.
+/// Forces the next `update_tray_menu` call to rebuild and asks it for fresh
+/// Devices/Up Next lists: records the action (issue #883 — the caches stay, and
+/// the rebuild re-fetches under `TRAY_POST_ACTION_FETCH_MIN`), nudges the dedup
+/// snapshot so the rebuild can't early-return, then rebuilds immediately.
+/// User-initiated tray actions call this so the menu reflects the new
+/// playback/device state right away — the dedup key alone wouldn't change on
+/// e.g. a pause or a transfer.
 ///
 /// The snapshot is nudged (not cleared) with the *current* track key so the
 /// re-seed logic in `update_tray_menu` (which only fires on a genuine track
@@ -1364,18 +1427,19 @@ fn force_tray_refresh(app: &AppHandle) {
     let state = app.state::<std::sync::Arc<crate::AppState>>();
     let is_syncing = state.polling.is_syncing(Ordering::Acquire);
     let current_track = state.polling.current_track().clone();
-    // S9 (issue #677): while a snooze is active the rebuild below renders the
-    // CACHED Devices/Up Next lists instead of fetching (`TrayFetch::CacheOnly`),
-    // so dropping the caches here would leave those submenus empty for the rest
-    // of the snooze — and dropping them is the only reason this helper used to
-    // be called on the way to a rebuild. The nudge below still forces the
-    // rebuild, which is all a snooze-time repaint needs.
+    // S9 (issue #677): the snooze is read here only for the dedup key below —
+    // while one is active the rebuild renders the CACHED Devices/Up Next lists
+    // instead of fetching (`TrayFetch::CacheOnly`) and an action cannot override
+    // that. The nudge below still forces the repaint, which is all a snooze-time
+    // repaint needs.
     let config = state.config.get().clone();
     let snooze = resolve_snooze(config.as_ref());
-    if snooze.is_none() {
-        *DEVICES_CACHE.lock() = None;
-        *QUEUE_CACHE.lock() = None;
-    }
+    // Issue #883: the caches stay. Emptying them was how this helper asked for
+    // fresh Devices/Up Next lists, and it bypassed `TRAY_SPOTIFY_FETCH_THROTTLE`
+    // on every player action; the action is recorded instead, and the rebuild
+    // re-fetches under `TRAY_POST_ACTION_FETCH_MIN` — which coalesces a burst
+    // into one pair of requests. The nudge below still forces the repaint.
+    *LAST_TRAY_ACTION.lock() = Some(Instant::now());
     let snooze_key = snooze.as_ref().map(|sn| snooze_dedup_key(&sn.status));
     // Nudge the dedup snapshot (not clear it) with the *current* track key so
     // the rebuild below can't early-return while the re-seed logic stays
@@ -1514,7 +1578,16 @@ fn rebuild_tray_menu(
     let config: Option<crate::config::AppConfig> = state.config.get().clone();
     let snooze = resolve_snooze(config.as_ref());
     let snooze_key = snooze.as_ref().map(|sn| snooze_dedup_key(&sn.status));
-    let fetch = paint_fetch_mode(paint, snooze.is_some());
+    // Issue #883: a player action asks for fresh Devices/Up Next lists, but only
+    // when it is not already covered by a fetch in flight (`action_fetch_due`),
+    // and never while snoozed (`paint_fetch_mode`).
+    let action_refresh_due = action_fetch_due(
+        *LAST_TRAY_ACTION.lock(),
+        *LAST_ACTION_FETCH.lock(),
+        Instant::now(),
+        TRAY_POST_ACTION_FETCH_MIN,
+    );
+    let fetch = paint_fetch_mode(paint, snooze.is_some(), action_refresh_due);
     // Issue #805: the two cache buckets are part of the key, so a session where
     // nothing else moves still repaints — and therefore re-fetches — once per
     // throttle window instead of keeping whatever the last rebuild rendered.
@@ -1566,6 +1639,11 @@ fn rebuild_tray_menu(
         .spotify()
         .as_ref()
         .map(|t| t.access_token.clone());
+    if fetch == TrayFetch::RefreshNow {
+        // Recorded BEFORE the requests run: a click that lands while they are in
+        // flight must reuse them, not start a pair of its own (issue #883).
+        *LAST_ACTION_FETCH.lock() = Some(Instant::now());
+    }
     let devices: Vec<crate::spotify::DeviceInfo> = devices_for_menu(access_token.as_deref(), fetch);
     let queue: Option<crate::spotify::QueueInfo> = queue_for_menu(access_token.as_deref(), fetch);
 
@@ -2612,7 +2690,7 @@ mod tests {
         let prod = prod_source(include_str!("tray.rs"));
         let body = body_of(prod, "fn rebuild_tray_menu(");
         assert!(
-            body.contains("paint_fetch_mode(paint, snooze.is_some())"),
+            body.contains("paint_fetch_mode(paint, snooze.is_some(), action_refresh_due)"),
             "the rebuild's fetch mode must come from the paint and the snooze"
         );
         // …and the snooze rule itself is unchanged: an ordinary rebuild while
@@ -2806,19 +2884,29 @@ mod tests {
         // not a snooze is active, while an ordinary rebuild still follows the
         // snooze rule (issue #677).
         assert_eq!(
-            paint_fetch_mode(TrayPaint::Startup, false),
+            paint_fetch_mode(TrayPaint::Startup, false, false),
             TrayFetch::CacheOnly
         );
         assert_eq!(
-            paint_fetch_mode(TrayPaint::Startup, true),
+            paint_fetch_mode(TrayPaint::Startup, true, false),
             TrayFetch::CacheOnly
         );
         assert_eq!(
-            paint_fetch_mode(TrayPaint::Deduped, false),
+            paint_fetch_mode(TrayPaint::Deduped, false, false),
             TrayFetch::Refresh
         );
         assert_eq!(
-            paint_fetch_mode(TrayPaint::Deduped, true),
+            paint_fetch_mode(TrayPaint::Deduped, true, false),
+            TrayFetch::CacheOnly
+        );
+        // Issue #883: an action makes one rebuild bypass the throttle — unless
+        // a snooze is active, which outranks it (issue #677).
+        assert_eq!(
+            paint_fetch_mode(TrayPaint::Deduped, false, true),
+            TrayFetch::RefreshNow
+        );
+        assert_eq!(
+            paint_fetch_mode(TrayPaint::Deduped, true, true),
             TrayFetch::CacheOnly
         );
 
@@ -3002,6 +3090,86 @@ mod tests {
         assert!(
             setup.contains(".on_tray_icon_event(|tray, event|"),
             "the click handler must stay for Windows and macOS (issue #971)"
+        );
+    }
+
+    /// Issue #883: every tray player action used to empty both throttled caches,
+    /// so each click paid two fresh Spotify fetches and the 60 s throttle that
+    /// protects the API was bypassed entirely. The action is now recorded and the
+    /// rebuild re-fetches under a short minimum interval, which a burst of clicks
+    /// shares instead of multiplying.
+    #[test]
+    fn post_action_refresh_coalesces_a_burst_of_clicks() {
+        let min = TRAY_POST_ACTION_FETCH_MIN;
+        let t0 = Instant::now();
+        let click = t0 + Duration::from_millis(10);
+
+        // No action: the ordinary throttle decides.
+        assert!(!action_fetch_due(None, None, t0, min));
+        // An action nothing has fetched for yet is due immediately, and stays
+        // due until a fetch is issued on its behalf.
+        assert!(action_fetch_due(Some(t0), None, t0, min));
+        assert!(action_fetch_due(Some(click), None, click, min));
+
+        // The pair of requests that action asked for, recorded as it is issued.
+        let fetched = click + Duration::from_millis(1);
+        assert!(
+            !action_fetch_due(Some(click), Some(fetched), fetched, min),
+            "the fetch already in flight covers the action that asked for it"
+        );
+
+        // Ten rapid clicks inside the interval share that single pair.
+        let mut pairs = 1;
+        for n in 1..10u64 {
+            let at = t0 + Duration::from_millis(n * 300);
+            if action_fetch_due(Some(at), Some(fetched), at + Duration::from_millis(1), min) {
+                pairs += 1;
+            }
+        }
+        assert_eq!(
+            pairs, 1,
+            "ten clicks inside the interval must share one devices+queue pair (issue #883)"
+        );
+
+        // A click that lands after the interval is worth a fresh pair…
+        assert!(action_fetch_due(
+            Some(t0 + Duration::from_secs(30)),
+            Some(fetched),
+            fetched + min,
+            min
+        ));
+        // …while a fetch that already followed the action is not repeated.
+        assert!(!action_fetch_due(
+            Some(click),
+            Some(fetched),
+            fetched + min,
+            min
+        ));
+
+        // The wiring: the caches must no longer be emptied on a player action,
+        // and the rebuild must pass the action's fetch mode to both submenu
+        // sources (it marks the fetch in flight before issuing it).
+        let prod = prod_source(include_str!("tray.rs"));
+        let force = body_of(prod, "fn force_tray_refresh(");
+        assert!(
+            force.contains("LAST_TRAY_ACTION.lock() = Some(Instant::now())"),
+            "a player action must be recorded, not enforced by emptying the caches"
+        );
+        assert!(
+            !force.contains("DEVICES_CACHE.lock() = None")
+                && !force.contains("QUEUE_CACHE.lock() = None"),
+            "the caches must stay: emptying them bypassed the fetch throttle (issue #883)"
+        );
+        let body = body_of(prod, "fn rebuild_tray_menu(");
+        let mark = body
+            .find("LAST_ACTION_FETCH.lock() = Some(Instant::now())")
+            .expect("a post-action rebuild must mark its fetch in flight");
+        let devices = body
+            .find("devices_for_menu(access_token.as_deref(), fetch)")
+            .expect("the rebuild must build the devices submenu from the fetch mode");
+        assert!(
+            mark < devices,
+            "the in-flight mark must be recorded before the requests run (issue #883)"
         );
     }
 }
