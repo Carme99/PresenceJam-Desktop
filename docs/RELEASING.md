@@ -153,14 +153,14 @@ behind the tag-push run.
    `# State of Features — vX.Y.Z` header, or the run fails with an `::error::`
    naming the missing file. A pre-release tag (`vX.Y.Z-beta.N`) is gated
    against the section of the version it will become.
-2. **`verify`** (`needs: resolve-tag`, ~lines 139-213) — checks out the same tag
+2. **`verify`** (`needs: resolve-tag`, ~lines 162-236) — checks out the same tag
    and reruns the `ci.yml` gate set there (fmt, clippy, `cargo test`,
    `npm run check`, `npm run test:coverage` — the coverage ratchet, not bare
    `npm test`, with Linux system deps). `ci.yml` only runs
    on PRs and `main`, so without this job the exact commit that produces
    user-facing binaries would never be tested — worst case on a re-cut of a
    commit that never saw CI.
-3. **`build`** (`needs: [resolve-tag, verify]`) — three-OS matrix:
+3. **`build`** (`needs: [resolve-tag, verify]`, ~lines 238-544) — three-OS matrix:
 
    | OS | Target | Artifact (upload) | Packaged files |
    | --- | --- | --- | --- |
@@ -194,7 +194,7 @@ behind the tag-push run.
    `.rpm` — a package without it never appears in GNOME Software or KDE
    Discover.
 
-4. **`sign`** (`needs: [resolve-tag, build]`, `environment: release-signing`) —
+4. **`sign`** (`needs: [resolve-tag, build]`, `environment: release-signing`, ~lines 546-632) —
    the only job holding `TAURI_SIGNING_PRIVATE_KEY` and its password, exported
    to one step (`Sign updater payloads`) rather than the job, so `npm ci` and
    its lifecycle scripts never see them. It downloads the unsigned payloads and
@@ -205,7 +205,7 @@ behind the tag-push run.
    it produced them. Add required reviewers to the `release-signing`
    environment in the repository settings, or a tag push can sign and publish
    without a human — until then the environment exists but gates nothing.
-5. **`release`** (`needs: [resolve-tag, build, sign]`) — checks the tag out (it needs
+5. **`release`** (`needs: [resolve-tag, build, sign]`, ~lines 634-885) — checks the tag out (it needs
    `CHANGELOG.md`), downloads all artifacts (`digest-mismatch: error`), writes
    `SHA256SUMS.txt` (one `"<sha256>  <filename>"` line per file; unsigned, and
    deliberately not covered by the build attestation), extracts this version's
@@ -240,12 +240,15 @@ behind the tag-push run.
    platform URL as "no update" **silently**, so a missing asset would strand
    every client (the v3.1.0 → v3.2.0 Windows incident, see
    [`archive/windows-update-chain-v3.2.md`](./archive/windows-update-chain-v3.2.md)).
-6. **`homebrew`** (`needs: [resolve-tag, release]`) — downloads the macOS DMG
-   artifact, computes its SHA-256, and updates `presence-jam.rb` in
-   `carme99/homebrew-tap` (version/url/sha256), creating the formula if absent
-   and no-oping if the version already matches. Requires `HOMEBREW_TAP_TOKEN`
-   with `contents:write` on the tap.
-7. **`winget`** (`needs: [resolve-tag, release]`) — `vedantmgoyal2009/winget-releaser`
+6. **`homebrew`** (`needs: [resolve-tag, release]`, ~lines 887-1009) — downloads the macOS DMG
+   artifact, computes its SHA-256, and updates the **cask**
+   `Casks/presence-jam.rb` in `carme99/homebrew-tap` (version/url/sha256),
+   creating it if absent, no-oping if it already matches, and deleting the
+   stale root-level `presence-jam.rb` formula left by the formula → cask
+   migration (`brew uninstall presence-jam` first, then
+   `brew install --cask carme99/tap/presence-jam`). Requires
+   `HOMEBREW_TAP_TOKEN` with `contents:write` on the tap.
+7. **`winget`** (`needs: [resolve-tag, release]`, ~lines 1011-1073) — `vedantmgoyal2009/winget-releaser`
    for `PresenceJam.PresenceJam`, submitting through the fork
    `Carme99/winget-pkgs` (`fork-user`). Requires `WINGET_TOKEN`: a **classic**
    PAT with `public_repo` **and** `workflow` scopes (fine-grained is
