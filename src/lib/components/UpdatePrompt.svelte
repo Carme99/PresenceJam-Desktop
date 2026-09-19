@@ -399,7 +399,7 @@
 
 {#if update && !dismissed}
   <div
-    class="update-banner"
+    class="update-banner update-banner--docked"
     role="region"
     aria-label={t('update.available', { version: update.version })}
     title={updateTooltip}
@@ -542,18 +542,6 @@
 
 <style>
   .update-banner {
-    /* #951: docked to the bottom edge instead of floating over the top
-       chrome. Centred at `top: var(--sp-3)` the banner sat on the Dashboard
-       header's icon row at the default window, so the theme, logs,
-       diagnostics, settings and about buttons were unclickable while an
-       update was offered. The bottom placement follows the `.playback-toast`
-       convention in `+layout.svelte`: it covers no chrome, and the z-index
-       stays below that toast so a playback error still wins. */
-    position: fixed;
-    bottom: var(--sp-3);
-    left: 50%;
-    transform: translateX(-50%);
-    z-index: 1000;
     display: flex;
     align-items: center;
     gap: var(--sp-4);
@@ -563,6 +551,20 @@
     border: 1px solid var(--accent);
     border-radius: var(--r-md);
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  }
+  /* #951: the banner is docked, never floating over the top chrome. Centred
+     at `top: var(--sp-3)` it sat on the Dashboard header's icon row at the
+     default window, so the theme, logs, diagnostics, settings and about
+     buttons were unclickable while an update was offered. The bottom edge
+     follows the `.playback-toast` convention in `+layout.svelte` — no layout
+     space reserved, no chrome covered — and the z-index stays below that
+     toast so a playback error still wins. */
+  .update-banner--docked {
+    position: fixed;
+    bottom: var(--sp-3);
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 1000;
   }
   .update-info {
     display: flex;
