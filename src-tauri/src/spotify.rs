@@ -391,26 +391,57 @@ pub fn complete_spotify_auth(
     parse_exchange_token_response(&body)
 }
 
+/// Shortest access-token lifetime the app accepts from the token endpoint,
+/// in seconds. Spotify documents 3600 s; anything below this floor is treated
+/// as malformed rather than believed (issue #931).
+const MIN_TOKEN_LIFETIME_SECS: u64 = 30;
+
+/// Longest access-token lifetime the app accepts from the token endpoint, in
+/// seconds (24 h). Anything above is treated as malformed (issue #931).
+const MAX_TOKEN_LIFETIME_SECS: u64 = 86_400;
+
+/// The shared shape of Spotify's token-endpoint success body, used by both the
+/// authorization_code exchange and the refresh_token grant (issue #931; the two
+/// paths previously carried byte-identical local copies of this struct).
+#[derive(Deserialize)]
+struct TokenResponse {
+    access_token: String,
+    refresh_token: Option<String>,
+    expires_in: u64,
+    #[allow(dead_code)]
+    token_type: String,
+}
+
+/// `expires_at` for a token whose response claimed a lifetime of `expires_in`
+/// seconds, clamped to
+/// [`MIN_TOKEN_LIFETIME_SECS`]..=[`MAX_TOKEN_LIFETIME_SECS`] (issue #931).
+///
+/// `expires_in` is server-controlled. Casting it straight through `as i64` and
+/// `chrono::Duration::seconds` panicked for values above `i64::MAX / 1000` and
+/// wrapped to a negative offset for values that overflow the cast, producing an
+/// `expires_at` in the past — an instantly-expired token that made
+/// `is_token_expired()` permanently true, so every poll iteration and every tray
+/// click refreshed again. `try_seconds` cannot panic; the clamp keeps a
+/// malformed response inside the range the app can reason about, falling back to
+/// one hour if the duration is somehow still out of range.
+fn token_expiry(expires_in: u64, now: DateTime<Utc>) -> DateTime<Utc> {
+    let lifetime = expires_in.clamp(MIN_TOKEN_LIFETIME_SECS, MAX_TOKEN_LIFETIME_SECS);
+    let offset = chrono::Duration::try_seconds(lifetime as i64)
+        .unwrap_or_else(|| chrono::Duration::hours(1));
+    now + offset
+}
+
 /// Parse an OAuth authorization_code exchange body into [`SpotifyTokens`].
 /// Split out of `complete_spotify_auth` so the mapping is unit-testable
 /// without a live `reqwest::blocking::Response` (issue #350).
 fn parse_exchange_token_response(body: &str) -> Result<SpotifyTokens, String> {
-    #[derive(Deserialize)]
-    struct TokenResponse {
-        access_token: String,
-        refresh_token: Option<String>,
-        expires_in: u64,
-        #[allow(dead_code)]
-        token_type: String,
-    }
-
     let token_resp: TokenResponse =
         serde_json::from_str(body).map_err(|e| format!("Failed to parse token response: {}", e))?;
     let refresh_token = token_resp.refresh_token.ok_or_else(|| {
         "token response omitted refresh_token - please try signing in again.".to_string()
     })?;
 
-    let expires_at = Utc::now() + chrono::Duration::seconds(token_resp.expires_in as i64);
+    let expires_at = token_expiry(token_resp.expires_in, Utc::now());
 
     Ok(SpotifyTokens {
         access_token: token_resp.access_token,
@@ -526,20 +557,11 @@ fn request_refreshed_token(
         )));
     }
 
-    #[derive(Deserialize)]
-    struct TokenResponse {
-        access_token: String,
-        refresh_token: Option<String>,
-        expires_in: u64,
-        #[allow(dead_code)]
-        token_type: String,
-    }
-
     let token_resp: TokenResponse = response
         .json()
         .map_err(|e| SpotifyApiError::Other(format!("Failed to parse refresh response: {}", e)))?;
 
-    let expires_at = Utc::now() + chrono::Duration::seconds(token_resp.expires_in as i64);
+    let expires_at = token_expiry(token_resp.expires_in, Utc::now());
 
     Ok(SpotifyTokens {
         access_token: token_resp.access_token,
@@ -2235,5 +2257,67 @@ mod tests {
             "an expired cached token must not be handed to a later caller"
         );
         assert_eq!(calls, 2, "the expired entry must not suppress the request");
+    }
+
+    // Issue #931: `expires_in` is server-controlled and was cast straight
+    // through `as i64` into `chrono::Duration::seconds`, which panics for
+    // absurd lifetimes and wraps negative for values that overflow the cast —
+    // the wrap stored an `expires_at` in the past, so the token was expired the
+    // moment it was saved and every poll iteration refreshed again.
+    #[test]
+    fn token_expiry_clamps_a_malformed_expires_in_to_a_sane_future_instant() {
+        let now = Utc::now();
+        let floor = now + chrono::Duration::seconds(MIN_TOKEN_LIFETIME_SECS as i64);
+        let ceiling = now + chrono::Duration::seconds(MAX_TOKEN_LIFETIME_SECS as i64);
+
+        for (expires_in, label) in [
+            (u64::MAX, "u64::MAX panicked the old cast"),
+            (0, "zero must not expire instantly"),
+            (1, "below the floor"),
+            (u64::MAX / 1000 + 1, "the old panic threshold"),
+            (MAX_TOKEN_LIFETIME_SECS * 2, "above the ceiling"),
+        ] {
+            let expires_at = token_expiry(expires_in, now);
+            assert!(
+                expires_at >= floor,
+                "expires_in={} ({}) must expire no sooner than the floor, got {}",
+                expires_in,
+                label,
+                expires_at
+            );
+            assert!(
+                expires_at <= ceiling,
+                "expires_in={} ({}) must expire no later than the ceiling, got {}",
+                expires_in,
+                label,
+                expires_at
+            );
+        }
+
+        assert_eq!(
+            token_expiry(3600, now),
+            now + chrono::Duration::hours(1),
+            "the lifetime Spotify documents must pass through unchanged"
+        );
+    }
+
+    // Same contract through the real parse path: a hostile or broken token
+    // endpoint answering with a huge `expires_in` must leave the app with a
+    // usable token, not a panic and not an already-expired one.
+    #[test]
+    fn exchange_parse_survives_a_malformed_expires_in() {
+        let body = r#"{"access_token":"at","refresh_token":"rt","token_type":"Bearer","expires_in":18446744073709551615}"#;
+        let tokens =
+            parse_exchange_token_response(body).expect("a huge expires_in must still parse");
+        assert!(
+            tokens.expires_at > Utc::now(),
+            "the stored token must not already be expired, got {}",
+            tokens.expires_at
+        );
+        assert!(
+            tokens.expires_at <= Utc::now() + chrono::Duration::seconds(MAX_TOKEN_LIFETIME_SECS as i64 + 1),
+            "the stored expiry must stay inside the accepted range, got {}",
+            tokens.expires_at
+        );
     }
 }
