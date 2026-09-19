@@ -679,6 +679,7 @@ mod tests {
             body.contains("leaving flag for the in-flight owner"),
             "the no-handle branch must not steal the flag from a live owner's in-flight drain (issue #395), nor from a start in its claim window (issue #941)"
         );
+    }
 
     fn spotify_tokens() -> SpotifyTokens {
         SpotifyTokens {

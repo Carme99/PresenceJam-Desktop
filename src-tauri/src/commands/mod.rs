@@ -620,6 +620,7 @@ mod tests {
              restart's install_pending_on_exit reinstalls the staged payload \
              over the version just installed (issue #806)"
         );
+    }
 
     /// Issue #485/#771: the matrix is the artifact a reviewer consults to
     /// decide whether a new command needs `require_main_window`, and it had

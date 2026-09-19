@@ -507,6 +507,7 @@ mod tests {
             "the supersession gate must run before the token slot is written, or \
              the stale commit has already clobbered the newer flow's tokens"
         );
+    }
 
     use super::{clamped_poll_interval, commit_polled_tokens, SessionCommitOutcome};
     use crate::teams::TeamsTokens;
