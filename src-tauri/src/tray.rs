@@ -449,6 +449,19 @@ struct TrayStateSnapshot {
     track_key: Option<String>,
     shuffle: bool,
     repeat: RepeatState,
+    /// Throttle bucket of the devices cache when this key was built (issue
+    /// #805): the number of full [`TRAY_SPOTIFY_FETCH_THROTTLE`] windows since
+    /// it was filled, `0` while it is empty.
+    ///
+    /// The key carries the bucket and not the timestamp because the bucket is
+    /// what the fetchers act on: a session where nothing else moves now
+    /// repaints — and therefore re-fetches — once per window, while a rebuild
+    /// inside the window still dedupes to a no-op. Without it the early return
+    /// below skipped the fetches themselves, and the Devices/Up Next submenus
+    /// kept whatever the last rebuild happened to render, indefinitely.
+    devices_bucket: u64,
+    /// Same, for the Up Next queue cache (issue #805).
+    queue_bucket: u64,
     snooze_key: Option<String>,
 }
 
@@ -462,7 +475,8 @@ fn tray_state_changed(prev: Option<&TrayStateSnapshot>, next: &TrayStateSnapshot
 /// Builds the dedup key from the same inputs the rebuild renders from: the
 /// caller's sync flag and precomputed window visibility, the track's
 /// artist/title/is_playing, the two playback-mode atoms the polling loop feeds
-/// (`note_playback_modes`) and the snooze the rebuild will render (4.7.0, S9).
+/// (`note_playback_modes`), the snooze the rebuild will render (4.7.0, S9) and
+/// the throttle bucket of both caches (issue #805).
 /// Single construction site so the key can never be built from a subset of what
 /// the menu shows (issue #691).
 fn tray_snapshot_for(
@@ -470,6 +484,10 @@ fn tray_snapshot_for(
     is_window_visible: bool,
     current_track: Option<&crate::spotify::TrackInfo>,
     snooze_key: Option<String>,
+    /// The two cache throttle buckets (issue #805). Read by the caller rather
+    /// than here so the key stays a pure function of its inputs.
+    devices_bucket: u64,
+    queue_bucket: u64,
 ) -> TrayStateSnapshot {
     TrayStateSnapshot {
         is_syncing,
@@ -478,7 +496,32 @@ fn tray_snapshot_for(
         shuffle: LAST_SHUFFLE_STATE.load(Ordering::Acquire),
         repeat: last_repeat_state(),
         snooze_key,
+        devices_bucket,
+        queue_bucket,
     }
+}
+
+/// The throttle bucket a cache slot is in (issue #805): how many full throttle
+/// windows have elapsed since it was filled, `0` while it is empty.
+///
+/// Pure in its timestamp, so "an unchanged rebuild inside the window is still
+/// a no-op, one window later it repaints" is asserted without sleeping.
+fn throttle_bucket(fetched_at: Option<Instant>, throttle: Duration) -> u64 {
+    match fetched_at {
+        None => 0,
+        Some(at) => at.elapsed().as_secs() / throttle.as_secs().max(1),
+    }
+}
+
+/// The throttle buckets of both caches (issue #805), read under short locks —
+/// no HTTP, and no lock held past the read.
+fn cache_buckets() -> (u64, u64) {
+    let devices_at = DEVICES_CACHE.lock().as_ref().map(|(at, _)| *at);
+    let queue_at = QUEUE_CACHE.lock().as_ref().map(|(at, _)| *at);
+    (
+        throttle_bucket(devices_at, TRAY_SPOTIFY_FETCH_THROTTLE),
+        throttle_bucket(queue_at, TRAY_SPOTIFY_FETCH_THROTTLE),
+    )
 }
 
 /// The active snooze as one rebuild renders it (4.7.0, S9 / issue #677).
@@ -1326,7 +1369,15 @@ fn force_tray_refresh(app: &AppHandle) {
     // inert: a cleared snapshot would look like a genuine track change and
     // clobber the toggle state the action just recorded. Flipping the sync
     // bit is enough — the real snapshot is committed by that rebuild.
-    let mut nudge = tray_snapshot_for(is_syncing, false, current_track.as_ref(), snooze_key);
+    let (devices_bucket, queue_bucket) = cache_buckets();
+    let mut nudge = tray_snapshot_for(
+        is_syncing,
+        false,
+        current_track.as_ref(),
+        snooze_key,
+        devices_bucket,
+        queue_bucket,
+    );
     nudge.is_syncing = !is_syncing;
     *last_tray_state().lock() = Some(nudge);
     let _ = update_tray_menu(app, is_syncing, current_track);
@@ -1451,11 +1502,17 @@ fn rebuild_tray_menu(
     let snooze = resolve_snooze(config.as_ref());
     let snooze_key = snooze.as_ref().map(|sn| snooze_dedup_key(&sn.status));
     let fetch = paint_fetch_mode(paint, snooze.is_some());
+    // Issue #805: the two cache buckets are part of the key, so a session where
+    // nothing else moves still repaints — and therefore re-fetches — once per
+    // throttle window instead of keeping whatever the last rebuild rendered.
+    let (devices_bucket, queue_bucket) = cache_buckets();
     let snapshot = tray_snapshot_for(
         is_syncing,
         is_window_visible,
         current_track,
         snooze_key,
+        devices_bucket,
+        queue_bucket,
     );
     {
         let last = last_tray_state().lock();
@@ -2227,8 +2284,9 @@ mod tests {
             progress_ms: None,
             duration_ms: 0,
         };
-        let key =
-            |sync: bool, visible: bool| tray_snapshot_for(sync, visible, Some(&track(true)), None);
+        let key = |sync: bool, visible: bool| {
+            tray_snapshot_for(sync, visible, Some(&track(true)), None, 0, 0)
+        };
 
         note_playback_modes(false, RepeatState::Off);
         let base = key(true, true);
@@ -2270,7 +2328,7 @@ mod tests {
         );
 
         // A same-track pause lives in the track half of the key (issue #229).
-        let paused = tray_snapshot_for(true, true, Some(&track(false)), None);
+        let paused = tray_snapshot_for(true, true, Some(&track(false)), None, 0, 0);
         assert!(
             tray_state_changed(Some(&repeated), &paused),
             "a same-track pause must still repaint the Play/Pause mark (#229)"
@@ -2472,7 +2530,7 @@ mod tests {
             progress_ms: None,
             duration_ms: 0,
         };
-        let at = |snooze: Option<String>| tray_snapshot_for(true, true, Some(&track), snooze);
+        let at = |snooze: Option<String>| tray_snapshot_for(true, true, Some(&track), snooze, 0, 0);
 
         let none = at(None);
         let snoozed = at(Some(snooze_dedup_key(&crate::config::SnoozeStatus {
@@ -2757,6 +2815,77 @@ mod tests {
         assert!(
             rebuild.contains("if paint == TrayPaint::Deduped"),
             "only an ordinary rebuild may commit the dedup snapshot (issue #882)"
+        );
+    }
+
+    /// Issue #805: the dedup key carries the throttle bucket of both caches.
+    /// Without it the early return also skipped the devices/queue fetches, so
+    /// a session where nothing else moved showed whatever the last rebuild had
+    /// rendered — possibly hours old, listing devices that had long since
+    /// disconnected. The bucket makes a quiet session repaint exactly once per
+    /// throttle window while every rebuild inside the window still dedupes.
+    #[test]
+    fn stale_caches_force_a_tray_rebuild_once_per_throttle_window() {
+        // The bucket is a pure function of the cache's age, so the window
+        // boundary is asserted without sleeping.
+        assert_eq!(
+            throttle_bucket(None, TRAY_SPOTIFY_FETCH_THROTTLE),
+            0,
+            "an empty cache must not force a rebuild on its own"
+        );
+        assert_eq!(
+            throttle_bucket(Some(Instant::now()), TRAY_SPOTIFY_FETCH_THROTTLE),
+            0
+        );
+        assert_eq!(
+            throttle_bucket(
+                Some(Instant::now() - TRAY_SPOTIFY_FETCH_THROTTLE),
+                TRAY_SPOTIFY_FETCH_THROTTLE
+            ),
+            1,
+            "a cache exactly one window old is due for a re-fetch"
+        );
+        assert_eq!(
+            throttle_bucket(
+                Some(Instant::now() - 10 * TRAY_SPOTIFY_FETCH_THROTTLE),
+                TRAY_SPOTIFY_FETCH_THROTTLE
+            ),
+            10
+        );
+
+        let _guard = MODE_ATOM_LOCK.lock();
+        note_playback_modes(false, RepeatState::Off);
+        let track = crate::spotify::TrackInfo {
+            title: "Title".to_string(),
+            artist: "Artist".to_string(),
+            album: "Album".to_string(),
+            album_art_url: String::new(),
+            is_playing: true,
+            progress_ms: None,
+            duration_ms: 0,
+        };
+        let at = |devices: u64, queue: u64| {
+            tray_snapshot_for(true, true, Some(&track), None, devices, queue)
+        };
+
+        // Identical track, window, modes and caches: still a no-op.
+        assert!(
+            !tray_state_changed(Some(&at(0, 0)), &at(0, 0)),
+            "a rebuild inside the throttle window must still dedupe"
+        );
+        // One window later either cache is due, and that must repaint — the
+        // repaint is what re-runs the fetchers.
+        assert!(
+            tray_state_changed(Some(&at(0, 0)), &at(1, 0)),
+            "a devices cache one throttle window old must repaint (issue #805)"
+        );
+        assert!(
+            tray_state_changed(Some(&at(0, 0)), &at(0, 1)),
+            "a queue cache one throttle window old must repaint (issue #805)"
+        );
+        assert!(
+            !tray_state_changed(Some(&at(1, 1)), &at(1, 1)),
+            "the bucket alone must not make every rebuild a repaint"
         );
     }
 }
