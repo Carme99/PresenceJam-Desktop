@@ -5,6 +5,19 @@ All notable changes to PresenceJam are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+Every change merged after 4.7.0 lands here until the release cut, which renames this
+section to the released version and opens a fresh empty one (see `docs/RELEASING.md` §2).
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Security
+
 ## [4.7.0] - 2026-09-17
 
 The first release built from a fresh audit of the codebase rather than from an issue
@@ -1417,6 +1430,7 @@ Closes #60 #61 #62 #63
 
 - PowerShell script version — this is a full rewrite
 [4.7.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.6.0...v4.7.0
+[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.7.0...HEAD
 [4.6.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.5.2...v4.6.0
 [4.5.2]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.5.1...v4.5.2
 [4.5.1]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.5.0...v4.5.1

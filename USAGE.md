@@ -44,7 +44,7 @@ PresenceJam lives in your **system tray** (Windows taskbar or macOS menu bar). T
 The main screen showing your current sync status.
 
 **Connection status badges:**
-- Green — connected and authenticated
+- Green — signed in — credentials are stored; the next poll re-checks them
 - Red — not connected or token expired — follow the Reconnect view to sign in again
 
 **Sync toggle:**
@@ -56,7 +56,7 @@ The main screen showing your current sync status.
 - Updates in real-time as tracks change
 - Shows ⏸️ when nothing is playing, including during adverts, which are never treated as "listening"
 
-**Suppressed chip:** when a write is being held back, the card shows a chip saying why. The wording is reason-specific for the four rules/policies — *quiet hours are active*, *a track rule matched*, *you set a status message by hand*, *you are out of office* — and falls back to a generic *busy, in a call, or presenting* line for a presence-based verdict (busy / Do Not Disturb / focusing / in a meeting / in a call / presenting). The chip reappears after a view switch, but it renders the generic line until the next `presence-gated` event arrives, since only the reason is carried live.
+**Suppressed chip:** when a write is being held back, the card shows a chip saying why. The wording is reason-specific for the four rules/policies — *quiet hours are active*, *a track rule matched*, *you set a status message by hand*, *you are out of office* — and falls back to a generic *busy, in a call, or presenting* line for a presence-based verdict (busy / Do Not Disturb / focusing / in a meeting / in a call / presenting). The reason survives a view switch, because it is part of the shared presence state rather than a one-off event payload, so the chip keeps its reason-specific wording.
 
 **Snooze chip:** while a tray snooze is active the Dashboard shows a countdown chip — *Snoozed — 12:34 left (until 14:30)* — with a **Resume now** button, so a snooze started from the tray is visible (and cancellable) in the window too. The tray tooltip leads with its status line and states the remaining time for the same reason.
 
@@ -138,7 +138,7 @@ New track rules are added **disabled**, so a half-filled rule can't suppress you
 
 **Quiet hours win over track rules.** If a quiet-hours row covers the current time and day, it decides the iteration — the matching track rule is not consulted at all, so its replacement text and its presence pair do not apply.
 
-**Replacement text is capped at 160 characters** and your quiet-hours replacement is posted from both the playing path *and* the stop/pause clear, so a rule you set is what ends up in Teams either way.
+**Replacement text is capped at 128 characters** and your quiet-hours replacement is posted from both the playing path *and* the stop/pause clear, so a rule you set is what ends up in Teams either way.
 
 **Pause and stop status text.** The two texts posted when playback pauses (`Paused` by default) and when nothing is playing (`Nothing playing on Spotify`) are editable at the bottom of this card — `teams.paused_status_format` / `teams.stopped_status_format` in `config.json`. The 🎵 prefix is added for you, and clearing a field restores the shipped default, so the rendered text is unchanged unless you change it. A matching rule's replacement status still takes precedence over both.
 
