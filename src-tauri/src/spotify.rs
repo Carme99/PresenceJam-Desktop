@@ -562,7 +562,9 @@ where
 {
     let _guard = REFRESH_LOCK.lock();
     if let Some(tokens) = cached_refresh(refresh_token, now) {
-        log::debug!("[SPOTIFY] refresh_spotify_token: reusing the token another caller just refreshed");
+        log::debug!(
+            "[SPOTIFY] refresh_spotify_token: reusing the token another caller just refreshed"
+        );
         return Ok(tokens);
     }
     let tokens = fetch()?;
@@ -2255,8 +2257,10 @@ mod tests {
     fn refresh_cache_does_not_serve_a_different_refresh_token() {
         let now = Utc::now();
         let mut calls = 0usize;
-        for (key, expected) in [("refresh-930-a", "access-930-a"), ("refresh-930-b", "access-930-b")]
-        {
+        for (key, expected) in [
+            ("refresh-930-a", "access-930-a"),
+            ("refresh-930-b", "access-930-b"),
+        ] {
             let tokens = refresh_serialized(key, now, || {
                 calls += 1;
                 Ok(SpotifyTokens {
@@ -2364,7 +2368,8 @@ mod tests {
             tokens.expires_at
         );
         assert!(
-            tokens.expires_at <= Utc::now() + chrono::Duration::seconds(MAX_TOKEN_LIFETIME_SECS as i64 + 1),
+            tokens.expires_at
+                <= Utc::now() + chrono::Duration::seconds(MAX_TOKEN_LIFETIME_SECS as i64 + 1),
             "the stored expiry must stay inside the accepted range, got {}",
             tokens.expires_at
         );
@@ -2379,11 +2384,13 @@ mod tests {
     fn classify_spotify_status_selects_the_variant_for_each_status() {
         const NO_DEVICE: &str = r#"{"error":{"status":404,"reason":"NO_ACTIVE_DEVICE"}}"#;
         const OTHER_404: &str = r#"{"error":{"status":404,"reason":"NOT_FOUND"}}"#;
-        let err = |status, retry_after, body| {
-            classify_spotify_status(status, retry_after, "play", body)
-        };
+        let err =
+            |status, retry_after, body| classify_spotify_status(status, retry_after, "play", body);
 
-        assert!(matches!(err(401, None, "{}"), SpotifyApiError::ExpiredToken));
+        assert!(matches!(
+            err(401, None, "{}"),
+            SpotifyApiError::ExpiredToken
+        ));
         assert!(matches!(err(403, None, "{}"), SpotifyApiError::NotPremium));
         assert!(matches!(
             err(429, Some(7), "{}"),
@@ -2444,7 +2451,10 @@ mod tests {
         assert!(matches!(player, SpotifyApiError::NotPremium));
         assert!(matches!(currently_playing, SpotifyApiError::NotPremium));
         assert_eq!(player.to_string(), currently_playing.to_string());
-        assert_eq!(player.to_string(), "Playback control requires Spotify Premium");
+        assert_eq!(
+            player.to_string(),
+            "Playback control requires Spotify Premium"
+        );
     }
 
     // Issue #796's contract, pinned at the type's own boundary: whatever the
