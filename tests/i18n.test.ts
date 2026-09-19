@@ -90,6 +90,36 @@ describe('i18n key coverage (#488)', () => {
     void i18n.set('en');
   });
 
+  // #907: fr.ts mixed ASCII apostrophes with the typographic U+2019, and used
+  // a plain space before `: ? ! ;` — a legal line-break opportunity in French
+  // typesetting, which is the defect the non-breaking space exists to prevent
+  // (a wrapped toast can otherwise start a line with a bare `:`).
+  it('uses the typographic apostrophe and a non-breaking space before French punctuation (#907)', () => {
+    // U+00A0, spelled out: an invisible literal in the source is a trap.
+    const NBSP = '\u00a0';
+    for (const { key, value } of dictEntries(frSrc)) {
+      if (/[A-Za-zÀ-ÿ]'[A-Za-zÀ-ÿ]/.test(value)) {
+        offenders.push(`${key}: ASCII apostrophe between letters`);
+      }
+      for (const m of value.matchAll(/\s([:?!;])/g)) {
+        if (m[0][0] !== NBSP) offenders.push(`${key}: plain space before '${m[1]}'`);
+      }
+      if (/«(?!\u00a0)/.test(value) || /(?<!\u00a0)»/.test(value)) {
+        offenders.push(`${key}: guillemet without a non-breaking space`);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it('renders the French punctuation without breaking placeholders (#907)', () => {
+    // The sweep is mechanical: `{seconds}` still interpolates, and the colon
+    // that introduces it now carries the non-breaking space.
+    const label = t('settings.defaultIntervalLabel', { seconds: 30 });
+    expect(label).toContain('30s');
+    expect(label).toMatch(/\u00a0: 30s$/);
+    void i18n.set('en');
+  });
+
   it('real t() resolves known keys and substitutes params', () => {
     expect(t('common.back')).toBe('Back');
     expect(t('common.codeExpiresIn', { time: '5m' })).toBe('Code expires in 5m');
