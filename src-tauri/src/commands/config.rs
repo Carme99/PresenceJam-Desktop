@@ -4,9 +4,14 @@
 
 use crate::config::{self, AppConfig, ConfigPatch};
 use crate::AppState;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::AppHandle;
 use tauri_plugin_dialog::DialogExt;
+
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 
 /// Log tag prefix for this submodule (issue #79 item 3).
 const CMD: &str = "[CMD.CONFIG]";
@@ -199,6 +204,119 @@ async fn after_persist(app: &AppHandle, persisted: &AppConfig) {
 // CLAUDE.md). Error strings stay English, as documented for Rust-side errors.
 // ---------------------------------------------------------------------------
 
+/// How many sidecar names an export tries before giving up. A collision means
+/// another process is writing the same destination at the same instant; eight
+/// attempts is already far past plausible.
+const EXPORT_SIDECAR_ATTEMPTS: u32 = 8;
+
+/// The private sidecar an export stages its bytes in:
+/// `<dest>.<pid>.<attempt>.pj-export.tmp`.
+///
+/// Deliberately not the config writer's `<dest>.tmp` (issue #823): that name is
+/// shared with whatever else the user keeps in the directory, and
+/// `atomic_write_json` pre-clears it.
+fn export_sidecar_path(dest: &Path, pid: u32, attempt: u32) -> PathBuf {
+    let mut name = dest.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    name.push(format!(".{}.{}.pj-export.tmp", pid, attempt));
+    dest.with_file_name(name)
+}
+
+/// Create `path` exclusively — no pre-clear, mode 0600 on Unix (the #135
+/// pattern `atomic_write_json` uses). `AlreadyExists` is reported to the
+/// caller rather than cleared away: the name belongs to whoever has it.
+fn open_exclusive(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    options.open(path)
+}
+
+/// fsync the directory the export landed in, so the rename survives a crash
+/// (the same guarantee `atomic_write_json` gives `config.json`).
+fn sync_parent_dir(path: &Path) {
+    #[cfg(unix)]
+    {
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                if let Err(e) = dir.sync_all() {
+                    log::warn!(
+                        "{CMD} export: failed to fsync export dir '{}': {}",
+                        parent.display(),
+                        e
+                    );
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// Write an export payload to `dest` through a sidecar private to this call.
+///
+/// Issue #823: the destination is a path the *user* chose, so it must not go
+/// through `config::atomic_write_json`. That writer derives its sidecar as
+/// `path.with_extension("tmp")` and removes it unconditionally — correct for
+/// `config.json`, which the app owns, but for an export it deleted an
+/// unrelated `~/notes.tmp` and, when that path was a directory, failed with an
+/// error naming a file the user never created. Here the sidecar carries this
+/// process id plus an attempt counter (so a collision picks another suffix
+/// instead of clearing anything), and the only path this function ever removes
+/// is the one it just created.
+fn write_export_file(dest: &Path, json: &str) -> Result<(), String> {
+    let pid = std::process::id();
+    for attempt in 0..EXPORT_SIDECAR_ATTEMPTS {
+        let staged = export_sidecar_path(dest, pid, attempt);
+        let mut file = match open_exclusive(&staged) {
+            Ok(file) => file,
+            // Somebody else holds this exact name — theirs, not ours: try the
+            // next suffix. A directory at that name is not an `AlreadyExists`
+            // error on Unix; it surfaces on write as the plain write error it
+            // is, naming this call's own sidecar.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(format!(
+                    "Failed to create export sidecar '{}': {}",
+                    staged.display(),
+                    e
+                ))
+            }
+        };
+        if let Err(e) = file.write_all(json.as_bytes()) {
+            let _ = std::fs::remove_file(&staged);
+            return Err(format!(
+                "Failed to write export sidecar '{}': {}",
+                staged.display(),
+                e
+            ));
+        }
+        if let Err(e) = file.sync_all() {
+            let _ = std::fs::remove_file(&staged);
+            return Err(format!(
+                "Failed to sync export sidecar '{}': {}",
+                staged.display(),
+                e
+            ));
+        }
+        drop(file);
+        if let Err(e) = std::fs::rename(&staged, dest) {
+            let _ = std::fs::remove_file(&staged);
+            return Err(format!(
+                "Failed to rename export sidecar to '{}': {}",
+                dest.display(),
+                e
+            ));
+        }
+        sync_parent_dir(dest);
+        return Ok(());
+    }
+    Err(format!(
+        "Failed to create an export sidecar next to '{}': every candidate name is taken",
+        dest.display()
+    ))
+}
+
 /// Write a shareable copy of the current config to a user-chosen path.
 ///
 /// The document is the persisted shape of the loaded config — clamped, with
@@ -247,10 +365,11 @@ pub async fn export_config(
     if path.extension().is_none() {
         path.set_extension("json");
     }
-    // Same crash-safe write as `save_config` (sidecar + fsync + rename, mode
-    // 0600): a failed export must not leave a half-written file where the user
-    // was told a complete copy lives.
-    config::atomic_write_json(&path, &json)?;
+    // Crash-safe write private to the export — sidecar + fsync + rename, mode
+    // 0600 as `save_config` uses — but through a sidecar this call names
+    // itself, so a user-chosen destination is never routed through the config
+    // writer (issue #823).
+    write_export_file(&path, &json)?;
 
     let written = path.to_string_lossy().into_owned();
     log::info!(
@@ -590,5 +709,58 @@ mod tests {
             !body.contains("rebuild_app_menu("),
             "set_locale must not keep a second relabel sequence of its own"
         );
+    }
+
+    /// Issue #823: an export destination belongs to the user, so the export
+    /// must leave whatever already sits beside it alone — the sibling
+    /// `<dest>.tmp` is exactly the path the config writer would have
+    /// pre-cleared.
+    #[test]
+    fn export_leaves_a_tmp_sibling_and_a_sibling_directory_alone() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "pj-test-export-{}-{}",
+            std::process::id(),
+            nanos
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let json = "{\"schema_version\":1}";
+
+        // Sibling file with unrelated bytes: it must survive the export.
+        let dest = dir.join("notes.json");
+        let sibling = dir.join("notes.tmp");
+        std::fs::write(&sibling, b"SENTINEL").unwrap();
+        write_export_file(&dest, json).unwrap();
+        assert_eq!(
+            std::fs::read(&sibling).unwrap(),
+            b"SENTINEL",
+            "the export must not touch a `<dest>.tmp` sibling it did not create"
+        );
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), json);
+
+        // Sibling directory: neither an abort nor a removal.
+        let dest2 = dir.join("journal.json");
+        let sibling_dir = dir.join("journal.tmp");
+        std::fs::create_dir(&sibling_dir).unwrap();
+        write_export_file(&dest2, json).unwrap();
+        assert!(
+            sibling_dir.is_dir(),
+            "a directory at the sibling path must not be removed"
+        );
+        assert_eq!(std::fs::read_to_string(&dest2).unwrap(), json);
+
+        // And no staged sidecar is left behind.
+        let strays: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".pj-export.tmp"))
+            .collect();
+        assert!(strays.is_empty(), "staged sidecars left behind: {strays:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
