@@ -45,32 +45,40 @@ const LOG_FILE_NAME: &str = "PresenceJam.log";
 const MAX_LOG_LINES: usize = 500;
 
 /// Cap on how many trailing bytes are read before splitting lines. The
-/// plugin rotates this file at ~40 KB (`DEFAULT_MAX_FILE_SIZE` in
-/// tauri-plugin-log), so this is a safety net for a hand-grown file rather
-/// than the normal case; the line clamp above is what bounds the payload.
+/// plugin rotates this file at `logging.max_file_size_mb` (default `10`,
+/// i.e. 10 MB — `config::default_max_file_size_mb`), so this is a safety
+/// net for a hand-grown file rather than the normal case; the line clamp
+/// above is what bounds the payload.
 const LOG_TAIL_MAX_BYTES: u64 = 256 * 1024;
 
 /// Read up to `limit` trailing lines of `path`, oldest first.
 ///
 /// A missing file is `Ok(empty)` — that is the normal first run, not an
-/// error. A genuine read failure is `Err`, carrying only the bare file name:
-/// the absolute path embeds the OS username (issue #409 hygiene) and the
-/// message can surface in the webview console.
+/// error. Any other failure to stat or read is `Err`, carrying only the bare
+/// file name: the absolute path embeds the OS username (issue #409 hygiene)
+/// and the message can surface in the webview console.
 fn read_log_tail(path: &Path, limit: usize, max_bytes: u64) -> Result<Vec<String>, String> {
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let len = std::fs::metadata(path)
-        .map_err(|e| format!("error reading {LOG_FILE_NAME}: {e}"))?
-        .len();
+    // `Path::exists()` collapses *every* stat error to `false`, which
+    // reported a permission or I/O failure as "no log file yet" — an empty
+    // pane with nothing logged anywhere (issue #825). Only `NotFound` is the
+    // first-run case; the one stat call also supplies the length.
+    let len = match std::fs::metadata(path) {
+        Ok(md) => md.len(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("error reading {LOG_FILE_NAME}: {e}")),
+    };
     let start = len.saturating_sub(max_bytes);
-    let bytes =
+    let (bytes, on_record_boundary) =
         read_from_offset(path, start).map_err(|e| format!("error reading {LOG_FILE_NAME}: {e}"))?;
     let text = String::from_utf8_lossy(&bytes);
     let mut lines: Vec<&str> = text.lines().collect();
     // Seeking mid-file lands inside a line; that fragment is not a log
-    // record and would render as a truncated one — drop it.
-    if start > 0 && !lines.is_empty() {
+    // record and would render as a truncated one — drop it. A seek that
+    // landed exactly on a newline is at a record boundary though, and the
+    // first split line is then whole: dropping it would lose a complete
+    // record, so the drop is conditional on the byte before the window
+    // (issue #824).
+    if start > 0 && !lines.is_empty() && !on_record_boundary {
         lines.remove(0);
     }
     let first = lines.len().saturating_sub(limit);
@@ -79,13 +87,28 @@ fn read_log_tail(path: &Path, limit: usize, max_bytes: u64) -> Result<Vec<String
 
 /// Offset read, so the byte cap above is actually honoured — `fs::read`
 /// would pull the whole file in before any bound could apply.
-fn read_from_offset(path: &Path, offset: u64) -> Result<Vec<u8>, String> {
+///
+/// The same open also probes the byte at `offset - 1`: a newline there means
+/// the window starts on a record boundary and its first line is whole
+/// (issue #824). Returns the window plus that flag.
+fn read_from_offset(path: &Path, offset: u64) -> Result<(Vec<u8>, bool), String> {
     use std::io::{Read, Seek, SeekFrom};
     let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let on_record_boundary = if offset == 0 {
+        true
+    } else {
+        f.seek(SeekFrom::Start(offset - 1))
+            .map_err(|e| e.to_string())?;
+        let mut prev = [0u8; 1];
+        // A short read (a rotation truncating the file under us) is not a
+        // newline: fall back to dropping the first fragment, as before.
+        let n = f.read(&mut prev).map_err(|e| e.to_string())?;
+        n == 1 && prev[0] == b'\n'
+    };
     f.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
     let mut buf = Vec::new();
     f.read_to_end(&mut buf).map_err(|e| e.to_string())?;
-    Ok(buf)
+    Ok((buf, on_record_boundary))
 }
 
 /// Clamp a caller-supplied line count into `1..=`[`MAX_LOG_LINES`].
@@ -148,6 +171,30 @@ mod tests {
         );
     }
 
+    /// A stat failure other than `NotFound` must surface, not pose as a
+    /// first run: an empty pane with no error is the one failure the log
+    /// viewer must not have (issue #825). A self-referential symlink gives a
+    /// deterministic `ELOOP` here, where a mode-based `EACCES` would not be
+    /// observable for a root-run test process.
+    #[cfg(unix)]
+    #[test]
+    fn test_read_log_tail_stat_failure_is_an_error_not_an_empty_history() {
+        let dir = scratch_dir("statfail");
+        let path = dir.join(LOG_FILE_NAME);
+        std::os::unix::fs::symlink(&path, &path).expect("create self-referential symlink");
+
+        let result = read_log_tail(&path, 10, LOG_TAIL_MAX_BYTES);
+        let err = result.expect_err("a stat failure must not look like a missing log");
+        assert!(
+            err.starts_with(&format!("error reading {LOG_FILE_NAME}:")),
+            "the message names the file and nothing else: {err}"
+        );
+        assert!(
+            !err.contains(dir.to_string_lossy().as_ref()),
+            "no absolute path in the message (#409 hygiene): {err}"
+        );
+    }
+
     #[test]
     fn test_read_log_tail_returns_only_the_last_limit_lines_oldest_first() {
         let dir = scratch_dir("bounded");
@@ -188,6 +235,34 @@ mod tests {
             tail.iter()
                 .all(|l| l.starts_with("line-0") && l.len() == 60),
             "no truncated record may be returned: {tail:?}"
+        );
+    }
+
+    /// A seek that lands exactly on a newline must return the record that
+    /// starts there: the byte check distinguishes a record boundary from a
+    /// mid-line seek (issue #824).
+    #[test]
+    fn test_read_log_tail_seek_on_a_newline_keeps_the_whole_first_line() {
+        let dir = scratch_dir("boundary");
+        let path = dir.join(LOG_FILE_NAME);
+        // Each line is 60 chars + '\n' = 61 bytes; 10 lines = 610 bytes.
+        let all: Vec<String> = (0..10)
+            .map(|i| format!("line-{i:04}-{}", "x".repeat(50)))
+            .collect();
+        std::fs::write(&path, all.join("\n") + "\n").expect("write log");
+
+        // 610 - 244 = 366, the exact start of line 6 — the byte before the
+        // window is line 5's '\n', so line 6 is complete and must survive.
+        let tail = read_log_tail(&path, 500, 244).expect("read tail");
+        assert_eq!(
+            tail,
+            vec![
+                all[6].clone(),
+                all[7].clone(),
+                all[8].clone(),
+                all[9].clone()
+            ],
+            "a boundary seek keeps the line at the offset"
         );
     }
 

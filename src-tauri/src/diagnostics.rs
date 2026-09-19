@@ -45,6 +45,11 @@ const LOG_TAIL_MAX_BYTES: u64 = 64 * 1024;
 /// (`file_name: Some("PresenceJam")`) — see `lib.rs::run`.
 const LOG_FILE_NAME: &str = "PresenceJam.log";
 
+/// Stem of [`LOG_FILE_NAME`]: the plugin is configured with
+/// `file_name: Some("PresenceJam")` and appends `.log` to the active file and
+/// `_<timestamp>.log` to every archive it rotates (issue #874).
+const LOG_FILE_STEM: &str = "PresenceJam";
+
 /// File-name stem for [`save_diagnostics_snapshot`] (issue #598): the
 /// snapshot is written into the platform downloads directory, which is
 /// where the old synthetic `<a download>` click claimed to put it.
@@ -72,8 +77,10 @@ pub struct DiagnosticsSnapshot {
     pub tokens: TokenMetadata,
     /// OS keychain presence flags for the two slots the app uses.
     pub keychain: KeychainStatus,
-    /// Last [`LOG_TAIL_LINES`] lines of the on-disk log, each passed
-    /// through [`redact_sensitive`].
+    /// Last [`LOG_TAIL_LINES`] lines of the on-disk log — the active file plus
+    /// any rotated archive it needed (issue #874) — each passed through
+    /// [`redact_sensitive`] and then [`strip_absolute_paths`] (issue #913), so
+    /// neither a credential nor an absolute path can reach a pasted snapshot.
     pub recent_logs: Vec<String>,
     /// Human-readable status of the log-tail collection (ok/error text).
     pub log_source_status: String,
@@ -87,8 +94,10 @@ pub struct DiagnosticsSnapshot {
     pub failed_update_install: Option<crate::updater_bg::FailedUpdateInstall>,
 }
 
-/// Coarse OS identity from `std::env::consts` (no new deps; the
-/// `tauri-plugin-os` plugin is deliberately not added for this).
+/// OS identity for the snapshot: compile-time constants from
+/// `std::env::consts` plus the runtime release probed with platform APIs
+/// (no new deps; the `tauri-plugin-os` plugin is deliberately not added
+/// for this).
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct OsInfo {
@@ -98,6 +107,17 @@ pub struct OsInfo {
     pub arch: String,
     /// `std::env::consts::FAMILY` (e.g. `"unix"` / `"windows"`).
     pub family: String,
+    /// Release of the running OS (issue #875), e.g.
+    /// `Ubuntu 24.04.1 LTS (7.0.0-31-generic)`, `macOS 14.5` or
+    /// `Windows 11 (24H2, build 26100)`. `unknown` when the probe fails;
+    /// never the hostname, machine name or a user path.
+    pub os_version: String,
+    /// How this copy was installed (issue #786), as a lowercase token:
+    /// `deb`, `rpm`, `appimage`, `msi`, `nsis`, `dmg` or `app` for a Tauri
+    /// bundle, `homebrew` for a Homebrew prefix, else `unknown`. Decides
+    /// whether an in-app update can succeed at all (the deb case fails by
+    /// design); never the executable path.
+    pub install_flavor: String,
 }
 
 /// Non-secret projection of `AppConfig`, flattened field-for-field so a
@@ -142,6 +162,32 @@ pub struct ConfigSummary {
     /// launch, so this is also how a later session can point the user at
     /// the settings it lost.
     pub config_quarantine_backup: Option<String>,
+    /// Finding #635 gate switch (issue #864): ON by default, and one of the
+    /// most common reasons a status write is held back on purpose.
+    pub respect_manual_status: bool,
+    /// Finding #637 gate switch (issue #864).
+    pub gate_when_out_of_office: bool,
+    /// Count only, like the rule counts above: the extra words are user
+    /// content and never travel (#432 rule, issue #864).
+    pub profanity_extra_words_count: usize,
+    /// Configured UI locale; `None` is the documented `"en"` default
+    /// (issue #864) — needed to reproduce anything from a translated build.
+    pub locale: Option<String>,
+    /// `stable` / `beta`: which release manifest this install consults
+    /// (issue #864).
+    pub update_channel: String,
+    /// An active snooze right now, and the whole minutes left — the reason a
+    /// long silence looks like a hang (issue #864). Derived, not the stored
+    /// deadline: [`crate::config::snooze_status`] already applies the
+    /// expiry/parse rules, and [`crate::config::snooze_minutes_left`] is the
+    /// same rounding the tray and Dashboard render.
+    pub snoozed: bool,
+    pub snooze_minutes_left: Option<i64>,
+    /// Rotation settings from `logging` (issue #874): without them a reader
+    /// cannot tell how far back the log above should reach — 64 KiB of a
+    /// 10 MB file looks the same as 64 KiB of a 1 MB one.
+    pub log_max_file_size_mb: u64,
+    pub log_keep_files: u32,
 }
 
 /// Token metadata ONLY. There is deliberately no field that could carry
@@ -586,6 +632,7 @@ fn config_summary(
     quarantine: &ConfigQuarantine,
 ) -> ConfigSummary {
     let cfg = state.config.get().clone().unwrap_or_default();
+    let snooze = crate::config::snooze_status(&cfg, chrono::Utc::now());
     ConfigSummary {
         spotify_client_id: cfg.spotify.client_id,
         redirect_uri: cfg.spotify.redirect_uri,
@@ -624,61 +671,200 @@ fn config_summary(
             .backup_name
             .as_deref()
             .and_then(quarantine_backup_field),
+        respect_manual_status: cfg.teams.respect_manual_status,
+        gate_when_out_of_office: cfg.teams.gate_when_out_of_office,
+        profanity_extra_words_count: cfg.teams.profanity_extra_words.len(),
+        locale: cfg.locale,
+        update_channel: update_channel_token(cfg.updates.channel),
+        snoozed: snooze.is_some(),
+        snooze_minutes_left: snooze
+            .map(|s| crate::config::snooze_minutes_left(s.remaining_seconds)),
+        log_max_file_size_mb: cfg.logging.max_file_size_mb,
+        log_keep_files: cfg.logging.keep_files,
     }
 }
 
-/// Tail the on-disk log file written by `tauri_plugin_log`'s `LogDir`
-/// target. Returns up to [`LOG_TAIL_LINES`] redacted lines plus a status
-/// string describing what happened (missing file is normal on first run).
-fn tail_log_file(log_dir: Option<std::path::PathBuf>) -> (Vec<String>, String) {
+/// Wire spelling of the update channel (issue #864). Mirrors the
+/// `#[serde(rename_all = "lowercase")]` contract that the Settings picker and
+/// `updates.channel` in `config.json` round-trip, so the snapshot reads the
+/// same token as the file it reports. An exhaustive match keeps a future
+/// channel from silently missing the snapshot.
+fn update_channel_token(channel: crate::config::UpdateChannel) -> String {
+    match channel {
+        crate::config::UpdateChannel::Stable => "stable",
+        crate::config::UpdateChannel::Beta => "beta",
+    }
+    .to_string()
+}
+
+/// Tail the on-disk log written by `tauri_plugin_log`'s `LogDir` target,
+/// together with the rotated archives that still hold the minutes before it
+/// (issue #874). Returns up to [`LOG_TAIL_LINES`] lines, oldest first, plus a
+/// status naming every file they came from (missing file is normal on first
+/// run).
+///
+/// `keep_files` is `logging.keep_files` — how many archives the plugin
+/// retains, and so the most this may read.
+fn tail_log_file(log_dir: Option<std::path::PathBuf>, keep_files: u32) -> (Vec<String>, String) {
     let Some(dir) = log_dir else {
         return (
             Vec::new(),
             "unavailable: could not resolve app log dir".to_string(),
         );
     };
-    let path = dir.join(LOG_FILE_NAME);
-    if !path.exists() {
-        // Username hygiene (issue #409): the absolute path embeds the OS
-        // username — snapshot strings carry only the bare file name.
-        return (Vec::new(), format!("no log file yet ({})", LOG_FILE_NAME));
-    }
-    let collected = (|| -> Result<Vec<String>, String> {
-        let len = fs::metadata(&path).map_err(|e| e.to_string())?.len();
-        let start = len - len.min(LOG_TAIL_MAX_BYTES);
-        let bytes = read_from_offset(&path, start)?;
-        let text = String::from_utf8_lossy(&bytes);
-        let mut lines: Vec<&str> = text.lines().collect();
-        // When we seeked mid-file, drop the (likely partial) first line.
-        if start > 0 && !lines.is_empty() {
-            lines.remove(0);
+
+    // Newest source first: the active file, then the archives.
+    let active = dir.join(LOG_FILE_NAME);
+    let mut merged: Vec<String> = Vec::new();
+    let mut sources: Vec<String> = Vec::new();
+    match read_tail_window(&active) {
+        Ok(Some(window)) => {
+            if !window.is_empty() {
+                sources.push(LOG_FILE_NAME.to_string());
+            }
+            merged = window;
         }
-        Ok(lines.into_iter().map(|s| s.to_string()).collect())
-    })();
-    match collected {
-        Ok(lines) => {
-            let total = lines.len();
-            // Keep chronological (oldest-first) order; take only the last
-            // LOG_TAIL_LINES lines when the file is longer.
-            let start = total.saturating_sub(LOG_TAIL_LINES);
-            let tail: Vec<String> = lines[start..].iter().map(|l| redact_sensitive(l)).collect();
-            let status = format!("ok: last {} of {} lines", tail.len(), total);
-            (tail, status)
-        }
+        // No active file yet: a first run, or a rotation that has not written
+        // one back. The archives below may still carry history.
+        Ok(None) => {}
         Err(e) => {
             // Full path stays in the local log only; the snapshot string
             // carries just the file name (issue #409).
             log::error!(
                 "[DIAG] tail_log_file: error reading {}: {}",
-                path.display(),
+                active.display(),
                 e
             );
-            (
+            return (
                 Vec::new(),
                 format!("error reading {}: {}", LOG_FILE_NAME, e),
-            )
+            );
         }
     }
+
+    // Only reach further back while the snapshot is short of its line budget.
+    for name in rotated_log_names(&dir, keep_files) {
+        if merged.len() >= LOG_TAIL_LINES {
+            break;
+        }
+        let path = dir.join(&name);
+        match read_tail_window(&path) {
+            Ok(Some(window)) if !window.is_empty() => {
+                sources.push(name);
+                // Older lines belong in front of the newer ones already held.
+                let mut group = window;
+                group.append(&mut merged);
+                merged = group;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                // An unreadable archive only costs history; the active file's
+                // own failure is the one reported above.
+                log::error!(
+                    "[DIAG] tail_log_file: error reading {}: {}",
+                    path.display(),
+                    e
+                );
+            }
+        }
+    }
+
+    if sources.is_empty() {
+        // Username hygiene (issue #409): the absolute path embeds the OS
+        // username — snapshot strings carry only the bare file name.
+        return (Vec::new(), format!("no log file yet ({})", LOG_FILE_NAME));
+    }
+
+    let total = merged.len();
+    // Keep chronological (oldest-first) order; take only the last
+    // LOG_TAIL_LINES lines when the merged window is longer.
+    //
+    // Both hygiene passes the failed-update error gets (issues #603/#409)
+    // apply here too (issue #913): `redact_sensitive` alone leaves every
+    // absolute path intact — its opaque-run mask needs 32 characters with no
+    // separator, so Windows paths split at each backslash and a short
+    // `/home/<user>/…` falls under the threshold. `strip_absolute_paths`
+    // trims each path to its bare last component, which is what the log line
+    // still needs to be useful ("Created config directory at 'PresenceJam'").
+    let start = total.saturating_sub(LOG_TAIL_LINES);
+    let tail: Vec<String> = merged[start..]
+        .iter()
+        .map(|l| strip_absolute_paths(&redact_sensitive(l)))
+        .collect();
+    let status = format!(
+        "ok: last {} of {} lines ({})",
+        tail.len(),
+        total,
+        sources.join(" + ")
+    );
+    (tail, status)
+}
+
+/// Last lines of one log file, oldest-first: at most [`LOG_TAIL_LINES`] from
+/// its final [`LOG_TAIL_MAX_BYTES`] bytes. `Ok(None)` when the file is not
+/// there (a first run, or an archive the plugin has since rotated away) and
+/// `Err` when it is there but cannot be read.
+fn read_tail_window(path: &std::path::Path) -> Result<Option<Vec<String>>, String> {
+    let len = match fs::metadata(path) {
+        Ok(md) => md.len(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.to_string()),
+    };
+    let start = len - len.min(LOG_TAIL_MAX_BYTES);
+    let bytes = read_from_offset(path, start)?;
+    let text = String::from_utf8_lossy(&bytes);
+    let mut lines: Vec<&str> = text.lines().collect();
+    // Seeking mid-file lands inside a line; that fragment is not a log record
+    // and would render as a truncated one. A seek that landed on a newline is
+    // at a record boundary, where dropping the first line would lose a whole
+    // one — so the drop is conditional on the byte before the window (the same
+    // rule `commands/logs.rs` applies for issue #824).
+    if start > 0 && !lines.is_empty() && read_byte_before(path, start) != Some(b'\n') {
+        lines.remove(0);
+    }
+    // Bound each file before merging: the byte window alone can hold far more
+    // lines than the snapshot will ever show.
+    let first = lines.len().saturating_sub(LOG_TAIL_LINES);
+    Ok(Some(
+        lines[first..].iter().map(|l| (*l).to_string()).collect(),
+    ))
+}
+
+/// The byte at `offset - 1`, or `None` when it cannot be read.
+fn read_byte_before(path: &std::path::Path, offset: u64) -> Option<u8> {
+    use std::io::{Read, Seek, SeekFrom};
+    if offset == 0 {
+        return None;
+    }
+    let mut f = fs::File::open(path).ok()?;
+    f.seek(SeekFrom::Start(offset - 1)).ok()?;
+    let mut byte = [0u8; 1];
+    f.read_exact(&mut byte).ok()?;
+    Some(byte[0])
+}
+
+/// Names of the rotated archives in `dir`, newest first, at most `keep_files`
+/// of them (issue #874).
+///
+/// The plugin renames the active file to
+/// `PresenceJam_<YYYY-MM-DD_HH-MM-SS>.log` (`tauri-plugin-log`'s
+/// `LOG_DATE_FORMAT`) and adds a `.bak` twin when that timestamp already
+/// existed. The format is fixed-width, so name order is chronological order
+/// and no date parsing is needed; `.bak` twins are skipped — they are the
+/// older duplicate of a name that is already listed.
+fn rotated_log_names(dir: &std::path::Path, keep_files: u32) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let prefix = format!("{LOG_FILE_STEM}_");
+    let mut names: Vec<String> = entries
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| name.starts_with(&prefix) && name.ends_with(".log"))
+        .collect();
+    names.sort_unstable_by(|a, b| b.cmp(a));
+    names.truncate(keep_files as usize);
+    names
 }
 
 fn read_from_offset(path: &std::path::Path, offset: u64) -> Result<Vec<u8>, String> {
@@ -706,7 +892,15 @@ fn build_snapshot(
     quarantine: ConfigQuarantine,
 ) -> DiagnosticsSnapshot {
     log::debug!("{CMD} build_snapshot: collecting local diagnostics");
-    let (recent_logs, log_source_status) = tail_log_file(log_dir);
+    // Retention bounds how many archives the tail may read (issue #874), and
+    // comes from the live config like every other value the summary reports.
+    let keep_files = state
+        .config
+        .get()
+        .as_ref()
+        .map(|cfg| cfg.logging.keep_files)
+        .unwrap_or_else(|| crate::config::LoggingConfig::default().keep_files);
+    let (recent_logs, log_source_status) = tail_log_file(log_dir, keep_files);
     DiagnosticsSnapshot {
         app_version: env!("CARGO_PKG_VERSION").to_string(),
         tauri_version: tauri::VERSION.to_string(),
@@ -714,6 +908,8 @@ fn build_snapshot(
             platform: std::env::consts::OS.to_string(),
             arch: std::env::consts::ARCH.to_string(),
             family: std::env::consts::FAMILY.to_string(),
+            os_version: os_release(),
+            install_flavor: install_flavor(),
         },
         config: config_summary(state, keychain.spotify_client_secret_present, &quarantine),
         tokens: token_metadata(state),
@@ -741,6 +937,201 @@ fn probe_keychain() -> KeychainStatus {
         spotify_client_secret_present: crate::keychain::has_spotify_client_secret(),
         tokens_encryption_key_present: crate::keychain::get_tokens_aes_key().is_ok(),
     }
+}
+
+/// Human-readable release of the running OS for `OsInfo::os_version`
+/// (issue #875). Whatever the platform probe cannot answer is folded to
+/// `unknown` rather than failing the snapshot.
+///
+/// Kept dependency-free on purpose: see the `OsInfo` doc comment.
+fn os_release() -> String {
+    #[cfg(target_os = "linux")]
+    {
+        let pretty = fs::read_to_string("/etc/os-release")
+            .ok()
+            .and_then(|raw| os_release_pretty_name(&raw));
+        let kernel = fs::read_to_string("/proc/sys/kernel/osrelease").ok();
+        compose_linux_release(pretty.as_deref(), kernel.as_deref().map(str::trim))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos_release()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        windows_release()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        "unknown".to_string()
+    }
+}
+
+/// `PRETTY_NAME` out of an `/etc/os-release` body, unquoted; a distribution
+/// that omits it falls back to `NAME VERSION_ID`, then to `NAME`.
+///
+/// Compiled for tests on every host (like [`reg_value`]), so both branches are
+/// covered off-Linux.
+#[cfg(any(target_os = "linux", test))]
+fn os_release_pretty_name(contents: &str) -> Option<String> {
+    let value = |key: &str| {
+        contents.lines().find_map(|line| {
+            let (k, v) = line.split_once('=')?;
+            if k.trim() != key {
+                return None;
+            }
+            let v = v.trim().trim_matches('"');
+            (!v.is_empty()).then(|| v.to_string())
+        })
+    };
+    value("PRETTY_NAME").or_else(|| {
+        let name = value("NAME")?;
+        Some(match value("VERSION_ID") {
+            Some(id) => format!("{name} {id}"),
+            None => name,
+        })
+    })
+}
+
+/// `Ubuntu 24.04.1 LTS (7.0.0-31-generic)`; the kernel alone when
+/// `/etc/os-release` had nothing usable, `unknown` when neither did.
+///
+/// Compiled for tests on every host, like [`os_release_pretty_name`].
+#[cfg(any(target_os = "linux", test))]
+fn compose_linux_release(pretty_name: Option<&str>, kernel: Option<&str>) -> String {
+    let kernel = kernel.filter(|k| !k.is_empty());
+    match (pretty_name, kernel) {
+        (Some(name), Some(kernel)) => format!("{name} ({kernel})"),
+        (Some(name), None) => name.to_string(),
+        (None, Some(kernel)) => format!("Linux {kernel}"),
+        (None, None) => "unknown".to_string(),
+    }
+}
+
+/// `macOS 14.5` from `sw_vers -productVersion` — the one release query macOS
+/// exposes without a crate (`std::env::consts::OS` is just `"macos"`).
+#[cfg(target_os = "macos")]
+fn macos_release() -> String {
+    let version = std::process::Command::new("sw_vers")
+        .arg("-productVersion")
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .filter(|v| !v.is_empty());
+    match version {
+        Some(v) => format!("macOS {v}"),
+        None => "unknown".to_string(),
+    }
+}
+
+/// `Windows 11 (24H2, build 26100)` from the `CurrentVersion` registry key,
+/// which `reg` reads on every supported Windows and — unlike `ver` — without
+/// a localised value name.
+#[cfg(target_os = "windows")]
+fn windows_release() -> String {
+    let output = std::process::Command::new("reg")
+        .args([
+            "query",
+            r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion",
+        ])
+        .output()
+        .ok()
+        .filter(|out| out.status.success());
+    let Some(output) = output else {
+        return "unknown".to_string();
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    windows_release_token(
+        reg_value(&text, "CurrentBuildNumber").as_deref(),
+        reg_value(&text, "DisplayVersion").as_deref(),
+        reg_value(&text, "ProductName").as_deref(),
+    )
+}
+
+/// One `<name>  <type>  <value…>` row of `reg query` output.
+///
+/// The value runs to the end of the line: registry values contain spaces
+/// (`ProductName` reads `Windows Server 2022`), so everything after the type
+/// field is joined back together.
+///
+/// Compiled for tests on every host so the parser is covered off-Windows.
+#[cfg(any(target_os = "windows", test))]
+fn reg_value(text: &str, name: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        if fields.next()? != name {
+            return None;
+        }
+        // `<type>` is `REG_SZ`/`REG_DWORD`; the value follows it.
+        fields.next()?;
+        let value = fields.collect::<Vec<_>>().join(" ");
+        (!value.is_empty()).then_some(value)
+    })
+}
+
+/// Windows release token from the registry values. The build number decides
+/// 10 versus 11 (Microsoft's own rule: 22000 and up is Windows 11) because
+/// `ProductName` still says "Windows 10" on Windows 11. Compiled for tests on
+/// every host, like [`reg_value`].
+#[cfg(any(target_os = "windows", test))]
+fn windows_release_token(
+    build: Option<&str>,
+    display_version: Option<&str>,
+    product_name: Option<&str>,
+) -> String {
+    let Some(build) = build else {
+        return match product_name {
+            Some(name) => name.to_string(),
+            None => "unknown".to_string(),
+        };
+    };
+    let generation = match build.parse::<u32>() {
+        Ok(b) if b >= 22_000 => "11",
+        Ok(_) => "10",
+        Err(_) => "?",
+    };
+    match display_version {
+        Some(dv) => format!("Windows {generation} ({dv}, build {build})"),
+        None => format!("Windows {generation} (build {build})"),
+    }
+}
+
+/// Install flavour token for `OsInfo::install_flavor` (issue #786).
+///
+/// [`tauri::utils::platform::bundle_type`] names the Tauri bundles; it cannot
+/// see a Homebrew install, which is not a bundle, so a Cellar/Caskroom/
+/// homebrew prefix on the running executable decides that case. The
+/// executable path itself never leaves these functions.
+fn install_flavor() -> String {
+    let exe = std::env::current_exe().ok();
+    install_flavor_of(tauri::utils::platform::bundle_type(), exe.as_deref())
+}
+
+/// Mapping from the bundle marker plus the executable path, parameterised so
+/// both sources are testable without a real bundle (the marker is a
+/// build-time constant).
+fn install_flavor_of(
+    bundle: Option<tauri::utils::config::BundleType>,
+    exe: Option<&std::path::Path>,
+) -> String {
+    if exe.is_some_and(is_homebrew_path) {
+        return "homebrew".to_string();
+    }
+    match bundle {
+        Some(bundle) => bundle.to_string(),
+        None => "unknown".to_string(),
+    }
+}
+
+/// Homebrew formulae live under `Cellar/`, casks under `Caskroom/`, and the
+/// prefix itself is `/opt/homebrew/` (Apple silicon) or `/usr/local/Homebrew/`
+/// (Intel).
+fn is_homebrew_path(exe: &std::path::Path) -> bool {
+    let path = exe.to_string_lossy().to_lowercase();
+    ["/cellar/", "/caskroom/", "/homebrew/"]
+        .iter()
+        .any(|marker| path.contains(marker))
 }
 
 /// Tauri command backing the Diagnostics page. Read-only, local-only,
@@ -1066,7 +1457,7 @@ mod tests {
     fn test_tail_log_file_missing_and_redacts() {
         let dir = std::env::temp_dir().join(format!("pj-diag-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let (lines, status) = tail_log_file(Some(dir.clone()));
+        let (lines, status) = tail_log_file(Some(dir.clone()), 3);
         assert!(lines.is_empty());
         assert!(status.contains("no log file yet"));
         // Issue #409: the status string must not embed the absolute dir
@@ -1079,10 +1470,15 @@ mod tests {
 
         let log_path = dir.join(LOG_FILE_NAME);
         std::fs::write(&log_path, "[AUTH] code=hunter2secret\n[AUTH] clean line\n").unwrap();
-        let (lines, _) = tail_log_file(Some(dir.clone()));
+        let (lines, status) = tail_log_file(Some(dir.clone()), 3);
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0], "[AUTH] code=[REDACTED len 13]");
         assert_eq!(lines[1], "[AUTH] clean line");
+        assert_eq!(
+            status,
+            format!("ok: last 2 of 2 lines ({LOG_FILE_NAME})"),
+            "a single-source tail names only the active file"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1094,7 +1490,7 @@ mod tests {
         // only the file — never the username-bearing absolute path.
         let dir = std::env::temp_dir().join(format!("pj-diag-err-{}", std::process::id()));
         std::fs::create_dir_all(dir.join(LOG_FILE_NAME)).unwrap();
-        let (lines, status) = tail_log_file(Some(dir.clone()));
+        let (lines, status) = tail_log_file(Some(dir.clone()), 3);
         assert!(lines.is_empty());
         assert!(status.contains("error reading"));
         assert!(status.contains(LOG_FILE_NAME));
@@ -1103,6 +1499,118 @@ mod tests {
             "error status leaked the absolute log path: {}",
             status
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Issue #874: after a rotation the snapshot must span the active file and
+    /// the newest archives, and say which files it read.
+    #[test]
+    fn test_tail_log_file_spans_the_active_file_and_the_newest_archive() {
+        let dir = std::env::temp_dir().join(format!("pj-diag-rot-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+
+        let archive = "PresenceJam_2026-09-17_04-00-01.log";
+        let active: Vec<String> = (0..3).map(|i| format!("active-{i}")).collect();
+        let rotated: Vec<String> = (0..60).map(|i| format!("arch-{i:04}")).collect();
+        std::fs::write(dir.join(LOG_FILE_NAME), active.join("\n") + "\n").expect("write active");
+        std::fs::write(dir.join(archive), rotated.join("\n") + "\n").expect("write archive");
+        // A `.bak` twin of a *different* archive must not be read.
+        std::fs::write(
+            dir.join("PresenceJam_2026-09-16_04-00-01.log.bak"),
+            "bak-0000\nbak-0001\n",
+        )
+        .expect("write bak twin");
+
+        let (lines, status) = tail_log_file(Some(dir.clone()), 3);
+
+        assert_eq!(
+            lines.len(),
+            LOG_TAIL_LINES,
+            "the budget still caps the tail"
+        );
+        // The oldest surviving line comes from the archive: merged is the
+        // archive's last 50 lines with the 3 active lines appended, and the
+        // final 50 of those start 3 lines into the archive.
+        assert_eq!(lines[0], "arch-0013");
+        assert_eq!(lines[46], "arch-0059", "the archive meets the active file");
+        assert_eq!(&lines[47..], &active[..], "the active file stays newest");
+        assert!(
+            !lines.iter().any(|l| l.starts_with("bak-")),
+            "a `.bak` twin is not history: {lines:?}"
+        );
+
+        assert!(
+            status.starts_with(&format!("ok: last {} of 53 lines (", LOG_TAIL_LINES)),
+            "status: {status}"
+        );
+        assert!(status.contains(LOG_FILE_NAME), "status: {status}");
+        assert!(status.contains(archive), "status: {status}");
+        assert!(
+            !status.contains(dir.to_str().expect("utf-8 dir")),
+            "status leaked the absolute log path: {status}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// After a rotation the active file can be absent (the plugin writes a
+    /// fresh one only on the next write) while the archives still hold the
+    /// history: the tail must come from them, and the status must say so.
+    #[test]
+    fn test_tail_log_file_reads_archives_when_the_active_file_is_gone() {
+        let dir = std::env::temp_dir().join(format!("pj-diag-noactive-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        let archive = "PresenceJam_2026-09-17_04-00-01.log";
+        let rotated: Vec<String> = (0..5).map(|i| format!("arch-{i:04}")).collect();
+        std::fs::write(dir.join(archive), rotated.join("\n") + "\n").expect("write archive");
+
+        let (lines, status) = tail_log_file(Some(dir.clone()), 3);
+
+        assert_eq!(lines, rotated, "the archive alone is the history");
+        assert_eq!(
+            status,
+            format!("ok: last 5 of 5 lines ({archive})"),
+            "the status names only the file the lines came from"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The archive prefix has to be the active file's stem or the tail would
+    /// silently stop seeing rotations.
+    #[test]
+    fn test_log_file_stem_matches_the_active_file_name() {
+        assert_eq!(format!("{LOG_FILE_STEM}.log"), LOG_FILE_NAME);
+    }
+
+    #[test]
+    fn test_rotated_log_names_are_newest_first_and_skip_bak_twins() {
+        let dir = std::env::temp_dir().join(format!("pj-diag-names-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        let older = "PresenceJam_2026-09-15_04-00-01.log";
+        let newer = "PresenceJam_2026-09-17_04-00-01.log";
+        for name in [
+            older,
+            newer,
+            "PresenceJam_2026-09-16_04-00-01.log.bak",
+            LOG_FILE_NAME,
+            "unrelated.log",
+        ] {
+            std::fs::write(dir.join(name), "x\n").expect("write candidate");
+        }
+
+        assert_eq!(
+            rotated_log_names(&dir, 5),
+            vec![newer.to_string(), older.to_string()],
+            "newest first, `.bak` twins and other files skipped"
+        );
+        assert_eq!(
+            rotated_log_names(&dir, 1),
+            vec![newer.to_string()],
+            "logging.keep_files bounds how far back the tail may read"
+        );
+        assert!(rotated_log_names(&dir, 0).is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1370,5 +1878,360 @@ mod tests {
             "snapshot leaked a config path: {json}"
         );
         assert!(!json.contains("pj/config.json.bak"), "{json}");
+    }
+
+    // ---------------------------------------------------------------
+    // U10 (#875): the snapshot names the OS *release*, not just the
+    // platform token.
+    // ---------------------------------------------------------------
+
+    /// Keychain state for snapshot tests — the probes are irrelevant to the
+    /// assembly contract and must not touch the real OS keychain.
+    fn inert_keychain() -> KeychainStatus {
+        KeychainStatus {
+            spotify_client_secret_present: false,
+            tokens_encryption_key_present: false,
+        }
+    }
+
+    #[test]
+    fn test_os_release_pretty_name_reads_os_release() {
+        let body = "NAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nPRETTY_NAME=\"Ubuntu 24.04.1 LTS\"\n";
+        assert_eq!(
+            os_release_pretty_name(body).as_deref(),
+            Some("Ubuntu 24.04.1 LTS")
+        );
+        // Older/minimal distributions may carry only NAME and VERSION_ID.
+        assert_eq!(
+            os_release_pretty_name("NAME=Alpine\nVERSION_ID=3.20\n").as_deref(),
+            Some("Alpine 3.20")
+        );
+        assert_eq!(
+            os_release_pretty_name("NAME=Alpine\n").as_deref(),
+            Some("Alpine")
+        );
+        // An empty PRETTY_NAME is not a name: the fallback still applies.
+        assert_eq!(
+            os_release_pretty_name("PRETTY_NAME=\"\"\nNAME=Debian\n").as_deref(),
+            Some("Debian")
+        );
+        assert_eq!(os_release_pretty_name("ID=linux\n"), None);
+    }
+
+    #[test]
+    fn test_compose_linux_release_names_the_kernel_alongside_the_distro() {
+        assert_eq!(
+            compose_linux_release(Some("Ubuntu 24.04.1 LTS"), Some("6.8.0-45-generic")),
+            "Ubuntu 24.04.1 LTS (6.8.0-45-generic)"
+        );
+        assert_eq!(
+            compose_linux_release(Some("Ubuntu 24.04"), None),
+            "Ubuntu 24.04"
+        );
+        // A kernel-only read still beats `unknown`.
+        assert_eq!(compose_linux_release(None, Some("6.8.0")), "Linux 6.8.0");
+        assert_eq!(compose_linux_release(None, None), "unknown");
+    }
+
+    #[test]
+    fn test_reg_value_reads_a_reg_query_row() {
+        let out = "\r\nHKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\r\n    CurrentBuildNumber    REG_SZ    26100\r\n    DisplayVersion    REG_SZ    24H2\r\n    ProductName    REG_SZ    Windows Server 2022\r\n\r\n";
+        assert_eq!(
+            reg_value(out, "CurrentBuildNumber").as_deref(),
+            Some("26100")
+        );
+        assert_eq!(reg_value(out, "DisplayVersion").as_deref(), Some("24H2"));
+        // The value runs to the end of the line: `ProductName` is multi-word,
+        // and stopping at the first space reported "Windows" (D1 review).
+        assert_eq!(
+            reg_value(out, "ProductName").as_deref(),
+            Some("Windows Server 2022")
+        );
+        assert_eq!(reg_value(out, "Missing"), None);
+    }
+
+    #[test]
+    fn test_windows_release_token_distinguishes_ten_from_eleven() {
+        // Microsoft's own rule — build 22000 and up is Windows 11 — because
+        // `ProductName` still says "Windows 10" on Windows 11.
+        assert_eq!(
+            windows_release_token(Some("26100"), Some("24H2"), Some("Windows 10 Pro")),
+            "Windows 11 (24H2, build 26100)"
+        );
+        assert_eq!(
+            windows_release_token(Some("19045"), Some("22H2"), Some("Windows 10 Pro")),
+            "Windows 10 (22H2, build 19045)"
+        );
+        assert_eq!(
+            windows_release_token(Some("22631"), None, None),
+            "Windows 11 (build 22631)"
+        );
+        // An unreadable build leaves the product name rather than a guess.
+        assert_eq!(
+            windows_release_token(None, None, Some("Windows Server 2022")),
+            "Windows Server 2022"
+        );
+        assert_eq!(windows_release_token(None, None, None), "unknown");
+    }
+
+    #[test]
+    fn test_snapshot_os_version_is_populated_on_this_platform() {
+        let snapshot = build_snapshot(
+            &crate::AppState::default(),
+            None,
+            inert_keychain(),
+            None,
+            ConfigQuarantine::default(),
+        );
+        assert!(
+            !snapshot.os.os_version.is_empty(),
+            "the snapshot must name an OS release, not an empty string"
+        );
+        #[cfg(target_os = "linux")]
+        {
+            // The probe reads the host, so the release must match the file it
+            // reads it from — a stubbed field would not.
+            assert_ne!(snapshot.os.os_version, "unknown");
+            let kernel =
+                fs::read_to_string("/proc/sys/kernel/osrelease").expect("read the kernel release");
+            assert!(
+                snapshot.os.os_version.contains(kernel.trim()),
+                "the kernel release travels with the distro name: {}",
+                snapshot.os.os_version
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // U22 (#786): the snapshot names how the copy was installed.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_install_flavor_distinguishes_bundles_from_a_homebrew_prefix() {
+        use tauri::utils::config::BundleType;
+        let flavor = |bundle, exe: &str| install_flavor_of(bundle, Some(std::path::Path::new(exe)));
+
+        // The marker decides the bundled cases; the path is irrelevant there.
+        assert_eq!(
+            flavor(Some(BundleType::Deb), "/usr/bin/presence-jam"),
+            "deb"
+        );
+        assert_eq!(
+            flavor(Some(BundleType::AppImage), "/tmp/.mount_pj/presence-jam"),
+            "appimage"
+        );
+        assert_eq!(
+            flavor(
+                Some(BundleType::Msi),
+                r"C:\Program Files\PresenceJam\presence-jam.exe"
+            ),
+            "msi"
+        );
+        assert_eq!(
+            flavor(
+                Some(BundleType::App),
+                "/Applications/PresenceJam.app/Contents/MacOS/presence-jam"
+            ),
+            "app"
+        );
+
+        // Homebrew is not a Tauri bundle: the prefix is the only tell, and it
+        // also catches a .app that Homebrew staged in the Caskroom.
+        assert_eq!(
+            flavor(
+                Some(BundleType::App),
+                "/opt/homebrew/Cellar/presencejam/4.7.0/bin/presence-jam"
+            ),
+            "homebrew"
+        );
+        assert_eq!(
+            flavor(
+                None,
+                "/usr/local/Caskroom/presencejam/4.7.0/PresenceJam.app/Contents/MacOS/presence-jam"
+            ),
+            "homebrew"
+        );
+
+        // An unbundled run and an unreadable executable path are `unknown`,
+        // never a guess (nor a panic).
+        assert_eq!(
+            flavor(None, "/home/jack/dev/target/debug/presence-jam"),
+            "unknown"
+        );
+        assert_eq!(install_flavor_of(None, None), "unknown");
+    }
+
+    #[test]
+    fn test_snapshot_os_install_flavor_matches_this_binary() {
+        // The bundle marker is patched into a real bundle at build time; a
+        // cargo test binary is not one, so the field must hold the documented
+        // fallback for this platform rather than a hardcoded token.
+        let snapshot = build_snapshot(
+            &crate::AppState::default(),
+            None,
+            inert_keychain(),
+            None,
+            ConfigQuarantine::default(),
+        );
+        let expected = if cfg!(target_os = "macos") {
+            "app"
+        } else {
+            "unknown"
+        };
+        assert_eq!(
+            snapshot.os.install_flavor, expected,
+            "an unbundled Linux/Windows binary reports the fallback token"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // U10 (#864): the config summary carries the switches, locale and
+    // channel a support reader needs.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_config_summary_reports_gating_switches_locale_channel_and_snooze() {
+        let state = crate::AppState::default();
+        {
+            let mut cfg = crate::config::AppConfig::default();
+            cfg.teams.respect_manual_status = false;
+            cfg.teams.gate_when_out_of_office = true;
+            cfg.teams.profanity_extra_words =
+                vec!["frobnicate".into(), "wibble".into(), "wobble".into()];
+            cfg.locale = Some("de-AT".into());
+            cfg.updates.channel = crate::config::UpdateChannel::Beta;
+            cfg.logging.max_file_size_mb = 25;
+            cfg.logging.keep_files = 7;
+            cfg.snooze_until =
+                Some((chrono::Utc::now() + chrono::Duration::minutes(30)).to_rfc3339());
+            *state.config.get_mut() = Some(cfg);
+        }
+
+        let snapshot = build_snapshot(
+            &state,
+            None,
+            inert_keychain(),
+            None,
+            ConfigQuarantine::default(),
+        );
+        let config = &snapshot.config;
+        assert!(
+            !config.respect_manual_status,
+            "the switch is reported as set"
+        );
+        assert!(config.gate_when_out_of_office);
+        assert_eq!(config.locale.as_deref(), Some("de-AT"));
+        assert_eq!(config.update_channel, "beta");
+        assert_eq!(config.profanity_extra_words_count, 3);
+        assert_eq!(config.log_max_file_size_mb, 25);
+        assert_eq!(config.log_keep_files, 7);
+        assert!(config.snoozed, "a running snooze must be visible");
+        let minutes = config.snooze_minutes_left.expect("snooze minutes");
+        assert!(
+            (25..=30).contains(&minutes),
+            "minutes left are rounded up from the deadline, got {minutes}"
+        );
+
+        // The words themselves are user content and must not travel (#432).
+        let json = serde_json::to_string(&snapshot).expect("serialize snapshot");
+        assert!(!json.contains("frobnicate"), "{json}");
+        assert!(!json.contains("wibble"), "{json}");
+    }
+
+    #[test]
+    fn test_config_summary_snooze_state_is_absent_without_a_deadline() {
+        let state = crate::AppState::default();
+        let snapshot = build_snapshot(
+            &state,
+            None,
+            inert_keychain(),
+            None,
+            ConfigQuarantine::default(),
+        );
+        assert!(!snapshot.config.snoozed);
+        assert_eq!(snapshot.config.snooze_minutes_left, None);
+    }
+
+    #[test]
+    fn test_update_channel_token_matches_the_serde_spelling() {
+        use crate::config::UpdateChannel;
+        // The token must be the on-disk spelling, not a Debug rendering.
+        assert_eq!(update_channel_token(UpdateChannel::Stable), "stable");
+        assert_eq!(update_channel_token(UpdateChannel::Beta), "beta");
+    }
+
+    // ---------------------------------------------------------------
+    // U10 (#913): no log line may carry an absolute path into the snapshot.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_snapshot_log_tail_carries_no_absolute_path_or_username() {
+        let dir = std::env::temp_dir().join(format!("pj-diag-hyg-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        // The two shapes the app really logs (`[CFG]` at startup and
+        // `commands/window.rs` on the Logs button) plus a control line.
+        std::fs::write(
+            dir.join(LOG_FILE_NAME),
+            concat!(
+                "[CFG] Loaded configuration from 'C:\\Users\\jack\\AppData\\Roaming\\PresenceJam\\config.json'\n",
+                "[CFG] Created config directory at '/home/jack/.config/PresenceJam'\n",
+                "[CFG] window open ok\n",
+                "[CMD.WINDOW] open_logs_folder: log path=/home/jack/.local/share/com.presencejam.app/logs\n",
+            ),
+        )
+        .expect("write log");
+
+        let snapshot = build_snapshot(
+            &crate::AppState::default(),
+            Some(dir.clone()),
+            inert_keychain(),
+            None,
+            ConfigQuarantine::default(),
+        );
+        let json = serde_json::to_string(&snapshot).expect("serialize snapshot");
+
+        // Neither username may survive, on either separator convention.
+        assert!(
+            !json.contains("jack"),
+            "snapshot leaked the OS username: {json}"
+        );
+        assert!(!json.contains("Users"), "{json}");
+        assert!(!json.contains("AppData"), "{json}");
+        assert!(!json.contains("/home/"), "{json}");
+        assert!(
+            !json.contains(dir.to_str().expect("utf-8 dir")),
+            "snapshot leaked the absolute log path: {json}"
+        );
+        // ...while the bare last component keeps the line useful and the
+        // unrelated control line is untouched.
+        assert!(
+            snapshot
+                .recent_logs
+                .iter()
+                .any(|l| l == "[CFG] window open ok"),
+            "the control line changed: {:?}",
+            snapshot.recent_logs
+        );
+        assert!(
+            json.contains("config.json"),
+            "the file name still tells support what failed: {json}"
+        );
+        let lines = &snapshot.recent_logs;
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "[CFG] Loaded configuration from 'config.json'"),
+            "the Windows path is trimmed to its bare file name: {lines:?}"
+        );
+        // 30 characters, so pass 2's >= 32-char opaque-run mask never fires:
+        // this is the line that reached the snapshot verbatim before #913.
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "[CFG] Created config directory at 'PresenceJam'"),
+            "a short Unix path survives redaction and needs the hygiene pass: {lines:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
