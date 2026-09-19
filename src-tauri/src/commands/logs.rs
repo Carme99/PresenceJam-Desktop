@@ -45,10 +45,10 @@ const LOG_FILE_NAME: &str = "PresenceJam.log";
 const MAX_LOG_LINES: usize = 500;
 
 /// Cap on how many trailing bytes are read before splitting lines. The
-/// plugin rotates this file at ~40 KB (`DEFAULT_MAX_FILE_SIZE` in
-/// tauri-plugin-log), so this is a safety net for a hand-grown file rather
-/// than the normal case; the line clamp above is what bounds the payload.
-const LOG_TAIL_MAX_BYTES: u64 = 256 * 1024;
+/// plugin rotates this file at `logging.max_file_size_mb` (default `10`,
+/// i.e. 10 MB — `config::default_max_file_size_mb`), so this is a safety
+/// net for a hand-grown file rather than the normal case; the line clamp
+/// above is what bounds the payload.
 
 /// Read up to `limit` trailing lines of `path`, oldest first.
 ///
@@ -69,8 +69,12 @@ fn read_log_tail(path: &Path, limit: usize, max_bytes: u64) -> Result<Vec<String
     let text = String::from_utf8_lossy(&bytes);
     let mut lines: Vec<&str> = text.lines().collect();
     // Seeking mid-file lands inside a line; that fragment is not a log
-    // record and would render as a truncated one — drop it.
-    if start > 0 && !lines.is_empty() {
+    // record and would render as a truncated one — drop it. A seek that
+    // landed exactly on a newline is at a record boundary though, and the
+    // first split line is then whole: dropping it would lose a complete
+    // record, so the drop is conditional on the byte before the window
+    // (issue #824).
+    if start > 0 && !lines.is_empty() && byte_before(path, start) != Some(b'\n') {
         lines.remove(0);
     }
     let first = lines.len().saturating_sub(limit);
@@ -86,6 +90,24 @@ fn read_from_offset(path: &Path, offset: u64) -> Result<Vec<u8>, String> {
     let mut buf = Vec::new();
     f.read_to_end(&mut buf).map_err(|e| e.to_string())?;
     Ok(buf)
+}
+
+/// The byte at `offset - 1`, or `None` when it cannot be read.
+///
+/// Used to decide whether a byte-window seek landed inside a line or on a
+/// record boundary (issue #824). An unreadable byte is treated as "not a
+/// newline" by the caller, which keeps the conservative behaviour of
+/// dropping the first fragment.
+fn byte_before(path: &Path, offset: u64) -> Option<u8> {
+    use std::io::{Read, Seek, SeekFrom};
+    if offset == 0 {
+        return None;
+    }
+    let mut f = std::fs::File::open(path).ok()?;
+    f.seek(SeekFrom::Start(offset - 1)).ok()?;
+    let mut byte = [0u8; 1];
+    f.read_exact(&mut byte).ok()?;
+    Some(byte[0])
 }
 
 /// Clamp a caller-supplied line count into `1..=`[`MAX_LOG_LINES`].
@@ -188,6 +210,29 @@ mod tests {
             tail.iter()
                 .all(|l| l.starts_with("line-0") && l.len() == 60),
             "no truncated record may be returned: {tail:?}"
+        );
+    }
+
+    /// A seek that lands exactly on a newline must return the record that
+    /// starts there: the byte check distinguishes a record boundary from a
+    /// mid-line seek (issue #824).
+    #[test]
+    fn test_read_log_tail_seek_on_a_newline_keeps_the_whole_first_line() {
+        let dir = scratch_dir("boundary");
+        let path = dir.join(LOG_FILE_NAME);
+        // Each line is 60 chars + '\n' = 61 bytes; 10 lines = 610 bytes.
+        let all: Vec<String> = (0..10)
+            .map(|i| format!("line-{i:04}-{}", "x".repeat(50)))
+            .collect();
+        std::fs::write(&path, all.join("\n") + "\n").expect("write log");
+
+        // 610 - 244 = 366, the exact start of line 6 — the byte before the
+        // window is line 5's '\n', so line 6 is complete and must survive.
+        let tail = read_log_tail(&path, 500, 244).expect("read tail");
+        assert_eq!(
+            tail,
+            vec![all[6].clone(), all[7].clone(), all[8].clone(), all[9].clone()],
+            "a boundary seek keeps the line at the offset"
         );
     }
 
