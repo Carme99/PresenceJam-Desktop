@@ -2450,6 +2450,15 @@ pub fn export_document(cfg: &AppConfig) -> Result<String, String> {
         spotify.remove("client_secret_set");
         spotify.remove("client_secret_state");
     }
+    // S9 (issue #975): the snooze deadline is RUNTIME state — "pause sync until
+    // then" on THIS machine — not a setting. An export is advertised as a
+    // shareable settings copy, so a file exported while sync was paused would
+    // otherwise hand the recipient the exporter's still-future deadline: that
+    // install performs no Spotify or Graph work until it passes, and nothing in
+    // the import flow says a pause came with the file.
+    if let Some(root) = value.as_object_mut() {
+        root.remove("snooze_until");
+    }
     serde_json::to_string_pretty(&value)
         .map_err(|e| format!("Failed to serialize config to JSON: {}", e))
 }
@@ -2516,6 +2525,13 @@ pub fn prepare_import(raw: &str) -> Result<PreparedImport, String> {
     // as soon as the import lands.
     config.spotify.client_secret_set = false;
     config.spotify.client_secret_state = ClientSecretState::Absent;
+
+    // Issue #975: an imported document must never start life paused. The
+    // deadline belongs to the exporting machine's runtime state — the export
+    // above no longer writes it — and an older or hand-edited file that still
+    // carries a future one would silence this machine's polling until it
+    // passed, with nothing in the UI explaining why.
+    config.snooze_until = None;
 
     let document = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize imported config to JSON: {}", e))?;
@@ -5656,5 +5672,54 @@ mod tests {
             vec!["list[0].client_secret".to_string()]
         );
         assert!(paths(&serde_json::json!({"spotify": {"client_id": "abc"}})).is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // Issue #975: the snooze deadline is runtime state, never a setting.
+    // -----------------------------------------------------------------
+
+    /// Issue #975: an export is advertised as a shareable settings copy, so it
+    /// must not carry "pause sync until then" from the exporting machine — the
+    /// recipient reads a live deadline as "sync is broken".
+    #[test]
+    fn test_export_never_carries_the_snooze_deadline() {
+        let cfg = AppConfig {
+            snooze_until: Some("2999-01-01T00:00:00Z".to_string()),
+            ..AppConfig::default()
+        };
+        let document = export_document(&cfg).expect("must export");
+        assert!(
+            !document.contains("snooze_until"),
+            "an export must not carry the deadline: {document}"
+        );
+        assert!(!document.contains("2999"), "{document}");
+        // Still a settings copy.
+        let value: serde_json::Value = serde_json::from_str(&document).unwrap();
+        assert!(value.get("teams").is_some(), "{document}");
+        assert_eq!(value["schema_version"], SCHEMA_VERSION);
+    }
+
+    /// Issue #975, the other direction: a document that still carries a FUTURE
+    /// deadline (an older export, a hand-edit) must leave the importing machine
+    /// syncing, and the rewritten document must not carry the key either.
+    #[test]
+    fn test_import_clears_a_future_snooze_deadline() {
+        let prepared = prepare_import(
+            r#"{"snooze_until": "2999-01-01T00:00:00Z", "autostart": true,
+                "teams": {"status_format": "🎧 {track}"}}"#,
+        )
+        .expect("must import");
+        assert_eq!(
+            prepared.config.snooze_until, None,
+            "an imported document must never start life paused"
+        );
+        assert!(
+            !prepared.document.contains("snooze_until"),
+            "{}",
+            prepared.document
+        );
+        let written: serde_json::Value = serde_json::from_str(&prepared.document).unwrap();
+        assert_eq!(written["autostart"], true);
+        assert_eq!(written["teams"]["status_format"], "🎧 {track}");
     }
 }
