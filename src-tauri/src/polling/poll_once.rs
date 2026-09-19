@@ -25,7 +25,7 @@ use rand::Rng;
 use serde_json::json;
 use tauri::{AppHandle, Emitter};
 
-use crate::config::{AppConfig, PresencePair};
+use crate::config::{AppConfig, PresencePair, TrackRuleMatchKind};
 use crate::profanity;
 use crate::spotify::{
     format_status_with_context, get_currently_playing, is_token_expired, refresh_spotify_token,
@@ -1904,6 +1904,24 @@ fn rule_gate_at(
     artist: &str,
     title: &str,
 ) -> RuleDecision {
+    let ctx = TrackRuleContext {
+        artist,
+        title,
+        ..TrackRuleContext::default()
+    };
+    rule_gate_at_with_ctx(config, now_minutes, weekday, &ctx)
+}
+
+/// Issue #868: the rich-context variant. The legacy `rule_gate_at` is
+/// the thin wrapper this delegates to; the live `process_track` calls
+/// this so a track / episode's album / show / device / playlist-uri /
+/// duration feed into the rule walker.
+fn rule_gate_at_with_ctx(
+    config: &Option<AppConfig>,
+    now_minutes: u16,
+    weekday: u8,
+    ctx: &TrackRuleContext<'_>,
+) -> RuleDecision {
     let Some(cfg) = config.as_ref() else {
         return RuleDecision::default();
     };
@@ -1929,19 +1947,72 @@ fn rule_gate_at(
             preferred,
         );
     }
-    match matching_track_rule_at(&cfg.status_rules, now_minutes, weekday, artist, title) {
-        Some(rule) => decision_from(
-            GATE_REASON_TRACK_RULE,
-            &rule.replacement_status,
-            &rule.presence_availability,
-            &rule.presence_activity,
-            preferred,
-        ),
+    match matching_track_rule_at_with_ctx(&cfg.status_rules, now_minutes, weekday, ctx) {
+        Some(rule) => decision_from_rule(rule, preferred),
         // No rule match: preferred presence is scoped to rules and snoozes.
         // The default listening session is the only `setPresence` arm that
         // runs when no rule fires; preferred presence would be a regression
         // outside that scope (issue #866 acceptance criteria).
         None => RuleDecision::default(),
+    }
+}
+
+/// Issue #868: assemble the rule decision from the matched rule's
+/// `action`, NOT just the legacy flat fields — but a `Suppress` rule
+/// with a populated legacy `replacement_status` keeps the documented
+/// "post this text instead of the track template" behaviour so the
+/// pre-#868 Settings UI does not silently lose its rule text. The
+/// `action` field's `Replace { status }` / `Presence { availability,
+/// activity }` variants are the canonical path; the legacy flat
+/// fields are the fallback for users who edited their config (or used
+/// the Settings picker) before the `action` enum existed.
+fn decision_from_rule(
+    rule: &crate::config::TrackRuleEntry,
+    preferred: Option<PresencePair>,
+) -> RuleDecision {
+    match &rule.action {
+        crate::config::TrackRuleAction::Suppress => {
+            // Legacy flat-field fallback: a `replacement_status` with
+            // no `action: Replace` still posts the user's fixed text.
+            // Same idea for the presence pair — a populated
+            // presence_availability / presence_activity with no
+            // `action: Presence` keeps applying the legacy pair.
+            decision_from(
+                GATE_REASON_TRACK_RULE,
+                &rule.replacement_status,
+                &rule.presence_availability,
+                &rule.presence_activity,
+                preferred,
+            )
+        }
+        crate::config::TrackRuleAction::Replace { status } => {
+            decision_from(GATE_REASON_TRACK_RULE, status, "", "", preferred)
+        }
+        crate::config::TrackRuleAction::SnoozeMinutes { .. } => {
+            // The snooze is an orthogonal effect the rule walker
+            // arms through `TrackRuleAction` — the decision itself
+            // is still the "suppress for this track" rule gate, so
+            // the existing `presence-gated` emitter does not need to
+            // change. The snooze fires when `process_track` consumes
+            // the matched rule.
+            decision_from(GATE_REASON_TRACK_RULE, "", "", "", preferred)
+        }
+        crate::config::TrackRuleAction::Profile { .. } => {
+            // Same shape as `SnoozeMinutes`: the profile switch is an
+            // orthogonal effect; the rule gate decision stays
+            // "presence-gated, suppress this track".
+            decision_from(GATE_REASON_TRACK_RULE, "", "", "", preferred)
+        }
+        crate::config::TrackRuleAction::Presence {
+            availability,
+            activity,
+        } => decision_from(
+            GATE_REASON_TRACK_RULE,
+            "",
+            availability,
+            activity,
+            preferred,
+        ),
     }
 }
 
@@ -2569,20 +2640,159 @@ fn rearm_availability_after_304(
     )
 }
 
-/// Issue #432: track-rule match. Both non-empty substrings must match
-/// (case-insensitive); an empty substring matches everything. Pure so the
-/// matching semantics are unit-testable.
-fn track_rule_hit(rule: &crate::config::TrackRuleEntry, artist: &str, title: &str) -> bool {
+/// Issue #868: the inputs the new rule dimensions look at, decoupled from
+/// `TrackInfo` so the dry-run tester in `commands::rules::explain_rules`
+/// can drive the rule walker with synthetic data (a typed fake track
+/// rather than a real Spotify `TrackInfo`). Every field is optional —
+/// a rule that doesn't look at album passes `None` for album; a rule
+/// that doesn't look at device passes `None` for device; the dry-run
+/// tester simply mirrors what the real `process_track` path would
+/// provide.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TrackRuleContext<'a> {
+    pub artist: &'a str,
+    pub title: &'a str,
+    pub album: &'a str,
+    pub show: &'a str,
+    pub device: &'a str,
+    pub playlist_uri: &'a str,
+    pub duration_ms: u64,
+}
+
+/// Issue #432 / issue #868: track-rule match. Each non-empty condition
+/// must hold (case-insensitive); an empty condition matches anything.
+/// `match_kind` only governs `artist_substring` / `track_substring` —
+/// the album / show / device / playlist-uri extensions stay substring
+/// matches because they are extension surfaces, not primary
+/// identifiers, and the Settings UI only exposes a substring field for
+/// them. `negate` flips the result so an empty match list still wins
+/// when the negation's conditions match. Pure so the matching
+/// semantics are unit-testable.
+pub(crate) fn track_rule_hit(
+    rule: &crate::config::TrackRuleEntry,
+    ctx: &TrackRuleContext<'_>,
+) -> bool {
     if !rule.enabled {
         return false;
     }
-    let artist_lc = artist.to_lowercase();
-    let title_lc = title.to_lowercase();
-    let artist_ok = rule.artist_substring.is_empty()
-        || artist_lc.contains(&rule.artist_substring.to_lowercase());
+    let matched = track_rule_conditions_match(rule, ctx);
+    if rule.negate {
+        !matched
+    } else {
+        matched
+    }
+}
+
+/// Evaluate the combined conditions WITHOUT applying `negate`. Issue
+/// #868: shared between the live walker and the dry-run tester so the
+/// "what would fire" projection and the actual firing share one
+/// definition of "matched".
+pub(crate) fn track_rule_conditions_match(
+    rule: &crate::config::TrackRuleEntry,
+    ctx: &TrackRuleContext<'_>,
+) -> bool {
+    // Duration gate (issue #868). `0` disables the gate so the legacy
+    // `min_duration_seconds` absent default continues to mean "every
+    // duration is OK".
+    if rule.min_duration_seconds > 0
+        && ctx.duration_ms < u64::from(rule.min_duration_seconds) * 1000
+    {
+        return false;
+    }
+    if !track_rule_substring_field_matches(
+        ctx.album,
+        &rule.album_substring,
+        TrackRuleMatchKind::Substring,
+    ) {
+        return false;
+    }
+    if !track_rule_substring_field_matches(
+        ctx.show,
+        &rule.show_substring,
+        TrackRuleMatchKind::Substring,
+    ) {
+        return false;
+    }
+    if !track_rule_substring_field_matches(
+        ctx.device,
+        &rule.device_substring,
+        TrackRuleMatchKind::Substring,
+    ) {
+        return false;
+    }
+    if !track_rule_substring_field_matches(
+        ctx.playlist_uri,
+        &rule.playlist_uri,
+        TrackRuleMatchKind::Substring,
+    ) {
+        return false;
+    }
+    let artist_ok =
+        track_rule_substring_field_matches(ctx.artist, &rule.artist_substring, rule.match_kind);
     let title_ok =
-        rule.track_substring.is_empty() || title_lc.contains(&rule.track_substring.to_lowercase());
+        track_rule_substring_field_matches(ctx.title, &rule.track_substring, rule.match_kind);
     artist_ok && title_ok
+}
+
+/// A single field comparison honouring the rule's `match_kind`. Empty
+/// patterns always match — the documented "match anything" behaviour so
+/// a rule with only one field set still works.
+fn track_rule_substring_field_matches(
+    haystack: &str,
+    pattern: &str,
+    kind: crate::config::TrackRuleMatchKind,
+) -> bool {
+    if pattern.is_empty() {
+        return true;
+    }
+    match kind {
+        crate::config::TrackRuleMatchKind::Substring => {
+            haystack.to_lowercase().contains(&pattern.to_lowercase())
+        }
+        crate::config::TrackRuleMatchKind::Exact => haystack.eq_ignore_ascii_case(pattern),
+        crate::config::TrackRuleMatchKind::Glob => glob_match_ignore_ascii_case(pattern, haystack),
+    }
+}
+
+/// Case-insensitive `glob`-style match: `*` matches any run (including
+/// empty), `?` matches exactly one character, all other characters match
+/// themselves literally. Anchored on both ends. Issue #868: deliberately
+/// simple — no `[abc]` / `[!abc]` / backslash-escape handling — so the
+/// Settings UI can preview the pattern without exposing a syntax that
+/// the runtime cannot parse. `O(|pattern| * |haystack|)` time, `O(|haystack|)`
+/// space — plenty for the 128-char patterns the Settings UI exposes.
+fn glob_match_ignore_ascii_case(pattern: &str, haystack: &str) -> bool {
+    let pat = pattern.as_bytes();
+    let txt = haystack.as_bytes();
+    // `prev[j]` = "the pattern so far matched the first `j` chars of
+    // haystack". Rolling array lets us reuse one row per pattern char.
+    let mut prev: Vec<bool> = vec![false; txt.len() + 1];
+    prev[0] = true;
+    for (i, &pb) in pat.iter().enumerate() {
+        let mut curr = vec![false; txt.len() + 1];
+        if pb == b'*' {
+            // `*` matches the empty string AND any suffix of every
+            // position the previous row already accepted.
+            for j in 0..=txt.len() {
+                curr[j] = prev[j] || (j > 0 && curr[j - 1]);
+            }
+        } else {
+            for j in 1..=txt.len() {
+                let char_matches = pb == b'?' || pb.eq_ignore_ascii_case(&txt[j - 1]);
+                curr[j] = prev[j - 1] && char_matches;
+            }
+        }
+        // Sanity: bail out early when nothing in the row is reachable
+        // so a long non-matching pattern does not iterate the rest of
+        // the haystack. (Cosmetic; the function still terminates
+        // without this guard.)
+        if !curr.iter().any(|&b| b) {
+            return false;
+        }
+        prev = curr;
+        let _ = i;
+    }
+    prev[txt.len()]
 }
 
 /// S4 (issue #672): whether a rule's `days` / `start_minutes` / `end_minutes`
@@ -2591,8 +2801,10 @@ fn track_rule_hit(rule: &crate::config::TrackRuleEntry, artist: &str, title: &st
 /// applies every day, the window is `[start, end)` with wrap-around
 /// (`start > end`, e.g. 22:00→07:00) honoured, and `start == end` matches
 /// nothing. `end_minutes == 1440` is the end of the day, so the default window
-/// covers every minute.
-fn track_rule_schedule_matches(
+/// covers every minute. Issue #868: `pub(crate)` because
+/// `commands::rules::explain_rules` runs the same walker the live
+/// `process_track` path uses.
+pub(crate) fn track_rule_schedule_matches(
     rule: &crate::config::TrackRuleEntry,
     now_minutes: u16,
     weekday: u8,
@@ -2615,11 +2827,19 @@ fn track_rule_schedule_matches(
     }
 }
 
-/// Issue #432 + S4 (issue #672): the first enabled track rule whose substrings
-/// match this track AND whose schedule contains the given local time.
-///
-/// Array order is priority — the first match wins — so the Settings card states
-/// that explicitly and offers move-up/move-down controls.
+/// Issue #432 + S4 (issue #672) + issue #868: the first enabled track
+/// rule whose conditions match this track AND whose schedule contains
+/// the given local time. Array order is priority — the first match
+/// wins — so the Settings card states that explicitly and offers
+/// move-up/move-down controls. The `SyntheticTrack` analogue
+/// (`matching_track_rule_at_with_ctx`) is the dry-run hook
+/// `commands::rules::explain_rules` calls; this helper is the legacy
+/// real-track entry point that builds the rich context from the
+/// `TrackInfo` already in scope. `#[cfg(test)]` because the live path
+/// now calls [`matching_track_rule_at_with_ctx`] directly with the
+/// real `TrackRuleContext`, so the legacy 4-arg wrapper exists only
+/// to keep the legacy unit tests below readable.
+#[cfg(test)]
 fn matching_track_rule_at<'a>(
     rules: &'a crate::config::StatusRulesConfig,
     now_minutes: u16,
@@ -2627,9 +2847,27 @@ fn matching_track_rule_at<'a>(
     artist: &str,
     title: &str,
 ) -> Option<&'a crate::config::TrackRuleEntry> {
+    let ctx = TrackRuleContext {
+        artist,
+        title,
+        ..TrackRuleContext::default()
+    };
+    matching_track_rule_at_with_ctx(rules, now_minutes, weekday, &ctx)
+}
+
+/// Issue #868: the rich-context variant of [`matching_track_rule_at`].
+/// Used by both `process_track` (with the album / show / device /
+/// playlist-uri the live path now feeds in) and
+/// `commands::rules::explain_rules` (with the synthetic track the
+/// Settings dry-run tester types in).
+pub(crate) fn matching_track_rule_at_with_ctx<'a>(
+    rules: &'a crate::config::StatusRulesConfig,
+    now_minutes: u16,
+    weekday: u8,
+    ctx: &TrackRuleContext<'_>,
+) -> Option<&'a crate::config::TrackRuleEntry> {
     rules.track_rules.iter().find(|rule| {
-        track_rule_schedule_matches(rule, now_minutes, weekday)
-            && track_rule_hit(rule, artist, title)
+        track_rule_schedule_matches(rule, now_minutes, weekday) && track_rule_hit(rule, ctx)
     })
 }
 
@@ -3574,13 +3812,26 @@ pub(crate) fn process_track(
             // falls into the presence re-check below.
             if gated_track_key.as_deref() == Some(track_key.as_str()) {
                 let (cur_minutes, cur_weekday) = local_minutes_and_weekday();
-                let current_rule = rule_gate_at(
-                    config,
-                    cur_minutes,
-                    cur_weekday,
-                    &track.artist,
-                    &track.title,
-                );
+                // Issue #868: feed the album / show / device /
+                // playlist-uri / duration the live path already has into
+                // the rule walker so a mid-track re-check honours the
+                // new conditions.
+                let show_name = now
+                    .episode
+                    .as_ref()
+                    .map(|e| e.show_name.as_str())
+                    .unwrap_or("");
+                let track_ctx = TrackRuleContext {
+                    artist: &track.artist,
+                    title: &track.title,
+                    album: &track.album,
+                    show: show_name,
+                    device: &now.context.device,
+                    playlist_uri: &now.context.playlist,
+                    duration_ms: track.duration_ms,
+                };
+                let current_rule =
+                    rule_gate_at_with_ctx(config, cur_minutes, cur_weekday, &track_ctx);
                 let remaining_ms =
                     corrected_progress_ms.map(|c| track.duration_ms.saturating_sub(c));
                 // Issue #867: calendar pre-gate re-evaluates here too. The
@@ -6442,22 +6693,40 @@ mod tests {
             replacement_status: String::new(),
             ..TrackRuleEntry::default()
         };
+        // Inline the `TrackRuleContext` so the borrow checker does not
+        // need to chase a closure's lifetime through every call site.
         assert!(track_rule_hit(
             &rule(true, "lofi", ""),
-            "LoFi Girl",
-            "Anything"
+            &TrackRuleContext {
+                artist: "LoFi Girl",
+                title: "Anything",
+                ..TrackRuleContext::default()
+            },
         ));
         assert!(track_rule_hit(
             &rule(true, "", "rain"),
-            "Anyone",
-            "Rain Sounds"
+            &TrackRuleContext {
+                artist: "Anyone",
+                title: "Rain Sounds",
+                ..TrackRuleContext::default()
+            },
         ));
         assert!(!track_rule_hit(
             &rule(true, "lofi", "rain"),
-            "Lofi Girl",
-            "Sunshine"
+            &TrackRuleContext {
+                artist: "Lofi Girl",
+                title: "Sunshine",
+                ..TrackRuleContext::default()
+            },
         ));
-        assert!(!track_rule_hit(&rule(false, "", ""), "Anyone", "Anything"));
+        assert!(!track_rule_hit(
+            &rule(false, "", ""),
+            &TrackRuleContext {
+                artist: "Anyone",
+                title: "Anything",
+                ..TrackRuleContext::default()
+            },
+        ));
         let rules = StatusRulesConfig {
             quiet_hours: Vec::new(),
             // First rule disabled (never hits even though empty matches

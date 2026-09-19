@@ -533,7 +533,10 @@ const QUIET_HOURS_DAY_MINUTES: u16 = 1440;
 /// windows ([`clamp_quiet_hours_window`] for quiet hours, issue #821;
 /// [`clamp_track_rule_window`] for track rules, issue #672). Mirrors
 /// `clamp_polling` / `clamp_teams`, so it runs on load and on every save through
-/// [`clamped_config`].
+/// [`clamped_config`]. Issue #868 adds the action's nested text / value / id
+/// normalization through [`clamp_track_rule_action`] — the SINGLE
+/// normalizer the spec mandates, so a hand-edited config cannot smuggle a
+/// 200-character status or a 100 000-minute snooze past the IPC boundary.
 fn clamp_rules(cfg: &mut StatusRulesConfig) {
     for entry in &mut cfg.quiet_hours {
         clamp_presence_pair(
@@ -547,6 +550,73 @@ fn clamp_rules(cfg: &mut StatusRulesConfig) {
         clamp_presence_pair(&mut rule.presence_availability, &mut rule.presence_activity);
         clamp_rule_text(&mut rule.replacement_status);
         clamp_track_rule_window(rule);
+        clamp_track_rule_action(rule);
+    }
+}
+
+/// Normalize a track rule's `action` field (issue #868). The legacy
+/// flat fields (`replacement_status`, `presence_availability` /
+/// `presence_activity`) are also mirrored INTO the action so the rule
+/// walker and the dry-run tester share one projection — a rule that
+/// sets `replacement_status` but keeps `action: Suppress` continues to
+/// behave like the legacy "post this fixed text" replacement, but a
+/// rule that sets `action: Replace { status: "…" }` now uses the new
+/// field verbatim. The `min_duration_seconds` cap mirrors the same
+/// paranoia as the `clamp_teams` caps — a hand-edited config cannot
+/// put the duration gate in a permanently-firing state.
+fn clamp_track_rule_action(rule: &mut TrackRuleEntry) {
+    rule.min_duration_seconds = rule.min_duration_seconds.min(MAX_TRACK_RULE_DURATION_SECS);
+    match &mut rule.action {
+        TrackRuleAction::Suppress => {
+            // No fields to clamp.
+        }
+        TrackRuleAction::Replace { status } => {
+            clamp_rule_text(status);
+        }
+        TrackRuleAction::SnoozeMinutes { value } => {
+            // 1..=1440 minutes (24 hours); an empty / zero value falls
+            // back to the legacy SnoozePreset::ForMinutes(15) default
+            // when the rule fires, so the gate can still act.
+            if *value == 0 {
+                *value = 15;
+            }
+            *value = (*value).clamp(1, MAX_TRACK_RULE_SNOOZE_MINUTES);
+        }
+        TrackRuleAction::Profile { id } => {
+            clamp_profile_id(id);
+        }
+        TrackRuleAction::Presence {
+            availability,
+            activity,
+        } => {
+            clamp_presence_pair(availability, activity);
+        }
+    }
+}
+
+/// Upper bound on `min_duration_seconds` (issue #868): 24 h. Mirrors
+/// the 60 minute pre-meeting cap and the `clamp_teams` upper bounds so
+/// a hand-edited config cannot wedge the duration gate in a
+/// permanently-matching state.
+pub const MAX_TRACK_RULE_DURATION_SECS: u32 = 24 * 60 * 60;
+
+/// Upper bound on `SnoozeMinutes.value` (issue #868): 24 h.
+pub const MAX_TRACK_RULE_SNOOZE_MINUTES: u32 = 24 * 60;
+
+/// Issue #869: shared cap on a presence profile's `id`. Also reused by
+/// `clamp_track_rule_action` for `TrackRuleAction::Profile { id }`.
+pub const MAX_PROFILE_ID_CHARS: usize = 32;
+
+/// Issue #869: trim / cap a presence profile id (and the matching
+/// `TrackRuleAction::Profile { id }`). Whitespace is stripped from the
+/// edges; the result is truncated to [`MAX_PROFILE_ID_CHARS`]; an empty
+/// id stays empty so the rule walker treats it as `Suppress`.
+pub fn clamp_profile_id(id: &mut String) {
+    let trimmed = id.trim().to_string();
+    if trimmed.chars().count() > MAX_PROFILE_ID_CHARS {
+        *id = trimmed.chars().take(MAX_PROFILE_ID_CHARS).collect();
+    } else {
+        *id = trimmed;
     }
 }
 
@@ -1077,12 +1147,70 @@ fn default_track_rule_end() -> u32 {
     TRACK_RULE_DAY_MINUTES
 }
 
-/// One track-matching rule for issue #432: when `artist_substring` /
-/// `track_substring` (case-insensitive) both match the current track, the
-/// rule suppresses the status write for this track exactly like the
-/// presence gate — flowing through the same `gated_track_key`
-/// suppression + mid-track re-evaluation path. Empty substrings match
-/// everything (so a rule with only one field set still works).
+/// Issue #868: how `artist_substring` / `track_substring` are compared
+/// against the playing track. Substring is the legacy behaviour (case-
+/// insensitive `contains`); Exact requires a full case-insensitive
+/// equality; Glob treats the two substrings as case-insensitive glob
+/// patterns (`*` matches any run, `?` matches one character) evaluated
+/// independently. Album / show / device / playlist-uri remain substring
+/// matches regardless of `match_kind` — they are extension surfaces, not
+/// primary identifiers, and the Settings UI exposes only the substring
+/// field for them.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, ts_rs::TS, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
+pub enum TrackRuleMatchKind {
+    #[default]
+    Substring,
+    Exact,
+    Glob,
+}
+
+/// Issue #868: what happens when a track rule matches. `Suppress` is the
+/// documented "write nothing" default; `Replace` posts a fixed status text
+/// instead of the track template; `SnoozeMinutes { value }` arms the snooze
+/// for `value` minutes; `Profile { id }` switches the active presence
+/// profile for the duration of the track; `Presence { availability,
+/// activity }` applies a Teams presence pair while the track plays. The
+/// legacy `replacement_status` + `presence_availability` /
+/// `presence_activity` fields continue to feed the `Replace` / `Presence`
+/// variants during the transition — see `explain_rules` for the canonical
+/// "what would fire" projection.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
+pub enum TrackRuleAction {
+    /// Default: write nothing for this track (suppress the status update).
+    #[default]
+    Suppress,
+    /// Post a fixed status text instead of the track template.
+    Replace { status: String },
+    /// Snooze sync for `value` minutes (clamped into 1..=1440 by
+    /// `clamp_track_rule_action`).
+    SnoozeMinutes { value: u32 },
+    /// Switch the active presence profile for this track. `id` is the
+    /// profile name from `AppConfig::presence_profiles`; a missing id is
+    /// treated as `Suppress` by the rule walker.
+    Profile { id: String },
+    /// Apply a Teams presence pair for the duration of the track. The pair
+    /// is normalized against [`PRESENCE_COMBINATIONS`] by `clamp_rules`
+    /// exactly like the legacy `presence_availability` /
+    /// `presence_activity` fields.
+    Presence {
+        availability: String,
+        activity: String,
+    },
+}
+
+/// One track-matching rule for issue #432 / issue #868: when the
+/// substring conditions AND the album / show / device / playlist-uri
+/// extensions AND the duration gate all match, the rule's `action` runs.
+/// Issue #868 also adds `negate` so an empty match list still wins when
+/// the negation's conditions match (a "suppress on the absence of a
+/// device substring" pattern), plus `match_kind` and the new
+/// `action` enum. Empty substrings match everything (so a rule with
+/// only one field set still works); `min_duration_seconds == 0` skips the
+/// duration gate.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct TrackRuleEntry {
@@ -1092,8 +1220,43 @@ pub struct TrackRuleEntry {
     pub artist_substring: String,
     #[serde(default)]
     pub track_substring: String,
+    /// Issue #868: how `artist_substring` / `track_substring` are compared.
+    /// Defaults to `Substring` (the legacy case-insensitive `contains`).
+    #[serde(default)]
+    pub match_kind: TrackRuleMatchKind,
+    /// Issue #868: substring matched against the track's album title
+    /// (empty = match any album).
+    #[serde(default)]
+    pub album_substring: String,
+    /// Issue #868: substring matched against the episode's show name when
+    /// the playing item is a podcast episode (empty = match any show or any
+    /// track).
+    #[serde(default)]
+    pub show_substring: String,
+    /// Issue #868: substring matched against the active Spotify device's
+    /// name (empty = match any device).
+    #[serde(default)]
+    pub device_substring: String,
+    /// Issue #868: substring matched against the playing context URI
+    /// (e.g. `spotify:playlist:abc…`). Empty = match any context.
+    #[serde(default)]
+    pub playlist_uri: String,
+    /// Issue #868: minimum track / episode duration, in seconds, for this
+    /// rule to match. `0` (the default) disables the gate. Capped at 86 400
+    /// (24 h) by `clamp_track_rule_action` so a hand-edited config cannot
+    /// put the gate in a permanently-firing state.
+    #[serde(default)]
+    pub min_duration_seconds: u32,
+    /// Issue #868: when `true`, the rule matches the NEGATION of the
+    /// combined conditions (the "suppress unless something matches"
+    /// pattern). `false` (the default) keeps the legacy "match if the
+    /// conditions hold" semantics.
+    #[serde(default)]
+    pub negate: bool,
     /// Optional fixed status posted instead of suppressing (issue #432
-    /// "busy/focus" alternative). Empty = suppress silently.
+    /// "busy/focus" alternative, retained for the legacy
+    /// `TrackRuleAction::Replace { status: … }` projection).
+    /// Empty = suppress silently.
     #[serde(default)]
     pub replacement_status: String,
     /// setPresence pair applied while this rule matches (finding #634, issue
@@ -1104,6 +1267,11 @@ pub struct TrackRuleEntry {
     pub presence_availability: String,
     #[serde(default)]
     pub presence_activity: String,
+    /// Issue #868: the rule's effect. Defaults to `Suppress`, the legacy
+    /// "write nothing for this track" outcome. `clamp_rules` normalizes
+    /// the inner text / value / id fields into their canonical forms.
+    #[serde(default)]
+    pub action: TrackRuleAction,
     /// S4 (issue #672): ISO weekday numbers 1 (Mon)..=7 (Sun) this rule
     /// applies on; empty = every day — the same shape and semantics
     /// [`QuietHoursEntry::days`] uses, normalized by `clamp_rules` (see
@@ -1129,9 +1297,17 @@ impl Default for TrackRuleEntry {
             enabled: false,
             artist_substring: String::new(),
             track_substring: String::new(),
+            match_kind: TrackRuleMatchKind::default(),
+            album_substring: String::new(),
+            show_substring: String::new(),
+            device_substring: String::new(),
+            playlist_uri: String::new(),
+            min_duration_seconds: 0,
+            negate: false,
             replacement_status: String::new(),
             presence_availability: String::new(),
             presence_activity: String::new(),
+            action: TrackRuleAction::default(),
             days: default_track_rule_days(),
             start_minutes: default_track_rule_start(),
             end_minutes: default_track_rule_end(),
@@ -3739,6 +3915,7 @@ mod tests {
             replacement_status: "Focus".to_string(),
             presence_availability: "DoNotDisturb".to_string(),
             presence_activity: "Presenting".to_string(),
+            ..TrackRuleEntry::default()
         });
         cfg.extra
             .insert("future_key".to_string(), serde_json::json!({"a": 1}));

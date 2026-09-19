@@ -1932,6 +1932,7 @@ pub fn run() {
             commands::playback::set_volume,
             commands::playback::seek,
             history::get_presence_history,
+            commands::rules::explain_rules,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

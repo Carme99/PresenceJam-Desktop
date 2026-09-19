@@ -72,6 +72,63 @@
   let availabilityTimeout: ReturnType<typeof setTimeout> | null = null;
   const AVAILABILITY_CLEARED_DISMISS_MS = 5000;
   let displayError = $state('');
+
+  // Issue #868: the "why" row's expanded state. The body re-asks
+  // `explain_rules` with the current track each time the user opens
+  // the details, so the verdict always reflects the live rule set —
+  // a stale rule that has since been edited still reports "this was
+  // the rule that was active when the gate fired" because the panel
+  // re-runs on open, not continuously.
+  let gateWhyOpen = $state(false);
+  let gateWhyResult = $state<{
+    matched_index: number | null;
+    summary: string;
+  } | null>(null);
+  let gateWhyBusy = $state(false);
+  let gateWhyError = $state('');
+
+  $effect(() => {
+    if (!gateWhyOpen) return;
+    if (!$presence.gated) {
+      gateWhyResult = null;
+      gateWhyError = '';
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      gateWhyBusy = true;
+      gateWhyError = '';
+      try {
+        const now = new Date();
+        const now_minutes = now.getHours() * 60 + now.getMinutes();
+        // JS `getDay()` returns 0 (Sun) .. 6 (Sat); the rule walker
+        // expects ISO 1 (Mon) .. 7 (Sun), so shift.
+        const weekday = ((now.getDay() + 6) % 7) + 1;
+        const synthetic = {
+          artist: currentTrack?.artist ?? '',
+          track: currentTrack?.title ?? '',
+          album: currentTrack?.album ?? '',
+          show: '',
+          device: '',
+          playlist_uri: '',
+          duration_ms: currentTrack?.duration_ms ?? 0,
+        };
+        const result = (await invoke('explain_rules', {
+          nowMinutes: now_minutes,
+          weekday,
+          syntheticTrack: synthetic,
+        })) as { matched_index: number | null; summary: string };
+        if (!cancelled) gateWhyResult = result;
+      } catch (e) {
+        if (!cancelled) gateWhyError = typeof e === 'string' ? e : '';
+      } finally {
+        if (!cancelled) gateWhyBusy = false;
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  });
   // #547/#670: the preview is the last status the poll loop confirmed it
   // posted (or the paused placeholder while a track is paused), so it
   // survives a remount; the fallback copy only applies when nothing has been
@@ -784,6 +841,42 @@
   <main>
     {#if $presence.gated}
       <div class="presence-chip" role="status">{gatedLabel}</div>
+      <!-- Issue #868: expandable "why" row. The presence-gated reason
+           the backend already publishes (see `presence-gated` event in
+           poll_once) is the headline; the user clicks to expand the
+           detail panel that maps the reason onto a per-rule verdict
+           via the dry-run tester. The tester always reflects the
+           CURRENT rule set, so a rule that fired five minutes ago and
+           has since been edited still explains "this was the rule that
+           was active when the gate fired". -->
+      <details class="gate-why" bind:open={gateWhyOpen}>
+        <summary>
+          {gateWhyOpen ? t('dashboard.gateWhyHide') : t('dashboard.gateWhyShow')}
+        </summary>
+        {#if gateWhyOpen}
+          <div class="gate-why-body">
+            {#if gateWhyResult}
+              <p class="gate-why-headline">
+                {#if gateWhyResult.matched_index !== null && gateWhyResult.matched_index !== undefined}
+                  {t('rules.testSummaryRuleMatched', {
+                    index: gateWhyResult.matched_index + 1,
+                    summary: gateWhyResult.summary,
+                  })}
+                {:else}
+                  {t('rules.testSummaryNoMatch')}
+                {/if}
+              </p>
+              <p class="gate-why-reason">{gatedLabel}</p>
+            {:else if gateWhyBusy}
+              <p class="hint">{t('rules.testRunning')}</p>
+            {:else if gateWhyError}
+              <p class="hint error" role="status">{gateWhyError}</p>
+            {:else}
+              <p class="hint">{t('dashboard.gateWhyEmpty')}</p>
+            {/if}
+          </div>
+        {/if}
+      </details>
     {/if}
     {#if snoozeActive}
       <!-- S9 (issue #677): the tray snooze, mirrored from the persisted config
@@ -1130,6 +1223,37 @@
   .snooze-resume:disabled {
     cursor: default;
     opacity: 0.6;
+  }
+
+  /* Issue #868: the "why is the status paused?" row. The native
+     `<details>` element gives keyboard / screen-reader affordance for
+     free, so the panel expands on focus and Enter / Space alike. */
+  .gate-why {
+    align-self: flex-start;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    padding: var(--sp-2) var(--sp-3);
+    font-size: var(--fs-sm);
+    color: var(--fg);
+    max-width: 36rem;
+  }
+  .gate-why summary {
+    cursor: pointer;
+    font-weight: 600;
+  }
+  .gate-why-body {
+    padding-top: var(--sp-2);
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+  }
+  .gate-why-headline {
+    font-weight: 600;
+  }
+  .gate-why-reason {
+    color: var(--fg-muted);
+    font-size: var(--fs-xs, 0.75rem);
   }
 
   .setup-card {

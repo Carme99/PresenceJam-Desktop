@@ -27,6 +27,17 @@ pub(crate) use poll_once::MUSIC_EMOJI;
 pub(crate) use poll_once::{
     cas_refresh_or_discard, clear_presence_on_exit, load_write_clocks, run_oneshot, CasOutcome,
 };
+// Issue #868: the rule walker (TrackRuleContext, track_rule_hit,
+// track_rule_conditions_match, track_rule_schedule_matches) is the
+// dry-run tester's source of truth — `commands::rules::explain_rules`
+// runs it against a Settings-typed synthetic track, so the same
+// walker the live `process_track` path uses feeds the IPC boundary
+// too. `matching_track_rule_at_with_ctx` is the public-in-this-crate
+// entry point the live path calls; the rule walker pieces are
+// re-exported for the IPC path to compose the same evaluation.
+pub(crate) use poll_once::{
+    track_rule_conditions_match, track_rule_hit, track_rule_schedule_matches, TrackRuleContext,
+};
 pub use state::{start_polling, stop_polling};
 
 use tauri::{AppHandle, Emitter};
