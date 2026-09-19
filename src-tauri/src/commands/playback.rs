@@ -209,7 +209,8 @@ pub fn get_spotify_granted_scopes(state: State<'_, Arc<crate::AppState>>) -> Opt
 
 #[cfg(test)]
 mod tests {
-    use super::concurrent_refresh_won;
+    use super::{concurrent_refresh_won, friendly_playback_error};
+    use crate::spotify::SpotifyApiError;
 
     /// Brace-counted body isolation (house style — never boundary anchors,
     /// which drift). Returns the byte range of the fn body starting at its
@@ -297,6 +298,12 @@ mod tests {
     /// `try_refresh_spotify_token`, so the policy lives in one place.
     /// Issue #586: the policy is the typed core the tray also calls —
     /// `player_with_refresh` is only its friendly-message wrapper.
+    ///
+    /// Source-level by necessity: `player_with_refresh_typed` starts by reading
+    /// a stored token and can pay for a network refresh, so a unit test cannot
+    /// reach it — the injected-closure seam would change the signature the tray
+    /// depends on. The scan pins that both refresh paths and the
+    /// concurrent-refresh check stay inside the one policy.
     #[test]
     fn test_player_with_refresh_owns_both_refresh_paths() {
         let source = include_str!("playback.rs");
@@ -337,6 +344,48 @@ mod tests {
         assert!(
             concurrent_refresh_won("a", ""),
             "any difference counts as a concurrent refresh win"
+        );
+    }
+
+    /// Issue #761: every player command returns this wording, so the two tiers
+    /// a user can act on have to keep their instruction — "pick a device" is
+    /// the fix for no-active-device, and the Premium line is the only place the
+    /// account limitation is named. Executed rather than scanned: the scan
+    /// above pins the wiring, this pins the strings.
+    #[test]
+    fn friendly_playback_error_names_the_action_for_every_tier() {
+        assert_eq!(
+            friendly_playback_error(SpotifyApiError::NoActiveDevice),
+            "No active playback device - pick one from the tray Devices menu"
+        );
+        assert_eq!(
+            friendly_playback_error(SpotifyApiError::NotPremium),
+            "Playback control requires Spotify Premium"
+        );
+        // An expired token and an invalid grant both need a re-auth, but they
+        // are not the same failure: one is recoverable by refreshing, the other
+        // means the stored grant is dead.
+        assert_eq!(
+            friendly_playback_error(SpotifyApiError::ExpiredToken),
+            "Spotify session expired - reconnect from Settings"
+        );
+        assert_eq!(
+            friendly_playback_error(SpotifyApiError::InvalidGrant),
+            "Spotify session invalid - reconnect from Settings"
+        );
+        // A 429 keeps the server's hint when it sent one.
+        assert_eq!(
+            friendly_playback_error(SpotifyApiError::RateLimited(Some(12))),
+            "Spotify is rate limiting requests (retry after 12s)"
+        );
+        assert_eq!(
+            friendly_playback_error(SpotifyApiError::RateLimited(None)),
+            "Spotify is rate limiting requests"
+        );
+        // Anything else is surfaced verbatim rather than swallowed.
+        assert_eq!(
+            friendly_playback_error(SpotifyApiError::Other("player said no".to_string())),
+            "player said no"
         );
     }
 }

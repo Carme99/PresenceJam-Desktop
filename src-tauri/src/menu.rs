@@ -210,31 +210,58 @@ pub fn rebuild_app_menu(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Handle menu events from the app menu bar.
-pub fn handle_app_menu_event(app: &AppHandle, event_id: &str) {
+/// The action one application-menu id selects.
+///
+/// The id → action half of the menu handling is a pure function so it can be
+/// asserted without an `AppHandle` (issues #761/#778); the effects stay in
+/// [`handle_app_menu_event`], which is the only match over this type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppMenuAction {
+    /// Show and focus the main window on this frontend view.
+    Navigate(&'static str),
+    /// Ask the frontend to reveal the logs folder.
+    OpenLogsFolder,
+    ShowAbout,
+    /// Drain the poller and exit — never a bare `exit`, see
+    /// [`request_graceful_shutdown`].
+    Quit,
+}
+
+/// Map an application-menu id to the action it triggers, or `None` for an id
+/// this menu never installs.
+fn app_menu_action(event_id: &str) -> Option<AppMenuAction> {
     match event_id {
-        ID_SETTINGS => {
-            let _ = app.emit("navigate", "settings");
+        ID_SETTINGS => Some(AppMenuAction::Navigate("settings")),
+        ID_OPEN_LOGS => Some(AppMenuAction::OpenLogsFolder),
+        ID_QUIT => Some(AppMenuAction::Quit),
+        ID_SHOW_DASHBOARD => Some(AppMenuAction::Navigate("dashboard")),
+        ID_SHOW_LOGS => Some(AppMenuAction::Navigate("logs")),
+        ID_ABOUT => Some(AppMenuAction::ShowAbout),
+        _ => None,
+    }
+}
+
+/// Handle menu events from the app menu bar.
+///
+/// The Quit arm is the load-bearing one: it must reach
+/// [`request_graceful_shutdown`], which emits `app-shutdown` and waits out the
+/// bounded grace, instead of exiting under a live polling thread (#383/#415).
+pub fn handle_app_menu_event(app: &AppHandle, event_id: &str) {
+    match app_menu_action(event_id) {
+        Some(AppMenuAction::Navigate(view)) => {
+            let _ = app.emit("navigate", view);
             show_and_focus_main_window(app);
         }
-        ID_OPEN_LOGS => {
+        Some(AppMenuAction::OpenLogsFolder) => {
             let _ = app.emit("open-logs-folder", ());
         }
-        ID_QUIT => {
+        Some(AppMenuAction::Quit) => {
             request_graceful_shutdown(app);
         }
-        ID_SHOW_DASHBOARD => {
-            let _ = app.emit("navigate", "dashboard");
-            show_and_focus_main_window(app);
-        }
-        ID_SHOW_LOGS => {
-            let _ = app.emit("navigate", "logs");
-            show_and_focus_main_window(app);
-        }
-        ID_ABOUT => {
+        Some(AppMenuAction::ShowAbout) => {
             let _ = app.emit("show-about", ());
         }
-        _ => {
+        None => {
             log::warn!(
                 "[MENU] handle_app_menu_event: unknown event_id={}",
                 event_id
@@ -245,10 +272,17 @@ pub fn handle_app_menu_event(app: &AppHandle, event_id: &str) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     /// Issue #415: the app-menu Quit path must give the frontend's `app_exit`
     /// drain time to run (polling stop + staged-update install) instead of a
-    /// fixed 500 ms sleep-then-exit. Brace-counted body isolation
-    /// (order-independent): do not anchor on the next fn.
+    /// fixed 500 ms sleep-then-exit.
+    ///
+    /// Source-level by necessity: the body is an emit, a watchdog thread and an
+    /// `AppHandle::exit`, so observing it means exiting the test process. The
+    /// scan pins the policy in the one place that implements it — no fixed
+    /// sleep, a bounded grace, a drain check, an unconditional exit — and the
+    /// id → action half is asserted behaviourally below.
     #[test]
     fn quit_arm_uses_bounded_graceful_shutdown() {
         let src = include_str!("menu.rs");
@@ -316,11 +350,15 @@ mod tests {
         );
     }
 
-    /// Issue #383: the app-menu Quit handler must stay wired through
+    /// Issue #383: the Quit action must stay wired through
     /// `request_graceful_shutdown` so the forced exit cannot be dropped
     /// without this test failing.
+    ///
+    /// Source-level by necessity: the arm's effect needs a live `AppHandle`
+    /// (emit + `AppHandle::exit` on the watchdog thread), so the scan pins the
+    /// wiring and `app_menu_ids_map_to_their_action` pins which id reaches it.
     #[test]
-    fn quit_handler_routes_through_graceful_shutdown() {
+    fn quit_action_routes_through_graceful_shutdown() {
         let src = include_str!("menu.rs");
         let sig_idx = src
             .find("fn handle_app_menu_event(")
@@ -348,13 +386,36 @@ mod tests {
             }
         };
         let body = &src[body_start + 1..body_end];
+        // The arm the builder wires `ID_QUIT` to, read after the mapping
+        // itself — asserted behaviourally by `app_menu_ids_map_to_their_action`.
         let quit_pos = body
-            .find("ID_QUIT =>")
-            .expect("handle_app_menu_event must handle ID_QUIT");
+            .find("AppMenuAction::Quit)")
+            .expect("handle_app_menu_event must handle the Quit action");
         let tail = &body[quit_pos..];
         assert!(
             tail.contains("request_graceful_shutdown(app)"),
             "ID_QUIT arm must route through request_graceful_shutdown"
         );
+    }
+
+    /// Issue #761/#778: the menu ids are the only link between the native menu
+    /// items the builder installs and what the app actually does, and a typo in
+    /// one is invisible at runtime — the item simply stops working. The mapping
+    /// is asserted by running it, including an id this menu never installs,
+    /// which must not fall through to any action.
+    #[test]
+    fn app_menu_ids_map_to_their_action() {
+        let cases = [
+            (ID_SETTINGS, AppMenuAction::Navigate("settings")),
+            (ID_OPEN_LOGS, AppMenuAction::OpenLogsFolder),
+            (ID_QUIT, AppMenuAction::Quit),
+            (ID_SHOW_DASHBOARD, AppMenuAction::Navigate("dashboard")),
+            (ID_SHOW_LOGS, AppMenuAction::Navigate("logs")),
+            (ID_ABOUT, AppMenuAction::ShowAbout),
+        ];
+        for (id, action) in cases {
+            assert_eq!(app_menu_action(id), Some(action));
+        }
+        assert_eq!(app_menu_action("not-a-menu-id"), None);
     }
 }
