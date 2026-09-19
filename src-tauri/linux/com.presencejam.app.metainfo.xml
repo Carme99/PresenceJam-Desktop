@@ -67,6 +67,23 @@
   <content_rating type="oars-1.1"/>
   <releases>
     <!-- Newest first. release.yml asserts the top entry matches the tag. -->
+    <release version="5.0.0" date="2026-09-19">
+      <description>
+        <p>
+          The v5.0.0 audit cut — eleven wave-1 + six wave-3 PRs close 47 issues
+          across commands, polling, onboarding, release-pipeline, tray,
+          lib-shell, presence, gating, outlook, profiles, serve and daemon. New
+          surfaces: a token-guarded localhost HTTP control + event API
+          (<code>--serve</code>), a supervised headless daemon
+          (<code>--daemon</code>), an OS-presentation + desktop-idle presence
+          gate, an Outlook calendar pre-gate, an Outlook working-hours
+          importer, named presence profiles switchable from the tray and CLI,
+          a <code>PlaybackSource</code> trait with SMTC + MPRIS sources for
+          non-Premium users, and a bounded status-decision history with a
+          Dashboard Activity card.
+        </p>
+      </description>
+    </release>
     <release version="4.7.0" date="2026-09-17">
       <description>
         <p>
