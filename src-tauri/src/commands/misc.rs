@@ -128,6 +128,12 @@ pub async fn relaunch_app(window: tauri::Window, app: AppHandle) -> Result<(), S
     super::require_main_window(&window)?;
     log::info!("{CMD} relaunch_app: ENTRY");
     tauri::async_runtime::spawn_blocking(move || {
+        // Issue #806: a payload still staged for "Install on quit" must not
+        // survive this restart — `app.restart()` fires `RunEvent::Exit`,
+        // which runs `install_pending_on_exit` and would install the staged
+        // version on top of the one just installed. Discard it first; the
+        // helper is a no-op when nothing is staged.
+        crate::updater_bg::discard_staged_update(&app);
         app.restart();
         // app.restart() never returns; this is unreachable, but keep a
         // fallback error shape for the type checker.

@@ -13,6 +13,81 @@ use tauri::{AppHandle, Emitter};
 /// Log tag prefix for this submodule (issue #79 item 3).
 const CMD: &str = "[CMD.SYNC]";
 
+/// Issue #809: the explicit-start session guard.
+///
+/// `start_syncing_with` used to gate only on `is_syncing`, so a user whose
+/// tokens had just been cleared — the poller's `invalid_grant` path clears
+/// them mid-session, and `reconnect_spotify_session` clears them too — could
+/// press Resume sync and get "Syncing" plus a "Pause Sync" tray entry while
+/// the poller slept in its tolerant no-token branch
+/// (`poll_once`: "No Spotify tokens available, waiting...") and nothing ever
+/// reached Teams. That tolerant sleep is the right answer to a mid-session
+/// loss a later reconnect heals; it is the wrong answer to an explicit user
+/// request nothing can satisfy.
+///
+/// Returns the machine-readable code naming the missing side, so the
+/// Dashboard toggle, the tray toggle and the sync hotkey can all prompt the
+/// right sign-in; `None` means both sessions are present.
+fn missing_session_code(state: &AppState) -> Option<&'static str> {
+    if state.tokens.spotify().is_none() {
+        return Some("spotify_not_connected");
+    }
+    if state.tokens.teams().is_none() {
+        return Some("teams_not_connected");
+    }
+    None
+}
+
+/// Issue #941: publish the claim-window owner sentinel.
+///
+/// `try_claim()` sets only `is_syncing`; the poller's own `ThreadId` is
+/// stored later, after `spawn_blocking` has queued (and run)
+/// `start_polling`. That window therefore held a flag with no owner, and
+/// `stop_polling_and_join`'s no-handle branch read `thread_id == None` as
+/// "wedged flag" and cleared it out from under the start: the fresh
+/// poller's first loop check then saw `is_syncing == false` and broke
+/// immediately, so a Start that should have run never polled and a
+/// "sync stopped unexpectedly" notification fired for a stop the user
+/// issued. The window covers the whole `spawn_blocking` queue wait, so it
+/// widens under blocking-pool load.
+///
+/// Publishing the claiming thread's id as owner until the real id replaces
+/// it makes the window look like what it is — a live owner — so a stop
+/// arriving in it leaves the flag to the start instead of stealing it.
+fn publish_start_sentinel(state: &AppState) -> std::thread::ThreadId {
+    let tid = std::thread::current().id();
+    *state.polling.thread_id_mut() = Some(tid);
+    tid
+}
+
+/// Issue #941 (F2): conclude a stop that won the race against this start.
+///
+/// `stop_tx == None` immediately after the handle store means no live poller:
+/// either a racing stop dropped the channel `start_polling` had just installed
+/// — so the fresh poller takes `Disconnected` and breaks on its first loop
+/// check — or the poller already self-exited. The drain that produced that
+/// state had no handle to join and deliberately left the flag to this start,
+/// so the start has to finish the stop: publishing the session now would leave
+/// `is_syncing == true`, a finished handle and nothing polling, which is
+/// exactly the "Syncing" UI with no Teams traffic the issue is about. The
+/// finished handle stays for the next start's drain to reclaim.
+///
+/// A *live* channel means the racing stop landed before `start_polling`
+/// installed the channel (it closed nothing) — the start owns the session and
+/// keeps its flag, which is the claim-window behaviour the issue's acceptance
+/// criteria ask for. Returns true when the stop was concluded here.
+fn conclude_raced_stop(state: &AppState) -> bool {
+    if state.polling.stop_tx().is_some() {
+        return false;
+    }
+    log::warn!(
+        "{CMD} start_syncing: stop channel already closed when the poller started - a stop won the race; clearing is_syncing instead of publishing a dead session"
+    );
+    state.polling.set_syncing(false, Ordering::Release);
+    *state.polling.thread_id_mut() = None;
+    true
+}
+
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct SyncStatus {
@@ -60,6 +135,17 @@ pub async fn start_syncing(
 pub async fn start_syncing_with(state: Arc<AppState>, app: &AppHandle) -> Result<(), String> {
     log::debug!("{CMD} start_syncing: ENTRY");
 
+    // Issue #809: refuse an explicit start that no session can satisfy,
+    // before the drain, so a refusal never tears down a running poller.
+    // The typed code names the side the user has to reconnect; leaving
+    // `is_syncing` untouched keeps the flag honest (it is still false).
+    if let Some(missing) = missing_session_code(&state) {
+        log::warn!(
+            "{CMD} start_syncing: refusing to start ({missing}) - no session to sync; is_syncing left false"
+        );
+        return Err(missing.to_string());
+    }
+
     // Issue #69: drain any previous polling thread BEFORE claiming the
     // is_syncing flag. Without this, a fast Stop+Start cycle (within the
     // 2s stop_polling_and_join budget) can leave a stale thread running
@@ -98,6 +184,12 @@ pub async fn start_syncing_with(state: Arc<AppState>, app: &AppHandle) -> Result
     }
     log::info!("{CMD} start_syncing: is_syncing flag set to true");
 
+    // Issue #941: own the claim window immediately. Until this line the
+    // flag was set with `thread_id == None`, which a concurrent stop read
+    // as a wedged flag and cleared.
+    let sentinel = publish_start_sentinel(&state);
+    log::debug!("{CMD} start_syncing: claim-window owner sentinel {sentinel:?} published");
+
     // #215: start_polling thread creation is offloaded to the blocking pool
     // so the async command does not block the Tauri async runtime. The
     // returned JoinHandle is stored under the polling lock.
@@ -107,7 +199,19 @@ pub async fn start_syncing_with(state: Arc<AppState>, app: &AppHandle) -> Result
         polling::start_polling(state_for_spawn, app_for_spawn)
     })
     .await
-    .map_err(|e| format!("start_syncing spawn_blocking panicked: {:?}", e))?
+    .map_err(|e| {
+        // Issue #941: a start that panicked before storing a handle must
+        // release the claim it published, sentinel included — otherwise the
+        // slot stays owned by a thread that is not polling and the next
+        // start is wedged.
+        log::error!(
+            "{CMD} start_syncing: spawn_blocking panicked - {:?}; rolling back is_syncing",
+            e
+        );
+        state.polling.set_syncing(false, Ordering::Release);
+        *state.polling.thread_id_mut() = None;
+        format!("start_syncing spawn_blocking panicked: {:?}", e)
+    })?
     .map_err(|e| {
         // Roll back is_syncing flag and thread_id since no handle was created
         log::error!(
@@ -130,11 +234,19 @@ pub async fn start_syncing_with(state: Arc<AppState>, app: &AppHandle) -> Result
             let mut handle_guard = state.polling.handle_mut();
             *handle_guard = Some(handle);
         }
+        // Issue #941: the real poller id replaces the claim-window sentinel.
         *state.polling.thread_id_mut() = Some(tid);
         log::info!(
             "{CMD} start_syncing: polling handle stored with thread id {:?}",
             tid
         );
+    }
+
+    // Issue #941 (F2): if a stop won the race while this start was in flight,
+    // the poller it raced is already dead — conclude the stop rather than
+    // publishing a session that can never poll.
+    if conclude_raced_stop(&state) {
+        return Ok(());
     }
 
     log::info!("{CMD} start_syncing: EMIT sync-started event");
@@ -225,6 +337,12 @@ async fn stop_polling_and_join(state: Arc<AppState>, context: &'static str) {
         // (set but owned by no live thread) so a future start is never
         // stuck; when another thread still owns the state, its in-flight
         // join owns the clear and we leave the flag alone.
+        //
+        // Issue #941: an owner is not only a running poller — a start
+        // between `try_claim` and the handle store owns the slot through
+        // the sentinel `start_syncing_with` publishes. Clearing the flag
+        // there would stop the poller the user just asked for, so the flag
+        // is only ever cleared when no owner at all is stored.
         if state.polling.is_syncing(Ordering::Acquire) {
             let owner = *state.polling.thread_id();
             match owner {
@@ -237,7 +355,7 @@ async fn stop_polling_and_join(state: Arc<AppState>, context: &'static str) {
                 }
                 Some(tid) => {
                     log::warn!(
-                        "{CMD} {context}: no polling handle but thread {:?} still owns polling state; leaving flag for the in-flight join",
+                        "{CMD} {context}: no polling handle but thread {:?} still owns polling state (running poller or a start in its claim window); leaving flag for the in-flight owner",
                         tid
                     );
                 }
@@ -390,9 +508,27 @@ pub async fn app_exit(
 /// (never `teams` before `spotify`, never `config` before `current_track`)
 /// or risk a lock-ordering deadlock with this critical section.
 #[tauri::command]
-pub fn get_sync_status(state: tauri::State<'_, Arc<AppState>>) -> Result<SyncStatus, String> {
+pub async fn get_sync_status(state: tauri::State<'_, Arc<AppState>>) -> Result<SyncStatus, String> {
     log::debug!("{CMD} get_sync_status: ENTRY");
-    Ok(sync_status_from_state(state.inner()))
+    sync_status_offloaded(Arc::clone(state.inner())).await
+}
+
+/// Issue #879: `get_sync_status`'s snapshot, handed to the blocking pool.
+///
+/// The snapshot takes four read guards, and the token writers hold theirs
+/// ACROSS the HTTPS refresh — `cas_refresh_or_discard` is given
+/// `&mut *state.tokens.teams_mut()` (poller) or
+/// `&mut *state.tokens.spotify_mut()` (boot gate) before it runs its refresh
+/// closure. As a synchronous command this ran on the main thread, so the
+/// Dashboard's mount-time and post-event calls parked the webview's UI thread
+/// until the in-flight refresh completed: a frozen window rather than a late
+/// status. `SyncStatus` is plain data with no frontend change needed, so the
+/// assembly moves off the UI thread and the caller only awaits. Lifted out of
+/// the command (not inlined) so the offload itself is covered by a test.
+async fn sync_status_offloaded(state: Arc<AppState>) -> Result<SyncStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || sync_status_from_state(&state))
+        .await
+        .map_err(|e| format!("get_sync_status spawn_blocking panicked: {:?}", e))
 }
 
 /// Assemble the status snapshot from `state`.
@@ -531,8 +667,8 @@ mod tests {
             "the no-handle branch must clear a wedged flag when no thread owns the state (issue #395)"
         );
         assert!(
-            body.contains("leaving flag for the in-flight join"),
-            "the no-handle branch must not steal the flag from a live owner's in-flight join (issue #395)"
+            body.contains("leaving flag for the in-flight owner"),
+            "the no-handle branch must not steal the flag from a live owner's in-flight drain (issue #395), nor from a start in its claim window (issue #941)"
         );
     }
 
@@ -568,9 +704,304 @@ mod tests {
             prod_source.contains("Single critical section"),
             "the lock-ordering contract must stay documented (issue #398)"
         );
+        // Issue #879: the assembly is reached through the offload, so the
+        // command must still return the shared derivation and nothing else.
+        let command_body = fn_body(prod_source, "pub async fn get_sync_status(");
         assert!(
-            fn_body(prod_source, "pub fn get_sync_status(").contains("sync_status_from_state("),
-            "the command must return the shared derivation, never a second copy of it (issue #679)"
+            command_body.contains("sync_status_offloaded("),
+            "the command must return the shared derivation through the blocking-pool offload, never a second copy of it (issues #679, #879)"
+        );
+        assert!(
+            fn_body(prod_source, "async fn sync_status_offloaded(")
+                .contains("sync_status_from_state("),
+            "the offload must assemble the snapshot through sync_status_from_state (issue #879)"
+        );
+    }
+
+    /// Issue #809: an explicit start with a session missing must be refused
+    /// by name instead of claiming the polling flag and sleeping in the
+    /// poller's tolerant no-token branch.
+    #[test]
+    fn test_start_syncing_refuses_without_both_sessions() {
+        use super::{missing_session_code, AppState};
+        use std::sync::atomic::Ordering;
+
+        let state = AppState::new();
+        assert_eq!(
+            missing_session_code(&state),
+            Some("spotify_not_connected"),
+            "with no session at all the guard must name Spotify first (issue #809)"
+        );
+        assert!(
+            !state.polling.is_syncing(Ordering::Acquire),
+            "a refused start must leave the polling flag false (issue #809)"
+        );
+
+        *state.tokens.spotify_mut() = Some(crate::spotify::SpotifyTokens {
+            access_token: "access".to_string(),
+            refresh_token: "refresh".to_string(),
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+        });
+        assert_eq!(
+            missing_session_code(&state),
+            Some("teams_not_connected"),
+            "a Spotify-only session must name Teams as the missing side (issue #809)"
+        );
+
+        *state.tokens.teams_mut() = Some(crate::teams::TeamsTokens {
+            access_token: "teams-access".to_string(),
+            refresh_token: Some("teams-refresh".to_string()),
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+        });
+        assert_eq!(
+            missing_session_code(&state),
+            None,
+            "with both sessions present the start must proceed (issue #809)"
+        );
+    }
+
+    /// Issue #809 acceptance: the guard runs before the flag is claimed, so a
+    /// refusal can never leave a claimed `is_syncing` behind.
+    #[test]
+    fn test_start_syncing_guard_runs_before_the_claim() {
+        let source = include_str!("sync.rs");
+        let prod_source = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("sync.rs has no #[cfg(test)] mod tests block");
+        let body = fn_body(prod_source, "pub async fn start_syncing_with(");
+        let guard = body
+            .find("missing_session_code(")
+            .expect("start_syncing_with must run the session guard (issue #809)");
+        let claim = body
+            .find("try_claim()")
+            .expect("start_syncing_with must claim the polling flag");
+        assert!(
+            guard < claim,
+            "the session guard must run before try_claim, so a refused start \
+             never claims the flag (issue #809)"
+        );
+    }
+
+    /// Issue #941: a stop arriving between `try_claim` and the handle store
+    /// must leave the flag to the in-flight start. Before the fix the claim
+    /// window was an ownerless flag, the drain's no-handle branch read that
+    /// as "wedged" and cleared it, and the poller the user had just started
+    /// broke on its first loop check.
+    #[test]
+    fn test_stop_in_the_claim_window_leaves_the_flag_for_the_start() {
+        use super::{publish_start_sentinel, stop_polling_and_join, AppState};
+        use std::sync::atomic::Ordering;
+        use std::sync::Arc;
+
+        let state = Arc::new(AppState::new());
+
+        // The production claim, in order: flag, then owner sentinel, then
+        // (only later, on the blocking pool) the real handle + thread id.
+        assert!(
+            state.polling.try_claim(),
+            "a fresh state must hand the claim to the first start"
+        );
+        publish_start_sentinel(&state);
+        assert!(
+            state.polling.thread_id().is_some(),
+            "the claim window must publish an owner, or a stop in it reads \
+             the flag as wedged (issue #941)"
+        );
+
+        // The racing stop, through the real drain path.
+        tauri::async_runtime::block_on(stop_polling_and_join(
+            Arc::clone(&state),
+            "test_claim_window",
+        ));
+
+        assert!(
+            state.polling.is_syncing(Ordering::Acquire),
+            "a stop in the claim window must leave is_syncing true for the \
+             start that owns it (issue #941)"
+        );
+        assert!(
+            state.polling.thread_id().is_some(),
+            "the winning start's owner entry must survive the racing stop \
+             (issue #941)"
+        );
+    }
+
+    /// Issue #941 acceptance: wedged-flag recovery must still work — a flag
+    /// set with no owner at all (no poller, no start in flight) is cleared.
+    #[test]
+    fn test_wedged_flag_without_any_owner_is_still_recovered() {
+        use super::{stop_polling_and_join, AppState};
+        use std::sync::atomic::Ordering;
+        use std::sync::Arc;
+
+        let state = Arc::new(AppState::new());
+        state.polling.set_syncing(true, Ordering::Release);
+        assert!(state.polling.thread_id().is_none());
+
+        tauri::async_runtime::block_on(stop_polling_and_join(
+            Arc::clone(&state),
+            "test_wedged_flag",
+        ));
+
+        assert!(
+            !state.polling.is_syncing(Ordering::Acquire),
+            "an ownerless flag must still be cleared so a future start is not \
+             permanently wedged (issue #395/#941)"
+        );
+    }
+
+    /// Issue #879: with a token refresh in flight (a writer holding the Teams
+    /// guard, as `cas_refresh_or_discard` does across its HTTPS call) the
+    /// status command must hand the snapshot to the blocking pool and yield
+    /// its own thread — the UI thread — instead of parking on the read guard
+    /// until the refresh commits. Before the fix the command was synchronous
+    /// and assembled the snapshot inline, so it could not yield at all.
+    #[test]
+    fn test_sync_status_offload_yields_instead_of_parking_the_command_thread() {
+        use super::{sync_status_offloaded, AppState};
+        use std::future::Future;
+        use std::sync::mpsc;
+        use std::sync::Arc;
+        use std::task::{Context, Poll, Waker};
+
+        let state = Arc::new(AppState::new());
+
+        // The in-flight refresh: another thread holds the Teams write guard
+        // until the test releases it.
+        let writer_state = Arc::clone(&state);
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let (held_tx, held_rx) = mpsc::channel::<()>();
+        let writer = std::thread::spawn(move || {
+            let _guard = writer_state.tokens.teams_mut();
+            let _ = held_tx.send(());
+            let _ = release_rx.recv();
+        });
+        held_rx
+            .recv()
+            .expect("the simulated refresh must take the write guard");
+
+        let mut snapshot = Box::pin(sync_status_offloaded(Arc::clone(&state)));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(
+            matches!(snapshot.as_mut().poll(&mut cx), Poll::Pending),
+            "the command must yield to the blocking pool while a refresh holds \
+             the token lock, not assemble the snapshot on the caller's own \
+             thread (issue #879)"
+        );
+
+        // The refresh commits, and the snapshot still lands — internally
+        // consistent, reporting the slot it actually read.
+        release_tx
+            .send(())
+            .expect("the simulated refresh must still be waiting");
+        writer.join().expect("the simulated refresh must finish");
+        let status = tauri::async_runtime::block_on(snapshot)
+            .expect("the offloaded snapshot must be produced");
+        assert!(
+            !status.teams_connected && !status.spotify_connected,
+            "an empty token slot must report disconnected, not a torn snapshot \
+             (issues #398, #879)"
+        );
+    }
+
+    /// Issue #941 acceptance, wiring half: the sentinel must be published by
+    /// `start_syncing_with` itself, between the claim and the spawn, and the
+    /// real poller id must replace it once the handle is stored — a sentinel
+    /// that is never published, or never replaced, leaves the claim window
+    /// ownerless again (or the poller's own exit cleanup unmatched).
+    #[test]
+    fn test_start_syncing_publishes_the_sentinel_between_claim_and_spawn() {
+        let source = include_str!("sync.rs");
+        let prod_source = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("sync.rs has no #[cfg(test)] mod tests block");
+        let body = fn_body(prod_source, "pub async fn start_syncing_with(");
+
+        let claim = body
+            .find("try_claim()")
+            .expect("start_syncing_with must claim the polling flag");
+        let sentinel = body
+            .find("publish_start_sentinel(")
+            .expect("start_syncing_with must publish the claim-window sentinel (issue #941)");
+        let spawn = body
+            .find("spawn_blocking(")
+            .expect("start_syncing_with must spawn the poller");
+        assert!(
+            claim < sentinel && sentinel < spawn,
+            "the sentinel must be published after try_claim and before the \
+             poller spawn, so the whole claim window has an owner (issue #941)"
+        );
+
+        let store = body
+            .find("*state.polling.thread_id_mut() = Some(tid)")
+            .expect("start_syncing_with must store the real poller id");
+        assert!(
+            store > spawn,
+            "the real poller id must replace the sentinel once the handle is \
+             stored (issue #941)"
+        );
+        let sentinels = body.matches("publish_start_sentinel(").count();
+        let clears = body
+            .matches("*state.polling.thread_id_mut() = None")
+            .count();
+        assert_eq!(
+            (sentinels, clears),
+            (1, 2),
+            "one publication, and None in both rollback paths (spawn_blocking \
+             join failure and polling-start failure), so a failed start never \
+             leaves an owner behind (issue #941)"
+        );
+    }
+
+    /// Issue #941 (F2): a stop landing after `start_polling` installed its stop
+    /// channel but before the handle store drops that fresh channel — the
+    /// poller then takes `Disconnected` and breaks on its first loop check,
+    /// while the drain, which has no handle to join, leaves the flag to the
+    /// in-flight start. The start must conclude the stop instead of publishing
+    /// a session that can never poll (which would show "Syncing" with nothing
+    /// reaching Teams).
+    #[test]
+    fn test_start_concludes_a_stop_that_won_the_race() {
+        use super::{conclude_raced_stop, publish_start_sentinel, AppState};
+        use std::sync::atomic::Ordering;
+
+        let state = AppState::new();
+
+        // Start-wins: the racing stop landed before `start_polling` installed
+        // the channel, so it closed nothing and the poller is alive.
+        assert!(state.polling.try_claim());
+        publish_start_sentinel(&state);
+        let (stop_tx, _stop_rx) = std::sync::mpsc::channel::<()>();
+        *state.polling.stop_tx_mut() = Some(stop_tx);
+        assert!(
+            !conclude_raced_stop(&state),
+            "a live stop channel means the poller is running and the start owns \
+             the session (issue #941)"
+        );
+        assert!(
+            state.polling.is_syncing(Ordering::Acquire),
+            "a start that won the race keeps is_syncing true (issue #941)"
+        );
+
+        // Stop-wins, exactly as the drain leaves it: the channel is gone, so
+        // the poller is already breaking out, and the flag is still the
+        // in-flight start's.
+        *state.polling.stop_tx_mut() = None;
+        assert!(
+            conclude_raced_stop(&state),
+            "a closed stop channel with the handle just stored means the stop \
+             won (issue #941, F2)"
+        );
+        assert!(
+            !state.polling.is_syncing(Ordering::Acquire),
+            "concluding the raced stop must clear is_syncing, or the UI reports \
+             Syncing while nothing polls (issue #941, F2)"
+        );
+        assert!(
+            state.polling.thread_id().is_none(),
+            "the owner entry must be released with the flag (issue #941, F2)"
         );
     }
 }

@@ -7,7 +7,10 @@
 //! Submodule map (each lists every `#[tauri::command]` it owns):
 //!   - `config` — load_config, save_config, update_config, export_config, import_config
 //!   - `spotify_auth` — start_spotify_auth, start_spotify_reconnect, complete_spotify_auth_manual, refresh_spotify, is_spotify_client_secret_set, reconnect_spotify_session
-//!   - `playback` — playback_play, playback_pause, playback_next, playback_previous, playback_transfer, get_playback_devices, get_playback_queue, get_spotify_granted_scopes
+//!   - `playback` — get_spotify_granted_scopes (issue #770 deleted the seven
+//!     callerless playback_* / get_playback_* commands; the tray and the global
+//!     hotkeys call `playback::player_with_refresh_typed` / `player_with_refresh`
+//!     directly, with no IPC hop)
 //!   - `teams_auth` — start_teams_auth_device_code, poll_teams_auth, refresh_teams, cancel_teams_auth_poll, get_teams_granted_scopes
 //!   - `sync` — start_syncing, stop_syncing, get_sync_status, app_exit
 //!   - `window` — show_window, set_autostart_enabled, open_logs_folder, open_external_url
@@ -77,18 +80,17 @@ pub fn require_main_window(window: &tauri::Window) -> Result<(), String> {
 /// relaunch_app (misc.rs), stage_deferred_update (updater_bg.rs).
 ///
 /// INTENTIONALLY UNGUARDED -- main-only by caller location (no Window param):
-/// playback_play/pause/next/previous/transfer, get_playback_devices/queue
-/// (Dashboard tray-adjacent controls + tray worker; Dashboard is main-only),
 /// show_window (+page main route), update_tray_menu_state (Dashboard),
 /// get_diagnostics_snapshot (Diagnostics-as-main-route), preview_status
 /// (Settings preview but read-only pure computation), get_sync_status
 /// (Dashboard/Settings status read), get_spotify/teams_granted_scopes
-/// (Settings scope readers, no side effect), is_spotify_client_secret_set
-/// (Settings/Reconnect presence read), clear_failed_update_install
-/// (Diagnostics dismiss; deletes only the marker file).
+/// (Settings scope readers, no side effect), clear_failed_update_install
+/// (Diagnostics dismiss; deletes only the marker file),
+/// is_onboarding_complete (issue #770: the boot gate in
+/// `src/routes/+page.svelte`, a main-window route).
 ///
 /// INTENTIONALLY UNGUARDED -- detached-legit (invoked from popped-out
-/// Settings/LogViewer by design): reconnect_spotify, reconnect_teams,
+/// Settings/LogViewer by design): reconnect_teams,
 /// poll_teams_auth, set_autostart_enabled, open_logs_folder,
 /// open_external_url (Teams verification-URL open during detached
 /// device-code flow), save_config (whole-document config write) and
@@ -101,11 +103,25 @@ pub fn require_main_window(window: &tauri::Window) -> Result<(), String> {
 /// `open_logs_folder` already exposes to both, unredacted there and here
 /// alike (only the paste-able snapshot is redacted, #434).
 ///
+/// set_locale (issue #770) — the language picker lives in Settings, one of
+/// the two detached-hosting views (`src/lib/i18n/store.svelte.ts`).
+///
 /// shortcuts: register_shortcuts, unregister_shortcuts, validate_shortcut
 /// (issue #676) — the Settings pane is one of the two detached-hosting views
 /// and hosts the hotkey card, so the pane that captures a combo must also be
 /// able to (re)register it; the commands act on the persisted config and this
 /// process's own OS grabs only.
+///
+/// REGISTERED BUT CALLERLESS (issue #770 review): `is_spotify_client_secret_set`
+/// (spotify_auth.rs) and `reconnect_spotify` (onboarding.rs) have no `invoke()`
+/// in `src/` or `tests/`, so they belong in neither list above — a command
+/// nothing can reach is not "main-only by caller location" and not
+/// "detached-legit". Reconnect.svelte reads the keychain state through
+/// `loadConfig` (#560) and Settings.svelte:872 calls
+/// `reconnect_spotify_session` (#554), which `tests/settings.test.ts` pins.
+/// Both are pending deletion (the same treatment the seven playback wrappers
+/// got here); `reconnect_spotify` is already deleted on the onboarding slice's
+/// branch, so whoever merges that one should not re-add it.
 #[cfg(test)]
 mod tests {
     /// Regression guard for issue #76: the `commands` module must declare
@@ -220,5 +236,188 @@ mod tests {
                 rejected
             );
         }
+    }
+
+    /// Issue #215/#928: the only commands in this slice's files that may stay
+    /// synchronous. Each carries a documented "no disk, network or keychain
+    /// IO" decision at its definition, so a fast window-manager call or a
+    /// pure string substitution is not pushed onto the blocking pool. A new
+    /// synchronous command must be added here with its rationale (it is a
+    /// deliberate decision, not a default) or made `async`.
+    const SYNC_EXCEPTIONS: &[&str] = &["preview_status", "show_window"];
+
+    /// Issue #928: a `#[tauri::command]` body that does network, disk or
+    /// keychain work. Comment text is included in the haystack, so the cost
+    /// is an occasional false positive — never a false negative (the guard
+    /// exists to catch an unconverted command, not to bless one).
+    fn touches_blocking_io(body: &str) -> bool {
+        ["keychain::", "persist_tokens", "reqwest"]
+            .iter()
+            .any(|needle| body.contains(needle))
+    }
+
+    /// Parse every `#[tauri::command]` item out of a command module's source
+    /// into `(name, is_async, body)`. Bodies are brace-counted from the first
+    /// `{` after the signature (house style: never boundary anchors), and the
+    /// attribute marker means plain helper fns are skipped.
+    fn commands_in(src: &str) -> Vec<(String, bool, String)> {
+        let mut found = Vec::new();
+        let mut rest = src;
+        while let Some(attr) = rest.find("#[tauri::command]") {
+            let after_attr = &rest[attr..];
+            let Some(fn_rel) = after_attr.find("fn ") else {
+                break;
+            };
+            let is_async = after_attr[..fn_rel].contains("async ");
+            let after_fn = &after_attr[fn_rel + "fn ".len()..];
+            let Some(paren_rel) = after_fn.find('(') else {
+                break;
+            };
+            let name = after_fn[..paren_rel].trim().to_string();
+            let Some(brace_rel) = after_fn.find('{') else {
+                break;
+            };
+            let mut depth = 0usize;
+            let mut end = None;
+            for (i, ch) in after_fn[brace_rel..].char_indices() {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = Some(brace_rel + i + 1);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let Some(end) = end else {
+                break;
+            };
+            found.push((name, is_async, after_fn[brace_rel..end].to_string()));
+            rest = &after_fn[end..];
+        }
+        found
+    }
+
+    /// Issue #928: Tauri runs a non-async `#[tauri::command]` on the main/UI
+    /// thread, so a synchronous command that reads the keychain, does an HTTPS
+    /// round trip or fsyncs freezes the window, the tray menu and window
+    /// events for the whole call — the class #215 fixed elsewhere and left its
+    /// "all commands touching network/disk/keychain declared async" item
+    /// unchecked for.
+    ///
+    /// Scope (orchestrator ruling, 2026-09-19): #928 asked this guard to scan
+    /// every `#[tauri::command]` in the tree. Scanning the tree from this
+    /// branch would fail on files owned by other slices that are not converted
+    /// here, so the three files this slice owns are scanned in full and the
+    /// remainder is named here instead: `commands/config.rs::load_config`;
+    /// `commands/spotify_auth.rs::refresh_spotify`, `start_spotify_reconnect`,
+    /// `reconnect_spotify_session`. Wave 2 tightens this to the whole tree
+    /// once that remainder is off the main thread.
+    #[test]
+    fn test_commands_touching_io_are_async_and_offloaded() {
+        // Positive control: the detector must fire on a body that does exactly
+        // the work this guard is about, or the guard would pass forever.
+        let fixture = concat!(
+            "#[tauri::command]\n",
+            "pub fn probe(state: tauri::State<'_, ()>) -> Result<(), String> {\n",
+            "    let _ = keychain::get_spotify_client_secret();\n",
+            "    Ok(())\n",
+            "}\n",
+        );
+        let parsed = commands_in(fixture);
+        assert_eq!(parsed.len(), 1, "the scanner must find one command");
+        assert!(
+            !parsed[0].1,
+            "the fixture must parse as a synchronous command"
+        );
+        assert!(
+            touches_blocking_io(&parsed[0].2),
+            "the detector must fire on a keychain read (issue #928)"
+        );
+
+        let mut scanned: Vec<String> = Vec::new();
+        for (file, src) in [
+            ("commands/sync.rs", include_str!("sync.rs")),
+            ("commands/window.rs", include_str!("window.rs")),
+            ("commands/misc.rs", include_str!("misc.rs")),
+        ] {
+            for (name, is_async, body) in commands_in(src) {
+                if touches_blocking_io(&body) {
+                    assert!(
+                        is_async,
+                        "{file}::{name} does network/disk/keychain work in a \
+                         synchronous command, so Tauri runs it on the main \
+                         thread and freezes the UI — make it async and offload \
+                         the body (issue #928)"
+                    );
+                    assert!(
+                        body.contains("spawn_blocking"),
+                        "{file}::{name} is async but does not offload its \
+                         blocking work to the blocking pool (issue #928)"
+                    );
+                } else {
+                    assert!(
+                        is_async || SYNC_EXCEPTIONS.contains(&name.as_str()),
+                        "{file}::{name} is a new synchronous command: make it \
+                         async with a blocking offload, or add it to \
+                         SYNC_EXCEPTIONS with its no-IO rationale (issue #928)"
+                    );
+                }
+                scanned.push(name);
+            }
+        }
+
+        // Scanner sanity + no stale exceptions: both prove the parse above
+        // really walked these files rather than finding nothing.
+        for expected in [
+            "show_window",
+            "preview_status",
+            "relaunch_app",
+            "get_sync_status",
+        ] {
+            assert!(
+                scanned.iter().any(|name| name.as_str() == expected),
+                "the scanner must see `{expected}` (issue #928)"
+            );
+        }
+        for allowed in SYNC_EXCEPTIONS {
+            assert!(
+                scanned.iter().any(|name| name.as_str() == *allowed),
+                "SYNC_EXCEPTIONS lists `{allowed}`, which no longer exists — \
+                 drop the stale exception (issue #928)"
+            );
+        }
+    }
+
+    /// Issue #806: `relaunch_app` must discard a payload staged for "install
+    /// on quit" BEFORE `app.restart()`. The restart fires `RunEvent::Exit`,
+    /// which runs `install_pending_on_exit` — without the discard, an
+    /// immediate relaunch installs the staged version on top of the one just
+    /// installed. The ordering is the whole fix and the command needs a live
+    /// `AppHandle` to drive (this crate has no mock runtime), so the guard is
+    /// a source-order assertion over the command's own body.
+    #[test]
+    fn test_relaunch_app_discards_a_staged_update_before_restart() {
+        let body = commands_in(include_str!("misc.rs"))
+            .into_iter()
+            .find(|(name, _, _)| name == "relaunch_app")
+            .expect("misc.rs must define the relaunch_app command (issue #806)")
+            .2;
+
+        let discard = body
+            .find("discard_staged_update(&app)")
+            .expect("relaunch_app must discard a staged update (issue #806)");
+        let restart = body
+            .find("app.restart();")
+            .expect("relaunch_app must restart the app");
+        assert!(
+            discard < restart,
+            "the staged-update discard must run before app.restart(), or the \
+             restart's install_pending_on_exit reinstalls the staged payload \
+             over the version just installed (issue #806)"
+        );
     }
 }

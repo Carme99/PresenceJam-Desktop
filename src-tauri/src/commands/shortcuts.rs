@@ -2,11 +2,11 @@
 //!
 //! Two bindings the user owns in `AppConfig::shortcuts` drive actions the app
 //! already has: `toggle_playback` runs the same Spotify play/pause path the
-//! `playback_play` / `playback_pause` commands and the tray run, and
-//! `toggle_sync` drives `commands::sync`'s start/stop lifecycle. Nothing here
-//! re-implements playback or the polling lifecycle — the shortcut and the IPC
-//! commands share one implementation (`playback::player_with_refresh`, and the
-//! `*_with` inner fns in `commands::sync`), so the two cannot drift apart.
+//! tray runs, and `toggle_sync` drives `commands::sync`'s start/stop
+//! lifecycle. Nothing here re-implements playback or the polling lifecycle —
+//! the shortcut, the tray and the per-command `*_with` inner fns share one
+//! implementation (`playback::player_with_refresh`, and those inner fns in
+//! `commands::sync`), so they cannot drift apart.
 //!
 //! Registration runs at startup from the persisted config (`lib.rs`'s setup)
 //! and again on every Settings save, and it is *never* fatal: a desktop that
@@ -371,10 +371,9 @@ fn config_or_default(app: &AppHandle) -> AppConfig {
         .unwrap_or_default()
 }
 
-/// Runs a player action through the same refresh-aware policy the
-/// `playback_play` / `playback_pause` commands and the tray use (issues
-/// #375/#428/#586), so a shortcut can never call Spotify with a stale token,
-/// and its failure wording is the commands'.
+/// Runs a player action through the same refresh-aware policy the tray uses
+/// (issues #375/#428/#586), so a shortcut can never call Spotify with a stale
+/// token, and its failure wording is the policy's.
 fn run_player(
     app: &AppHandle,
     label: &'static str,

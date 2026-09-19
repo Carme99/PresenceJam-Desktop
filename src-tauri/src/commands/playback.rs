@@ -1,14 +1,23 @@
-//! Spotify playback-control Tauri commands.
+//! Spotify playback-control helpers: the shared player-refresh policy plus
+//! the one command that still needs an IPC surface.
 //!
-//! See issue #3.0-P3. Thin wrappers over `crate::spotify` player fns: the
-//! tray menu dispatches player actions directly from Rust (no frontend
-//! roundtrip), while `get_spotify_granted_scopes` powers the Settings
-//! one-time-reconnect banner for the new `user-modify-playback-state`
-//! scope.
+//! See issue #3.0-P3. The tray menu and the global-shortcut handlers dispatch
+//! player actions from Rust through [`player_with_refresh_typed`] /
+//! [`player_with_refresh`] with no frontend roundtrip;
+//! `get_spotify_granted_scopes` powers the Settings one-time-reconnect banner
+//! for the `user-modify-playback-state` scope.
+//!
+//! Issue #770: the seven callerless `#[tauri::command]` wrappers —
+//! `playback_play`, `playback_pause`, `playback_next`, `playback_previous`,
+//! `playback_transfer`, `get_playback_devices`, `get_playback_queue` — were
+//! deleted. Nothing in `src/`, `tests/` or Rust invoked them (`generate_handler!`
+//! registrations aside), so they were reachable IPC surface with no caller.
+//! The refresh policy they wrapped stays exactly as it was: only the
+//! unreachable commands are gone.
 
 use crate::spotify::{
-    decode_spotify_granted_scopes, is_token_expired, refresh_spotify_token, DeviceInfo, QueueInfo,
-    SpotifyApiError, SpotifyTokens,
+    decode_spotify_granted_scopes, is_token_expired, refresh_spotify_token, SpotifyApiError,
+    SpotifyTokens,
 };
 use std::sync::Arc;
 use tauri::{AppHandle, State};
@@ -178,132 +187,6 @@ fn friendly_playback_error(err: SpotifyApiError) -> String {
     }
 }
 
-/// Resumes playback on the active device (or the given one via
-/// `playback_transfer`). See issue #3.0-P3.
-#[tauri::command]
-pub async fn playback_play(
-    state: State<'_, Arc<crate::AppState>>,
-    app: AppHandle,
-) -> Result<(), String> {
-    log::debug!("{CMD} playback_play: ENTRY");
-    let state_inner = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        player_with_refresh(&state_inner, &app, "playback_play", |token| {
-            crate::spotify::player_play(token, None)
-        })
-    })
-    .await
-    .map_err(|e| format!("{CMD} playback_play: task panicked: {e}"))?
-}
-
-/// Pauses playback on the active device. See issue #3.0-P3.
-#[tauri::command]
-pub async fn playback_pause(
-    state: State<'_, Arc<crate::AppState>>,
-    app: AppHandle,
-) -> Result<(), String> {
-    log::debug!("{CMD} playback_pause: ENTRY");
-    let state_inner = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        player_with_refresh(&state_inner, &app, "playback_pause", |token| {
-            crate::spotify::player_pause(token, None)
-        })
-    })
-    .await
-    .map_err(|e| format!("{CMD} playback_pause: task panicked: {e}"))?
-}
-
-/// Skips to the next track on the active device. See issue #3.0-P3.
-#[tauri::command]
-pub async fn playback_next(
-    state: State<'_, Arc<crate::AppState>>,
-    app: AppHandle,
-) -> Result<(), String> {
-    log::debug!("{CMD} playback_next: ENTRY");
-    let state_inner = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        player_with_refresh(&state_inner, &app, "playback_next", |token| {
-            crate::spotify::player_next(token, None)
-        })
-    })
-    .await
-    .map_err(|e| format!("{CMD} playback_next: task panicked: {e}"))?
-}
-
-/// Skips to the previous track on the active device. See issue #3.0-P3.
-#[tauri::command]
-pub async fn playback_previous(
-    state: State<'_, Arc<crate::AppState>>,
-    app: AppHandle,
-) -> Result<(), String> {
-    log::debug!("{CMD} playback_previous: ENTRY");
-    let state_inner = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        player_with_refresh(&state_inner, &app, "playback_previous", |token| {
-            crate::spotify::player_previous(token, None)
-        })
-    })
-    .await
-    .map_err(|e| format!("{CMD} playback_previous: task panicked: {e}"))?
-}
-
-/// Transfers playback to the given device id, starting playback there.
-/// See issue #3.0-P3.
-#[tauri::command]
-pub async fn playback_transfer(
-    device_id: String,
-    state: State<'_, Arc<crate::AppState>>,
-    app: AppHandle,
-) -> Result<(), String> {
-    log::debug!(
-        "{CMD} playback_transfer: ENTRY - device_id.len={}",
-        device_id.len()
-    );
-    let state_inner = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        player_with_refresh(&state_inner, &app, "playback_transfer", |token| {
-            crate::spotify::player_transfer(token, &device_id, true)
-        })
-    })
-    .await
-    .map_err(|e| format!("{CMD} playback_transfer: task panicked: {e}"))?
-}
-
-/// Lists the user's available playback devices. See issue #3.0-P3.
-#[tauri::command]
-pub async fn get_playback_devices(
-    state: State<'_, Arc<crate::AppState>>,
-    app: AppHandle,
-) -> Result<Vec<DeviceInfo>, String> {
-    log::debug!("{CMD} get_playback_devices: ENTRY");
-    let state_inner = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        player_with_refresh(&state_inner, &app, "get_playback_devices", |token| {
-            crate::spotify::get_devices(token)
-        })
-    })
-    .await
-    .map_err(|e| format!("{CMD} get_playback_devices: task panicked: {e}"))?
-}
-
-/// Fetches the user's playback queue (currently playing + up to the whole
-/// up-next list). See issue #3.0-P3.
-#[tauri::command]
-pub async fn get_playback_queue(
-    state: State<'_, Arc<crate::AppState>>,
-    app: AppHandle,
-) -> Result<QueueInfo, String> {
-    log::debug!("{CMD} get_playback_queue: ENTRY");
-    let state_inner = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        player_with_refresh(&state_inner, &app, "get_playback_queue", |token| {
-            crate::spotify::get_queue(token)
-        })
-    })
-    .await
-    .map_err(|e| format!("{CMD} get_playback_queue: task panicked: {e}"))?
-}
-
 /// Returns the scopes granted on the stored Spotify access token by
 /// base64url-decoding its JWT payload (informational only — no signature
 /// verification).
@@ -357,42 +240,55 @@ mod tests {
         &after_sig[..end.unwrap_or_else(|| panic!("{} body never closed", sig))]
     }
 
-    /// Issue #464: every Spotify player command must route through the
-    /// single `player_with_refresh` policy (proactive refresh + one
-    /// ExpiredToken refresh+retry). Pre-fix each command hand-rolled its
-    /// own token handling and they drifted.
+    /// Issue #770: the seven callerless playback wrappers must stay deleted —
+    /// no definition left here and no `generate_handler!` registration left in
+    /// `lib.rs`, or they become reachable IPC surface with no caller again.
+    ///
+    /// This replaces the issue #464 sweep that listed those seven commands:
+    /// their refresh-policy coverage now lives in the policy tests below and
+    /// in the tray/shortcut callers, which invoke `player_with_refresh_typed` /
+    /// `player_with_refresh` directly with no IPC hop.
     #[test]
-    fn test_all_player_commands_route_through_player_with_refresh() {
+    fn test_callerless_playback_commands_stay_deleted() {
         let source = include_str!("playback.rs");
         let prod_source = source
             .split("#[cfg(test)]\nmod tests")
             .next()
             .expect("playback.rs has no #[cfg(test)] mod tests block");
-        // The five transport controls plus devices/queue: all six player
-        // commands plus the two query commands share the one refresh policy.
-        for sig in [
-            "pub async fn playback_play(",
-            "pub async fn playback_pause(",
-            "pub async fn playback_next(",
-            "pub async fn playback_previous(",
-            "pub async fn playback_transfer(",
-            "pub async fn get_playback_devices(",
-            "pub async fn get_playback_queue(",
+        let registered = include_str!("../lib.rs");
+
+        for name in [
+            "playback_play",
+            "playback_pause",
+            "playback_next",
+            "playback_previous",
+            "playback_transfer",
+            "get_playback_devices",
+            "get_playback_queue",
         ] {
-            let body = fn_body(prod_source, sig);
             assert!(
-                body.contains("player_with_refresh("),
-                "{} must route through player_with_refresh (issue #464)",
-                sig
+                !prod_source.contains(&format!("fn {name}(")),
+                "{name} has no caller in src/, tests/ or Rust — it must stay \
+                 deleted (issue #770)"
+            );
+            assert!(
+                !registered.contains(&format!("commands::playback::{name}")),
+                "{name} was deleted, so lib.rs must not register it (issue #770)"
             );
         }
-        // The scopes reader is informational (base64url-decodes the stored
-        // JWT) and makes no API call, so it must NOT go through the refresh
-        // policy — pin the intentional exclusion.
+
+        // The scopes reader stays, and stays out of the refresh policy: it
+        // base64url-decodes the stored JWT and makes no API call.
         let scopes_body = fn_body(prod_source, "pub fn get_spotify_granted_scopes(");
         assert!(
             !scopes_body.contains("player_with_refresh("),
-            "get_spotify_granted_scopes makes no API call and must not route through player_with_refresh"
+            "get_spotify_granted_scopes makes no API call and must not route \
+             through player_with_refresh (issue #464)"
+        );
+        assert!(
+            registered.contains("commands::playback::get_spotify_granted_scopes"),
+            "the one playback command with a live caller must stay registered \
+             (issue #770)"
         );
     }
 

@@ -207,7 +207,7 @@ PresenceJam-Desktop/
 │   │   │   ├── sync.rs                     #   start_syncing / stop_syncing / get_sync_status
 │   │   │   ├── window.rs                    #   show_window / autostart / logs folder
 │   │   │   ├── onboarding.rs                #   is_onboarding_complete / complete / reconnect
-│   │   │   ├── playback.rs                 #   playback_play / pause / next / previous / transfer + devices / queue (v3.0)
+│   │   │   ├── playback.rs                 #   player-refresh policy + get_spotify_granted_scopes (v3.0; #770)
 │   │   │   ├── misc.rs                     #   preview_status / update_tray_menu_state / relaunch_app
 │   │   │   ├── logs.rs                     #   get_recent_logs — bounded on-disk tail for the Logs pane (v4.6, #595)
 │   │   │   └── shortcuts.rs                #   global-hotkey registration, validation and rebinding (v4.7, #676)
