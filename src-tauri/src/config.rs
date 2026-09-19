@@ -75,6 +75,15 @@ pub struct SpotifyConfig {
     pub client_secret_state: ClientSecretState,
     #[serde(default = "default_redirect_uri")]
     pub redirect_uri: String,
+    /// Unknown / future keys NESTED inside this section, retained across
+    /// load→save so a section written by a newer binary is not silently
+    /// stripped by an older one (issue #938 — the section-level companion of
+    /// [`AppConfig::extra`]). Omitted from JSON while empty and skipped in the
+    /// TypeScript export, so an untouched config gains no bytes and the
+    /// generated TypeScript is unchanged.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[ts(skip)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 fn default_redirect_uri() -> String {
@@ -136,6 +145,15 @@ pub struct TeamsConfig {
     /// `"🎵 Nothing playing on Spotify"`. Defaults to that literal's text.
     #[serde(default = "default_stopped_status_format")]
     pub stopped_status_format: String,
+    /// Unknown / future keys NESTED inside this section, retained across
+    /// load→save so a section written by a newer binary is not silently
+    /// stripped by an older one (issue #938 — the section-level companion of
+    /// [`AppConfig::extra`]). Omitted from JSON while empty and skipped in the
+    /// TypeScript export, so an untouched config gains no bytes and the
+    /// generated TypeScript is unchanged.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[ts(skip)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 fn default_status_format() -> String {
@@ -199,6 +217,15 @@ pub struct PollingConfig {
     /// and the value is clamped into 60..=3600 by `clamp_polling`.
     #[serde(default = "default_pause_backoff_max")]
     pub pause_backoff_max_seconds: u64,
+    /// Unknown / future keys NESTED inside this section, retained across
+    /// load→save so a section written by a newer binary is not silently
+    /// stripped by an older one (issue #938 — the section-level companion of
+    /// [`AppConfig::extra`]). Omitted from JSON while empty and skipped in the
+    /// TypeScript export, so an untouched config gains no bytes and the
+    /// generated TypeScript is unchanged.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[ts(skip)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 fn default_interval_seconds() -> u64 {
@@ -449,6 +476,15 @@ pub struct LoggingConfig {
     /// `keep_files + 1` log files. Clamped to 1..=20 by [`clamp_logging`].
     #[serde(default = "default_keep_files")]
     pub keep_files: u32,
+    /// Unknown / future keys NESTED inside this section, retained across
+    /// load→save so a section written by a newer binary is not silently
+    /// stripped by an older one (issue #938 — the section-level companion of
+    /// [`AppConfig::extra`]). Omitted from JSON while empty and skipped in the
+    /// TypeScript export, so an untouched config gains no bytes and the
+    /// generated TypeScript is unchanged.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[ts(skip)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 fn default_logging_enabled() -> bool {
@@ -721,11 +757,17 @@ fn default_schema_version() -> u32 {
 }
 
 /// Make the binary — never the client — authoritative for `schema_version`
-/// (CfgDiag#1, issue #536). A stale frontend payload (or a wizard literal
-/// that still sends `1`) can no longer erase the record that a migration
-/// already ran.
+/// (CfgDiag#1, issue #536; issue #938 for the newer-document half).
+///
+/// A stale frontend payload (or a wizard literal that still sends `1`) can no
+/// longer erase the record that a migration already ran: the marker never goes
+/// below [`SCHEMA_VERSION`]. It never goes DOWN at all — a document written by a
+/// NEWER binary keeps its own version, because this build cannot know which of
+/// that version's migrations have already run, and relabelling it would make the
+/// newer build's dispatcher skip them on its next launch. [`save_config`]
+/// refuses such a document outright rather than writing over it.
 pub fn stamp_schema_version(cfg: &mut AppConfig) {
-    cfg.schema_version = SCHEMA_VERSION;
+    cfg.schema_version = cfg.schema_version.max(SCHEMA_VERSION);
 }
 
 /// Version-directed fixups run by `load_config` BEFORE the clamps (issue
@@ -938,6 +980,15 @@ pub struct NotificationsConfig {
     /// An update finished staging and will install on quit.
     #[serde(default = "default_notification_class")]
     pub update_staged: bool,
+    /// Unknown / future keys NESTED inside this section, retained across
+    /// load→save so a section written by a newer binary is not silently
+    /// stripped by an older one (issue #938 — the section-level companion of
+    /// [`AppConfig::extra`]). Omitted from JSON while empty and skipped in the
+    /// TypeScript export, so an untouched config gains no bytes and the
+    /// generated TypeScript is unchanged.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[ts(skip)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 /// Mirrors the serde defaults field-by-field ([`QuietHoursEntry`]'s pattern):
@@ -950,6 +1001,7 @@ impl Default for NotificationsConfig {
             sync_stopped: default_notification_class(),
             auth_required: default_notification_class(),
             update_staged: default_notification_class(),
+            extra: BTreeMap::new(),
         }
     }
 }
@@ -1031,6 +1083,15 @@ pub struct UpdatesConfig {
     /// is read leniently — see [`deserialize_update_channel`].
     #[serde(default, deserialize_with = "deserialize_update_channel")]
     pub channel: UpdateChannel,
+    /// Unknown / future keys NESTED inside this section, retained across
+    /// load→save so a section written by a newer binary is not silently
+    /// stripped by an older one (issue #938 — the section-level companion of
+    /// [`AppConfig::extra`]). Omitted from JSON while empty and skipped in the
+    /// TypeScript export, so an untouched config gains no bytes and the
+    /// generated TypeScript is unchanged.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[ts(skip)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 /// Lenient read of one `updates.channel` value (4.7.0, issue #678): the
@@ -1158,6 +1219,7 @@ impl Default for SpotifyConfig {
             client_secret_set: false,
             client_secret_state: ClientSecretState::Absent,
             redirect_uri: default_redirect_uri(),
+            extra: BTreeMap::new(),
         }
     }
 }
@@ -1177,6 +1239,7 @@ impl Default for TeamsConfig {
             gate_when_out_of_office: default_gate_when_out_of_office(),
             paused_status_format: default_paused_status_format(),
             stopped_status_format: default_stopped_status_format(),
+            extra: BTreeMap::new(),
         }
     }
 }
@@ -1189,6 +1252,7 @@ impl Default for PollingConfig {
             max_interval_seconds: default_max_interval_seconds(),
             expiry_buffer_seconds: default_expiry_buffer_seconds(),
             pause_backoff_max_seconds: default_pause_backoff_max(),
+            extra: BTreeMap::new(),
         }
     }
 }
@@ -1200,6 +1264,7 @@ impl Default for LoggingConfig {
             log_level: default_log_level(),
             max_file_size_mb: default_max_file_size_mb(),
             keep_files: default_keep_files(),
+            extra: BTreeMap::new(),
         }
     }
 }
@@ -2120,17 +2185,56 @@ pub fn clamped_config(config: &AppConfig) -> AppConfig {
     cfg
 }
 
-pub fn save_config(config: &AppConfig) -> Result<(), String> {
-    let path = get_config_path()?;
+/// The `schema_version` recorded in the document at `path` (issue #938).
+///
+/// `None` for a missing, unreadable, unparsable or non-object file, and for a
+/// document whose `schema_version` is not a `u32` — every one of which this
+/// build is free to overwrite, so the caller reads `None` as "no reason to
+/// refuse".
+fn stored_schema_version(path: &std::path::Path) -> Option<u32> {
+    let contents = fs::read_to_string(path).ok()?;
+    let root: serde_json::Value = serde_json::from_str(&contents).ok()?;
+    u32::try_from(root.get("schema_version")?.as_u64()?).ok()
+}
 
+pub fn save_config(config: &AppConfig) -> Result<(), String> {
+    save_config_to(&get_config_path()?, config)
+}
+
+/// Path-taking core of [`save_config`]: the normalization, the newer-document
+/// refusal and the atomic write — so the write path is testable against real
+/// files, the same shape [`import_config_document`] uses.
+fn save_config_to(path: &std::path::Path, config: &AppConfig) -> Result<(), String> {
     let mut cfg = clamped_config(config);
-    // CfgDiag#1 (#536): the client's `schema_version` is a suggestion, not
-    // an instruction — a stale payload can never lower the version.
+    // CfgDiag#1 (#536): the client's `schema_version` is a suggestion, not an
+    // instruction — a stale payload can never lower the version, and since
+    // issue #938 it cannot raise one above a newer document's either.
     stamp_schema_version(&mut cfg);
+
+    // Issue #938: never rewrite a document a NEWER binary wrote. The marker is
+    // the only record of which migrations have run, and this build sees none of
+    // that document's unknown keys: writing back would relabel it at this
+    // build's version — so the newer build's dispatcher skips its own
+    // migrations on the next launch — and drop the keys those migrations read.
+    // Leaving the file alone loses nothing, and the caller surfaces the error.
+    if let Some(stored) = stored_schema_version(path) {
+        if stored > SCHEMA_VERSION {
+            log::warn!(
+                "[CFG] refusing to overwrite config '{}': schema_version {} was written by a newer PresenceJam (this build writes {})",
+                path.display(),
+                stored,
+                SCHEMA_VERSION
+            );
+            return Err(format!(
+                "The stored configuration was written by a newer version of PresenceJam (schema {stored}); leaving it untouched"
+            ));
+        }
+    }
+
     let json = serde_json::to_string_pretty(&cfg)
         .map_err(|e| format!("Failed to serialize config to JSON: {}", e))?;
 
-    atomic_write_json(&path, &json)?;
+    atomic_write_json(path, &json)?;
 
     log::info!("[CFG] Saved configuration to '{}'", path.display());
     Ok(())
@@ -2863,6 +2967,7 @@ mod tests {
             max_interval_seconds: 30,
             expiry_buffer_seconds: 10,
             pause_backoff_max_seconds: 300,
+            ..PollingConfig::default()
         };
         clamp_polling(&mut polling);
         assert_eq!(polling.max_interval_seconds, 30);
@@ -2879,6 +2984,7 @@ mod tests {
             max_interval_seconds: 60,
             expiry_buffer_seconds: 10,
             pause_backoff_max_seconds: 300,
+            ..PollingConfig::default()
         };
         clamp_polling(&mut polling);
         assert_eq!(polling.default_interval_seconds, 20);
@@ -2891,6 +2997,7 @@ mod tests {
             max_interval_seconds: 9999,
             expiry_buffer_seconds: 9999,
             pause_backoff_max_seconds: 9999,
+            ..PollingConfig::default()
         };
         clamp_polling(&mut polling);
         assert!(polling.minimum_interval_seconds <= polling.default_interval_seconds);
@@ -3912,6 +4019,7 @@ mod tests {
                 log_level: "Info".into(),
                 max_file_size_mb,
                 keep_files,
+                ..LoggingConfig::default()
             };
             clamp_logging(&mut logging);
             (logging.max_file_size_mb, logging.keep_files)
@@ -5209,5 +5317,106 @@ mod tests {
             "an all-out-of-range list becomes empty, which means every day"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------
+    // Issue #938: a section's unknown keys survive, and `schema_version`
+    // is a floor that never comes back down.
+    // -----------------------------------------------------------------
+
+    /// Issue #938: a key a NEWER build nested inside a section used to be
+    /// dropped by the next save from this build — `AppConfig::extra` retained
+    /// only the top level. The nested case now rides through the same load→save
+    /// path the app uses.
+    #[test]
+    fn test_nested_unknown_keys_survive_load_then_save() {
+        let (dir, path) = temp_config_file(
+            "nested-extra",
+            r#"{"autostart": true,
+                "teams": {"status_format": "🎧 {track}", "future_flag": true,
+                          "future_block": {"a": [1, 2]}},
+                "spotify": {"client_id": "abc", "future_spotify": "x"},
+                "logging": {"future_logging": 1}}"#,
+        );
+        let cfg = load_config_from(&path).expect("must load");
+        assert_eq!(
+            cfg.teams.extra.get("future_flag"),
+            Some(&serde_json::json!(true))
+        );
+        assert_eq!(
+            cfg.spotify.extra.get("future_spotify"),
+            Some(&serde_json::json!("x"))
+        );
+        assert_eq!(
+            cfg.logging.extra.get("future_logging"),
+            Some(&serde_json::json!(1))
+        );
+
+        save_config_to(&path, &cfg).expect("save must succeed");
+
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            written["teams"]["future_flag"], true,
+            "a nested unknown key must survive a load-then-save round trip"
+        );
+        assert_eq!(
+            written["teams"]["future_block"],
+            serde_json::json!({"a": [1, 2]})
+        );
+        assert_eq!(written["spotify"]["future_spotify"], "x");
+        assert_eq!(written["logging"]["future_logging"], 1);
+        assert_eq!(written["teams"]["status_format"], "🎧 {track}");
+        assert_eq!(written["autostart"], true);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #938: `save_config` refuses to rewrite a document a newer binary
+    /// wrote. The marker is the only record of which migrations have run, and
+    /// this build cannot see the keys those migrations read — so the file is
+    /// left byte-identical and the caller gets the error to surface.
+    #[test]
+    fn test_save_refuses_a_newer_document_and_never_lowers_the_marker() {
+        let contents = r#"{"schema_version": 99, "future_key": {"kept": true}, "autostart": true}"#;
+        let (dir, path) = temp_config_file("newer-than-us", contents);
+        let cfg = load_config_from(&path).expect("a newer document must still load");
+        assert_eq!(
+            cfg.schema_version, 99,
+            "a newer document keeps its own version instead of being relabelled"
+        );
+        assert!(
+            cfg.extra.contains_key("future_key"),
+            "its unknown keys are read"
+        );
+
+        let err =
+            save_config_to(&path, &cfg).expect_err("saving over a newer document must be refused");
+        assert!(err.contains("newer"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            contents,
+            "the newer document must be left byte-identical"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #938: stamping is a FLOOR, not an assignment — a document already
+    /// at a higher version must not be relabelled downward, while a stale
+    /// client payload still cannot lower the running build's own marker.
+    #[test]
+    fn test_stamp_schema_version_never_lowers_a_newer_document() {
+        let mut newer = AppConfig {
+            schema_version: SCHEMA_VERSION + 1,
+            ..AppConfig::default()
+        };
+        stamp_schema_version(&mut newer);
+        assert_eq!(newer.schema_version, SCHEMA_VERSION + 1);
+
+        let mut stale = AppConfig {
+            schema_version: 1,
+            ..AppConfig::default()
+        };
+        stamp_schema_version(&mut stale);
+        assert_eq!(stale.schema_version, SCHEMA_VERSION);
     }
 }
