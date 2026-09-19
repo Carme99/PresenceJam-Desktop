@@ -4,9 +4,14 @@
 
 use crate::config::{self, AppConfig, ConfigPatch};
 use crate::AppState;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::AppHandle;
 use tauri_plugin_dialog::DialogExt;
+
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 
 /// Log tag prefix for this submodule (issue #79 item 3).
 const CMD: &str = "[CMD.CONFIG]";
@@ -199,6 +204,125 @@ async fn after_persist(app: &AppHandle, persisted: &AppConfig) {
 // CLAUDE.md). Error strings stay English, as documented for Rust-side errors.
 // ---------------------------------------------------------------------------
 
+/// How many sidecar names an export tries before giving up. A collision means
+/// another process is writing the same destination at the same instant; eight
+/// attempts is already far past plausible.
+const EXPORT_SIDECAR_ATTEMPTS: u32 = 8;
+
+/// The private sidecar an export stages its bytes in:
+/// `<dest>.<pid>.<attempt>.pj-export.tmp`.
+///
+/// Deliberately not the config writer's `<dest>.tmp` (issue #823): that name is
+/// shared with whatever else the user keeps in the directory, and
+/// `atomic_write_json` pre-clears it.
+fn export_sidecar_path(dest: &Path, pid: u32, attempt: u32) -> PathBuf {
+    let mut name = dest
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(format!(".{}.{}.pj-export.tmp", pid, attempt));
+    dest.with_file_name(name)
+}
+
+/// Create `path` exclusively — no pre-clear, mode 0600 on Unix (the #135
+/// pattern `atomic_write_json` uses). `AlreadyExists` is reported to the caller
+/// rather than cleared away: the name belongs to whoever has it. That includes
+/// a *directory* at the name — `O_CREAT|O_EXCL` reports `EEXIST` for any
+/// existing entry — so the caller decides whether to try another name.
+fn open_exclusive(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    options.open(path)
+}
+
+/// fsync the directory the export landed in, so the rename survives a crash
+/// (the same guarantee `atomic_write_json` gives `config.json`).
+fn sync_parent_dir(path: &Path) {
+    #[cfg(unix)]
+    {
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                if let Err(e) = dir.sync_all() {
+                    log::warn!(
+                        "{CMD} export: failed to fsync export dir '{}': {}",
+                        parent.display(),
+                        e
+                    );
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// Write an export payload to `dest` through a sidecar private to this call.
+///
+/// Issue #823: the destination is a path the *user* chose, so it must not go
+/// through `config::atomic_write_json`. That writer derives its sidecar as
+/// `path.with_extension("tmp")` and removes it unconditionally — correct for
+/// `config.json`, which the app owns, but for an export it deleted an
+/// unrelated `~/notes.tmp` and, when that path was a directory, failed with an
+/// error naming a file the user never created. Here the sidecar carries this
+/// process id plus an attempt counter (so a collision picks another suffix
+/// instead of clearing anything), and the only path this function ever removes
+/// is the one it just created.
+fn write_export_file(dest: &Path, json: &str) -> Result<(), String> {
+    let pid = std::process::id();
+    for attempt in 0..EXPORT_SIDECAR_ATTEMPTS {
+        let staged = export_sidecar_path(dest, pid, attempt);
+        let mut file = match open_exclusive(&staged) {
+            Ok(file) => file,
+            // Somebody (or something) else holds this exact name — theirs, not
+            // ours: try the next suffix rather than clearing it away. A
+            // directory at the name lands here too, since `O_CREAT|O_EXCL`
+            // reports `EEXIST` for it; the export then fails naming this call's
+            // own sidecar, never a path the user chose.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(format!(
+                    "Failed to create export sidecar '{}': {}",
+                    staged.display(),
+                    e
+                ))
+            }
+        };
+        if let Err(e) = file.write_all(json.as_bytes()) {
+            let _ = std::fs::remove_file(&staged);
+            return Err(format!(
+                "Failed to write export sidecar '{}': {}",
+                staged.display(),
+                e
+            ));
+        }
+        if let Err(e) = file.sync_all() {
+            let _ = std::fs::remove_file(&staged);
+            return Err(format!(
+                "Failed to sync export sidecar '{}': {}",
+                staged.display(),
+                e
+            ));
+        }
+        drop(file);
+        if let Err(e) = std::fs::rename(&staged, dest) {
+            let _ = std::fs::remove_file(&staged);
+            return Err(format!(
+                "Failed to rename export sidecar to '{}': {}",
+                dest.display(),
+                e
+            ));
+        }
+        sync_parent_dir(dest);
+        return Ok(());
+    }
+    Err(format!(
+        "Failed to create an export sidecar next to '{}': every candidate name is taken",
+        dest.display()
+    ))
+}
+
 /// Write a shareable copy of the current config to a user-chosen path.
 ///
 /// The document is the persisted shape of the loaded config — clamped, with
@@ -227,13 +351,19 @@ pub async fn export_config(
     let json = config::export_document(&current)?;
     let suggested = config::export_file_name(env!("CARGO_PKG_VERSION"), chrono::Utc::now());
 
-    let chosen = app
+    // Issue #885: the picker blocks until the user answers, and that wait is
+    // unbounded, so only its terminal call runs on the blocking pool — the
+    // same contract `ask_overwrite` documents below. The dialog itself is
+    // built here, on the command thread.
+    let picker = app
         .dialog()
         .file()
         .set_title(title)
         .set_file_name(&suggested)
-        .add_filter("JSON", &["json"])
-        .blocking_save_file();
+        .add_filter("JSON", &["json"]);
+    let chosen = tauri::async_runtime::spawn_blocking(move || picker.blocking_save_file())
+        .await
+        .map_err(|e| format!("export_config spawn_blocking panicked: {:?}", e))?;
     let Some(chosen) = chosen else {
         log::info!("{CMD} export_config: CANCELLED - dialog dismissed");
         return Ok(None);
@@ -247,10 +377,11 @@ pub async fn export_config(
     if path.extension().is_none() {
         path.set_extension("json");
     }
-    // Same crash-safe write as `save_config` (sidecar + fsync + rename, mode
-    // 0600): a failed export must not leave a half-written file where the user
-    // was told a complete copy lives.
-    config::atomic_write_json(&path, &json)?;
+    // Crash-safe write private to the export — sidecar + fsync + rename, mode
+    // 0600 as `save_config` uses — but through a sidecar this call names
+    // itself, so a user-chosen destination is never routed through the config
+    // writer (issue #823).
+    write_export_file(&path, &json)?;
 
     let written = path.to_string_lossy().into_owned();
     log::info!(
@@ -288,7 +419,7 @@ pub struct ImportOutcome {
 /// pressed".
 ///
 /// Blocking on purpose: this is called from the blocking pool (never the main
-/// thread), which is the same pattern the file picker above uses.
+/// thread), the same `spawn_blocking` shape the file pickers above use.
 fn ask_overwrite(
     app: &AppHandle,
     title: &str,
@@ -310,13 +441,176 @@ fn ask_overwrite(
     confirmed
 }
 
+/// Top-level keys a genuine PresenceJam export always carries. A document with
+/// none of them is not one of ours (issue #963).
+const IMPORT_SECTION_KEYS: [&str; 9] = [
+    "schema_version",
+    "spotify",
+    "teams",
+    "polling",
+    "logging",
+    "updates",
+    "notifications",
+    "shortcuts",
+    "status_rules",
+];
+
+/// Whether `value` is recognisably a PresenceJam configuration (issue #963).
+///
+/// `AppConfig`'s fields all carry `#[serde(default)]`, so *any* JSON object
+/// deserializes — that is what makes this check necessary rather than implied
+/// by the schema parse.
+fn is_presencejam_document(value: &serde_json::Value) -> bool {
+    value.is_object()
+        && IMPORT_SECTION_KEYS
+            .iter()
+            .any(|key| value.get(*key).is_some())
+}
+
+/// Read the file the user picked, refusing anything that is not a PresenceJam
+/// configuration at all (issue #963).
+///
+/// Without this check a mis-picked `.json` that shares none of the
+/// application's sections still deserializes into a complete, all-defaults
+/// config, and the import reports success while the user's Spotify client id,
+/// status format, quiet hours, track rules, notification classes, shortcuts and
+/// locale are replaced by defaults. A real export always carries the full
+/// section set, so a genuine backup is never refused here.
+///
+/// A malformed file is deliberately left to `config::prepare_import`'s own
+/// error, so the "not valid JSON" wording keeps one home.
+fn read_import_source(path: &Path) -> Result<String, String> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| format!("import_config: failed to read '{}': {}", path.display(), e))?;
+    match serde_json::from_str::<serde_json::Value>(&raw) {
+        Ok(value) if !is_presencejam_document(&value) => {
+            log::warn!("{CMD} import_config: REFUSED - not a PresenceJam configuration");
+            Err(
+                "Imported file is not a PresenceJam configuration (no recognisable section: expected schema_version, spotify, teams, polling, logging, updates, notifications, shortcuts or status_rules)"
+                    .to_string(),
+            )
+        }
+        _ => Ok(raw),
+    }
+}
+
+/// The sidecar an imported document is staged in before it replaces the live
+/// config: `<config.json>.import.tmp`. Beside the live file, so the final
+/// rename stays on one volume and is atomic (issue #939).
+fn staged_config_path(path: &Path) -> PathBuf {
+    let mut staged = path.as_os_str().to_owned();
+    staged.push(".import.tmp");
+    PathBuf::from(staged)
+}
+
+/// Stage `json` beside `path`, move the live file to the quarantine backup, then
+/// install the staged copy over `path` (issue #939).
+///
+/// `config::import_config_document` moves the live file to `config.json.bak`
+/// first and writes the imported document only afterwards: a write that fails —
+/// disk full, quota, permission denied, an antivirus lock — or a process death
+/// between the two steps returns an error with **no live config at all**. The
+/// next launch then logs "Config file not found", boots on defaults, and the
+/// user's settings exist only in a `.bak` nothing restores. Staging first means
+/// a replacement that cannot be written fails before the live file moves; if
+/// the final rename fails, the previous document is moved back before the error
+/// returns.
+///
+/// The staged sidecar is app-owned, so a leftover from an import that died
+/// mid-flight is pre-cleared exactly as `atomic_write_json` does for
+/// `config.json.tmp` (#135 path A) — one crash must not become a permanent
+/// import failure.
+fn replace_config_file(path: &Path, json: &str) -> Result<(), String> {
+    let staged = staged_config_path(path);
+
+    if let Err(e) = std::fs::remove_file(&staged) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return Err(format!(
+                "Failed to remove stale import temp file '{}': {}",
+                staged.display(),
+                e
+            ));
+        }
+    }
+
+    let mut file = open_exclusive(&staged).map_err(|e| {
+        format!(
+            "Failed to create import temp file '{}': {}",
+            staged.display(),
+            e
+        )
+    })?;
+    if let Err(e) = file.write_all(json.as_bytes()) {
+        let _ = std::fs::remove_file(&staged);
+        return Err(format!(
+            "Failed to write import temp file '{}': {}",
+            staged.display(),
+            e
+        ));
+    }
+    if let Err(e) = file.sync_all() {
+        let _ = std::fs::remove_file(&staged);
+        return Err(format!(
+            "Failed to sync import temp file '{}': {}",
+            staged.display(),
+            e
+        ));
+    }
+    drop(file);
+
+    // The outgoing file goes to the same backup path the corrupt-file
+    // quarantine uses, so an import is never a one-way door. A missing current
+    // file is not an error: a fresh install has nothing to back up.
+    let backup = config::quarantine_backup_path(path);
+    let had_live = path.exists();
+    if had_live {
+        if let Err(e) = std::fs::rename(path, &backup) {
+            let _ = std::fs::remove_file(&staged);
+            return Err(format!(
+                "Failed to move the current config to '{}': {}",
+                backup.display(),
+                e
+            ));
+        }
+        log::info!(
+            "{CMD} import: previous config moved to '{}'",
+            backup.display()
+        );
+    }
+
+    if let Err(e) = std::fs::rename(&staged, path) {
+        log::error!("{CMD} import: FAILED to install the imported config: {}", e);
+        let _ = std::fs::remove_file(&staged);
+        if had_live {
+            match std::fs::rename(&backup, path) {
+                Ok(()) => log::warn!("{CMD} import: the previous config was moved back into place"),
+                Err(rollback) => log::error!(
+                    "{CMD} import: rollback FAILED - the previous config is at '{}': {}",
+                    backup.display(),
+                    rollback
+                ),
+            }
+        }
+        return Err(format!(
+            "Failed to install the imported config at '{}': {}",
+            path.display(),
+            e
+        ));
+    }
+
+    sync_parent_dir(path);
+    Ok(())
+}
+
 /// Replace the stored config with a document the user picks.
 ///
-/// Validation happens in `config::import_config_document` before anything is
-/// written — a document carrying a plaintext `client_secret` is refused — and
-/// the user is asked before the current file is replaced, with the outgoing
-/// copy kept as `config.json.bak`. Returns `None` when the picker was dismissed
-/// or the overwrite was declined (both are clean no-ops).
+/// Validation happens before anything is written: a file that is not a
+/// PresenceJam configuration is refused by [`read_import_source`] (issue #963),
+/// and a document carrying a plaintext `client_secret` by
+/// `config::prepare_import`. The user is asked before the current file is
+/// replaced — a fresh install, having nothing to replace, is not asked — and the
+/// outgoing copy is kept as `config.json.bak`. Returns `None` when the picker
+/// was dismissed or the overwrite was declined (both are clean no-ops).
 #[tauri::command]
 pub async fn import_config(
     app: AppHandle,
@@ -328,12 +622,16 @@ pub async fn import_config(
 ) -> Result<Option<ImportOutcome>, String> {
     log::info!("{CMD} import_config: ENTRY");
 
-    let chosen = app
+    // Same blocking-pool contract as the export picker (issue #885): building
+    // the dialog is cheap, the wait on the user is not.
+    let picker = app
         .dialog()
         .file()
         .set_title(title.clone())
-        .add_filter("JSON", &["json"])
-        .blocking_pick_file();
+        .add_filter("JSON", &["json"]);
+    let chosen = tauri::async_runtime::spawn_blocking(move || picker.blocking_pick_file())
+        .await
+        .map_err(|e| format!("import_config spawn_blocking panicked: {:?}", e))?;
     let Some(chosen) = chosen else {
         log::info!("{CMD} import_config: CANCELLED - dialog dismissed");
         return Ok(None);
@@ -341,23 +639,26 @@ pub async fn import_config(
     let source = chosen
         .into_path()
         .map_err(|e| format!("import_config: unusable source: {}", e))?;
-    let raw = std::fs::read_to_string(&source).map_err(|e| {
-        format!(
-            "import_config: failed to read '{}': {}",
-            source.display(),
-            e
-        )
-    })?;
+    // Issue #963: read and identity-check the picked file before the
+    // destination is even resolved — a file that is not a PresenceJam
+    // configuration is refused with nothing on disk touched.
+    let raw = read_import_source(&source)?;
     let source_path = source.to_string_lossy().into_owned();
     let destination = config::get_config_path()?;
 
-    // The validate → ask → replace sequence runs on the blocking pool, and
-    // deliberately *without* the config write guard: the confirmation is a
-    // user-driven wait, and holding the guard across it would stall the polling
-    // loop's config reads for as long as the dialog is on screen.
-    let dialog_app = app.clone();
-    let outcome = tauri::async_runtime::spawn_blocking(move || {
-        config::import_config_document(&raw, &destination, || {
+    // Validation before anything is written: `prepare_import` refuses a
+    // document carrying a plaintext client_secret and clamps everything it
+    // accepts, so the replace below cannot introduce a value the UI could not
+    // have saved.
+    let prepared = config::prepare_import(&raw)?;
+
+    // The overwrite question is a user-driven wait, so it runs on the blocking
+    // pool and *outside* the config write guard: holding the guard across it
+    // would stall the polling loop's config reads for as long as the dialog is
+    // on screen. A fresh install has nothing to replace and is not asked.
+    if destination.exists() {
+        let dialog_app = app.clone();
+        let confirmed = tauri::async_runtime::spawn_blocking(move || {
             ask_overwrite(
                 &dialog_app,
                 &title,
@@ -366,13 +667,23 @@ pub async fn import_config(
                 &confirm_cancel,
             )
         })
+        .await
+        .map_err(|e| format!("import_config spawn_blocking panicked: {:?}", e))?;
+        if !confirmed {
+            log::info!("{CMD} import_config: DECLINED - configuration left untouched");
+            return Ok(None);
+        }
+    }
+
+    // Issue #939: the imported document is staged beside the live file and only
+    // then installed, so a replace that cannot be written leaves the previous
+    // `config.json` in place instead of wiping the user's settings.
+    let write_destination = destination.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        replace_config_file(&write_destination, &prepared.document)
     })
     .await
     .map_err(|e| format!("import_config spawn_blocking panicked: {:?}", e))??;
-    let Some(_written) = outcome else {
-        log::info!("{CMD} import_config: DECLINED - configuration left untouched");
-        return Ok(None);
-    };
 
     // #215 pattern for the adoption only: the file write is done, and this guard
     // covers the load-then-store pair so a concurrent write cannot interleave.
@@ -489,6 +800,8 @@ pub async fn set_locale(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     /// Production half of this module — everything before the inline test
     /// module, so a scan can never match the assertions themselves.
     fn prod_source(src: &str) -> &str {
@@ -590,5 +903,280 @@ mod tests {
             !body.contains("rebuild_app_menu("),
             "set_locale must not keep a second relabel sequence of its own"
         );
+    }
+
+    /// Issue #823: an export destination belongs to the user, so the export
+    /// must leave whatever already sits beside it alone — the sibling
+    /// `<dest>.tmp` is exactly the path the config writer would have
+    /// pre-cleared.
+    #[test]
+    fn export_leaves_a_tmp_sibling_and_a_sibling_directory_alone() {
+        let dir = temp_dir("pj-test-export");
+        let json = "{\"schema_version\":1}";
+
+        // Sibling file with unrelated bytes: it must survive the export.
+        let dest = dir.join("notes.json");
+        let sibling = dir.join("notes.tmp");
+        std::fs::write(&sibling, b"SENTINEL").unwrap();
+        super::write_export_file(&dest, json).unwrap();
+        assert_eq!(
+            std::fs::read(&sibling).unwrap(),
+            b"SENTINEL",
+            "the export must not touch a `<dest>.tmp` sibling it did not create"
+        );
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), json);
+
+        // Sibling directory: neither an abort nor a removal.
+        let dest2 = dir.join("journal.json");
+        let sibling_dir = dir.join("journal.tmp");
+        std::fs::create_dir(&sibling_dir).unwrap();
+        super::write_export_file(&dest2, json).unwrap();
+        assert!(
+            sibling_dir.is_dir(),
+            "a directory at the sibling path must not be removed"
+        );
+        assert_eq!(std::fs::read_to_string(&dest2).unwrap(), json);
+
+        // And no staged sidecar is left behind.
+        let strays: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".pj-export.tmp"))
+            .collect();
+        assert!(strays.is_empty(), "staged sidecars left behind: {strays:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The statement that carries `needle` when `needle` is an argument of a
+    /// `spawn_blocking` call: from that call to the `;` ending the statement.
+    /// `None` when the call is nowhere inside a `spawn_blocking` argument
+    /// list — the failure the #885 guard exists to catch. Paren-counted, so a
+    /// closure written either inline (`move || expr`, what rustfmt produces)
+    /// or as a block passes.
+    fn blocking_statement_of(body: &str, needle: &str) -> Option<String> {
+        let pos = body.find(needle)?;
+        let open = body[..pos].rfind("spawn_blocking(")?;
+        let tail = &body[open..];
+        let mut depth = 0i32;
+        let mut end = None;
+        for (i, ch) in tail.char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                ';' if depth == 0 => {
+                    end = Some(i);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        Some(tail[..end?].to_string())
+    }
+
+    /// Issue #885: an open file dialog holds a runtime worker for as long as
+    /// the user leaves it open, which on a low-core machine delays every other
+    /// command that hops through the async runtime. Both pickers must
+    /// therefore run on the blocking pool.
+    ///
+    /// Source-level by necessity: showing a native picker needs a real desktop
+    /// session. The structural check — the call is an argument of the
+    /// `spawn_blocking` call, and the join handle is awaited — is what makes
+    /// this more than a proximity scan.
+    #[test]
+    fn file_pickers_run_on_the_blocking_pool() {
+        let prod = prod_source(include_str!("config.rs"));
+
+        for (sig, call) in [
+            ("pub async fn export_config(", "blocking_save_file()"),
+            ("pub async fn import_config(", "blocking_pick_file()"),
+        ] {
+            let body = body_of(prod, sig);
+            let statement = blocking_statement_of(&body, call).unwrap_or_else(|| {
+                panic!("{sig} calls {call} outside a spawn_blocking call (issue #885)")
+            });
+            assert!(
+                statement.contains(".await"),
+                "{sig} must await the picker task, or the command returns before the user answers"
+            );
+        }
+    }
+
+    /// A fresh temp directory for one test, unique per process and per call.
+    fn temp_dir(prefix: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("{prefix}-{}-{}", std::process::id(), nanos));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    /// Issue #963: `AppConfig` is `#[serde(default)]` throughout, so any JSON
+    /// object deserializes — including one carrying none of the application's
+    /// sections, which would replace the user's settings with defaults while
+    /// the import reported success.
+    #[test]
+    fn import_refuses_a_file_that_is_not_a_presencejam_config() {
+        assert!(!is_presencejam_document(&serde_json::json!({})));
+        assert!(!is_presencejam_document(&serde_json::json!({"foo": 1})));
+        assert!(!is_presencejam_document(&serde_json::json!([1, 2, 3])));
+        // One recognisable section is enough, whatever else the file carries.
+        assert!(is_presencejam_document(&serde_json::json!({"spotify": {}})));
+        assert!(is_presencejam_document(
+            &serde_json::json!({"schema_version": 0})
+        ));
+    }
+
+    /// The refusal runs on the command path and touches nothing: the live
+    /// `config.json` stays byte-identical and no `.bak` appears (issue #963).
+    #[test]
+    fn refused_import_leaves_the_live_config_byte_identical() {
+        let dir = temp_dir("pj-test-import-refuse");
+        let live = dir.join("config.json");
+        let previous = "{\n  \"spotify\": {\"client_id\": \"KEEP\"}\n}";
+        std::fs::write(&live, previous).expect("live config");
+
+        let picked = dir.join("picked.json");
+        for document in ["{}", "{\"foo\":1}"] {
+            std::fs::write(&picked, document).expect("picked file");
+            let err = read_import_source(&picked)
+                .expect_err("a file that is not a PresenceJam config must be refused");
+            assert!(
+                err.contains("not a PresenceJam configuration"),
+                "the refusal must say what the file is not: {err}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&live).expect("live config"),
+                previous,
+                "a refused import must leave the live config byte-identical"
+            );
+            assert!(
+                !dir.join("config.json.bak").exists(),
+                "a refused import must not quarantine the live config"
+            );
+        }
+
+        // A genuine export is never refused — the export/import round trip.
+        let exported = config::export_document(&config::AppConfig::default()).expect("export");
+        std::fs::write(&picked, &exported).expect("picked export");
+        assert_eq!(
+            read_import_source(&picked).expect("export must import"),
+            exported
+        );
+
+        // ...and `import_config` is what runs this check.
+        let prod = prod_source(include_str!("config.rs"));
+        let body = body_of(prod, "pub async fn import_config(");
+        assert!(
+            body.contains("read_import_source("),
+            "import_config must refuse a non-PresenceJam file on its own path"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #939: a replace that cannot be written must leave the previous
+    /// `config.json` in place. Staging first is what makes that true — the
+    /// rename-then-write sequence this replaced moved the live file aside and
+    /// only then failed, leaving the app with no config at all.
+    #[test]
+    fn failed_replace_leaves_the_previous_config_in_place() {
+        let dir = temp_dir("pj-test-import-failed-replace");
+        let live = dir.join("config.json");
+        let previous = "{\"spotify\":{\"client_id\":\"KEEP\"}}";
+        std::fs::write(&live, previous).expect("live config");
+        // An obstruction at the staged sidecar name fails the stage step —
+        // which is the point: it happens before the live file is touched.
+        let staged = staged_config_path(&live);
+        std::fs::create_dir(&staged).expect("obstruction");
+
+        let err = replace_config_file(&live, "{\"spotify\":{\"client_id\":\"NEW\"}}")
+            .expect_err("the replace cannot be staged");
+        assert!(err.contains("import temp file"), "unexpected error: {err}");
+        assert_eq!(
+            std::fs::read_to_string(&live).expect("live config"),
+            previous,
+            "a failed replace must leave the previous config.json in place"
+        );
+        assert!(
+            !dir.join("config.json.bak").exists(),
+            "the live config must not have been moved aside before the write"
+        );
+        assert!(staged.is_dir(), "the obstruction must not be removed");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #939 (unix): the real-world version of the same contract — a
+    /// directory the app cannot write to yields an error while the previous
+    /// config stays on disk, byte-identical.
+    #[cfg(unix)]
+    #[test]
+    fn replace_in_an_unwritable_directory_keeps_the_previous_config() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir("pj-test-import-unwritable");
+        let inner = dir.join("cfg");
+        std::fs::create_dir(&inner).expect("inner dir");
+        let live = inner.join("config.json");
+        let previous = "{\"spotify\":{\"client_id\":\"KEEP\"}}";
+        std::fs::write(&live, previous).expect("live config");
+        std::fs::set_permissions(&inner, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+
+        // Root (or a filesystem that ignores the mode bits) would not be denied
+        // here, and the contract can only be asserted where the write really
+        // fails.
+        let denied = std::fs::write(inner.join("probe"), b"x").is_err();
+        if denied {
+            let err = replace_config_file(&live, "{\"spotify\":{\"client_id\":\"NEW\"}}")
+                .expect_err("an unwritable directory must fail the replace");
+            assert!(err.contains("import temp file"), "unexpected error: {err}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(&live).expect("live config"),
+            previous,
+            "the previous config must survive a replace that could not be staged"
+        );
+        assert!(
+            denied,
+            "expected the 0o555 directory to deny this test's write"
+        );
+
+        let _ = std::fs::set_permissions(&inner, std::fs::Permissions::from_mode(0o755));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A replace that can be written lands the new document exactly once and
+    /// keeps the outgoing one as `config.json.bak`.
+    #[test]
+    fn replace_installs_the_document_once_and_quarantines_the_previous_one() {
+        let dir = temp_dir("pj-test-import-replace");
+        let live = dir.join("config.json");
+        let previous = "{\"spotify\":{\"client_id\":\"OLD\"}}";
+        let next = "{\n  \"spotify\": {\"client_id\": \"NEW\"}\n}";
+        std::fs::write(&live, previous).expect("live config");
+
+        replace_config_file(&live, next).expect("the replace must land");
+
+        assert_eq!(std::fs::read_to_string(&live).expect("live config"), next);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("config.json.bak")).expect("backup"),
+            previous
+        );
+        assert!(
+            !staged_config_path(&live).exists(),
+            "the staged sidecar must not survive a successful replace"
+        );
+
+        // A fresh install has nothing to back up and is still replaced.
+        let fresh = dir.join("fresh.json");
+        replace_config_file(&fresh, next).expect("a replace into a missing file must succeed");
+        assert_eq!(std::fs::read_to_string(&fresh).expect("fresh"), next);
+        assert!(!staged_config_path(&fresh).exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
