@@ -4593,7 +4593,15 @@ mod tests {
     }
 
     /// Regression guard for issue #79/#117: poll_once.rs must NOT emit raw
-    /// "error" events directly.
+    /// "error" events directly — every error emit in this file goes through
+    /// `emit_error`, the one place the envelope is built.
+    ///
+    /// Source-level by necessity: observing the invariant means capturing emits
+    /// from a live `AppHandle`, which is also why the envelope's shape is
+    /// asserted where it is built rather than here
+    /// (`polling::tests::error_payload_carries_source_message_and_severity`).
+    /// This scan is the ordering guard that no call site grows its own inline
+    /// envelope.
     #[test]
     fn test_no_raw_error_emit_in_poll_once() {
         let source = include_str!("poll_once.rs");

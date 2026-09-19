@@ -891,6 +891,11 @@ mod tests {
     /// The `set_locale` command must converge through the same post-write path
     /// as every other config write instead of keeping its own copy of the
     /// relabel sequence.
+    ///
+    /// Source-level by necessity, for the same reason as the test above: the
+    /// effect is a tray repaint plus an app-menu rebuild on a live app handle,
+    /// so no unit test can watch it happen. The scan is the ordering guard that
+    /// the command keeps exactly one relabel path.
     #[test]
     fn set_locale_routes_through_the_shared_post_write_path() {
         let prod = prod_source(include_str!("config.rs"));

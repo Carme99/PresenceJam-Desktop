@@ -11,13 +11,14 @@
 //!     callerless playback_* / get_playback_* commands; the tray and the global
 //!     hotkeys call `playback::player_with_refresh_typed` / `player_with_refresh`
 //!     directly, with no IPC hop)
+
 //!   - `teams_auth` — start_teams_auth_device_code, poll_teams_auth, refresh_teams, cancel_teams_auth_poll, get_teams_granted_scopes
-//!   - `sync` — start_syncing, stop_syncing, get_sync_status, app_exit
+//!   - `sync` — start_syncing, stop_syncing, get_sync_status, app_exit, refresh_status
 //!   - `window` — show_window, set_autostart_enabled, open_logs_folder, open_external_url
 //!   - `onboarding` — is_onboarding_complete, complete_onboarding, reconnect_spotify, reconnect_teams
-//!   - `misc` — preview_status, update_tray_menu_state
-//!   - `logs` — get_recent_logs (LogViewer history backfill, issue #595)
-//!   - `shortcuts` — register_shortcuts, unregister_shortcuts, validate_shortcut (global hotkeys, issue #676)
+//!   - `misc` — preview_status, update_tray_menu_state, relaunch_app
+//!   - `logs` — get_recent_logs
+//!   - `shortcuts` — register_shortcuts, unregister_shortcuts, validate_shortcut
 
 pub mod config;
 pub mod logs;
@@ -65,19 +66,18 @@ pub fn require_main_window(window: &tauri::Window) -> Result<(), String> {
 
 /// Issue #485 caller-location matrix: which commands are guarded by
 /// `require_main_window`, which are intentionally unguarded, and why.
-/// Commands without a `tauri::Window` param cannot call the guard (it
-/// needs the caller label); their main-only status is justified by caller
-/// location instead -- every frontend call site lives in a main-window-only
-/// view (Dashboard, +page, UpdatePrompt, Diagnostics-as-main-route).
-/// Detached windows (`logs-detached` / `settings-detached`) host only
+///
+/// Commands without a `tauri::Window` param cannot call the guard (it needs
+/// the caller label); their main-only status is justified by caller location
+/// instead. Detached windows (`logs-detached` / `settings-detached`) host only
 /// Settings + LogViewer, whose invokes are the allowlist below.
 ///
-/// GUARDED (take `window` and reject non-main first):
-/// start_syncing, stop_syncing, app_exit, refresh_status (sync.rs),
-/// start_spotify_auth, start_spotify_reconnect, complete_spotify_auth_manual,
-/// refresh_spotify (spotify_auth.rs), start_teams_auth_device_code,
-/// refresh_teams (teams_auth.rs), complete_onboarding (onboarding.rs),
-/// relaunch_app (misc.rs), stage_deferred_update (updater_bg.rs).
+/// Every registered command appears under exactly one heading, as a bullet
+/// whose backticked names are the commands that bullet justifies. That shape is
+/// what `matrix_covers_every_registered_command` and
+/// `matrix_guard_claims_match_the_code` parse, so a command cannot be
+/// registered without landing here, listed here without being registered, or
+/// claimed to be guarded without actually calling the guard.
 ///
 /// INTENTIONALLY UNGUARDED -- main-only by caller location (no Window param):
 /// show_window (+page main route), update_tray_menu_state (Dashboard),
@@ -122,12 +122,207 @@ pub fn require_main_window(window: &tauri::Window) -> Result<(), String> {
 /// Both are pending deletion (the same treatment the seven playback wrappers
 /// got here); `reconnect_spotify` is already deleted on the onboarding slice's
 /// branch, so whoever merges that one should not re-add it.
+
 #[cfg(test)]
 mod tests {
+    /// The ten `commands::*` submodules, with their sources. The submodule map
+    /// above has to stay in step with these.
+    const COMMAND_MODULES: [(&str, &str); 10] = [
+        ("config", include_str!("config.rs")),
+        ("spotify_auth", include_str!("spotify_auth.rs")),
+        ("playback", include_str!("playback.rs")),
+        ("teams_auth", include_str!("teams_auth.rs")),
+        ("sync", include_str!("sync.rs")),
+        ("window", include_str!("window.rs")),
+        ("onboarding", include_str!("onboarding.rs")),
+        ("misc", include_str!("misc.rs")),
+        ("logs", include_str!("logs.rs")),
+        ("shortcuts", include_str!("shortcuts.rs")),
+    ];
+
+    /// The two registered modules outside `commands::`. They own commands too,
+    /// so the caller-location matrix has to cover them.
+    const SIBLING_SOURCES: [&str; 2] = [
+        include_str!("../updater_bg.rs"),
+        include_str!("../diagnostics.rs"),
+    ];
+
+    /// One caller-location matrix entry: the heading it sits under, and the
+    /// command that heading's bullet justifies.
+    type MatrixEntry = (String, String);
+
+    /// The production half of a module — everything before its inline test
+    /// module, so a scan can never match the assertions themselves.
+    fn prod_source(src: &str) -> &str {
+        src.split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("every scanned module carries a #[cfg(test)] mod tests block")
+    }
+
+    /// Brace-counted body isolation (house style — never boundary anchors,
+    /// which drift).
+    fn fn_body<'a>(prod: &'a str, sig: &str) -> Option<&'a str> {
+        let after_sig = prod.split(sig).nth(1)?;
+        let open = after_sig.find('{')?;
+        let mut depth = 0usize;
+        for (i, ch) in after_sig[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(&after_sig[..open + i + 1]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// The body of the `#[tauri::command]` fn named `name`, found in whichever
+    /// module declares it.
+    fn command_body(name: &str) -> String {
+        let sig = format!("fn {name}(");
+        let sources = COMMAND_MODULES.iter().map(|module| module.1);
+        for source in sources.chain(SIBLING_SOURCES) {
+            if let Some(body) = fn_body(prod_source(source), &sig) {
+                return body.to_string();
+            }
+        }
+        panic!("no registered command named `{name}` in the scanned sources")
+    }
+
+    /// The `#[tauri::command]` fn names a module declares, in source order.
+    fn declared_commands(source: &str) -> Vec<String> {
+        let lines: Vec<&str> = prod_source(source).lines().collect();
+        let mut names = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            if line.trim() != "#[tauri::command]" {
+                continue;
+            }
+            let sig = lines[i + 1..]
+                .iter()
+                .map(|l| l.trim())
+                .find(|l| l.starts_with("pub "));
+            let Some(sig) = sig else {
+                continue;
+            };
+            let rest = sig
+                .strip_prefix("pub async fn ")
+                .or_else(|| sig.strip_prefix("pub fn "));
+            let Some(rest) = rest else {
+                continue;
+            };
+            let name = rest.split_once('(').map_or(rest, |(name, _)| name);
+            names.push(name.to_string());
+        }
+        names
+    }
+
+    /// Every command registered with `generate_handler![…]`, in registration
+    /// order.
+    fn registered_commands(lib_source: &str) -> Vec<String> {
+        let after = lib_source
+            .split("generate_handler![")
+            .nth(1)
+            .expect("lib.rs must register its commands with generate_handler!");
+        let list = after.split(']').next().unwrap_or(after);
+        list.lines()
+            .map(|line| line.trim().trim_end_matches(','))
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| entry.rsplit("::").next().unwrap_or(entry).to_string())
+            .collect()
+    }
+
+    /// Parse the `//!` submodule map: each entry is
+    /// ``- `module` — cmd_a, cmd_b``.
+    fn submodule_map(source: &str) -> Vec<(String, Vec<String>)> {
+        source
+            .lines()
+            .filter_map(|line| {
+                let doc = line.trim_start_matches("//!").trim_start();
+                let rest = doc.strip_prefix("- `")?;
+                let (module, rest) = rest.split_once('`')?;
+                let (_, list) = rest.split_once(" — ")?;
+                let names = list.split(',').map(|name| name.trim().to_string());
+                Some((module.to_string(), names.filter(|n| !n.is_empty()).collect()))
+            })
+            .collect()
+    }
+
+    /// Flush the bullet being accumulated: every backticked name before the
+    /// em-dash justification belongs to the current section.
+    fn push_bullet(entries: &mut Vec<MatrixEntry>, section: &str, bullet: &mut Option<String>) {
+        let Some(text) = bullet.take() else {
+            return;
+        };
+        let names = text.split(" — ").next().unwrap_or(text.as_str());
+        for name in names.split('`').skip(1).step_by(2) {
+            entries.push((section.to_string(), name.to_string()));
+        }
+    }
+
+    /// Parse the caller-location matrix above: under each `## <SECTION>`
+    /// heading, a bullet's backticked names are the commands it justifies.
+    fn matrix_entries(source: &str) -> Vec<MatrixEntry> {
+        let marker = "/// Issue #485 caller-location matrix";
+        let after = source
+            .split(marker)
+            .nth(1)
+            .expect("commands/mod.rs must carry the #485 caller-location matrix");
+        // The marker sits mid-line, so the rest of its own line is not doc.
+        let matrix = after.split_once('\n').map_or(after, |(_, rest)| rest);
+        let mut section = String::new();
+        let mut bullet: Option<String> = None;
+        let mut entries: Vec<MatrixEntry> = Vec::new();
+        for line in matrix.lines() {
+            let Some(doc) = line.strip_prefix("///") else {
+                break;
+            };
+            let doc = doc.trim();
+            if let Some(heading) = doc.strip_prefix("## ") {
+                push_bullet(&mut entries, &section, &mut bullet);
+                section = heading.split_whitespace().next().unwrap_or_default().to_string();
+                continue;
+            }
+            if let Some(rest) = doc.strip_prefix("- ") {
+                push_bullet(&mut entries, &section, &mut bullet);
+                bullet = Some(rest.to_string());
+                continue;
+            }
+            if doc.is_empty() {
+                push_bullet(&mut entries, &section, &mut bullet);
+                continue;
+            }
+            if let Some(text) = bullet.as_mut() {
+                text.push(' ');
+                text.push_str(doc);
+            }
+        }
+        push_bullet(&mut entries, &section, &mut bullet);
+        entries
+    }
+
+    /// The commands the matrix lists under `section`.
+    fn matrix_names(section: &str) -> Vec<String> {
+        matrix_entries(include_str!("mod.rs"))
+            .into_iter()
+            .filter(|(entry_section, _)| entry_section == section)
+            .map(|(_, name)| name)
+            .collect()
+    }
+
     /// Regression guard for issue #76: the `commands` module must declare
     /// every per-workflow submodule. If a contributor deletes one (or renames
     /// the module without updating this list), `cargo test` fails fast.
     /// `logs` joined the list with the #595 LogViewer backfill.
+    ///
+    /// Source-level by necessity: "the module is declared" is a fact of the
+    /// module tree, not a value a unit test can compute — a declaration that
+    /// goes missing either fails the build (if something names it) or leaves
+    /// the map above pointing at a file the tree no longer reaches, which is
+    /// exactly the drift this scan catches.
     #[test]
     fn test_commands_split_groups_present() {
         let source = include_str!("mod.rs");
@@ -157,6 +352,12 @@ mod tests {
     /// the legacy un-namespaced `[CMD]` prefix must no longer appear in
     /// any of the per-group command files. Each group should use its
     /// own `[CMD.<GROUP>]` constant.
+    ///
+    /// Source-level by necessity: the invariant is a logging convention whose
+    /// only reader is a human grepping `PresenceJam.log`, and observing it
+    /// means installing a log subscriber and capturing records. (The tags are
+    /// module constants, so a behavioural test would assert the constant, not
+    /// the emitted line.)
     #[test]
     fn test_log_tags_use_namespaced_prefix() {
         // `include_str!` requires a literal path, so this is one helper fn
@@ -419,5 +620,78 @@ mod tests {
              restart's install_pending_on_exit reinstalls the staged payload \
              over the version just installed (issue #806)"
         );
+
+    /// Issue #485/#771: the matrix is the artifact a reviewer consults to
+    /// decide whether a new command needs `require_main_window`, and it had
+    /// drifted from the registered set — seven commands were missing
+    /// (`load_config`, `set_locale`, `is_onboarding_complete`,
+    /// `save_diagnostics_snapshot`, `check_for_update`,
+    /// `cancel_deferred_update`) and one was guarded but unlisted
+    /// (`reconnect_spotify_session`). Both directions are now pinned: a
+    /// registered command has to land in the matrix, and a name in the matrix
+    /// has to be registered.
+    #[test]
+    fn matrix_covers_every_registered_command() {
+        let mut registered = registered_commands(include_str!("../lib.rs"));
+        registered.sort();
+        let mut listed: Vec<String> = matrix_entries(include_str!("mod.rs"))
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect();
+        listed.sort();
+        assert_eq!(listed, registered);
+    }
+
+    /// Issue #485/#771: a heading is a claim about the command it names.
+    /// `GUARDED` means it rejects non-main callers before it reads anything,
+    /// which only `require_main_window` makes true; the other headings mean it
+    /// deliberately does not guard. Both halves are checked against the fn
+    /// bodies, so the matrix cannot describe a codebase that is not there.
+    ///
+    /// The claim's subject is a live `tauri::Window` label, so the accept/reject
+    /// boundary itself is asserted behaviourally by
+    /// `test_guard_matrix_primitive_accepts_only_main`.
+    #[test]
+    fn matrix_guard_claims_match_the_code() {
+        let guarded = matrix_names("GUARDED");
+        assert!(
+            !guarded.is_empty(),
+            "the matrix must name its guarded commands"
+        );
+        for name in &guarded {
+            let body = command_body(name);
+            assert!(
+                body.contains("require_main_window("),
+                "{name} is listed as guarded but never calls require_main_window"
+            );
+        }
+
+        let mut unguarded = matrix_names("MAIN-ONLY");
+        unguarded.extend(matrix_names("DETACHED-LEGIT"));
+        for name in &unguarded {
+            let body = command_body(name);
+            assert!(
+                !body.contains("require_main_window("),
+                "{name} is listed as unguarded but calls require_main_window"
+            );
+        }
+    }
+
+    /// Issue #771: the submodule map is this file's own index of which module
+    /// owns which command, and it listed `config` without `set_locale`. Each
+    /// entry now has to equal the module's own `#[tauri::command]` set.
+    #[test]
+    fn submodule_map_lists_every_command_a_module_owns() {
+        let map = submodule_map(include_str!("mod.rs"));
+        for (module, source) in COMMAND_MODULES {
+            let mut expected = declared_commands(source);
+            expected.sort();
+            let entry = map.iter().find(|(name, _)| name.as_str() == module);
+            let mut listed = entry.map(|(_, names)| names.clone()).unwrap_or_default();
+            listed.sort();
+            // The module name rides along so a failure names the map line.
+            assert_eq!((module, listed), (module, expected));
+        }
+
     }
 }
