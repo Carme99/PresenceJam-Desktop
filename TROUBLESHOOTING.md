@@ -23,7 +23,7 @@ Before diving in, check these basics:
 
 **Cause:** the app is tray-only, so on a desktop that cannot show tray icons it looks like nothing started. GNOME needs the AppIndicator extension, and the tray library (`libayatana-appindicator3`) must be installed; a Wayland session without the extension shows nothing at all.
 
-**Fix:** install `libayatana-appindicator3` for your distro and enable the GNOME AppIndicator extension (or use a desktop with a native tray), then re-launch the binary — a running instance is raised rather than a second one started. If the launch fails without a tray library, the app now reports an error instead of panicking. See **Linux: System Keyring Required** in SETUP.md for the other Linux prerequisite.
+**Fix:** install `libayatana-appindicator3` for your distro and enable the GNOME AppIndicator extension (or use a desktop with a native tray), then re-launch the binary — a running instance is raised rather than a second one started. If the tray library is missing entirely, tray setup can fail rather than degrade, so installing the package above is the fix (issue #927 tracks making that failure graceful). See **Linux: System Keyring Required** in SETUP.md for the other Linux prerequisite.
 
 ## Spotify
 
