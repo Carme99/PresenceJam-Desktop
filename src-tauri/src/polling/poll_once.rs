@@ -713,13 +713,37 @@ fn run_inner(
                 record_success(transient_failure_count, consecutive_network_failures);
                 return PollIteration::Sleep { seconds: sleep };
             }
-            not_modified_iteration(
+            // Issue #790: a 304 with a tracked track never reaches
+            // `process_track`, so the availability session's own 4-minute clock
+            // has to be wound here too — otherwise the steady state of a long
+            // episode, DJ set or live stream only ever re-arms on the 5-minute
+            // keepalive, at or past the fade boundary. The gate verdict
+            // recorded for this track is the only authority a bodyless
+            // response offers: while it stands, the arm stays suppressed
+            // exactly as the shared tail keeps it.
+            let availability_backoff = rearm_availability_after_304(
+                app,
+                state,
+                last_track_key,
+                last_poll_instant,
+                &config,
+                gate_blocks_304_rearm(gated_track_key.as_deref(), last_track_key.as_deref()),
+                armed_presence,
+                last_availability_arm,
+            );
+            let mut iteration = not_modified_iteration(
                 last_track_key,
                 consecutive_pauses,
                 transient_failure_count,
                 consecutive_network_failures,
                 &config,
-            )
+            );
+            if let PollIteration::Sleep { seconds } = &mut iteration {
+                // Issue #154: a throttled arm extends the next poll to the
+                // server-directed delay.
+                *seconds = (*seconds).max(availability_backoff);
+            }
+            iteration
         }
         Err(e) => {
             log::error!(
@@ -874,13 +898,35 @@ fn run_inner(
                                             );
                                             return PollIteration::Sleep { seconds: sleep };
                                         }
-                                        return not_modified_iteration(
+                                        // Issue #790: the post-refresh retry
+                                        // owes the same availability re-arm as
+                                        // the sibling 304 arm above.
+                                        let availability_backoff =
+                                            rearm_availability_after_304(
+                                                app,
+                                                state,
+                                                last_track_key,
+                                                last_poll_instant_retry,
+                                                &config,
+                                                gate_blocks_304_rearm(
+                                                    gated_track_key.as_deref(),
+                                                    last_track_key.as_deref(),
+                                                ),
+                                                armed_presence,
+                                                last_availability_arm,
+                                            );
+                                        let mut iteration = not_modified_iteration(
                                             last_track_key,
                                             consecutive_pauses,
                                             transient_failure_count,
                                             consecutive_network_failures,
                                             &config,
                                         );
+                                        if let PollIteration::Sleep { seconds } = &mut iteration
+                                        {
+                                            *seconds = (*seconds).max(availability_backoff);
+                                        }
+                                        return iteration;
                                     }
                                     Err(retry_err) => {
                                         log::error!(
@@ -1966,6 +2012,163 @@ fn availability_sync_enabled(config: &Option<AppConfig>) -> bool {
         .unwrap_or(false)
 }
 
+/// Issue #790: the default session armed while a track plays and no rule
+/// overrides it — `Available`/`Available` is "Listening" in the Graph
+/// vocabulary.
+fn default_listening_presence() -> PresencePair {
+    PresencePair {
+        availability: "Available".to_string(),
+        activity: "Available".to_string(),
+    }
+}
+
+/// Issue #790: the shared presence-session tail of one iteration with a track
+/// in hand. Extracted from `process_track` so EVERY tail that can be reached
+/// while a track plays honours the session's own 4-minute
+/// `AVAILABILITY_REARM_SECONDS` clock — including the identical-write skip
+/// above, which returns before the shared block ever runs. An `Available`
+/// session FADES after 5 minutes whatever this app POSTs, so the re-arm has to
+/// ride the poll, not the status write.
+///
+/// Returns extra backoff seconds for `teams_backoff_secs` (0 unless Graph
+/// throttled an arm/clear). No-op when `availability_sync` is off or the
+/// presence gate blocked this iteration: the gate is the outer authority, so a
+/// busy/DND/meeting user — or one who typed their own status — is never
+/// answered with a `setPresence` of ours.
+#[allow(clippy::too_many_arguments)]
+fn sync_availability(
+    app: &AppHandle,
+    access_token: &str,
+    track_is_playing: bool,
+    remaining_ms: Option<u64>,
+    rule: &RuleDecision,
+    config: &Option<AppConfig>,
+    presence_blocked: bool,
+    armed_presence: &mut Option<PresencePair>,
+    last_availability_arm: &mut Option<Instant>,
+) -> u64 {
+    if !availability_sync_enabled(config) || presence_blocked {
+        return 0;
+    }
+    // A matching rule's own pair takes precedence: it IS the user's
+    // instruction for this track/window, and it applies whether the track is
+    // playing or paused — leaving a quiet-hours rule clears it again so the
+    // user's real state returns.
+    if let Some(pair) = rule.presence.as_ref() {
+        return arm_presence_session(
+            app,
+            access_token,
+            pair,
+            &presence_expiration_duration(remaining_ms),
+            &format!("Rule presence ({}/{})", pair.availability, pair.activity),
+            armed_presence,
+            last_availability_arm,
+        );
+    }
+    if track_is_playing {
+        let listening = default_listening_presence();
+        return arm_presence_session(
+            app,
+            access_token,
+            &listening,
+            &presence_expiration_duration(remaining_ms),
+            "Listening (Available)",
+            armed_presence,
+            last_availability_arm,
+        );
+    }
+    clear_presence_session(
+        app,
+        access_token,
+        "Availability cleared",
+        armed_presence,
+        last_availability_arm,
+    )
+}
+
+/// Issue #790: whether a 304 Not Modified iteration owes the availability
+/// session a re-arm. A 304 with a tracked track is the steady state of a long
+/// episode, DJ set or live stream: `process_track` never runs, so nothing else
+/// keeps the session inside the 5-minute fade window. A 304 with no tracked
+/// track is "still nothing playing" (issue #242) — nothing of ours is armed and
+/// there is nothing to keep alive. Pure, so the contract is unit-testable
+/// without an `AppHandle`.
+fn rearm_after_304(tracked: bool, availability_sync: bool, gate_blocked: bool) -> bool {
+    tracked && availability_sync && !gate_blocked
+}
+
+/// Issue #790: whether the presence-gate verdict `process_track` recorded for
+/// the track on screen also blocks a re-arm on a bodyless 304.
+/// `gated_track_key` holds the track key a suppressed write was recorded
+/// against; equality with the key still on screen means the verdict stands. A
+/// `None` on either side means no verdict was recorded, and nothing blocks the
+/// arm. Pure.
+fn gate_blocks_304_rearm(gated_track_key: Option<&str>, last_track_key: Option<&str>) -> bool {
+    matches!(
+        (gated_track_key, last_track_key),
+        (Some(gated), Some(key)) if gated == key
+    )
+}
+
+/// Issue #790: re-arm the session a 304-with-track steady state already has.
+/// The response carries no body, so the desired pair is by definition the one
+/// already armed (the default "Listening" pair when nothing is armed yet) and
+/// the rule that produced it cannot be re-matched here — arm that same pair on
+/// the usual cadence instead of inventing a new one.
+///
+/// `gate_blocked` is the verdict `process_track` recorded for this track
+/// (`gated_track_key`): while it stands, the arm stays suppressed, exactly as
+/// the shared tail would. Returns extra backoff seconds for the caller's sleep
+/// (0 unless Graph throttled the arm).
+#[allow(clippy::too_many_arguments)]
+fn rearm_availability_after_304(
+    app: &AppHandle,
+    state: &Arc<AppState>,
+    last_track_key: &Option<String>,
+    last_poll_instant: Instant,
+    config: &Option<AppConfig>,
+    gate_blocked: bool,
+    armed_presence: &mut Option<PresencePair>,
+    last_availability_arm: &mut Option<Instant>,
+) -> u64 {
+    if !rearm_after_304(
+        last_track_key.is_some(),
+        availability_sync_enabled(config),
+        gate_blocked,
+    ) {
+        return 0;
+    }
+    let Some(teams_tok) = teams_token_for_write(app, state) else {
+        return 0;
+    };
+    // The 304 carries no playback body, so the remaining time comes from the
+    // last stored track plus the elapsed poll interval — the same correction
+    // `process_track` applies. Without a stored track (or an unknown position,
+    // issue #165) it falls back to the unknown-position bound.
+    let remaining_ms = state.polling.current_track().and_then(|t| {
+        let elapsed_ms = last_poll_instant.elapsed().as_millis() as u64;
+        t.progress_ms
+            .map(|p| t.duration_ms.saturating_sub(p.saturating_add(elapsed_ms)))
+    });
+    let pair = armed_presence
+        .clone()
+        .unwrap_or_else(default_listening_presence);
+    let label = if pair == default_listening_presence() {
+        "Listening (Available)".to_string()
+    } else {
+        format!("Rule presence ({}/{})", pair.availability, pair.activity)
+    };
+    arm_presence_session(
+        app,
+        &teams_tok.access_token,
+        &pair,
+        &presence_expiration_duration(remaining_ms),
+        &label,
+        armed_presence,
+        last_availability_arm,
+    )
+}
+
 /// Issue #432: track-rule match. Both non-empty substrings must match
 /// (case-insensitive); an empty substring matches everything. Pure so the
 /// matching semantics are unit-testable.
@@ -2964,6 +3167,23 @@ pub(crate) fn process_track(
                 Instant::now(),
             ) {
                 log::debug!("[POLLING] process_track: status identical and keepalive fresh, skipping Teams write");
+                // Issue #790: the skipped POST must not skip the presence
+                // session's own clock. An `Available` session fades after 5
+                // minutes whatever this app POSTs, and the keepalive that
+                // eventually does fire lands at or past that boundary — so the
+                // re-arm winds through the shared tail here, on the 4-minute
+                // cadence, exactly as it would after a real write.
+                teams_backoff_secs = teams_backoff_secs.max(sync_availability(
+                    app,
+                    &teams_tok.access_token,
+                    track.is_playing,
+                    corrected_progress_ms.map(|c| track.duration_ms.saturating_sub(c)),
+                    &rule,
+                    config,
+                    presence_blocked,
+                    armed_presence,
+                    last_availability_arm,
+                ));
                 let remaining_ms =
                     corrected_progress_ms.map(|c| track.duration_ms.saturating_sub(c));
                 return playing_track_sleep(remaining_ms, config).max(teams_backoff_secs);
@@ -3318,58 +3538,25 @@ pub(crate) fn process_track(
             }
         }
 
-        // P1 (issue #3.0-P1) + finding #634 (issue #634): presence sessions —
-        // OFF by default. `teams.availability_sync` arms a session while a
-        // track plays (re-armed at most every 4 minutes: an `Available` session
-        // FADES after 5 min regardless of `expirationDuration`, so the re-arm
-        // stays strictly inside that window) and clears it on pause
-        // (`clearPresence` 404 = session already gone = success).
-        //
-        // A matching rule's own pair takes precedence: it IS the user's
-        // instruction for this track/window, and it applies whether the track is
-        // playing or paused — leaving a quiet-hours rule clears it again so the
-        // user's real state returns. Emits `presence-availability-updated` on
-        // each arm/clear.
-        //
-        // Skipped entirely while `presence_blocked`: the presence gate is the
-        // outer authority, so a busy/DND/meeting user (or one who typed their
-        // own status) is never answered with a setPresence of ours.
-        if availability_sync_enabled(config) && !presence_blocked {
-            let remaining_ms = corrected_progress_ms.map(|c| track.duration_ms.saturating_sub(c));
-            if let Some(pair) = rule.presence.as_ref() {
-                teams_backoff_secs = teams_backoff_secs.max(arm_presence_session(
-                    app,
-                    &teams_tok.access_token,
-                    pair,
-                    &presence_expiration_duration(remaining_ms),
-                    &format!("Rule presence ({}/{})", pair.availability, pair.activity),
-                    armed_presence,
-                    last_availability_arm,
-                ));
-            } else if track.is_playing {
-                let listening = PresencePair {
-                    availability: "Available".to_string(),
-                    activity: "Available".to_string(),
-                };
-                teams_backoff_secs = teams_backoff_secs.max(arm_presence_session(
-                    app,
-                    &teams_tok.access_token,
-                    &listening,
-                    &presence_expiration_duration(remaining_ms),
-                    "Listening (Available)",
-                    armed_presence,
-                    last_availability_arm,
-                ));
-            } else {
-                teams_backoff_secs = teams_backoff_secs.max(clear_presence_session(
-                    app,
-                    &teams_tok.access_token,
-                    "Availability cleared",
-                    armed_presence,
-                    last_availability_arm,
-                ));
-            }
-        }
+        // P1 (issue #3.0-P1) + finding #634 (issue #634) + issue #790:
+        // presence-session maintenance for this iteration. It lives in one
+        // helper shared with the identical-write early return above and the
+        // 304-with-track steady state, so the arm/clear cadence cannot drift
+        // between the iterations that POST a status and the ones that do not
+        // (an `Available` session fades after 5 minutes regardless of
+        // `expirationDuration`). Emits `presence-availability-updated` on each
+        // arm/clear.
+        teams_backoff_secs = teams_backoff_secs.max(sync_availability(
+            app,
+            &teams_tok.access_token,
+            track.is_playing,
+            corrected_progress_ms.map(|c| track.duration_ms.saturating_sub(c)),
+            &rule,
+            config,
+            presence_blocked,
+            armed_presence,
+            last_availability_arm,
+        ));
     }
 
     if track.is_playing {
@@ -4673,21 +4860,27 @@ mod tests {
             "the presence-gate read must precede the status write in process_track \
              so a busy/meeting presence can suppress it (issue #3.0-P2)"
         );
-        // Finding #634: the setPresence/clearPresence calls moved into the two
-        // session helpers (one call site per direction for rules AND the
-        // default listening session), so the source-level contract is now
-        // "process_track arms through arm_presence_session and clears through
-        // clear_presence_session" — the Graph calls themselves are pinned in
-        // the helper bodies below.
+        // Finding #634 / issue #790: the setPresence/clearPresence calls moved
+        // into the shared `sync_availability` tail, which process_track reaches
+        // from BOTH of its tails (the identical-write skip and the end of the
+        // branch), so the source-level contract is now "process_track maintains
+        // the session through sync_availability" — the Graph calls themselves
+        // are pinned in the helper bodies below.
         assert!(
-            body.contains("arm_presence_session("),
-            "process_track must re-arm a presence session while playing \
-             (issues #3.0-P1/#634)"
+            body.contains("sync_availability("),
+            "process_track must maintain the presence session through the shared \
+             tail (issues #3.0-P1/#634/#790)"
+        );
+        let tail = prod_fn_body(prod_source, "fn sync_availability(");
+        assert!(
+            tail.contains("arm_presence_session("),
+            "the shared tail must re-arm a presence session while playing \
+             (issues #3.0-P1/#634/#790)"
         );
         assert!(
-            body.contains("clear_presence_session("),
-            "process_track must clear the presence session on pause \
-             (issues #3.0-P1/#634)"
+            tail.contains("clear_presence_session("),
+            "the shared tail must clear the presence session on pause \
+             (issues #3.0-P1/#634/#790)"
         );
         let helper = prod_fn_body(prod_source, "fn arm_presence_session(");
         assert!(
@@ -4698,6 +4891,126 @@ mod tests {
         assert!(
             clear_helper.contains("clear_teams_presence("),
             "the clear helper must be the clearPresence call site (issue #3.0-P1)"
+        );
+    }
+
+    /// Issue #790: a 304 with a tracked track owes the availability re-arm (it
+    /// is the steady state of a long episode/DJ set, which `process_track`
+    /// never sees); a 304 with nothing tracked is "still nothing playing"
+    /// (issue #242) and has no session of ours to keep alive; and a standing
+    /// gate verdict for the track on screen suppresses the arm exactly as the
+    /// shared tail does (issue #3.0-P1).
+    #[test]
+    fn test_rearm_after_304_contract() {
+        assert!(
+            rearm_after_304(true, true, false),
+            "a 304 with a tracked track and availability_sync on must re-arm \
+             (issue #790)"
+        );
+        assert!(
+            !rearm_after_304(false, true, false),
+            "a 304 with no tracked track has no session of ours to keep alive"
+        );
+        assert!(
+            !rearm_after_304(true, false, false),
+            "availability_sync off leaves nothing to arm"
+        );
+        assert!(
+            !rearm_after_304(true, true, true),
+            "a gated iteration is never answered with a setPresence of ours \
+             (issue #3.0-P1)"
+        );
+    }
+
+    /// Issue #790: only a verdict recorded for the track STILL on screen blocks
+    /// the 304 re-arm. A verdict left over from another track, or none at all,
+    /// does not — otherwise a gate that was recorded once would mute the 4-min
+    /// cadence for every later 304 of the same play.
+    #[test]
+    fn test_gate_blocks_304_rearm_scope() {
+        assert!(gate_blocks_304_rearm(Some("key"), Some("key")));
+        assert!(!gate_blocks_304_rearm(Some("key"), Some("other")));
+        assert!(!gate_blocks_304_rearm(None, Some("key")));
+        assert!(!gate_blocks_304_rearm(Some("key"), None));
+        assert!(
+            !gate_blocks_304_rearm(None, None),
+            "no verdict on either side means nothing blocks the arm"
+        );
+    }
+
+    /// Issue #790 regression guard. Teams' `Available` fade is a 5-minute
+    /// clock that does not care whether this app POSTed, so the re-arm must
+    /// ride the poll tail: the identical-write skip has to reach the shared
+    /// availability tail BEFORE it returns, and every 304 arm (the plain one
+    /// and the post-refresh retry) has to re-arm the track it can no longer
+    /// re-derive from a bodyless response. Both paths bypass `process_track`,
+    /// which is exactly how the pre-fix code armed only on the keepalive.
+    #[test]
+    fn test_identical_write_skip_and_304_arms_rearm_availability() {
+        let source = include_str!("poll_once.rs");
+        let prod_source = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("poll_once.rs has no #[cfg(test)] mod tests block");
+        let body = prod_fn_body(prod_source, "pub(crate) fn process_track(");
+
+        let skip_pos = body
+            .find("if should_skip_identical_write(")
+            .expect("process_track must keep the #384 identical-write guard");
+        let after_guard = &body[skip_pos..];
+        let skip_return = after_guard
+            .find("return playing_track_sleep(")
+            .expect("the identical-write guard must still return early");
+        let sync_pos = after_guard.find("sync_availability(").expect(
+            "the identical-write skip must reach the shared availability tail \
+             before returning: an Available session fades after 5 minutes \
+             whatever this app POSTs (issue #790)",
+        );
+        assert!(
+            sync_pos < skip_return,
+            "the availability re-arm must land BEFORE the identical-write early \
+             return, or the unchanged-status steady state never re-arms (issue \
+             #790)"
+        );
+
+        // Brace-count each `Ok(CurrentlyPlaying::NotModified) => { … }` arm so
+        // the guard can only be satisfied from inside the arm itself.
+        let mut rest = prod_source;
+        let mut arms = 0usize;
+        while let Some(pos) = rest.find("Ok(CurrentlyPlaying::NotModified) =>") {
+            let arm = &rest[pos..];
+            let open = arm.find('{').expect("a 304 match arm must open a block");
+            let mut depth = 0usize;
+            let mut end = None;
+            for (i, ch) in arm[open..].char_indices() {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = Some(open + i + 1);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let end = end.expect("a 304 match arm must close");
+            let arm_body = &arm[..end];
+            assert!(
+                arm_body.contains("rearm_availability_after_304("),
+                "every 304 arm must re-arm the availability session of the track \
+                 still playing (issue #790); arm body was: {}",
+                arm_body
+            );
+            arms += 1;
+            rest = &arm[end..];
+        }
+        assert!(
+            arms >= 2,
+            "the plain 304 arm and the post-refresh retry arm must both be \
+             guarded (issue #790), found {}",
+            arms
         );
     }
 
