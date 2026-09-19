@@ -8,6 +8,7 @@ use crate::keychain::{self, KeychainPresence};
 use crate::polling::{cas_refresh_or_discard, CasOutcome};
 use crate::token_io;
 use crate::AppState;
+use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
@@ -44,37 +45,84 @@ pub async fn is_onboarding_complete(
     log::debug!("{CMD} is_onboarding_complete: ENTRY");
 
     // Cache hit — return immediately.
-    {
-        let guard = state.onboarding_cache.lock();
-        if let Some((ts, result)) = *guard {
-            if ts.elapsed() < ONBOARDING_CACHE_TTL {
-                log::info!(
-                    "{CMD} is_onboarding_complete: cache HIT (age={:.2}s, result={})",
-                    ts.elapsed().as_secs_f32(),
-                    result
-                );
-                return Ok(result);
-            }
-        }
+    if let Some(result) = cached_verdict(&state, "cache HIT") {
+        return Ok(result);
     }
 
-    // Cache miss — run the actual check on a blocking thread (HTTPS round-trips).
+    // Cache miss — run the actual check on a blocking thread (HTTPS
+    // round-trips). Overlapping callers share one run (issue #942): the front
+    // end gives up on the boot probe after 8 s and offers Retry, so two gate
+    // runs used to refresh from clones of the same refresh token.
     let state_clone: Arc<AppState> = Arc::clone(&state);
     let app_clone = app.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        is_onboarding_complete_impl(&state_clone, &app_clone)
+    tauri::async_runtime::spawn_blocking(move || {
+        single_flight(
+            &BOOT_GATE_FLIGHT,
+            || cached_verdict(&state_clone, "in-flight check already landed"),
+            || {
+                let result = is_onboarding_complete_impl(&state_clone, &app_clone)?;
+                // Store result in cache. We cache both `true` and `false`
+                // outcomes — a recent "complete" result is just as valid as a
+                // recent "incomplete" one for the 30s window. The write happens
+                // inside the flight lock, so a caller that waited for this run
+                // observes this verdict instead of starting another one.
+                *state_clone.onboarding_cache.lock() = Some((Instant::now(), result));
+                log::info!(
+                    "{CMD} is_onboarding_complete: cache MISS, stored fresh result={result}"
+                );
+                Ok(result)
+            },
+        )
     })
     .await
-    .map_err(|e| format!("is_onboarding_complete task panicked: {}", e))??;
+    .map_err(|e| format!("is_onboarding_complete task panicked: {}", e))?
+}
 
-    // Store result in cache. We cache both `true` and `false` outcomes — a recent "complete"
-    // result is just as valid as a recent "incomplete" one for the 30s window.
-    *state.onboarding_cache.lock() = Some((Instant::now(), result));
-    log::info!(
-        "{CMD} is_onboarding_complete: cache MISS, stored fresh result={}",
-        result
-    );
-    Ok(result)
+/// Freshness-window read of the 30 s verdict cache (issues #70, #942).
+/// `why` completes the log line, so a verdict shared from a check that was in
+/// flight stays distinguishable from a plain cache hit.
+fn cached_verdict(state: &Arc<AppState>, why: &str) -> Option<bool> {
+    let guard = state.onboarding_cache.lock();
+    if let Some((ts, result)) = *guard {
+        if ts.elapsed() < ONBOARDING_CACHE_TTL {
+            log::info!(
+                "{CMD} is_onboarding_complete: {why} (age={:.2}s, result={result})",
+                ts.elapsed().as_secs_f32()
+            );
+            return Some(result);
+        }
+    }
+    None
+}
+
+/// Process-wide single-flight lock for the boot gate (issue #942).
+///
+/// The drain-style cache dedupes only *finished* checks, so two overlapping
+/// callers — the boot probe and the Retry the front end offers after its 8 s
+/// `BOOT_TIMEOUT_MS` — each ran the gate and refreshed from clones of the same
+/// refresh token. `cas_refresh_or_discard` refreshes before it compares, so
+/// against a provider that rotated the token the loser's `invalid_grant` arm
+/// clears and persists a session that is alive: a full re-auth for a healthy
+/// user. A plain `std::sync` mutex is the right shape here — every caller
+/// reaches it on a blocking thread (`spawn_blocking`), so waiting parks a pool
+/// thread instead of stalling the async runtime.
+static BOOT_GATE_FLIGHT: Mutex<()> = Mutex::new(());
+
+/// Single-flight core of the boot gate: while one check runs, a second caller
+/// waits for it and shares its verdict instead of spending the same refresh
+/// token again. `cached` is consulted *after* the wait (double-checked): the
+/// owner writes its verdict into the cache before it releases the flight lock,
+/// so `run` only executes when there genuinely is no verdict to share.
+fn single_flight<T>(
+    flight: &Mutex<()>,
+    cached: impl Fn() -> Option<T>,
+    run: impl FnOnce() -> T,
+) -> T {
+    let _in_flight = flight.lock();
+    if let Some(verdict) = cached() {
+        return verdict;
+    }
+    run()
 }
 
 /// Boot-gate verdict for one provider's session (issue #530).
@@ -508,13 +556,16 @@ pub fn reconnect_teams(
 #[cfg(test)]
 mod tests {
     use super::{
-        boot_gate_client_secret, record_client_secret_state, session_verdict, RefreshFailure,
-        SessionVerdict,
+        boot_gate_client_secret, cached_verdict, record_client_secret_state, session_verdict,
+        single_flight, ONBOARDING_CACHE_TTL, RefreshFailure, SessionVerdict,
     };
     use crate::config::{AppConfig, ClientSecretState};
     use crate::keychain::KeychainPresence;
     use crate::AppState;
+    use parking_lot::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     /// Issue #530: the boot gate must spend the refresh token for a
     /// locally-expired access token instead of reporting a dead session.
@@ -744,5 +795,93 @@ mod tests {
         let state = Arc::new(AppState::new());
         record_client_secret_state(&state, &KeychainPresence::Unavailable("locked".into()));
         assert!(state.config.get().is_none());
+    }
+
+    /// Issue #942: two overlapping checks must share one refresh, and the
+    /// caller that arrived second must observe the first one's verdict.
+    /// Pre-fix the cache was written only after a check finished, so the Retry
+    /// the front end offers when its 8 s `BOOT_TIMEOUT_MS` fires started a
+    /// second gate run and spent the same refresh token; against a provider
+    /// that rotates tokens the loser's `invalid_grant` arm cleared a session
+    /// that was alive. The refresh counter is the observable.
+    #[test]
+    fn overlapping_boot_checks_share_one_refresh() {
+        let flight = Mutex::new(());
+        let cache = Mutex::new(None::<(Instant, bool)>);
+        let refreshes = AtomicUsize::new(0);
+        let in_check = AtomicBool::new(false);
+
+        let cached = || -> Option<bool> {
+            let guard = cache.lock();
+            let verdict = guard
+                .as_ref()
+                .filter(|(ts, _)| ts.elapsed() < ONBOARDING_CACHE_TTL)
+                .map(|(_, result)| *result);
+            verdict
+        };
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                single_flight(&flight, cached, || {
+                    refreshes.fetch_add(1, Ordering::SeqCst);
+                    in_check.store(true, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(150));
+                    *cache.lock() = Some((Instant::now(), true));
+                    true
+                })
+            });
+
+            // Wait until the first run is provably inside its refresh, so the
+            // second call below overlaps it instead of racing it.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !in_check.load(Ordering::SeqCst) {
+                assert!(Instant::now() < deadline, "the first check never started");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+
+            let shared = single_flight(&flight, cached, || {
+                refreshes.fetch_add(1, Ordering::SeqCst);
+                false
+            });
+
+            assert_eq!(
+                refreshes.load(Ordering::SeqCst),
+                1,
+                "a retry issued while the gate was in flight must not refresh a second time"
+            );
+            assert!(
+                shared,
+                "the overlapping caller must share the in-flight verdict, not its own"
+            );
+            assert!(first.join().expect("the first check must not panic"));
+        });
+    }
+
+    /// The double-check is what makes sharing work: a verdict that is already
+    /// fresh answers without starting another gate run, and the flight lock is
+    /// released with the run rather than poisoned by it.
+    #[test]
+    fn a_fresh_verdict_is_shared_without_running_the_check() {
+        let flight = Mutex::new(());
+        let verdict = single_flight(
+            &flight,
+            || Some(false),
+            || panic!("a fresh verdict must not start another gate run"),
+        );
+        assert_eq!(verdict, Some(false), "the shared verdict is returned verbatim");
+        assert_eq!(
+            single_flight(&flight, || None, || true),
+            true,
+            "the flight lock must be released, or the next boot check would block forever"
+        );
+    }
+
+    /// The command's own cache read: an empty cache has no verdict to share,
+    /// and the verdict a caller just stored is the one the next one gets.
+    #[test]
+    fn cached_verdict_reports_the_stored_result() {
+        let state = Arc::new(AppState::new());
+        assert_eq!(cached_verdict(&state, "test"), None);
+        *state.onboarding_cache.lock() = Some((Instant::now(), true));
+        assert_eq!(cached_verdict(&state, "test"), Some(true));
     }
 }
