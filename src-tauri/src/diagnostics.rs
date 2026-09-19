@@ -77,8 +77,10 @@ pub struct DiagnosticsSnapshot {
     pub tokens: TokenMetadata,
     /// OS keychain presence flags for the two slots the app uses.
     pub keychain: KeychainStatus,
-    /// Last [`LOG_TAIL_LINES`] lines of the on-disk log, each passed
-    /// through [`redact_sensitive`].
+    /// Last [`LOG_TAIL_LINES`] lines of the on-disk log — the active file plus
+    /// any rotated archive it needed (issue #874) — each passed through
+    /// [`redact_sensitive`] and then [`strip_absolute_paths`] (issue #913), so
+    /// neither a credential nor an absolute path can reach a pasted snapshot.
     pub recent_logs: Vec<String>,
     /// Human-readable status of the log-tail collection (ok/error text).
     pub log_source_status: String,
@@ -967,6 +969,10 @@ fn os_release() -> String {
 
 /// `PRETTY_NAME` out of an `/etc/os-release` body, unquoted; a distribution
 /// that omits it falls back to `NAME VERSION_ID`, then to `NAME`.
+///
+/// Compiled for tests on every host (like [`reg_value`]), so both branches are
+/// covered off-Linux.
+#[cfg(any(target_os = "linux", test))]
 fn os_release_pretty_name(contents: &str) -> Option<String> {
     let value = |key: &str| {
         contents.lines().find_map(|line| {
@@ -989,6 +995,9 @@ fn os_release_pretty_name(contents: &str) -> Option<String> {
 
 /// `Ubuntu 24.04.1 LTS (7.0.0-31-generic)`; the kernel alone when
 /// `/etc/os-release` had nothing usable, `unknown` when neither did.
+///
+/// Compiled for tests on every host, like [`os_release_pretty_name`].
+#[cfg(any(target_os = "linux", test))]
 fn compose_linux_release(pretty_name: Option<&str>, kernel: Option<&str>) -> String {
     let kernel = kernel.filter(|k| !k.is_empty());
     match (pretty_name, kernel) {
