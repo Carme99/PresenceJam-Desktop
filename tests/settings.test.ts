@@ -431,7 +431,7 @@ describe('Settings presence-rules and orphaned-field controls (#538/#634/#635/#6
     await tick();
 
     const replacement = container.querySelector(
-      'input[aria-label="' + t('rules.quietReplacementPlaceholder') + '"]'
+      'input[aria-label="' + t('rules.replacementPlaceholder') + '"]'
     ) as HTMLInputElement;
     expect(replacement).not.toBeNull();
     await fireEvent.input(replacement, { target: { value: '🌙 Back at 09:00' } });

@@ -532,4 +532,10 @@ export const de: Dict = {
     '„System“ folgt der Darstellung Ihres Betriebssystems; Dunkel und Hell bleiben fest gewählt.',
   'settings.densityCompactLabel': 'Kompakte Abstände',
   'settings.densityHint': 'Verkleinert Abstände und Schriftgrößen. Unabhängig vom Design.',
+  // --- 5.0 wave1 settings ---
+  'rules.presenceAvailable': 'Verfügbar',
+  'rules.presenceBusyCall': 'Beschäftigt — In einem Anruf',
+  'rules.presenceBusyConference': 'Beschäftigt — In einer Telefonkonferenz',
+  'rules.presenceAway': 'Abwesend',
+  'rules.presenceDndPresenting': 'Nicht stören — Präsentiert',
 };

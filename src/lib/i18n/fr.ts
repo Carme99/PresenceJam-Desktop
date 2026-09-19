@@ -541,4 +541,10 @@ export const fr: Dict = {
     "« Système » suit l'apparence de votre système d'exploitation ; Sombre et Clair restent fixes.",
   'settings.densityCompactLabel': 'Espacement compact',
   'settings.densityHint': "Resserre les espacements et l'échelle typographique. Indépendant du thème.",
+  // --- 5.0 wave1 settings ---
+  'rules.presenceAvailable': 'Disponible',
+  'rules.presenceBusyCall': 'Occupé — En appel',
+  'rules.presenceBusyConference': 'Occupé — En conférence téléphonique',
+  'rules.presenceAway': 'Absent',
+  'rules.presenceDndPresenting': 'Ne pas déranger — Présentation',
 };
