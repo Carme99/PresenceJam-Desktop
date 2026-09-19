@@ -145,6 +145,13 @@ export const defaultConfig: AppConfig = {
   // no profiles and the `effective_config` overlay is a no-op.
   presence_profiles: [],
   active_profile: null,
+  // Issue #862: the playback-source selector. `auto` mirrors the Rust
+  // `PlaybackSourceKind::Auto` default — try the OS media-session source
+  // first (SMTC on Windows, MPRIS on Linux), fall back to Spotify when
+  // the session is empty. Pre-5.0 configs load as `auto` via
+  // `#[serde(default)]` on `PlaybackConfig` so the on-disk byte shape
+  // does not change.
+  playback: { source: 'auto' },
   // 4.7.0 (issue #676): mirrors Rust `ShortcutsConfig::default()`. Spread from
   // `DEFAULT_SHORTCUTS` rather than written as a literal so the values have
   // exactly one home in this file.

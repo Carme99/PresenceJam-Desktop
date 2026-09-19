@@ -109,7 +109,32 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
     // from each 200/204 and echoes it back as `If-None-Match` on the next poll.
     // Absent ⇒ unconditional GET (graceful degradation: Spotify's ETag support
     // is empirical, not documented).
-    let mut last_etag: Option<String> = None;
+    //
+    // Issue #862: the ETag now lives inside the Spotify playback source
+    // (see `sources::spotify`). Constructing the source fresh each
+    // iteration would reset the etag; we therefore reuse the source
+    // across iterations, which means the `poll_once::run` signature
+    // drops the explicit `last_etag: &mut Option<String>` parameter and
+    // accepts `&mut Box<dyn PlaybackSource>` instead. A change to
+    // `config.playback.source` (Spotify / System / Auto) from Settings
+    // rebuilds the source on the next iteration — the kind stored in
+    // `last_source_kind` is the comparison key.
+    let mut playback_source: Box<dyn crate::sources::PlaybackSource> =
+        crate::sources::build_source(
+            state
+                .config
+                .get()
+                .as_ref()
+                .map(|c| c.playback.source)
+                .unwrap_or_default(),
+        )
+        .unwrap_or_else(|| Box::new(crate::sources::spotify::SpotifySource::new()));
+    let mut last_source_kind: crate::sources::PlaybackSourceKind = state
+        .config
+        .get()
+        .as_ref()
+        .map(|c| c.playback.source)
+        .unwrap_or_default();
     // Issue #373: fresh threads start with `last_track_key=None` — this
     // flag lets the first no-track poll attempt one clear instead of
     // returning early and leaving pre-restart status stale. Consumed
@@ -294,7 +319,8 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
             &mut clocks.gated_track_key,
             &mut clocks.last_availability_arm,
             &mut clocks.armed_presence,
-            &mut last_etag,
+            &mut playback_source,
+            &mut last_source_kind,
             &mut first_iteration,
             &mut clocks.last_posted_status,
             &mut clocks.last_gate_check,

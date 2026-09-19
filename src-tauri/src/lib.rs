@@ -392,6 +392,7 @@ pub mod platform;
 pub mod polling;
 pub mod profanity;
 pub mod serve;
+pub mod sources;
 pub mod spotify;
 pub mod teams;
 pub mod token_io;

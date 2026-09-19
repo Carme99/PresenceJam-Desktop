@@ -1675,6 +1675,30 @@ pub struct UpdatesConfig {
     pub extra: BTreeMap<String, serde_json::Value>,
 }
 
+/// Playback source selection (5.0.0, issue #862).
+///
+/// `Auto` is the documented default — the poll loop tries the OS media-
+/// session source first (SMTC on Windows, MPRIS on Linux) and falls back
+/// to the Spotify Web API source when the session is empty. `Spotify`
+/// reproduces the pre-5.0 behaviour exactly. `System` forces the OS
+/// source; on macOS there is no OS source so the poll loop reports
+/// "no track" and the user is told to switch back to Spotify in
+/// `Onboarding.svelte`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
+pub struct PlaybackConfig {
+    #[serde(default)]
+    pub source: crate::sources::PlaybackSourceKind,
+    /// Unknown / future keys NESTED inside this section, retained across
+    /// load→save so a section written by a newer binary is not silently
+    /// stripped by an older one (issue #938 — the section-level companion
+    /// of [`AppConfig::extra`]). Omitted from JSON while empty and
+    /// skipped in the TypeScript export.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[ts(skip)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
 /// Lenient read of one `updates.channel` value (4.7.0, issue #678): the
 /// channel, plus the warning to log when the document carried a spelling this
 /// binary does not know.
@@ -1735,6 +1759,13 @@ pub struct AppConfig {
     /// Release channel the updater reads (issue #678).
     #[serde(default)]
     pub updates: UpdatesConfig,
+    /// Playback source selection (5.0.0, issue #862). `Auto` is the
+    /// documented default — try the OS media-session source first,
+    /// fall back to Spotify. Additive on `AppConfig` with
+    /// `#[serde(default)]`, so a pre-5.0 config file loads as `Auto`
+    /// and the on-disk byte shape does not change.
+    #[serde(default)]
+    pub playback: PlaybackConfig,
     #[serde(default)]
     pub autostart: bool,
     /// Desktop-notification classes (4.7.0 / issue #675). Additive on
@@ -1917,6 +1948,7 @@ impl Default for AppConfig {
             polling: PollingConfig::default(),
             logging: LoggingConfig::default(),
             updates: UpdatesConfig::default(),
+            playback: PlaybackConfig::default(),
             autostart: false,
             notifications: NotificationsConfig::default(),
             locale: None,
@@ -2248,12 +2280,13 @@ fn quarantine_corrupt_config(path: &std::path::Path, parse_err: impl std::fmt::D
 /// section can be replaced by its default without rejecting the rest.
 /// `typed_config_keys_match_the_serialized_schema` fails if this list and the
 /// struct ever disagree.
-const TYPED_CONFIG_KEYS: [&str; 15] = [
+const TYPED_CONFIG_KEYS: [&str; 16] = [
     "spotify",
     "teams",
     "polling",
     "logging",
     "updates",
+    "playback",
     "autostart",
     "notifications",
     "locale",
@@ -2329,6 +2362,7 @@ fn config_from_sections(root: serde_json::Map<String, serde_json::Value>) -> App
         polling: field_or_fallback(&root, "polling", Default::default()),
         logging: field_or_fallback(&root, "logging", Default::default()),
         updates: field_or_fallback(&root, "updates", Default::default()),
+        playback: field_or_fallback(&root, "playback", Default::default()),
         autostart: field_or_fallback(&root, "autostart", Default::default()),
         notifications: field_or_fallback(&root, "notifications", Default::default()),
         locale: field_or_fallback(&root, "locale", Default::default()),
