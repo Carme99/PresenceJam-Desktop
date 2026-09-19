@@ -1267,8 +1267,8 @@
                 type="text"
                 bind:value={entry.replacement_status}
                 maxlength={MAX_RULE_STATUS_CHARS}
-                placeholder={t('rules.quietReplacementPlaceholder')}
-                aria-label={t('rules.quietReplacementPlaceholder')}
+                placeholder={t('rules.replacementPlaceholder')}
+                aria-label={t('rules.replacementPlaceholder')}
               />
               <select
                 value={presenceValue(entry.presence_availability, entry.presence_activity)}
