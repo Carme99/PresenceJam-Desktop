@@ -87,6 +87,9 @@
     // Findings #635/#637: both new presence policies reset with the card.
     localConfig.teams.respect_manual_status = defaultConfig.teams.respect_manual_status;
     localConfig.teams.gate_when_out_of_office = defaultConfig.teams.gate_when_out_of_office;
+    // Issue #872: the OS-level presentation gate resets with the card —
+    // an untouched config is identical byte-for-byte to 4.7.
+    localConfig.teams.gate_when_presenting = defaultConfig.teams.gate_when_presenting;
     markDirty();
   }
   function resetStatusFormatDefaults() {
@@ -1305,6 +1308,21 @@
       </div>
       <p class="hint">
         {t('settings.gateOutOfOfficeHint')}
+      </p>
+      <!-- Issue #872: OS-level presentation gate (full-screen app, slide
+           deck, Windows Focus Assist Quiet Time). OFF by default; the
+           toggle is a no-op on Linux/macOS where the probe always
+           returns `Unknown`. -->
+      <div class="toggle-row">
+        <label for="gate-when-presenting">{t('settings.gateWhenPresentingLabel')}</label>
+        <input
+          id="gate-when-presenting"
+          type="checkbox"
+          bind:checked={localConfig.teams.gate_when_presenting}
+        />
+      </div>
+      <p class="hint">
+        {t('settings.gateWhenPresentingHint')}
       </p>
     </section>
     <section class="card pane-card">

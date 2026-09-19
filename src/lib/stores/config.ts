@@ -59,6 +59,9 @@ export const defaultConfig: AppConfig = {
     // 4.6 (finding #637): the out-of-office gate is opt-in, like
     // `availability_sync` before it.
     gate_when_out_of_office: false,
+    // 5.0 wave3 (issue #872): the OS-level presentation gate — opt-in,
+    // matching the OOO gate. Linux/macOS never report the signal.
+    gate_when_presenting: false,
     // 4.7.0 — S4 (issue #672): the user-templatable paused/stopped status
     // texts. Rust keeps the emoji prefix out of the field, so these mirror
     // the serde defaults verbatim.

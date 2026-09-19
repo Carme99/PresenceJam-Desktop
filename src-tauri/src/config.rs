@@ -133,6 +133,14 @@ pub struct TeamsConfig {
     /// user opts in.
     #[serde(default = "default_gate_when_out_of_office")]
     pub gate_when_out_of_office: bool,
+    /// Issue #872: also gate the status write while the OS reports a
+    /// full-screen app, presentation mode, or Quiet Time. OFF by default
+    /// — a hand-edited config flips it on; the GUI does too. Linux/macOS
+    /// always report `Unknown` (`platform::focus`), so the toggle is a
+    /// no-op on those targets. Fails open on a Windows probe error so a
+    /// transient shell-API failure cannot lock the gate.
+    #[serde(default = "default_gate_when_presenting")]
+    pub gate_when_presenting: bool,
     /// S4 (issue #672): the text posted as the Teams status message while
     /// playback is paused — the user-templatable form of the literal the
     /// paused clear used to hardcode (`"🎵 Paused"`, emoji included by
@@ -206,6 +214,10 @@ fn default_respect_manual_status() -> bool {
 }
 
 fn default_gate_when_out_of_office() -> bool {
+    false
+}
+
+fn default_gate_when_presenting() -> bool {
     false
 }
 
@@ -1417,6 +1429,7 @@ impl Default for TeamsConfig {
             profanity_extra_words: Vec::new(),
             respect_manual_status: default_respect_manual_status(),
             gate_when_out_of_office: default_gate_when_out_of_office(),
+            gate_when_presenting: default_gate_when_presenting(),
             paused_status_format: default_paused_status_format(),
             stopped_status_format: default_stopped_status_format(),
             preferred_presence: PreferredPresenceConfig::default(),

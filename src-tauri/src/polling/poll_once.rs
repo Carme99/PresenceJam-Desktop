@@ -1387,7 +1387,9 @@ fn manual_status_blocks_write(
 ///
 /// ORDER is the precedence the user sees on the Dashboard chip: a
 /// busy/meeting/out-of-office presence first (the more specific real-world
-/// state), then a status message the user wrote by hand.
+/// state), then the OS-level presentation signal (issue #872, lowest of the
+/// presence-class reasons but never outranking busy or in-a-call), then a
+/// status message the user wrote by hand.
 #[allow(clippy::too_many_arguments)]
 fn presence_gate_decision(
     presence: &crate::teams::PresenceInfo,
@@ -1397,11 +1399,29 @@ fn presence_gate_decision(
     last_posted_status: Option<&str>,
     last_posted_placeholder: Option<&str>,
     now: chrono::DateTime<Utc>,
+    // Issue #872: OS-level presentation state. `PresentationState::Unknown`
+    // (Linux/macOS, or a Windows probe error) collapses to an empty reason
+    // — the gate stays off and the rest of the decision runs unchanged.
+    presentation_state: crate::platform::focus::PresentationState,
+    gate_when_presenting: bool,
 ) -> Option<String> {
     if presence_gate_enabled {
         let reason = presence_gate_reason(presence, gate_when_out_of_office);
         if !reason.is_empty() {
             return Some(reason);
+        }
+        // Issue #872: the OS-level presentation signal sits BELOW
+        // `presence_gate_reason` so it can never outrank busy or in-a-call
+        // (those are the more specific real-world states the Graph sample
+        // already names). An `Unknown` probe answer collapses to an empty
+        // reason — failing open. The opt-in is the user's, not the
+        // installer's, so the default `false` leaves 4.7 behaviour
+        // byte-identical.
+        if gate_when_presenting {
+            let reason = presentation_state.gate_reason();
+            if !reason.is_empty() {
+                return Some(reason.to_string());
+            }
         }
     }
     if manual_status_blocks_write(
@@ -3102,6 +3122,15 @@ pub(crate) fn process_track(
         .as_ref()
         .map(|c| c.teams.respect_manual_status)
         .unwrap_or(true);
+    // Issue #872: the OS-level presentation gate is opt-in via
+    // `teams.gate_when_presenting`. OFF by default, so the 4.7 behaviour
+    // is preserved exactly for users who never touch the toggle. The
+    // probe runs inside the gate closure, so a `None` config keeps the
+    // feature entirely off (no extra shell calls on Linux/macOS).
+    let gate_when_presenting = config
+        .as_ref()
+        .map(|c| c.teams.gate_when_presenting)
+        .unwrap_or(false);
     let presence_read_needed = presence_gate_enabled || respect_manual_status;
 
     // The gate verdict for one sample — a local closure so the read sites
@@ -3109,11 +3138,17 @@ pub(crate) fn process_track(
     // "what we posted" texts are PARAMETERS rather than captures: the write
     // path below mutates them, and a capturing closure would hold a borrow of
     // them for the whole function.
+    //
+    // Issue #872: the OS probe (`platform::focus::probe_focus`) is called
+    // here, inside the closure, so every gate run sees a fresh reading.
+    // The probe fails open — a `PresentationState::Unknown` collapses to
+    // "the gate is off", so an unavailable probe cannot lock the gate.
     let gate_verdict = |presence: &crate::teams::PresenceInfo,
                         posted: Option<&str>,
                         placeholder: Option<&str>|
      -> Option<String> {
         observe_presence_sample(respect_manual_status, presence, posted, placeholder);
+        let presentation_state = crate::platform::focus::probe_focus();
         presence_gate_decision(
             presence,
             presence_gate_enabled,
@@ -3122,6 +3157,8 @@ pub(crate) fn process_track(
             posted,
             placeholder,
             Utc::now(),
+            presentation_state,
+            gate_when_presenting,
         )
     };
 
@@ -3402,6 +3439,9 @@ pub(crate) fn process_track(
                             // The same verdict as the change-time gate, so a
                             // manual status that lapses mid-track clears the
                             // gate and late-posts exactly like a meeting ending.
+                            // Issue #872: the OS probe runs here too (this
+                            // path is NOT through `gate_verdict`).
+                            let presentation_state = crate::platform::focus::probe_focus();
                             match presence_gate_decision(
                                 &presence,
                                 presence_gate_enabled,
@@ -3410,6 +3450,8 @@ pub(crate) fn process_track(
                                 last_posted_status.as_deref(),
                                 last_posted_placeholder.as_deref(),
                                 Utc::now(),
+                                presentation_state,
+                                gate_when_presenting,
                             ) {
                                 Some(_) => {
                                     log::debug!("[POLLING] process_track: still presence-gated, keeping suppression");
@@ -7473,9 +7515,12 @@ mod tests {
 
     /// Finding #635/#637: the ONE gate decision the read sites share — the
     /// presence reasons outrank the manual-status reason, and each opt-in flag
-    /// gates only its own reason.
+    /// gates only its own reason. Issue #872 extends the table with the
+    /// OS-level presentation signal — at the LOWEST precedence of the
+    /// presence-class reasons so it can never outrank busy or in-a-call.
     #[test]
     fn test_presence_gate_decision_precedence_and_opt_ins() {
+        use crate::platform::focus::PresentationState;
         use crate::teams::{PresenceInfo, PresenceStatusMessage};
         let now = Utc::now();
         let busy_manual = PresenceInfo {
@@ -7503,34 +7548,64 @@ mod tests {
             ..PresenceInfo::default()
         };
 
+        // Issue #872: a local helper so the 8-argument call sites stay
+        // readable. Default opt-ins (no presentation gate).
+        let decide = |presence: &PresenceInfo,
+                      gate: bool,
+                      ooo: bool,
+                      manual_check: bool,
+                      ps: PresentationState,
+                      gate_pres: bool|
+         -> Option<String> {
+            presence_gate_decision(
+                presence,
+                gate,
+                ooo,
+                manual_check,
+                None,
+                None,
+                now,
+                ps,
+                gate_pres,
+            )
+        };
+
         // Busy wins over the manual message (the more specific state).
         assert_eq!(
-            presence_gate_decision(&busy_manual, true, false, true, None, None, now).as_deref(),
+            decide(
+                &busy_manual,
+                true,
+                false,
+                true,
+                PresentationState::None,
+                false
+            )
+            .as_deref(),
             Some("busy")
         );
         // Manual status is reported under its own reason.
         assert_eq!(
-            presence_gate_decision(&manual, true, false, true, None, None, now).as_deref(),
+            decide(&manual, true, false, true, PresentationState::None, false).as_deref(),
             Some(GATE_REASON_MANUAL_STATUS)
         );
         // Turning the manual check off leaves only the presence gate.
         assert_eq!(
-            presence_gate_decision(&manual, true, false, false, None, None, now),
+            decide(&manual, true, false, false, PresentationState::None, false),
             None
         );
         // OOO participates only when opted in.
         assert_eq!(
-            presence_gate_decision(&ooo, true, false, true, None, None, now),
+            decide(&ooo, true, false, true, PresentationState::None, false),
             None
         );
         assert_eq!(
-            presence_gate_decision(&ooo, true, true, true, None, None, now).as_deref(),
+            decide(&ooo, true, true, true, PresentationState::None, false).as_deref(),
             Some(crate::teams::GATE_REASON_OUT_OF_OFFICE)
         );
         // The manual check survives the presence gate being switched off —
         // that is the one case where it costs an extra Graph read.
         assert_eq!(
-            presence_gate_decision(&manual, false, false, true, None, None, now).as_deref(),
+            decide(&manual, false, false, true, PresentationState::None, false).as_deref(),
             Some(GATE_REASON_MANUAL_STATUS)
         );
 
@@ -7542,6 +7617,92 @@ mod tests {
         on.teams.gate_when_out_of_office = true;
         assert!(ooo_gate_enabled(&Some(on.clone()), false));
         assert!(!ooo_gate_enabled(&Some(on), true));
+
+        // Issue #872: busy STILL outranks the OS-level presentation
+        // signal — the Graph sample is the more specific real-world state.
+        assert_eq!(
+            decide(
+                &busy_manual,
+                true,
+                false,
+                false,
+                PresentationState::Presentation,
+                true,
+            )
+            .as_deref(),
+            Some("busy"),
+            "a busy Graph sample must outrank the OS-level presentation signal"
+        );
+        // Issue #872: the presentation signal participates only when
+        // opted in. The default behaviour (gate_when_presenting=false)
+        // leaves an `Available` user + `Presentation` shell state
+        // unblocked, exactly like 4.7.
+        assert_eq!(
+            decide(
+                &manual,
+                true,
+                false,
+                false,
+                PresentationState::Presentation,
+                false
+            ),
+            None,
+            "without the opt-in, the OS-level presentation signal is silent"
+        );
+        // Issue #872: with the opt-in on, the presentation signal gates
+        // a write that nothing else has blocked.
+        assert_eq!(
+            decide(
+                &manual,
+                true,
+                false,
+                false,
+                PresentationState::Presentation,
+                true
+            )
+            .as_deref(),
+            Some(crate::teams::GATE_REASON_PRESENTING)
+        );
+        // Issue #872: `FullScreen` collapses to the same wire reason.
+        assert_eq!(
+            decide(
+                &manual,
+                true,
+                false,
+                false,
+                PresentationState::FullScreen,
+                true
+            )
+            .as_deref(),
+            Some(crate::teams::GATE_REASON_PRESENTING)
+        );
+        // Issue #872: `QuietTime` is its own wire spelling.
+        assert_eq!(
+            decide(
+                &manual,
+                true,
+                false,
+                false,
+                PresentationState::QuietTime,
+                true
+            )
+            .as_deref(),
+            Some(crate::teams::GATE_REASON_QUIET_TIME)
+        );
+        // Issue #872: an `Unknown` probe (Linux/macOS, or a Windows
+        // probe error) collapses to an empty reason — failing open.
+        assert_eq!(
+            decide(
+                &manual,
+                true,
+                false,
+                false,
+                PresentationState::Unknown,
+                true
+            ),
+            None,
+            "an Unknown probe must fail open, not block"
+        );
     }
 
     /// Finding #636: the requested `expirationDuration` is bounded by the real

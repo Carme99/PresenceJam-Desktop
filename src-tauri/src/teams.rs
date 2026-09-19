@@ -900,6 +900,14 @@ pub const GATE_REASON_TRACK_RULE: &str = "track-rule";
 pub const GATE_REASON_MANUAL_STATUS: &str = "manual-status";
 /// The out-of-office reason (finding #637) — the only gate reason that is
 pub const GATE_REASON_OUT_OF_OFFICE: &str = "out of office";
+/// Issue #872: the OS reports a full-screen app, presentation mode or
+/// Quiet Time. Wire spelling is `presenting` (Dashboard chip maps it to
+/// a localised label).
+pub const GATE_REASON_PRESENTING: &str = "presenting";
+/// Issue #872: the OS reports Quiet Time specifically (Focus Assist on
+/// Windows). Same Dashboard mapping as `presenting`, but distinct on
+/// the wire so a future `quiet-time-only` opt-in can target it.
+pub const GATE_REASON_QUIET_TIME: &str = "quiet-time";
 
 /// The `statusMessage` half of a Graph presence (finding #635, issue #635).
 ///
