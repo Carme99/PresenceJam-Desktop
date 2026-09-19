@@ -45,6 +45,11 @@ const LOG_TAIL_MAX_BYTES: u64 = 64 * 1024;
 /// (`file_name: Some("PresenceJam")`) — see `lib.rs::run`.
 const LOG_FILE_NAME: &str = "PresenceJam.log";
 
+/// Stem of [`LOG_FILE_NAME`]: the plugin is configured with
+/// `file_name: Some("PresenceJam")` and appends `.log` to the active file and
+/// `_<timestamp>.log` to every archive it rotates (issue #874).
+const LOG_FILE_STEM: &str = "PresenceJam";
+
 /// File-name stem for [`save_diagnostics_snapshot`] (issue #598): the
 /// snapshot is written into the platform downloads directory, which is
 /// where the old synthetic `<a download>` click claimed to put it.
@@ -176,6 +181,11 @@ pub struct ConfigSummary {
     /// same rounding the tray and Dashboard render.
     pub snoozed: bool,
     pub snooze_minutes_left: Option<i64>,
+    /// Rotation settings from `logging` (issue #874): without them a reader
+    /// cannot tell how far back the log above should reach — 64 KiB of a
+    /// 10 MB file looks the same as 64 KiB of a 1 MB one.
+    pub log_max_file_size_mb: u64,
+    pub log_keep_files: u32,
 }
 
 /// Token metadata ONLY. There is deliberately no field that could carry
@@ -667,6 +677,8 @@ fn config_summary(
         snoozed: snooze.is_some(),
         snooze_minutes_left: snooze
             .map(|s| crate::config::snooze_minutes_left(s.remaining_seconds)),
+        log_max_file_size_mb: cfg.logging.max_file_size_mb,
+        log_keep_files: cfg.logging.keep_files,
     }
 }
 
@@ -683,58 +695,166 @@ fn update_channel_token(channel: crate::config::UpdateChannel) -> String {
     .to_string()
 }
 
-/// Tail the on-disk log file written by `tauri_plugin_log`'s `LogDir`
-/// target. Returns up to [`LOG_TAIL_LINES`] redacted lines plus a status
-/// string describing what happened (missing file is normal on first run).
-fn tail_log_file(log_dir: Option<std::path::PathBuf>) -> (Vec<String>, String) {
+/// Tail the on-disk log written by `tauri_plugin_log`'s `LogDir` target,
+/// together with the rotated archives that still hold the minutes before it
+/// (issue #874). Returns up to [`LOG_TAIL_LINES`] lines, oldest first, plus a
+/// status naming every file they came from (missing file is normal on first
+/// run).
+///
+/// `keep_files` is `logging.keep_files` — how many archives the plugin
+/// retains, and so the most this may read.
+fn tail_log_file(log_dir: Option<std::path::PathBuf>, keep_files: u32) -> (Vec<String>, String) {
     let Some(dir) = log_dir else {
         return (
             Vec::new(),
             "unavailable: could not resolve app log dir".to_string(),
         );
     };
-    let path = dir.join(LOG_FILE_NAME);
-    if !path.exists() {
-        // Username hygiene (issue #409): the absolute path embeds the OS
-        // username — snapshot strings carry only the bare file name.
-        return (Vec::new(), format!("no log file yet ({})", LOG_FILE_NAME));
-    }
-    let collected = (|| -> Result<Vec<String>, String> {
-        let len = fs::metadata(&path).map_err(|e| e.to_string())?.len();
-        let start = len - len.min(LOG_TAIL_MAX_BYTES);
-        let bytes = read_from_offset(&path, start)?;
-        let text = String::from_utf8_lossy(&bytes);
-        let mut lines: Vec<&str> = text.lines().collect();
-        // When we seeked mid-file, drop the (likely partial) first line.
-        if start > 0 && !lines.is_empty() {
-            lines.remove(0);
+
+    // Newest source first: the active file, then the archives.
+    let active = dir.join(LOG_FILE_NAME);
+    let mut merged: Vec<String> = Vec::new();
+    let mut sources: Vec<String> = Vec::new();
+    match read_tail_window(&active) {
+        Ok(Some(window)) => {
+            if !window.is_empty() {
+                sources.push(LOG_FILE_NAME.to_string());
+            }
+            merged = window;
         }
-        Ok(lines.into_iter().map(|s| s.to_string()).collect())
-    })();
-    match collected {
-        Ok(lines) => {
-            let total = lines.len();
-            // Keep chronological (oldest-first) order; take only the last
-            // LOG_TAIL_LINES lines when the file is longer.
-            let start = total.saturating_sub(LOG_TAIL_LINES);
-            let tail: Vec<String> = lines[start..].iter().map(|l| redact_sensitive(l)).collect();
-            let status = format!("ok: last {} of {} lines", tail.len(), total);
-            (tail, status)
-        }
+        // No active file yet: a first run, or a rotation that has not written
+        // one back. The archives below may still carry history.
+        Ok(None) => {}
         Err(e) => {
             // Full path stays in the local log only; the snapshot string
             // carries just the file name (issue #409).
             log::error!(
                 "[DIAG] tail_log_file: error reading {}: {}",
-                path.display(),
+                active.display(),
                 e
             );
-            (
+            return (
                 Vec::new(),
                 format!("error reading {}: {}", LOG_FILE_NAME, e),
-            )
+            );
         }
     }
+
+    // Only reach further back while the snapshot is short of its line budget.
+    for name in rotated_log_names(&dir, keep_files) {
+        if merged.len() >= LOG_TAIL_LINES {
+            break;
+        }
+        let path = dir.join(&name);
+        match read_tail_window(&path) {
+            Ok(Some(window)) if !window.is_empty() => {
+                sources.push(name);
+                // Older lines belong in front of the newer ones already held.
+                let mut group = window;
+                group.append(&mut merged);
+                merged = group;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                // An unreadable archive only costs history; the active file's
+                // own failure is the one reported above.
+                log::error!(
+                    "[DIAG] tail_log_file: error reading {}: {}",
+                    path.display(),
+                    e
+                );
+            }
+        }
+    }
+
+    if sources.is_empty() {
+        // Username hygiene (issue #409): the absolute path embeds the OS
+        // username — snapshot strings carry only the bare file name.
+        return (Vec::new(), format!("no log file yet ({})", LOG_FILE_NAME));
+    }
+
+    let total = merged.len();
+    // Keep chronological (oldest-first) order; take only the last
+    // LOG_TAIL_LINES lines when the merged window is longer.
+    let start = total.saturating_sub(LOG_TAIL_LINES);
+    let tail: Vec<String> = merged[start..]
+        .iter()
+        .map(|l| redact_sensitive(l))
+        .collect();
+    let status = format!(
+        "ok: last {} of {} lines ({})",
+        tail.len(),
+        total,
+        sources.join(" + ")
+    );
+    (tail, status)
+}
+
+/// Last lines of one log file, oldest-first: at most [`LOG_TAIL_LINES`] from
+/// its final [`LOG_TAIL_MAX_BYTES`] bytes. `Ok(None)` when the file is not
+/// there (a first run, or an archive the plugin has since rotated away) and
+/// `Err` when it is there but cannot be read.
+fn read_tail_window(path: &std::path::Path) -> Result<Option<Vec<String>>, String> {
+    let len = match fs::metadata(path) {
+        Ok(md) => md.len(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.to_string()),
+    };
+    let start = len - len.min(LOG_TAIL_MAX_BYTES);
+    let bytes = read_from_offset(path, start)?;
+    let text = String::from_utf8_lossy(&bytes);
+    let mut lines: Vec<&str> = text.lines().collect();
+    // Seeking mid-file lands inside a line; that fragment is not a log record
+    // and would render as a truncated one. A seek that landed on a newline is
+    // at a record boundary, where dropping the first line would lose a whole
+    // one — so the drop is conditional on the byte before the window (the same
+    // rule `commands/logs.rs` applies for issue #824).
+    if start > 0 && !lines.is_empty() && read_byte_before(path, start) != Some(b'\n') {
+        lines.remove(0);
+    }
+    // Bound each file before merging: the byte window alone can hold far more
+    // lines than the snapshot will ever show.
+    let first = lines.len().saturating_sub(LOG_TAIL_LINES);
+    Ok(Some(
+        lines[first..].iter().map(|l| (*l).to_string()).collect(),
+    ))
+}
+
+/// The byte at `offset - 1`, or `None` when it cannot be read.
+fn read_byte_before(path: &std::path::Path, offset: u64) -> Option<u8> {
+    use std::io::{Read, Seek, SeekFrom};
+    if offset == 0 {
+        return None;
+    }
+    let mut f = fs::File::open(path).ok()?;
+    f.seek(SeekFrom::Start(offset - 1)).ok()?;
+    let mut byte = [0u8; 1];
+    f.read_exact(&mut byte).ok()?;
+    Some(byte[0])
+}
+
+/// Names of the rotated archives in `dir`, newest first, at most `keep_files`
+/// of them (issue #874).
+///
+/// The plugin renames the active file to
+/// `PresenceJam_<YYYY-MM-DD_HH-MM-SS>.log` (`tauri-plugin-log`'s
+/// `LOG_DATE_FORMAT`) and adds a `.bak` twin when that timestamp already
+/// existed. The format is fixed-width, so name order is chronological order
+/// and no date parsing is needed; `.bak` twins are skipped — they are the
+/// older duplicate of a name that is already listed.
+fn rotated_log_names(dir: &std::path::Path, keep_files: u32) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let prefix = format!("{LOG_FILE_STEM}_");
+    let mut names: Vec<String> = entries
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| name.starts_with(&prefix) && name.ends_with(".log"))
+        .collect();
+    names.sort_unstable_by(|a, b| b.cmp(a));
+    names.truncate(keep_files as usize);
+    names
 }
 
 fn read_from_offset(path: &std::path::Path, offset: u64) -> Result<Vec<u8>, String> {
@@ -762,7 +882,15 @@ fn build_snapshot(
     quarantine: ConfigQuarantine,
 ) -> DiagnosticsSnapshot {
     log::debug!("{CMD} build_snapshot: collecting local diagnostics");
-    let (recent_logs, log_source_status) = tail_log_file(log_dir);
+    // Retention bounds how many archives the tail may read (issue #874), and
+    // comes from the live config like every other value the summary reports.
+    let keep_files = state
+        .config
+        .get()
+        .as_ref()
+        .map(|cfg| cfg.logging.keep_files)
+        .unwrap_or_else(|| crate::config::LoggingConfig::default().keep_files);
+    let (recent_logs, log_source_status) = tail_log_file(log_dir, keep_files);
     DiagnosticsSnapshot {
         app_version: env!("CARGO_PKG_VERSION").to_string(),
         tauri_version: tauri::VERSION.to_string(),
@@ -1301,7 +1429,7 @@ mod tests {
     fn test_tail_log_file_missing_and_redacts() {
         let dir = std::env::temp_dir().join(format!("pj-diag-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let (lines, status) = tail_log_file(Some(dir.clone()));
+        let (lines, status) = tail_log_file(Some(dir.clone()), 3);
         assert!(lines.is_empty());
         assert!(status.contains("no log file yet"));
         // Issue #409: the status string must not embed the absolute dir
@@ -1314,10 +1442,15 @@ mod tests {
 
         let log_path = dir.join(LOG_FILE_NAME);
         std::fs::write(&log_path, "[AUTH] code=hunter2secret\n[AUTH] clean line\n").unwrap();
-        let (lines, _) = tail_log_file(Some(dir.clone()));
+        let (lines, status) = tail_log_file(Some(dir.clone()), 3);
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0], "[AUTH] code=[REDACTED len 13]");
         assert_eq!(lines[1], "[AUTH] clean line");
+        assert_eq!(
+            status,
+            format!("ok: last 2 of 2 lines ({LOG_FILE_NAME})"),
+            "a single-source tail names only the active file"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1329,7 +1462,7 @@ mod tests {
         // only the file — never the username-bearing absolute path.
         let dir = std::env::temp_dir().join(format!("pj-diag-err-{}", std::process::id()));
         std::fs::create_dir_all(dir.join(LOG_FILE_NAME)).unwrap();
-        let (lines, status) = tail_log_file(Some(dir.clone()));
+        let (lines, status) = tail_log_file(Some(dir.clone()), 3);
         assert!(lines.is_empty());
         assert!(status.contains("error reading"));
         assert!(status.contains(LOG_FILE_NAME));
@@ -1338,6 +1471,95 @@ mod tests {
             "error status leaked the absolute log path: {}",
             status
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Issue #874: after a rotation the snapshot must span the active file and
+    /// the newest archives, and say which files it read.
+    #[test]
+    fn test_tail_log_file_spans_the_active_file_and_the_newest_archive() {
+        let dir = std::env::temp_dir().join(format!("pj-diag-rot-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+
+        let archive = "PresenceJam_2026-09-17_04-00-01.log";
+        let active: Vec<String> = (0..3).map(|i| format!("active-{i}")).collect();
+        let rotated: Vec<String> = (0..60).map(|i| format!("arch-{i:04}")).collect();
+        std::fs::write(dir.join(LOG_FILE_NAME), active.join("\n") + "\n").expect("write active");
+        std::fs::write(dir.join(archive), rotated.join("\n") + "\n").expect("write archive");
+        // A `.bak` twin of a *different* archive must not be read.
+        std::fs::write(
+            dir.join("PresenceJam_2026-09-16_04-00-01.log.bak"),
+            "bak-0000\nbak-0001\n",
+        )
+        .expect("write bak twin");
+
+        let (lines, status) = tail_log_file(Some(dir.clone()), 3);
+
+        assert_eq!(
+            lines.len(),
+            LOG_TAIL_LINES,
+            "the budget still caps the tail"
+        );
+        // The oldest surviving line comes from the archive: merged is the
+        // archive's last 50 lines with the 3 active lines appended, and the
+        // final 50 of those start 3 lines into the archive.
+        assert_eq!(lines[0], "arch-0013");
+        assert_eq!(lines[46], "arch-0059", "the archive meets the active file");
+        assert_eq!(&lines[47..], &active[..], "the active file stays newest");
+        assert!(
+            !lines.iter().any(|l| l.starts_with("bak-")),
+            "a `.bak` twin is not history: {lines:?}"
+        );
+
+        assert!(
+            status.starts_with(&format!("ok: last {} of 53 lines (", LOG_TAIL_LINES)),
+            "status: {status}"
+        );
+        assert!(status.contains(LOG_FILE_NAME), "status: {status}");
+        assert!(status.contains(archive), "status: {status}");
+        assert!(
+            !status.contains(dir.to_str().expect("utf-8 dir")),
+            "status leaked the absolute log path: {status}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The archive prefix has to be the active file's stem or the tail would
+    /// silently stop seeing rotations.
+    #[test]
+    fn test_log_file_stem_matches_the_active_file_name() {
+        assert_eq!(format!("{LOG_FILE_STEM}.log"), LOG_FILE_NAME);
+    }
+
+    #[test]
+    fn test_rotated_log_names_are_newest_first_and_skip_bak_twins() {
+        let dir = std::env::temp_dir().join(format!("pj-diag-names-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        let older = "PresenceJam_2026-09-15_04-00-01.log";
+        let newer = "PresenceJam_2026-09-17_04-00-01.log";
+        for name in [
+            older,
+            newer,
+            "PresenceJam_2026-09-16_04-00-01.log.bak",
+            LOG_FILE_NAME,
+            "unrelated.log",
+        ] {
+            std::fs::write(dir.join(name), "x\n").expect("write candidate");
+        }
+
+        assert_eq!(
+            rotated_log_names(&dir, 5),
+            vec![newer.to_string(), older.to_string()],
+            "newest first, `.bak` twins and other files skipped"
+        );
+        assert_eq!(
+            rotated_log_names(&dir, 1),
+            vec![newer.to_string()],
+            "logging.keep_files bounds how far back the tail may read"
+        );
+        assert!(rotated_log_names(&dir, 0).is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 
