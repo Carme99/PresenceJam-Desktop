@@ -491,10 +491,21 @@ pub async fn complete_onboarding(
 }
 
 #[tauri::command]
-pub fn reconnect_spotify(
+pub async fn reconnect_spotify(
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<(), String> {
+    // Issue #928: the body rewrites tokens.json and clears the keychain
+    // entry — blocking I/O that must not run inline on the IPC thread.
+    let state = Arc::clone(state.inner());
+    tauri::async_runtime::spawn_blocking(move || reconnect_spotify_impl(&state, &app))
+        .await
+        .map_err(|e| format!("reconnect_spotify task panicked: {e}"))?
+}
+
+/// Blocking body of [`reconnect_spotify`]: drop the session, persist the
+/// cleared file, forget the keychain secret, and ask the UI to re-auth.
+fn reconnect_spotify_impl(state: &Arc<AppState>, app: &AppHandle) -> Result<(), String> {
     log::debug!("{CMD} reconnect_spotify: ENTRY");
 
     // Clear Spotify tokens from state
@@ -506,7 +517,7 @@ pub fn reconnect_spotify(
     log::info!("{CMD} reconnect_spotify: cleared pending_spotify_auth");
 
     // Persist the cleared state to disk atomically.
-    if let Err(e) = token_io::persist_tokens(state.inner(), &app) {
+    if let Err(e) = token_io::persist_tokens(state, app) {
         log::warn!(
             "{CMD} reconnect_spotify: failed to persist cleared state - {}",
             e
@@ -539,10 +550,21 @@ pub fn reconnect_spotify(
 }
 
 #[tauri::command]
-pub fn reconnect_teams(
+pub async fn reconnect_teams(
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
 ) -> Result<(), String> {
+    // Issue #928: the body rewrites tokens.json — blocking I/O that must not
+    // run inline on the IPC thread.
+    let state = Arc::clone(state.inner());
+    tauri::async_runtime::spawn_blocking(move || reconnect_teams_impl(&state, &app))
+        .await
+        .map_err(|e| format!("reconnect_teams task panicked: {e}"))?
+}
+
+/// Blocking body of [`reconnect_teams`]: drop the session, persist the cleared
+/// file, and ask the UI to re-auth.
+fn reconnect_teams_impl(state: &Arc<AppState>, app: &AppHandle) -> Result<(), String> {
     log::debug!("{CMD} reconnect_teams: ENTRY");
 
     // Clear Teams tokens from state
@@ -550,7 +572,7 @@ pub fn reconnect_teams(
     log::info!("{CMD} reconnect_teams: cleared teams_tokens");
 
     // Persist the cleared state to disk atomically.
-    if let Err(e) = token_io::persist_tokens(state.inner(), &app) {
+    if let Err(e) = token_io::persist_tokens(state, app) {
         log::warn!(
             "{CMD} reconnect_teams: failed to persist cleared state - {}",
             e

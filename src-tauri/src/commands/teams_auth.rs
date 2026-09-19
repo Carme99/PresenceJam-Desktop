@@ -154,7 +154,7 @@ pub async fn poll_teams_auth(
 }
 
 #[tauri::command]
-pub fn refresh_teams(
+pub async fn refresh_teams(
     window: tauri::Window,
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
@@ -163,6 +163,15 @@ pub fn refresh_teams(
     // uses `teams::refresh_teams_token` directly and the frontend never
     // invokes this from a detached window.
     super::require_main_window(&window)?;
+
+    // Issue #928: the refresh is a blocking HTTPS round-trip and the commit
+    // rewrites tokens.json — neither may run inline on the IPC thread.
+    let state = Arc::clone(state.inner());
+    offload_blocking("refresh_teams", move || refresh_teams_impl(&state, &app)).await?
+}
+
+/// Blocking body of [`refresh_teams`].
+fn refresh_teams_impl(state: &Arc<AppState>, app: &AppHandle) -> Result<(), String> {
     log::debug!("{CMD} refresh_teams: ENTRY");
 
     let current_tokens = {
@@ -193,7 +202,7 @@ pub fn refresh_teams(
         // at the end of that statement, so persisting here cannot re-lock the
         // same RwLock for reading.
         CasOutcome::Committed(new_tokens) => {
-            token_io::persist_tokens(state.inner(), &app)?;
+            token_io::persist_tokens(state, app)?;
             log::info!(
                 "{CMD} refresh_teams: SUCCESS (state updated and persisted, access_token.len={})",
                 new_tokens.access_token.len()
@@ -219,7 +228,7 @@ pub fn refresh_teams(
             *state.tokens.teams_mut() = None;
             // Issue #180: the clearing statement above drops its guard at the
             // end of that statement, so this persist cannot self-deadlock.
-            if let Err(e) = token_io::persist_tokens(state.inner(), &app) {
+            if let Err(e) = token_io::persist_tokens(state, app) {
                 log::warn!(
                     "{CMD} refresh_teams: failed to persist cleared teams tokens: {}",
                     e
@@ -275,31 +284,22 @@ mod tests {
         );
     }
 
-    /// Normalised source of the `start_teams_auth_device_code` command: from
-    /// its (async) signature to the brace that closes its body. The
-    /// assertions below cannot read the whole file, because this test module
-    /// contains the very patterns they look for and a whole-file grep would
-    /// pass vacuously. Panics when the command is not async — that is the
-    /// pre-#878 shape.
+    /// The command's body, sliced by the shared literal-aware scanner (so a
+    /// brace inside a log string cannot end the slice early) and with the
+    /// test module cut off: this module contains the very patterns the
+    /// assertions look for, so a whole-file grep would pass vacuously.
     fn device_code_command_source() -> String {
         let src = include_str!("teams_auth.rs");
-        let start = src
-            .find("pub async fn start_teams_auth_device_code(")
-            .expect("the device-code command must be an async `#[tauri::command]`");
-        let open = start + src[start..].find('{').expect("a command body opener");
-        let mut depth = 0usize;
-        for (offset, ch) in src[open..].char_indices() {
-            if ch == '{' {
-                depth += 1;
-            } else if ch == '}' {
-                depth -= 1;
-                if depth == 0 {
-                    let body = &src[start..=open + offset];
-                    return body.split_whitespace().collect::<Vec<_>>().join(" ");
-                }
-            }
-        }
-        panic!("the device-code command body is unterminated");
+        let production = &src[..src.find("\n#[cfg(test)]").expect("a test module")];
+        assert!(
+            production.contains("pub async fn start_teams_auth_device_code("),
+            "the command must be an async `#[tauri::command]`: a synchronous body \
+             runs inline on the IPC thread while it performs the POST"
+        );
+        crate::token_io::test_scan::fn_body(production, "fn start_teams_auth_device_code(")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     /// A synchronous call left in the command body is the pre-#878
