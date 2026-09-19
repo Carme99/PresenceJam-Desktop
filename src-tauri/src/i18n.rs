@@ -83,6 +83,13 @@ pub struct Strings {
     pub snooze_paused: &'static str,
     /// Countdown unit, composed as `{word} — {n} {unit} (→ HH:MM)`.
     pub snooze_minutes_left: &'static str,
+    // ── Manual-status submenu (issue #870) ───────────────────────────────────
+    /// Title of the tray's "Recent statuses" submenu.
+    pub manual_status_recent_menu: &'static str,
+    /// Disabled placeholder shown when the recent ring is empty.
+    pub manual_status_recent_empty: &'static str,
+    /// "Clear manual status" entry, only present while a manual status is armed.
+    pub manual_status_clear: &'static str,
 }
 
 /// English table — the source of truth the other two mirror.
@@ -125,6 +132,9 @@ pub const EN: Strings = Strings {
     snooze_resume_now: "Resume sync now",
     snooze_paused: "Snoozed",
     snooze_minutes_left: "min left",
+    manual_status_recent_menu: "Recent statuses",
+    manual_status_recent_empty: "(no recent statuses)",
+    manual_status_clear: "Clear manual status",
 };
 
 /// German table.
@@ -167,6 +177,9 @@ pub const DE: Strings = Strings {
     snooze_resume_now: "Sync jetzt fortsetzen",
     snooze_paused: "Sync pausiert",
     snooze_minutes_left: "Min. verbleibend",
+    manual_status_recent_menu: "Letzte Status",
+    manual_status_recent_empty: "(keine letzten Status)",
+    manual_status_clear: "Manuellen Status löschen",
 };
 
 /// French table.
@@ -209,6 +222,9 @@ pub const FR: Strings = Strings {
     snooze_resume_now: "Reprendre la synchro maintenant",
     snooze_paused: "Synchro en pause",
     snooze_minutes_left: "min restant",
+    manual_status_recent_menu: "Statuts récents",
+    manual_status_recent_empty: "(aucun statut récent)",
+    manual_status_clear: "Effacer le statut manuel",
 };
 
 /// Canonical locale tags, in table order. The value persisted in
@@ -355,6 +371,12 @@ impl Strings {
             ("snooze_resume_now", self.snooze_resume_now),
             ("snooze_paused", self.snooze_paused),
             ("snooze_minutes_left", self.snooze_minutes_left),
+            ("manual_status_recent_menu", self.manual_status_recent_menu),
+            (
+                "manual_status_recent_empty",
+                self.manual_status_recent_empty,
+            ),
+            ("manual_status_clear", self.manual_status_clear),
         ]
     }
 }

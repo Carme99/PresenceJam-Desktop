@@ -441,6 +441,12 @@ fn run_inner(
             let _ = clear_expired_preferred_presence(app, &teams_tokens.access_token, Utc::now());
         }
     }
+    // Issue #870: the iteration-head expiry tick for the manual status.
+    // Mirrors the preferred-presence tick above: the local record clears
+    // when the user-picked expiry lapses, so the Dashboard composer stops
+    // claiming a manual status is armed. The Graph side already cleared
+    // itself via the expiry we POSTed in `set_manual_status_inner`.
+    crate::commands::status::tick_manual_status_expiry(app, Utc::now());
 
     let spotify_tokens = state.tokens.spotify().clone();
     log::debug!(
@@ -2500,7 +2506,11 @@ fn matching_track_rule_at<'a>(
 /// The music-note prefix on both placeholder clears. Kept out of the config
 /// fields so their defaults stay plain text (`"Paused"`), which is what the
 /// fixed schema in the release contract specifies.
-const MUSIC_EMOJI: &str = "\u{1F3B5}";
+/// The standard music-emoji prefix (`🎵`) the polling path prefixes every
+/// status with. Exported `pub(crate)` so the manual-status clear path
+/// (issue #870) can mirror it without copying the literal — a future
+/// "make the prefix configurable" change should land in one place.
+pub(crate) const MUSIC_EMOJI: &str = "\u{1F3B5}";
 /// S4 (issue #672): fallbacks used when no config is loaded — the same literals
 /// `config.rs` defaults to, so a config-less iteration renders exactly what a
 /// default config renders.

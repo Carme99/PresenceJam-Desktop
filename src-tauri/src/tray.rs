@@ -63,6 +63,15 @@ const SNOOZE_1H_SUFFIX: &str = "1h";
 const SNOOZE_TOMORROW_SUFFIX: &str = "tomorrow";
 const SNOOZE_RESUME_SUFFIX: &str = "resume";
 
+// Issue #870: the "Recent statuses" submenu entries carry the
+// `{MANUAL_STATUS_ITEM_PREFIX}|<index>` shape — the index resolves to a
+// recent-status entry, and a stale index falls off the back of the ring
+// cleanly (the click handler ignores unknown indices). The literal suffixes
+// declared below are stable across the GUI and the tray, so a menu rebuilt
+// against a stale snapshot cannot dispatch an unknown action.
+const MANUAL_STATUS_ITEM_PREFIX: &str = "manualstatus|";
+const ID_MANUAL_STATUS_CLEAR: &str = "manualstatus|clear";
+
 static TRAY: OnceLock<TrayIcon> = OnceLock::new();
 
 /// Get the global TrayIcon instance.
@@ -335,6 +344,59 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
                         }
                     }
                     repaint_tray_from_state(&app_handle, "snooze");
+                });
+            }
+            id if id == ID_MANUAL_STATUS_CLEAR => {
+                // Issue #870: the tray's "Clear manual status" entry. Routes
+                // through the same `clear_manual_status_inner` helper the
+                // Dashboard composer uses, on a worker thread — the Graph
+                // POST + the persisted record reset must not run on the
+                // menu-event thread.
+                let app_handle = app.clone();
+                std::thread::spawn(move || {
+                    let state = app_handle.state::<std::sync::Arc<crate::AppState>>();
+                    if let Err(e) = crate::commands::status::clear_manual_status_inner(
+                        state.inner(),
+                        &app_handle,
+                    ) {
+                        log::error!("[TRAY] manual status clear: {}", e);
+                    }
+                    repaint_tray_from_state(&app_handle, "manual status clear");
+                });
+            }
+            id if id.starts_with(MANUAL_STATUS_ITEM_PREFIX) => {
+                // Issue #870: a "Recent statuses" pick. The trailing index
+                // resolves to one of the ring's slots; a stale index (the
+                // ring rotated since the menu was built) is logged and
+                // ignored. The pick carries the user's text verbatim, so the
+                // Dashboard composer and the tray share the same store.
+                let raw = id.to_string();
+                let index: usize = raw
+                    .strip_prefix(MANUAL_STATUS_ITEM_PREFIX)
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(99);
+                let recent = crate::commands::status::load_recent_statuses();
+                let picked = recent.get(index).cloned();
+                let app_handle = app.clone();
+                std::thread::spawn(move || {
+                    let Some(entry) = picked else {
+                        log::warn!(
+                            "[TRAY] manual status pick: stale index {index}; the recent ring rotated"
+                        );
+                        repaint_tray_from_state(&app_handle, "manual status pick (stale)");
+                        return;
+                    };
+                    let state = app_handle.state::<std::sync::Arc<crate::AppState>>();
+                    let expiry = crate::commands::status::clamp_expiry_public(60);
+                    if let Err(e) = crate::commands::status::set_manual_status_inner(
+                        state.inner(),
+                        &app_handle,
+                        &entry.message,
+                        expiry,
+                    ) {
+                        log::error!("[TRAY] manual status pick: {}", e);
+                    }
+                    repaint_tray_from_state(&app_handle, "manual status pick");
                 });
             }
             id if id.starts_with(DEVICE_ITEM_PREFIX) => {
@@ -1198,6 +1260,66 @@ fn build_snooze_submenu(
     Ok(submenu)
 }
 
+/// Issue #870: the "Recent statuses" submenu. The spec caps the visible
+/// entries at three; the Dashboard composer reads the broader
+/// [`crate::commands::status::RECENT_STATUSES_CAPACITY`] ring. The labels
+/// use the recent-status entry's exact text (filtered through the same
+/// `MAX_RULE_STATUS_CHARS` bound as the composer), so a user picking
+/// "Right back at 2" from the tray gets the same text the Dashboard would
+/// have posted.
+///
+/// The "Clear manual status" entry sits at the bottom, only while a
+/// manual status is armed — picking it routes through the same helper the
+/// Dashboard composer's Clear button uses.
+fn build_manual_status_submenu(
+    app: &AppHandle,
+    s: &Strings,
+    recent: &[crate::commands::status::RecentManualStatus],
+    armed: Option<&crate::commands::status::ManualStatus>,
+) -> Result<Submenu<tauri::Wry>, String> {
+    let mut items: Vec<Box<dyn tauri::menu::IsMenuItem<tauri::Wry>>> = Vec::new();
+    let shown = recent.iter().take(3);
+    for (idx, entry) in shown.enumerate() {
+        let item = MenuItemBuilder::with_id(
+            format!("{MANUAL_STATUS_ITEM_PREFIX}{idx}"),
+            entry.message.clone(),
+        )
+        .build(app)
+        .map_err(|e| e.to_string())?;
+        items.push(Box::new(item));
+    }
+    let has_items = !items.is_empty();
+    let submenu = SubmenuBuilder::new(app, s.manual_status_recent_menu)
+        .build()
+        .map_err(|e| e.to_string())?;
+    if !has_items {
+        let empty = MenuItemBuilder::with_id(
+            format!("{MANUAL_STATUS_ITEM_PREFIX}none"),
+            s.manual_status_recent_empty,
+        )
+        .enabled(false)
+        .build(app)
+        .map_err(|e| e.to_string())?;
+        submenu.append(&empty).map_err(|e| e.to_string())?;
+    } else {
+        for item in items
+            .iter()
+            .map(|b| b.as_ref() as &dyn tauri::menu::IsMenuItem<tauri::Wry>)
+        {
+            submenu.append(item).map_err(|e| e.to_string())?;
+        }
+    }
+    if armed.is_some() {
+        let separator = PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?;
+        let clear = MenuItemBuilder::with_id(ID_MANUAL_STATUS_CLEAR, s.manual_status_clear)
+            .build(app)
+            .map_err(|e| e.to_string())?;
+        submenu.append(&separator).map_err(|e| e.to_string())?;
+        submenu.append(&clear).map_err(|e| e.to_string())?;
+    }
+    Ok(submenu)
+}
+
 /// What a snooze menu id asked for (4.7.0, S9 / issue #677). Parsed rather
 /// than switched on the raw id so the click arm stays a dispatch table and the
 /// mapping is unit-testable without a menu.
@@ -1926,6 +2048,24 @@ fn rebuild_tray_menu(
         );
         e
     })?;
+    // Issue #870: the "Recent statuses" submenu. The recent ring is a
+    // process-global; this build call is the only thing that turns it into a
+    // tray surface, and the `manualstatus|clear` entry only appears while a
+    // manual status is armed. The Dashboard composer reads the same ring,
+    // so a click on the tray's pick hits the same record the Dashboard would.
+    let manual_status_submenu = build_manual_status_submenu(
+        app,
+        s,
+        &crate::commands::status::load_recent_statuses(),
+        crate::commands::status::load_manual_status().as_ref(),
+    )
+    .map_err(|e| {
+        log::warn!(
+            "[TRAY] update_tray_menu: failed to build manual-status submenu: {}",
+            e
+        );
+        e
+    })?;
 
     // Build menu with optional track info
     let mut menu_builder = MenuBuilder::new(app)
@@ -1934,6 +2074,7 @@ fn rebuild_tray_menu(
             &show_hide,
             &pause_resume,
             &snooze_submenu,
+            &manual_status_submenu,
             &separator1,
         ])
         .items(&[&play_pause, &previous, &next, &shuffle, &repeat])

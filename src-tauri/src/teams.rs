@@ -1092,6 +1092,23 @@ struct SetUserPreferredPresenceRequest {
     expiration_duration: String,
 }
 
+/// Issue #870: the expiry the Dashboard composer / `--set-status` CLI flag
+/// carries. Wraps `format_expiry` (the offset-less `dateTime` the Graph
+/// `statusMessage.expiryDateTime` schema requires — issue #156) so the
+/// format cannot drift between the manual path and the polling path.
+pub fn manual_status_expiry_rfc3339(expires_at: chrono::DateTime<chrono::Utc>) -> String {
+    expires_at.format("%Y-%m-%dT%H:%M:%S%.6f").to_string()
+}
+
+/// Issue #870: the short-lived 60-second placeholder expiry the manual
+/// status clear path mirrors. Exposed here (instead of borrowing the
+/// private `polling::placeholder_expiry_str`) so the manual-status clear
+/// cannot accidentally drift from the polling paused/stopped clears.
+pub fn placeholder_expiry_rfc3339() -> String {
+    let expiry = chrono::Utc::now() + chrono::Duration::seconds(60);
+    manual_status_expiry_rfc3339(expiry)
+}
+
 /// POSTs a JSON body to a Graph presence endpoint and maps the response to
 /// a typed error — the same status-code discrimination and `Retry-After`
 /// parsing as `post_status_message` (issues #153/#154). A 404 is surfaced

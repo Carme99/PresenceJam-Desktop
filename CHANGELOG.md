@@ -13,6 +13,7 @@ section to the released version and opens a fresh empty one (see `docs/RELEASING
 ### Added
 
 - **A user-opt-in `setUserPreferredPresence` integration (#866).** The Teams config now carries `teams.preferred_presence { enabled, availability, activity, expiry_minutes }`. When the user opts in and `respect_manual_status` is OFF, a matching rule that does not name its own presence pair (or a freshly-armed snooze) drives Graph `setUserPreferredPresence` with the configured Busy/DND/BeRightBack/Away pair; the resulting session is cleared at the configured expiry, at the next snooze-end, and on `RunEvent::Exit`. National-cloud note: `setUserPreferredPresence` is a commercial-Graph surface that sovereign clouds have historically rejected; the call goes through the same `/users/{oid}` fallback the other Graph POSTs use.
+- **A user-composed manual Teams status with an expiry (#870).** A Dashboard composer + tray "Recent statuses" submenu + `--set-status <message>` / `--clear-status` CLI flags let the user post a one-off Teams status (bounded to `MAX_RULE_STATUS_CHARS`, profanity-filtered, with an `expiry_minutes` clamped to 5..=720). The status expires locally and on Teams at the same instant, the Dashboard chip shows the active window, and the tray "Clear manual status" entry only appears while one is armed. The recent-statuses ring is capped at 5 entries and dedupes on identical messages.
 
 ### Changed
 

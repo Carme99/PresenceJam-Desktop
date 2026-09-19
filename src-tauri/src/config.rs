@@ -406,6 +406,16 @@ pub fn preferred_presence_expiry_duration(teams: &TeamsConfig) -> String {
     format!("PT{}M", minutes)
 }
 
+/// Issue #870: borrow the user's lexicon (`teams.profanity_extra_words`,
+/// issue #538) into the slice shape `profanity::filter_status` expects. The
+/// function is `None`-aware — a hand-edited config that lacks the section
+/// reads as the empty slice, reproducing the pre-#538 behaviour exactly.
+pub fn profanity_extra_words_for_filter(config: Option<&AppConfig>) -> &[String] {
+    config
+        .map(|c| c.teams.profanity_extra_words.as_slice())
+        .unwrap_or(&[])
+}
+
 /// The closed set of `availability`/`activity` pairs the Graph
 /// `presence: setPresence` action accepts (finding #634, issue #634).
 ///
@@ -516,7 +526,10 @@ fn clamp_presence_pair(availability: &mut String, activity: &mut String) {
 }
 
 /// Truncate a rule's replacement text to [`MAX_RULE_STATUS_CHARS`].
-fn clamp_rule_text(text: &mut String) {
+/// Issue #870: the text-length bound shared by [`clamp_rule_text`] and the
+/// Dashboard composer / `--set-status` CLI flag. Public so the manual
+/// status path and the rule-replacement-text path share one anchor.
+pub fn clamp_rule_text(text: &mut String) {
     if text.chars().count() > MAX_RULE_STATUS_CHARS {
         *text = text.chars().take(MAX_RULE_STATUS_CHARS).collect();
     }

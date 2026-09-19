@@ -18,6 +18,9 @@
 //!   - `misc` — preview_status, update_tray_menu_state
 //!   - `logs` — get_recent_logs (LogViewer history backfill, issue #595)
 //!   - `shortcuts` — register_shortcuts, unregister_shortcuts, validate_shortcut (global hotkeys, issue #676)
+//!   - `status` — set_manual_status, clear_manual_status (issue #870, user-composed
+//!     Teams status with an expiry, mirrored by a Dashboard composer, a tray
+//!     "Recent statuses" submenu, and a `--set-status` CLI flag)
 
 pub mod config;
 pub mod logs;
@@ -26,6 +29,7 @@ pub mod onboarding;
 pub mod playback;
 pub mod shortcuts;
 pub mod spotify_auth;
+pub mod status;
 pub mod sync;
 pub mod teams_auth;
 pub mod window;
@@ -142,6 +146,7 @@ mod tests {
             "onboarding",
             "misc",
             "shortcuts",
+            "status",
         ] {
             let needle_pub = format!("pub mod {};", group);
             let needle_priv = format!("mod {};", group);

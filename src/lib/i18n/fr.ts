@@ -550,4 +550,22 @@ export const fr: Dict = {
   'rules.presenceBusyConference': 'Occupé — En conférence téléphonique',
   'rules.presenceAway': 'Absent',
   'rules.presenceDndPresenting': 'Ne pas déranger — Présentation',
+  // --- 5.0 wave3 features-presence ---
+  'dashboard.manualStatusTitle': 'Statut manuel',
+  'dashboard.manualStatusPlaceholder': 'Définir un statut visible par votre équipe pendant un moment',
+  'dashboard.manualStatusExpiryLabel': 'Expire après',
+  'dashboard.manualStatusExpiry15': '15 minutes',
+  'dashboard.manualStatusExpiry30': '30 minutes',
+  'dashboard.manualStatusExpiry60': '1 heure',
+  'dashboard.manualStatusExpiry120': '2 heures',
+  'dashboard.manualStatusSet': 'Définir le statut',
+  'dashboard.manualStatusClear': 'Effacer le statut',
+  'dashboard.manualStatusActive': 'Actif jusqu’à {expiry}',
+  'dashboard.manualStatusActiveEmpty': 'Actif (expire bientôt)',
+  'dashboard.manualStatusRecentTitle': 'Statuts récents',
+  'dashboard.manualStatusRecentEmpty': 'Aucun statut récent pour l’instant',
+  'dashboard.manualStatusFiltered': 'Le statut a été réécrit par votre filtre de vulgarité',
+  'dashboard.activityTitle': 'Activité',
+  'dashboard.activityEmpty':
+    'Aucune décision pour l’instant — lancez la synchronisation pour voir ce que votre application a choisi',
 };

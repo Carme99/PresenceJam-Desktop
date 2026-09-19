@@ -13,6 +13,38 @@ use tauri::{AppHandle, Emitter};
 /// Log tag prefix for this submodule (issue #79 item 3).
 const CMD: &str = "[CMD.SYNC]";
 
+/// Issue #870: the safe-placeholder text the manual status clear posts.
+/// Mirrors the paused-clear placeholder so a user who clears a manual
+/// status ends up looking identical to a user whose Spotify paused — that
+/// was the shipped 4.6 behaviour, and the regression risk is high enough
+/// that the text is anchored here rather than duplicated at the call site.
+///
+/// The emoji prefix comes from the polling-side helper so a future
+/// "make the prefix a config knob" change does not need to revisit the
+/// manual status clear.
+pub fn safe_placeholder_text(state: &AppState) -> String {
+    let cfg = state.config.get();
+    let text = cfg
+        .as_ref()
+        .map(|c| c.teams.paused_status_format.clone())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "Paused".to_string());
+    format!("{} {text}", crate::polling::MUSIC_EMOJI)
+}
+
+/// Issue #870: the placeholder expiry the manual status clear carries —
+/// 60 seconds, matching the paused/stopped clear paths so a user who
+/// clears a manual status finds Teams in the same shape the auto-paused
+/// path leaves it. Mirrors `placeholder_expiry_str` in the polling
+/// module without importing a private function.
+pub fn placeholder_expiry_minutes() -> u32 {
+    // Exposed in minutes (the SyncStatus wire shape) for the Dashboard chip
+    // and the diagnostics snapshot. The Graph-side string is built at the
+    // call site through `teams::placeholder_expiry_rfc3339()` so this fn
+    // is a single-purpose accessor.
+    1
+}
+
 /// Issue #809: the explicit-start session guard.
 ///
 /// `start_syncing_with` used to gate only on `is_syncing`, so a user whose
@@ -111,6 +143,15 @@ pub struct SyncStatus {
     /// in #669), so a mounting Dashboard shows the paused track card instead
     /// of "Nothing playing".
     pub presence_paused: bool,
+    /// Issue #870: the user-composed manual status currently armed on
+    /// Teams. `None` when the composer is empty, the user cleared it, or
+    /// the expiry lapsed. The Dashboard composer reads this to decide
+    /// whether to render the "Clear manual status" button.
+    pub manual_status: Option<crate::commands::status::ManualStatus>,
+    /// Issue #870: the three most-recently-used manual statuses, newest
+    /// first. The Dashboard composer renders this as the quick-pick list
+    /// and the tray's "Recent statuses" submenu reads the same array.
+    pub recent_manual_statuses: Vec<crate::commands::status::RecentManualStatus>,
 }
 
 #[tauri::command]
@@ -584,6 +625,8 @@ pub fn sync_status_from_state(state: &AppState) -> SyncStatus {
         last_posted_status: clocks.last_posted_status.clone(),
         presence_gated: clocks.gated_track_key.is_some(),
         presence_paused,
+        manual_status: crate::commands::status::load_manual_status(),
+        recent_manual_statuses: crate::commands::status::load_recent_statuses(),
     }
 }
 #[tauri::command]
