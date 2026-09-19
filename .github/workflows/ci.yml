@@ -64,7 +64,7 @@ jobs:
       - name: Cargo check (all targets)
         env:
           CARGO_INCREMENTAL: 0
-        run: cargo check --manifest-path src-tauri/Cargo.toml --all-targets
+        run: cargo check --locked --manifest-path src-tauri/Cargo.toml --all-targets
 
       # Platform-gated behaviour (#836): the check above proves these branches
       # compile, this proves they run, which is the gap that let a regression
@@ -74,7 +74,7 @@ jobs:
       - name: Cargo test (lib)
         env:
           CARGO_INCREMENTAL: 0
-        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
 
   # Frontend: catches Svelte/TS build errors. Mirrors the npm ci + npm run build
   # steps from release.yml. Cached via actions/setup-node cache: 'npm'.
@@ -142,7 +142,7 @@ jobs:
         run: |
           rm -rf src/lib/types-generated/
           mkdir -p src/lib/types-generated/
-          cargo test --manifest-path src-tauri/Cargo.toml --lib
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
 
       # Type-check Svelte/TS via svelte-check. Runs after Build frontend
       # and the cargo test step above so the generated $types,
@@ -245,7 +245,7 @@ jobs:
       - name: Cargo check (all targets)
         env:
           CARGO_INCREMENTAL: 0
-        run: cargo check --manifest-path src-tauri/Cargo.toml --all-targets
+        run: cargo check --locked --manifest-path src-tauri/Cargo.toml --all-targets
 
       # Runs the Rust unit-test suite. `cargo check` above only emits
       # metadata (.rmeta); `cargo test` needs codegen'd rlib/bin artifacts,
@@ -256,7 +256,7 @@ jobs:
       - name: Cargo test (all targets)
         env:
           CARGO_INCREMENTAL: 0
-        run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --all-targets
 
   # Clippy: same scope as cargo check but with lint enforcement.
   # Treats warnings as errors so noisy/deprecated lints can't sneak in.
@@ -312,7 +312,7 @@ jobs:
       - name: Cargo clippy (deny warnings)
         env:
           CARGO_INCREMENTAL: 0
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+        run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
   # Rust coverage ratchet (issue #838): the frontend has had a measured coverage
   # gate since #443/#681, the backend had none — so a PR that deletes a module's
@@ -389,7 +389,7 @@ jobs:
         env:
           CARGO_INCREMENTAL: 0
         run: |
-          cargo llvm-cov --manifest-path src-tauri/Cargo.toml --lib \
+          cargo llvm-cov --locked --manifest-path src-tauri/Cargo.toml --lib \
             --lcov --output-path lcov.info \
             --fail-under-lines 62
 
@@ -501,14 +501,21 @@ jobs:
       - name: Audit relative markdown links (docs/link-audit.py)
         run: python3 docs/link-audit.py
 
-  # Version consistency (issue #605): the release tag decides the version
-  # written into latest.json, while the shipped binary self-reports
-  # whatever tauri.conf.json says (Cargo.toml and package.json are two more
-  # copies). A partial bump ships a binary whose self-reported version never
-  # matches latest.json, so tauri-plugin-updater re-offers the same update
-  # on every check and the prompt never goes away. release.yml gates the
-  # tag against all three sources; this leg catches the drift at PR time,
-  # before a tag exists to disagree with.
+  # Version consistency (issues #605, #832): the release tag decides the version
+  # written into latest.json, while the shipped binary self-reports whatever
+  # tauri.conf.json says — and package.json, package-lock.json (twice),
+  # Cargo.toml and Cargo.lock (the `presence-jam` entry) are five more copies of
+  # it. A partial bump ships a binary whose self-reported version never matches
+  # latest.json, so tauri-plugin-updater re-offers the same update on every check
+  # and the prompt never goes away. All six literals are gated here and by
+  # release.yml's tag check, and every source is read from the repository, so the
+  # `node_modules/cssstyle` version that coincidentally matches cannot satisfy
+  # this leg.
+  #
+  # Every cargo invocation in this workflow passes `--locked` (#832): a
+  # Cargo.lock that no longer matches Cargo.toml must fail loudly rather than be
+  # rewritten in the runner and committed stale by the next `cargo update`-free
+  # change.
   version-consistency:
     name: Version consistency
     runs-on: ubuntu-latest
@@ -519,20 +526,40 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Check the three version sources agree
+      - name: Check the six version sources agree
         run: |
           set -euo pipefail
           CONFIG_VERSION=$(jq -r .version src-tauri/tauri.conf.json)
           PKG_VERSION=$(jq -r .version package.json)
+          LOCK_VERSION=$(jq -r .version package-lock.json)
+          LOCK_ROOT_VERSION=$(jq -r '.packages[""].version' package-lock.json)
           CARGO_VERSION=$(sed -nE 's/^version = "(.*)"/\1/p' src-tauri/Cargo.toml | head -1)
-          echo "src-tauri/tauri.conf.json : ${CONFIG_VERSION}"
-          echo "package.json              : ${PKG_VERSION}"
-          echo "src-tauri/Cargo.toml      : ${CARGO_VERSION}"
+          # The workspace crate's own lockfile entry: `name = "presence-jam"`
+          # followed by its `version` line, not a dependency of the same name.
+          CARGO_LOCK_VERSION=$(awk '/^name = "presence-jam"$/ { found = 1; next } found && /^version = / { gsub(/[",]/, "", $3); print $3; exit }' src-tauri/Cargo.lock)
+          echo "src-tauri/tauri.conf.json          : ${CONFIG_VERSION}"
+          echo "package.json                       : ${PKG_VERSION}"
+          echo "package-lock.json                  : ${LOCK_VERSION}"
+          echo "package-lock.json packages[\"\"]    : ${LOCK_ROOT_VERSION}"
+          echo "src-tauri/Cargo.toml               : ${CARGO_VERSION}"
+          echo "src-tauri/Cargo.lock (presence-jam): ${CARGO_LOCK_VERSION}"
           drift=0
-          for entry in "package.json:${PKG_VERSION}" "src-tauri/Cargo.toml:${CARGO_VERSION}"; do
+          for entry in \
+            "package.json:${PKG_VERSION}" \
+            "package-lock.json:${LOCK_VERSION}" \
+            "package-lock.json (packages[\"\"]):${LOCK_ROOT_VERSION}" \
+            "src-tauri/Cargo.toml:${CARGO_VERSION}" \
+            "src-tauri/Cargo.lock (presence-jam):${CARGO_LOCK_VERSION}"; do
             file="${entry%:*}"
             version="${entry##*:}"
-            if [ "$version" != "$CONFIG_VERSION" ]; then
+            # An unreadable literal is its own failure: `jq` prints `null` and a
+            # missed awk prints nothing, and both would otherwise read as drift.
+            if [ -z "${version}" ] || [ "${version}" = "null" ]; then
+              echo "::error::could not read a version from ${file} (got '${version}')"
+              drift=1
+              continue
+            fi
+            if [ "${version}" != "${CONFIG_VERSION}" ]; then
               echo "::error::version drift: ${file} says '${version}' but src-tauri/tauri.conf.json says '${CONFIG_VERSION}'"
               drift=1
             fi
