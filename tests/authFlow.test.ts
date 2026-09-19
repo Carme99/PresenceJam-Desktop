@@ -17,6 +17,7 @@ import {
   isSafeHttpUrl,
   releaseTeamsPoll,
   resetSpotifyAuthFlow,
+  resetTeamsAuthFlow,
   setTeamsDeviceCode,
   tryAcquireTeamsPoll
 } from '$lib/stores/authFlow.svelte';
@@ -75,6 +76,32 @@ describe('teams poll mutex (#396)', () => {
   it('admits one poll at a time', () => {
     expect(tryAcquireTeamsPoll()).toBe(true);
     expect(tryAcquireTeamsPoll()).toBe(false);
+    releaseTeamsPoll();
+    expect(tryAcquireTeamsPoll()).toBe(true);
+    releaseTeamsPoll();
+  });
+});
+
+describe('teams poll mutex under a restart (#933)', () => {
+  beforeEach(() => {
+    releaseTeamsPoll();
+  });
+
+  it('lets the restarted sign-in in, and keeps the abandoned release harmless', () => {
+    // The abandoned poll is still awaiting its invoke.
+    expect(tryAcquireTeamsPoll()).toBe(true);
+
+    // The user starts over: the flow is reset, and the restarted sign-in must
+    // not be skipped behind the abandoned invoke.
+    resetTeamsAuthFlow();
+    expect(tryAcquireTeamsPoll()).toBe(true);
+
+    // The abandoned poll finally resolves. Its release must not free the mutex
+    // the newer flow is still holding.
+    releaseTeamsPoll();
+    expect(tryAcquireTeamsPoll()).toBe(false);
+
+    // And when the newer flow resolves, the mutex is free again.
     releaseTeamsPoll();
     expect(tryAcquireTeamsPoll()).toBe(true);
     releaseTeamsPoll();

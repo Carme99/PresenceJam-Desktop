@@ -7,6 +7,7 @@ use crate::polling::{cas_refresh_or_discard, CasOutcome};
 use crate::teams::{decode_teams_granted_scopes, DeviceCodeResponse, TeamsApiError};
 use crate::token_io;
 use crate::AppState;
+use parking_lot::Mutex;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 
@@ -29,6 +30,25 @@ where
     tauri::async_runtime::spawn_blocking(work)
         .await
         .map_err(|e| format!("{CMD} {label} task panicked: {e}"))
+}
+
+/// Device code of the sign-in flow the UI is currently running (issue #933).
+///
+/// [`start_teams_auth_device_code`] makes its code current, and a poll may
+/// only commit while its own code is still the current one. The device code is
+/// the natural key: it is exactly what the frontend threads through
+/// [`poll_teams_auth`], so a newer sign-in supersedes an older attempt with no
+/// new wire field. Supersession is not cosmetic — the token slot and
+/// `cas_refresh_or_discard` are shared, so a stale poll that lands overwrites
+/// the newer flow's tokens, persists them, invalidates the onboarding cache,
+/// and navigates the user to Settings while the flow they are actually running
+/// is still on screen.
+static CURRENT_FLOW: Mutex<Option<String>> = Mutex::new(None);
+
+/// Whether a poll for `device_code` may still commit the tokens it polled
+/// (issue #933). `None` — cancelled, or never started — discards them.
+fn may_commit(current: &Mutex<Option<String>>, device_code: &str) -> bool {
+    current.lock().as_deref() == Some(device_code)
 }
 
 #[tauri::command]
@@ -67,6 +87,14 @@ pub async fn start_teams_auth_device_code(
     // command via the frontend, and a device-code flow needs no registered
     // redirect URI (Entra reply-url docs). See issue #158.
 
+    // Issue #933: this is now the flow the UI is running, which supersedes any
+    // older attempt — its poll may no longer commit.
+    *CURRENT_FLOW.lock() = Some(response.device_code.clone());
+    log::info!(
+        "{CMD} start_teams_auth_device_code: flow is current (device_code.len={})",
+        response.device_code.len()
+    );
+
     log::info!("{CMD} start_teams_auth_device_code: SUCCESS");
     Ok(response)
 }
@@ -93,6 +121,19 @@ pub async fn poll_teams_auth(
     })
     .await
     .map_err(|e| format!("poll_teams_auth task panicked: {}", e))?;
+
+    // Issue #933: the poll runs for up to 900 s. If the user started a newer
+    // sign-in — or abandoned this one — meanwhile, this attempt must not land:
+    // committing would overwrite the newer flow's tokens, persist them and
+    // navigate away from the code the user is actually looking at. Both arms
+    // are discarded, so a superseded attempt cannot report its failure onto
+    // the newer flow's screen either.
+    if !may_commit(&CURRENT_FLOW, &device_code) {
+        log::warn!(
+            "{CMD} poll_teams_auth: flow superseded or cancelled; discarding the polled result without committing"
+        );
+        return Ok(());
+    }
 
     match poll_result {
         Ok(tokens) => {
@@ -151,6 +192,20 @@ pub async fn poll_teams_auth(
             Err(err_string)
         }
     }
+}
+
+/// Supersede the running device-code poll (issue #933).
+///
+/// The frontend calls this from `resetTeamsAuthFlow()`: the abandoned poll
+/// keeps its HTTP attempt — the retry loop lives in `teams::poll_teams_auth` —
+/// but its result can no longer commit, persist or navigate, and the same
+/// reset releases the frontend's poll mutex, so a restarted sign-in is not
+/// skipped. No main-window guard: a detached Settings window may abandon the
+/// flow it handed back to the main window.
+#[tauri::command]
+pub fn cancel_teams_auth_poll() {
+    let had_flow = CURRENT_FLOW.lock().take().is_some();
+    log::info!("{CMD} cancel_teams_auth_poll: ENTRY - had_flow={had_flow}");
 }
 
 #[tauri::command]
@@ -265,7 +320,8 @@ pub fn get_teams_granted_scopes(state: tauri::State<'_, Arc<AppState>>) -> Vec<S
 
 #[cfg(test)]
 mod tests {
-    use super::offload_blocking;
+    use super::{may_commit, offload_blocking};
+    use parking_lot::Mutex;
 
     /// Issue #878: the point of the offload is that the thread which *awaits*
     /// the request is not the thread which *runs* it. `block_on` parks the
@@ -317,6 +373,58 @@ mod tests {
             ),
             "the request must be awaited through `offload_blocking`, or the window \
              freezes for the round trip"
+        );
+    }
+
+    /// Issue #933: a poll may only commit while its own device code is still
+    /// the flow the UI is running. Pre-fix the spawned task committed whatever
+    /// the code yielded, so an abandoned or superseded attempt still landed —
+    /// including a sign-in as a different Microsoft account, which overwrote
+    /// the newer flow's tokens and navigated the user away from its code.
+    #[test]
+    fn superseded_or_cancelled_flows_may_not_commit() {
+        let current = Mutex::new(None);
+
+        // Nothing registered: a poll whose start never ran has nothing to land on.
+        assert!(!may_commit(&current, "code-a"));
+
+        *current.lock() = Some("code-a".to_string());
+        assert!(
+            may_commit(&current, "code-a"),
+            "the flow the UI started may commit its tokens"
+        );
+
+        // A newer sign-in supersedes it: the older poll is discarded, the
+        // newer one may still commit.
+        *current.lock() = Some("code-b".to_string());
+        assert!(!may_commit(&current, "code-a"));
+        assert!(may_commit(&current, "code-b"));
+
+        // Cancelling the abandoned attempt clears the slot outright.
+        *current.lock() = None;
+        assert!(!may_commit(&current, "code-b"));
+    }
+
+    /// The gate has to sit before the commit: a check placed after
+    /// `*guard = Some(tokens)` would already have overwritten the newer flow's
+    /// tokens. Structural because reaching those lines needs a live
+    /// `AppHandle` and the blocking poll loop.
+    #[test]
+    fn the_commit_gate_precedes_the_token_slot_write() {
+        let body = crate::token_io::test_scan::fn_body(
+            include_str!("teams_auth.rs"),
+            "fn poll_teams_auth(",
+        );
+        let gate = body
+            .find("may_commit(")
+            .expect("poll_teams_auth must gate its commit on the flow being current");
+        let commit = body
+            .find("*guard = Some(tokens)")
+            .expect("poll_teams_auth must commit the tokens it polled");
+        assert!(
+            gate < commit,
+            "the supersession gate must run before the token slot is written, or \
+             the stale commit has already clobbered the newer flow's tokens"
         );
     }
 }
