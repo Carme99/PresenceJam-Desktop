@@ -1771,9 +1771,14 @@ fn rebuild_tray_menu(
         .item(&playback_separator)
         .items(&[&devices_submenu, &queue_submenu]);
 
-    // Add current track item if playing — insert separator2 here too
-    if let Some(track) = &current_track {
-        if track.is_playing {
+    // Add current track item if playing — insert separator2 here too.
+    // Issue #956: the gate is the rebuild's OWN `is_playing` binding — the same
+    // one the Play/Pause mark and the status line read — not the stored track's
+    // flag. `run_player_action` records the new playing state and forces this
+    // rebuild without re-storing the track, so a tray-initiated pause used to
+    // leave this row naming a track the tray had just paused.
+    if is_playing {
+        if let Some(track) = &current_track {
             let separator2 = PredefinedMenuItem::separator(app).map_err(|e| {
                 log::warn!("[TRAY] update_tray_menu: failed to build separator2: {}", e);
                 e.to_string()
@@ -1817,12 +1822,15 @@ fn rebuild_tray_menu(
     // rebuild, i.e. exactly whenever track info changes (the dedup key
     // already covers artist/title/is_playing), and performs no IO and no
     // extra locking beyond the tray handle itself.
+    // Issue #956: the glyph comes from the rebuild's own `is_playing` binding,
+    // like the row above and the check mark, so one hover cannot contradict the
+    // menu it belongs to.
     let track_tooltip = match &current_track {
         Some(t) => format!(
             "{} — {} ({})",
             t.artist,
             t.title,
-            if t.is_playing { "▶" } else { "⏸" }
+            if is_playing { "▶" } else { "⏸" }
         ),
         None => "PresenceJam".to_string(),
     };
@@ -2886,6 +2894,54 @@ mod tests {
         assert!(
             !tray_state_changed(Some(&at(1, 1)), &at(1, 1)),
             "the bucket alone must not make every rebuild a repaint"
+        );
+    }
+
+    /// Issue #956: one rebuild described two different playing states. The
+    /// status line and the Play/Pause check mark read the rebuild's own
+    /// `is_playing`, while the now-playing row and the tooltip glyph read the
+    /// poller's stored `TrackInfo` — which a tray pause does not re-store. So a
+    /// pause left the row naming a track that was no longer playing and the
+    /// tooltip claiming ▶ over a menu that said paused, until the next poll.
+    #[test]
+    fn now_playing_row_and_tooltip_follow_the_rebuilds_playing_state() {
+        let prod = prod_source(include_str!("tray.rs"));
+        let body = body_of(prod, "fn rebuild_tray_menu(");
+
+        // The now-playing row: the gate is the shared binding, placed before
+        // the row is built, and nothing in the row re-reads a stored flag.
+        let gate = body
+            .find("if is_playing {")
+            .expect("the now-playing row must be gated on the playing state");
+        let row_pos = body
+            .find("ID_CURRENT_TRACK")
+            .expect("the rebuild must build the now-playing row");
+        let row_end = body[row_pos..]
+            .find("open_settings")
+            .map(|i| row_pos + i)
+            .unwrap_or(body.len());
+        let row = &body[row_pos..row_end];
+        assert!(
+            gate < row_pos,
+            "the now-playing row must be gated on the rebuild's playing state (issue #956)"
+        );
+        assert!(
+            !row.contains(".is_playing"),
+            "the now-playing row must not re-read the stored track's flag (issue #956)"
+        );
+
+        // The tooltip glyph: same binding, so a hover agrees with the menu.
+        let tip_pos = body
+            .find("let track_tooltip")
+            .expect("the rebuild must build the tooltip");
+        let tip = &body[tip_pos..];
+        assert!(
+            tip.contains("if is_playing { \"▶\" } else { \"⏸\" }"),
+            "the tooltip glyph must come from the rebuild's playing state (issue #956)"
+        );
+        assert!(
+            !tip.contains(".is_playing"),
+            "the tooltip must not read the stored track's playing flag (issue #956)"
         );
     }
 }
