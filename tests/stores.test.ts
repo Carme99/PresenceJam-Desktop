@@ -17,14 +17,18 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke }));
 type FakeWindow = {
   setFocus: () => Promise<void>;
   close: () => Promise<void>;
+  once: (event: string, handler: (e?: unknown) => void) => void;
 };
 
 const winState = {
   win: null as FakeWindow | null,
   created: 0,
   closed: 0,
-  // tauri://destroyed / tauri://error handlers the store registered on the
-  // window it created — recorded so the badge-teardown paths are reachable.
+  // tauri://destroyed handler the store registered on the window it created —
+  // recorded so the badge-teardown path is reachable. Creation failures no
+  // longer arrive as `tauri://error` events on the window (issue #922): the
+  // store invokes the `detach_pane` command instead and rejects in its own
+  // catch block, which is driven directly in the test below.
   handlers: {} as Record<string, (e?: unknown) => void>
 };
 
@@ -35,10 +39,29 @@ class FakeWebviewWindow {
   constructor() {
     winState.created++;
   }
+  async setFocus(): Promise<void> {
+    // no-op — the real setFocus focuses an already-open child window.
+  }
+  async close(): Promise<void> {
+    winState.closed++;
+  }
   once(event: string, handler: (e?: unknown) => void) {
     winState.handlers[event] = handler;
   }
 }
+
+// Issue #922: detached windows are now opened by the Rust `detach_pane`
+// command, not by the main window's `WebviewWindow` constructor. Tests stub
+// the command by handing the store a fake window handle so `getByLabel` can
+// resolve it after the command "returns".
+invoke.mockImplementation(async (cmd: string) => {
+  if (cmd === 'detach_pane') {
+    const win = new FakeWebviewWindow();
+    winState.win = win as unknown as FakeWindow;
+    return undefined;
+  }
+  return undefined;
+});
 
 vi.mock('@tauri-apps/api/webviewWindow', () => ({
   WebviewWindow: FakeWebviewWindow
@@ -46,6 +69,17 @@ vi.mock('@tauri-apps/api/webviewWindow', () => ({
 
 beforeEach(() => {
   invoke.mockReset();
+  // Issue #922: re-install the default `detach_pane` handler after every
+  // reset — `mockReset` clears the implementation as well as the call
+  // history, and the detach store relies on it.
+  invoke.mockImplementation(async (cmd: string) => {
+    if (cmd === 'detach_pane') {
+      const win = new FakeWebviewWindow();
+      winState.win = win as unknown as FakeWindow;
+      return undefined;
+    }
+    return undefined;
+  });
   winState.win = null;
   winState.created = 0;
   winState.closed = 0;
@@ -176,7 +210,8 @@ describe('detach store runtime (#422)', () => {
       setFocus: async () => {
         throw new Error('stale handle');
       },
-      close: async () => {}
+      close: async () => {},
+      once: () => {}
     };
     await d.popOut('logs');
     // Fell through to creation (not stuck on the zombie handle).
@@ -203,9 +238,16 @@ describe('detach store runtime (#422)', () => {
     winState.handlers['tauri://destroyed']?.();
     expect(get(d.detachedPanes).logs).toBe(false);
 
+    // Issue #922: a refused creation now comes back through `invoke()`,
+    // not a `tauri://error` event on the window. Drive that path instead:
+    // when the Rust `detach_pane` command rejects, the badge must clear.
+    // Wipe the live window handle so the store has to call the command
+    // again instead of taking the still-fake "existing window" branch.
+    winState.win = null;
+    invoke.mockImplementationOnce(async () => {
+      throw new Error('creation failed');
+    });
     await d.popOut('logs');
-    expect(get(d.detachedPanes).logs).toBe(true);
-    winState.handlers['tauri://error']?.({ message: 'creation failed' });
     expect(get(d.detachedPanes).logs).toBe(false);
   });
 
@@ -218,7 +260,8 @@ describe('detach store runtime (#422)', () => {
       setFocus: async () => {},
       close: async () => {
         closeCalls++;
-      }
+      },
+      once: () => {}
     };
     d.detachedPanes.set({ logs: false, settings: true });
     await d.popIn('settings');
