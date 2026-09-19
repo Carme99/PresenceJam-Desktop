@@ -3520,12 +3520,14 @@ mod tests {
     /// returns the canonical pair.
     #[test]
     fn test_preferred_presence_pair_gates_on_manual_status() {
-        let mut teams = TeamsConfig::default();
-        teams.preferred_presence = PreferredPresenceConfig {
-            enabled: true,
-            availability: "Busy".to_string(),
-            activity: "InACall".to_string(),
-            expiry_minutes: 60,
+        let mut teams = TeamsConfig {
+            preferred_presence: PreferredPresenceConfig {
+                enabled: true,
+                availability: "Busy".to_string(),
+                activity: "InACall".to_string(),
+                expiry_minutes: 60,
+            },
+            ..TeamsConfig::default()
         };
         let pair = preferred_presence_pair(&teams, false).expect("must resolve");
         assert_eq!(pair.availability, "Busy");

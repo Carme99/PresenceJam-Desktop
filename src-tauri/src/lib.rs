@@ -1088,7 +1088,7 @@ fn cli_set_manual_status_from_disk(message: &str, expiry_minutes: u32) -> Result
         .unwrap_or_default();
     let cfg_guard = state.config.get();
     let extra_words = crate::config::profanity_extra_words_for_filter(cfg_guard.as_ref());
-    let posted_text = crate::profanity::filter_status(&text, &placeholder, true, &extra_words);
+    let posted_text = crate::profanity::filter_status(&text, &placeholder, true, extra_words);
 
     let now = chrono::Utc::now();
     let expires_at = now + chrono::Duration::minutes(expiry_minutes as i64);

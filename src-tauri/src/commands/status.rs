@@ -172,7 +172,7 @@ pub fn set_manual_status_inner(
         .map(|c| c.teams.profanity_placeholder.clone())
         .unwrap_or_default();
     let extra_words = profanity_extra_words_for_filter(config_guard.as_ref());
-    let posted_text = profanity::filter_status(&text, &placeholder, true, &extra_words);
+    let posted_text = profanity::filter_status(&text, &placeholder, true, extra_words);
     let filtered = posted_text != text;
 
     // Step 3: POST to Teams. The expiry is the ISO 8601 the docs document
