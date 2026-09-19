@@ -104,29 +104,29 @@ impl FocusProbe for WindowsFocusProbe {
             SHQueryUserNotificationState, QUNS_APP, QUNS_BUSY, QUNS_NOT_PRESENT,
             QUNS_PRESENTATION_MODE, QUNS_QUIET_TIME, QUNS_RUNNING_D3D_FULL_SCREEN,
         };
-        let mut state = QUNS_NOT_PRESENT;
-        // SAFETY: `SHQueryUserNotificationState` writes a `QUNS_*` value
-        // through an out-pointer; passing a stack `QUNS_NOT_PRESENT` is the
-        // documented initial value (the function overwrites it).
-        let hr = unsafe { SHQueryUserNotificationState(&mut state) };
-        if hr.is_ok() {
-            Ok(match state {
-                QUNS_BUSY | QUNS_RUNNING_D3D_FULL_SCREEN => PresentationState::FullScreen,
-                QUNS_PRESENTATION_MODE => PresentationState::Presentation,
-                QUNS_QUIET_TIME => PresentationState::QuietTime,
-                // `QUNS_NOT_PRESENT` (no flag) and `QUNS_APP` (an app is
-                // foreground) are both "OS isn't presenting".
-                _ => PresentationState::None,
-            })
-        } else {
-            // `HRESULT` is a `i32`; preserve the bit pattern in `u32` so the
-            // log line stays greppable across 32/64-bit builds.
-            let code = hr.0 as u32;
-            log::warn!(
-                "[FOCUS] WindowsFocusProbe: SHQueryUserNotificationState returned 0x{:x}, failing open",
-                code
-            );
-            Err(FocusProbeError::Native(code))
+        // The `windows` crate (>= 0.61) wraps `SHQueryUserNotificationState`
+        // as `fn() -> Result<QUERY_USER_NOTIFICATION_STATE, Error>` — no
+        // out-pointer, the `QUNS_*` value comes through the Ok arm.
+        let result = unsafe { SHQueryUserNotificationState() };
+        match result {
+            Ok(state) => Ok(match state {
+                    QUNS_BUSY | QUNS_RUNNING_D3D_FULL_SCREEN => PresentationState::FullScreen,
+                    QUNS_PRESENTATION_MODE => PresentationState::Presentation,
+                    QUNS_QUIET_TIME => PresentationState::QuietTime,
+                    // `QUNS_NOT_PRESENT` (no flag) and `QUNS_APP` (an app is
+                    // foreground) are both "OS isn't presenting".
+                    _ => PresentationState::None,
+                }),
+            Err(e) => {
+                // Preserve the bit pattern in `u32` so the log line stays
+                // greppable across 32/64-bit builds.
+                let code = e.code().0 as u32;
+                log::warn!(
+                    "[FOCUS] WindowsFocusProbe: SHQueryUserNotificationState returned 0x{:x}, failing open",
+                    code
+                );
+                Err(FocusProbeError::Native(code))
+            }
         }
     }
 }
