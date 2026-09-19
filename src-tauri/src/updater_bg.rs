@@ -410,8 +410,10 @@ struct StaleSkippedUpdate {
 /// `+build` metadata (ignored in ordering per semver §10). Returns
 /// `(major, minor, patch, prerelease)`, or `None` when the string is not
 /// a well-formed triple. Deliberately dependency-free (`Cargo.toml` is
-/// outside this slice's ownership): ordering only needs the numeric
-/// core plus the release-vs-prerelease rule.
+/// outside this slice's ownership): the caller can rely on the shape (a real
+/// triple, no trailing fields, a non-empty prerelease when one is present)
+/// rather than on a third-party parser that would accept shapes the updater
+/// feed never publishes.
 fn parse_semver_core(v: &str) -> Option<(u64, u64, u64, Option<String>)> {
     let s = v.trim();
     let s = s
@@ -438,11 +440,16 @@ fn parse_semver_core(v: &str) -> Option<(u64, u64, u64, Option<String>)> {
     Some((major, minor, patch, prerelease))
 }
 
-/// Semver ordering for two version strings. A plain release outranks its
-/// own prereleases; two prereleases compare lexically (a documented
-/// simplification — updater feed versions are plain numeric triples, so
-/// the prerelease arm only needs to be deterministic, not dot-separated
-/// aware). Returns `None` when either side is unparseable.
+/// Semver ordering for two version strings: the numeric core, then a plain
+/// release outranking its own prereleases, then semver §11 precedence between
+/// two prereleases. Returns `None` when either side is unparseable.
+///
+/// Issue #808: the prerelease arm used to compare the two strings with
+/// `String::cmp`, which inverts numeric identifiers — `beta.9` sorted above
+/// `beta.10`, so a newer beta was refused as stale. The comparison is
+/// hand-rolled rather than delegated to the `semver` crate because that
+/// means a new direct dependency in `src-tauri/Cargo.toml`, which is outside
+/// this module's ownership.
 fn compare_semver(a: &str, b: &str) -> Option<std::cmp::Ordering> {
     use std::cmp::Ordering;
     let (major_a, minor_a, patch_a, pre_a) = parse_semver_core(a)?;
@@ -452,10 +459,63 @@ fn compare_semver(a: &str, b: &str) -> Option<std::cmp::Ordering> {
             (None, None) => Some(Ordering::Equal),
             (None, Some(_)) => Some(Ordering::Greater),
             (Some(_), None) => Some(Ordering::Less),
-            (Some(x), Some(y)) => Some(x.cmp(&y)),
+            (Some(x), Some(y)) => Some(compare_prerelease(&x, &y)),
         },
         ord => Some(ord),
     }
+}
+
+/// Semver §11 precedence between two prereleases (issue #808).
+///
+/// Dot-separated identifiers, compared left to right: a numeric identifier
+/// ranks below an alphanumeric one and compares by value; two alphanumeric
+/// identifiers compare in ASCII order; and when every shared identifier is
+/// equal the shorter list ranks lower, so `1.0.0-beta` < `1.0.0-beta.1`.
+fn compare_prerelease(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    let mut left = a.split('.');
+    let mut right = b.split('.');
+    loop {
+        match (left.next(), right.next()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(x), Some(y)) => {
+                let ord = match (numeric_identifier(x), numeric_identifier(y)) {
+                    (Some(nx), Some(ny)) => compare_numeric_identifiers(nx, ny),
+                    (Some(_), None) => Ordering::Less,
+                    (None, Some(_)) => Ordering::Greater,
+                    (None, None) => x.cmp(y),
+                };
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+            }
+        }
+    }
+}
+
+/// A prerelease identifier as a numeric one, or `None` for an alphanumeric
+/// one. Semver §9 allows only digits, with no leading zeroes — a zero-padded
+/// identifier is not a valid numeric one, so it ranks as alphanumeric, as does
+/// an empty field from a malformed `a..b` prerelease.
+fn numeric_identifier(id: &str) -> Option<&str> {
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    if id.len() > 1 && id.starts_with('0') {
+        return None;
+    }
+    Some(id)
+}
+
+/// Value comparison of two numeric prerelease identifiers. Both are
+/// digit-only and zero-free, so a longer one is the larger number and equal
+/// lengths compare lexically — no integer parse, hence no overflow on an
+/// identifier longer than `u64` can hold.
+fn compare_numeric_identifiers(a: &str, b: &str) -> std::cmp::Ordering {
+    a.len().cmp(&b.len()).then_with(|| a.cmp(b))
 }
 
 /// True when `staged` is older than or equal to `current` under semver
@@ -1304,6 +1364,65 @@ mod tests {
         );
         assert_eq!(compare_semver("nope", "4.1.1"), None);
         assert_eq!(compare_semver("4.1.1", "nope"), None);
+    }
+
+    /// Issue #808: semver §11 precedence between prereleases. The lexical
+    /// comparison this replaced ranked `beta.9` above `beta.10` — precisely
+    /// the shape a beta channel publishes — so a newer beta was refused as
+    /// stale. Also covers the numeric-vs-alphanumeric rule and the
+    /// shorter-list rule, both of which a lexical compare got wrong.
+    #[test]
+    fn test_compare_semver_orders_prereleases_by_semver_precedence() {
+        use std::cmp::Ordering;
+        assert_eq!(
+            compare_semver("4.8.0-beta.9", "4.8.0-beta.10"),
+            Some(Ordering::Less),
+            "beta.10 is newer than beta.9 (issue #808)"
+        );
+        assert_eq!(compare_semver("1.0.0-1", "1.0.0-2"), Some(Ordering::Less));
+        assert_eq!(
+            compare_semver("1.0.0-beta.10", "1.0.0-beta.10"),
+            Some(Ordering::Equal)
+        );
+        // Numeric identifiers rank below alphanumeric ones.
+        assert_eq!(
+            compare_semver("1.0.0-1", "1.0.0-alpha"),
+            Some(Ordering::Less)
+        );
+        // Equal identifiers: the shorter list ranks lower.
+        assert_eq!(
+            compare_semver("1.0.0-beta", "1.0.0-beta.1"),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            compare_semver("1.0.0-alpha.1", "1.0.0-alpha"),
+            Some(Ordering::Greater)
+        );
+        // Identifiers too long for u64 still order by value, not by width.
+        assert_eq!(
+            compare_semver("1.0.0-99999999999999999999", "1.0.0-100000000000000000000"),
+            Some(Ordering::Less),
+            "20 nines is smaller than 1 followed by 20 zeroes"
+        );
+        // A zero-padded identifier is not a valid numeric one (semver §9), so
+        // it ranks as alphanumeric — above the numeric `1`.
+        assert_eq!(
+            compare_semver("1.0.0-01", "1.0.0-1"),
+            Some(Ordering::Greater)
+        );
+    }
+
+    /// Issue #808, end to end at the level the updater actually asks: a
+    /// newer numeric prerelease must not be declined as a downgrade. This is
+    /// the predicate `stage_deferred_update` uses to refuse a payload.
+    #[test]
+    fn test_is_stale_version_accepts_a_higher_prerelease() {
+        assert!(
+            !is_stale_version("4.8.0-beta.10", "4.8.0-beta.9"),
+            "a newer beta must be staged, not refused as stale (issue #808)"
+        );
+        assert!(is_stale_version("4.8.0-beta.9", "4.8.0-beta.10"));
+        assert!(!is_stale_version("4.8.0-rc.1", "4.8.0-beta.10"));
     }
 
     #[test]
