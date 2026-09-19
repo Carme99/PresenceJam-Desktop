@@ -92,11 +92,10 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
 
     let builder = TrayIconBuilder::new()
         .tooltip("PresenceJam")
-        .icon(
-            app.default_window_icon()
-                .cloned()
-                .ok_or("No default icon")?,
-        )
+        // Issue #911: macOS wants a monochrome TEMPLATE image (marked as one
+        // right after the build below); Windows and Linux keep the
+        // application icon.
+        .icon(tray_icon(app)?)
         // Issue #971: Tauri documents this flag as unsupported on Linux, where
         // a left click opens the AppIndicator menu unconditionally. It only
         // ever changes behaviour on Windows and macOS.
@@ -399,6 +398,18 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
         "tray icon",
         std::panic::AssertUnwindSafe(|| builder.build(app).map_err(|e| e.to_string())),
     )?;
+
+    // Issue #911: mark the menu-bar icon as a template, so macOS draws it from
+    // its alpha channel and tints it — black stays black on a light menu bar and
+    // inverts on a dark one, and it dims with the bar for a modal. The call is a
+    // no-op off macOS (Tauri only implements it there), so it stays gated.
+    #[cfg(target_os = "macos")]
+    if let Err(e) = tray.set_icon_as_template(true) {
+        log::warn!(
+            "[TRAY] setup_tray: failed to mark the menu-bar icon as a template: {}",
+            e
+        );
+    }
 
     // Store the TrayIcon globally (idempotent)
     if TRAY.get().is_some() {
@@ -2098,6 +2109,98 @@ pub fn tray_available() -> bool {
     get_tray().is_some()
 }
 
+/// Side of [`TEMPLATE_GLYPH`] in cells (issue #911). macOS sizes menu-bar items
+/// at 22 pt, so the glyph is drawn as a 22-cell square and doubled for `@2x`.
+#[cfg(any(target_os = "macos", test))]
+const TEMPLATE_GLYPH_SIZE: u32 = 22;
+
+/// The menu-bar glyph: a quarter note, `#` inked and `.` transparent.
+///
+/// A bitmap in the source rather than a shipped PNG: the tray then needs no
+/// macOS-only asset and no PNG-decoding feature to read one, and the shape is
+/// pure data that every platform's test run can check. The stem starts at the
+/// top-right and runs down into the note head, with the flag off its top.
+#[cfg(any(target_os = "macos", test))]
+const TEMPLATE_GLYPH: [&str; TEMPLATE_GLYPH_SIZE as usize] = [
+    "......................",
+    "......................",
+    "......................",
+    "......................",
+    "...........#####......",
+    "...........######.....",
+    "...........######.....",
+    "...........######.....",
+    "...........##.........",
+    "...........##.........",
+    "...........##.........",
+    "...........##.........",
+    ".......#...##.........",
+    ".....#####.##.........",
+    "....#########.........",
+    "....#########.........",
+    "...##########.........",
+    "....#########.........",
+    "....#########.........",
+    ".....#####.##.........",
+    ".......#...##.........",
+    "......................",
+];
+
+/// The RGBA bytes for [`TEMPLATE_GLYPH`] at `scale` (issue #911): opaque black
+/// for ink, fully transparent elsewhere.
+///
+/// A template image carries no colour — macOS reads the alpha channel and lets
+/// the menu bar tint the result — so the colour channels are zero everywhere and
+/// only the alpha distinguishes ink from background. Each cell becomes a
+/// `scale`×`scale` block, which is how the `@2x` twin is produced.
+#[cfg(any(target_os = "macos", test))]
+fn template_icon_rgba(scale: u32) -> Vec<u8> {
+    let scale = scale.max(1);
+    let side = TEMPLATE_GLYPH_SIZE * scale;
+    let mut rgba = Vec::with_capacity((side * side * 4) as usize);
+    for row in TEMPLATE_GLYPH {
+        for _ in 0..scale {
+            for cell in row.bytes() {
+                let alpha = if cell == b'#' { 255u8 } else { 0u8 };
+                for _ in 0..scale {
+                    rgba.extend_from_slice(&[0, 0, 0, alpha]);
+                }
+            }
+        }
+    }
+    rgba
+}
+
+/// The macOS menu-bar icon (issue #911): [`TEMPLATE_GLYPH`] at its `@2x` size, so
+/// the same image is sharp on a Retina bar without a second asset.
+#[cfg(target_os = "macos")]
+fn macos_template_icon() -> tauri::image::Image<'static> {
+    const SCALE: u32 = 2;
+    let side = TEMPLATE_GLYPH_SIZE * SCALE;
+    let rgba = template_icon_rgba(SCALE);
+    debug_assert_eq!(rgba.len(), (side * side * 4) as usize);
+    tauri::image::Image::new_owned(rgba, side, side)
+}
+
+/// The tray icon this platform wants (issue #911).
+///
+/// macOS gets the monochrome template glyph — the full-colour application icon
+/// (`default_window_icon()`, 32/128 px) is what the menu bar rendered oversized
+/// and untinted. Windows' notification area and Linux's indicators are unaffected
+/// by the missing template flag, so they keep that icon.
+fn tray_icon(app: &tauri::App) -> Result<tauri::image::Image<'static>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(macos_template_icon())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        app.default_window_icon()
+            .cloned()
+            .ok_or_else(|| "No default icon".to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3381,6 +3484,78 @@ mod tests {
         assert!(
             prod.contains("pub fn tray_available()"),
             "close-to-tray needs an accessor for whether a tray exists (issue #927)"
+        );
+    }
+
+    /// Issue #911: macOS wants a monochrome TEMPLATE image for the menu bar,
+    /// because the bar draws the icon from its alpha channel and tints it — that
+    /// is what makes the item invert in a dark bar and dim with the bar for a
+    /// modal. The tray used `default_window_icon()`, the full-colour 32/128 px
+    /// application icon, which is why the item was oversized and ignored the tint.
+    #[test]
+    fn the_menu_bar_icon_is_a_monochrome_template_at_menu_bar_size() {
+        // The glyph is a square bitmap of ink and transparency, and it is a mark
+        // rather than a stray pixel.
+        assert_eq!(TEMPLATE_GLYPH.len(), TEMPLATE_GLYPH_SIZE as usize);
+        for row in TEMPLATE_GLYPH {
+            assert_eq!(row.len(), TEMPLATE_GLYPH_SIZE as usize, "row {:?}", row);
+            assert!(
+                row.bytes().all(|b| b == b'#' || b == b'.'),
+                "row {:?} must be ink or transparency only",
+                row
+            );
+        }
+        let ink = TEMPLATE_GLYPH
+            .iter()
+            .flat_map(|row| row.bytes())
+            .filter(|b| *b == b'#')
+            .count();
+        assert!(
+            ink > 60,
+            "the glyph must be a legible mark, got {} cells",
+            ink
+        );
+
+        // The RGBA handed to macOS is black plus alpha at both menu-bar sizes,
+        // and the ink covers exactly the glyph's cells scaled up — a template
+        // image gets its colour from the menu bar, so a coloured pixel would be
+        // ignored there anyway.
+        for scale in [1u32, 2] {
+            let side = TEMPLATE_GLYPH_SIZE * scale;
+            let rgba = template_icon_rgba(scale);
+            assert_eq!(rgba.len(), (side * side * 4) as usize, "scale {}", scale);
+            for px in rgba.chunks_exact(4) {
+                assert_eq!(&px[..3], &[0, 0, 0], "a template image is black");
+                assert!(px[3] == 0 || px[3] == 255, "alpha is on or off");
+            }
+            assert_eq!(
+                rgba.chunks_exact(4).filter(|px| px[3] == 255).count(),
+                ink * (scale * scale) as usize,
+                "scale {} must cover the glyph and nothing else",
+                scale
+            );
+        }
+
+        // The wiring: macOS builds the tray from the template glyph and marks it
+        // as a template; Windows and Linux keep the application icon.
+        let prod = prod_source(include_str!("tray.rs"));
+        let setup = body_of(prod, "pub fn setup_tray(");
+        assert!(
+            setup.contains(".icon(tray_icon(app)?)"),
+            "the tray icon must come from the platform-aware source (issue #911)"
+        );
+        assert!(
+            setup.contains("set_icon_as_template(true)"),
+            "the macOS icon must be marked as a template (issue #911)"
+        );
+        let source = body_of(prod, "fn tray_icon(");
+        assert!(
+            source.contains("default_window_icon()"),
+            "Windows and Linux must keep the application icon (issue #911)"
+        );
+        assert!(
+            source.contains("macos_template_icon()"),
+            "macOS must build the monochrome template glyph (issue #911)"
         );
     }
 }
