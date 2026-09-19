@@ -15,6 +15,8 @@ const ID_ABOUT: &str = "about";
 fn show_and_focus_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
+        // Issue #886: report the raise to the mirror the tray dedup key reads.
+        crate::tray::note_window_visibility(true);
         // Issue #483: a minimized window stays minimized after show() --
         // unminimize first (mirrors the single-instance raise in lib.rs).
         let _ = window.unminimize();

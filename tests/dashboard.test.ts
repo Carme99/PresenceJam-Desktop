@@ -374,21 +374,30 @@ describe('Dashboard availability chip (#551)', () => {
   });
 });
 
-describe('Dashboard tray refresh is claim-free (#592, #670)', () => {
+describe('Dashboard tray refresh is claim-free (#592, #670, #889)', () => {
   it('never sends the backend a tray-state snapshot it would ignore', async () => {
     await mountShell();
     const dash = render(Dashboard);
     await waitFor(() => expect(dash.container.querySelector('.track-card')).not.toBeNull());
-
-    // The two hot-path triggers: a sync-state transition (owned by the
-    // always-mounted layout) and a track change (owned by Dashboard).
-    await emit('sync-stopped', {});
+    await tick();
+    // #889: a track change does not touch the tray from here — `process_track`
+    // has already stored the track and the polling loop rebuilds the tray right
+    // after the iteration returns, so the frontend call was an IPC round trip
+    // (plus a blocking-pool hop) whose rebuild the dedup key discarded.
+    const before = invokeMock.mock.calls.filter((c) => c[0] === 'update_tray_menu_state').length;
     await emit('spotify-track-changed', TRACK);
+    await tick();
+    expect(
+      invokeMock.mock.calls.filter((c) => c[0] === 'update_tray_menu_state').length
+    ).toBe(before);
 
+    // The load-bearing trigger is the sync transition: start/stop sync do not
+    // repaint the tray themselves.
+    await emit('sync-stopped', {});
     await waitFor(() =>
       expect(
         invokeMock.mock.calls.filter((c) => c[0] === 'update_tray_menu_state').length
-      ).toBeGreaterThanOrEqual(2)
+      ).toBeGreaterThan(before)
     );
 
     // The Rust command derives is_syncing/current_track from AppState; any

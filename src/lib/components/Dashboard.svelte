@@ -229,12 +229,11 @@
     }
 
     devLog('[DASHBOARD] onMount: setting up spotify-track-changed listener');
-    teardown.add(listen('spotify-track-changed', async (event: any) => {
+    teardown.add(listen('spotify-track-changed', (event: any) => {
       devLog('[DASHBOARD] EVENT: spotify-track-changed received');
       devLog('[DASHBOARD] EVENT: track.title=', event.payload.title);
       devLog('[DASHBOARD] EVENT: track.artist=', event.payload.artist);
       currentTrack = event.payload;
-      await updateMenuState();
       // #675: class-gated inside the store, which also owns the OS permission
       // check; the notification is fire-and-forget so the card never waits on it.
       void notifyTrackChange(event.payload);
@@ -399,7 +398,6 @@
       teamsConnected = status.teams_connected;
       currentTrack = status.current_track;
       hydrate(status, snapshotRevision);
-      await updateMenuState();
     } catch (e) {
       console.error('[DASHBOARD] refreshStatus failed:', e);
       if (displayErrorTimeout) clearTimeout(displayErrorTimeout);
@@ -505,9 +503,10 @@
   // Helper to refresh the tray menu. #592: the Rust command takes no
   // arguments — it rebuilds from authoritative backend state — so sending
   // the frontend's isSyncing/currentTrack mirrors would be a claim the
-  // backend ignores. Keeping the catch here is load-bearing: the
-  // track-change listener calls this un-awaited, so a rejection would
-  // otherwise surface as an unhandled promise rejection.
+  // backend ignores. #889: the only caller left is the sync-transition
+  // effect above, which fires this un-awaited, so the catch is still
+  // load-bearing — a rejection would otherwise surface as an unhandled
+  // promise rejection.
   async function updateMenuState() {
     try {
       await invoke('update_tray_menu_state');

@@ -82,31 +82,46 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
     // tray never renders a state the config no longer holds, and only writes
     // when there is actually something to clear.
     clear_expired_snooze_at_startup(app.handle());
-    // Build initial menu
-    let menu = build_initial_menu(app)?;
+    // Issue #768: the tray is built WITHOUT a menu and `update_tray_menu` below
+    // sets the real one. The transient initial menu this used to build was a
+    // second, already-diverged layout (no status row, no now-playing row,
+    // hardcoded Pause/Show labels) that the immediate rebuild replaced
+    // microseconds later — and that a FAILED rebuild left on screen. An empty
+    // tray can only be empty; it is reachable for the first moments of
+    // startup, while the window is not yet interactive.
 
-    let tray = TrayIconBuilder::new()
+    let builder = TrayIconBuilder::new()
         .tooltip("PresenceJam")
-        .icon(
-            app.default_window_icon()
-                .cloned()
-                .ok_or("No default icon")?,
-        )
-        .menu(&menu)
+        // Issue #911: macOS wants a monochrome TEMPLATE image (marked as one
+        // right after the build below); Windows and Linux keep the
+        // application icon.
+        .icon(tray_icon(app)?)
+        // Issue #971: Tauri documents this flag as unsupported on Linux, where
+        // a left click opens the AppIndicator menu unconditionally. It only
+        // ever changes behaviour on Windows and macOS.
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             ID_SHOW_HIDE => {
                 if let Some(window) = app.get_webview_window("main") {
                     if window.is_visible().unwrap_or(false) {
                         let _ = window.hide();
+                        // Issue #886: the dedup key reads the visibility mirror,
+                        // so the tray's own window changes must report it.
+                        note_window_visibility(false);
                     } else {
                         let _ = window.show();
+                        note_window_visibility(true);
                         // Issue #483: a minimized window stays minimized
                         // after show() -- unminimize first (mirrors the
                         // single-instance raise in lib.rs and show_window).
                         let _ = window.unminimize();
                         let _ = window.set_focus();
                     }
+                } else {
+                    // Residual of #826: this arm is the tray's second window-raise
+                    // path, and it must not stay silent about the same condition
+                    // `commands::window::show_window` warns about.
+                    log::warn!("[TRAY] show/hide: main window not found");
                 }
                 // Issue #587: the repaint performs blocking Spotify HTTP
                 // (devices/queue fetches, 10 s timeout each) whenever the
@@ -149,6 +164,7 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
                 let _ = app.emit("navigate", "settings");
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.show();
+                    note_window_visibility(true);
                     // Issue #483: mirror the unminimize in the Show arm.
                     let _ = window.unminimize();
                     let _ = window.set_focus();
@@ -353,6 +369,11 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
             }
             _ => {}
         })
+        // Issue #971: Linux delivers no tray click events at all (Tauri lists
+        // `TrayIconEvent::Click` as unsupported there), so the `tray-click`
+        // emit below — and the frontend listener for it — are inert on that
+        // platform. Nothing may depend on that event: the window is raised from
+        // the menu's Show/Hide item, which every platform has.
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
@@ -363,9 +384,31 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
                 let app = tray.app_handle();
                 let _ = app.emit("tray-click", ());
             }
-        })
-        .build(app)
-        .map_err(|e| e.to_string())?;
+        });
+    // Issue #927: the tray build is the one call here that panics instead of
+    // returning `Err`. On Linux it dlopens libayatana-appindicator3.so.1 /
+    // libappindicator3.so.1 through `libappindicator-sys`, whose `Lazy<Library>`
+    // panics when neither soname resolves — and this runs inline on the setup
+    // thread, so the panic would unwind across the event-loop callback instead of
+    // becoming the error `lib.rs` already handles by running without a tray.
+    // The panic is raised on this thread, above the FFI boundary, so it is
+    // catchable.
+    let tray = guard_tray_panic(
+        "tray icon",
+        std::panic::AssertUnwindSafe(|| builder.build(app).map_err(|e| e.to_string())),
+    )?;
+
+    // Issue #911: mark the menu-bar icon as a template, so macOS draws it from
+    // its alpha channel and tints it — black stays black on a light menu bar and
+    // inverts on a dark one, and it dims with the bar for a modal. The call is a
+    // no-op off macOS (Tauri only implements it there), so it stays gated.
+    #[cfg(target_os = "macos")]
+    if let Err(e) = tray.set_icon_as_template(true) {
+        log::warn!(
+            "[TRAY] setup_tray: failed to mark the menu-bar icon as a template: {}",
+            e
+        );
+    }
 
     // Store the TrayIcon globally (idempotent)
     if TRAY.get().is_some() {
@@ -386,106 +429,35 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
         consume_playback_state_changed(event.payload());
     });
 
-    // Immediately update tray menu to reflect actual state (Bug 11 fix).
-    // Without this, the initial menu always shows "Pause Sync" regardless of actual
-    // sync state, and the menu doesn't show the current track if one is cached.
+    // Immediately set the real menu to reflect actual state (Bug 11 fix).
+    // Without this the tray would stay menu-less until the first poll, and a
+    // track cached from the previous session would not be shown.
+    // Issue #768: there is no throwaway menu underneath this any more, so a
+    // failure here cannot leave a "Pause Sync"-labelled stale layout behind.
+    // The dedup snapshot is only committed by a successful rebuild, so the
+    // next poll retries this paint.
+    // Issue #882: this paint is CACHE-ONLY. It runs on the main thread inside
+    // Tauri's `setup()`, before the event loop starts and while the dedup
+    // snapshot is still empty — so a normal rebuild would issue the devices
+    // and queue GETs right here (10 s timeout each) with no window on screen
+    // to explain the wait, and could never take the "nothing changed" early
+    // return.
     let state = app.state::<std::sync::Arc<crate::AppState>>();
     let is_syncing = state.polling.is_syncing(Ordering::Acquire);
     let current_track = state.polling.current_track().clone();
-    if let Err(e) = update_tray_menu(app.handle(), is_syncing, current_track) {
+    if let Err(e) = update_tray_menu_startup(app.handle(), is_syncing, current_track) {
         log::warn!(
             "[TRAY] setup_tray: failed to update initial tray menu: {}",
             e
         );
     }
+    // Issue #882: the real devices/queue fetch belongs to the worker refresh,
+    // off the setup thread, so the startup paint costs no network at all and
+    // the submenus still converge to the full content a moment later.
+    refresh_tray_from_state(app.handle());
 
     log::info!("[TRAY] setup_tray: system tray initialized successfully");
     Ok(())
-}
-
-/// Builds the initial tray menu. Transient — `setup_tray` calls
-/// `update_tray_menu` with real state immediately after — but every label
-/// still comes from the installed i18n table (issue #674).
-fn build_initial_menu(app: &tauri::App) -> Result<tauri::menu::Menu<tauri::Wry>, String> {
-    let s = i18n::current();
-    let show_hide = MenuItemBuilder::with_id(ID_SHOW_HIDE, s.show_window)
-        .build(app)
-        .map_err(|e| e.to_string())?;
-
-    let pause_sync = MenuItemBuilder::with_id(ID_PAUSE_SYNC, s.pause_sync)
-        .build(app)
-        .map_err(|e| e.to_string())?;
-
-    let separator = PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?;
-
-    let open_settings = MenuItemBuilder::with_id(ID_OPEN_SETTINGS, s.open_settings)
-        .build(app)
-        .map_err(|e| e.to_string())?;
-
-    let open_logs = MenuItemBuilder::with_id(ID_OPEN_LOGS, s.open_logs_folder)
-        .build(app)
-        .map_err(|e| e.to_string())?;
-
-    let quit = MenuItemBuilder::with_id(ID_QUIT, s.quit)
-        .build(app)
-        .map_err(|e| e.to_string())?;
-
-    // Spotify playback controls (issue #3.0-P3). This initial menu is
-    // transient — `setup_tray` immediately calls `update_tray_menu` with
-    // real state — so the Play/Pause toggle starts unchecked and the
-    // Devices/Up Next submenus start as placeholders (no network at
-    // startup).
-    let play_pause = CheckMenuItemBuilder::with_id(ID_PLAY_PAUSE, s.play_pause)
-        .checked(false)
-        .build(app)
-        .map_err(|e| e.to_string())?;
-    let previous = MenuItemBuilder::with_id(ID_PREVIOUS, s.previous)
-        .build(app)
-        .map_err(|e| e.to_string())?;
-    let next = MenuItemBuilder::with_id(ID_NEXT, s.next)
-        .build(app)
-        .map_err(|e| e.to_string())?;
-    // Issue #582: the two playback-mode toggles. They start off here (this
-    // menu is transient — `update_tray_menu` follows immediately) and take
-    // their real marks from the poll body thereafter.
-    let shuffle = CheckMenuItemBuilder::with_id(ID_SHUFFLE, s.shuffle)
-        .checked(false)
-        .build(app)
-        .map_err(|e| e.to_string())?;
-    let repeat = CheckMenuItemBuilder::with_id(ID_REPEAT, repeat_menu_label(s, RepeatState::Off))
-        .checked(false)
-        .build(app)
-        .map_err(|e| e.to_string())?;
-    let playback_separator = PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?;
-    let devices_submenu = build_devices_submenu(app.handle(), None)?;
-    let queue_submenu = build_queue_submenu(app.handle(), None)?;
-    // 4.7.0 (S9 / issue #677): the snooze submenu. Built with no active snooze
-    // here — this menu is transient (`setup_tray` calls `update_tray_menu` with
-    // real state immediately after), exactly like the unchecked Play/Pause and
-    // mode items above.
-    let snooze_submenu = build_snooze_submenu(app.handle(), s, None)?;
-
-    MenuBuilder::new(app)
-        .items(&[
-            &show_hide,
-            &pause_sync,
-            &snooze_submenu,
-            &separator,
-            &play_pause,
-            &previous,
-            &next,
-            &shuffle,
-            &repeat,
-            &playback_separator,
-            &devices_submenu,
-            &queue_submenu,
-            &open_settings,
-            &open_logs,
-            &separator,
-            &quit,
-        ])
-        .build()
-        .map_err(|e| e.to_string())
 }
 
 /// Snapshot of the last tray-menu state, used for the dedup guard in
@@ -516,6 +488,19 @@ struct TrayStateSnapshot {
     track_key: Option<String>,
     shuffle: bool,
     repeat: RepeatState,
+    /// Throttle bucket of the devices cache when this key was built (issue
+    /// #805): the number of full [`TRAY_SPOTIFY_FETCH_THROTTLE`] windows since
+    /// it was filled, `0` while it is empty.
+    ///
+    /// The key carries the bucket and not the timestamp because the bucket is
+    /// what the fetchers act on: a session where nothing else moves now
+    /// repaints — and therefore re-fetches — once per window, while a rebuild
+    /// inside the window still dedupes to a no-op. Without it the early return
+    /// below skipped the fetches themselves, and the Devices/Up Next submenus
+    /// kept whatever the last rebuild happened to render, indefinitely.
+    devices_bucket: u64,
+    /// Same, for the Up Next queue cache (issue #805).
+    queue_bucket: u64,
     snooze_key: Option<String>,
 }
 
@@ -529,7 +514,8 @@ fn tray_state_changed(prev: Option<&TrayStateSnapshot>, next: &TrayStateSnapshot
 /// Builds the dedup key from the same inputs the rebuild renders from: the
 /// caller's sync flag and precomputed window visibility, the track's
 /// artist/title/is_playing, the two playback-mode atoms the polling loop feeds
-/// (`note_playback_modes`) and the snooze the rebuild will render (4.7.0, S9).
+/// (`note_playback_modes`), the snooze the rebuild will render (4.7.0, S9) and
+/// the throttle bucket of both caches (issue #805).
 /// Single construction site so the key can never be built from a subset of what
 /// the menu shows (issue #691).
 fn tray_snapshot_for(
@@ -537,6 +523,10 @@ fn tray_snapshot_for(
     is_window_visible: bool,
     current_track: Option<&crate::spotify::TrackInfo>,
     snooze_key: Option<String>,
+    // The two cache throttle buckets (issue #805). Read by the caller rather
+    // than here so the key stays a pure function of its inputs.
+    devices_bucket: u64,
+    queue_bucket: u64,
 ) -> TrayStateSnapshot {
     TrayStateSnapshot {
         is_syncing,
@@ -545,7 +535,32 @@ fn tray_snapshot_for(
         shuffle: LAST_SHUFFLE_STATE.load(Ordering::Acquire),
         repeat: last_repeat_state(),
         snooze_key,
+        devices_bucket,
+        queue_bucket,
     }
+}
+
+/// The throttle bucket a cache slot is in (issue #805): how many full throttle
+/// windows have elapsed since it was filled, `0` while it is empty.
+///
+/// Pure in its timestamp, so "an unchanged rebuild inside the window is still
+/// a no-op, one window later it repaints" is asserted without sleeping.
+fn throttle_bucket(fetched_at: Option<Instant>, throttle: Duration) -> u64 {
+    match fetched_at {
+        None => 0,
+        Some(at) => at.elapsed().as_secs() / throttle.as_secs().max(1),
+    }
+}
+
+/// The throttle buckets of both caches (issue #805), read under short locks —
+/// no HTTP, and no lock held past the read.
+fn cache_buckets() -> (u64, u64) {
+    let devices_at = DEVICES_CACHE.lock().as_ref().map(|(at, _)| *at);
+    let queue_at = QUEUE_CACHE.lock().as_ref().map(|(at, _)| *at);
+    (
+        throttle_bucket(devices_at, TRAY_SPOTIFY_FETCH_THROTTLE),
+        throttle_bucket(queue_at, TRAY_SPOTIFY_FETCH_THROTTLE),
+    )
 }
 
 /// The active snooze as one rebuild renders it (4.7.0, S9 / issue #677).
@@ -592,6 +607,88 @@ static TRAY_WRITE_LOCK: std::sync::OnceLock<parking_lot::Mutex<()>> = std::sync:
 
 fn tray_write_lock() -> &'static parking_lot::Mutex<()> {
     TRAY_WRITE_LOCK.get_or_init(|| parking_lot::Mutex::new(()))
+}
+
+/// Last known main-window visibility, which is what the dedup key carries
+/// (issue #886).
+///
+/// The rebuild used to ask the window directly, and `is_visible()` blocks the
+/// calling thread on an event-loop reply — a hop paid by every poll, including
+/// the ones the dedup key discards a few lines later. [`note_window_visibility`]
+/// keeps the mirror honest, and the rebuild re-reads the real window whenever it
+/// paints anyway (see the self-heal in `rebuild_tray_menu`).
+static WINDOW_VISIBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Records the main window's visibility (issue #886). Every path that shows or
+/// hides the window should report it — the tray's own Show/Hide and Open
+/// Settings arms do, and the window commands / close-to-tray paths are expected
+/// to; the poll loop then never has to ask the event loop for it.
+pub fn note_window_visibility(visible: bool) {
+    WINDOW_VISIBLE.store(visible, Ordering::Release);
+}
+
+/// The visibility the dedup key is built from (issue #886) — the mirror, so the
+/// discarded path performs no event-loop hop.
+fn window_visible() -> bool {
+    WINDOW_VISIBLE.load(Ordering::Acquire)
+}
+
+/// The real main-window visibility, queried once per paint (issue #886). Only
+/// the paths that are already off the hot path may call this: the startup paint
+/// (on the main thread) and the rebuild that passed the dedup guard.
+fn live_window_visible(app: &AppHandle) -> bool {
+    app.get_webview_window("main")
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false)
+}
+
+/// The snooze a rebuild must render, read out of the mounted config under a
+/// scoped guard (issue #886).
+///
+/// Only `snooze_until` (plus the clock) is needed, so that one field is copied
+/// out instead of cloning the whole `AppConfig` — which allocates its status
+/// rules on every poll, including the ones the dedup key discards. The guard
+/// lives only for this call, so none survives into the blocking Spotify HTTP
+/// below.
+fn snooze_from_app_state(state: &crate::AppState) -> Option<TraySnooze> {
+    let config = state.config.get();
+    resolve_snooze(config.as_ref())
+}
+
+/// Which entry point a rebuild came through (issue #882).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrayPaint {
+    /// An ordinary rebuild: the dedup key decides whether the menu is rebuilt,
+    /// and a successful rebuild commits the snapshot.
+    Deduped,
+    /// The startup paint. Built on the main thread before the event loop runs:
+    /// it renders the throttled caches without touching the network, and it
+    /// does not commit the snapshot (see `update_tray_menu_startup`).
+    Startup,
+}
+
+/// The fetch mode a rebuild runs under (issues #677, #882).
+///
+/// Pure, so "the startup paint performs no request" and "a snooze performs no
+/// request" are asserted directly rather than through the rebuild's source.
+fn paint_fetch_mode(paint: TrayPaint, snoozed: bool, action_refresh_due: bool) -> TrayFetch {
+    match paint {
+        // Issue #882: no network before the event loop exists.
+        TrayPaint::Startup => TrayFetch::CacheOnly,
+        TrayPaint::Deduped => {
+            let base = tray_fetch_mode(snoozed);
+            // A snooze outranks an action: "no Spotify request while snoozed" is
+            // that feature's acceptance criterion (issue #677).
+            if base == TrayFetch::CacheOnly {
+                TrayFetch::CacheOnly
+            } else if action_refresh_due {
+                // Issue #883: the action asks for fresh Devices/Up Next lists.
+                TrayFetch::RefreshNow
+            } else {
+                base
+            }
+        }
+    }
 }
 
 /// Throttle window for the tray's Spotify devices/queue fetches
@@ -716,6 +813,48 @@ fn repeat_menu_label(strings: &Strings, state: RepeatState) -> &'static str {
 static DELAYED_REFRESH_IN_FLIGHT: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// Shortest gap between the post-action re-fetches of the Devices/Up Next lists
+/// (issue #883). A player action wants those submenus to mirror what just
+/// happened, but a burst of clicks must share one devices+queue pair: five
+/// seconds is long enough to coalesce a burst, short enough that the menu still
+/// matches the click the user just made.
+const TRAY_POST_ACTION_FETCH_MIN: Duration = Duration::from_secs(5);
+
+/// The most recent tray player action that wants the Devices/Up Next lists
+/// refreshed (issue #883). `force_tray_refresh` records the action here instead
+/// of emptying both caches, which bypassed the fetch throttle for every click.
+static LAST_TRAY_ACTION: std::sync::LazyLock<parking_lot::Mutex<Option<Instant>>> =
+    std::sync::LazyLock::new(|| parking_lot::Mutex::new(None));
+
+/// When the most recent post-action re-fetch was issued (issue #883). Recorded
+/// before the requests run, so a click landing while they are in flight reuses
+/// them instead of paying for a pair of its own.
+static LAST_ACTION_FETCH: std::sync::LazyLock<parking_lot::Mutex<Option<Instant>>> =
+    std::sync::LazyLock::new(|| parking_lot::Mutex::new(None));
+
+/// Whether a rebuild must re-fetch the Devices/Up Next lists on behalf of a
+/// player action (issue #883). Pure in its instants, so the coalescing rule —
+/// ten rapid clicks, one pair of requests — is unit-testable without waiting.
+fn action_fetch_due(
+    last_action: Option<Instant>,
+    last_action_fetch: Option<Instant>,
+    now: Instant,
+    min_interval: Duration,
+) -> bool {
+    match (last_action, last_action_fetch) {
+        // No action has asked for anything.
+        (None, _) => false,
+        // An action nothing has fetched for yet is due immediately.
+        (Some(_), None) => true,
+        // Only an action newer than the last post-action fetch — and far enough
+        // after it — is worth two more requests; a burst inside `min_interval`
+        // shares the pair already issued.
+        (Some(action), Some(fetched)) => {
+            action > fetched && now.duration_since(fetched) >= min_interval
+        }
+    }
+}
+
 /// Returns cached devices when the throttle window hasn't elapsed, else
 /// fetches fresh ones. On a fetch failure the stale cache is returned so
 /// the submenu doesn't flicker to "(no devices)" on a transient error.
@@ -725,14 +864,16 @@ static DELAYED_REFRESH_IN_FLIGHT: std::sync::atomic::AtomicBool =
 /// cache never blocks tray interactions. If two threads race on a stale
 /// cache both will fetch; the last writer wins. This benign double-fetch
 /// wastes one request but cannot corrupt state. See issue #217.
-fn cached_devices(access_token: &str) -> Vec<crate::spotify::DeviceInfo> {
+/// `min_interval` is this fetch's throttle (issue #883): the full window for an
+/// ordinary rebuild, `Duration::ZERO` for the one a player action asks for.
+fn cached_devices(access_token: &str, min_interval: Duration) -> Vec<crate::spotify::DeviceInfo> {
     // Snapshot under short lock, then drop before deciding staleness.
     let snapshot = {
         let cache = DEVICES_CACHE.lock();
         cache.clone()
     };
     let needs_fetch = match &snapshot {
-        Some((fetched_at, _)) => fetched_at.elapsed() >= TRAY_SPOTIFY_FETCH_THROTTLE,
+        Some((fetched_at, _)) => fetched_at.elapsed() >= min_interval,
         None => true,
     };
     if !needs_fetch {
@@ -757,14 +898,14 @@ fn cached_devices(access_token: &str) -> Vec<crate::spotify::DeviceInfo> {
 ///
 /// Same lock discipline as `cached_devices`: snapshot, drop, fetch outside
 /// lock, re-acquire to store. Benign double-fetch on a race. See issue #217.
-fn cached_queue(access_token: &str) -> Option<crate::spotify::QueueInfo> {
+fn cached_queue(access_token: &str, min_interval: Duration) -> Option<crate::spotify::QueueInfo> {
     // Snapshot under short lock, then drop before deciding staleness.
     let snapshot = {
         let cache = QUEUE_CACHE.lock();
         cache.clone()
     };
     let needs_fetch = match &snapshot {
-        Some((fetched_at, _)) => fetched_at.elapsed() >= TRAY_SPOTIFY_FETCH_THROTTLE,
+        Some((fetched_at, _)) => fetched_at.elapsed() >= min_interval,
         None => true,
     };
     if !needs_fetch {
@@ -798,6 +939,10 @@ fn cached_queue(access_token: &str) -> Option<crate::spotify::QueueInfo> {
 enum TrayFetch {
     /// Normal rebuild: reuse the throttled cache, fetching when it lapsed.
     Refresh,
+    /// Issue #883: a player action just changed the playback/device state these
+    /// lists mirror, so this one rebuild bypasses the throttle. A burst of
+    /// clicks still shares one pair of requests — see [`action_fetch_due`].
+    RefreshNow,
     /// A snooze is active: render the last cached lists (or nothing) and issue
     /// no request. The submenus go stale by design until the snooze ends.
     CacheOnly,
@@ -822,7 +967,8 @@ fn devices_for_menu(
     fetch: TrayFetch,
 ) -> Vec<crate::spotify::DeviceInfo> {
     match (access_token, fetch) {
-        (Some(token), TrayFetch::Refresh) => cached_devices(token),
+        (Some(token), TrayFetch::Refresh) => cached_devices(token, TRAY_SPOTIFY_FETCH_THROTTLE),
+        (Some(token), TrayFetch::RefreshNow) => cached_devices(token, Duration::ZERO),
         (_, TrayFetch::CacheOnly) => DEVICES_CACHE
             .lock()
             .clone()
@@ -839,7 +985,8 @@ fn queue_for_menu(
     fetch: TrayFetch,
 ) -> Option<crate::spotify::QueueInfo> {
     match (access_token, fetch) {
-        (Some(token), TrayFetch::Refresh) => cached_queue(token),
+        (Some(token), TrayFetch::Refresh) => cached_queue(token, TRAY_SPOTIFY_FETCH_THROTTLE),
+        (Some(token), TrayFetch::RefreshNow) => cached_queue(token, Duration::ZERO),
         (_, TrayFetch::CacheOnly) => QUEUE_CACHE.lock().clone().map(|(_, queue)| queue),
         (None, _) => None,
     }
@@ -938,20 +1085,6 @@ fn resolve_device_id(app: &AppHandle, selected: &DeviceMenuSelection) -> Option<
     }
 }
 
-/// Builds the Devices submenu. `access_token` is `None` before the app has
-/// Spotify tokens (initial menu build) — the submenu then shows a single
-/// disabled "(no devices)" placeholder.
-fn build_devices_submenu(
-    app: &AppHandle,
-    access_token: Option<&str>,
-) -> Result<Submenu<tauri::Wry>, String> {
-    let devices = match access_token {
-        Some(token) => cached_devices(token),
-        None => Vec::new(),
-    };
-    build_devices_submenu_from_devices(app, &devices)
-}
-
 /// Builds the Devices submenu from an already-fetched slice. No HTTP is
 /// performed here — the caller must have fetched outside any tray lock.
 /// See issue #217.
@@ -990,19 +1123,6 @@ fn build_devices_submenu_from_devices(
         }
     }
     Ok(submenu)
-}
-
-/// Builds the Up Next submenu from the cached queue, showing at most 3
-/// upcoming tracks as disabled items and "(queue empty)" when none.
-fn build_queue_submenu(
-    app: &AppHandle,
-    access_token: Option<&str>,
-) -> Result<Submenu<tauri::Wry>, String> {
-    let queue = match access_token {
-        Some(token) => cached_queue(token),
-        None => None,
-    };
-    build_queue_submenu_from_queue(app, queue.as_ref())
 }
 
 /// Builds the Up Next submenu from an already-fetched queue snapshot.
@@ -1363,12 +1483,13 @@ fn await_sync_toggle(app: &AppHandle, before: bool) -> bool {
     false
 }
 
-/// Forces the next `update_tray_menu` call to rebuild: clears both throttled
-/// caches (so devices/queue are re-fetched), nudges the dedup snapshot so
-/// the rebuild can't early-return, then rebuilds immediately. User-initiated
-/// tray actions call this so the menu reflects the new playback/device
-/// state right away — the dedup key alone wouldn't change on e.g. a pause
-/// or a transfer.
+/// Forces the next `update_tray_menu` call to rebuild and asks it for fresh
+/// Devices/Up Next lists: records the action (issue #883 — the caches stay, and
+/// the rebuild re-fetches under `TRAY_POST_ACTION_FETCH_MIN`), nudges the dedup
+/// snapshot so the rebuild can't early-return, then rebuilds immediately.
+/// User-initiated tray actions call this so the menu reflects the new
+/// playback/device state right away — the dedup key alone wouldn't change on
+/// e.g. a pause or a transfer.
 ///
 /// The snapshot is nudged (not cleared) with the *current* track key so the
 /// re-seed logic in `update_tray_menu` (which only fires on a genuine track
@@ -1378,25 +1499,33 @@ fn force_tray_refresh(app: &AppHandle) {
     let state = app.state::<std::sync::Arc<crate::AppState>>();
     let is_syncing = state.polling.is_syncing(Ordering::Acquire);
     let current_track = state.polling.current_track().clone();
-    // S9 (issue #677): while a snooze is active the rebuild below renders the
-    // CACHED Devices/Up Next lists instead of fetching (`TrayFetch::CacheOnly`),
-    // so dropping the caches here would leave those submenus empty for the rest
-    // of the snooze — and dropping them is the only reason this helper used to
-    // be called on the way to a rebuild. The nudge below still forces the
-    // rebuild, which is all a snooze-time repaint needs.
-    let config = state.config.get().clone();
-    let snooze = resolve_snooze(config.as_ref());
-    if snooze.is_none() {
-        *DEVICES_CACHE.lock() = None;
-        *QUEUE_CACHE.lock() = None;
-    }
+    // S9 (issue #677): the snooze is read here only for the dedup key below —
+    // while one is active the rebuild renders the CACHED Devices/Up Next lists
+    // instead of fetching (`TrayFetch::CacheOnly`) and an action cannot override
+    // that. The nudge below still forces the repaint, which is all a snooze-time
+    // repaint needs.
+    let snooze = snooze_from_app_state(state.inner());
+    // Issue #883: the caches stay. Emptying them was how this helper asked for
+    // fresh Devices/Up Next lists, and it bypassed `TRAY_SPOTIFY_FETCH_THROTTLE`
+    // on every player action; the action is recorded instead, and the rebuild
+    // re-fetches under `TRAY_POST_ACTION_FETCH_MIN` — which coalesces a burst
+    // into one pair of requests. The nudge below still forces the repaint.
+    *LAST_TRAY_ACTION.lock() = Some(Instant::now());
     let snooze_key = snooze.as_ref().map(|sn| snooze_dedup_key(&sn.status));
     // Nudge the dedup snapshot (not clear it) with the *current* track key so
     // the rebuild below can't early-return while the re-seed logic stays
     // inert: a cleared snapshot would look like a genuine track change and
     // clobber the toggle state the action just recorded. Flipping the sync
     // bit is enough — the real snapshot is committed by that rebuild.
-    let mut nudge = tray_snapshot_for(is_syncing, false, current_track.as_ref(), snooze_key);
+    let (devices_bucket, queue_bucket) = cache_buckets();
+    let mut nudge = tray_snapshot_for(
+        is_syncing,
+        false,
+        current_track.as_ref(),
+        snooze_key,
+        devices_bucket,
+        queue_bucket,
+    );
     nudge.is_syncing = !is_syncing;
     *last_tray_state().lock() = Some(nudge);
     let _ = update_tray_menu(app, is_syncing, current_track);
@@ -1460,6 +1589,32 @@ pub fn update_tray_menu(
     is_syncing: bool,
     current_track: Option<crate::spotify::TrackInfo>,
 ) -> Result<(), String> {
+    rebuild_tray_menu(app, is_syncing, current_track.as_ref(), TrayPaint::Deduped)
+}
+
+/// The menu the tray shows before the event loop is running (issue #882).
+///
+/// Two differences from a normal rebuild, both consequences of running on the
+/// main thread inside `setup()`: it never touches the network (the throttled
+/// caches are rendered as they stand — empty on a cold start), and it does NOT
+/// commit the dedup snapshot. This paint shows the caches only, so recording it
+/// would make the first honest rebuild look like a no-op and the Devices/Up
+/// Next submenus would stay empty for the rest of the session.
+fn update_tray_menu_startup(
+    app: &AppHandle,
+    is_syncing: bool,
+    current_track: Option<crate::spotify::TrackInfo>,
+) -> Result<(), String> {
+    rebuild_tray_menu(app, is_syncing, current_track.as_ref(), TrayPaint::Startup)
+}
+
+/// The rebuild both entry points above share, so the tray has one layout.
+fn rebuild_tray_menu(
+    app: &AppHandle,
+    is_syncing: bool,
+    current_track: Option<&crate::spotify::TrackInfo>,
+    paint: TrayPaint,
+) -> Result<(), String> {
     let tray = match get_tray() {
         Some(t) => t,
         None => {
@@ -1480,26 +1635,40 @@ pub fn update_tray_menu(
     // Window visibility is computed up front so the dedup key includes
     // it — otherwise a hide/show click would early-return and the label
     // would go stale.
-    let is_window_visible = app
-        .get_webview_window("main")
-        .and_then(|w| w.is_visible().ok())
-        .unwrap_or(false);
-    // 4.7.0 (S9 / issue #677): the snooze is resolved once, up front, because
-    // it feeds three separate decisions below — the dedup key, the fetch mode
-    // and the rendered status line. The config is CLONED so no read guard
-    // survives into the blocking Spotify HTTP below (and into the write lock
-    // this function takes at the end). `state` is the same handle the rest of
-    // the rebuild uses.
+    // Issue #886: the key reads the visibility mirror, so this path performs no
+    // event-loop hop — `live_window_visible` below re-reads the real window on
+    // the way to a paint, which is where the label is built.
+    let key_visible = window_visible();
+    // 4.7.0 (S9 / issue #677): the snooze is resolved once, up front, because it
+    // feeds three separate decisions below — the dedup key, the fetch mode and
+    // the rendered status line. Issue #886: it comes from a scoped read of the
+    // mounted config, so no whole-`AppConfig` clone is allocated per poll and no
+    // read guard survives into the blocking Spotify HTTP below. `state` is the
+    // same handle the rest of the rebuild uses.
     let state = app.state::<std::sync::Arc<crate::AppState>>();
-    let config: Option<crate::config::AppConfig> = state.config.get().clone();
-    let snooze = resolve_snooze(config.as_ref());
+    let snooze = snooze_from_app_state(state.inner());
     let snooze_key = snooze.as_ref().map(|sn| snooze_dedup_key(&sn.status));
-    let fetch = tray_fetch_mode(snooze.is_some());
+    // Issue #883: a player action asks for fresh Devices/Up Next lists, but only
+    // when it is not already covered by a fetch in flight (`action_fetch_due`),
+    // and never while snoozed (`paint_fetch_mode`).
+    let action_refresh_due = action_fetch_due(
+        *LAST_TRAY_ACTION.lock(),
+        *LAST_ACTION_FETCH.lock(),
+        Instant::now(),
+        TRAY_POST_ACTION_FETCH_MIN,
+    );
+    let fetch = paint_fetch_mode(paint, snooze.is_some(), action_refresh_due);
+    // Issue #805: the two cache buckets are part of the key, so a session where
+    // nothing else moves still repaints — and therefore re-fetches — once per
+    // throttle window instead of keeping whatever the last rebuild rendered.
+    let (devices_bucket, queue_bucket) = cache_buckets();
     let snapshot = tray_snapshot_for(
         is_syncing,
-        is_window_visible,
-        current_track.as_ref(),
+        key_visible,
+        current_track,
         snooze_key,
+        devices_bucket,
+        queue_bucket,
     );
     {
         let last = last_tray_state().lock();
@@ -1529,6 +1698,14 @@ pub fn update_tray_menu(
         // same state to retry rather than no-op on a stale snapshot.
     }
 
+    // Issue #886: the key was built from the mirror; the label below is built
+    // from the real window — one query, paid only on this path, which is about
+    // to perform Spotify HTTP anyway. A show/hide that did not report itself
+    // therefore cannot leave the Show/Hide label wrong, and the mirror self-heals
+    // for the polls that follow.
+    let is_window_visible = live_window_visible(app);
+    note_window_visibility(is_window_visible);
+
     // Fetch Spotify data OUTSIDE the tray write lock, and only when the fetch
     // mode allows it. The throttled caches are snapshotted and fetched without
     // holding either cache mutex across HTTP (see cached_devices/cached_queue),
@@ -1540,6 +1717,11 @@ pub fn update_tray_menu(
         .spotify()
         .as_ref()
         .map(|t| t.access_token.clone());
+    if fetch == TrayFetch::RefreshNow {
+        // Recorded BEFORE the requests run: a click that lands while they are in
+        // flight must reuse them, not start a pair of its own (issue #883).
+        *LAST_ACTION_FETCH.lock() = Some(Instant::now());
+    }
     let devices: Vec<crate::spotify::DeviceInfo> = devices_for_menu(access_token.as_deref(), fetch);
     let queue: Option<crate::spotify::QueueInfo> = queue_for_menu(access_token.as_deref(), fetch);
 
@@ -1646,7 +1828,7 @@ pub fn update_tray_menu(
     // and naming a track would describe work the app is deliberately not doing.
     let status_line = match &snooze {
         Some(sn) => snooze_status_line(s, sn),
-        None => sync_status_line(s, is_syncing, is_playing, current_track.as_ref()),
+        None => sync_status_line(s, is_syncing, is_playing, current_track),
     };
     let sync_status = MenuItemBuilder::with_id(ID_SYNC_STATUS, status_line.clone())
         .enabled(false)
@@ -1758,9 +1940,14 @@ pub fn update_tray_menu(
         .item(&playback_separator)
         .items(&[&devices_submenu, &queue_submenu]);
 
-    // Add current track item if playing — insert separator2 here too
-    if let Some(track) = &current_track {
-        if track.is_playing {
+    // Add current track item if playing — insert separator2 here too.
+    // Issue #956: the gate is the rebuild's OWN `is_playing` binding — the same
+    // one the Play/Pause mark and the status line read — not the stored track's
+    // flag. `run_player_action` records the new playing state and forces this
+    // rebuild without re-storing the track, so a tray-initiated pause used to
+    // leave this row naming a track the tray had just paused.
+    if is_playing {
+        if let Some(track) = &current_track {
             let separator2 = PredefinedMenuItem::separator(app).map_err(|e| {
                 log::warn!("[TRAY] update_tray_menu: failed to build separator2: {}", e);
                 e.to_string()
@@ -1804,12 +1991,15 @@ pub fn update_tray_menu(
     // rebuild, i.e. exactly whenever track info changes (the dedup key
     // already covers artist/title/is_playing), and performs no IO and no
     // extra locking beyond the tray handle itself.
+    // Issue #956: the glyph comes from the rebuild's own `is_playing` binding,
+    // like the row above and the check mark, so one hover cannot contradict the
+    // menu it belongs to.
     let track_tooltip = match &current_track {
         Some(t) => format!(
             "{} — {} ({})",
             t.artist,
             t.title,
-            if t.is_playing { "▶" } else { "⏸" }
+            if is_playing { "▶" } else { "⏸" }
         ),
         None => "PresenceJam".to_string(),
     };
@@ -1821,10 +2011,25 @@ pub fn update_tray_menu(
         log::warn!("[TRAY] update_tray_menu: failed to set tooltip: {}", e);
     }
 
+    // Issue #971: `set_tooltip` is a documented no-op on Linux, which has no
+    // hover surface for an AppIndicator — so the same summary rides as the
+    // indicator's title, which Linux renders beside the icon. That closes the
+    // gap where the status line, the current track and the snooze countdown
+    // were only visible after opening the menu. Windows and macOS keep the
+    // tooltip and set no title (the call is a no-op there anyway).
+    #[cfg(target_os = "linux")]
+    if let Err(e) = tray.set_title(Some(status_line.clone())) {
+        log::warn!("[TRAY] update_tray_menu: failed to set tray title: {}", e);
+    }
+
     // Commit the snapshot only after a successful set_menu. A failed
     // set_menu above left the snapshot at the previous value, so the
     // next call with the same state will retry rather than no-op.
-    *last_tray_state().lock() = Some(snapshot);
+    // Issue #882: the startup paint never commits — it renders the caches
+    // only, so recording it would dedup away the first real rebuild.
+    if paint == TrayPaint::Deduped {
+        *last_tray_state().lock() = Some(snapshot);
+    }
 
     log::info!(
         "[TRAY] update_tray_menu: tray menu updated - is_syncing={}, visible={}, track={:?}",
@@ -1865,6 +2070,135 @@ pub fn set_presence_gated_badge(app: &AppHandle, gated: bool) {
 
 #[cfg(not(target_os = "macos"))]
 pub fn set_presence_gated_badge(_app: &AppHandle, _gated: bool) {}
+
+/// Runs a tray-library call, turning the panic a missing native tray library
+/// raises into the `Err` this module's contract promises (issue #927).
+///
+/// The reason is logged once, at error level, together with what failed: an
+/// AppImage whose bundler could not see a dlopen-only dependency is the likely
+/// host, and the log line is the only thing that says so.
+fn guard_tray_panic<T>(
+    what: &str,
+    f: impl FnOnce() -> Result<T, String> + std::panic::UnwindSafe,
+) -> Result<T, String> {
+    match std::panic::catch_unwind(f) {
+        Ok(result) => result,
+        Err(payload) => {
+            let reason = payload
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".to_string());
+            log::error!(
+                "[TRAY] {}: the tray library is unavailable ({}); running without a tray",
+                what,
+                reason
+            );
+            Err(format!("{} unavailable: {}", what, reason))
+        }
+    }
+}
+
+/// Whether a tray icon actually exists (issue #927).
+///
+/// `setup_tray` can now fail without panicking, and a session with no tray has
+/// no reachable way back to a window that close-to-tray has hidden — so the
+/// caller that hides it (lib.rs) has to gate on this.
+pub fn tray_available() -> bool {
+    get_tray().is_some()
+}
+
+/// Side of [`TEMPLATE_GLYPH`] in cells (issue #911). macOS sizes menu-bar items
+/// at 22 pt, so the glyph is drawn as a 22-cell square and doubled for `@2x`.
+#[cfg(any(target_os = "macos", test))]
+const TEMPLATE_GLYPH_SIZE: u32 = 22;
+
+/// The menu-bar glyph: a quarter note, `#` inked and `.` transparent.
+///
+/// A bitmap in the source rather than a shipped PNG: the tray then needs no
+/// macOS-only asset and no PNG-decoding feature to read one, and the shape is
+/// pure data that every platform's test run can check. The stem starts at the
+/// top-right and runs down into the note head, with the flag off its top.
+#[cfg(any(target_os = "macos", test))]
+const TEMPLATE_GLYPH: [&str; TEMPLATE_GLYPH_SIZE as usize] = [
+    "......................",
+    "......................",
+    "......................",
+    "......................",
+    "...........#####......",
+    "...........######.....",
+    "...........######.....",
+    "...........######.....",
+    "...........##.........",
+    "...........##.........",
+    "...........##.........",
+    "...........##.........",
+    ".......#...##.........",
+    ".....#####.##.........",
+    "....#########.........",
+    "....#########.........",
+    "...##########.........",
+    "....#########.........",
+    "....#########.........",
+    ".....#####.##.........",
+    ".......#...##.........",
+    "......................",
+];
+
+/// The RGBA bytes for [`TEMPLATE_GLYPH`] at `scale` (issue #911): opaque black
+/// for ink, fully transparent elsewhere.
+///
+/// A template image carries no colour — macOS reads the alpha channel and lets
+/// the menu bar tint the result — so the colour channels are zero everywhere and
+/// only the alpha distinguishes ink from background. Each cell becomes a
+/// `scale`×`scale` block, which is how the `@2x` twin is produced.
+#[cfg(any(target_os = "macos", test))]
+fn template_icon_rgba(scale: u32) -> Vec<u8> {
+    let scale = scale.max(1);
+    let side = TEMPLATE_GLYPH_SIZE * scale;
+    let mut rgba = Vec::with_capacity((side * side * 4) as usize);
+    for row in TEMPLATE_GLYPH {
+        for _ in 0..scale {
+            for cell in row.bytes() {
+                let alpha = if cell == b'#' { 255u8 } else { 0u8 };
+                for _ in 0..scale {
+                    rgba.extend_from_slice(&[0, 0, 0, alpha]);
+                }
+            }
+        }
+    }
+    rgba
+}
+
+/// The macOS menu-bar icon (issue #911): [`TEMPLATE_GLYPH`] at its `@2x` size, so
+/// the same image is sharp on a Retina bar without a second asset.
+#[cfg(target_os = "macos")]
+fn macos_template_icon() -> tauri::image::Image<'static> {
+    const SCALE: u32 = 2;
+    let side = TEMPLATE_GLYPH_SIZE * SCALE;
+    let rgba = template_icon_rgba(SCALE);
+    debug_assert_eq!(rgba.len(), (side * side * 4) as usize);
+    tauri::image::Image::new_owned(rgba, side, side)
+}
+
+/// The tray icon this platform wants (issue #911).
+///
+/// macOS gets the monochrome template glyph — the full-colour application icon
+/// (`default_window_icon()`, 32/128 px) is what the menu bar rendered oversized
+/// and untinted. Windows' notification area and Linux's indicators are unaffected
+/// by the missing template flag, so they keep that icon.
+fn tray_icon(app: &tauri::App) -> Result<tauri::image::Image<'_>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(macos_template_icon())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        app.default_window_icon()
+            .cloned()
+            .ok_or_else(|| "No default icon".to_string())
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -2267,8 +2601,9 @@ mod tests {
             progress_ms: None,
             duration_ms: 0,
         };
-        let key =
-            |sync: bool, visible: bool| tray_snapshot_for(sync, visible, Some(&track(true)), None);
+        let key = |sync: bool, visible: bool| {
+            tray_snapshot_for(sync, visible, Some(&track(true)), None, 0, 0)
+        };
 
         note_playback_modes(false, RepeatState::Off);
         let base = key(true, true);
@@ -2310,7 +2645,7 @@ mod tests {
         );
 
         // A same-track pause lives in the track half of the key (issue #229).
-        let paused = tray_snapshot_for(true, true, Some(&track(false)), None);
+        let paused = tray_snapshot_for(true, true, Some(&track(false)), None, 0, 0);
         assert!(
             tray_state_changed(Some(&repeated), &paused),
             "a same-track pause must still repaint the Play/Pause mark (#229)"
@@ -2512,7 +2847,7 @@ mod tests {
             progress_ms: None,
             duration_ms: 0,
         };
-        let at = |snooze: Option<String>| tray_snapshot_for(true, true, Some(&track), snooze);
+        let at = |snooze: Option<String>| tray_snapshot_for(true, true, Some(&track), snooze, 0, 0);
 
         let none = at(None);
         let snoozed = at(Some(snooze_dedup_key(&crate::config::SnoozeStatus {
@@ -2560,10 +2895,18 @@ mod tests {
         // hands it to BOTH submenu sources — a literal `Refresh` in either call
         // would re-fetch devices/queue every throttle window while snoozed.
         let prod = prod_source(include_str!("tray.rs"));
-        let body = body_of(prod, "pub fn update_tray_menu(");
+        let body = body_of(prod, "fn rebuild_tray_menu(");
         assert!(
-            body.contains("tray_fetch_mode(snooze.is_some())"),
-            "the rebuild's fetch mode must come from the snooze (issue #677)"
+            body.contains("paint_fetch_mode(paint, snooze.is_some(), action_refresh_due)"),
+            "the rebuild's fetch mode must come from the paint and the snooze"
+        );
+        // …and the snooze rule itself is unchanged: an ordinary rebuild while
+        // snoozed is cache-only (issue #677), while the startup paint is
+        // cache-only whatever the snooze says (issue #882).
+        let decider = body_of(prod, "fn paint_fetch_mode(");
+        assert!(
+            decider.contains("tray_fetch_mode(snoozed)"),
+            "an ordinary rebuild must take its fetch mode from the snooze (issue #677)"
         );
         for call in [
             "devices_for_menu(access_token.as_deref(), fetch)",
@@ -2586,9 +2929,11 @@ mod tests {
     #[test]
     fn snooze_is_resolved_before_the_dedup_guard() {
         let prod = prod_source(include_str!("tray.rs"));
-        let body = body_of(prod, "pub fn update_tray_menu(");
+        let body = body_of(prod, "fn rebuild_tray_menu(");
+        // Issue #886: the snooze comes from a scoped read of the mounted config
+        // (`snooze_from_app_state`) instead of a whole-`AppConfig` clone.
         let resolve = body
-            .find("resolve_snooze(")
+            .find("snooze_from_app_state(")
             .expect("update_tray_menu must resolve the snooze");
         let snapshot = body
             .find("tray_snapshot_for(")
@@ -2729,11 +3074,487 @@ mod tests {
         let cleanup = setup
             .find("clear_expired_snooze_at_startup(")
             .expect("call site");
-        let menu = setup.find("build_initial_menu(").expect("menu build");
+        let menu = setup.find("update_tray_menu_startup(").expect("tray paint");
         assert!(
             cleanup < menu,
             "the cleanup must precede the first menu build, so the tray never \
              renders a state the config no longer holds"
+        );
+    }
+
+    /// Issue #882: `setup_tray` runs on the main thread inside Tauri's
+    /// `setup()`, before the event loop exists, so its paint must not perform
+    /// the devices/queue GETs (10 s timeout each, with no window on screen to
+    /// explain the wait). It renders the throttled caches and hands the real
+    /// fetch to the worker refresh.
+    #[test]
+    fn startup_paint_is_cache_only_and_fetches_nothing() {
+        // The decision itself: the startup paint renders the caches whether or
+        // not a snooze is active, while an ordinary rebuild still follows the
+        // snooze rule (issue #677).
+        assert_eq!(
+            paint_fetch_mode(TrayPaint::Startup, false, false),
+            TrayFetch::CacheOnly
+        );
+        assert_eq!(
+            paint_fetch_mode(TrayPaint::Startup, true, false),
+            TrayFetch::CacheOnly
+        );
+        assert_eq!(
+            paint_fetch_mode(TrayPaint::Deduped, false, false),
+            TrayFetch::Refresh
+        );
+        assert_eq!(
+            paint_fetch_mode(TrayPaint::Deduped, true, false),
+            TrayFetch::CacheOnly
+        );
+        // Issue #883: an action makes one rebuild bypass the throttle — unless
+        // a snooze is active, which outranks it (issue #677).
+        assert_eq!(
+            paint_fetch_mode(TrayPaint::Deduped, false, true),
+            TrayFetch::RefreshNow
+        );
+        assert_eq!(
+            paint_fetch_mode(TrayPaint::Deduped, true, true),
+            TrayFetch::CacheOnly
+        );
+
+        // The wiring: setup_tray must paint through the cache-only entry point
+        // and must not run a fetching rebuild inline, and the devices/queue
+        // fetch must be handed to the off-thread refresh instead.
+        let prod = prod_source(include_str!("tray.rs"));
+        let setup = body_of(prod, "pub fn setup_tray(");
+        assert!(
+            setup.contains("update_tray_menu_startup("),
+            "setup_tray must paint through the cache-only entry point (issue #882)"
+        );
+        assert!(
+            !setup.contains("update_tray_menu(app.handle()"),
+            "setup_tray must not run a fetching rebuild on the setup thread"
+        );
+        assert!(
+            setup.contains("refresh_tray_from_state(app.handle())"),
+            "the startup paint must hand the real fetch to the worker refresh"
+        );
+        // The startup paint must not record the dedup snapshot: it renders the
+        // caches only, so recording it would make the first honest rebuild —
+        // the worker refresh just spawned — look like a no-op and leave the
+        // Devices/Up Next submenus empty.
+        let rebuild = body_of(prod, "fn rebuild_tray_menu(");
+        assert!(
+            rebuild.contains("if paint == TrayPaint::Deduped"),
+            "only an ordinary rebuild may commit the dedup snapshot (issue #882)"
+        );
+    }
+
+    /// Issue #805: the dedup key carries the throttle bucket of both caches.
+    /// Without it the early return also skipped the devices/queue fetches, so
+    /// a session where nothing else moved showed whatever the last rebuild had
+    /// rendered — possibly hours old, listing devices that had long since
+    /// disconnected. The bucket makes a quiet session repaint exactly once per
+    /// throttle window while every rebuild inside the window still dedupes.
+    #[test]
+    fn stale_caches_force_a_tray_rebuild_once_per_throttle_window() {
+        // The bucket is a pure function of the cache's age, so the window
+        // boundary is asserted without sleeping.
+        assert_eq!(
+            throttle_bucket(None, TRAY_SPOTIFY_FETCH_THROTTLE),
+            0,
+            "an empty cache must not force a rebuild on its own"
+        );
+        assert_eq!(
+            throttle_bucket(Some(Instant::now()), TRAY_SPOTIFY_FETCH_THROTTLE),
+            0
+        );
+        assert_eq!(
+            throttle_bucket(
+                Some(Instant::now() - TRAY_SPOTIFY_FETCH_THROTTLE),
+                TRAY_SPOTIFY_FETCH_THROTTLE
+            ),
+            1,
+            "a cache exactly one window old is due for a re-fetch"
+        );
+        assert_eq!(
+            throttle_bucket(
+                Some(Instant::now() - 10 * TRAY_SPOTIFY_FETCH_THROTTLE),
+                TRAY_SPOTIFY_FETCH_THROTTLE
+            ),
+            10
+        );
+
+        let _guard = MODE_ATOM_LOCK.lock();
+        note_playback_modes(false, RepeatState::Off);
+        let track = crate::spotify::TrackInfo {
+            title: "Title".to_string(),
+            artist: "Artist".to_string(),
+            album: "Album".to_string(),
+            album_art_url: String::new(),
+            is_playing: true,
+            progress_ms: None,
+            duration_ms: 0,
+        };
+        let at = |devices: u64, queue: u64| {
+            tray_snapshot_for(true, true, Some(&track), None, devices, queue)
+        };
+
+        // Identical track, window, modes and caches: still a no-op.
+        assert!(
+            !tray_state_changed(Some(&at(0, 0)), &at(0, 0)),
+            "a rebuild inside the throttle window must still dedupe"
+        );
+        // One window later either cache is due, and that must repaint — the
+        // repaint is what re-runs the fetchers.
+        assert!(
+            tray_state_changed(Some(&at(0, 0)), &at(1, 0)),
+            "a devices cache one throttle window old must repaint (issue #805)"
+        );
+        assert!(
+            tray_state_changed(Some(&at(0, 0)), &at(0, 1)),
+            "a queue cache one throttle window old must repaint (issue #805)"
+        );
+        assert!(
+            !tray_state_changed(Some(&at(1, 1)), &at(1, 1)),
+            "the bucket alone must not make every rebuild a repaint"
+        );
+    }
+
+    /// Issue #956: one rebuild described two different playing states. The
+    /// status line and the Play/Pause check mark read the rebuild's own
+    /// `is_playing`, while the now-playing row and the tooltip glyph read the
+    /// poller's stored `TrackInfo` — which a tray pause does not re-store. So a
+    /// pause left the row naming a track that was no longer playing and the
+    /// tooltip claiming ▶ over a menu that said paused, until the next poll.
+    #[test]
+    fn now_playing_row_and_tooltip_follow_the_rebuilds_playing_state() {
+        let prod = prod_source(include_str!("tray.rs"));
+        let body = body_of(prod, "fn rebuild_tray_menu(");
+
+        // The now-playing row: the gate is the shared binding, placed before
+        // the row is built, and nothing in the row re-reads a stored flag.
+        let gate = body
+            .find("if is_playing {")
+            .expect("the now-playing row must be gated on the playing state");
+        let row_pos = body
+            .find("ID_CURRENT_TRACK")
+            .expect("the rebuild must build the now-playing row");
+        let row_end = body[row_pos..]
+            .find("open_settings")
+            .map(|i| row_pos + i)
+            .unwrap_or(body.len());
+        let row = &body[row_pos..row_end];
+        assert!(
+            gate < row_pos,
+            "the now-playing row must be gated on the rebuild's playing state (issue #956)"
+        );
+        assert!(
+            !row.contains(".is_playing"),
+            "the now-playing row must not re-read the stored track's flag (issue #956)"
+        );
+
+        // The tooltip glyph: same binding, so a hover agrees with the menu.
+        let tip_pos = body
+            .find("let track_tooltip")
+            .expect("the rebuild must build the tooltip");
+        let tip = &body[tip_pos..];
+        assert!(
+            tip.contains("if is_playing { \"▶\" } else { \"⏸\" }"),
+            "the tooltip glyph must come from the rebuild's playing state (issue #956)"
+        );
+        assert!(
+            !tip.contains(".is_playing"),
+            "the tooltip must not read the stored track's playing flag (issue #956)"
+        );
+    }
+
+    /// Issue #971: on Linux Tauri supports neither tray click events nor
+    /// `set_tooltip`, so the status summary — which the tooltip carries on
+    /// Windows and macOS — must ride as the AppIndicator's title there, or the
+    /// sync state, the current track and the snooze countdown are only visible
+    /// after opening the menu.
+    #[test]
+    fn linux_tray_title_carries_the_status_line() {
+        let prod = prod_source(include_str!("tray.rs"));
+        let body = body_of(prod, "fn rebuild_tray_menu(");
+        let tooltip_pos = body
+            .find("tray.set_tooltip(")
+            .expect("the rebuild must still write the tooltip");
+        let after = &body[tooltip_pos..];
+        assert!(
+            after.contains("#[cfg(target_os = \"linux\")]"),
+            "the title mirror must be Linux-only (issue #971)"
+        );
+        assert!(
+            after.contains("tray.set_title(Some(status_line.clone()))"),
+            "the Linux title must carry the status line the tooltip carries (issue #971)"
+        );
+
+        // The build site names the behaviours that are inert on Linux: the
+        // left-click flag, the click handler it belongs to, and the tooltip
+        // above. The flag itself must stay (it is what Windows/macOS need).
+        let setup = body_of(prod, "pub fn setup_tray(");
+        assert!(
+            setup.contains(".show_menu_on_left_click(false)"),
+            "the tray must keep the documented left-click behaviour (issue #971)"
+        );
+        assert!(
+            setup.contains(".on_tray_icon_event(|tray, event|"),
+            "the click handler must stay for Windows and macOS (issue #971)"
+        );
+    }
+
+    /// Issue #883: every tray player action used to empty both throttled caches,
+    /// so each click paid two fresh Spotify fetches and the 60 s throttle that
+    /// protects the API was bypassed entirely. The action is now recorded and the
+    /// rebuild re-fetches under a short minimum interval, which a burst of clicks
+    /// shares instead of multiplying.
+    #[test]
+    fn post_action_refresh_coalesces_a_burst_of_clicks() {
+        let min = TRAY_POST_ACTION_FETCH_MIN;
+        let t0 = Instant::now();
+        let click = t0 + Duration::from_millis(10);
+
+        // No action: the ordinary throttle decides.
+        assert!(!action_fetch_due(None, None, t0, min));
+        // An action nothing has fetched for yet is due immediately, and stays
+        // due until a fetch is issued on its behalf.
+        assert!(action_fetch_due(Some(t0), None, t0, min));
+        assert!(action_fetch_due(Some(click), None, click, min));
+
+        // The pair of requests that action asked for, recorded as it is issued.
+        let fetched = click + Duration::from_millis(1);
+        assert!(
+            !action_fetch_due(Some(click), Some(fetched), fetched, min),
+            "the fetch already in flight covers the action that asked for it"
+        );
+
+        // Ten rapid clicks inside the interval share that single pair.
+        let mut pairs = 1;
+        for n in 1..10u64 {
+            let at = t0 + Duration::from_millis(n * 300);
+            if action_fetch_due(Some(at), Some(fetched), at + Duration::from_millis(1), min) {
+                pairs += 1;
+            }
+        }
+        assert_eq!(
+            pairs, 1,
+            "ten clicks inside the interval must share one devices+queue pair (issue #883)"
+        );
+
+        // A click that lands after the interval is worth a fresh pair…
+        assert!(action_fetch_due(
+            Some(t0 + Duration::from_secs(30)),
+            Some(fetched),
+            fetched + min,
+            min
+        ));
+        // …while a fetch that already followed the action is not repeated.
+        assert!(!action_fetch_due(
+            Some(click),
+            Some(fetched),
+            fetched + min,
+            min
+        ));
+
+        // The wiring: the caches must no longer be emptied on a player action,
+        // and the rebuild must pass the action's fetch mode to both submenu
+        // sources (it marks the fetch in flight before issuing it).
+        let prod = prod_source(include_str!("tray.rs"));
+        let force = body_of(prod, "fn force_tray_refresh(");
+        assert!(
+            force.contains("LAST_TRAY_ACTION.lock() = Some(Instant::now())"),
+            "a player action must be recorded, not enforced by emptying the caches"
+        );
+        assert!(
+            !force.contains("DEVICES_CACHE.lock() = None")
+                && !force.contains("QUEUE_CACHE.lock() = None"),
+            "the caches must stay: emptying them bypassed the fetch throttle (issue #883)"
+        );
+        let body = body_of(prod, "fn rebuild_tray_menu(");
+        let mark = body
+            .find("LAST_ACTION_FETCH.lock() = Some(Instant::now())")
+            .expect("a post-action rebuild must mark its fetch in flight");
+        let devices = body
+            .find("devices_for_menu(access_token.as_deref(), fetch)")
+            .expect("the rebuild must build the devices submenu from the fetch mode");
+        assert!(
+            mark < devices,
+            "the in-flight mark must be recorded before the requests run (issue #883)"
+        );
+    }
+
+    /// Issue #886: the poll loop calls the rebuild on every iteration and the
+    /// dedup key discards most of those calls — but only after a window query
+    /// that blocks the calling thread on an event-loop reply and a clone of the
+    /// whole `AppConfig`. The key now reads a visibility mirror and a scoped
+    /// snooze read, and the real query sits below the early return.
+    #[test]
+    fn discarded_rebuilds_query_neither_the_window_nor_a_config_clone() {
+        // The mirror is the key's source and round-trips.
+        note_window_visibility(true);
+        assert!(window_visible(), "the mirror must report what was recorded");
+        note_window_visibility(false);
+        assert!(!window_visible());
+
+        let prod = prod_source(include_str!("tray.rs"));
+        let body = body_of(prod, "fn rebuild_tray_menu(");
+        let guard = body
+            .find("tray_state_changed(")
+            .expect("the rebuild must keep the dedup guard");
+        let mirror = body
+            .find("window_visible()")
+            .expect("the dedup key must read the visibility mirror (issue #886)");
+        assert!(
+            mirror < guard,
+            "the key must be built from the mirror, so a discarded rebuild costs no hop"
+        );
+        // The real query, and anything else that can block, sits below it.
+        let live = body
+            .find("live_window_visible(")
+            .expect("a repaint must still render the real window state (issue #886)");
+        assert!(
+            live > guard,
+            "the visibility query belongs below the dedup early-return (issue #886)"
+        );
+        assert!(
+            !body.contains("is_visible()"),
+            "the rebuild itself must not query the event loop (issue #886)"
+        );
+        assert!(
+            !body.contains("config.get().clone()"),
+            "the snooze must not cost a whole-AppConfig clone per poll (issue #886)"
+        );
+        assert!(
+            body.contains("snooze_from_app_state("),
+            "the snooze must come from the scoped read (issue #886)"
+        );
+        // The same scoped read replaces the clone on the forced path.
+        let force = body_of(prod, "fn force_tray_refresh(");
+        assert!(
+            !force.contains("config.get().clone()"),
+            "force_tray_refresh must not clone the config either (issue #886)"
+        );
+        assert!(
+            force.contains("snooze_from_app_state("),
+            "force_tray_refresh must use the scoped snooze read (issue #886)"
+        );
+    }
+
+    /// Issue #927: on a host where neither appindicator soname resolves, the tray
+    /// build panics inside `libappindicator-sys` (its `Lazy<Library>` dlopens
+    /// both and panics when neither is there). `setup_tray` is written to fail as
+    /// `Result` — lib.rs logs the error and carries on without a tray — so the
+    /// panic has to arrive as that error, and `tray_available()` is what the
+    /// close-to-tray guard reads.
+    ///
+    /// The panic message this test provokes is expected output.
+    #[test]
+    fn a_missing_tray_library_is_an_error_not_a_panic() {
+        let err = guard_tray_panic("tray icon", || -> Result<(), String> {
+            panic!("libayatana-appindicator3.so.1: cannot open shared object file")
+        })
+        .expect_err("a panicking tray build must be reported as an error");
+        assert!(
+            err.contains("libayatana-appindicator3.so.1"),
+            "the error must name the reason, got: {}",
+            err
+        );
+        assert!(err.contains("tray icon"), "the error must name what failed");
+
+        // A normal failure passes through untouched, and a success returns its
+        // value — the guard must not swallow either.
+        assert_eq!(
+            guard_tray_panic("tray icon", || Err::<(), String>("nope".to_string())),
+            Err("nope".to_string())
+        );
+        assert_eq!(guard_tray_panic("tray icon", || Ok(7)), Ok(7));
+
+        // The wiring: the build is the guarded call, and the close-to-tray guard
+        // has an accessor to gate on (lib.rs owns that call site).
+        let prod = prod_source(include_str!("tray.rs"));
+        let setup = body_of(prod, "pub fn setup_tray(");
+        assert!(
+            setup.contains("guard_tray_panic(") && setup.contains("\"tray icon\""),
+            "the tray build must be guarded (issue #927)"
+        );
+        assert!(
+            setup.contains("builder.build(app)"),
+            "the guarded call must be the tray build itself"
+        );
+        assert!(
+            prod.contains("pub fn tray_available()"),
+            "close-to-tray needs an accessor for whether a tray exists (issue #927)"
+        );
+    }
+
+    /// Issue #911: macOS wants a monochrome TEMPLATE image for the menu bar,
+    /// because the bar draws the icon from its alpha channel and tints it — that
+    /// is what makes the item invert in a dark bar and dim with the bar for a
+    /// modal. The tray used `default_window_icon()`, the full-colour 32/128 px
+    /// application icon, which is why the item was oversized and ignored the tint.
+    #[test]
+    fn the_menu_bar_icon_is_a_monochrome_template_at_menu_bar_size() {
+        // The glyph is a square bitmap of ink and transparency, and it is a mark
+        // rather than a stray pixel.
+        assert_eq!(TEMPLATE_GLYPH.len(), TEMPLATE_GLYPH_SIZE as usize);
+        for row in TEMPLATE_GLYPH {
+            assert_eq!(row.len(), TEMPLATE_GLYPH_SIZE as usize, "row {:?}", row);
+            assert!(
+                row.bytes().all(|b| b == b'#' || b == b'.'),
+                "row {:?} must be ink or transparency only",
+                row
+            );
+        }
+        let ink = TEMPLATE_GLYPH
+            .iter()
+            .flat_map(|row| row.bytes())
+            .filter(|b| *b == b'#')
+            .count();
+        assert!(
+            ink > 60,
+            "the glyph must be a legible mark, got {} cells",
+            ink
+        );
+
+        // The RGBA handed to macOS is black plus alpha at both menu-bar sizes,
+        // and the ink covers exactly the glyph's cells scaled up — a template
+        // image gets its colour from the menu bar, so a coloured pixel would be
+        // ignored there anyway.
+        for scale in [1u32, 2] {
+            let side = TEMPLATE_GLYPH_SIZE * scale;
+            let rgba = template_icon_rgba(scale);
+            assert_eq!(rgba.len(), (side * side * 4) as usize, "scale {}", scale);
+            for px in rgba.chunks_exact(4) {
+                assert_eq!(&px[..3], &[0, 0, 0], "a template image is black");
+                assert!(px[3] == 0 || px[3] == 255, "alpha is on or off");
+            }
+            assert_eq!(
+                rgba.chunks_exact(4).filter(|px| px[3] == 255).count(),
+                ink * (scale * scale) as usize,
+                "scale {} must cover the glyph and nothing else",
+                scale
+            );
+        }
+
+        // The wiring: macOS builds the tray from the template glyph and marks it
+        // as a template; Windows and Linux keep the application icon.
+        let prod = prod_source(include_str!("tray.rs"));
+        let setup = body_of(prod, "pub fn setup_tray(");
+        assert!(
+            setup.contains(".icon(tray_icon(app)?)"),
+            "the tray icon must come from the platform-aware source (issue #911)"
+        );
+        assert!(
+            setup.contains("set_icon_as_template(true)"),
+            "the macOS icon must be marked as a template (issue #911)"
+        );
+        let source = body_of(prod, "fn tray_icon(");
+        assert!(
+            source.contains("default_window_icon()"),
+            "Windows and Linux must keep the application icon (issue #911)"
+        );
+        assert!(
+            source.contains("macos_template_icon()"),
+            "macOS must build the monochrome template glyph (issue #911)"
         );
     }
 }
