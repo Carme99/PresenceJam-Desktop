@@ -387,6 +387,70 @@ input[type='radio'] {
   padding: var(--sp-5);
 }
 
+/* ---------- Pane primitives (issue #751) ----------
+ * Promoted out of the auth panes, each of which carried its own copy and had
+ * already drifted: `.code-display` rendered at two sizes depending on the
+ * pane, `.hint` at two, `.error-message` with and without a weight, and
+ * `.device-code-box` at two paddings. One definition each, so the next
+ * contrast or type-scale fix is applied once instead of N times.
+ *
+ * `.card` and `.btn-full` above are the other two halves of the same set —
+ * they were already global, and the components' copies are gone. */
+.hint {
+  font-size: var(--fs-xs);
+  color: var(--fg-subtle);
+  line-height: var(--lh-normal);
+}
+.error-message {
+  color: var(--danger);
+  font-size: var(--fs-sm);
+  background: var(--danger-soft);
+  border-radius: var(--r-md);
+  padding: var(--sp-3);
+  font-weight: 500;
+}
+/* Visually hidden, still announced (the manual-paste inputs' labels, #385). */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+/* Busy indicator. `--spinner-size` lets a pane scale it without declaring a
+ * second `.spinner` rule (issue #751). */
+.spinner {
+  width: var(--spinner-size, 24px);
+  height: var(--spinner-size, 24px);
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin: 0 auto;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* A pane's sections stack with the card primitive. */
+.pane-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--sp-3);
+}
+.section-header h2 {
+  font-size: var(--fs-md);
+  font-weight: 600;
+}
+
 /* ---------- Badge primitive ---------- */
 .badge {
   display: inline-flex;
@@ -432,15 +496,22 @@ input[type='radio'] {
   animation: pulse-dot 1.5s var(--ease-out) infinite;
 }
 
-/* WCAG 2.3.3 / prefers-reduced-motion: stop decorative pulsing for users
- * who opt out of animation. Colour state remains fully conveyed. */
+/* WCAG 2.3.3 / prefers-reduced-motion: stop decorative motion for users who opt
+ * out of animation. Colour and text state remain fully conveyed. */
 @media (prefers-reduced-motion: reduce) {
   .badge .dot.pulse {
     animation: none;
   }
+  /* #747: keyframe animations are not transitions, so the motion tokens below
+     do not touch them. The sign-in spinner waits for as long as the user takes
+     in the browser, which is exactly where continuous rotation is worst; the
+     static ring (border + accent top segment) keeps the busy state readable. */
+  .spinner {
+    animation: none;
+  }
   /* #596: the motion tokens drive every colour/background/border/shadow
    * transition (body, button, input, the LogViewer segmented control), so
-   * zeroing them here makes the whole system instant without touching each
+   * zeroing them here neutralises those transitions without touching each
    * component. Same specificity as the token block; later source order wins. */
   :root {
     --dur-fast: 0ms;

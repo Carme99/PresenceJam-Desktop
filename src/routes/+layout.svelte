@@ -46,7 +46,7 @@
     typeof window !== 'undefined' &&
     typeof (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !== 'undefined';
   const isMainWindow = isTauriRuntime ? getCurrentWindow().label === 'main' : false;
-  import { authFlow, setTeamsPhase, setTeamsDeviceCode, setSpotifyPhase, expiresAtFromResponse, resetTeamsAuthFlow, tryAcquireTeamsPoll, releaseTeamsPoll } from '$lib/stores/authFlow.svelte';
+  import { authFlow, setTeamsPhase, setTeamsDeviceCode, setSpotifyPhase, expiresAtFromResponse, resetTeamsAuthFlow, pollTeamsAuth } from '$lib/stores/authFlow.svelte';
   import type { DeviceCodeResponse, AppConfig } from '$lib/types';
   devLog(`[LAYOUT] PresenceJam build: ${import.meta.env.VITE_APP_BUILD ?? 'dev build'}`);
 
@@ -252,32 +252,11 @@
       })
     );
 
-    // Polls the backend for device-code completion. The cadence is
-    // Rust-side; `interval` comes from the DeviceCodeResponse stored in
-    // the authFlow store so the server's requested polling rate is
+    // The device-code poll is the shared store function (#785): this copy was
+    // the one missing the #429 "never poll a dead code" guard. Its cadence is
+    // still Rust-side, and `interval` still comes from the DeviceCodeResponse
+    // stored in the authFlow store so the server's requested polling rate is
     // honored — see issue #152.
-    async function pollTeamsAuth() {
-      if (!authFlow.teams.deviceCode) return;
-      // #396: shared poll mutex — only one poll_teams_auth at a time
-      // across Onboarding/Settings/Reconnect/+layout.
-      if (!tryAcquireTeamsPoll()) {
-        devLog('[LAYOUT] pollTeamsAuth: another poll in flight, skipping');
-        return;
-      }
-      setTeamsPhase('waiting');
-      try {
-        await invoke('poll_teams_auth', {
-          deviceCode: authFlow.teams.deviceCode,
-          interval: authFlow.teams.interval
-        });
-        setTeamsPhase('done');
-      } catch (e) {
-        console.error('[LAYOUT] poll_teams_auth failed:', e);
-        setTeamsPhase('error', String(e));
-      } finally {
-        releaseTeamsPoll();
-      }
-    }
 
     return () => {
       destroyed = true;

@@ -1,3 +1,4 @@
+import { invoke } from '@tauri-apps/api/core';
 import { devLog } from '$lib/utils/dev';
 
 export type AuthPhase = 'idle' | 'waiting' | 'error' | 'done';
@@ -164,5 +165,58 @@ export function isSafeHttpUrl(url: string): boolean {
     return new URL(url).protocol === 'https:';
   } catch {
     return false;
+  }
+}
+
+/**
+ * Issue #785: the single `poll_teams_auth` call, shared by every view that can
+ * start a device-code flow (Onboarding, Settings, Reconnect, +layout). The four
+ * copies had already drifted — the layout's was missing the "never poll a dead
+ * code" guard the other three added for #429 — so the rule now lives beside the
+ * mutex and the phase transitions it drives.
+ *
+ * Order is the copies' order, deliberately: no device code → bail; a code whose
+ * `expiresAt` has passed → bail (the expired box offers a fresh one, #429);
+ * mutex held → bail with the dev log; otherwise poll, releasing the mutex in
+ * `finally` even when the invoke rejects, which also sets the error phase.
+ *
+ * @param onDone runs only when a poll actually succeeded — never when it was
+ * skipped by the expiry guard or the mutex, and never on a rejected invoke.
+ */
+export async function pollTeamsAuth(onDone?: () => void): Promise<void> {
+  const { deviceCode, interval, expiresAt } = authFlow.teams;
+  if (!deviceCode) {
+    devLog('[AUTHFLOW] pollTeamsAuth: no device code, skipping');
+    return;
+  }
+  // Read `expiresAt` here rather than a component's derived local, so all four
+  // paths share exactly one expiry rule.
+  if (expiresAt != null && expiresAt - Date.now() <= 0) {
+    devLog('[AUTHFLOW] pollTeamsAuth: code expired, refusing to poll');
+    return;
+  }
+  if (!tryAcquireTeamsPoll()) {
+    devLog('[AUTHFLOW] pollTeamsAuth: another poll in flight, skipping');
+    return;
+  }
+  setTeamsPhase('waiting');
+  try {
+    await invoke('poll_teams_auth', { deviceCode, interval });
+    // #933/#978: a poll whose device code has since been replaced (the user asked
+    // for a fresh code, or another view started a flow) still resolves Ok —
+    // the backend discards the superseded poll's tokens. Adopting that Ok
+    // would report a connection the app does not have, so only the code still
+    // in the store may claim success. The mutex is released either way.
+    if (!isCurrentTeamsPoll(deviceCode)) {
+      devLog('[AUTHFLOW] pollTeamsAuth: superseded code, ignoring success');
+      return;
+    }
+    setTeamsPhase('done');
+    onDone?.();
+  } catch (e) {
+    console.error('[AUTHFLOW] pollTeamsAuth failed:', e);
+    setTeamsPhase('error', String(e));
+  } finally {
+    releaseTeamsPoll();
   }
 }

@@ -14,9 +14,26 @@
  * Fail pre-fix (with a replace-style literal these values are gone), pass
  * post-fix.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { render, cleanup, fireEvent } from '@testing-library/svelte';
+import { get } from 'svelte/store';
 import { mergeWizardConfig, defaultConfig } from '$lib/stores/config';
 import type { AppConfig } from '$lib/types';
+
+// The mount tests below drive the real component, so the Tauri IPC has to be
+// mocked before the component and its stores load. `vi.hoisted` (not a plain
+// module-level const) because `vi.mock` is hoisted above these imports.
+const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
+
+vi.mock('@tauri-apps/api/core', () => ({ invoke }));
+vi.mock('@tauri-apps/api/event', () => ({
+  // Mirror the real signature: listen(eventName, handler) → unlisten.
+  listen: vi.fn(async () => () => {})
+}));
+
+import Onboarding from '$lib/components/Onboarding.svelte';
+import { currentView } from '$lib/stores/app';
+import { resetAuthFlow } from '$lib/stores/authFlow.svelte';
 
 /**
  * A stored config that differs from `defaultConfig` in every field the
@@ -149,5 +166,60 @@ describe('mergeWizardConfig (#531, #542)', () => {
     expect(merged.polling.max_interval_seconds).toBe(
       defaultConfig.polling.max_interval_seconds
     );
+  });
+});
+
+/**
+ * #967 — the wizard's escape hatch. A configured install can be dropped into
+ * the wizard from Settings' "Run onboarding" (or the boot probe's fail-open
+ * path) and must be able to leave without re-entering credentials it cannot
+ * read back: the Spotify client secret lives in the OS keychain. A first-run
+ * install has nothing to go back to, so it must stay one-way.
+ */
+function mockBackend(complete: boolean) {
+  invoke.mockImplementation(async (cmd: string) => {
+    switch (cmd) {
+      case 'load_config':
+        return structuredClone(defaultConfig);
+      case 'is_onboarding_complete':
+        return complete;
+      default:
+        return undefined;
+    }
+  });
+}
+
+/** Mount the wizard and settle its mocked IPC plus Svelte's flush scheduler. */
+async function renderWizard(complete: boolean) {
+  mockBackend(complete);
+  const rendered = render(Onboarding);
+  for (let i = 0; i < 24; i++) await Promise.resolve();
+  return rendered;
+}
+
+describe('wizard escape hatch (#967)', () => {
+  beforeEach(() => {
+    invoke.mockReset();
+    resetAuthFlow();
+    currentView.set('onboarding');
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it('#967 lets a configured install return to the Dashboard', async () => {
+    const { getByRole } = await renderWizard(true);
+
+    // The control exists only because the install is already complete.
+    await fireEvent.click(getByRole('button', { name: 'Back to dashboard' }));
+
+    expect(get(currentView)).toBe('dashboard');
+  });
+
+  it('#967 keeps first-run setup one-way', async () => {
+    const { queryByRole } = await renderWizard(false);
+
+    expect(queryByRole('button', { name: 'Back to dashboard' })).toBeNull();
   });
 });

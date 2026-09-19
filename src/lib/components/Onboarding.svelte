@@ -4,10 +4,11 @@
   import { loadConfig, mergeWizardConfig, saveConfig } from '$lib/stores/config';
   import type { AppConfig, DeviceCodeResponse } from '$lib/types';
   import { currentView } from '$lib/stores/app';
-  import { authFlow, setSpotifyPhase, setTeamsPhase, setTeamsDeviceCode, expiresAtFromResponse, formatCountdownMs, resetSpotifyAuthFlow, resetTeamsAuthFlow, teamsPollMutex, tryAcquireTeamsPoll, releaseTeamsPoll, isSafeHttpUrl } from '$lib/stores/authFlow.svelte';
+  import { authFlow, setSpotifyPhase, setTeamsPhase, setTeamsDeviceCode, expiresAtFromResponse, resetSpotifyAuthFlow, resetTeamsAuthFlow, teamsPollMutex, pollTeamsAuth } from '$lib/stores/authFlow.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
   import { devLog } from '$lib/utils/dev';
   import Logo from './Logo.svelte';
+  import DeviceCodeBox from './DeviceCodeBox.svelte';
   import { t } from '$lib/i18n';
 
   let step = $state(1);
@@ -53,6 +54,14 @@
   let manualSubmitBusy = $state(false);
   let validationError = $state('');
   let isFinishing = $state(false);
+  // #967: whether this install is already configured. The wizard is reachable
+  // by returning users (Settings' "Run onboarding", Dashboard's goToSetup, the
+  // boot probe's fail-open path), and their only exit today was to complete
+  // both sign-ins or quit the app — with a Spotify client secret they cannot
+  // read back, that is a dead end. Probed from `is_onboarding_complete()`, the
+  // same verdict the boot gate uses, so a first-run install (nothing to go
+  // back to) keeps its one-way flow.
+  let alreadyComplete = $state(false);
   // #394: in-flight guards — set BEFORE the first await so a double-click
   // cannot start two flows. Mirrors Settings.svelte / Reconnect.svelte.
   let spotifyConnecting = $state(false);
@@ -67,6 +76,11 @@
     requestAnimationFrame(() => {
       document.getElementById('onboarding-step-heading')?.focus();
     });
+  }
+
+  function goToDashboard() {
+    devLog('[ONBOARDING] goToDashboard: leaving the wizard for the dashboard');
+    currentView.set('dashboard');
   }
 
   onMount(() => {
@@ -119,6 +133,17 @@
         // rejects; this guard only keeps a future change from breaking the
         // wizard silently. Prefill is display-only — `finish()` re-reads.
         console.warn('[ONBOARDING] onMount: config prefill failed:', e);
+      }
+
+      // #967: separate from the config prefill on purpose — a failed probe
+      // must leave the wizard one-way rather than offer a way out of
+      // first-run setup.
+      try {
+        alreadyComplete = await invoke<boolean>('is_onboarding_complete');
+        devLog('[ONBOARDING] onMount: is_onboarding_complete=', alreadyComplete);
+      } catch (e) {
+        console.warn('[ONBOARDING] onMount: onboarding-complete probe failed:', e);
+        alreadyComplete = false;
       }
     })();
   });
@@ -292,7 +317,9 @@
         devLog('[ONBOARDING] connectTeams: open_external_url FAILED (non-fatal)');
       }
 
-      // Auto-poll once the user opens the browser. The user can also retry manually.
+      // Auto-poll once the user opens the browser. The user can also retry
+      // manually. #785: the poll itself (mutex, expiry guard, phase) lives in
+      // the shared store function.
       void pollTeamsAuth();
     } catch (e) {
       console.error('[ONBOARDING] connectTeams: FAILED:', e);
@@ -302,45 +329,6 @@
     }
 
     devLog('[ONBOARDING] connectTeams: EXIT');
-  }
-
-  async function pollTeamsAuth() {
-    devLog('[ONBOARDING] pollTeamsAuth: ENTRY');
-    // Never poll a dead code — the expired box offers a fresh one (#429).
-    if (teamsCodeExpired) {
-      devLog('[ONBOARDING] pollTeamsAuth: code expired, refusing to poll');
-      return;
-    }
-    // #396: shared poll mutex — only one poll_teams_auth at a time across
-    // Onboarding/Settings/Reconnect/+layout.
-    if (!tryAcquireTeamsPoll()) {
-      devLog('[ONBOARDING] pollTeamsAuth: another poll in flight, skipping');
-      return;
-    }
-    setTeamsPhase('waiting');
-
-    try {
-      devLog('[ONBOARDING] pollTeamsAuth: setTeamsPhase(waiting)');
-      devLog('[ONBOARDING] pollTeamsAuth: calling invoke poll_teams_auth');
-      devLog('[ONBOARDING] pollTeamsAuth: deviceCode.length=', authFlow.teams.deviceCode.length);
-
-      await invoke('poll_teams_auth', {
-        deviceCode: authFlow.teams.deviceCode,
-        interval: authFlow.teams.interval
-      });
-      devLog('[ONBOARDING] pollTeamsAuth: invoke SUCCESS');
-
-      setTeamsPhase('done');
-      devLog('[ONBOARDING] pollTeamsAuth: setTeamsPhase(done)');
-    } catch (e) {
-      console.error('[ONBOARDING] pollTeamsAuth: FAILED:', e);
-      setTeamsPhase('error', String(e));
-      devLog('[ONBOARDING] pollTeamsAuth: setTeamsPhase(error)');
-    } finally {
-      releaseTeamsPoll();
-    }
-
-    devLog('[ONBOARDING] pollTeamsAuth: EXIT');
   }
 
   async function finish() {
@@ -430,7 +418,14 @@
 <div class="onboarding">
   <header class="brand">
     <Logo size={32} withWordmark />
-    <span class="step-label" role="status">{t('onboarding.stepOf', { step })}</span>
+    <div class="brand-right">
+      <span class="step-label" role="status">{t('onboarding.stepOf', { step })}</span>
+      {#if alreadyComplete}
+        <button type="button" class="btn-secondary back-link" onclick={goToDashboard}>
+          {t('common.backToDashboard')}
+        </button>
+      {/if}
+    </div>
   </header>
 
   <div class="progress" aria-hidden="true">
@@ -446,7 +441,7 @@
 
   <div class="step">
     {#if step === 1}
-      <div class="card">
+      <div class="card pane-card wizard-card">
         <h2 id="onboarding-step-heading" tabindex="-1">{t('onboarding.step1Title')}</h2>
         <p>
           {t('onboarding.step1Intro')}
@@ -522,7 +517,7 @@
         {/if}
       </div>
     {:else if step === 2}
-      <div class="card">
+      <div class="card pane-card wizard-card">
         <h2 id="onboarding-step-heading" tabindex="-1">{t('onboarding.step2Title')}</h2>
         <p>
           {t('onboarding.step2Intro')}
@@ -531,27 +526,17 @@
         {#if !teamsConnected && !teamsPolling}
           <button class="btn-full" onclick={connectTeams} disabled={teamsConnecting}>{t('onboarding.startMicrosoftSignIn')}</button>
         {:else if teamsPolling}
-          <div class="device-code-box">
-            <p class="hint">{t('common.openSignInPage')}</p>
-            {#if isSafeHttpUrl(teamsVerificationUrl)}
-              <a class="verification-url" href={teamsVerificationUrl} target="_blank" rel="noopener">{teamsVerificationUrl}</a>
-            {:else}
-              <span class="verification-url">{teamsVerificationUrl}</span>
-            {/if}
-            <p class="hint">{t('common.enterCodeWhenAsked')}</p>
-            <div class="code-display" aria-live="polite">{teamsUserCode}</div>
-            {#if teamsCodeExpired}
-              <p class="error-message" role="alert">{t('common.codeExpired')}</p>
-              <button class="btn-secondary" onclick={connectTeams}>{t('common.getNewCode')}</button>
-            {:else}
-              {#if teamsRemainingMs != null}
-                <p class="hint" aria-live="polite">{t('common.codeExpiresIn', { time: formatCountdownMs(teamsRemainingMs) })}</p>
-              {/if}
-              <div class="spinner" aria-hidden="true"></div>
-              <p>{t('common.waitingForSignIn')}</p>
-              <button class="btn-secondary" onclick={pollTeamsAuth} disabled={teamsPollMutex.inFlight}>{t('common.checkNow')}</button>
-            {/if}
-          </div>
+          <!-- #952: the device-code block is shared with Settings and
+               Reconnect, so all three panes render the same box. -->
+          <DeviceCodeBox
+            userCode={teamsUserCode}
+            verificationUrl={teamsVerificationUrl}
+            remainingMs={teamsRemainingMs}
+            expired={teamsCodeExpired}
+            busy={teamsPollMutex.inFlight}
+            onCheckNow={() => void pollTeamsAuth()}
+            onNewCode={connectTeams}
+          />
         {:else}
           <div class="success-badge">
             <span aria-hidden="true">✓</span> {t('onboarding.connectedToTeams')}
@@ -564,7 +549,7 @@
         {/if}
       </div>
     {:else}
-      <div class="card">
+      <div class="card pane-card wizard-card">
         <h2 id="onboarding-step-heading" tabindex="-1">{t('onboarding.step3Title')}</h2>
         <p>
           {t('onboarding.step3Intro')}
@@ -605,18 +590,6 @@
   </div>
 </div>
 <style>
-  /* Visually-hidden label for the manual-URL paste input (#385). */
-  .sr-only {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    padding: 0;
-    margin: -1px;
-    overflow: hidden;
-    clip: rect(0 0 0 0);
-    white-space: nowrap;
-    border: 0;
-  }
   .onboarding {
     padding: var(--sp-7) var(--sp-5);
     max-width: 480px;
@@ -643,6 +616,21 @@
     background: var(--bg-elevated);
     border-radius: var(--r-pill);
     border: 1px solid var(--border);
+  }
+
+  /* #967: the step pill and the escape hatch sit together on the right of the
+     brand header. `.brand-right .back-link` beats the local
+     `.btn-secondary { width: 100% }` below on specificity, so the header
+     control stays intrinsic-width. */
+  .brand-right {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+  }
+  .brand-right .back-link {
+    width: auto;
+    padding: var(--sp-2) var(--sp-4);
+    font-size: var(--fs-sm);
   }
 
   .progress {
@@ -686,13 +674,11 @@
     display: flex;
     flex-direction: column;
   }
-  .card {
-    background: var(--bg-surface);
-    border: 1px solid var(--border);
-    border-radius: var(--r-lg);
+  /* #751: `.card` (background, border, radius, padding), `.hint`,
+     `.error-message`, `.sr-only`, `.spinner` and `.btn-full` are global now.
+     This pane only says how its cards stack and how wide they breathe. */
+  .wizard-card {
     padding: var(--sp-6);
-    display: flex;
-    flex-direction: column;
     gap: var(--sp-4);
     box-shadow: var(--shadow-2);
   }
@@ -701,7 +687,6 @@
     font-weight: 700;
     letter-spacing: -0.02em;
   }
-  p { color: var(--fg-muted); font-size: var(--fs-base); }
 
   .instructions-box {
     background: var(--bg-elevated);
@@ -731,46 +716,6 @@
     font-size: 0.9em;
   }
 
-  .device-code-box {
-    background: var(--bg-elevated);
-    border: 1px solid var(--border);
-    border-radius: var(--r-md);
-    padding: var(--sp-5);
-    text-align: center;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: var(--sp-3);
-  }
-  .device-code-box .hint { margin: 0; font-size: var(--fs-sm); }
-  .verification-url {
-    display: inline-block;
-    padding: var(--sp-2) var(--sp-4);
-    background: var(--accent-soft);
-    color: var(--accent);
-    border-radius: var(--r-md);
-    font-weight: 600;
-    word-break: break-all;
-    text-decoration: none;
-    font-family: var(--font-mono);
-    font-size: var(--fs-sm);
-  }
-  .verification-url:hover { background: var(--bg-base); }
-
-  .code-display {
-    font-family: var(--font-mono);
-    font-size: var(--fs-3xl);
-    font-weight: 700;
-    letter-spacing: 0.2em;
-    color: var(--fg);
-    background: var(--bg-base);
-    border: 2px dashed var(--border-strong);
-    border-radius: var(--r-md);
-    padding: var(--sp-4);
-    user-select: all;
-    font-variant-numeric: tabular-nums;
-  }
-
   .waiting-box {
     background: var(--bg-elevated);
     border: 1px solid var(--border);
@@ -782,18 +727,6 @@
     gap: var(--sp-3);
   }
   .waiting-box .hint { font-size: var(--fs-sm); margin: 0; }
-
-  .spinner {
-    width: 24px;
-    height: 24px;
-    border: 3px solid var(--border);
-    border-top-color: var(--accent);
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-    margin: 0 auto;
-  }
-  @keyframes spin { to { transform: rotate(360deg); } }
-
   .success-badge {
     display: flex;
     align-items: center;
@@ -808,14 +741,6 @@
   }
   .success-badge span[aria-hidden] { font-size: var(--fs-lg); }
 
-  .error-message {
-    color: var(--danger);
-    font-size: var(--fs-sm);
-    background: var(--danger-soft);
-    border-radius: var(--r-md);
-    padding: var(--sp-3);
-    font-weight: 500;
-  }
 
   .toggle-row {
     display: flex;
@@ -825,16 +750,5 @@
   }
   .toggle-row label { color: var(--fg); font-size: var(--fs-base); }
 
-  .hint {
-    font-size: var(--fs-xs);
-    color: var(--fg-subtle);
-    line-height: var(--lh-normal);
-  }
-
-  .btn-full {
-    width: 100%;
-    padding: var(--sp-3) var(--sp-5);
-    font-size: var(--fs-md);
-  }
   .btn-secondary { width: 100%; }
 </style>
