@@ -48,6 +48,15 @@
   let statusFormat = $state('🎵 {artist} - {track} 🎧');
   let launchAtLogin = $state(false);
   let pollingInterval = $state(30);
+  // Issue #983: the poll-interval slider is `min="10" max="60"`, so a stored
+  // value outside that band (hand-edited config.json, imported 4.7 backup)
+  // used to leave the label reading e.g. "120s" with the thumb pinned at 60,
+  // and `finish()` silently rewrote it. Clamp on prefill AND surface the
+  // discrepancy so the label and thumb agree.
+  const POLL_SLIDER_MIN = 10;
+  const POLL_SLIDER_MAX = 60;
+  let pollIntervalStoredOutOfBand = $state(false);
+  let pollIntervalRawStored = $state(0);
   // #545: in-flight guard for the manual-URL submit. Every other flow entry
   // point in this component sets its flag before the first await (#394); a
   // double-click here used to consume an already-used authorization code.
@@ -141,7 +150,20 @@
         const loaded = await loadConfig();
         statusFormat = loaded.teams.status_format;
         launchAtLogin = loaded.autostart;
-        pollingInterval = Number(loaded.polling.default_interval_seconds);
+        const storedInterval = Number(loaded.polling.default_interval_seconds);
+        // Issue #983: the slider's native `min`/`max` is 10/60, so anything
+        // outside that band would pin the thumb at the nearest end and show
+        // an unrepresentable number in the label. Clamp the prefill and
+        // remember the discrepancy for the inline hint.
+        pollIntervalStoredOutOfBand =
+          !Number.isFinite(storedInterval) ||
+          storedInterval < POLL_SLIDER_MIN ||
+          storedInterval > POLL_SLIDER_MAX;
+        pollIntervalRawStored = storedInterval;
+        pollingInterval = Math.min(
+          POLL_SLIDER_MAX,
+          Math.max(POLL_SLIDER_MIN, storedInterval)
+        );
         spotifyClientId = loaded.spotify.client_id;
         devLog('[ONBOARDING] onMount: prefilled from stored config');
       } catch (e) {
@@ -597,6 +619,21 @@
         <div class="form-group">
           <label for="poll-interval-onb">{t('onboarding.pollInterval', { seconds: pollingInterval })}</label>
           <input id="poll-interval-onb" type="range" min="10" max="60" step="5" bind:value={pollingInterval} />
+          <!-- Issue #983: the label and thumb now agree (both reflect the
+               clamped prefill), but the stored value is still wrong on
+               disk — surface that with the same clamp-hint affordance
+               Settings uses, so the user sees the discrepancy before
+               `finish()` rewrites it into the slider's band. -->
+          {#if pollIntervalStoredOutOfBand}
+            <p class="clamp-hint" role="status" data-testid="poll-interval-clamp-hint">
+              {t('onboarding.pollIntervalClamped', {
+                stored: pollIntervalRawStored,
+                min: POLL_SLIDER_MIN,
+                max: POLL_SLIDER_MAX,
+                seconds: pollingInterval
+              })}
+            </p>
+          {/if}
         </div>
 
         <div class="toggle-row">

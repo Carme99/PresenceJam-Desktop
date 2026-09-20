@@ -33,7 +33,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 
 import Onboarding from '$lib/components/Onboarding.svelte';
 import { currentView } from '$lib/stores/app';
-import { resetAuthFlow } from '$lib/stores/authFlow.svelte';
+import { resetAuthFlow, setSpotifyPhase, setTeamsPhase } from '$lib/stores/authFlow.svelte';
 
 /**
  * A stored config that differs from `defaultConfig` in every field the
@@ -176,11 +176,11 @@ describe('mergeWizardConfig (#531, #542)', () => {
  * read back: the Spotify client secret lives in the OS keychain. A first-run
  * install has nothing to go back to, so it must stay one-way.
  */
-function mockBackend(complete: boolean) {
+function mockBackend(complete: boolean, config: AppConfig = structuredClone(defaultConfig)) {
   invoke.mockImplementation(async (cmd: string) => {
     switch (cmd) {
       case 'load_config':
-        return structuredClone(defaultConfig);
+        return structuredClone(config);
       case 'is_onboarding_complete':
         return complete;
       default:
@@ -221,5 +221,85 @@ describe('wizard escape hatch (#967)', () => {
     const { queryByRole } = await renderWizard(false);
 
     expect(queryByRole('button', { name: 'Back to dashboard' })).toBeNull();
+  });
+});
+
+/**
+ * Issue #983 — the wizard's poll-interval slider is `min="10" max="60"`, but
+ * it used to seed its label from the stored config unchanged. A hand-edited
+ * `config.json` (or an imported 4.7 backup) could leave the label reading
+ * e.g. "120s" while the thumb sat pinned at the rail, and `finish()` would
+ * silently merge the slider's band back through `mergeWizardConfig`.
+ *
+ * The prefill must clamp, AND the label and thumb must agree, AND the
+ * discrepancy must be visible via the inline clamp-hint affordance.
+ */
+describe('wizard poll-interval clamp (#983)', () => {
+  beforeEach(() => {
+    invoke.mockReset();
+    resetAuthFlow();
+    currentView.set('onboarding');
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it('#983 clamps an out-of-band stored value into the slider range', async () => {
+    // Stored value 120 is above the slider's max="60" — pre-fix this left
+    // the label reading "120s" with the thumb pinned at 60.
+    const cfg = structuredClone(defaultConfig) as AppConfig;
+    cfg.polling.default_interval_seconds = BigInt(120);
+
+    mockBackend(false, cfg);
+    // Both auth phases must report 'done' so the Continue buttons render
+    // and the test can navigate from step 1 → step 2 → step 3 (where the
+    // poll-interval slider lives).
+    setSpotifyPhase('done');
+    setTeamsPhase('done');
+
+    const rendered = render(Onboarding);
+    // Let onMount's prefill IIFE and the auth-flow reactivity settle.
+    for (let i = 0; i < 24; i++) await Promise.resolve();
+
+    // Step 1 → Step 2.
+    await fireEvent.click(rendered.getByRole('button', { name: 'Continue →' }));
+    for (let i = 0; i < 24; i++) await Promise.resolve();
+    // Step 2 → Step 3 (the poll-interval step).
+    await fireEvent.click(rendered.getByRole('button', { name: 'Continue →' }));
+    for (let i = 0; i < 24; i++) await Promise.resolve();
+
+    const slider = rendered.container.querySelector('#poll-interval-onb') as HTMLInputElement;
+    // The thumb must reflect the clamped value, not the stored one.
+    expect(slider.value).toBe('60');
+    expect(Number(slider.value)).toBeLessThanOrEqual(60);
+    expect(Number(slider.value)).toBeGreaterThanOrEqual(10);
+
+    // The label reads "How often to check Spotify: Xs" — it must NOT echo
+    // the stored 120.
+    const labelText = slider.closest('label')?.textContent ?? '';
+    expect(labelText).not.toContain('120s');
+
+    // The clamp-hint affordance must be present so the user sees the
+    // discrepancy before `finish()` rewrites it into the slider's band.
+    expect(rendered.queryByTestId('poll-interval-clamp-hint')).not.toBeNull();
+  });
+
+  it('#983 does not show the clamp hint for an in-band stored value', async () => {
+    const cfg = structuredClone(defaultConfig) as AppConfig;
+    cfg.polling.default_interval_seconds = BigInt(30);
+
+    mockBackend(false, cfg);
+    setSpotifyPhase('done');
+    setTeamsPhase('done');
+
+    const rendered = render(Onboarding);
+    for (let i = 0; i < 24; i++) await Promise.resolve();
+    await fireEvent.click(rendered.getByRole('button', { name: 'Continue →' }));
+    for (let i = 0; i < 24; i++) await Promise.resolve();
+    await fireEvent.click(rendered.getByRole('button', { name: 'Continue →' }));
+    for (let i = 0; i < 24; i++) await Promise.resolve();
+
+    expect(rendered.queryByTestId('poll-interval-clamp-hint')).toBeNull();
   });
 });
