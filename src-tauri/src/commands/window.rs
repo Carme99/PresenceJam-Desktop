@@ -4,6 +4,7 @@
 //! `open_external_url` (issue #67).
 
 use crate::commands::shortcut_reason::ShortcutReason;
+use std::path::Path;
 use tauri::{AppHandle, Manager};
 use url::Url;
 
@@ -125,7 +126,7 @@ pub async fn open_logs_folder(app: AppHandle) -> Result<(), String> {
     log::debug!("{CMD} open_logs_folder: ENTRY");
 
     // #215: app_log_dir() touches the filesystem (app data dir resolution)
-    // and opener::open_url spawns a shell process. Offload both to the
+    // and opener::open_path spawns a shell process. Offload both to the
     // blocking pool.
     let app_clone = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -133,22 +134,39 @@ pub async fn open_logs_folder(app: AppHandle) -> Result<(), String> {
             log::error!("{CMD} open_logs_folder: failed to get log dir - {}", e);
             e.to_string()
         })?;
-        let path_str = logs_path.to_string_lossy();
-        log::info!("{CMD} open_logs_folder: log path={}", path_str);
+        log::info!("{CMD} open_logs_folder: log path={}", logs_path.display());
 
-        match tauri_plugin_opener::open_url(&path_str, None::<&str>) {
+        match open_logs_dir(&logs_path) {
             Ok(()) => {
                 log::info!("{CMD} open_logs_folder: SUCCESS");
                 Ok(())
             }
             Err(e) => {
                 log::error!("{CMD} open_logs_folder: FAILED - {}", e);
-                Err(e.to_string())
+                Err(e)
             }
         }
     })
     .await
     .map_err(|e| format!("open_logs_folder spawn_blocking panicked: {:?}", e))?
+}
+
+/// Hands the path to the desktop file manager and returns the opener's
+/// outcome.
+///
+/// This is intentionally a thin wrapper: `tauri_plugin_opener::open_path`
+/// performs a `metadata()` check first, so a non-existent target surfaces
+/// as an `io::Error` here (instead of being silently "spawned" the way
+/// `open_url` would treat a path-as-URL string). The plugin then calls
+/// `open::that_detached`, which is best-effort — once the spawn has been
+/// dispatched we cannot guarantee the desktop actually opened it, so the
+/// returned `Ok(())` means "spawn dispatched" rather than "user is
+/// looking at the folder".
+///
+/// Issue #979: replaced `open_url` with `open_path` so a missing log
+/// directory is an error the caller can show, not a silent success.
+pub(crate) fn open_logs_dir(path: &Path) -> Result<(), String> {
+    tauri_plugin_opener::open_path(path, None::<&str>).map_err(|e| e.to_string())
 }
 
 // `open_external` and `get_current_track` were removed in v2.6.4 (issue #77).
@@ -185,6 +203,63 @@ pub async fn open_external_url(url: String) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use std::env;
+    use std::path::PathBuf;
+
+    /// Issue #979: a non-existent logs directory must surface as an error.
+    /// `open_url` (the previous implementation) silently accepted any
+    /// path-as-URL string and reported SUCCESS once `that_detached` was
+    /// dispatched — including for paths the desktop could never open.
+    /// `open_path` runs `path.metadata()` first, so a missing target
+    /// returns an IO error that the caller can render to the user.
+    #[test]
+    fn open_logs_dir_returns_err_for_missing_directory() {
+        let bogus = PathBuf::from("/nonexistent/path/that/should/not/exist/anywhere");
+        // Sanity: the path really is absent — otherwise this test would
+        // silently pass on a machine that happened to have it.
+        assert!(
+            !bogus.exists(),
+            "precondition: the test path must not exist on this machine"
+        );
+
+        let result = super::open_logs_dir(&bogus);
+        assert!(
+            result.is_err(),
+            "open_logs_dir must surface a missing directory as Err, \
+             not dispatch a no-op spawn (issue #979)"
+        );
+        // The error string comes from `path.metadata()` -> io::Error, which
+        // already names the kind — keep it informative rather than mapping
+        // it down to a generic "failed" message.
+        let err = result.unwrap_err();
+        assert!(
+            !err.is_empty(),
+            "error message must not be empty — the frontend surfaces it verbatim"
+        );
+    }
+
+    /// Issue #979: a path that exists must dispatch the opener and return
+    /// `Ok`. `temp_dir()` always exists on every supported platform, so
+    /// this case is safe to assert unconditionally. The actual GUI window
+    /// opening is best-effort (the spawn is detached); the assertion is on
+    /// the spawn dispatch, not on a user-visible file-manager window.
+    #[test]
+    fn open_logs_dir_returns_ok_for_existing_directory() {
+        let existing = env::temp_dir();
+        assert!(
+            existing.exists(),
+            "precondition: env::temp_dir() must exist (issue #979)"
+        );
+
+        let result = super::open_logs_dir(&existing);
+        assert!(
+            result.is_ok(),
+            "open_logs_dir must dispatch the opener for an existing path, \
+             got: {:?}",
+            result.err()
+        );
+    }
+
     /// Issue #391: show_window must unminimize (a minimized window stays
     /// minimized after show()). Brace-counted body isolation
     /// (order-independent): do not anchor on the next fn.

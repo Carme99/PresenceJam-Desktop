@@ -1108,10 +1108,18 @@
   }
 
   async function openLogs() {
+    // Issue #979: surface in-pane via the existing `saveMessage` channel
+    // (same toast the rest of this view uses) instead of a console-only
+    // warning. The backend now returns a non-empty error string for a
+    // missing target instead of silently dispatching a no-op spawn.
+    saveMessage = '';
     try {
       await invoke('open_logs_folder');
     } catch (e) {
       console.warn('[SETTINGS] open_logs_folder failed:', e);
+      const msg = String((e as Error)?.message ?? e).slice(0, 180);
+      saveMessage = msg || t('logs.openFolderError');
+      saveTimeout = setTimeout(() => saveMessage = '', 3000);
     }
   }
 

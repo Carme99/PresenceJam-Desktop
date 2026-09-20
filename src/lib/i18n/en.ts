@@ -357,6 +357,8 @@ export const en = {
   'logs.copySnapshot': 'Copy snapshot',
   'logs.snapshotCopied': 'Redacted snapshot copied to clipboard.',
   'logs.snapshotCopyFailed': 'Could not copy the snapshot.',
+  'logs.openFolderError':
+    'Could not open the logs folder. It may not exist yet — try restarting the app to create it.',
   // 4.6 additions
   'dashboard.availabilityListening': 'Listening (Available)',
   'dashboard.availabilityCleared': 'Availability cleared',

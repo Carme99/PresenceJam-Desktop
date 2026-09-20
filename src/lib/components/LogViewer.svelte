@@ -322,6 +322,12 @@
   // #399: render-window over the tail — buffer keeps 500, DOM renders <= 100.
   let visibleLogs = $derived(filteredLogs.slice(-RENDER_WINDOW));
 
+  // Issue #979: a failed open must be visible in the pane, not just in
+  // the developer console. Reuse `snapshotFeedback` so the user sees
+  // a localised toast the same way they see copy-success / copy-fail.
+  // Auto-clears on the next open attempt.
+  let openFolderFeedback = $state('');
+
   // Count label as a derived string (cases live in describeCount).
   let countLabel = $derived(describeCount(visibleLogs.length, filteredLogs.length));
 
@@ -337,10 +343,15 @@
   }
 
   async function openFolder() {
+    openFolderFeedback = '';
     try {
       await invoke('open_logs_folder');
     } catch (e) {
+      // Issue #979: surface in-pane; the backend now returns a non-empty
+      // error string instead of silently dispatching a no-op spawn.
       console.warn('[LOGVIEWER] open_logs_folder failed:', e);
+      const msg = String((e as Error)?.message ?? e).slice(0, 180);
+      openFolderFeedback = msg || t('logs.openFolderError');
     }
   }
   // Issue #434: one-click redacted support snapshot. Clipboard text comes
@@ -432,6 +443,9 @@
   </div>
   {#if snapshotFeedback}
     <p class="snapshot-feedback" role="status" aria-live="polite">{snapshotFeedback}</p>
+  {/if}
+  {#if openFolderFeedback}
+    <p class="snapshot-feedback" role="status" aria-live="polite">{openFolderFeedback}</p>
   {/if}
 
   <div class="log-wrap">

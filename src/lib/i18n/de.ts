@@ -369,6 +369,8 @@ export const de: Dict = {
   'logs.copySnapshot': 'Snapshot kopieren',
   'logs.snapshotCopied': 'Geschwärzter Snapshot in die Zwischenablage kopiert.',
   'logs.snapshotCopyFailed': 'Der Snapshot konnte nicht kopiert werden.',
+  'logs.openFolderError':
+    'Der Protokollordner konnte nicht geöffnet werden. Möglicherweise existiert er noch nicht — starten Sie die App neu, um ihn anzulegen.',
   // 4.6 additions
   'dashboard.availabilityListening': 'Wird gehört (verfügbar)',
   'dashboard.availabilityCleared': 'Verfügbarkeit zurückgesetzt',
