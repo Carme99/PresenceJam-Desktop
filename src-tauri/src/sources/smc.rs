@@ -12,7 +12,7 @@
 //! Implementation notes:
 //!
 //! - The manager / sessions / media-properties APIs are WinRT and
-//!   `IAsyncOperation`-based. The `windows` crate's `.get()` blocks the
+//!   `IAsyncOperation`-based. The `windows` crate's `.join()` blocks the
 //!   current thread on the operation, so the polling thread can drive
 //!   the read synchronously without an async runtime.
 //! - The active session is whichever session has the most recent
@@ -86,7 +86,7 @@ impl PlaybackSource for SmcSource {
             .GetSessions()
             .map_err(|e| SourceError::Other(format!("SMTC GetSessions failed: {e}")))?;
         let sessions = sessions_op
-            .get()
+            .join()
             .map_err(|e| SourceError::Transient(format!("SMTC GetSessions wait failed: {e}")))?;
         let active = pick_active_session(&sessions);
         let Some(session) = active else {
@@ -97,7 +97,7 @@ impl PlaybackSource for SmcSource {
         let media_op = session.TryGetMediaPropertiesAsync().map_err(|e| {
             SourceError::Other(format!("SMTC TryGetMediaPropertiesAsync failed: {e}"))
         })?;
-        let props = media_op.get().map_err(|e| {
+        let props = media_op.join().map_err(|e| {
             SourceError::Transient(format!("SMTC media-properties wait failed: {e}"))
         })?;
 
@@ -105,10 +105,12 @@ impl PlaybackSource for SmcSource {
             .GetPlaybackInfo()
             .map_err(|e| SourceError::Other(format!("SMTC GetPlaybackInfo failed: {e}")))?;
         let playback = playback_op
-            .get()
+            .join()
             .map_err(|e| SourceError::Transient(format!("SMTC playback-info wait failed: {e}")))?;
 
-        Ok(Some(media_properties_to_now_playing(&props, &playback)))
+        Ok(Some(media_properties_to_now_playing(
+            &props, &playback, &session,
+        )))
     }
 
     fn capabilities(&self) -> SourceCaps {
@@ -150,7 +152,7 @@ fn acquire_manager(
     let op = GlobalSystemMediaTransportControlsSessionManager::RequestAsync()
         .map_err(|e| SourceError::Transient(format!("SMTC RequestAsync failed: {e}")))?;
     let manager = op
-        .get()
+        .join()
         .map_err(|e| SourceError::Transient(format!("SMTC RequestAsync wait failed: {e}")))?;
     {
         let mut slot = manager_slot().lock().unwrap_or_else(|e| e.into_inner());
@@ -179,7 +181,7 @@ fn pick_active_session(
         let Ok(playback_op) = session.GetPlaybackInfo() else {
             continue;
         };
-        let Ok(playback) = playback_op.get() else {
+        let Ok(playback) = playback_op.join() else {
             continue;
         };
         let status = playback
@@ -203,23 +205,24 @@ fn pick_active_session(
     best.map(|(_, s)| s)
 }
 
-/// Translate SMTC's `MediaProperties` + `PlaybackInfo` pair into the
-/// flat trait shape.
+/// Translate SMTC's `MediaProperties` + `PlaybackInfo` + session-timeline
+/// triple into the flat trait shape. The timeline lives on the session
+/// (`GetTimelineProperties`), not on `PlaybackInfo`, so the session is
+/// passed in alongside the media-properties / playback-info pair.
 fn media_properties_to_now_playing(
     props: &windows::Media::Control::GlobalSystemMediaTransportControlsSessionMediaProperties,
     playback: &windows::Media::Control::GlobalSystemMediaTransportControlsSessionPlaybackInfo,
+    session: &GlobalSystemMediaTransportControlsSession,
 ) -> NowPlaying {
-    let title = props.Title().ok().unwrap_or_default();
-    let artist = props.Artist().ok().unwrap_or_default();
-    let album = props.AlbumTitle().ok().unwrap_or_default();
+    let title = props.Title().ok().unwrap_or_default().to_string();
+    let artist = props.Artist().ok().unwrap_or_default().to_string();
+    let album = props.AlbumTitle().ok().unwrap_or_default().to_string();
     let album_art_url = props
         .Thumbnail()
         .ok()
         .and_then(|t| t.as_ref())
-        .and_then(|thumb| thumb.Source())
-        .ok()
         .and_then(|_| {
-            // The WinRT thumbnail source is a `IRandomAccessStreamReference` whose
+            // The WinRT thumbnail is an `IRandomAccessStreamReference` whose
             // `Source` is not a URL — `OpenReadAsync` returns the bitmap bytes.
             // The existing Teams / SyncStatus consumers already expect a URL
             // (they set it via `MediaInfo.album_art_url`), so we leave the
@@ -234,7 +237,9 @@ fn media_properties_to_now_playing(
         .unwrap_or(GlobalSystemMediaTransportControlsSessionPlaybackStatus::Stopped);
     let is_playing = status == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing;
 
-    let timeline = playback.Playback().ok().and_then(|t| t).and_then(|t| {
+    // Timeline lives on the session, not on PlaybackInfo. Read it here
+    // so the caller only needs to pass three handles.
+    let timeline = session.GetTimelineProperties().ok().and_then(|t| {
         let pos = t.Position().ok().map(|d| (d.Duration / 10_000) as u64);
         let end = t.EndTime().ok().map(|d| (d.Duration / 10_000) as u64);
         Some((pos, end))
