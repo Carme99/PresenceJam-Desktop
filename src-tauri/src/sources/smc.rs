@@ -82,12 +82,9 @@ impl Default for SmcSource {
 impl PlaybackSource for SmcSource {
     fn poll(&mut self) -> Result<Option<NowPlaying>, SourceError> {
         let manager = acquire_manager(&mut self.cached)?;
-        let sessions_op = manager
+        let sessions = manager
             .GetSessions()
             .map_err(|e| SourceError::Other(format!("SMTC GetSessions failed: {e}")))?;
-        let sessions = sessions_op
-            .join()
-            .map_err(|e| SourceError::Transient(format!("SMTC GetSessions wait failed: {e}")))?;
         let active = pick_active_session(&sessions);
         let Some(session) = active else {
             log::debug!("[SOURCES] SmcSource: no active SMTC session");
@@ -101,12 +98,9 @@ impl PlaybackSource for SmcSource {
             SourceError::Transient(format!("SMTC media-properties wait failed: {e}"))
         })?;
 
-        let playback_op = session
+        let playback = session
             .GetPlaybackInfo()
             .map_err(|e| SourceError::Other(format!("SMTC GetPlaybackInfo failed: {e}")))?;
-        let playback = playback_op
-            .join()
-            .map_err(|e| SourceError::Transient(format!("SMTC playback-info wait failed: {e}")))?;
 
         Ok(Some(media_properties_to_now_playing(
             &props, &playback, &session,
@@ -167,9 +161,7 @@ fn acquire_manager(
 /// `LastUpdatedTime`, so without the playback-status filter a paused
 /// Spotify-desktop could out-rank a live YouTube tab.
 fn pick_active_session(
-    sessions: &windows::Foundation::Collections::IVectorView<
-        GlobalSystemMediaTransportControlsSession,
-    >,
+    sessions: &windows_collections::IVectorView<GlobalSystemMediaTransportControlsSession>,
 ) -> Option<GlobalSystemMediaTransportControlsSession> {
     let count = sessions.Size().ok().map(|s| s as usize).unwrap_or_default();
     let mut best: Option<(i64, GlobalSystemMediaTransportControlsSession)> = None;
@@ -178,10 +170,7 @@ fn pick_active_session(
             continue;
         };
         // Read playback status; ignore the session if it cannot answer.
-        let Ok(playback_op) = session.GetPlaybackInfo() else {
-            continue;
-        };
-        let Ok(playback) = playback_op.join() else {
+        let Ok(playback) = session.GetPlaybackInfo() else {
             continue;
         };
         let status = playback
@@ -287,9 +276,8 @@ mod tests {
         // An empty vector view has Size == 0 and the helper returns None
         // without touching the manager. The build verifies the contract;
         // a Windows-only integration test would otherwise be required.
-        let v: windows::Foundation::Collections::IVectorView<
-            GlobalSystemMediaTransportControlsSession,
-        > = windows::Foundation::Collections::IVectorView::default();
+        let v: windows_collections::IVectorView<GlobalSystemMediaTransportControlsSession> =
+            windows_collections::IVectorView::default();
         let picked = pick_active_session(&v);
         assert!(picked.is_none() || picked.is_some());
     }
