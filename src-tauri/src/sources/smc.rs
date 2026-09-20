@@ -180,11 +180,15 @@ fn pick_active_session(
         if status != GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing {
             continue;
         }
+        // `LastUpdatedTime` lives on the timeline object in 0.62 (it was
+        // a session method in 0.61). A session that cannot answer its
+        // timeline is treated as a zero timestamp, which still lets the
+        // "most recent" comparison degrade gracefully to "first seen".
         let ts = session
-            .LastUpdatedTime()
+            .GetTimelineProperties()
             .ok()
-            .and_then(|t| t.UniversalTime())
-            .ok()
+            .and_then(|t| t.LastUpdatedTime().ok())
+            .and_then(|t| t.UniversalTime().ok())
             .unwrap_or_default();
         match &best {
             Some((best_ts, _)) if *best_ts >= ts => {}
@@ -268,16 +272,7 @@ mod tests {
         assert!(caps.has_album_art);
     }
 
-    /// `pick_active_session` is the core heuristic; the unit test drives
-    /// the empty-list path and the integration is exercised on Windows.
-    #[test]
-    fn pick_active_handles_empty_sessions() {
-        // An empty vector view has Size == 0 and the helper returns None
-        // without touching the manager. The build verifies the contract;
-        // a Windows-only integration test would otherwise be required.
-        let v: windows_collections::IVectorView<GlobalSystemMediaTransportControlsSession> =
-            windows_collections::IVectorView::default();
-        let picked = pick_active_session(&v);
-        assert!(picked.is_none() || picked.is_some());
-    }
+    // The empty-vector path through `pick_active_session` is exercised
+    // on Windows in integration tests; `windows_collections::IVectorView`
+    // has no `Default` impl, so it cannot be hand-built in a unit test.
 }
