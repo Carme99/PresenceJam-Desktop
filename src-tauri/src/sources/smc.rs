@@ -209,12 +209,11 @@ fn media_properties_to_now_playing(
     let album_art_url = props
         .Thumbnail()
         .ok()
-        .and_then(|t| t.as_ref())
         .and_then(|_| {
             // The WinRT thumbnail is an `IRandomAccessStreamReference` whose
-            // `Source` is not a URL — `OpenReadAsync` returns the bitmap bytes.
-            // The existing Teams / SyncStatus consumers already expect a URL
-            // (they set it via `MediaInfo.album_art_url`), so we leave the
+            // payload is bitmap bytes fetched through `OpenReadAsync`, not a
+            // URL. The existing Teams / SyncStatus consumers already expect a
+            // URL (they set it via `MediaInfo.album_art_url`), so we leave the
             // URL blank here: a future `tauri-plugin-http` fetch can fill it in.
             None::<String>
         })
