@@ -36,7 +36,8 @@ objc2-core-services = { version = "~0.3", default-features = false, features = [
 # No other Windows-specific APIs are pulled in — `platform::idle::WindowsIdleProbe`
 # for issue #873 reuses the same crate.
 [target."cfg(target_os = \"windows\")".dependencies]
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_SystemInformation"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_SystemInformation", "Media_Control", "Storage_Streams"] }
+windows-collections = "0.3"
 
 [dependencies]
 tauri = { version = "~2.11", features = ["tray-icon"] }
@@ -99,6 +100,15 @@ tiny_http = { version = "0.12", default-features = false }
 # on Windows the daemon stops via `taskkill` (see CHANGELOG.md).
 [target."cfg(unix)".dependencies]
 signal-hook = "0.3"
+
+# Issue #862: the Linux `MprisSource` reads now-playing metadata from any
+# audio app registered with the OS media-session bus (`org.mpris.MediaPlayer2.*`).
+# `zbus` is the smallest pure-Rust D-Bus client. Tauri's `async_runtime`
+# is tokio on every platform, so we use the tokio feature; the polling
+# thread drives the read via `tauri::async_runtime::spawn_blocking` —
+# same trade-off as `tiny_http` for the `--serve` slice.
+[target."cfg(target_os = \"linux\")".dependencies]
+zbus = { version = "4", default-features = false, features = ["tokio"] }
 
 # Release profile (issue #899). Cargo builds release artefacts with 16 codegen
 # units, no cross-crate LTO and a full symbol table by default, and every

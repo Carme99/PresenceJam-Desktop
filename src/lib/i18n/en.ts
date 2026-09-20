@@ -661,6 +661,10 @@ export const en = {
   'cli.profileActive': 'Active profile is now "{name}".',
   'cli.profileUnknown': 'No profile named "{name}" — base configuration remains active.',
   'settings.shortcutToggleProfile': 'Cycle presence profiles',
+
+  // --- 5.0 wave3 playback-source ---
+  'onboarding.playbackSourceMacNote':
+    "You're on macOS — only the Spotify playback source is available here. The system media-session source (Windows SMTC / Linux MPRIS) is not available on macOS, so PresenceJam falls back to Spotify automatically. Switch to Spotify if the wizard ever reports \"no track\" while music is playing in another app.",
 };
 
 export type Dict = { readonly [K in keyof typeof en]: string };

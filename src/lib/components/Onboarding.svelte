@@ -62,6 +62,14 @@
   // same verdict the boot gate uses, so a first-run install (nothing to go
   // back to) keeps its one-way flow.
   let alreadyComplete = $state(false);
+  // Issue #862: surface the macOS playback-source limitation. The OS
+  // media-session source (Windows SMTC / Linux MPRIS) has no
+  // implementation on macOS — Apple has no public API for another app's
+  // now-playing — so the wizard tells macOS users up front that Spotify
+  // is the only working source here. Detected from `navigator.userAgent`
+  // (the same heuristic Settings.svelte uses for the platform modifier)
+  // since the wizard never sees the Tauri runtime.
+  let isMacPlatform = $state(false);
   // #394: in-flight guards — set BEFORE the first await so a double-click
   // cannot start two flows. Mirrors Settings.svelte / Reconnect.svelte.
   let spotifyConnecting = $state(false);
@@ -85,6 +93,14 @@
 
   onMount(() => {
     devLog('[ONBOARDING] onMount: ENTRY');
+    // Issue #862: detect the host platform once at mount. macOS users see
+    // the playback-source limitation banner below the progress dots;
+    // everyone else never sees it. `navigator.userAgent` is the same
+    // heuristic the Settings modifier key uses — the wizard runs in the
+    // webview, so the real OS detection happens server-side via
+    // `state::platform`.
+    isMacPlatform = /mac/i.test(navigator.userAgent ?? '');
+    devLog('[ONBOARDING] onMount: isMacPlatform=', isMacPlatform);
     unlistenAuth = useAuthListeners({
       onSpotifyComplete: () => {
         devLog('[ONBOARDING] EVENT: spotify-auth-complete received');
@@ -439,6 +455,16 @@
     </div>
   </div>
 
+  {#if isMacPlatform}
+    <!-- Issue #862: macOS has no public API for another app's now-playing,
+         so the system playback source is unavailable here. The wizard
+         shows this note on every step so the user is never surprised by
+         a silent no-op when they switch to "System" later. -->
+    <div class="card pane-card platform-note" role="note">
+      <p>{t('onboarding.playbackSourceMacNote')}</p>
+    </div>
+  {/if}
+
   <div class="step">
     {#if step === 1}
       <div class="card pane-card wizard-card">
@@ -715,6 +741,21 @@
     border-radius: var(--r-sm);
     font-size: 0.9em;
   }
+
+  /* Issue #862: macOS playback-source limitation note. Same shape as
+     the existing `.instructions-box` panel — elevated background, soft
+     border, modest padding — so the user reads it as wizard guidance
+     rather than an error banner. */
+  .platform-note {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    padding: var(--sp-4);
+    color: var(--fg-muted);
+    font-size: var(--fs-sm);
+    line-height: var(--lh-normal);
+  }
+  .platform-note p { margin: 0; }
 
   .waiting-box {
     background: var(--bg-elevated);
