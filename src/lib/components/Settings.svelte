@@ -495,6 +495,18 @@
     return { active: effective !== raw, effective };
   });
   function resetAppearanceDefaults() {
+    // #970: every sibling card's Reset restores its whole section, so this
+    // card has to do the same. The original implementation only restored
+    // `localConfig.autostart` and silently left theme, density and language
+    // on whatever the user had switched them to. Theme and density live in
+    // their own stores (applied immediately, persisted to localStorage), and
+    // the language select is the same shape as the autostart toggle — a value
+    // mirrored from `localConfig.locale` plus an immediate `i18n.set` so the
+    // tray + native menu follow.
+    theme.set('system');
+    density.set('comfortable');
+    localConfig.locale = 'en';
+    void i18n.set('en');
     localConfig.autostart = defaultConfig.autostart;
     markDirty();
   }

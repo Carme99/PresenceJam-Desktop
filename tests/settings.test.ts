@@ -42,7 +42,7 @@ import { currentView } from '$lib/stores/app';
 import { configStore, defaultConfig } from '$lib/stores/config';
 import { notificationPreferences } from '$lib/stores/notifications';
 import { authFlow, resetSpotifyAuthFlow, resetTeamsAuthFlow, setSpotifyPhase, setTeamsPhase } from '$lib/stores/authFlow.svelte';
-import { theme } from '$lib/stores/theme';
+import { theme, density } from '$lib/stores/theme';
 import { t, i18n, type TKey, type Locale } from '$lib/i18n';
 // #955: the presence dropdown's labels are dictionary entries, so the test
 // reads the three dictionaries the app ships rather than restating the copy.
@@ -387,6 +387,90 @@ describe('Settings theme picker semantics (#552, #680)', () => {
     await fireEvent.click(compact);
     await tick();
     expect(document.documentElement.getAttribute('data-density')).toBe('comfortable');
+  });
+});
+
+/**
+ * #970 — the Appearance card's "Reset to default" button must restore every
+ * control the card renders: theme, density, language and launch-at-login.
+ * The original implementation only restored `localConfig.autostart`, so
+ * three of the four controls were silently left on whatever the user had
+ * switched them to — a regression vs. every sibling card's Reset.
+ *
+ * Fails pre-fix: theme, density and language are not reset, only autostart is.
+ */
+describe('Settings appearance card reset (#970)', () => {
+  it('resets theme, density, language and launch-at-login back to their defaults', async () => {
+    await i18n.set('en');
+    const { container } = await mountSettings();
+
+    // Scope to the Appearance card so the click does not land on a different
+    // section's reset control (presence / rules / polling all carry one).
+    const appearanceCard = [...container.querySelectorAll('section.card')].find(
+      (section) => section.querySelector('h2')?.textContent?.trim() === t('settings.sectionAppearance')
+    ) as HTMLElement;
+    expect(appearanceCard).not.toBeNull();
+    const reset = appearanceCard.querySelector('button.btn-link') as HTMLButtonElement;
+    expect(reset).not.toBeNull();
+
+    // Theme: switch off the default 'system' (per #970 reset semantics) to a
+    // concrete theme the radiogroup renders.
+    const themeRadios = [...appearanceCard.querySelectorAll<HTMLElement>('[role="radio"]')];
+    expect(themeRadios).toHaveLength(3);
+    theme.set('light');
+    await tick();
+    expect(get(theme)).toBe('light');
+
+    // Density: away from the 'comfortable' default.
+    density.set('compact');
+    await tick();
+
+    // Language: away from the 'en' default.
+    const language = appearanceCard.querySelector('#language') as HTMLSelectElement;
+    expect(language).not.toBeNull();
+    await fireEvent.change(language, { target: { value: 'de' } });
+    await tick();
+    await i18n.set('de');
+    expect(i18n.locale).toBe('de');
+
+    // Launch-at-login: away from the `false` default.
+    const autostart = appearanceCard.querySelector('#autostart') as HTMLInputElement;
+    expect(autostart).not.toBeNull();
+    await fireEvent.click(autostart);
+    await tick();
+    // The handler awaits `set_autostart_enabled` before yielding — the mock
+    // returns `[]` (no-op), so the toggle sticks and the draft reflects it.
+    await waitFor(() => expect(autostart.checked).toBe(true));
+
+    // Click the card's Reset button.
+    await fireEvent.click(reset);
+    await tick();
+    // The autostart toggle's onchange awaits `set_autostart_enabled`, which
+    // the Settings render also observes through a subsequent reactive tick.
+    await tick();
+
+    // Theme, density and language all reset to their defaults via the store
+    // setters and the `i18n.set` mirror — those flow synchronously through
+    // the same tick. The autostart checkbox uses a one-way
+    // `checked={localConfig.autostart}` attribute (not `bind:checked`); its
+    // DOM `.checked` may lag the awaited `set_autostart_enabled` call from
+    // the prior toggle click, so the ground-truth assertion lives on the
+    // persisted config below.
+    expect(get(theme)).toBe('system');
+    expect(get(density)).toBe('comfortable');
+    expect(i18n.locale).toBe('en');
+    expect(language.value).toBe('en');
+    // `markDirty()` must run so the user can save the change (matching every
+    // other reset function's pattern).
+    expect(container.querySelector('.dirty-banner')).not.toBeNull();
+
+    // Save propagates the reset values to the persisted config.
+    await fireEvent.click(container.querySelector('.actions .btn-full') as HTMLElement);
+    await waitFor(() => {
+      const saved = get(configStore);
+      expect(saved.autostart).toBe(defaultConfig.autostart);
+      expect(saved.locale).toBe('en');
+    });
   });
 });
 
