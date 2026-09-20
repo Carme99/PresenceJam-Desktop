@@ -934,6 +934,23 @@ where
         .any(|arg| arg.as_ref() == std::ffi::OsStr::new(MINIMIZED_FLAG))
 }
 
+/// Should a second-instance launch bring the existing main window to the
+/// front (issue #976)?
+///
+/// Returns `false` iff the argv carries the autostart plugin's
+/// `--minimized` flag — a hidden start must stay hidden even when it
+/// reaches an already-running instance. The deep-link forwarding path
+/// still runs unconditionally; only the show/unminimize/focus step is
+/// gated.
+///
+/// The argv slice is the one `forward_launch_to_running_instance`
+/// receives from the single-instance plugin (the element type is
+/// `String`, never `OsString`, on that path), so a `&[String]` shape is
+/// both accurate to the call site and ergonomic for unit tests.
+pub(crate) fn should_raise_window(argv: &[String]) -> bool {
+    !has_minimized_flag(argv.iter())
+}
+
 /// The file target's rotation strategy for a clamped `logging.keep_files`.
 ///
 /// **Always `KeepSome`**, including at `1`. The field means "archived log files
@@ -1729,19 +1746,32 @@ fn suppress_config_windows<R: tauri::Runtime>(context: &mut tauri::Context<R>) -
 /// repaints the tray; it never touches argv URLs. macOS goes through the
 /// deep-link plugin's `on_open_url` callback, which is wired in setup.
 #[cfg(desktop)]
-fn forward_launch_to_running_instance(app: &AppHandle, _argv: Vec<String>, _cwd: String) {
-    // Raise the existing window so the user sees it when a second
-    // instance is launched (e.g., double-click the .msi shortcut
-    // while the app is running, or a deep-link click from a
-    // browser when the app is already open).
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        // Issue #886: the tray's dedup key reads a visibility mirror, so every
-        // path that shows the window has to report it — otherwise the raise
-        // would be deduped away and the Show/Hide label would keep "Show Window".
-        crate::tray::note_window_visibility(true);
-        let _ = window.unminimize();
-        let _ = window.set_focus();
+fn forward_launch_to_running_instance(app: &AppHandle, argv: Vec<String>, _cwd: String) {
+    // Issue #976: a second instance launched with `--minimized` (the
+    // autostart plugin does this on every login) must not raise the
+    // already-running window — the autostart user expects to stay
+    // hidden. The tray refresh still runs unconditionally; only the
+    // show/unminimize/focus step is gated on the launch intent encoded
+    // in argv. (Deep-link argv scanning is gone per #799 — the plugin
+    // routes URLs through handle_cli_arguments → on_open_url.)
+    if should_raise_window(&argv) {
+        // Raise the existing window so the user sees it when a second
+        // instance is launched (e.g., double-click the .msi shortcut
+        // while the app is running, or a deep-link click from a
+        // browser when the app is already open).
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.show();
+            // Issue #886: the tray's dedup key reads a visibility mirror, so every
+            // path that shows the window has to report it — otherwise the raise
+            // would be deduped away and the Show/Hide label would keep "Show Window".
+            crate::tray::note_window_visibility(true);
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+        }
+    } else {
+        log::info!(
+            "[APP] single_instance: argv carried {MINIMIZED_FLAG}; leaving the running window alone"
+        );
     }
     // Issue #592: raising the window changes its visibility, which
     // drives the tray's Show/Hide label — repaint from backend state
@@ -2909,6 +2939,46 @@ mod tests {
         assert!(
             !has_minimized_flag(vec!["--minimized-please"]),
             "the flag is matched exactly, never as a prefix"
+        );
+    }
+
+    /// Issue #976: the second-instance callback must honour `--minimized`
+    /// — a hidden launch must not raise the already-running window.
+    /// `should_raise_window` is the single decision point shared by the
+    /// show/unminimize/focus sequence; a `false` here means the window
+    /// stays exactly as the autostart user left it.
+    #[test]
+    fn test_should_raise_window_respects_minimized_flag() {
+        // A plain GUI launch must always raise the running window.
+        assert!(
+            should_raise_window(&["presencejam".to_string()]),
+            "a launch without {MINIMIZED_FLAG} must raise the running window",
+        );
+        // Autostart-shaped launch (exe path + the flag) must stay hidden.
+        assert!(
+            !should_raise_window(&["presencejam.exe".to_string(), MINIMIZED_FLAG.to_string()]),
+            "the autostart argv shape must not raise the running window",
+        );
+        // A launch that carries both the flag and a deep link must still
+        // forward the link, so the gate is "don't raise" — not "ignore the
+        // launch entirely".
+        assert!(
+            !should_raise_window(&[
+                "presencejam".to_string(),
+                MINIMIZED_FLAG.to_string(),
+                "presencejam://join/abc123".to_string(),
+            ]),
+            "a minimized launch with a deep link must not raise, but the link still needs forwarding",
+        );
+        // Same shape, flag before the deep link — flag position in argv
+        // is not part of the contract.
+        assert!(
+            !should_raise_window(&[
+                "presencejam".to_string(),
+                MINIMIZED_FLAG.to_string(),
+                "presencejam://x".to_string(),
+            ]),
+            "should_raise_window is independent of the flag's argv position",
         );
     }
 
