@@ -137,10 +137,13 @@
     font-size: var(--fs-sm);
   }
   .links a {
-    color: var(--accent-text);
+    /* Colour + visited + hover now come from the base `a` primitive
+     * (app.css). Keeping the local overrides that diverge from it: links
+     * in this strip are not body-copy, so no underline, and the heavier
+     * weight matches the surrounding labels (#953). */
     text-decoration: none;
     font-weight: 600;
   }
-  .links a:hover { color: var(--accent); text-decoration: underline; }
+  .links a:hover { text-decoration: underline; }
   .separator { color: var(--fg-subtle); }
 </style>
