@@ -23,16 +23,6 @@ export default defineConfig({
   },
   test: {
     environment: 'jsdom',
-    // Vitest 4 defaults to the `forks` pool, which evaluates test modules via
-    // Vite's ModuleRunner in a separate VM context. The jsdom environment's
-    // `setup(globalThis)` populates the worker process's `globalThis`, but
-    // that VM context does not see those globals, so a test file that reads
-    // `window.localStorage` at module-init time (e.g. `src/lib/stores/theme.ts`
-    // hydrating from localStorage) crashes before any test runs. The
-    // `vmThreads` pool runs the module evaluator in a context that the env
-    // setup has already configured, so the jsdom globals are visible where
-    // the test modules actually execute.
-    pool: 'vmThreads',
     include: ['tests/**/*.test.ts'],
     // #681: the coverage RATCHET. The four thresholds below are the values
     // MEASURED on the tree this branch merges into (rebased onto
