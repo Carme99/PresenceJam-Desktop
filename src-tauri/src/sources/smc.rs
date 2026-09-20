@@ -181,14 +181,15 @@ fn pick_active_session(
             continue;
         }
         // `LastUpdatedTime` lives on the timeline object in 0.62 (it was
-        // a session method in 0.61). A session that cannot answer its
-        // timeline is treated as a zero timestamp, which still lets the
-        // "most recent" comparison degrade gracefully to "first seen".
+        // a session method in 0.61). The returned `DateTime` is a plain
+        // struct in 0.62 whose `UniversalTime` field is the i64 ticks —
+        // no method call. A session whose timeline cannot be read still
+        // degrades gracefully to a zero timestamp.
         let ts = session
             .GetTimelineProperties()
             .ok()
             .and_then(|t| t.LastUpdatedTime().ok())
-            .and_then(|t| t.UniversalTime().ok())
+            .map(|t| t.UniversalTime)
             .unwrap_or_default();
         match &best {
             Some((best_ts, _)) if *best_ts >= ts => {}
