@@ -217,10 +217,9 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
                     "play/pause state",
                     |token| crate::spotify::get_currently_playing(token, None),
                 ) {
-                    Ok(crate::spotify::CurrentlyPlaying::Modified {
-                        now: Some(now),
-                        ..
-                    }) => now.media.is_playing,
+                    Ok(crate::spotify::CurrentlyPlaying::Modified { now: Some(now), .. }) => {
+                        now.media.is_playing
+                    }
                     Ok(_) => false,
                     Err(e) => {
                         log::warn!("[TRAY] play/pause: playback state read failed: {}", e);
@@ -229,21 +228,13 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
                     }
                 };
                 if should_pause {
-                    run_player_action(
-                        &app_handle,
-                        "pause",
-                        Some(false),
-                        None,
-                        |t| crate::spotify::player_pause(t, None),
-                    );
+                    run_player_action(&app_handle, "pause", Some(false), None, |t| {
+                        crate::spotify::player_pause(t, None)
+                    });
                 } else {
-                    run_player_action(
-                        &app_handle,
-                        "play",
-                        Some(true),
-                        None,
-                        |t| crate::spotify::player_play(t, None),
-                    );
+                    run_player_action(&app_handle, "play", Some(true), None, |t| {
+                        crate::spotify::player_play(t, None)
+                    });
                 }
             });
         }
@@ -333,15 +324,13 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
                         // (no fetch) — the entry is only built while a
                         // meeting is active, so the cache is fresh
                         // enough.
-                        let next_meeting_end = if preset
-                            == crate::config::SnoozePreset::UntilNextMeetingEnds
-                        {
-                            let state = app_handle
-                                .state::<std::sync::Arc<crate::AppState>>();
-                            state.calendar.current_meeting_end(now_utc)
-                        } else {
-                            None
-                        };
+                        let next_meeting_end =
+                            if preset == crate::config::SnoozePreset::UntilNextMeetingEnds {
+                                let state = app_handle.state::<std::sync::Arc<crate::AppState>>();
+                                state.calendar.current_meeting_end(now_utc)
+                            } else {
+                                None
+                            };
                         let deadline = crate::config::snooze_preset_deadline(
                             preset,
                             now_utc,
@@ -385,9 +374,7 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
                 let state = app_handle.state::<std::sync::Arc<crate::AppState>>();
                 let target: Option<String> = if raw == ID_PROFILE_BASE {
                     None
-                } else if let Some(stripped) =
-                    raw.strip_prefix(PROFILE_ITEM_PREFIX)
-                {
+                } else if let Some(stripped) = raw.strip_prefix(PROFILE_ITEM_PREFIX) {
                     // Skip the disabled empty placeholder.
                     if stripped == "empty" {
                         repaint_tray_from_state(&app_handle, "profile (empty placeholder)");
@@ -398,11 +385,10 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
                     // (or a stale menu from a previous build) must
                     // fall back to base, not silently land on a
                     // phantom id.
-                    let exists = state
-                        .config
-                        .get()
-                        .as_ref()
-                        .is_some_and(|c| c.presence_profiles.iter().any(|p| p.name == stripped));
+                    let exists =
+                        state.config.get().as_ref().is_some_and(|c| {
+                            c.presence_profiles.iter().any(|p| p.name == stripped)
+                        });
                     if !exists {
                         log::warn!(
                             "[TRAY] profile: {:?} not found — falling back to base",
@@ -431,10 +417,9 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
             let app_handle = app.clone();
             std::thread::spawn(move || {
                 let state = app_handle.state::<std::sync::Arc<crate::AppState>>();
-                if let Err(e) = crate::commands::status::clear_manual_status_inner(
-                    state.inner(),
-                    &app_handle,
-                ) {
+                if let Err(e) =
+                    crate::commands::status::clear_manual_status_inner(state.inner(), &app_handle)
+                {
                     log::error!("[TRAY] manual status clear: {}", e);
                 }
                 repaint_tray_from_state(&app_handle, "manual status clear");
@@ -490,13 +475,9 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
                     repaint_tray_from_state(&app_handle, "volume (stale)");
                     return;
                 };
-                run_player_action(
-                    &app_handle,
-                    "volume",
-                    None,
-                    None,
-                    |token| crate::spotify::player_set_volume(token, percent, None),
-                );
+                run_player_action(&app_handle, "volume", None, None, |token| {
+                    crate::spotify::player_set_volume(token, percent, None)
+                });
             });
         }
         id if id.starts_with(SEEK_ITEM_PREFIX) => {
@@ -537,15 +518,9 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
                 } else {
                     progress.saturating_sub((-delta) as u64)
                 };
-                run_player_action(
-                    &app_handle,
-                    "seek",
-                    None,
-                    None,
-                    |token| {
-                        crate::spotify::player_seek(token, new_position as i64, None)
-                    },
-                );
+                run_player_action(&app_handle, "seek", None, None, |token| {
+                    crate::spotify::player_seek(token, new_position as i64, None)
+                });
             });
         }
         id if id.starts_with(DEVICE_ITEM_PREFIX) => {
