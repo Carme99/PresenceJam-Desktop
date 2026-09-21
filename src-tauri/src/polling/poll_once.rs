@@ -1488,11 +1488,12 @@ fn presence_expiration_duration(remaining_ms: Option<u64>) -> String {
 ///    last posted — `last_posted_status` for playing/replacement text,
 ///    `last_posted_placeholder` for the "Paused"/"Nothing playing" clears.
 ///
-/// COST. Zero extra Graph calls under the default configuration: the sample is
-/// the one the presence gate already fetches per track change (and every
-/// `AVAILABILITY_REARM_SECONDS` mid-track). Only a user who turned the presence
-/// gate OFF while leaving this check on pays one extra `getPresence` per gate
-/// point, because the read is what makes the decision possible.
+/// COST. One extra `getPresence` per `AVAILABILITY_REARM_SECONDS` (~4
+/// minutes) while a track plays: the ungated mid-track re-check (issue
+/// #792) shares the gate's sample, so recording the verdict costs no second
+/// call. Only a user who turned the presence gate OFF while leaving this
+/// check on pays one extra `getPresence` per gate point, because the read
+/// is what makes the decision possible.
 fn manual_status_blocks_write(
     respect_manual_status: bool,
     presence: Option<&crate::teams::PresenceInfo>,
@@ -4098,6 +4099,72 @@ pub(crate) fn process_track(
                         "[POLLING] process_track: track presence-gated, skipping status write"
                     );
                     return playing_track_sleep(remaining_ms, config);
+                }
+            }
+            // Issue #792: the UNGATED mid-track re-check. The change-time gate
+            // above ran once inside `if changed`, and the #380 block above only
+            // re-reads for a recorded gate — so a meeting joined, DND enabled,
+            // or hand-typed Teams status mid-track kept getting the music status
+            // re-POSTed by the #384 keepalive for the rest of the track. Re-read
+            // on the same `last_gate_check` clock the gated path uses (debounce +
+            // keepalive windows untouched): on `Some(reason)` record the gate,
+            // emit `presence-gated`, and return before the keepalive POSTs; on
+            // `None` clear the gate and fall through to the write below.
+            // `!changed` skips change iterations — the change-time gate just read
+            // presence for those. Fail-safe: a failed read proceeds with the
+            // write. The read routes through `gate_verdict`, so the manual-status
+            // verdict is recorded for the exit path like every other read.
+            if !changed
+                && gated_track_key.as_deref() != Some(track_key.as_str())
+                && presence_read_needed
+                && gate_recheck_due(
+                    *last_gate_check,
+                    Instant::now(),
+                    chrono::Utc::now(),
+                    next_meeting_boundary,
+                )
+            {
+                match get_teams_presence(&teams_tok.access_token) {
+                    Ok(presence) => {
+                        match gate_verdict(
+                            &presence,
+                            last_posted_status.as_deref(),
+                            last_posted_placeholder.as_deref(),
+                        ) {
+                            Some(reason) => {
+                                log::info!(
+                                    "[POLLING] process_track: gate engaged mid-track ({}), suppressing status write",
+                                    reason
+                                );
+                                *gated_track_key = Some(track_key.clone());
+                                *last_gate_check = Some(Instant::now());
+                                emit_presence_gated(
+                                    app,
+                                    &reason,
+                                    &presence.availability,
+                                    &presence.activity,
+                                );
+                                let remaining_ms = corrected_progress_ms
+                                    .map(|c| track.duration_ms.saturating_sub(c));
+                                return playing_track_sleep(remaining_ms, config)
+                                    .max(teams_backoff_secs);
+                            }
+                            None => {
+                                *gated_track_key = None;
+                                *last_gate_check = Some(Instant::now());
+                            }
+                        }
+                        // Issue #873: stamp the verdict like the change-time gate
+                        // so the next re-check detects the resume transition.
+                        *last_idle_verdict = Some(idle_threshold_crossed);
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "[POLLING] process_track: mid-track gate read failed, proceeding with status write: {}",
+                            e
+                        );
+                        *last_gate_check = Some(Instant::now());
+                    }
                 }
             }
 
@@ -9497,6 +9564,35 @@ mod tests {
              (review round 3, item 3) — route it through `gate_verdict`, or call \
              `observe_presence_sample` at the read"
         );
+        // Issue #792: the UNGATED mid-track re-check — an ungated track must
+        // re-read presence through `gate_verdict` (which records the verdict)
+        // before the keepalive can re-POST. Sliced from the gated-track tail
+        // to the keepalive so the bounds stay inside the playing branch:
+        // pre-fix the slice holds no read and every assert below fails.
+        let track_body = prod_fn_body(prod, "pub(crate) fn process_track(");
+        let gated_tail = track_body
+            .find("track presence-gated, skipping status write")
+            .expect("the gated-track early return must exist");
+        let after = &track_body[gated_tail..];
+        let keepalive = after
+            .find("should_skip_identical_write(")
+            .expect("the #384 keepalive must still follow the gate");
+        let ungated = &after[..keepalive];
+        for site in [
+            "get_teams_presence(",
+            "gate_verdict(",
+            "gate_recheck_due(",
+            "*gated_track_key = Some",
+            "emit_presence_gated",
+            "gate engaged mid-track",
+        ] {
+            assert!(
+                ungated.contains(site),
+                "issue #792: the ungated mid-track re-check must contain `{site}` before the \
+                 keepalive can re-POST — a meeting joined mid-track must suppress within the \
+                 `last_gate_check` window"
+            );
+        }
     }
 
     /// Review round 2, item 3: `handle_no_track`'s early returns cannot post a
