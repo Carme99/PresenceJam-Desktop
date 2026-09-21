@@ -31,6 +31,7 @@ pub mod misc;
 pub mod onboarding;
 pub mod playback;
 pub mod rules;
+pub mod shortcut_reason;
 pub mod shortcuts;
 pub mod spotify_auth;
 pub mod status;
@@ -135,7 +136,8 @@ mod tests {
     /// Regression guard for issue #76: the `commands` module must declare
     /// every per-workflow submodule. If a contributor deletes one (or renames
     /// the module without updating this list), `cargo test` fails fast.
-    /// `logs` joined the list with the #595 LogViewer backfill.
+    /// `logs` joined the list with the #595 LogViewer backfill, and
+    /// `shortcut_reason` with the #968 machine-readable Settings reasons.
     #[test]
     fn test_commands_split_groups_present() {
         let source = include_str!("mod.rs");
@@ -150,6 +152,7 @@ mod tests {
             "onboarding",
             "misc",
             "shortcuts",
+            "shortcut_reason",
             "status",
             "rules",
         ] {

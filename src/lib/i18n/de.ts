@@ -160,8 +160,6 @@ export const de: Dict = {
   'settings.themeDark': 'Dunkel',
   'settings.themeLight': 'Hell',
   'settings.languageLabel': 'Sprache',
-  'settings.autostartError':
-    'Aktualisieren von „Bei der Anmeldung starten“ fehlgeschlagen: {error}',
   'settings.saveChanges': 'Änderungen speichern',
   'settings.saving': 'Speichern…',
   'settings.saved': 'Einstellungen gespeichert.',
@@ -542,6 +540,17 @@ export const de: Dict = {
   'settings.shortcutRejected': 'Nicht verwendbar: {reason}',
   'settings.shortcutRegistrationFailed':
     'Registrierung auf diesem Desktop fehlgeschlagen: {reason}',
+  // Issue #968: typisierte Ursachencodes aus dem Rust-Validator. Die
+  // Settings-Karte ordnet jede `kind` einem Wörterbucheintrag zu, so dass
+  // die Ablehnungsmeldung lokalisiert ist; `shortcutReasonUnknown` zeigt den
+  // Freitext des Backends bei wirklich fremden Ablehnungen (Compositor-/
+  // App-eigene Kombinationen).
+  'settings.shortcutReasonNotAKey': '„{accelerator}“ ist keine erkannte Tastenkombination',
+  'settings.shortcutReasonConflict':
+    'Steht im Konflikt mit der Belegung {other} — eine Kombination kann nicht zwei Aktionen auslösen',
+  'settings.shortcutReasonAutostart':
+    '„Bei der Anmeldung starten“ fehlgeschlagen: {cause}',
+  'settings.shortcutReasonUnknown': '{message}',
   // 4.7.0 — S12 Hygiene (Design/Dichte)
   'settings.themeSystem': 'System',
   'settings.themeHint':

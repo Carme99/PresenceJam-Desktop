@@ -167,8 +167,6 @@ export const fr: Dict = {
   'settings.themeDark': 'Sombre',
   'settings.themeLight': 'Clair',
   'settings.languageLabel': 'Langue',
-  'settings.autostartError':
-    'Échec de la mise à jour du lancement à l’ouverture de session : {error}',
   'settings.saveChanges': 'Enregistrer les modifications',
   'settings.saving': 'Enregistrement…',
   'settings.saved': 'Paramètres enregistrés.',
@@ -553,6 +551,19 @@ export const fr: Dict = {
   'settings.shortcutRejected': 'Inutilisable : {reason}',
   'settings.shortcutRegistrationFailed':
     'Échec de l’enregistrement sur ce bureau : {reason}',
+  // Issue #968 : codes de raison typés provenant du validateur Rust. La carte
+  // Paramètres associe chaque `kind` à une entrée du dictionnaire afin que
+  // le message de rejet soit localisé ; `shortcutReasonUnknown` affiche le
+  // texte brut du backend pour les refus vraiment étrangers (combinaisons
+  // appartenant au compositeur / à une autre application). NBSPs around
+  // guillemets and before `:` are mandatory (#907).
+  'settings.shortcutReasonNotAKey':
+    '« {accelerator} » n’est pas un raccourci reconnu',
+  'settings.shortcutReasonConflict':
+    'Est en conflit avec le raccourci {other} — une même combinaison ne peut pas piloter deux actions',
+  'settings.shortcutReasonAutostart':
+    'Échec du lancement à l’ouverture de session : {cause}',
+  'settings.shortcutReasonUnknown': '{message}',
   // 4.7.0 — S12 hygiène (thème/densité)
   'settings.themeSystem': 'Système',
   'settings.themeHint':

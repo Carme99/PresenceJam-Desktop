@@ -11,7 +11,7 @@
   // redirect forwards the navigation to the main window first.
   let { detached = false }: { detached?: boolean } = $props();
   import { configStore, saveConfig, loadConfig, defaultConfig, clientSecretStateOf, SHORTCUT_SLOTS, shortcutBindingsOf, setShortcutBindings, type ShortcutSlot } from '$lib/stores/config';
-  import type { AppConfig, SyncStatus } from '$lib/types';
+  import type { AppConfig, ShortcutReason, SyncStatus } from '$lib/types';
   import { authFlow, setSpotifyPhase, setTeamsPhase, resetSpotifyAuthFlow, resetTeamsAuthFlow, teamsPollMutex, pollTeamsAuth } from '$lib/stores/authFlow.svelte';
   import DeviceCodeBox from './DeviceCodeBox.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
@@ -689,7 +689,7 @@
   // only the OS can say whether a grab was accepted.
 
   /** What the backend reported for one slot's last registration pass. */
-  type SlotRegistration = { accelerator: string | null; registered: boolean; error: string | null };
+  type SlotRegistration = { accelerator: string | null; registered: boolean; error: ShortcutReason | null };
   type ShortcutStatus = Record<ShortcutSlot, SlotRegistration>;
 
   const SHORTCUT_LABEL_KEYS: Record<ShortcutSlot, TKey> = {
@@ -702,8 +702,17 @@
     toggle_playback: { ...NO_REGISTRATION },
     toggle_sync: { ...NO_REGISTRATION }
   });
-  /** The backend's reason for the last rejected edit, per slot. */
-  let shortcutErrors = $state<Record<ShortcutSlot, string>>({ toggle_playback: '', toggle_sync: '' });
+  /** The backend's reason for the last rejected edit, per slot (issue #968).
+   *
+   * The validator used to splice an English string (e.g. `"Ctrl+P" is not a
+   * recognised shortcut (NotAKey)`) into localized copy, so a German card
+   * showed e.g. `Nicht verwendbar: "Ctrl+P" is not a recognised shortcut
+   * (NotAKey)`. The backend now returns a typed [`ShortcutReason`] — `null`
+   * here means "this slot has no pending rejection" (the value clears when
+   * the slot is edited again and clears is treated as "nothing to say").
+   * [`shortcutReasonLabel`] maps a reason to its dictionary entry.
+   */
+  let shortcutErrors = $state<Record<ShortcutSlot, ShortcutReason | null>>({ toggle_playback: null, toggle_sync: null });
   /**
    * The slot whose field is recording a combination. Its grab is released for
    * as long as it records: the OS delivers the key to the grab, not to the
@@ -767,7 +776,7 @@
   async function validateShortcut(slot: ShortcutSlot): Promise<boolean> {
     const accelerator = shortcutBindings[slot];
     if (accelerator === null || accelerator.trim() === '') {
-      shortcutErrors[slot] = '';
+      shortcutErrors[slot] = null;
       return true;
     }
     const otherSlot = slot === 'toggle_playback' ? 'toggle_sync' : 'toggle_playback';
@@ -777,11 +786,72 @@
         action: slot,
         other: shortcutBindings[otherSlot] ?? ''
       });
-      shortcutErrors[slot] = '';
+      shortcutErrors[slot] = null;
       return true;
     } catch (e) {
-      shortcutErrors[slot] = String(e).slice(0, 180);
+      // Issue #968: the validator rejects with a typed `ShortcutReason`
+      // (issue #968). Capture it as the structured value, not a string of
+      // JS error text — the copy is owned by the dictionary the helper
+      // maps to.
+      const reason = normalizeReason(e);
+      if (reason !== null) shortcutErrors[slot] = reason;
       return false;
+    }
+  }
+
+  /**
+   * Issue #968: a `ShortcutReason` from the IPC boundary, defensive against a
+   * payload the backend did not shape (a partial chunk, an old build, a
+   * future variant). Anything that does not match the typed enum becomes
+   * `Unknown { message: '<unrecognized reason>' }`, so the Settings card
+   * renders *something* rather than crashing — and the unrecognized shape's
+   * raw `kind` and fields are logged in the dev console (the developer
+   * reading the log) instead of leaking into the user-facing message.
+   */
+  function normalizeReason(raw: unknown): ShortcutReason | null {
+    if (raw === null || raw === undefined) return null;
+    if (typeof raw !== 'object') {
+      return { kind: 'Unknown', message: String(raw).slice(0, 180) };
+    }
+    const obj = raw as Record<string, unknown>;
+    if (obj.kind === 'NotAKey' && typeof obj.accelerator === 'string') {
+      return { kind: 'NotAKey', accelerator: obj.accelerator };
+    }
+    if (obj.kind === 'Conflict' && typeof obj.other_slot === 'string') {
+      return { kind: 'Conflict', other_slot: obj.other_slot };
+    }
+    if (obj.kind === 'Autostart' && typeof obj.cause === 'string') {
+      return { kind: 'Autostart', cause: obj.cause };
+    }
+    if (obj.kind === 'Unknown' && typeof obj.message === 'string') {
+      return { kind: 'Unknown', message: obj.message };
+    }
+    console.warn(
+      '[SETTINGS] normalizeReason: unrecognized ShortcutReason payload:',
+      raw
+    );
+    return { kind: 'Unknown', message: 'Unrecognized reason' };
+  }
+
+  /**
+   * Maps a typed `ShortcutReason` to its localized copy. Mirrors
+   * `Dashboard.svelte::gatedReasonLabel`: each known `kind` resolves to a
+   * dictionary entry the translator owns, so a German card shows German
+   * copy instead of the validator's English. `Unknown` is the escape hatch
+   * — a Wayland compositor refusal, an older backend, anything the typed
+   * contract did not anticipate — and renders the backend's free-form
+   * text through the unknown template.
+   */
+  function shortcutReasonLabel(reason: ShortcutReason): string {
+    switch (reason.kind) {
+      case 'NotAKey':
+        return t('settings.shortcutReasonNotAKey', { accelerator: reason.accelerator });
+      case 'Conflict':
+        return t('settings.shortcutReasonConflict', { other: reason.other_slot });
+      case 'Autostart':
+        return t('settings.shortcutReasonAutostart', { cause: reason.cause });
+      case 'Unknown':
+        return t('settings.shortcutReasonUnknown', { message: reason.message });
     }
   }
 
@@ -830,10 +900,14 @@
       return { ...NO_REGISTRATION };
     }
 
+    // Issue #968: the backend's error field is now a typed `ShortcutReason`
+    // (a tagged enum), not a free-form string. `normalizeReason` upgrades a
+    // raw JS value to a typed reason; anything unrecognised becomes
+    // `Unknown { message }` so a partial payload never crashes the card.
     return {
       accelerator: typeof entry.accelerator === 'string' ? entry.accelerator : null,
       registered: entry.registered === true,
-      error: typeof entry.error === 'string' ? entry.error : null
+      error: normalizeReason(entry.error)
     };
   }
 
@@ -992,9 +1066,13 @@
       // saved nor registered. The card validates on every edit, so the reason
       // is already recorded — read it here rather than issuing IPC in the save
       // path, which nothing else in this handler does.
-      const rejectedSlot = SHORTCUT_SLOTS.find((slot) => shortcutErrors[slot] !== '');
-      if (rejectedSlot) {
-        saveMessage = t('settings.shortcutRejected', { reason: shortcutErrors[rejectedSlot] });
+      const rejectedSlot = SHORTCUT_SLOTS.find((slot) => shortcutErrors[slot] !== null);
+      if (rejectedSlot !== undefined && rejectedSlot !== null && shortcutErrors[rejectedSlot]) {
+        // Issue #968: render the localized label for the typed reason, not
+        // the raw English string the validator used to splice in.
+        saveMessage = t('settings.shortcutRejected', {
+          reason: shortcutReasonLabel(shortcutErrors[rejectedSlot]!)
+        });
         return;
       }
       localConfig.teams.profanity_extra_words = extraWordsClamp.clamped;
@@ -2609,7 +2687,9 @@
               console.warn('[SETTINGS] set_autostart_enabled failed:', err);
               localConfig.autostart = previous;
               target.checked = previous;
-              saveMessage = t('settings.autostartError', { error: String(err).slice(0, 120) });
+              saveMessage = t('settings.shortcutRejected', {
+                reason: shortcutReasonLabel(normalizeReason(err) ?? { kind: 'Unknown', message: String(err).slice(0, 120) })
+              });
               if (saveTimeout) clearTimeout(saveTimeout);
               saveTimeout = setTimeout(() => saveMessage = '', 3000);
             }
@@ -2717,11 +2797,15 @@
           </div>
           {#if shortcutErrors[slot]}
             <p class="error-message" role="alert">
-              {t('settings.shortcutRejected', { reason: shortcutErrors[slot] })}
+              {t('settings.shortcutRejected', {
+                reason: shortcutReasonLabel(shortcutErrors[slot]!)
+              })}
             </p>
           {:else if shortcutStatus[slot].error}
             <p class="error-message" role="alert">
-              {t('settings.shortcutRegistrationFailed', { reason: shortcutStatus[slot].error })}
+              {t('settings.shortcutRegistrationFailed', {
+                reason: shortcutReasonLabel(shortcutStatus[slot].error!)
+              })}
             </p>
           {:else if shortcutStatus[slot].registered}
             <p class="hint" role="status">{t('settings.shortcutRegistered')}</p>

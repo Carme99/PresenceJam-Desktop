@@ -32,6 +32,15 @@ export type {
 } from './types-generated/AppConfig';
 export type { DiagnosticsSnapshot } from './types-generated/DiagnosticsSnapshot';
 /**
+ * Issue #968: typed reason codes for Settings-card errors. Generated from
+ * `src-tauri/src/commands/shortcut_reason.rs::ShortcutReason` at
+ * `cargo test` time; do not hand-edit. Re-exported here so the Settings
+ * card can `import type { ShortcutReason } from '$lib/types'`.
+ */
+export type { ShortcutReason } from './types-generated/ShortcutReason';
+export type { SlotRegistration } from './types-generated/SlotRegistration';
+export type { ShortcutsStatus } from './types-generated/ShortcutsStatus';
+/**
  * Payload of the `error` event emitted by the Rust polling loop. The
  * `severity` field was added in #79 part 1; the Dashboard.svelte
  * listener uses it to gate the red banner (only `severity: "error"`

@@ -11,6 +11,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, fireEvent, waitFor } from '@testing-library/svelte';
+import { tick } from 'svelte';
 import type { Mock } from 'vitest';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
@@ -43,6 +44,7 @@ import { resetSpotifyAuthFlow, resetTeamsAuthFlow } from '$lib/stores/authFlow.s
 import { presence, INITIAL_PRESENCE } from '$lib/stores/presence';
 import { theme } from '$lib/stores/theme';
 import { t } from '$lib/i18n';
+import type { ShortcutReason } from '$lib/types';
 
 const invokeMock = invoke as unknown as Mock;
 
@@ -52,10 +54,19 @@ type Status = { toggle_playback: SlotStatus; toggle_sync: SlotStatus };
 
 /** The bindings the backend has persisted — what registration reads from. */
 let persisted: ShortcutBindings;
-/** Accelerators this fake desktop refuses to grab, keyed to the reason. */
+/** Accelerators this fake desktop refuses to grab, keyed to the reason
+ * string the plugin answered with. Rust wraps the plugin text as
+ * `ShortcutReason::Unknown { message }` (issue #968), so the harness still
+ * produces a free-form string here and lets the wrap happen Rust-side;
+ * the rejected slot will surface as `Unknown { message }`.
+ */
 let refusals: Record<string, string>;
-/** Accelerators the backend's validator rejects, keyed to the reason. */
-let rejections: Record<string, string>;
+/** Accelerators the backend's validator rejects, keyed to the typed
+ * `ShortcutReason` Rust throws (issue #968). The harness emits the same
+ * tagged-enum JSON the Rust command serializes, so the frontend's
+ * `normalizeReason` parses it back to a typed reason.
+ */
+let rejections: Record<string, ShortcutReason>;
 
 /** A configured install with the given bindings. */
 function configWith(bindings: ShortcutBindings) {
@@ -263,9 +274,17 @@ describe('Settings — global shortcuts (#676)', () => {
     await waitFor(() => expect(commandsCalled('register_shortcuts')).toBeGreaterThan(before));
   });
 
+  /**
+   * Issue #968: the rejection is a typed `Conflict { other_slot }` from
+   * Rust, not a free-form string the validator built in English. The card
+   * maps it to the localized `settings.shortcutReasonConflict` template;
+   * the test asserts the *template* (not the raw English the old code
+   * spliced into German / French copy), and pins the save path that refused
+   * the combo so the test cannot be made green by a card that swallowed
+   * the rejection.
+   */
   it('names the reason a combination cannot be used and refuses to save it', async () => {
-    const reason = 'Conflicts with the toggle_sync shortcut ("CmdOrCtrl+Alt+S")';
-    rejections['CmdOrCtrl+Shift+K'] = reason;
+    rejections['CmdOrCtrl+Shift+K'] = { kind: 'Conflict', other_slot: 'toggle_sync' };
     const { container } = await mountSettings();
     const target = field(container, 'toggle_playback');
 
@@ -273,7 +292,9 @@ describe('Settings — global shortcuts (#676)', () => {
     await fireEvent.keyDown(target, { key: 'K', code: 'KeyK', ctrlKey: true, shiftKey: true });
 
     await waitFor(() => {
-      expect(rowText(container, 'toggle_playback')).toContain(reason);
+      expect(rowText(container, 'toggle_playback')).toContain(
+        t('settings.shortcutReasonConflict', { other: 'toggle_sync' })
+      );
     });
 
     await fireEvent.click(saveButton(container));
@@ -303,14 +324,30 @@ describe('Settings — global shortcuts (#676)', () => {
     expect(saveButton(container)).toBeTruthy();
   });
 
-  it('names an unparsable stored binding at mount', async () => {
+  /**
+   * Issue #968: the planner surfaces a stored-but-unparseable binding
+   * through the typed `NotAKey { accelerator }` reason (the same code path
+   * the live validator uses). The Settings card mounts by re-validating
+   * every slot through the `validate_shortcut` IPC, so the typed reason
+   * reaches the row on mount and the card renders the localized
+   * `settings.shortcutReasonNotAKey` template (which interpolates the
+   * offending accelerator verbatim). A regression here would render the
+   * raw stored string instead of the localized template.
+   */
+  it('names an unparsable stored binding at mount through the localized key', async () => {
     persisted = { toggle_playback: 'NotAKey', toggle_sync: 'CmdOrCtrl+Alt+S' };
-    rejections['NotAKey'] = '"NotAKey" is not a recognised shortcut (UnsupportedKey)';
+    // The Settings card's onMount re-validates each slot via
+    // `validate_shortcut`, which the harness answers from the typed
+    // `rejections` map. Setting the typed reason here is what the
+    // production Settings card observes.
+    rejections['NotAKey'] = { kind: 'NotAKey', accelerator: 'NotAKey' };
 
     const { container } = await mountSettings();
 
     await waitFor(() => {
-      expect(rowText(container, 'toggle_playback')).toContain('not a recognised shortcut');
+      expect(rowText(container, 'toggle_playback')).toContain(
+        t('settings.shortcutReasonNotAKey', { accelerator: 'NotAKey' })
+      );
     });
     // The raw stored value is shown, so the user can see what to replace.
     expect(field(container, 'toggle_playback').value).toBe('NotAKey');
@@ -348,6 +385,152 @@ describe('Settings — global shortcuts (#676)', () => {
     await waitFor(() => expect(commandsCalled('register_shortcuts')).toBeGreaterThan(before + 1));
     await waitFor(() => {
       expect(field(container, 'toggle_playback').value).toBe('CmdOrCtrl+Shift+K');
+    });
+  });
+
+  /**
+   * Issue #968 (acceptance #1): "a rejected accelerator renders fully
+   * localized copy in every shipped locale". The validator returns a typed
+   * `NotAKey { accelerator }` from Rust; the Settings card routes it
+   * through `shortcutReasonLabel` so a German card shows the German
+   * `settings.shortcutReasonNotAKey` template, not `"foo bar baz" is not a
+   * recognised shortcut`. The offensive accelerator is rendered via the
+   * `{accelerator}` placeholder, so the substituted text reaches the
+   * screen and a regression to the raw text breaks the assertion.
+   */
+  it('renders a NotAKey rejection through the localized key, not the raw accelerator (#968)', async () => {
+    // Pre-seed the typed reason the harness's `validate_shortcut` IPC
+    // throws. The accelerator the field records (Ctrl+Alt+X) is keyed in
+    // the rejection map, so the live IPC throws the typed reason and the
+    // row renders the localized label.
+    rejections['CmdOrCtrl+Alt+X'] = { kind: 'NotAKey', accelerator: 'CmdOrCtrl+Alt+X' };
+    const { container } = await mountSettings();
+    const target = field(container, 'toggle_playback');
+
+    // Focus + keypress drives `setShortcutBinding`, which calls
+    // `validateShortcut` and stores the typed reason the IPC throws.
+    await fireEvent.focus(target);
+    await fireEvent.keyDown(target, {
+      key: 'X',
+      code: 'KeyX',
+      ctrlKey: true,
+      altKey: true
+    });
+    await tick();
+
+    await waitFor(() => {
+      const row = rowText(container, 'toggle_playback');
+      const localized = t('settings.shortcutReasonNotAKey', {
+        accelerator: 'CmdOrCtrl+Alt+X'
+      });
+      // The localized template (including the `{accelerator}` interpolation)
+      // reaches the row.
+      expect(row).toContain(localized);
+      expect(row).toContain('CmdOrCtrl+Alt+X');
+      // The legacy English copy must not appear spliced into a German /
+      // French card.
+      expect(row).not.toContain('is not a recognised shortcut');
+      expect(row).not.toContain('(NotAKey)');
+    });
+
+    await fireEvent.click(saveButton(container));
+    // The rejected combination must not reach the backend's save path.
+    expect(commandsCalled('save_config')).toBe(0);
+  });
+
+  /**
+   * Issue #968 (acceptance #2): "unrecognised reasons still fall back to
+   * the backend text rather than rendering a raw code". A slot whose
+   * error is something `normalizeReason` does not recognise (e.g. a future
+   * variant Rust adds before the frontend ships the matching template) is
+   * downgraded to `Unknown { message }`, which the Settings card renders
+   * through `settings.shortcutReasonUnknown` — not as a JSON object dump
+   * like `{"kind":"Future"}`.
+   */
+  it('falls back to Unknown for a reason the frontend does not recognise (#968)', async () => {
+    // Capture the default impl so the mount's onMount chain still
+    // resolves (load_config, get_sync_status, …) — only the
+    // `register_shortcuts` response is replaced with a payload whose
+    // `kind` is not in the typed enum.
+    const defaultImpl = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'register_shortcuts') {
+        return {
+          toggle_playback: {
+            accelerator: 'CmdOrCtrl+Alt+P',
+            registered: false,
+            error: { kind: 'Future', payload: 42 }
+          },
+          toggle_sync: {
+            accelerator: 'CmdOrCtrl+Alt+S',
+            registered: true,
+            error: null
+          }
+        };
+      }
+      if (defaultImpl) return defaultImpl(cmd, args);
+      return [];
+    });
+    const { container } = await mountSettings();
+
+    await waitFor(() => {
+      const row = rowText(container, 'toggle_playback');
+      // The unrecognised shape is serialized through the unknown template —
+      // a JSON object dump must not appear in the rendered card.
+      expect(row).not.toContain('Future');
+      expect(row).not.toContain('"payload"');
+      expect(row).not.toContain('undefined');
+      // The Unknown path renders something the user can act on, not an
+      // empty card.
+      expect(row.length).toBeGreaterThan(0);
+    });
+  });
+
+  /**
+   * Issue #968 (autostart acceptance): the autostart toggle is the other
+   * place the Settings card used to splice a plugin/io error verbatim
+   * into localized copy. With the typed reason, a denial surfaces through
+   * `settings.shortcutReasonAutostart` and the original `cause` text is
+   * the parameter, not the body of the localized wrapper.
+   */
+  it('renders an autostart rejection through the localized key with the cause (#968)', async () => {
+    // Capture the default impl so the mount's onMount chain still
+    // resolves (load_config, get_sync_status, …) — only
+    // `set_autostart_enabled` throws the typed reason here.
+    const defaultImpl = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'set_autostart_enabled') {
+        throw { kind: 'Autostart', cause: 'permission denied' };
+      }
+      if (defaultImpl) return defaultImpl(cmd, args);
+      return [];
+    });
+
+    const { container } = await mountSettings();
+
+    // The autostart toggle is the labeled `#autostart` checkbox. The
+    // onchange handler invokes `set_autostart_enabled`, which throws the
+    // typed reason here.
+    const toggle = container.querySelector('#autostart') as HTMLInputElement | null;
+    expect(toggle).not.toBeNull();
+    // jsdom: fireEvent.click on a checkbox toggles `checked` and fires
+    // both `click` and `change`; the production handler reads
+    // `e.currentTarget.checked` on the change event.
+    toggle!.checked = true;
+    await fireEvent.change(toggle!);
+    await tick();
+
+    await waitFor(() => {
+      const body = container.textContent ?? '';
+      const localized = t('settings.shortcutReasonAutostart', {
+        cause: 'permission denied'
+      });
+      expect(body).toContain(localized);
+      // The `cause` placeholder must reach the screen.
+      expect(body).toContain('permission denied');
+      // The old prefix is gone — the wrapper is not the legacy English
+      // copy.
+      expect(body).not.toContain('Failed to update launch-at-login');
     });
   });
 });

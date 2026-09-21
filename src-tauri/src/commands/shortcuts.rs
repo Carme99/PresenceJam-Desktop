@@ -21,6 +21,7 @@
 //! apply time, which is exactly the state the Settings card renders.
 
 use crate::commands;
+use crate::commands::shortcut_reason::ShortcutReason;
 use crate::config::{AppConfig, ShortcutsConfig};
 use serde::Serialize;
 use std::sync::atomic::Ordering;
@@ -97,26 +98,30 @@ pub fn configured_binding(cfg: &ShortcutsConfig, slot: ShortcutSlot) -> Option<S
 ///
 /// A binding the *other* slot cannot itself parse is ignored rather than
 /// treated as a conflict: it is that slot's problem, and it registers nothing.
+///
+/// Failure carries a [`ShortcutReason`] (issue #968) — the Settings card maps
+/// the variant to a dictionary entry, so a German card shows e.g. `Nicht
+/// verwendbar: …` instead of `Nicht verwendbar: "Ctrl+P" is not a recognised
+/// shortcut (NotAKey)`. The user-facing message and the raw parse error stay
+/// in Rust's logs; the IPC contract stays a small set of codes.
 pub fn validate_accelerator(
     slot: ShortcutSlot,
     accelerator: &str,
     other_binding: Option<&str>,
-) -> Result<Shortcut, String> {
+) -> Result<Shortcut, ShortcutReason> {
     let trimmed = accelerator.trim();
     if trimmed.is_empty() {
-        return Err("Empty shortcut — use Clear to remove a binding".to_string());
+        return Err(ShortcutReason::NotAKey {
+            accelerator: trimmed.to_string(),
+        });
     }
     let parsed = trimmed
         .parse::<Shortcut>()
-        .map_err(|e| format!("\"{trimmed}\" is not a recognised shortcut ({e})"))?;
+        .map_err(|_| ShortcutReason::not_a_key(trimmed))?;
     if let Some(other) = other_binding {
         if let Ok(other_parsed) = other.trim().parse::<Shortcut>() {
             if other_parsed.id() == parsed.id() {
-                return Err(format!(
-                    "Conflicts with the {} shortcut (\"{}\") — one accelerator cannot drive both actions",
-                    slot.other().name(),
-                    other.trim()
-                ));
+                return Err(ShortcutReason::conflict(slot.other().name()));
             }
         }
     }
@@ -136,7 +141,10 @@ pub enum SlotPlan {
         parsed: Shortcut,
     },
     /// Keep the slot unbound and surface the reason.
-    Invalid { accelerator: String, reason: String },
+    Invalid {
+        accelerator: String,
+        reason: ShortcutReason,
+    },
 }
 
 /// Plans both slots from the config, in registration order.
@@ -183,7 +191,15 @@ pub struct SlotRegistration {
     /// Why the grab is not held: this desktop refused it, or the stored string
     /// does not parse. `None` whenever `registered` is true, and `None` for a
     /// deliberate release (see [`release_all`]).
-    pub error: Option<String>,
+    ///
+    /// Why a typed enum (issue #968): the rejection used to splice an English
+    /// `format!` into the Settings card's localized copy, so a German card
+    /// showed e.g. `Nicht verwendbar: "Ctrl+P" is not a recognised shortcut
+    /// (NotAKey)`. The variant is the user-facing reason key the frontend
+    /// maps to a dictionary entry; [`ShortcutReason::Unknown`] is the
+    /// escape hatch for genuinely foreign refusals (compositor text, partial
+    /// payloads).
+    pub error: Option<ShortcutReason>,
 }
 
 /// Both slots' registration outcomes (issue #676).
@@ -278,10 +294,16 @@ pub fn apply_plan(
                         registered: true,
                         error: None,
                     },
+                    // Issue #968: a plugin refusal carries the plugin's free-form
+                    // text (a Wayland compositor or another app's owner). It is
+                    // genuinely untranslatable, so it lands in `Unknown` and the
+                    // frontend renders the verbatim message through its own
+                    // dictionary entry (the message is the data; the entry is
+                    // just the wrapper that says "untranslated").
                     Err(reason) => SlotRegistration {
                         accelerator: Some(accelerator.clone()),
                         registered: false,
-                        error: Some(reason),
+                        error: Some(ShortcutReason::unknown(&reason)),
                     },
                 }
             }
@@ -663,15 +685,20 @@ pub fn conflict_reference(
 /// only feeds a *message* — what gets registered is decided by
 /// [`plan_shortcuts`] from the persisted config, so no caller can use this
 /// argument to smuggle a binding past the planner.
+///
+/// Returns a [`ShortcutReason`] on rejection (issue #968): an unknown slot
+/// name is reported as `Unknown` (a malformed caller — the frontend cannot
+/// name it without a UI for `invalid action`), the validation cases are the
+/// same `NotAKey` / `Conflict` codes the planner surfaces.
 #[tauri::command]
 pub fn validate_shortcut(
     accelerator: String,
     action: String,
     other: Option<String>,
     app: AppHandle,
-) -> Result<(), String> {
+) -> Result<(), ShortcutReason> {
     let slot = ShortcutSlot::from_name(&action)
-        .ok_or_else(|| format!("Unknown shortcut action \"{action}\""))?;
+        .ok_or_else(|| ShortcutReason::unknown(&format!("Unknown shortcut action \"{action}\"")))?;
     let cfg = config_or_default(&app);
     let reference = conflict_reference(other, &cfg.shortcuts, slot);
     validate_accelerator(slot, &accelerator, reference.as_deref()).map(|_| ())
@@ -747,18 +774,47 @@ mod tests {
 
     // ── validation ──────────────────────────────────────────────────────
 
+    /// Issue #968: the rejection carries a typed `NotAKey` variant (not a
+    /// free-form string), so the frontend maps it to the localized
+    /// `settings.shortcutReasonNotAKey` template instead of splicing the raw
+    /// `"NotAKey+Alt" is not a recognised shortcut (NotAKey)` text. The
+    /// offending string is preserved verbatim (the frontend renders it next
+    /// to the localized text). Blank/whitespace inputs are rejected too —
+    /// planning handles those upstream and the Settings card never sends a
+    /// blank through `validate_shortcut`, but the typed reason for blanks
+    /// is the same `NotAKey` code so there is exactly one rejection shape.
     #[test]
-    fn unparsable_accelerator_is_rejected_by_name() {
-        let err = validate_accelerator(ShortcutSlot::TogglePlayback, "NotAKey+Alt", None)
-            .expect_err("a key the plugin parser cannot read must be rejected");
-        assert!(
-            err.contains("not a recognised shortcut"),
-            "the reason must name the failure, got: {err}"
-        );
-        assert!(
-            err.contains("NotAKey"),
-            "the reason must quote the offending accelerator, got: {err}"
-        );
+    fn unparsable_accelerator_is_rejected_with_not_a_key_code() {
+        for accelerator in ["NotAKey+Alt", "foo bar baz"] {
+            let err = validate_accelerator(ShortcutSlot::TogglePlayback, accelerator, None)
+                .expect_err("a key the plugin parser cannot read must be rejected");
+            match &err {
+                ShortcutReason::NotAKey { accelerator: got } => {
+                    assert_eq!(
+                        got, accelerator,
+                        "the reason must quote the offending accelerator unchanged"
+                    );
+                }
+                other => panic!(
+                    "an unparsable accelerator must surface as `NotAKey`, got {other:?} (issue #968)"
+                ),
+            }
+        }
+
+        // Blank inputs normalize to "" — the function trims first (a re-parse
+        // of the trimmed form is what registration would feed the plugin), so
+        // the reason quotes the trimmed value, which is empty. The Settings
+        // card's other field-driven paths (`validate_shortcut`, the planner's
+        // `Unbound`) avoid calling this branch entirely, so the empty reason
+        // never reaches a UI; we just pin the typed reason stays a `NotAKey`.
+        for blank in ["", "   "] {
+            let err = validate_accelerator(ShortcutSlot::TogglePlayback, blank, None)
+                .expect_err("a blank binding must be rejected (the planner does not call this)");
+            assert!(
+                matches!(err, ShortcutReason::NotAKey { .. }),
+                "a blank binding must still surface as `NotAKey`, got {err:?} (issue #968)"
+            );
+        }
     }
 
     #[test]
@@ -769,10 +825,17 @@ mod tests {
             Some("CmdOrCtrl+Alt+P"),
         )
         .expect_err("both slots cannot share one accelerator");
-        assert!(
-            err.contains("toggle_playback"),
-            "the reason must name the slot that already holds it, got: {err}"
-        );
+        match &err {
+            ShortcutReason::Conflict { other_slot } => {
+                assert_eq!(
+                    other_slot, "toggle_playback",
+                    "the reason must name the slot that already holds it"
+                );
+            }
+            other => {
+                panic!("a conflict must surface as the `Conflict` code, got {other:?} (issue #968)")
+            }
+        }
     }
 
     /// The collision test is on the *parsed* accelerator, not the text: a user
@@ -870,10 +933,17 @@ mod tests {
             reference.as_deref(),
         )
         .expect_err("two rows cannot hold the same accelerator");
-        assert!(
-            err.contains("toggle_sync"),
-            "the reason must name the row that already has it, got: {err}"
-        );
+        match &err {
+            ShortcutReason::Conflict { other_slot } => {
+                assert_eq!(
+                    other_slot, "toggle_sync",
+                    "the reason must name the row that already has it"
+                );
+            }
+            other => panic!(
+                "a pending-pair conflict must surface as `Conflict`, got {other:?} (issue #968)"
+            ),
+        }
     }
 
     /// The other slot's binding being unreadable is *its* problem: it registers
@@ -888,6 +958,65 @@ mod tests {
             )
             .is_ok(),
             "a broken binding in the other slot must not block a valid one"
+        );
+    }
+
+    /// Issue #968: explicit regression for the previously-spliced English
+    /// string. The validator must answer `NotAKey { accelerator }` with the
+    /// trimmed offending string verbatim, and the inner parse error must
+    /// *not* leak into the IPC contract.
+    #[test]
+    fn a_garbage_accelerator_answers_with_not_a_key_only() {
+        let err = validate_accelerator(ShortcutSlot::TogglePlayback, "foo bar baz", None)
+            .expect_err("a multi-token garbage string must be rejected");
+        match err {
+            ShortcutReason::NotAKey { accelerator } => {
+                assert_eq!(
+                    accelerator, "foo bar baz",
+                    "the offending string is what the user has on screen, so the \
+                     reason must carry it verbatim"
+                );
+            }
+            other => panic!(
+                "garbage strings must surface as `NotAKey` only — the parser's \
+                 inner error text is not part of the IPC contract and must not \
+                 leak, got {other:?} (issue #968)"
+            ),
+        }
+    }
+
+    /// Issue #968: with the same `validate_accelerator` reason flowing to
+    /// both the live registration pass (via [`plan_shortcuts`]) and the
+    /// pre-save validator (`validate_shortcut` IPC), no accelerator that
+    /// parses for two slots can survive a register pass — both slots resolve
+    /// to the same `Conflict` code.
+    #[test]
+    fn two_slots_binding_one_accelerator_get_the_typed_conflict_code() {
+        let conflict_a = validate_accelerator(
+            ShortcutSlot::TogglePlayback,
+            "CmdOrCtrl+Alt+Z",
+            Some("CmdOrCtrl+Alt+Z"),
+        )
+        .expect_err("identical bindings in both rows must be a conflict");
+        let conflict_b = validate_accelerator(
+            ShortcutSlot::ToggleSync,
+            "CmdOrCtrl+Alt+Z",
+            Some("CmdOrCtrl+Alt+Z"),
+        )
+        .expect_err("the symmetric case is the same code");
+        assert_eq!(
+            conflict_a,
+            ShortcutReason::Conflict {
+                other_slot: "toggle_sync".to_string()
+            },
+            "slot A's conflict names the slot it conflicts with"
+        );
+        assert_eq!(
+            conflict_b,
+            ShortcutReason::Conflict {
+                other_slot: "toggle_playback".to_string()
+            },
+            "slot B's conflict names the slot it conflicts with"
         );
     }
 
@@ -919,7 +1048,14 @@ mod tests {
                 reason,
             } => {
                 assert_eq!(accelerator, "NotAKey");
-                assert!(!reason.is_empty(), "an invalid slot must carry a reason");
+                // Issue #968: the invalid slot's reason is now a typed code
+                // (not a free-form string), so the planner does the same
+                // surgery the live validator does.
+                assert_eq!(
+                    reason,
+                    &ShortcutReason::not_a_key("NotAKey"),
+                    "an invalid slot's reason must be the typed `NotAKey` code"
+                );
             }
             other => panic!("expected the bad slot to be Invalid, got {other:?}"),
         }
@@ -987,14 +1123,24 @@ mod tests {
             !refused.registered,
             "a refused grab must not be reported as live"
         );
-        assert!(
-            refused
-                .error
-                .as_deref()
-                .is_some_and(|e| e.contains("already in use")),
-            "the refusal must carry the plugin's reason, got {:?}",
-            refused.error
-        );
+        // Issue #968: a plugin refusal is genuinely foreign copy
+        // (compositor-owned, app-owned) — the typed reason captures the
+        // plugin's text in `Unknown { message }` so the Settings card can
+        // render it through the unknown template without splicing English
+        // into localized copy.
+        match refused.error.as_ref() {
+            Some(ShortcutReason::Unknown { message }) => {
+                assert!(
+                    message.contains("already in use"),
+                    "the refusal must carry the plugin's reason, got {message:?}"
+                );
+            }
+            other => panic!(
+                "a plugin refusal must be reported as `Unknown {{ message }}` \
+                 so the frontend renders the plugin text verbatim, got {other:?} \
+                 (issue #968)"
+            ),
+        }
         assert_eq!(
             refused.accelerator.as_deref(),
             Some("CmdOrCtrl+Alt+P"),
