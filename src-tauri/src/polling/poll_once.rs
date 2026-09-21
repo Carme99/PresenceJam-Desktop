@@ -621,7 +621,9 @@ fn run_inner(
                             );
                         }
                     },
-                    CasOutcome::RefreshFailed(_) => unreachable!("inner refresh_fn is Ok-wrapping"),
+                    CasOutcome::RefreshFailed { .. } => {
+                        unreachable!("inner refresh_fn is Ok-wrapping")
+                    }
                 }
             }
             Err(e) => {
@@ -634,7 +636,17 @@ fn run_inner(
                 // trigger re-auth instead of retrying forever. The write guard
                 // is dropped before persist_tokens (which re-locks the same
                 // RwLock for reading — parking_lot is not reentrant).
-                if matches!(e, SpotifyApiError::InvalidGrant) {
+                // Issue #798: only clear when the slot still holds the token
+                // this refresh ran from — a mid-flight replacement means the
+                // error is about a superseded token and the newer session is
+                // alive.
+                let refresh_superseded = state
+                    .tokens
+                    .spotify()
+                    .as_ref()
+                    .map(|t| t.access_token.as_str())
+                    != Some(pre_refresh_access_token.as_str());
+                if matches!(e, SpotifyApiError::InvalidGrant) && !refresh_superseded {
                     log::error!("[POLLING] poll_once: Spotify refresh token invalid (invalid_grant), discarding tokens and requiring reconnect");
                     *state.tokens.spotify_mut() = None;
                     if let Err(persist_err) = token_io::persist_tokens(state, app) {
@@ -651,6 +663,9 @@ fn run_inner(
                         "invalid-grant sleep",
                         mode,
                     );
+                }
+                if matches!(e, SpotifyApiError::InvalidGrant) && refresh_superseded {
+                    log::warn!("[POLLING] poll_once: slot replaced mid-refresh, keeping newer Spotify session");
                 }
                 emit_error(
                     app,
@@ -938,7 +953,7 @@ fn run_inner(
                             ) {
                                 CasOutcome::Committed(_) => true,
                                 CasOutcome::Discarded { .. } => false,
-                                CasOutcome::RefreshFailed(_) => {
+                                CasOutcome::RefreshFailed { .. } => {
                                     unreachable!("inner refresh_fn is Ok-wrapping")
                                 }
                             };
@@ -1112,7 +1127,22 @@ fn run_inner(
                             // (`invalid_grant`) needs re-auth; other refresh
                             // failures are transient and flow into the
                             // backoff / 5-strikes logic below.
-                            if matches!(refresh_err, SpotifyApiError::InvalidGrant) {
+                            // Issue #798: a mid-flight replacement means the error is
+                            // about a superseded token, not the live session — skip
+                            // the clear AND the reconnect emits, and report the
+                            // stale write error (not the refresh error) so the
+                            // attempt does not feed the 5-strikes reconnect exit.
+                            // Only clear when the slot still holds the token this
+                            // refresh ran from.
+                            let refresh_superseded = state
+                                .tokens
+                                .spotify()
+                                .as_ref()
+                                .map(|t| t.access_token.as_str())
+                                != Some(pre_refresh_access_token.as_str());
+                            if matches!(refresh_err, SpotifyApiError::InvalidGrant)
+                                && !refresh_superseded
+                            {
                                 log::warn!("[POLLING] poll_once: Spotify refresh token invalid (invalid_grant), discarding tokens and requiring reconnect");
                                 *state.tokens.spotify_mut() = None;
                                 if let Err(persist_err) = token_io::persist_tokens(state, app) {
@@ -1124,7 +1154,14 @@ fn run_inner(
                                 let _ = app.emit("spotify-reconnect-required", json!(null));
                                 let _ = app.emit("reconnect-required", json!(null));
                             }
-                            final_err = crate::sources::SourceError::Auth(refresh_err.to_string());
+                            if refresh_superseded {
+                                log::warn!("[POLLING] poll_once: slot replaced mid-refresh, keeping newer Spotify session");
+                            }
+                            final_err = if refresh_superseded {
+                                final_err
+                            } else {
+                                crate::sources::SourceError::Auth(refresh_err.to_string())
+                            };
                         }
                     }
                 }
@@ -1334,8 +1371,19 @@ fn interruptible_sleep(
 
 pub(crate) enum CasOutcome<T, E> {
     Committed(T),
-    Discarded { current: Option<T> },
-    RefreshFailed(E),
+    Discarded {
+        current: Option<T>,
+    },
+    /// Issue #798: the refresh failed, but the slot verdict still travels
+    /// with the error — `replaced` is true when the slot no longer holds
+    /// `pre_refresh_access_token`, i.e. a newer session was installed while
+    /// this refresh was in flight and the error is about a superseded
+    /// token. Dead-credential branches must only clear, persist and emit
+    /// `reconnect-required` when `replaced` is false.
+    RefreshFailed {
+        error: E,
+        replaced: bool,
+    },
 }
 
 /// Generic over the refresh error type `E` so each caller keeps its
@@ -1351,13 +1399,8 @@ pub(crate) fn cas_refresh_or_discard<T, E, F, G>(
 where
     T: Clone,
     F: FnOnce() -> Result<T, E>,
-    G: FnOnce(&T) -> &str,
+    G: Fn(&T) -> &str,
 {
-    let new_tokens = match refresh_fn() {
-        Ok(t) => t,
-        Err(e) => return CasOutcome::RefreshFailed(e),
-    };
-
     // Issue #180: this helper must NEVER persist tokens itself. Callers pass
     // `&mut *state.tokens.X_mut()` — a reborrow of the parking_lot write
     // guard, which stays alive for the whole call statement. Persisting here
@@ -1367,24 +1410,33 @@ where
     // thread parks forever on every successful refresh. The call sites
     // therefore persist in a statement AFTER this call returns, when the
     // guard is provably dropped.
-    let committed = {
-        if lock.as_ref().map(access_token_of) == Some(pre_refresh_access_token) {
-            *lock = Some(new_tokens.clone());
-            true
-        } else {
-            log::warn!(
-                "[POLLING] poll_once: cas_refresh_or_discard: {} state changed during refresh, discarding result",
-                label
-            );
-            false
+    //
+    // Issue #798: run the refresh FIRST, then compare the slot. The
+    // comparison must observe a replacement installed while `refresh_fn`
+    // was in flight (the lock-free reactive paths refresh without the
+    // tokens lock), so computing it before the call would be blind to the
+    // very interleave this guards. The verdict travels on the failure path
+    // too, so a dead-credential error about a superseded token cannot clear
+    // a newer session.
+    let result = refresh_fn();
+    let replaced = lock.as_ref().map(access_token_of) != Some(pre_refresh_access_token);
+    if replaced {
+        log::warn!(
+            "[POLLING] poll_once: cas_refresh_or_discard: {} state changed during refresh, discarding result",
+            label
+        );
+    }
+    match result {
+        Err(e) => CasOutcome::RefreshFailed { error: e, replaced },
+        Ok(new_tokens) => {
+            if !replaced {
+                *lock = Some(new_tokens.clone());
+                CasOutcome::Committed(new_tokens)
+            } else {
+                let current = lock.clone();
+                CasOutcome::Discarded { current }
+            }
         }
-    };
-
-    if committed {
-        CasOutcome::Committed(new_tokens)
-    } else {
-        let current = lock.clone();
-        CasOutcome::Discarded { current }
     }
 }
 
@@ -3263,7 +3315,23 @@ fn teams_token_for_write(app: &AppHandle, state: &Arc<AppState>) -> Option<Teams
                     Some(new_tokens)
                 }
                 CasOutcome::Discarded { current } => current,
-                CasOutcome::RefreshFailed(e) => {
+                CasOutcome::RefreshFailed {
+                    error: e,
+                    replaced: true,
+                } => {
+                    // Issue #798: the failed refresh never matched the slot
+                    // — a newer session was installed mid-flight, so it is
+                    // alive; keep it and skip this iteration's Teams work.
+                    log::warn!(
+                        "[POLLING] teams_token_for_write: slot replaced mid-refresh, keeping newer session: {}",
+                        e
+                    );
+                    state.tokens.teams().clone()
+                }
+                CasOutcome::RefreshFailed {
+                    error: e,
+                    replaced: false,
+                } => {
                     log::error!(
                         "[POLLING] teams_token_for_write: Failed to refresh Teams token: {}",
                         e
@@ -4355,7 +4423,7 @@ pub(crate) fn process_track(
                                     ) {
                                         CasOutcome::Committed(_) => true,
                                         CasOutcome::Discarded { .. } => false,
-                                        CasOutcome::RefreshFailed(_) => {
+                                        CasOutcome::RefreshFailed { .. } => {
                                             unreachable!("inner refresh_fn is Ok-wrapping")
                                         }
                                     };
@@ -4408,7 +4476,28 @@ pub(crate) fn process_track(
                                     // with no reconnect event. Either way the
                                     // typed refresh error (not the stale
                                     // write error) is what gets classified.
-                                    if teams_refresh_requires_reauth(&refresh_err) {
+                                    // Issue #798: only clear when the slot still holds the
+                                    // token this refresh ran from — a mid-flight
+                                    // replacement means the error is about a
+                                    // superseded token and the newer session is alive.
+                                    let refresh_superseded = state
+                                        .tokens
+                                        .teams()
+                                        .as_ref()
+                                        .map(|t| t.access_token.as_str())
+                                        != Some(pre_refresh_access_token.as_str());
+                                    if refresh_superseded {
+                                        log::warn!("[POLLING] process_track: slot replaced mid-refresh, keeping newer Teams session");
+                                        // Issue #798: the error is about a superseded token —
+                                        // yield a transient (not `return`: this arm's value
+                                        // feeds `write_outcome`, whose classifier below
+                                        // then treats it as transient — no clear, no
+                                        // reconnect event) instead of blaming the live
+                                        // session.
+                                        Err(TeamsApiError::Transient(format!(
+                                            "slot replaced mid-refresh; superseded refresh error ignored: {refresh_err}"
+                                        )))
+                                    } else if teams_refresh_requires_reauth(&refresh_err) {
                                         log::warn!("[POLLING] process_track: Teams refresh token is dead, discarding tokens");
                                         *state.tokens.teams_mut() = None;
                                         // Issue #180: the write guard in the
@@ -4424,10 +4513,11 @@ pub(crate) fn process_track(
                                                 persist_err
                                             );
                                         }
+                                        Err(refresh_err)
                                     } else {
                                         log::warn!("[POLLING] process_track: Teams reactive refresh failed (transient), keeping session");
+                                        Err(refresh_err)
                                     }
-                                    Err(refresh_err)
                                 }
                             }
                         }
@@ -4958,7 +5048,7 @@ pub(crate) fn handle_no_track(
                     ) {
                         CasOutcome::Committed(_) => true,
                         CasOutcome::Discarded { .. } => false,
-                        CasOutcome::RefreshFailed(_) => {
+                        CasOutcome::RefreshFailed { .. } => {
                             unreachable!("inner refresh_fn is Ok-wrapping")
                         }
                     };
@@ -5003,7 +5093,27 @@ pub(crate) fn handle_no_track(
                     // session; a transient refresh failure keeps it. Either
                     // way the typed refresh error (not the stale write
                     // error) is what gets classified.
-                    if teams_refresh_requires_reauth(&refresh_err) {
+                    // Issue #798: only clear when the slot still holds the
+                    // token this refresh ran from — a mid-flight replacement
+                    // means the error is about a superseded token and the
+                    // newer session is alive.
+                    let refresh_superseded = state
+                        .tokens
+                        .teams()
+                        .as_ref()
+                        .map(|t| t.access_token.as_str())
+                        != Some(pre_refresh_access_token.as_str());
+                    if refresh_superseded {
+                        log::warn!("[POLLING] handle_no_track: slot replaced mid-refresh, keeping newer Teams session");
+                        // Issue #798: the error is about a superseded token —
+                        // yield a transient (not `return`: this arm's value feeds
+                        // `clear_outcome`, whose classifier below then treats it
+                        // as transient — no clear, no reconnect event) instead
+                        // of blaming the live session.
+                        Err(TeamsApiError::Transient(format!(
+                            "slot replaced mid-refresh; superseded refresh error ignored: {refresh_err}"
+                        )))
+                    } else if teams_refresh_requires_reauth(&refresh_err) {
                         log::warn!("[POLLING] handle_no_track: Teams refresh token is dead, discarding tokens");
                         *state.tokens.teams_mut() = None;
                         // Issue #180: the write guard in the clearing
@@ -5016,10 +5126,11 @@ pub(crate) fn handle_no_track(
                                     persist_err
                                 );
                         }
+                        Err(refresh_err)
                     } else {
                         log::warn!("[POLLING] handle_no_track: Teams reactive refresh failed (transient), keeping session");
+                        Err(refresh_err)
                     }
-                    Err(refresh_err)
                 }
             }
         }
@@ -5513,7 +5624,76 @@ mod tests {
         assert_eq!(config_pause_backoff_max(&Some(raised)), 900);
     }
 
-    /// Regression guard for issue #72 drift point #3.
+    /// Issue #798: a failed refresh whose slot no longer holds the token it
+    /// ran from must report `replaced: true`. Pre-fix the helper returned
+    /// `RefreshFailed(e)` before inspecting the slot, so the error carried no
+    /// verdict and every dead-credential branch cleared the newer session
+    /// unconditionally. The swapped slot models a concurrent sign-in that
+    /// landed while the (failed) refresh was in flight — the helper computes
+    /// its verdict after `refresh_fn` returns, so a pre-call swap pins the
+    /// same observable as a mid-call one.
+    #[test]
+    fn test_cas_failed_refresh_reports_mid_flight_replacement() {
+        // `replaced: false` — slot untouched: the error is about the stored
+        // session, so callers may clear.
+        let mut slot: Option<String> = Some("old-access".to_string());
+        let outcome: CasOutcome<String, &str> = cas_refresh_or_discard(
+            "test",
+            &mut slot,
+            "old-access",
+            || Err("invalid_grant"),
+            |t| t.as_str(),
+        );
+        assert!(
+            matches!(
+                outcome,
+                CasOutcome::RefreshFailed {
+                    replaced: false,
+                    ..
+                }
+            ),
+            "an unmatched failed refresh must report replaced: false"
+        );
+
+        // `replaced: true` — the slot moved while the refresh was in flight:
+        // the error is about a superseded token, so callers must NOT clear.
+        let mut slot: Option<String> = Some("new-access".to_string());
+        let outcome: CasOutcome<String, &str> = cas_refresh_or_discard(
+            "test",
+            &mut slot,
+            "old-access",
+            || Err("invalid_grant"),
+            |t| t.as_str(),
+        );
+        assert!(
+            matches!(outcome, CasOutcome::RefreshFailed { replaced: true, .. }),
+            "a failed refresh whose slot moved mid-flight must report replaced: true"
+        );
+        assert_eq!(
+            slot.as_deref(),
+            Some("new-access"),
+            "the helper must leave the newer session in the slot"
+        );
+
+        // Success path keeps its CAS verdict too: racing a replacement
+        // discards the winner instead of clobbering it.
+        let mut slot: Option<String> = Some("new-access".to_string());
+        let outcome: CasOutcome<String, &str> = cas_refresh_or_discard(
+            "test",
+            &mut slot,
+            "old-access",
+            || Ok("refreshed".to_string()),
+            |t| t.as_str(),
+        );
+        assert!(
+            matches!(
+                outcome,
+                CasOutcome::Discarded { current } if current.as_deref() == Some("new-access")
+            ),
+            "a successful refresh racing a replacement must discard"
+        );
+    }
+
     #[test]
     fn test_cas_discard_block_is_single_source_of_truth() {
         let source = include_str!("poll_once.rs");
