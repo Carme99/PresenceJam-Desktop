@@ -31,7 +31,7 @@ import { render, cleanup, waitFor } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { get } from 'svelte/store';
 import type { AppConfig } from '$lib/types';
-import { configStore, defaultConfig } from '$lib/stores/config';
+import { configHydrated, configStore, defaultConfig, loadConfig } from '$lib/stores/config';
 import {
   NOTIFICATION_CLASSES,
   NOTIFICATION_PREFS_MIRROR_KEY,
@@ -126,6 +126,9 @@ function seed(classes: Partial<NotificationPreferences> = {}): void {
     }
   };
   configStore.set(storedConfig);
+  // The seeded document stands in for a backend `load_config` result, so the
+  // store counts as hydrated — #789 tests reset this explicitly.
+  configHydrated.set(true);
 }
 
 /**
@@ -146,6 +149,7 @@ async function emit(event: string, payload: unknown = null) {
 }
 
 const saveCalls = () => invoke.mock.calls.filter((c) => c[0] === 'save_config');
+const updateCalls = () => invoke.mock.calls.filter((c) => c[0] === 'update_config');
 
 beforeEach(() => {
   window.localStorage.clear();
@@ -156,10 +160,20 @@ beforeEach(() => {
   // `isTauriRuntime` is computed at component init; without it the layout
   // registers no process-wide listeners at all.
   Object.defineProperty(window, '__TAURI_INTERNALS__', { value: {}, configurable: true });
-  invoke.mockReset().mockImplementation(async (cmd: string, args?: { config?: AppConfig }) => {
+  invoke.mockReset().mockImplementation(async (cmd: string, args?: { config?: AppConfig; patch?: Partial<AppConfig> }) => {
     if (cmd === 'load_config') return storedConfig;
     if (cmd === 'save_config') {
       storedConfig = args?.config ?? storedConfig;
+      return storedConfig;
+    }
+    if (cmd === 'update_config') {
+      const patch = args?.patch;
+      if (patch?.notifications) {
+        storedConfig = {
+          ...storedConfig,
+          notifications: { ...storedConfig.notifications, ...patch.notifications }
+        };
+      }
       return storedConfig;
     }
     if (cmd === 'get_sync_status') {
@@ -408,15 +422,19 @@ describe('the Settings toggle path (#675)', () => {
     expect(await setNotificationPreference('sync_stopped', true)).toBe(false);
     expect(get(notificationPreferences).sync_stopped).toBe(false);
     expect(saveCalls()).toEqual([]);
+    expect(updateCalls()).toEqual([]);
   });
 
-  it('persists an enabled class to the config and mirrors it to sibling windows', async () => {
+  it('persists an enabled class through the partial patch and mirrors it to sibling windows', async () => {
     seed();
 
     expect(await setNotificationPreference('auth_required', true)).toBe(true);
     expect(get(notificationPreferences).auth_required).toBe(true);
-    const saved = saveCalls()[0]?.[1] as { config: AppConfig };
-    expect(saved.config.notifications.auth_required).toBe(true);
+    // Issue #789: a toggle merges one section — it never rewrites the whole
+    // document from the in-memory copy.
+    expect(saveCalls()).toEqual([]);
+    const patched = updateCalls()[0]?.[1] as { patch: { notifications: NotificationPreferences } };
+    expect(patched.patch.notifications).toEqual({ auth_required: true });
     expect(
       JSON.parse(window.localStorage.getItem(NOTIFICATION_PREFS_MIRROR_KEY) ?? '{}')
     ).toMatchObject({ auth_required: true });
@@ -453,6 +471,39 @@ describe('the Settings toggle path (#675)', () => {
     expect(get(notificationPreferences).sync_stopped).toBe(true);
     expect(get(configStore).notifications.sync_stopped).toBe(true);
     expect(convergeFromMirror('{oops')).toBe(false);
+  });
+});
+
+describe('the toggle hydration gate (#789)', () => {
+  it('leaves the document untouched and returns false when load_config rejects', async () => {
+    seed();
+    configHydrated.set(false);
+    const before = structuredClone(storedConfig);
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'load_config') throw new Error('config.json is unreadable');
+      return undefined;
+    });
+
+    expect(await setNotificationPreference('sync_stopped', true)).toBe(false);
+
+    expect(saveCalls()).toEqual([]);
+    expect(updateCalls()).toEqual([]);
+    expect(storedConfig).toEqual(before);
+    expect(get(notificationPreferences).sync_stopped).toBe(false);
+    expect(get(configHydrated)).toBe(false);
+  });
+
+  it('stays silent after a failed load even with the compiled-in defaults on', async () => {
+    seed({ sync_stopped: true });
+    configHydrated.set(false);
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'load_config') throw new Error('config.json is unreadable');
+      return undefined;
+    });
+    await loadConfig();
+    expect(get(configHydrated)).toBe(false);
+    expect(await notifySyncStopped()).toBe(false);
+    expect(plugin.sendNotification).not.toHaveBeenCalled();
   });
 });
 

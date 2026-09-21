@@ -534,6 +534,12 @@ export interface ConfigPatchPayload {
   polling?: Partial<AppConfig['polling']>;
   logging?: Partial<AppConfig['logging']>;
   autostart?: boolean;
+  // Issue #789: one-class toggle — the backend merges just this section, so
+  // a toggle never rewrites the document from a possibly-stale in-memory copy.
+  notifications?: Partial<AppConfig['notifications']>;
+  // Issue #789: the pause-sync deadline for the same partial-write path — a
+  // string sets it, `null` clears it, absent leaves it untouched.
+  snooze_until?: string | null;
   status_rules?: Partial<AppConfig['status_rules']>;
 }
 
