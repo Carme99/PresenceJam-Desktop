@@ -378,6 +378,8 @@ export const fr: Dict = {
   'logs.copySnapshot': 'Copier le snapshot',
   'logs.snapshotCopied': 'Snapshot censuré copié dans le presse-papiers.',
   'logs.snapshotCopyFailed': 'Impossible de copier le snapshot.',
+  'logs.openFolderError':
+    'Impossible d\'ouvrir le dossier des journaux. Il n\'existe peut-être pas encore — essayez de redémarrer l\'application pour le créer.',
   // 4.6 additions
   'dashboard.availabilityListening': 'Écoute en cours (disponible)',
   'dashboard.availabilityCleared': 'Disponibilité réinitialisée',
