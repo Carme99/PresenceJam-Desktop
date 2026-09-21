@@ -4723,6 +4723,74 @@ pub(crate) fn handle_no_track(
     } else {
         None
     };
+    // Issue #791: the no-track clear is a status write too, so the presence
+    // gate and the manual-status verdict govern it — pre-fix playback stopping
+    // replaced a status message the user typed with our placeholder. Mirrors
+    // the paused-clear read: a failed read fails open and the write proceeds.
+    // A rule verdict needs no read, so it short-circuits first (paused path).
+    let mut presence_reason: Option<String> = None;
+    let mut presence_sample: Option<(String, String)> = None;
+    if suppression_reason.is_none() {
+        let presence_gate_enabled = config
+            .as_ref()
+            .map(|c| c.teams.presence_gate)
+            .unwrap_or(true);
+        let respect_manual_status = config
+            .as_ref()
+            .map(|c| c.teams.respect_manual_status)
+            .unwrap_or(true);
+        if presence_gate_enabled || respect_manual_status {
+            match get_teams_presence(&teams_tok.access_token) {
+                Ok(presence) => {
+                    observe_presence_sample(
+                        respect_manual_status,
+                        &presence,
+                        last_posted_status.as_deref(),
+                        last_posted_placeholder.as_deref(),
+                    );
+                    let idle_threshold_secs: u64 = config
+                        .as_ref()
+                        .map(|c| c.teams.idle_away_after_seconds)
+                        .unwrap_or(0);
+                    let idle_threshold_crossed = if idle_threshold_secs > 0 {
+                        crate::platform::idle::seconds_since_last_input()
+                            .is_some_and(|secs| secs.0 >= idle_threshold_secs)
+                    } else {
+                        false
+                    };
+                    if let Some(reason) = presence_gate_decision(
+                        &presence,
+                        presence_gate_enabled,
+                        ooo_gate_enabled(config, no_track_rule.presence.is_some()),
+                        respect_manual_status,
+                        last_posted_status.as_deref(),
+                        last_posted_placeholder.as_deref(),
+                        Utc::now(),
+                        crate::platform::focus::probe_focus(),
+                        config
+                            .as_ref()
+                            .map(|c| c.teams.gate_when_presenting)
+                            .unwrap_or(false),
+                        idle_threshold_crossed,
+                    ) {
+                        presence_sample =
+                            Some((presence.availability.clone(), presence.activity.clone()));
+                        presence_reason = Some(reason);
+                    }
+                }
+                Err(e) => {
+                    log::warn!(
+                        "[POLLING] handle_no_track: presence gate read failed, proceeding with no-track clear: {}",
+                        e
+                    );
+                }
+            }
+        }
+    }
+    // The combined verdict: a rule suppression or a presence/manual-status gate
+    // both block the clear. Either one records a suppression (never a post) so
+    // the decision can flip back, and the event fires once per episode.
+    let gate_blocked = suppression_reason.is_some() || presence_reason.is_some();
     // Finding D4 (issue #687): the same class of defect as the paused clear.
     // Pre-fix the byte-identity check above ran BEFORE the suppression verdict,
     // and the suppressed branch recorded the placeholder as POSTED although
@@ -4732,15 +4800,14 @@ pub(crate) fn handle_no_track(
     // compare, and record a SUPPRESSION (not a post) when it blocks.
     let already_posted = last_posted_placeholder.as_deref() == Some(placeholder.as_str());
     let already_suppressed = suppressed_placeholder.as_deref() == Some(placeholder.as_str());
-    match placeholder_write_decision(
-        suppression_reason.is_some(),
-        already_posted,
-        already_suppressed,
-    ) {
+    match placeholder_write_decision(gate_blocked, already_posted, already_suppressed) {
         PlaceholderWrite::Suppress { announce } => {
+            let reason = suppression_reason
+                .or(presence_reason.as_deref())
+                .unwrap_or(GATE_REASON_QUIET_HOURS);
             log::info!(
                 "[POLLING] handle_no_track: clear suppressed ({}), keeping Teams status untouched (retried once the decision changes)",
-                suppression_reason.unwrap_or(GATE_REASON_QUIET_HOURS)
+                reason
             );
             // Findings D4 (issue #687): recorded as SUPPRESSED so the decision
             // can flip back — the next iteration where the rule no longer
@@ -4755,12 +4822,8 @@ pub(crate) fn handle_no_track(
             // naming a track that has ended. Record the no-track sentinel.
             *gated_track_key = no_track_gate_key(true).map(str::to_string);
             if announce {
-                emit_presence_gated(
-                    app,
-                    suppression_reason.unwrap_or(GATE_REASON_QUIET_HOURS),
-                    "",
-                    "",
-                );
+                let (availability, activity) = presence_sample.unwrap_or_default();
+                emit_presence_gated(app, reason, &availability, &activity);
             }
             return teams_backoff_secs;
         }
@@ -9496,6 +9559,94 @@ mod tests {
             "the direct presence read must record the manual-status verdict before deciding \
              (review round 3, item 3) — route it through `gate_verdict`, or call \
              `observe_presence_sample` at the read"
+        );
+    }
+
+    /// Issue #791: with `respect_manual_status` on and a user-typed status,
+    /// playback stopping must leave the status untouched — the manual-status
+    /// verdict turns the no-track decision into `Suppress`.
+    #[test]
+    fn test_no_track_manual_status_verdict_suppresses_the_clear() {
+        use crate::platform::focus::PresentationState;
+        use crate::teams::{PresenceInfo, PresenceStatusMessage};
+        let manual = PresenceInfo {
+            availability: "available".to_string(),
+            activity: "available".to_string(),
+            status_message: Some(PresenceStatusMessage {
+                content: "In a workshop".to_string(),
+                expires_at: None,
+            }),
+            ..PresenceInfo::default()
+        };
+        let verdict = presence_gate_decision(
+            &manual,
+            false,
+            false,
+            true,
+            None,
+            None,
+            Utc::now(),
+            PresentationState::None,
+            false,
+            false,
+        );
+        assert_eq!(
+            verdict.as_deref(),
+            Some(GATE_REASON_MANUAL_STATUS),
+            "a user-typed status blocks even with no track and no other gate (issue #791)"
+        );
+        assert_eq!(
+            placeholder_write_decision(verdict.is_some(), false, false),
+            PlaceholderWrite::Suppress { announce: true },
+            "the manual-status verdict turns the no-track decision into Suppress, \
+             leaving the user's status untouched and recording the presence-gated reason"
+        );
+        assert!(
+            !manual_status_blocks_write(false, Some(&manual), None, None, Utc::now()),
+            "with respect_manual_status off the same status must not block (fail-open opt-out)"
+        );
+    }
+
+    /// Issue #791 structural guard: `handle_no_track` must consult the
+    /// presence/manual-status verdict before the clear POST.
+    #[test]
+    fn test_no_track_clear_consults_presence_verdict_before_post() {
+        let prod = prod_source();
+        let body = prod_fn_body(prod, "pub(crate) fn handle_no_track(");
+        let read = body
+            .find("get_teams_presence(")
+            .expect("handle_no_track must read presence for the gate (issue #791)");
+        let record = body.find("observe_presence_sample(").expect(
+            "handle_no_track must record the manual-status verdict (review round 3, item 3)",
+        );
+        let verdict = body
+            .find("presence_gate_decision(")
+            .expect("handle_no_track must consult the presence/manual-status verdict (issue #791)");
+        let decision = body
+            .find("placeholder_write_decision(gate_blocked,")
+            .expect("handle_no_track must decide from the combined verdict (issue #791)");
+        let clear = body
+            .find("clear_teams_status_message(")
+            .expect("handle_no_track must keep the clear POST");
+        assert!(
+            read < verdict && record < verdict && verdict < decision && decision < clear,
+            "the presence read, its recording, the verdict, and the combined decision \
+             must all precede the clear POST: pre-fix the no-track path posted the \
+             placeholder over a status message the user typed (issue #791)"
+        );
+        // The blocked path must announce the presence/manual-status reason with
+        // the Graph sample, mirroring the paused path's once-per-episode emit.
+        let suppress_arm_start = body
+            .find("PlaceholderWrite::Suppress")
+            .expect("the no-track clear must use the shared decision");
+        let post_arm_start = body
+            .find("PlaceholderWrite::Post")
+            .expect("the no-track clear must keep the POST arm");
+        let suppress_arm = &body[suppress_arm_start..post_arm_start];
+        assert!(
+            suppress_arm.contains("presence_reason"),
+            "the no-track suppress arm must surface the presence/manual-status reason, \
+             not only the rule verdict (issue #791)"
         );
     }
 
