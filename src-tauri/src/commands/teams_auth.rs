@@ -291,7 +291,10 @@ fn refresh_teams_impl(state: &Arc<AppState>, app: &AppHandle) -> Result<(), Stri
             );
             Err(TEAMS_REAUTH_MSG.to_string())
         }
-        CasOutcome::RefreshFailed(TeamsApiError::InvalidGrant) => {
+        CasOutcome::RefreshFailed {
+            error: TeamsApiError::InvalidGrant,
+            replaced: false,
+        } => {
             log::error!(
                 "{CMD} refresh_teams: Teams refresh token is dead (invalid_grant); discarding tokens and requiring re-auth"
             );
@@ -306,7 +309,14 @@ fn refresh_teams_impl(state: &Arc<AppState>, app: &AppHandle) -> Result<(), Stri
             }
             Err(TEAMS_REAUTH_MSG.to_string())
         }
-        CasOutcome::RefreshFailed(e) => {
+        // Issue #798: the failed refresh never matched the slot — a newer
+        // session was installed mid-flight, so it is alive and this refresh
+        // is a no-op (mirrors the Discarded-Some arm above).
+        CasOutcome::RefreshFailed { replaced: true, .. } => {
+            log::info!("{CMD} refresh_teams: NOOP (slot replaced mid-refresh; not persisted)");
+            Ok(())
+        }
+        CasOutcome::RefreshFailed { error: e, .. } => {
             log::warn!("{CMD} refresh_teams: refresh failed (session kept): {}", e);
             Err(e.to_string())
         }

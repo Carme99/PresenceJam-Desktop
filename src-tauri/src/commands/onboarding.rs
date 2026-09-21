@@ -262,11 +262,17 @@ fn spotify_session_verdict(
             // in the slot now is newer, so the session is alive.
             CasOutcome::Discarded { current } if current.is_some() => Ok(()),
             CasOutcome::Discarded { .. } => Err(RefreshFailure::Dead),
-            CasOutcome::RefreshFailed(SpotifyApiError::InvalidGrant) => {
+            CasOutcome::RefreshFailed {
+                error: SpotifyApiError::InvalidGrant,
+                replaced: false,
+            } => {
                 discard_dead_session("Spotify", || *state.tokens.spotify_mut() = None, state, app);
                 Err(RefreshFailure::Dead)
             }
-            CasOutcome::RefreshFailed(_) => Err(RefreshFailure::Transient),
+            // Issue #798: the error is about a superseded token — the newer
+            // session in the slot is alive.
+            CasOutcome::RefreshFailed { replaced: true, .. } => Ok(()),
+            CasOutcome::RefreshFailed { .. } => Err(RefreshFailure::Transient),
         }
     })
 }
@@ -388,11 +394,17 @@ fn teams_session_verdict(
             }
             CasOutcome::Discarded { current } if current.is_some() => Ok(()),
             CasOutcome::Discarded { .. } => Err(RefreshFailure::Dead),
-            CasOutcome::RefreshFailed(TeamsApiError::InvalidGrant) => {
+            CasOutcome::RefreshFailed {
+                error: TeamsApiError::InvalidGrant,
+                replaced: false,
+            } => {
                 discard_dead_session("Teams", || *state.tokens.teams_mut() = None, state, app);
                 Err(RefreshFailure::Dead)
             }
-            CasOutcome::RefreshFailed(_) => Err(RefreshFailure::Transient),
+            // Issue #798: the error is about a superseded token — the newer
+            // session in the slot is alive.
+            CasOutcome::RefreshFailed { replaced: true, .. } => Ok(()),
+            CasOutcome::RefreshFailed { .. } => Err(RefreshFailure::Transient),
         }
     })
 }

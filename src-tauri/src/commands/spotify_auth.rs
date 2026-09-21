@@ -703,9 +703,10 @@ pub fn refresh_spotify(
         // raise the same re-auth signal the polling loop raises for this
         // outcome — mirroring `poll_once`'s Spotify policy so the UI reacts
         // identically whichever path noticed the dead session.
-        crate::polling::CasOutcome::RefreshFailed(
-            crate::spotify::SpotifyApiError::InvalidGrant,
-        ) => {
+        crate::polling::CasOutcome::RefreshFailed {
+            error: crate::spotify::SpotifyApiError::InvalidGrant,
+            replaced: false,
+        } => {
             *state.tokens.spotify_mut() = None;
             if let Err(e) = token_io::persist_tokens(state.inner(), &app) {
                 log::warn!(
@@ -720,7 +721,13 @@ pub fn refresh_spotify(
             let _ = app.emit("spotify-reconnect-required", ());
             return Err("Spotify sign-in expired - reconnect Spotify to continue.".to_string());
         }
-        crate::polling::CasOutcome::RefreshFailed(e) => {
+        // Issue #798: the failed refresh never matched the slot — a newer
+        // session was installed mid-flight, so it is alive and this refresh
+        // is a no-op (mirrors the Discarded-Some arm above).
+        crate::polling::CasOutcome::RefreshFailed { replaced: true, .. } => {
+            log::info!("{CMD} refresh_spotify: NOOP (slot replaced mid-refresh; not persisted)");
+        }
+        crate::polling::CasOutcome::RefreshFailed { error: e, .. } => {
             log::warn!("{CMD} refresh_spotify: transient refresh failure - {}", e);
             return Err(e.to_string());
         }
