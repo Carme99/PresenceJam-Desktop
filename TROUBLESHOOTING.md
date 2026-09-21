@@ -155,6 +155,15 @@ Settings shows the same state on the credential row ("System keychain unavailabl
 Closing the window is not an exit: the close button only hides the app to the
 tray, where it keeps polling Spotify and keeps writing your Teams status.
 
+**No tray icon?** On GNOME without the AppIndicator extension (or a host
+missing `libayatana-appindicator3`) there is no tray to minimize to, so the
+app closes the window for real instead and quits — sync stops with it — and
+shows a notification saying so plus how to get the tray back (issue #819). To
+restore the tray, install `libayatana-appindicator3` for your distro and
+enable the GNOME AppIndicator extension, then re-launch — see [Linux: no tray
+icon and no window](#linux-no-tray-icon-and-no-window). Closing without a
+tray is a full quit: re-launch the app to start a fresh session.
+
 **To prevent it from starting automatically:**
 - Turn off **Launch at Login** in Settings. The login entry it writes is the Windows/macOS login item or `~/.config/autostart/PresenceJam.desktop` on Linux; delete that file if the app is already uninstalled.
 
