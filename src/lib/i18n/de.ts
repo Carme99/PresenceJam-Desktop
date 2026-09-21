@@ -457,12 +457,12 @@ export const de: Dict = {
 
   // 4.7.0 — S4 (rules engine)
   'rules.quietWindowHint':
-    'Ruhezeiten laufen über Mitternacht — 22:00–07:00 gilt durch die Nacht. Eine Endzeit von 00:00 bedeutet Mitternacht (Tagesende), und gleicher Beginn und Schluss passen nie.',
+    'Ruhezeiten laufen über Mitternacht — 22:00–07:00 gilt durch die Nacht. Jede Hälfte gehört zu der Nacht, in der sie beginnt: Ist nur Montag ausgewählt, gilt der Zeitraum von Montagnacht bis Dienstagmorgen. Eine Endzeit von 00:00 bedeutet Mitternacht (Tagesende), und gleicher Beginn und Schluss passen nie.',
   'rules.pausePollingLabel': 'Abfrage in diesem Zeitraum anhalten',
   'rules.pausePollingHint':
     'Während dieses Zeitraums wird Spotify gar nicht abgefragt — kein Status, kein Teams-Aufruf. Die Abfrage läuft automatisch weiter, sobald der Zeitraum endet.',
   'rules.trackRulesOrderHint':
-    'Regeln werden von oben nach unten geprüft — die erste passende gewinnt. Ohne Wochentage gilt eine Regel jeden Tag; eine Endzeit von 00:00 bedeutet Tagesende, und gleicher Beginn und Schluss passen nie.',
+    'Regeln werden von oben nach unten geprüft — die erste passende gewinnt. Ohne Wochentage gilt eine Regel jeden Tag; eine Endzeit von 00:00 bedeutet Tagesende, und gleicher Beginn und Schluss passen nie. Ein Zeitraum über Mitternacht gehört zu der Nacht, in der er beginnt: Ist nur Montag ausgewählt, gilt 22:00–07:00 von Montagnacht bis Dienstagmorgen.',
   'rules.ruleStart': 'Beginn des Regelzeitraums',
   'rules.ruleEnd': 'Ende des Regelzeitraums',
   'rules.ruleDays': 'Aktive Tage dieser Regel (keine Auswahl = jeden Tag)',
