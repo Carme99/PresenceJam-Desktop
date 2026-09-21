@@ -130,7 +130,7 @@ Each quiet-hours row also has a **Presence while this rule applies** picker. It 
 | Active days | The weekdays this rule applies on — none ticked means every day. |
 | Window start / Window end | The rule's own time window, with the same wrap-over-midnight semantics as quiet hours: an end time of `00:00` means the end of the day, and a start equal to the end never matches. The default `00:00 → 24:00` contains every time. |
 | Post this instead | Non-empty — this text is posted instead of the formatted status. **Empty — the status write is suppressed entirely** for the matching track. |
-| Presence while this rule applies | *Don't change my presence* (default), or one of the five supported availability/activity pairs — armed while the rule matches. |
+| Presence while this rule applies | *Don't change my presence* (default), or one of the five supported availability/activity pairs — armed while the rule matches, including on the nothing-playing path for time-based quiet-hours windows (a scoped track rule's stale pair still clears when its track ends). |
 
 New track rules are added **disabled**, so a half-filled rule can't suppress your status by accident. Rules are evaluated **top to bottom and the first matching rule wins**, and the card's move-up / move-down buttons change that order — put the narrow rule above the broad one. A rule whose window does not contain the current time, or whose active-day set does not include today, simply does not match. A suppressed track is re-checked every 240 s (the same clock as the presence gate), so clearing the rule or leaving the window posts the status mid-track.
 

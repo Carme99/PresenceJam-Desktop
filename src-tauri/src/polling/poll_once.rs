@@ -4861,24 +4861,47 @@ pub(crate) fn handle_no_track(
         }
     };
 
-    // P1 (issue #3.0-P1): availability sync — clear the Graph presence session
-    // when nothing is playing (`clearPresence` 404 = session already gone =
-    // success). Runs independently of `clear_on_pause`: that toggle governs the
-    // placeholder status message only, while availability sync owns the
-    // presence bubble. Finding #634: a rule's own presence session is cleared
-    // here too — nothing is playing, so the rule's window/track no longer
-    // applies and the user's real state must return. `armed_presence` is
-    // cleared with it, so the next track re-arms instead of believing a session
-    // is live.
+    // P1 (issue #3.0-P1): availability sync owns the presence bubble while
+    // nothing is playing, independently of `clear_on_pause` (that toggle
+    // governs the placeholder status message only). The rule decision is
+    // evaluated HERE — hoisted above the presence block (it used to live
+    // below, feeding only the status-write verdict) — because the presence
+    // half needs it too. The decision is pure (config + clock, no Graph I/O),
+    // so hoisting changes nothing for the verdict below, which keeps
+    // consuming the same value. With nothing playing there is no
+    // artist/title, so only quiet hours and match-all rules can match.
+    //
+    // Issue #795: a time-based quiet-hours window carrying a presence pair is
+    // still in force while nothing plays, so its pair is armed through
+    // `rule_presence_backoff` (mirroring the playing-path quiet entry).
+    // The no-pair case keeps the `clearPresence` clear (404 = session already
+    // gone = success), so a track rule's stale pair still retires when its
+    // track ends — finding #634's "the window/track no longer applies"
+    // rationale holds for track rules, not for quiet hours. The pair arm also
+    // updates `armed_presence`, so the next track re-arms instead of
+    // believing a session is live.
+    let no_track_rule = rule_gate(config, "", "");
     let mut teams_backoff_secs: u64 = 0;
     if availability_sync_enabled(config) {
-        teams_backoff_secs = teams_backoff_secs.max(clear_presence_session(
-            app,
-            &teams_tok.access_token,
-            "Availability cleared",
-            armed_presence,
-            last_availability_arm,
-        ));
+        if no_track_rule.presence.is_some() {
+            teams_backoff_secs = teams_backoff_secs.max(rule_presence_backoff(
+                app,
+                &teams_tok.access_token,
+                config,
+                &no_track_rule,
+                None,
+                armed_presence,
+                last_availability_arm,
+            ));
+        } else {
+            teams_backoff_secs = teams_backoff_secs.max(clear_presence_session(
+                app,
+                &teams_tok.access_token,
+                "Availability cleared",
+                armed_presence,
+                last_availability_arm,
+            ));
+        }
     }
 
     // Issue #155: honor `clear_on_pause` like the paused-track branch.
@@ -4903,8 +4926,9 @@ pub(crate) fn handle_no_track(
     //
     // Finding #634 (issue #634): the decision now also carries the rule's
     // replacement text, so a quiet-hours entry saying "🌙 Back at 09:00" posts
-    // that instead of going silent.
-    let no_track_rule = rule_gate(config, "", "");
+    // that instead of going silent. (`no_track_rule` was evaluated above for
+    // the presence half and is reused here — the decision is pure, so the
+    // verdict is unchanged.)
     let placeholder = no_track_rule
         .replacement
         .clone()
@@ -8656,6 +8680,85 @@ mod tests {
         let decision = rule_gate_at(&outside, 1200, 3, "", "");
         assert!(!decision.suppresses());
         assert!(decision.presence.is_none());
+    }
+
+    /// Issue #795: the no-track decision carries the quiet-hours pair (empty
+    /// artist/title = the no-track call), so the hoisted `handle_no_track`
+    /// presence block arms it instead of clearing; and the pair retires when
+    /// window ends.
+    #[test]
+    fn test_no_track_rule_presence_decision_for_quiet_hours() {
+        use crate::config::{AppConfig, QuietHoursEntry};
+        let cfg = |quiet: Vec<QuietHoursEntry>| {
+            let mut c = AppConfig::default();
+            c.status_rules.quiet_hours = quiet;
+            c.teams.availability_sync = true;
+            Some(c)
+        };
+        let entry = |start: u16, end: u16, avail: &str, act: &str| QuietHoursEntry {
+            enabled: true,
+            start_minutes: start,
+            end_minutes: end,
+            presence_availability: avail.to_string(),
+            presence_activity: act.to_string(),
+            ..QuietHoursEntry::default()
+        };
+        // Inside the window (empty artist/title = the no-track call): the
+        // decision carries the pair, so the no-track presence block takes the
+        // `rule_presence_backoff` arm.
+        let config = cfg(vec![entry(540, 1020, "Away", "Away")]);
+        let decision = rule_gate_at(&config, 600, 3, "", "");
+        assert_eq!(decision.reason, Some(GATE_REASON_QUIET_HOURS));
+        assert!(
+            decision.presence.is_some(),
+            "quiet-hours pair must ride the no-track decision so handle_no_track arms it (issue #795)"
+        );
+        // Outside the window the decision carries nothing: the no-pair case
+        // keeps the clear, so the stale pair retires at window end.
+        let decision = rule_gate_at(&config, 1200, 3, "", "");
+        assert!(
+            decision.presence.is_none(),
+            "window end must yield no pair so the no-track path clears (issue #795)"
+        );
+    }
+
+    /// Issue #795: a scoped track rule cannot match the no-track call (empty
+    /// artist/title), so its decision carries no pair and the no-track
+    /// presence block keeps the clear — the stale pair retires.
+    #[test]
+    fn test_no_track_scoped_track_rule_carries_no_pair() {
+        use crate::config::{AppConfig, TrackRuleEntry};
+        let mut c = AppConfig::default();
+        c.status_rules.track_rules = vec![TrackRuleEntry {
+            enabled: true,
+            artist_substring: "lofi".to_string(),
+            presence_availability: "DoNotDisturb".to_string(),
+            presence_activity: "Presenting".to_string(),
+            ..TrackRuleEntry::default()
+        }];
+        c.teams.availability_sync = true;
+        let decision = rule_gate_at(&Some(c), 600, 3, "", "");
+        assert!(
+            decision.presence.is_none(),
+            "a scoped track rule must not match the empty no-track call, so the stale pair still clears (issue #795)"
+        );
+    }
+
+    /// Issue #795: structural guard — the no-track presence block must route
+    /// a paired decision through `rule_presence_backoff` and keep the clear
+    /// for the no-pair case.
+    #[test]
+    fn test_no_track_presence_routes_pair_through_rule_backoff() {
+        let prod = prod_source();
+        let body = prod_fn_body(prod, "pub(crate) fn handle_no_track(");
+        assert!(
+            body.contains("rule_presence_backoff("),
+            "handle_no_track must arm a matching rule's pair through rule_presence_backoff (issue #795)"
+        );
+        assert!(
+            body.contains("clear_presence_session("),
+            "handle_no_track must keep the clear for the no-pair case (issue #795)"
+        );
     }
 
     /// Finding #635: the read-before-write policy, as a truth table.
