@@ -361,6 +361,13 @@ pub(crate) fn run(
 /// moves no clock. Without this, `refresh_status`, the tray's post-action
 /// catch-up and the CLI's `--sync-once` were three silent bypasses of the
 /// feature's "no work while snoozed" promise.
+///
+/// Issue #793: the same holds for the quiet-hours pause (`pause_polling`) —
+/// decided HERE, after the snooze gate and before the clocks are loaded, so a
+/// refresh inside a pausing window issues no Spotify/Graph request and moves
+/// no clock. The CLI's `--sync-once` deliberately gets NO override flag: a
+/// documented cron/headless path that silently ignored the pause would break
+/// the `pausePollingHint` promise, so all three entry points honour the pause.
 pub(crate) fn run_oneshot(state: &Arc<AppState>, app: &AppHandle) {
     // S9 (issue #677): the snooze gate, BEFORE the shared clocks are loaded.
     // Every entry point to an iteration has to honour it, and this is the second
@@ -381,6 +388,23 @@ pub(crate) fn run_oneshot(state: &Arc<AppState>, app: &AppHandle) {
         }
         SnoozeGate::Expired => clear_snooze_if_expired(state),
         SnoozeGate::Inactive => {}
+    }
+    // Issue #793: the quiet-hours pause, AFTER the snooze gate and BEFORE the
+    // shared clocks are loaded. Same shape as the driver's loop (S4): a refresh
+    // inside a pausing window issues no Spotify/Graph request and moves no
+    // clock. `quiet_pause_iteration` already emitted the pause-transition line,
+    // exactly like in the loop — this line only explains why the manual
+    // refresh did nothing, mirroring the snooze skip message above.
+    let paused = {
+        // Scoped: the config read guard must not outlive the decision.
+        let config = state.config.get();
+        quiet_pause_iteration(&config)
+    };
+    if paused.is_some() {
+        log::info!(
+            "[POLLING] run_oneshot: skipped — a quiet-hours pause is active, so this refresh performed no request"
+        );
+        return;
     }
     // `_tx` is a live binding (not `let _`): the top stop-check treats a
     // `Disconnected` receiver as Break, so a dropped sender would make every
@@ -10022,6 +10046,81 @@ mod tests {
         assert!(
             skip_arm.contains("skipped — a snooze is active"),
             "a refresh that did nothing must say why (S9)"
+        );
+    }
+
+    /// Issue #793: EVERY entry point to an iteration honours the quiet-hours
+    /// pause — the driver's loop is pinned by
+    /// `test_quiet_pause_gate_precedes_the_clock_load_and_the_iteration` above,
+    /// and `run_oneshot` is pinned here. `refresh_status` (commands/sync.rs),
+    /// the tray's post-action catch-up (tray.rs) and the CLI's `--sync-once`
+    /// (lib.rs) all route through `run_oneshot`, so a pause the loop alone
+    /// consulted left three silent bypasses of the `pausePollingHint` promise
+    /// ("no Spotify query, no status update, no Teams call while paused").
+    /// There is deliberately NO `--sync-once` override flag: a documented
+    /// cron/headless path that silently ignored the pause would break that
+    /// promise, so all three entry points honour it.
+    #[test]
+    fn run_oneshot_honours_the_quiet_pause() {
+        let prod = prod_source();
+        let body = prod_fn_body(prod, "pub(crate) fn run_oneshot(");
+        let snooze = body
+            .find("snooze_gate(&config)")
+            .expect("run_oneshot must still consult the snooze gate (S9)");
+        let pause = body
+            .find("quiet_pause_iteration(&config)")
+            .expect("run_oneshot must consult the quiet-hours pause gate (#793)");
+        let clocks = body
+            .find("load_write_clocks()")
+            .expect("run_oneshot must still load the shared clocks");
+        let inner = body
+            .find("run_inner(")
+            .expect("run_oneshot must still dispatch the iteration");
+        assert!(
+            snooze < pause,
+            "an explicit user snooze outranks a scheduled quiet window (#793)"
+        );
+        assert!(
+            pause < clocks,
+            "the one-shot pause must run BEFORE the clocks are loaded: a paused \
+             refresh must not move (or discard) a keepalive/debounce clock (#793)"
+        );
+        assert!(
+            pause < inner,
+            "the one-shot pause must run BEFORE the iteration: a paused refresh \
+             must issue no Spotify GET and no Teams write (#793)"
+        );
+        assert_eq!(
+            body.matches("quiet_pause_iteration(").count(),
+            1,
+            "exactly one pause-gate call site is expected in the one-shot"
+        );
+        let skip_arm = &body[pause..clocks];
+        assert!(
+            skip_arm.contains("return;"),
+            "the pause verdict must return before any request (#793)"
+        );
+        assert!(
+            skip_arm.contains("skipped — a quiet-hours pause is active"),
+            "a refresh that did nothing must say why (#793)"
+        );
+        // All three one-shot entry points route through run_oneshot, so the
+        // gate above covers the command, the tray and the CLI with no
+        // per-callsite bypass.
+        let sync_source = include_str!("../commands/sync.rs");
+        assert!(
+            sync_source.contains("crate::polling::run_oneshot("),
+            "refresh_status must route its one-shot through run_oneshot so the pause applies (#793)"
+        );
+        let tray_source = include_str!("../tray.rs");
+        assert!(
+            tray_source.contains("crate::polling::run_oneshot("),
+            "the tray catch-up must route its one-shot through run_oneshot so the pause applies (#793)"
+        );
+        let cli_source = include_str!("../lib.rs");
+        assert!(
+            cli_source.contains("polling::run_oneshot("),
+            "--sync-once must route its one-shot through run_oneshot so the pause applies (#793)"
         );
     }
 }
