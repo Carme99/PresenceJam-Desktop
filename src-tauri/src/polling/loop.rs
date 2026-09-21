@@ -28,6 +28,21 @@ use tauri::AppHandle;
 use crate::tray;
 use crate::AppState;
 
+/// Issue #962: upper bound on the snooze pause's `recv_timeout`. The snooze
+/// gate returns `polling.max_interval_seconds` as the wait (default 60 s, up
+/// to 300 s), and a tray/Dashboard `Resume sync now` click only rewrites
+/// `config.json` — it does not signal the driver. Without this cap the thread
+/// sits in `recv_timeout` for the whole derived wait and the gate re-derives
+/// only when it expires, so the snooze ends by itself but a manual resume
+/// leaves the app performing no Spotify or Graph work for up to one
+/// `max_interval` even though the tray entry and the Dashboard chip have
+/// already disappeared. Clipping the wait to `SNOOZE_WAKE_SECONDS` bounds the
+/// wake-up while keeping the original behaviour for the first iteration; the
+/// gate is re-evaluated on every tick, so the next loop sees the cleared
+/// deadline and falls out of `Skipped`. A closed stop channel still breaks
+/// the wait at once (see the `Ok(()) | Err(...::Disconnected)` arm).
+pub const SNOOZE_WAKE_SECONDS: u64 = 15;
+
 /// Issue #866: the snooze-start path of the preferred-presence feature.
 /// Resolves the configured pair and POSTs `setUserPreferredPresence` so the
 /// user's Teams bubble carries Busy/DND/BeRightBack/Away for the duration of
@@ -218,10 +233,21 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
                     );
                 }
                 log::debug!(
-                    "[POLLING] polling_loop: snoozed, sleeping for {} seconds",
-                    seconds
+                    "[POLLING] polling_loop: snoozed, sleeping for up to {} seconds \
+                     (capped from {} by SNOOZE_WAKE_SECONDS={}, issue #962)",
+                    seconds.min(SNOOZE_WAKE_SECONDS),
+                    seconds,
+                    SNOOZE_WAKE_SECONDS
                 );
-                match stop_rx.recv_timeout(StdDuration::from_secs(seconds)) {
+                // Issue #962: cap the snooze wait at SNOOZE_WAKE_SECONDS so a
+                // tray/Dashboard `Resume sync now` click — which rewrites
+                // `config.json` only — takes effect within a few seconds
+                // instead of after up to `polling.max_interval_seconds`
+                // (default 60, max 300). The gate is re-evaluated on every
+                // iteration; once the deadline is cleared the next tick
+                // returns `Inactive`/`Expired` and the iteration runs.
+                let wait = seconds.min(SNOOZE_WAKE_SECONDS);
+                match stop_rx.recv_timeout(StdDuration::from_secs(wait)) {
                     Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                         log::info!(
                             "[POLLING] polling_loop: stop signal during a snooze, breaking loop"
@@ -585,5 +611,128 @@ mod tests {
                  is an explicit continue rather than a catch-all"
             );
         }
+    }
+
+    /// Issue #962: a snooze pause must end within a few seconds when the user
+    /// clicks `Resume sync now` from the tray or the Dashboard chip. Without a
+    /// cap, the driver's `recv_timeout(seconds)` sits idle for the whole wait
+    /// returned by `snooze_pause_at` (`polling.max_interval_seconds`, default
+    /// 60 s, up to 300 s) and the gate re-derives only when that sleep
+    /// expires — so a manual resume rewrites `config.json`, the tray entry and
+    /// the chip disappear immediately, and the app performs no Spotify or
+    /// Graph work for up to one `max_interval` even though the user asked for
+    /// the snooze to end. `USAGE.md:22` documents the action as ending the
+    /// snooze immediately, so the wait must be bounded by
+    /// [`SNOOZE_WAKE_SECONDS`] (a `pub const` this module owns).
+    ///
+    /// Pinned at the source rather than as a behavioural assertion because
+    /// `polling_loop` cannot be driven in a unit test — it takes an
+    /// `AppHandle<Wry>` and this crate has no mock runtime (the rationale
+    /// `test_every_driver_wait_site_is_stop_aware` spells out above). A
+    /// regression that re-introduced the bare `from_secs(seconds)` wait would
+    /// fail both assertions below; a future change that wants to raise the
+    /// cap must update the literal value (and the doc comment) here at the
+    /// same time, so the contract stays explicit.
+    #[test]
+    fn test_snooze_pause_wait_is_bounded_by_snooze_wake_seconds() {
+        let source = include_str!("loop.rs");
+        let prod = &source[..source
+            .find("#[cfg(test)]")
+            .expect("loop.rs must keep its test module last")];
+
+        // The cap must exist at module scope with the documented value. The
+        // public name, the `u64` type and the literal `15` are all part of
+        // the contract — the gate code below reads `SNOOZE_WAKE_SECONDS` by
+        // name, and a typo (or a switch to a runtime value) would silently
+        // un-cap the wait. Asserted as a single string match so the test
+        // compiles (and fails with a clear message) even against the
+        // pre-fix source where the constant does not exist yet.
+        assert!(
+            prod.contains("pub const SNOOZE_WAKE_SECONDS: u64 = 15;"),
+            "`SNOOZE_WAKE_SECONDS` must be declared as `pub const SNOOZE_WAKE_SECONDS: u64 = 15;` \
+             (issue #962): the cap is what makes `Resume sync now` end the \
+             snooze within a few seconds instead of up to one \
+             `polling.max_interval_seconds`"
+        );
+        // The cap must be small enough to be "a few seconds" — the doc comment
+        // promises an immediate end, and a 60 s cap would still leave the
+        // app visibly frozen between the click and the next iteration.
+        // Parsed from the source rather than read off the constant so the
+        // assertion is independent of the symbol's existence: against
+        // pre-fix source the previous assertion already failed; this one
+        // catches a future edit that raises the cap.
+        let cap_literal: u64 = {
+            let needle = "pub const SNOOZE_WAKE_SECONDS: u64 = ";
+            let Some(start) = prod.find(needle).map(|i| i + needle.len()) else {
+                unreachable!("the previous assertion already proved the constant is declared");
+            };
+            let end_rel = prod[start..]
+                .find(';')
+                .expect("SNOOZE_WAKE_SECONDS declaration must end with `;`");
+            prod[start..start + end_rel]
+                .trim()
+                .parse()
+                .expect("SNOOZE_WAKE_SECONDS must be a u64 literal")
+        };
+        assert!(
+            cap_literal > 0 && cap_literal <= 15,
+            "SNOOZE_WAKE_SECONDS must stay within (0, 15] so the snooze wake \
+             remains 'a few seconds' (issue #962); the documented value is 15, \
+             got {}",
+            cap_literal
+        );
+
+        // The `SnoozeGate::Skipped` arm must clip the wait at the cap. The arm
+        // is long because it does side-effect work (preferred-presence POST,
+        // history append, tray rebuild, log line) BEFORE the actual wait, so
+        // a narrow window can land before the `let wait = ...;` line and
+        // miss both the clip and the recv_timeout argument. A 6 KiB window
+        // comfortably covers the full arm at the current scale.
+        let skip_start = prod
+            .find("SnoozeGate::Skipped(seconds)")
+            .expect("the SnoozeGate::Skipped arm must exist");
+        let skip_arm = &prod[skip_start..(skip_start + 6_000).min(prod.len())];
+
+        assert!(
+            skip_arm.contains("seconds.min(SNOOZE_WAKE_SECONDS)"),
+            "the snooze pause wait must be capped at `SNOOZE_WAKE_SECONDS` \
+             (issue #962): `from_secs(seconds.min(SNOOZE_WAKE_SECONDS))` is \
+             what bounds the wake-up to a few seconds so the gate re-derives \
+             promptly after a `Resume sync now` click"
+        );
+        assert!(
+            !skip_arm.contains("from_secs(seconds)"),
+            "the snooze pause wait must NOT be the raw `seconds` value \
+             (issue #962): writing `from_secs(seconds)` would leave \
+             `Resume sync now` waiting up to `polling.max_interval_seconds` \
+             (default 60 s, max 300 s) before the gate notices the cleared \
+             deadline"
+        );
+        assert!(
+            skip_arm.contains("from_secs(wait)"),
+            "the snooze pause wait must use the clipped value, not a separate \
+             recomputation (issue #962): `let wait = seconds.min(SNOOZE_WAKE_SECONDS); \
+             recv_timeout(StdDuration::from_secs(wait))`"
+        );
+
+        // The behavioural half — "the wait returns, the loop re-evaluates
+        // the gate" — falls out of the four assertions above: the bounded
+        // `recv_timeout` returns `Err(RecvTimeoutError::Timeout)` on a live
+        // channel with no signal (asserted by
+        // `test_every_driver_wait_site_is_stop_aware`), the clip proves the
+        // bound is `SNOOZE_WAKE_SECONDS`, and the `continue` arm in the
+        // match (visible in `skip_arm` because it contains
+        // `RecvTimeoutError::Timeout` from the scan above) re-enters the
+        // loop. Driving `polling_loop` itself is out of reach here — it
+        // takes an `AppHandle<Wry>` and this crate has no mock runtime,
+        // which is also why `test_every_driver_wait_site_is_stop_aware`
+        // pins the driver's wait contract at the source.
+        assert!(
+            skip_arm.contains("Err(std::sync::mpsc::RecvTimeoutError::Timeout)"),
+            "the snooze pause wait's `Timeout` arm must be matched so the \
+             loop re-evaluates the gate on the next tick (issue #962): \
+             without a `continue` the bounded wait would still leave the \
+             driver parked after `Resume sync now` clears the deadline"
+        );
     }
 }
