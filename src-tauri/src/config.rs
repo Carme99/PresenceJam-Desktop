@@ -2048,6 +2048,22 @@ pub struct StatusRulesPatch {
     pub track_rules: Option<Vec<TrackRuleEntry>>,
 }
 
+/// Field-level patch for the `notifications` section (issue #789). Each
+/// class is an `Option<bool>` so a toggle names only its own class; an
+/// absent class leaves the stored flag untouched, mirroring the per-field
+/// shape of every other section patch above.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
+pub struct NotificationsPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_change: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_stopped: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_required: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_staged: Option<bool>,
+}
+
 /// Field-level update to [`AppConfig`] for callers that only know part of
 /// the document (CfgDiag#0, issue #535).
 ///
@@ -2076,6 +2092,14 @@ pub struct ConfigPatch {
     pub logging: Option<LoggingPatch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autostart: Option<bool>,
+    // Issue #789: one-class toggle + pause-sync deadline for the same
+    // merge-instead-of-replace path. `snooze_until` is `Option<Option<_>>`
+    // so the three states stay distinct: absent leaves the stored deadline
+    // untouched, `Some(None)` clears it, `Some(Some(..))` sets it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notifications: Option<NotificationsPatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snooze_until: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_rules: Option<StatusRulesPatch>,
 }
@@ -2156,6 +2180,26 @@ pub fn apply_patch(base: &mut AppConfig, patch: &ConfigPatch) {
     }
     if let Some(v) = patch.autostart {
         base.autostart = v;
+    }
+    if let Some(p) = &patch.notifications {
+        if let Some(v) = p.track_change {
+            base.notifications.track_change = v;
+        }
+        if let Some(v) = p.sync_stopped {
+            base.notifications.sync_stopped = v;
+        }
+        if let Some(v) = p.auth_required {
+            base.notifications.auth_required = v;
+        }
+        if let Some(v) = p.update_staged {
+            base.notifications.update_staged = v;
+        }
+    }
+    // Absent leaves the stored deadline untouched; `Some(None)` clears an
+    // active pause; `Some(Some(..))` sets a new one. The write path's
+    // `clamp_snooze` still drops an expired value afterwards.
+    if let Some(v) = &patch.snooze_until {
+        base.snooze_until = v.clone();
     }
     if let Some(p) = &patch.status_rules {
         if let Some(v) = &p.quiet_hours {

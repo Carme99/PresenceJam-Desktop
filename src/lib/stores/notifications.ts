@@ -4,7 +4,7 @@ import {
   requestPermission,
   sendNotification
 } from '@tauri-apps/plugin-notification';
-import { configStore, defaultConfig, saveConfig } from './config';
+import { configHydrated, configStore, defaultConfig, loadConfig, saveConfig, updateConfig } from './config';
 import { t } from '$lib/i18n';
 import type { AppConfig } from '../types';
 
@@ -231,6 +231,11 @@ async function sendNow(
   body?: string,
   icon?: string
 ): Promise<boolean> {
+  // Issue #789: no config on disk may have been read yet, so the class flags
+  // are still the compiled-in defaults — dispatching on them could notify a
+  // class the user turned off. After a failed `load_config` the store holds
+  // those same defaults, and a disabled class must stay silent.
+  if (!get(configHydrated)) return false;
   if (!get(notificationPreferences)[cls]) return false;
   if (!(await ensurePermission())) return false;
   const target = CLASS_TARGETS[cls];
@@ -256,6 +261,9 @@ let lastNotifiedAt = 0;
  */
 export async function notifyTrackChange(track: NotificationTrack): Promise<boolean> {
   if (!track?.title) return false;
+  // Issue #789: same hydration gate as `sendNow` — this helper returns
+  // before reaching it, so it must check directly.
+  if (!get(configHydrated)) return false;
   if (!get(notificationPreferences).track_change) return false;
   const id = `${track.title}::${track.artist}`;
   if (id === lastNotifiedId) return false;
@@ -306,9 +314,17 @@ export async function notifyUpdateStaged(version: string): Promise<boolean> {
 
 /**
  * Flip one class. Enabling requests OS permission first (the #549 rule: the
- * prompt's answer decides the value), then persists through `saveConfig` so
- * `config.json` — not a localStorage key — is what survives a relaunch, and
- * writes the in-session mirror so an already-open sibling window converges.
+ * prompt's answer decides the value), then persists through `updateConfig` so
+ * only the notification section merges — `config.json`, not a localStorage
+ * key, is what survives a relaunch — and writes the in-session mirror so an
+ * already-open sibling window converges.
+ *
+ * Issue #789: when the config has not hydrated yet, `configStore` holds the
+ * compiled-in defaults, not the user's stored document — a whole-document
+ * `saveConfig` from those defaults would rewrite `config.json` from scratch.
+ * So the toggle first awaits `loadConfig()`; when the store is still
+ * unhydrated afterwards (a rejected backend read) it returns false and
+ * leaves every class unchanged.
  *
  * Returns whether the class ended up in the requested state.
  */
@@ -316,13 +332,33 @@ export async function setNotificationPreference(
   cls: NotificationClass,
   enabled: boolean
 ): Promise<boolean> {
+  if (!get(configHydrated)) {
+    const before = { ...get(notificationPreferences) };
+    const beforeCfg = get(configStore);
+    await loadConfig();
+    if (!get(configHydrated)) {
+      // The backend read failed, so `loadConfig` fell back to the compiled-in
+      // defaults — restore the classes and the store the session had, keeping
+      // the toggle a no-op instead of flipping toward defaults where a later
+      // whole-document save could rewrite the document from them.
+      setLocal(before);
+      configStore.set(beforeCfg);
+      return false;
+    }
+  }
   if (enabled && !(await ensurePermission())) return false;
   const next: NotificationPreferences = { ...get(notificationPreferences), [cls]: enabled };
   setLocal(next);
   writeMirror(next);
   const cfg = get(configStore);
   try {
-    await saveConfig({ ...cfg, notifications: next });
+    await updateConfig({ notifications: { [cls]: enabled } as Partial<NotificationPreferences> });
+    // Issue #789: the partial write bypasses the whole-document path, so the
+    // backend document is converged but `configStore` still holds the stale
+    // section — Settings.svelte:554 reads `$configStore.notifications`
+    // directly, and a stale store also lets a sibling view's later save
+    // resurrect the old flag. Converge here, same as the catch path below.
+    configStore.set({ ...cfg, notifications: next });
   } catch (e) {
     // In-session the choice still stands; keep the config store coherent so a
     // later unrelated save cannot resurrect the old flag.
