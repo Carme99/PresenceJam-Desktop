@@ -48,6 +48,9 @@ section to the released version and opens a fresh empty one (see `docs/RELEASING
 - **The surname Dix no longer trips the profanity filter (#827).** Fold-origin matches need a glued profane continuation; `Dix`/`Dix's`/`Dixon` stay clean while `dixs` still flags.
 - **One menu click fires exactly once (#804).** Tray and window handlers unify in a single dispatcher; the duplicate registration and twin id arms are gone.
 - **The log file and directory are user-only on Unix (#920).** The logs dir is 0700 and every `PresenceJam*.log*` file is 0600, re-tightened by a watchdog after rotation.
+- **Playback stopping no longer clobbers a hand-typed Teams status (#791).** `handle_no_track` reads presence and honours the manual-status gate before the placeholder write, mirroring the paused path.
+- **An ungated track notices a meeting starting mid-play (#792).** The unchanged-track path re-checks the gate on the `last_gate_check` clock, suppressing the keepalive write and showing the chip.
+- **One-shot refreshes honour the quiet-hours pause (#793).** `run_oneshot` short-circuits on an active `pause_polling` window before any Spotify or Teams call; no override flag.
 
 ### Security
 - **Detached windows are now opened from Rust.** The main window no longer carries the unscoped `core:webview:allow-create-webview-window` grant — any script in that window could previously raise a chromed window on an arbitrary origin. The grant is removed from `src-tauri/capabilities/default.json` and the windows are built by the new `detach_pane` command from a fixed label/URL/size table (#922).
