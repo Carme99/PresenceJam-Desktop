@@ -484,12 +484,39 @@ jobs:
           # tauri.conf.json is what puts it there, and a typo in that map is
           # invisible until a software centre refuses to index the package.
           # Assert the packaged payload, not the source file.
+          #
+          # SIGPIPE-safe enumeration. The original pipeline
+          # (`dpkg-deb --fsys-tarfile ... | tar -t | grep -Fqx ...`,
+          # same for `rpm2cpio ... | cpio -t --quiet | grep -Fqx ...`)
+          # combined with `set -euo pipefail` at the top of this block
+          # was wrong: once `grep -Fqx` matches the metainfo line it
+          # early-exits 0 and closes its stdin, the upstream `tar` /
+          # `cpio` gets SIGPIPE on its very next write of a later path
+          # and exits 141, the pipeline surfaces 141 through pipefail,
+          # and the `if !` flips that 141 to 0 — so the gate passes
+          # precisely when the metainfo IS present but is followed by
+          # more entries (which is the common case). Buffer each
+          # listing into a temp file first; grep then reads the file,
+          # not the upstream, so SIGPIPE is impossible and grep's exit
+          # code reflects ONLY whether the metainfo is in the listing.
           METAINFO_PATH="usr/share/metainfo/com.presencejam.app.metainfo.xml"
-          if ! dpkg-deb --fsys-tarfile "PresenceJam-linux-amd64.deb" | tar -t | grep -Fqx "./${METAINFO_PATH}"; then
+          DEB_LISTING="$(mktemp)"
+          RPM_LISTING="$(mktemp)"
+          trap 'rm -f "$DEB_LISTING" "$RPM_LISTING"' EXIT
+
+          if ! dpkg-deb --fsys-tarfile "PresenceJam-linux-amd64.deb" | tar -t > "$DEB_LISTING"; then
+            echo "::error::Failed to enumerate PresenceJam-linux-amd64.deb contents"
+            exit 1
+          fi
+          if ! grep -Fqx "./${METAINFO_PATH}" "$DEB_LISTING"; then
             echo "::error::${METAINFO_PATH} is not in PresenceJam-linux-amd64.deb — check bundle.linux.deb.files"
             exit 1
           fi
-          if ! rpm2cpio "PresenceJam-linux-amd64.rpm" | cpio -t --quiet | grep -Fqx "./${METAINFO_PATH}"; then
+          if ! rpm2cpio "PresenceJam-linux-amd64.rpm" | cpio -t --quiet > "$RPM_LISTING"; then
+            echo "::error::Failed to enumerate PresenceJam-linux-amd64.rpm contents"
+            exit 1
+          fi
+          if ! grep -Fqx "./${METAINFO_PATH}" "$RPM_LISTING"; then
             echo "::error::${METAINFO_PATH} is not in PresenceJam-linux-amd64.rpm — check bundle.linux.rpm.files"
             exit 1
           fi
