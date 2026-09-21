@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
-  import { currentView, type View } from '$lib/stores/app';
+  import { currentView, settingsDirty, pendingMenuNav, type View } from '$lib/stores/app';
   import Onboarding from '$lib/components/Onboarding.svelte';
   import Dashboard from '$lib/components/Dashboard.svelte';
   import Settings from '$lib/components/Settings.svelte';
@@ -135,29 +135,26 @@
     }
   }
 
+  // #817: single gate for programmatic navigation (fix/815 routes
+  // `show-about` through this too). C2 + #967 keep the wizard's ownership
+  // and its configured-install dashboard escape hatch; the dirty check then
+  // parks a menu target while Settings holds unsaved edits instead of
+  // unmounting the form and destroying the draft.
+  function navigateTo(target: View) {
+    if (!ready) return;
+    const wantsDashboard = target === 'dashboard' && onboardingComplete;
+    if ($currentView === 'onboarding' && !wantsDashboard) return;
+    if (target !== 'settings' && $currentView === 'settings' && $settingsDirty) {
+      devLog('[PAGE] navigate parked: settings draft is dirty, target=', target);
+      pendingMenuNav.set(target);
+      return;
+    }
+    currentView.set(target);
+  }
+
   function retryBoot() {
     ready = false;
     void boot();
-  }
-  // #815: single navigation gate — `ready` plus the onboarding ownership
-  // rule (with the #967 configured-install dashboard escape hatch). Both
-  // the `navigate` and `show-about` listeners route through here so the
-  // tray About item cannot pull the wizard off screen mid-setup.
-  function navigateTo(view: View) {
-    // C2: deep-link auth completions also emit 'navigate'. While the
-    // Onboarding view is up it owns its own phase transitions — jumping
-    // to another view would strand setup half-done — so programmatic
-    // navigation is ignored until onboarding yields the view.
-    //
-    // #967: the one exception is the Dashboard for an install that is already
-    // configured. The wizard offers that escape hatch itself (its header
-    // control), and without this the app menu's "Show Dashboard" stayed inert
-    // for a returning user who had been routed into the wizard. First-run
-    // installs keep the old one-way behaviour.
-    if (!ready) return;
-    const wantsDashboard = view === 'dashboard' && onboardingComplete;
-    if ($currentView === 'onboarding' && !wantsDashboard) return;
-    currentView.set(view);
   }
 
   onMount(() => {
@@ -187,8 +184,9 @@
     devLog('[PAGE] onMount: setting up navigate listener');
     teardown.add(listen<string>('navigate', (event) => {
       devLog('[PAGE] EVENT: navigate received:', event.payload);
-      // #815: routed through navigateTo — the ready/onboarding gate above
-      // (fix/817 extends it with the settings-dirty park inside that helper).
+      // C2 + #967 live in navigateTo (wizard ownership + the
+      // configured-install dashboard escape hatch); #817's dirty check parks
+      // a menu target while Settings holds unsaved edits.
       navigateTo(event.payload as View);
     }));
 

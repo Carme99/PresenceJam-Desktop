@@ -60,7 +60,7 @@ vi.mock('$lib/stores/detach', () => ({
 }));
 
 import Page from '../src/routes/+page.svelte';
-import { currentView } from '$lib/stores/app';
+import { currentView, pendingMenuNav, settingsDirty } from '$lib/stores/app';
 import { defaultConfig } from '$lib/stores/config';
 import { resetAuthFlow } from '$lib/stores/authFlow.svelte';
 
@@ -123,6 +123,8 @@ beforeEach(() => {
   listeners.clear();
   resetAuthFlow();
   currentView.set('dashboard');
+  settingsDirty.set(false);
+  pendingMenuNav.set(null);
 });
 
 afterEach(() => {
@@ -206,5 +208,40 @@ describe('show-about before boot settles (#815)', () => {
     expect(get(currentView)).not.toBe('about');
     for (let i = 0; i < 32; i++) await Promise.resolve();
     expect(get(currentView)).toBe('onboarding');
+  });
+});
+describe('navigate with a dirty Settings draft (#817)', () => {
+  it('stays on the form and parks the menu target', async () => {
+    // Fails pre-fix: the listener set currentView unconditionally, so the
+    // form unmounted and the draft was destroyed with no banner.
+    await mountPage(true);
+    currentView.set('settings');
+    settingsDirty.set(true);
+
+    fireNavigate('dashboard');
+
+    expect(get(currentView)).toBe('settings');
+    expect(get(pendingMenuNav)).toBe('dashboard');
+  });
+
+  it('navigates straight through when the Settings draft is clean', async () => {
+    await mountPage(true);
+    currentView.set('settings');
+
+    fireNavigate('logs');
+
+    expect(get(currentView)).toBe('logs');
+    expect(get(pendingMenuNav)).toBeNull();
+  });
+
+  it('navigates to settings itself even while a draft is dirty', async () => {
+    await mountPage(true);
+    currentView.set('settings');
+    settingsDirty.set(true);
+
+    fireNavigate('settings');
+
+    expect(get(currentView)).toBe('settings');
+    expect(get(pendingMenuNav)).toBeNull();
   });
 });
