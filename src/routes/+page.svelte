@@ -139,6 +139,27 @@
     ready = false;
     void boot();
   }
+  // #815: single navigation gate — `ready` plus the onboarding ownership
+  // rule (with the #967 configured-install dashboard escape hatch). Both
+  // the `navigate` and `show-about` listeners route through here so the
+  // tray About item cannot pull the wizard off screen mid-setup.
+  function navigateTo(view: View) {
+    // C2: deep-link auth completions also emit 'navigate'. While the
+    // Onboarding view is up it owns its own phase transitions — jumping
+    // to another view would strand setup half-done — so programmatic
+    // navigation is ignored until onboarding yields the view.
+    //
+    // #967: the one exception is the Dashboard for an install that is already
+    // configured. The wizard offers that escape hatch itself (its header
+    // control), and without this the app menu's "Show Dashboard" stayed inert
+    // for a returning user who had been routed into the wizard. First-run
+    // installs keep the old one-way behaviour.
+    if (!ready) return;
+    const wantsDashboard = view === 'dashboard' && onboardingComplete;
+    if ($currentView === 'onboarding' && !wantsDashboard) return;
+    currentView.set(view);
+  }
+
   onMount(() => {
     devLog('[PAGE] onMount: ENTRY');
     void boot();
@@ -166,20 +187,9 @@
     devLog('[PAGE] onMount: setting up navigate listener');
     teardown.add(listen<string>('navigate', (event) => {
       devLog('[PAGE] EVENT: navigate received:', event.payload);
-      // C2: deep-link auth completions also emit 'navigate'. While the
-      // Onboarding view is up it owns its own phase transitions — jumping
-      // to another view would strand setup half-done — so programmatic
-      // navigation is ignored until onboarding yields the view.
-      //
-      // #967: the one exception is the Dashboard for an install that is already
-      // configured. The wizard offers that escape hatch itself (its header
-      // control), and without this the app menu's "Show Dashboard" stayed inert
-      // for a returning user who had been routed into the wizard. First-run
-      // installs keep the old one-way behaviour.
-      if (!ready) return;
-      const wantsDashboard = event.payload === 'dashboard' && onboardingComplete;
-      if ($currentView === 'onboarding' && !wantsDashboard) return;
-      currentView.set(event.payload as View);
+      // #815: routed through navigateTo — the ready/onboarding gate above
+      // (fix/817 extends it with the settings-dirty park inside that helper).
+      navigateTo(event.payload as View);
     }));
 
     devLog('[PAGE] onMount: setting up open-logs-folder listener');
@@ -195,7 +205,9 @@
     devLog('[PAGE] onMount: setting up show-about listener');
     teardown.add(listen('show-about', () => {
       devLog('[PAGE] EVENT: show-about received');
-      currentView.set('about');
+      // #815: the tray About item goes through the same gate — during
+      // onboarding (or before boot settles) the wizard stays mounted.
+      navigateTo('about');
     }));
 
     devLog('[PAGE] onMount: setting up toggle-pause listener');
