@@ -1,4 +1,6 @@
 use parking_lot::{Mutex, RwLock};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -948,6 +950,92 @@ fn log_rotation_strategy(keep_files: u32) -> tauri_plugin_log::RotationStrategy 
     tauri_plugin_log::RotationStrategy::KeepSome(keep_files.max(1) as usize)
 }
 
+/// Issue #920: the `tauri-plugin-log` file target opens `PresenceJam.log`
+/// — and every rotated successor — with `create(true).append(true)` and no
+/// `.mode()`, inside a `create_dir_all` directory. Under the usual umask 022
+/// that is a 0644 file in a 0755 dir, world-readable on a multi-user box,
+/// while `config.json` / `tokens.json` are explicitly 0600 / 0700 for the
+/// same threat model. The log holds track titles and artist names, and at
+/// Debug level the truncated Graph token-response fragment `poll_teams_auth`
+/// writes — so tighten both, best-effort, mirroring `config.rs::config_dir`
+/// (0700 dir) and `token_io.rs` (0600 files). Idempotent on an
+/// already-tight dir; per-file failures are logged and skipped, never fatal
+/// to startup. Windows needs nothing: the default ACL is already user-only.
+#[cfg(unix)]
+fn tighten_log_permissions(dir: &std::path::Path) {
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        log::warn!(
+            "[APP] could not create log dir '{}': {} — skipping mode tighten",
+            dir.display(),
+            e
+        );
+        return;
+    }
+    match std::fs::metadata(dir) {
+        Ok(metadata) => {
+            let current_mode = metadata.permissions().mode() & 0o777;
+            if current_mode != 0o700 {
+                log::info!(
+                    "[APP] tightening log dir mode from {:o} to 0700 (issue #920)",
+                    current_mode
+                );
+                if let Err(e) =
+                    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+                {
+                    log::warn!(
+                        "[APP] could not chmod log dir '{}' to 0700: {}",
+                        dir.display(),
+                        e
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            log::warn!(
+                "[APP] could not stat log dir '{}': {} — skipping mode tighten",
+                dir.display(),
+                e
+            );
+            return;
+        }
+    }
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            log::warn!("[APP] could not list log dir '{}': {}", dir.display(), e);
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // `PresenceJam*.log*`: the active `PresenceJam.log` plus every dated
+        // archive the rotation pass creates itself.
+        if !name.starts_with("PresenceJam") || !name.contains("log") {
+            continue;
+        }
+        let path = entry.path();
+        let current_mode = match std::fs::metadata(&path) {
+            Ok(metadata) => metadata.permissions().mode() & 0o777,
+            Err(_) => continue,
+        };
+        if current_mode != 0o600 {
+            log::info!(
+                "[APP] tightening log file mode from {:o} to 0600: {} (issue #920)",
+                current_mode,
+                name
+            );
+            if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            {
+                log::warn!(
+                    "[APP] could not chmod log file '{}' to 0600: {}",
+                    path.display(),
+                    e
+                );
+            }
+        }
+    }
+}
+
 // =====================================================================
 // CLI flags (issue #679)
 // =====================================================================
@@ -1872,6 +1960,38 @@ pub fn run() {
 
 
             log::info!("[APP] setup: ENTRY");
+
+            // Issue #920: the log target opens its files with no `.mode()`
+            // and the dir comes from `create_dir_all`, so under umask 022
+            // both are world-readable. Tighten now (0700 dir, 0600
+            // `PresenceJam*.log*` files); the watchdog below re-tightens
+            // after rotation, which creates successor files itself.
+            #[cfg(unix)]
+            match app.handle().path().app_log_dir() {
+                Ok(dir) => {
+                    tighten_log_permissions(&dir);
+                    // Rotation creates the successor with the process umask
+                    // (0644 under 022) — no hook exists in the plugin to
+                    // tighten at creation, so re-run the same pass every
+                    // 60 s. `read_dir` + a stat per file is negligible next
+                    // to the logging itself; the thread dies with the process.
+                    let watch_dir = dir.clone();
+                    if let Err(e) = thread::Builder::new()
+                        .name("log-perm-watchdog".to_string())
+                        .spawn(move || loop {
+                            thread::sleep(std::time::Duration::from_secs(60));
+                            tighten_log_permissions(&watch_dir);
+                        }) {
+                        log::warn!("[APP] could not start log-perm watchdog: {}", e);
+                    }
+                }
+                Err(e) => {
+                    log::warn!(
+                        "[APP] could not resolve log dir: {} — skipping mode tighten",
+                        e
+                    );
+                }
+            }
 
             let state = Arc::new(AppState::new());
             app.manage(state.clone());
@@ -2815,6 +2935,74 @@ mod tests {
                 tauri_plugin_log::RotationStrategy::KeepSome(1)
             ),
             "a 0 that slipped past clamp_logging must still floor at KeepSome(1)"
+        );
+    }
+
+    /// Issue #920: the log dir must be 0700 and every `PresenceJam*.log*`
+    /// file 0600 on Unix — the same threat model the `tokens.json` 0600
+    /// assertion (issue #263) covers. Fails pre-fix: no production path set
+    /// either mode before this slice, so `tighten_log_permissions` did not
+    /// exist and this test did not compile.
+    #[cfg(unix)]
+    #[test]
+    fn test_tighten_log_permissions_sets_0700_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let base =
+            std::env::temp_dir().join(format!("presencejam-test-logperms-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        // Simulate the pre-fix on-disk state: a umask-022 `create_dir_all`
+        // dir (0755) holding a loose active log plus a rotated archive.
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for name in ["PresenceJam.log", "PresenceJam.2026-09-21-00-00-00.log"] {
+            let path = base.join(name);
+            std::fs::write(&path, "x").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        // A non-log file in the same dir must be left alone.
+        let other = base.join("presence-history.jsonl");
+        std::fs::write(&other, "x").unwrap();
+        std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        tighten_log_permissions(&base);
+
+        let dir_mode = std::fs::metadata(&base).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700, "log dir must be 0700, got {:o}", dir_mode);
+        for name in ["PresenceJam.log", "PresenceJam.2026-09-21-00-00-00.log"] {
+            let mode = std::fs::metadata(base.join(name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "{name} must be 0600, got {mode:o}");
+        }
+        let other_mode = std::fs::metadata(&other).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            other_mode, 0o644,
+            "non-log files must be left alone, got {other_mode:o}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Issue #920: the tighten must actually run at startup — and keep
+    /// running after rotation — not just exist as a dead helper. Guards the
+    /// `setup` call site and the watchdog spawn against a future refactor
+    /// dropping either.
+    #[test]
+    fn test_setup_tightens_log_permissions_and_watches_rotation() {
+        let source = include_str!("lib.rs");
+        let prod_source = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("lib.rs has no #[cfg(test)] mod tests block");
+        let setup_body = body_of(prod_source, ".setup(move |app|");
+        assert!(
+            setup_body.contains("tighten_log_permissions"),
+            "setup must tighten the log dir/files at startup (issue #920)"
+        );
+        assert!(
+            setup_body.contains("log-perm-watchdog"),
+            "setup must spawn the rotation re-tighten watchdog (issue #920)"
         );
     }
 

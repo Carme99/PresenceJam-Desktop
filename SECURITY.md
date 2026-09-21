@@ -97,11 +97,16 @@ storage bullet naming `config.rs::save_config` → `atomic_write_json` and the
 
 `tokens.json` and `config.json` are explicitly set to mode **0600** (owner
 read/write only) on Unix-like systems and inherit the user-only default
-ACL on Windows. For `tokens.json` this is defense-in-depth **on top of**
+ACL on Windows. Since #920 the log directory is **0700** and every
+`PresenceJam*.log*` file (the active `PresenceJam.log` plus rotated
+archives) is **0600** on Unix (`lib.rs::tighten_log_permissions`, run at
+startup and re-run by a 60 s watchdog after rotation creates successors
+with the process umask); on Windows the default ACL remains user-only and
+no explicit ACL change is required. For `tokens.json` this is defense-in-depth **on top of**
 the AES-256-GCM encryption (issue #140): the ciphertext is never
 world-readable at any point of the write. For `config.json` (still
 plaintext JSON — it holds no credentials, only settings) the mode is the
-only file-level protection. Claims tied to the source:
+only file-level protection. The log holds track titles, artist names and — at Debug level — the truncated Graph token-response fragment `poll_teams_auth` writes, so its 0600 mode is load-bearing, not cosmetic. Claims tied to the source:
 
 | Claim | Source |
 |---|---|
@@ -111,6 +116,7 @@ only file-level protection. Claims tied to the source:
 | Pre-existing loose files are tightened on read (upgrade path) | `src-tauri/src/token_io.rs::read_tokens_at` and `src-tauri/src/config.rs::load_config` — `fs::set_permissions(0o600)` after `fs::metadata` shows a non-0600 mode. Idempotent. |
 | Stale `.tmp` sidecar from a prior crash is cleared before create_new (avoids `AlreadyExists` permanent save failure) | `src-tauri/src/token_io.rs::write_tokens_atomic` and `src-tauri/src/config.rs::atomic_write_json` — `fs::remove_file(&temp_path)` with `NotFound` tolerated. |
 | Windows does NOT need an explicit DACL change | Windows default ACL on a new file in a user-owned directory inherits user-only access (issue #135 acceptance; verified by reading the existing `Encrypted tokens.json` paragraph above). |
+| Log dir is 0700 and every `PresenceJam*.log*` file is 0600 on Unix, incl. after rotation (issue #920) | `src-tauri/src/lib.rs::tighten_log_permissions` — `fs::set_permissions(0o700)` on the dir, `fs::set_permissions(0o600)` on each `PresenceJam*.log*` entry; run in `setup` from `app_log_dir()` and re-run every 60 s by the `log-perm-watchdog` thread because rotation creates successors with the process umask. |
 
 **What this is NOT.** The file-mode tightening does not encrypt
 `config.json` — it remains plaintext JSON on disk; only the OS-level file
