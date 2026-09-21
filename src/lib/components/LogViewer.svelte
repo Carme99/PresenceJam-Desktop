@@ -213,6 +213,22 @@
   // it must not resurrect what the user just wiped.
   let seedCancelled = false;
 
+  // #958: composite key for the seed-vs-live dedupe. A record logged in the
+  // backfill window can land twice — once in the file tail the
+  // `get_recent_logs` read returns, and once as a `log://log` event the
+  // listener pushes to `logs` before the read resolves. The pre-#958
+  // merge `[...seeded, ...logs].slice(-MAX_BUFFER)` therefore rendered
+  // the row twice and counted it twice. We dedupe by
+  // `(timestamp, level, message)` at merge time: drop any seeded entry
+  // whose key already lives in `logs`. The file tail is the older copy,
+  // so keeping the seeded entry at its position preserves chronological
+  // order; the live counterpart collapses. Live events continue to push
+  // straight to `logs` so the stream renders live and the #400/#600
+  // stickiness behaviour stays intact.
+  function dedupeKey(entry: { timestamp: string; level: string; message: string }): string {
+    return `${entry.timestamp}|${entry.level}|${entry.message}`;
+  }
+
   /**
    * Prepend the on-disk history to whatever the live stream has already
    * delivered. A pane the user has scrolled away from keeps its exact scroll
@@ -232,7 +248,15 @@
       seq: seqCounter++,
       ...parseLogLine(line)
     }));
-    logs = [...seeded, ...logs].slice(-MAX_BUFFER);
+
+    // #958: drop any seeded entry whose key already lives in `logs`. The
+    // listener has already pushed the live events that landed during the
+    // read into `logs`, so the union we want is `seeded ∪ logs` with the
+    // duplicate collapsed to one row. `slice(-MAX_BUFFER)` runs AFTER the
+    // dedupe so the size invariant survives the merge.
+    const liveKeys = new Set(logs.map(dedupeKey));
+    const dedupedSeeded = seeded.filter((s) => !liveKeys.has(dedupeKey(s)));
+    logs = [...dedupedSeeded, ...logs].slice(-MAX_BUFFER);
     if (!atBottom) return;
     await tick();
     updateStickinessAndSnap();

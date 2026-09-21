@@ -212,3 +212,72 @@ describe('LogViewer history backfill (#595)', () => {
     warn.mockRestore();
   });
 });
+
+/**
+ * #958 — dedupe the LogViewer backfill against the live `log://log` stream.
+ *
+ * A record logged in the gap between the file read and the seed landing
+ * arrives in two places: as the last line of the file tail AND as a
+ * `log://log` delivery. The pre-#958 merge `[...seeded, ...logs].slice(-MAX_BUFFER)`
+ * put both copies in the buffer, so the row rendered (and was counted) twice.
+ * The fix routes live events into a `pending` buffer while the read is in
+ * flight, then drops the pending copies whose dedupe key already appears in
+ * the seeded tail. Both cases pinned here:
+ *   - colliding key: the live event collapses to the seeded row, count is 3;
+ *   - distinct key: the live event passes through, count is 4.
+ * The dedupe key is `(timestamp, level, message)`; the harness freezes the
+ * wall clock to a moment whose local representation matches the parsed UTC
+ * timestamp of the targeted seeded line, so the test exercises the collision
+ * path deterministically rather than relying on real-time coincidence.
+ */
+describe('LogViewer history backfill dedup (#958)', () => {
+  afterEach(() => {
+    // Fake timers set inside a test must be released even if the assertion
+    // threw, otherwise the next test inherits a frozen clock and any
+    // subsequent `Date.now()` / `new Date()` use goes sideways.
+    vi.useRealTimers();
+  });
+
+  it('drops a live event whose dedupe key matches the seeded tail', async () => {
+    // Freeze the wall clock so the live event's `toLocaleTimeString()`
+    // matches the parsed UTC timestamp of the last seeded line — that is
+    // the only way the (timestamp, level, message) dedupe key collides in
+    // the harness without depending on real-time coincidence.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-16T04:00:03Z'));
+
+    const { container } = render(LogViewer, { detached: false });
+    await listenerReady();
+
+    // The last seeded line is `[2026-09-16][04:00:03][pj_lib::teams][ERROR] [TEAMS] refresh failed`.
+    // Parsed: timestamp = local(2026-09-16T04:00:03Z), level = 'Error',
+    // message = `[pj_lib::teams] [TEAMS] refresh failed`. A live delivery of
+    // exactly that record — same (timestamp, level, message) — before the
+    // read resolves is the scenario the bug calls out: both surfaces cover
+    // the same row.
+    emit(5, '[pj_lib::teams] [TEAMS] refresh failed');
+    await tick();
+    resolveBackfill?.(FILE_LINES);
+
+    // 3 entries — not 4. The duplicate collapses to a single row, and the
+    // count label reflects that.
+    await waitFor(() => expect(container.querySelectorAll('.log-entry').length).toBe(3));
+    expect(container.querySelector('.count')?.textContent).toMatch(/3 entries/i);
+  });
+
+  it('keeps a live event whose dedupe key does NOT match any seeded entry', async () => {
+    // Distinct message => distinct dedupe key => the live event survives
+    // the merge unchanged and lands after the seeded tail. This is the
+    // explicit non-duplicate case for the gate: false positives in the
+    // dedupe would clip legitimate events here.
+    const { container } = render(LogViewer, { detached: false });
+    await listenerReady();
+
+    emit(5, 'unique-live-message-not-in-seed');
+    await tick();
+    resolveBackfill?.(FILE_LINES);
+
+    await waitFor(() => expect(container.querySelectorAll('.log-entry').length).toBe(4));
+    expect(container.querySelector('.count')?.textContent).toMatch(/4 entries/i);
+  });
+});
