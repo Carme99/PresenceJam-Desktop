@@ -2,6 +2,8 @@
 src-tauri/target/
 src-tauri/target
 src-tauri/.cargo/
+# Cargo target dir (CARGO_TARGET_DIR override or future workspace member)
+target/
 
 # SvelteKit
 build/

@@ -64,6 +64,8 @@ vi.mock('$lib/stores/detach', () => ({
 // above it, so Tauri mocks still apply at load time).
 import LogViewer from '$lib/components/LogViewer.svelte';
 import { i18n } from '$lib/i18n';
+import type { Mock } from 'vitest';
+import { invoke } from '@tauri-apps/api/core';
 
 function emit(level: number, message: string) {
   for (const fn of listeners) fn({ payload: { level, message } });
@@ -179,5 +181,82 @@ describe('LogViewer listener teardown (#692)', () => {
 
     expect(registrationsCreated).toBe(3);
     expect(unlistenCalls).toBe(3);
+  });
+});
+
+/**
+ * #969 — backfilled rows from different days are distinguishable in the log
+ * view, and timestamps follow the configured app locale instead of the OS
+ * default. The pane seeds its buffer from `get_recent_logs` (#595), so the
+ * fix lands in `parseLogLine` and the live-row formatter.
+ */
+describe('LogViewer date + locale (#969)', () => {
+  // Two on-disk lines from different days, far enough in the past that the
+  // system timezone can never flip either of them onto "today" during a
+  // test run. Same time-of-day on purpose — the criterion is that two rows
+  // sharing only their HH:MM:SS must remain distinguishable.
+  const TWO_DAYS_BACK = [
+    '[2024-09-19][09:14:02][pj_lib::demo][INFO] from day one',
+    '[2024-09-20][09:14:02][pj_lib::demo][INFO] from day two'
+  ];
+
+  it('renders a date span on backfilled rows whose day is not today', async () => {
+    const invokeMock = invoke as unknown as Mock;
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'get_recent_logs') return TWO_DAYS_BACK;
+      return undefined;
+    });
+
+    const { container } = render(LogViewer, { detached: false });
+    await waitFor(() => expect(container.querySelectorAll('.log-entry').length).toBe(2));
+
+    const rows = Array.from(container.querySelectorAll('.log-entry'));
+    const dateSpans = rows.map((row) => row.querySelector('.date'));
+    // Both rows are from 2024 — never today — so both must carry their date.
+    expect(dateSpans[0]).not.toBeNull();
+    expect(dateSpans[1]).not.toBeNull();
+    // Two distinct dates produce two distinct renderings (locale formatting
+    // may reorder fields, but the day/key is unique per row).
+    expect(dateSpans[0]?.textContent).not.toBe(dateSpans[1]?.textContent);
+    // The shared HH:MM:SS alone would have been indistinguishable; with the
+    // date span the two rows now read differently.
+    expect(rows[0].textContent).not.toBe(rows[1].textContent);
+  });
+
+  it('localizes the seeded row timestamp to the active locale', async () => {
+    const invokeMock = invoke as unknown as Mock;
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'get_recent_logs') return TWO_DAYS_BACK;
+      return undefined;
+    });
+
+    i18n.set('en');
+    const en = render(LogViewer, { detached: false });
+    await waitFor(() =>
+      expect(en.container.querySelectorAll('.log-entry').length).toBe(2)
+    );
+    const enTimestamp = en.container.querySelector('.log-entry .timestamp')?.textContent ?? '';
+
+    en.unmount();
+    await tick();
+
+    i18n.set('fr');
+    const fr = render(LogViewer, { detached: false });
+    await waitFor(() =>
+      expect(fr.container.querySelectorAll('.log-entry').length).toBe(2)
+    );
+    const frTimestamp = fr.container.querySelector('.log-entry .timestamp')?.textContent ?? '';
+
+    // The two locales render the same wall-clock time differently — `en`
+    // appends "AM"/"PM" by default, `fr` uses 24-hour notation. Asserting
+    // NOT identical keeps the test stable across ICU revisions where the
+    // exact separator (`:`, `\u202F:`, …) may change.
+    expect(frTimestamp).not.toBe('');
+    expect(enTimestamp).not.toBe('');
+    expect(frTimestamp).not.toBe(enTimestamp);
+
+    // Restore the test-suite default so subsequent tests aren't pinned to fr.
+    i18n.set('en');
+    await tick();
   });
 });
