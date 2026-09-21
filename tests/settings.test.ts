@@ -120,6 +120,12 @@ beforeEach(() => {
       case 'save_config':
         // The backend echoes the copy it persisted (#297).
         return args != null && typeof args === 'object' && 'config' in args ? args.config : undefined;
+      case 'update_config':
+        // Issue #789: the partial-write twin of save_config — the backend
+        // merges the patch and echoes the converged document, same as #297.
+        return args != null && typeof args === 'object' && 'patch' in args
+          ? { ...get(configStore), ...(args.patch as object) }
+          : get(configStore);
       case 'get_sync_status':
         return {
           is_syncing: false,
