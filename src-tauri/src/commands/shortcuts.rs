@@ -27,7 +27,7 @@ use serde::Serialize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
-use tauri_plugin_global_shortcut::{GlobalShortcut, GlobalShortcutExt, Shortcut, ShortcutState};
+use tauri_plugin_global_shortcut::{Code, GlobalShortcut, GlobalShortcutExt, Shortcut, ShortcutState};
 
 /// Log tag prefix for this submodule (issue #79 item 3).
 const CMD: &str = "[CMD.SHORTCUTS]";
@@ -89,8 +89,11 @@ pub fn configured_binding(cfg: &ShortcutsConfig, slot: ShortcutSlot) -> Option<S
 /// Validates one accelerator for one slot and returns the form the caller must
 /// register (never a re-parse of the raw string).
 ///
-/// Two rules, both pre-save so the Settings field can name the reason:
+/// Three rules, all pre-save so the Settings field can name the reason:
 ///   * it must parse as a plugin accelerator;
+///   * it must carry at least one modifier unless the key is F1–F24 or a
+///     media key (issue #810) — a bare `Escape` (or `Enter`, a letter, …)
+///     would be grabbed system-wide, swallowing the key in every application;
 ///   * it must not collide with the other slot's binding — compared by parsed
 ///     identity, so `Ctrl+P` and `CONTROL + p` are one accelerator, and
 ///     `CmdOrCtrl+P` collides with `Ctrl+P` only on the platforms where they
@@ -118,6 +121,15 @@ pub fn validate_accelerator(
     let parsed = trimmed
         .parse::<Shortcut>()
         .map_err(|_| ShortcutReason::not_a_key(trimmed))?;
+    // Issue #810: `global-hotkey` accepts a single token as a key with
+    // `Modifiers::empty()`, so without this rule a bare key registers through
+    // the OS grab on every platform and swallows that key everywhere else.
+    if parsed.mods.is_empty() && !key_binds_bare(parsed.key) {
+        log::warn!(
+            "{CMD} validate: \"{trimmed}\" has no modifier — a bare key would be grabbed system-wide"
+        );
+        return Err(ShortcutReason::needs_modifier(trimmed));
+    }
     if let Some(other) = other_binding {
         if let Ok(other_parsed) = other.trim().parse::<Shortcut>() {
             if other_parsed.id() == parsed.id() {
@@ -126,6 +138,47 @@ pub fn validate_accelerator(
         }
     }
     Ok(parsed)
+}
+
+/// Keys safe to grab without a modifier (issue #810): function keys F1–F24
+/// and dedicated media keys have no typing role, so binding them bare cannot
+/// steal ordinary input from other applications.
+fn key_binds_bare(key: Code) -> bool {
+    use Code::*;
+    matches!(
+        key,
+        F1 | F2
+            | F3
+            | F4
+            | F5
+            | F6
+            | F7
+            | F8
+            | F9
+            | F10
+            | F11
+            | F12
+            | F13
+            | F14
+            | F15
+            | F16
+            | F17
+            | F18
+            | F19
+            | F20
+            | F21
+            | F22
+            | F23
+            | F24 | MediaPlayPause
+            | MediaPlay
+            | MediaPause
+            | MediaStop
+            | MediaTrackNext
+            | MediaTrackPrevious
+            | AudioVolumeUp
+            | AudioVolumeDown
+            | AudioVolumeMute
+    )
 }
 
 // ── planning ────────────────────────────────────────────────────────────
@@ -689,7 +742,7 @@ pub fn conflict_reference(
 /// Returns a [`ShortcutReason`] on rejection (issue #968): an unknown slot
 /// name is reported as `Unknown` (a malformed caller — the frontend cannot
 /// name it without a UI for `invalid action`), the validation cases are the
-/// same `NotAKey` / `Conflict` codes the planner surfaces.
+/// same `NotAKey` / `NeedsModifier` / `Conflict` codes the planner surfaces.
 #[tauri::command]
 pub fn validate_shortcut(
     accelerator: String,
@@ -859,6 +912,45 @@ mod tests {
             )
             .is_ok(),
             "distinct accelerators must validate"
+        );
+    }
+    /// Issue #810: a bare key would be grabbed system-wide (`Modifiers::empty()`
+    /// parses, then the OS swallows the key in every application), so the
+    /// validator rejects it with the typed `NeedsModifier` code that names the
+    /// offending accelerator. Function keys and media keys are exempt — they
+    /// have no typing role, so binding them bare steals nothing.
+    #[test]
+    fn bare_keys_are_rejected_with_needs_modifier() {
+        for accelerator in ["Escape", "P", "Enter", "Space", "Backquote"] {
+            let err = validate_accelerator(ShortcutSlot::TogglePlayback, accelerator, None)
+                .expect_err("a modifier-less binding must be rejected (issue #810)");
+            match &err {
+                ShortcutReason::NeedsModifier { accelerator: got } => {
+                    assert_eq!(
+                        got, accelerator,
+                        "the reason must quote the offending accelerator unchanged"
+                    );
+                }
+                other => panic!(
+                    "a bare key must surface as `NeedsModifier`, got {other:?} (issue #810)"
+                ),
+            }
+        }
+    }
+
+    /// Issue #810: the exempt keys still bind bare, and a modified binding is
+    /// untouched by the rule.
+    #[test]
+    fn function_and_media_keys_bind_bare() {
+        for accelerator in ["F1", "F8", "F12", "F24", "MediaPlayPause", "MediaStop", "MediaTrackNext"] {
+            assert!(
+                validate_accelerator(ShortcutSlot::TogglePlayback, accelerator, None).is_ok(),
+                "{accelerator} must bind without a modifier (issue #810)"
+            );
+        }
+        assert!(
+            validate_accelerator(ShortcutSlot::TogglePlayback, "Ctrl+Escape", None).is_ok(),
+            "a modified Escape must validate (issue #810)"
         );
     }
     /// The unsaved pair is what the user is looking at: a pending value for the

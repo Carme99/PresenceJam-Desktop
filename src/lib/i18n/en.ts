@@ -537,6 +537,10 @@ export const en = {
   'settings.shortcutReasonNotAKey': '“{accelerator}” is not a recognized shortcut',
   'settings.shortcutReasonConflict':
     'Conflicts with the {other} shortcut — one accelerator cannot drive both actions',
+  // Issue #810: a bare key would be grabbed system-wide. Function keys
+  // (F1–F24) and media keys are exempt and bind without a modifier.
+  'settings.shortcutReasonNeedsModifier':
+    '“{accelerator}” needs at least one modifier — a bare key would be grabbed in every application',
   'settings.shortcutReasonAutostart':
     'Launch-at-login failed: {cause}',
   'settings.shortcutReasonUnknown': '{message}',

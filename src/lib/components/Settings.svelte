@@ -766,8 +766,9 @@
   }
 
   /**
-   * Asks the backend whether a combination may bind this slot, so an unparsable
-   * or conflicting one is named inline instead of only failing at registration.
+   * Asks the backend whether a combination may bind this slot, so an unparsable,
+   * modifier-less or conflicting one is named inline instead of only failing
+   * at registration.
    *
    * The other row's *pending* value goes along — the conflict a user creates
    * here is between the two rows on screen, and neither is saved yet — and a
@@ -823,6 +824,12 @@
     if (obj.kind === 'Conflict' && typeof obj.other_slot === 'string') {
       return { kind: 'Conflict', other_slot: obj.other_slot };
     }
+    // Issue #810: the modifier-less rejection is a typed variant, not a
+    // foreign string — map it like the other known kinds so the card renders
+    // the localized `settings.shortcutReasonNeedsModifier` template.
+    if (obj.kind === 'NeedsModifier' && typeof obj.accelerator === 'string') {
+      return { kind: 'NeedsModifier', accelerator: obj.accelerator };
+    }
     if (obj.kind === 'Autostart' && typeof obj.cause === 'string') {
       return { kind: 'Autostart', cause: obj.cause };
     }
@@ -844,13 +851,16 @@
    * — a Wayland compositor refusal, an older backend, anything the typed
    * contract did not anticipate — and renders the backend's free-form
    * text through the unknown template.
-   */
   function shortcutReasonLabel(reason: ShortcutReason): string {
     switch (reason.kind) {
       case 'NotAKey':
         return t('settings.shortcutReasonNotAKey', { accelerator: reason.accelerator });
       case 'Conflict':
         return t('settings.shortcutReasonConflict', { other: reason.other_slot });
+      // Issue #810: a bare key would be grabbed system-wide. The backend
+      // names the accelerator; the card renders the localized template.
+      case 'NeedsModifier':
+        return t('settings.shortcutReasonNeedsModifier', { accelerator: reason.accelerator });
       case 'Autostart':
         return t('settings.shortcutReasonAutostart', { cause: reason.cause });
       case 'Unknown':
@@ -873,6 +883,21 @@
   function onShortcutKeydown(e: KeyboardEvent, slot: ShortcutSlot) {
     // A modifier-only press never completes a combination: keep waiting.
     if (['Control', 'Meta', 'Alt', 'Shift', 'CapsLock'].includes(e.key)) return;
+    // Issue #810: a bare Escape/Enter cancels the capture instead of binding.
+    // Without this the field would record "Escape" — which the backend now
+    // rejects as a modifier-less grab — instead of doing what the user meant
+    // (back out of recording). A modified press (e.g. Ctrl+Escape) still
+    // binds, so only the modifier-less case cancels.
+    if (
+      (e.code === 'Escape' || e.code === 'Enter') &&
+      !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey
+    ) {
+      e.preventDefault();
+      e.currentTarget instanceof HTMLInputElement
+        ? e.currentTarget.blur()
+        : void endShortcutCapture(slot);
+      return;
+    }
     e.preventDefault();
     const accelerator = acceleratorFromEvent(e);
     if (accelerator === null) return;

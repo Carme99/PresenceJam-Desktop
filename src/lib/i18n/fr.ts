@@ -563,6 +563,9 @@ export const fr: Dict = {
     '« {accelerator} » n’est pas un raccourci reconnu',
   'settings.shortcutReasonConflict':
     'Est en conflit avec le raccourci {other} — une même combinaison ne peut pas piloter deux actions',
+  // Issue #810 : une touche seule serait interceptée dans toutes les applications.
+  'settings.shortcutReasonNeedsModifier':
+    '« {accelerator} » a besoin d’au moins un modificateur — une touche seule serait interceptée dans toutes les applications',
   'settings.shortcutReasonAutostart':
     'Échec du lancement à l’ouverture de session : {cause}',
   'settings.shortcutReasonUnknown': '{message}',

@@ -550,6 +550,9 @@ export const de: Dict = {
   'settings.shortcutReasonNotAKey': '„{accelerator}“ ist keine erkannte Tastenkombination',
   'settings.shortcutReasonConflict':
     'Steht im Konflikt mit der Belegung {other} — eine Kombination kann nicht zwei Aktionen auslösen',
+  // Issue #810: eine einzelne Taste würde systemweit abgefangen.
+  'settings.shortcutReasonNeedsModifier':
+    '„{accelerator}“ braucht mindestens einen Modifikator — eine einzelne Taste würde in jeder Anwendung abgefangen',
   'settings.shortcutReasonAutostart':
     '„Bei der Anmeldung starten“ fehlgeschlagen: {cause}',
   'settings.shortcutReasonUnknown': '{message}',
