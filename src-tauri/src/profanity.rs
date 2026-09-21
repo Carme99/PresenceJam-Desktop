@@ -338,16 +338,49 @@ fn is_clean_compound(stem: &str, token: &str) -> bool {
 }
 
 /// Continuations that extend a stem into profanity rather than a new
-/// word: inflections (`ing`/`er`/`ed`/plurals), insult compounds
-/// (`head`) and the glued compounds modern titles use (`boy`/`face`/
-/// `wad`/`post` — #579: `fuckboy`, `fuckface`, `shitposting`). Anything
-/// else (`pit`, `ens`, `ake`) is a distinct clean word (#328).
-fn is_profane_continuation(token: &str) -> bool {
-    [
-        "ing", "er", "ed", "es", "s", "head", "boy", "face", "wad", "post",
-    ]
-    .iter()
-    .any(|p| token.starts_with(p))
+/// word: whole inflections (`s`/`es`/`ed`/`ing`/`er`/`ers`/`ings`) and
+/// the glued compounds modern titles use (`head`/`boy`/`face`/`wad`/
+/// `post` — #579: `fuckboy`, `fuckface`, `shitposting`). Plain tails
+/// require a whole inflection: a mere prefix (`eria` for `er`) is a
+/// distinct clean word (#812: `Pizzeria`), while whole-inflection
+/// collisions on innocent words (`Spices`, `Spiced`, `crapes`) are
+/// carved per stem below. Compound tails keep the prefix form, where
+/// `headed`/`posting` really are the inflected forms. Anything else
+/// (`pit`, `ake`) is a distinct clean word (#328).
+fn is_profane_continuation(stem: &str, token: &str) -> bool {
+    if token.is_empty() {
+        return false;
+    }
+    // Compound tails keep the prefix form (`headed`, `posting`).
+    if ["head", "boy", "face", "wad", "post"]
+        .iter()
+        .any(|p| token.starts_with(p))
+    {
+        return true;
+    }
+    // Plain tails require a whole inflection.
+    if !matches!(
+        token,
+        "s" | "es" | "ed" | "ing" | "er" | "ers" | "ings"
+    ) {
+        return false;
+    }
+    // Per-stem carve-outs (#812), mirroring how `is_y_tail` scopes `y`:
+    // `spic` rejects `es`/`ed` (`Spices`/`Spiced`, while `spics` still
+    // flags), `crap` rejects `es` (`crapes`, while `craps` still flags),
+    // and `piss` rejects `er` (defence in depth: the `z`-to-`s`
+    // fold reads `Pizzeria` as `pisseria`, whose remainder `eria` is
+    // already not a whole inflection).
+    if stem == "spic" && matches!(token, "es" | "ed") {
+        return false;
+    }
+    if stem == "crap" && token == "es" {
+        return false;
+    }
+    if stem == "piss" && token == "er" {
+        return false;
+    }
+    true
 }
 
 /// `y`-tail scoped per stem: `shitty`/`bitchy`/`fucky` flag, while
@@ -436,7 +469,7 @@ fn contains_profanity(text: &str, extra_words: &[String]) -> bool {
                     // Veto only: a non-profane remainder stays clean, while a
                     // profane one falls through to the usual boundary checks
                     // below (so glued-left `adixs` keeps its verdict).
-                    if di_fold && !is_profane_continuation(&glued_token(&chars, end)) {
+                    if di_fold && !is_profane_continuation(word, &glued_token(&chars, end)) {
                         continue;
                     }
                 }
@@ -502,7 +535,7 @@ fn contains_profanity(text: &str, extra_words: &[String]) -> bool {
                 if is_y_tail(word, &token) {
                     return true;
                 }
-                if is_profane_continuation(&token) {
+                if is_profane_continuation(word, &token) {
                     return true;
                 }
                 continue;
@@ -521,7 +554,7 @@ fn contains_profanity(text: &str, extra_words: &[String]) -> bool {
             if is_y_tail(word, &token) {
                 return true;
             }
-            if is_profane_continuation(&token) {
+            if is_profane_continuation(word, &token) {
                 return true;
             }
         }
@@ -1010,6 +1043,35 @@ mod tests {
         assert!(!contains_profanity("Dixie Chicks", &[]));
         assert!(!contains_profanity("Dickens", &[]));
         assert!(contains_profanity("dixs", &[]));
+    }
+
+    // issue #812: the stem-continuation list matched any token that merely
+    // STARTED WITH an inflection, so ordinary words whose tails collide
+    // with one of those inflections were replaced by the placeholder —
+    // `Spices` (spic + es), `Spiced` (spic + ed), `crapes` (crap + es)
+    // and `Pizzeria` (the `z`-to-`s` fold reads piss + eria). Plain tails
+    // now require a whole inflection while the compound tails (`head`,
+    // `boy`, `face`, `wad`, `post`) keep the prefix form (`headed`,
+    // `posting`), and the remaining collisions are scoped per stem the
+    // way `is_y_tail` already does.
+    #[test]
+    fn test_issue_812_scoped_stem_continuations() {
+        assert!(!contains_profanity("Spices", &[]));
+        assert!(!contains_profanity("Spiced", &[]));
+        assert!(!contains_profanity("crapes", &[]));
+        assert!(!contains_profanity("Pizzeria", &[]));
+        assert_eq!(
+            filter_status("Artist - Spices", "Placeholder", true, &[]),
+            "Artist - Spices"
+        );
+        // The scoping only carves out the clean collisions: real
+        // inflections of the same stems still flag.
+        assert!(contains_profanity("spics", &[]));
+        assert!(contains_profanity("pisses", &[]));
+        assert!(contains_profanity("pissed", &[]));
+        assert!(contains_profanity("pissing", &[]));
+        assert!(contains_profanity("craps", &[]));
+        assert!(contains_profanity("fuckers", &[]));
     }
 
     // issue #579: the glued-right continuation list stopped at
