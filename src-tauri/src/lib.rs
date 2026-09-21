@@ -1,4 +1,6 @@
 use parking_lot::{Mutex, RwLock};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -6,8 +8,6 @@ use std::sync::OnceLock;
 use std::thread;
 use std::time::Instant;
 use tauri::{AppHandle, Emitter, Manager};
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct PendingSpotifyAuth {
@@ -1024,8 +1024,7 @@ fn tighten_log_permissions(dir: &std::path::Path) {
                 current_mode,
                 name
             );
-            if let Err(e) =
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
             {
                 log::warn!(
                     "[APP] could not chmod log file '{}' to 0600: {}",
@@ -2975,11 +2974,7 @@ mod tests {
 
         tighten_log_permissions(&base);
 
-        let dir_mode = std::fs::metadata(&base)
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
+        let dir_mode = std::fs::metadata(&base).unwrap().permissions().mode() & 0o777;
         assert_eq!(dir_mode, 0o700, "log dir must be 0700, got {:o}", dir_mode);
         for name in ["PresenceJam.log", "PresenceJam.2026-09-21-00-00-00.log"] {
             let mode = std::fs::metadata(base.join(name))
@@ -2989,11 +2984,7 @@ mod tests {
                 & 0o777;
             assert_eq!(mode, 0o600, "{name} must be 0600, got {mode:o}");
         }
-        let other_mode = std::fs::metadata(&other)
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
+        let other_mode = std::fs::metadata(&other).unwrap().permissions().mode() & 0o777;
         assert_eq!(
             other_mode, 0o644,
             "non-log files must be left alone, got {other_mode:o}"
