@@ -4364,12 +4364,11 @@ pub(crate) fn process_track(
                                 "[POLLING] process_track: Failed to set Teams status: {}",
                                 e
                             );
-                            emit_error(
-                                app,
-                                "teams",
-                                format!("Failed to update status: {}", e),
-                                ErrorSeverity::Error,
-                            );
+                            // Issue #974: the Dashboard banner reads `user_message()`,
+                            // never `Display`. `Display` carries the raw Graph body for
+                            // 403/418 — useful in logs, useless to a user staring at a
+                            // five-second banner.
+                            emit_error(app, "teams", e.user_message(), ErrorSeverity::Error);
                             // Issue #154: a 429 extends the next poll to the
                             // server-directed delay.
                             teams_backoff_secs = teams_backoff_secs.max(rate_limit_sleep_secs(&e));

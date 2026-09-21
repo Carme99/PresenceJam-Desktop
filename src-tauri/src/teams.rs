@@ -109,7 +109,7 @@ impl TeamsApiError {
                 "Microsoft Teams is temporarily unavailable. Retrying shortly.".to_string()
             }
             TeamsApiError::Other(status, _) => format!(
-                "Microsoft Teams returned an unexpected error (HTTP {}).",
+                "Microsoft returned an unexpected response (HTTP {}).",
                 status
             ),
         }
@@ -2586,6 +2586,22 @@ mod tests {
                 message.ends_with('.'),
                 "must read as a sentence ({variant:?}): {message}"
             );
+            // JSON-y substrings — the body and its keys are exactly what
+            // `Display` leaks. A 403 message that says "error" reads like a
+            // Graph envelope fragment, not a sentence; the test must catch
+            // both the structural chars and the lexical fingerprints.
+            let lowered = message.to_lowercase();
+            for needle in ["error", "code", "message"] {
+                assert!(
+                    !lowered.contains(needle),
+                    "JSON-y substring {needle:?} must never reach the UI ({variant:?}): {message}"
+                );
+            }
+            // No HTTP body fragment either.
+            assert!(
+                !message.contains("Insufficient privileges"),
+                "raw body fragment must never reach the UI ({variant:?}): {message}"
+            );
         }
 
         // The contrast with Display is the point: the body survives for logs…
@@ -2631,6 +2647,35 @@ mod tests {
         assert!(TeamsApiError::Other(418, body.to_string())
             .user_message()
             .contains("418"));
+    }
+
+    /// Issue #974: the poller must format Teams failures through
+    /// `user_message()`, never `Display`. `Display` carries the raw Graph
+    /// body for 403/418 — useful in logs, useless in the Dashboard banner.
+    /// A regression that re-uses `format!("… {}", e)` (which calls
+    /// `Display`) would reintroduce the issue #974 symptom: a JSON body
+    /// appearing in a five-second error toast.
+    ///
+    /// Source-grep is brittle on purpose: the previous shape was a single
+    /// `format!` line that slipped past tests, and the only place this
+    /// regresses is exactly that line, so a structural assertion is the
+    /// cheapest, most reliable check we have.
+    #[test]
+    fn poll_once_routes_teams_errors_through_user_message() {
+        let poll = include_str!("polling/poll_once.rs");
+        // The body-printing shape that produced issue #974. Reintroducing
+        // it would silently restore the raw Graph body in a Dashboard
+        // banner, so we explicitly assert it's gone.
+        assert!(
+            !poll.contains("Failed to update status: {}"),
+            "the body-printing `format!` must be gone — use `e.user_message()` instead"
+        );
+        // And the routing is in place: the poller's Teams emit uses
+        // `user_message()` so a 403 reaches the user as a sentence.
+        assert!(
+            poll.contains(".user_message()"),
+            "the poller must call `user_message()` somewhere on the Teams error path"
+        );
     }
 
     /// Issue #884: the shared Graph client must stay memoized. Reintroducing a
