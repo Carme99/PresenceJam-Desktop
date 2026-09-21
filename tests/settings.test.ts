@@ -1537,3 +1537,43 @@ describe('Settings Spotify playback-scope banner (#973)', () => {
     expect(hasScopeBanner(container)).toBe(false);
   });
 });
+
+/**
+ * Issue #813: the startup migration conflict must be replayable. The one-shot
+ * `spotify-secret-conflict` event fires from the setup hook before any webview
+ * has mounted, so Settings seeds the banner from `get_sync_status`'s
+ * `spotify_secret_conflict` field alone — no event delivery required.
+ *
+ * Fails pre-fix: `onMount` never reads the flag, so the banner never renders.
+ */
+describe('Settings Spotify secret-conflict banner replay (#813)', () => {
+  const hasConflictBanner = (container: HTMLElement) =>
+    Array.from(container.querySelectorAll('.scope-banner')).some((el) =>
+      el.textContent?.includes(t('settings.spotifySecretConflict'))
+    );
+
+  function syncStatusWithConflict(conflict: boolean) {
+    const base = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'get_sync_status') {
+        const status = await base(cmd, args);
+        return { ...(status as object), spotify_secret_conflict: conflict };
+      }
+      return base(cmd, args);
+    });
+  }
+
+  it('renders the reconnect banner from the flag alone, with no event', async () => {
+    syncStatusWithConflict(true);
+    const { container } = await mountSettings();
+    await waitFor(() => expect(hasConflictBanner(container)).toBe(true));
+  });
+
+  it('renders no banner when the flag is absent', async () => {
+    syncStatusWithConflict(false);
+    const { container } = await mountSettings();
+    await tick();
+    await tick();
+    expect(hasConflictBanner(container)).toBe(false);
+  });
+});

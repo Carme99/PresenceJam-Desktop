@@ -2663,17 +2663,21 @@ pub const SPOTIFY_SECRET_CONFLICT_EVENT: &str = "spotify-secret-conflict";
 pub fn migrate_legacy_client_secret() {
     run_legacy_secret_migration();
 }
+
 /// Startup migration with user-visible conflict surfacing (issue #376).
 ///
-/// Runs the same migration as [`migrate_legacy_client_secret`]; when the
-/// outcome is [`LegacySecretOutcome::ConflictKeychainDiffers`], emits a
+/// Runs the same migration as [`migrate_legacy_client_secret`] and returns
+/// the observable outcome so the caller can persist it (issue #813); when
+/// the outcome is [`LegacySecretOutcome::ConflictKeychainDiffers`], emits a
 /// one-time [`SPOTIFY_SECRET_CONFLICT_EVENT`] so Settings can prompt
 /// Settings → Reconnect Spotify (payload carries the manual step).
 /// All other outcomes are silent apart from the usual `[CFG]` logs.
-pub fn migrate_legacy_client_secret_with_app(app: &tauri::AppHandle) {
-    if run_legacy_secret_migration() == LegacySecretOutcome::ConflictKeychainDiffers {
+pub fn migrate_legacy_client_secret_with_app(app: &tauri::AppHandle) -> LegacySecretOutcome {
+    let outcome = run_legacy_secret_migration();
+    if outcome == LegacySecretOutcome::ConflictKeychainDiffers {
         emit_spotify_secret_conflict_once(app);
     }
+    outcome
 }
 /// Observable outcome of one [`run_legacy_secret_migration`] pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

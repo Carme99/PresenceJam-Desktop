@@ -588,10 +588,13 @@
       grantedScopes !== null &&
       !grantedScopes.includes('user-modify-playback-state')
   );
-  // Issue #376: set when the setup-path migration emits the one-time
-  // `spotify-secret-conflict` event (legacy plaintext in config.json
-  // differs from the keychain entry). The banner below prompts a
-  // Spotify reconnect; the plaintext is left untouched until then.
+  // Issue #376: set when the setup-path migration finds a legacy plaintext
+  // in config.json that differs from the keychain entry. Issue #813: the
+  // one-time `spotify-secret-conflict` event fires before any webview has
+  // mounted, so the flag is seeded from `get_sync_status`'s replayable
+  // `spotify_secret_conflict` field in `onMount` (the event listener below
+  // stays as a belt-and-braces path). The banner below prompts a Spotify
+  // reconnect; the plaintext is left untouched until then.
   let spotifySecretConflict = $state(false);
 
   // #693: a Teams sign-in whose tokens could not be persisted (locked
@@ -1013,6 +1016,13 @@
       const syncStatus = await invoke<SyncStatus>('get_sync_status');
       isConnected = syncStatus.spotify_connected ?? false;
       teamsStatusConnected = syncStatus.teams_connected ?? false;
+      // Issue #813: replay the startup migration conflict. The one-shot
+      // `spotify-secret-conflict` event fires from the setup hook before any
+      // webview has mounted, so the extra listener above can never observe
+      // it — the persisted `spotify_secret_conflict` field is what raises
+      // the banner for a conflicting legacy plaintext on disk. (Older
+      // backends omit the field; `?? false` keeps the banner hidden there.)
+      spotifySecretConflict = syncStatus.spotify_secret_conflict ?? false;
     } catch {
       // `get_sync_status` failure means the backend hasn't reported
       // connection state yet — default to disconnected and let the
