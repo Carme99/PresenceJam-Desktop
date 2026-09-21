@@ -13,7 +13,7 @@
   import { onMount, onDestroy, tick } from 'svelte';
   import PageHeader from './PageHeader.svelte';
   import { currentView } from '$lib/stores/app';
-  import { t, tCount, type TKey } from '$lib/i18n';
+  import { t, tCount, i18n, type TKey } from '$lib/i18n';
   import type { LogPayload } from '$lib/types';
   // C7 multi-window detach: pop-out/pop-back controls.
   import { popOut, popIn } from '$lib/stores/detach';
@@ -26,7 +26,10 @@
 
   interface LogEntry {
     seq: number;
+    // Localized HH:MM:SS — `date` is filled only when the row's local day
+    // differs from today, so today's rows stay uncluttered.
     timestamp: string;
+    date?: string;
     level: string;
     message: string;
   }
@@ -191,6 +194,11 @@
     return 'Info';
   }
 
+  /** YYYY-MM-DD in the system timezone, used to compare a row's day to today. */
+  function localDateKey(d: Date): string {
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+
   /** One on-disk log line -> the shape the list renders. */
   function parseLogLine(line: string): Omit<LogEntry, 'seq'> {
     const m = LOG_LINE_RE.exec(line);
@@ -202,8 +210,19 @@
     // The file is UTC; the live rows below are local, so convert — otherwise
     // one instant would print as two different times in the same column.
     const at = new Date(`${m[1]}T${m[2]}Z`);
+    const locale = i18n.locale;
+    if (Number.isNaN(at.getTime())) {
+      return { date: m[1], timestamp: m[2], level: canonicalLevel(m[4]), message: `[${m[3]}] ${m[5]}` };
+    }
+    // #969: keep the date on rows whose local day differs from today, so up
+    // to 500 backfilled lines from a multi-day PresenceJam.log are
+    // distinguishable ("09:14:02 today" vs "09:14:02 yesterday"). Today's
+    // rows stay uncluttered (no date span, no layout shift).
+    const date =
+      localDateKey(at) === localDateKey(new Date()) ? undefined : at.toLocaleDateString(locale);
     return {
-      timestamp: Number.isNaN(at.getTime()) ? m[2] : at.toLocaleTimeString(),
+      date,
+      timestamp: at.toLocaleTimeString(locale),
       level: canonicalLevel(m[4]),
       message: `[${m[3]}] ${m[5]}`
     };
@@ -255,7 +274,7 @@
       const levelStr = typeof numericLevel === 'number' ? (levelMap[numericLevel] ?? 'Info') : (numericLevel ?? 'Info');
       logs.push({
         seq: seqCounter++,
-        timestamp: new Date().toLocaleTimeString(),
+        timestamp: new Date().toLocaleTimeString(i18n.locale),
         level: levelStr,
         message: event.payload?.message || ''
       });
@@ -401,7 +420,10 @@
       {:else}
         {#each visibleLogs as log (log.seq)}
           <div class="log-entry" data-seq={log.seq}>
-            <span class="timestamp">{log.timestamp}</span>
+            <span class="timestamp">
+              {#if log.date}<span class="date">{log.date}</span>{/if}
+              {log.timestamp}
+            </span>
             <span class="level-badge {getLevelClass(log.level)}">{LEVEL_KEYS[log.level] ? t(LEVEL_KEYS[log.level]) : log.level}</span>
             <span class="message">{log.message}</span>
           </div>
@@ -541,6 +563,15 @@
     color: var(--fg-subtle);
     font-variant-numeric: tabular-nums;
     font-size: var(--fs-xs);
+  }
+  /* #969: a non-today row carries its date in front of the time. Smaller and
+   * dimmer than the timestamp so the common (today) row keeps its visual
+   * weight — the criterion is distinguishability, not prominence. */
+  .date {
+    color: var(--fg-subtle);
+    opacity: 0.7;
+    font-size: var(--fs-xs);
+    margin-right: var(--sp-2);
   }
   .level-badge {
     justify-self: start;

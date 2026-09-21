@@ -12,7 +12,7 @@
   import { presence, hydrate, setSyncing } from '$lib/stores/presence';
   import { notifyTrackChange } from '$lib/stores/notifications';
   import Logo from './Logo.svelte';
-  import { t } from '$lib/i18n';
+  import { t, i18n } from '$lib/i18n';
   import { useListenerTeardown } from '$lib/utils/useAuthListeners';
 
   /**
@@ -182,7 +182,10 @@
     snoozeActive && snoozeUntilMs !== null && snoozeRemainingMs !== null
       ? t('dashboard.snoozeChip', {
           remaining: formatRemaining(snoozeRemainingMs),
-          time: new Date(snoozeUntilMs).toLocaleTimeString(undefined, {
+          // #969: the live chip's clock follows `config.locale` instead of the
+          // OS default, so a German or French user sees the chip in their own
+          // time format. Reactive: a locale change re-renders this derived.
+          time: new Date(snoozeUntilMs).toLocaleTimeString(i18n.locale, {
             hour: '2-digit',
             minute: '2-digit'
           })

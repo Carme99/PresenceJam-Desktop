@@ -21,6 +21,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, waitFor } from '@testing-library/svelte';
+import { tick } from 'svelte';
 import type { Mock } from 'vitest';
 
 type Listener = { event: string; fn: (e: { payload: unknown }) => void };
@@ -66,6 +67,7 @@ import { invoke } from '@tauri-apps/api/core';
 import Dashboard from '$lib/components/Dashboard.svelte';
 import { configStore, defaultConfig } from '$lib/stores/config';
 import type { AppConfig } from '$lib/types';
+import { i18n } from '$lib/i18n';
 
 const invokeMock = invoke as unknown as Mock;
 
@@ -237,5 +239,32 @@ describe('Dashboard snooze chip (S9 / #677)', () => {
     });
     expect(container.querySelector('.snooze-chip')).not.toBeNull();
     expect(currentStore().snooze_until).not.toBeNull();
+  });
+
+  /**
+   * #969 — the chip's clock must follow `config.locale`. The pre-fix call
+   * passed `undefined` as the locale, so a French or German user saw the
+   * OS clock format; this case asserts the chip re-renders when the locale
+   * flips. Two different locales produce two different renderings of the
+   * same wall-clock instant.
+   */
+  it('renders the chip clock in the active locale, not the OS default (#969)', async () => {
+    i18n.set('en');
+    configStore.set(configWith(deadlineIn(30 * 60)));
+    const { container } = render(Dashboard as never);
+    await waitFor(() => {
+      expect(container.querySelector('.snooze-chip')).not.toBeNull();
+    });
+    const enText = (container.querySelector('.snooze-chip') as HTMLElement).textContent ?? '';
+
+    i18n.set('fr');
+    await tick();
+    // Reactive: `snoozeLabel` is a `$derived` that reads `i18n.locale`, so a
+    // locale flip re-renders the chip without remounting.
+    await waitFor(() => {
+      const next = (container.querySelector('.snooze-chip') as HTMLElement).textContent ?? '';
+      expect(next).not.toBe(enText);
+    });
+    i18n.set('en');
   });
 });
