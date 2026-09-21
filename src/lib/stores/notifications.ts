@@ -353,6 +353,12 @@ export async function setNotificationPreference(
   const cfg = get(configStore);
   try {
     await updateConfig({ notifications: { [cls]: enabled } as Partial<NotificationPreferences> });
+    // Issue #789: the partial write bypasses the whole-document path, so the
+    // backend document is converged but `configStore` still holds the stale
+    // section — Settings.svelte:554 reads `$configStore.notifications`
+    // directly, and a stale store also lets a sibling view's later save
+    // resurrect the old flag. Converge here, same as the catch path below.
+    configStore.set({ ...cfg, notifications: next });
   } catch (e) {
     // In-session the choice still stands; keep the config store coherent so a
     // later unrelated save cannot resurrect the old flag.
