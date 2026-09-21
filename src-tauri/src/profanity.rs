@@ -13,10 +13,14 @@ pub fn safe_placeholder_default() -> &'static str {
 /// A normalized character plus whether it arrived via a lossy fold
 /// (leet glyph, confusable decomposition, fullwidth fold). Lossy-origin
 /// chars are skippable inside a match (#337: the `1` in `fuu1uck`).
+/// `via_x_fold` marks the `c`/`k` pair from the scoped `x`-for-`ck`
+/// fold (#827): a `dick` fabricated from `Dix` needs a glued profane
+/// continuation to flag.
 #[derive(Clone, Copy)]
 struct NormChar {
     ch: char,
     leet: bool,
+    via_x_fold: bool,
 }
 
 fn collapse_repeated_chars(text: &[NormChar]) -> Vec<NormChar> {
@@ -171,6 +175,7 @@ fn normalize(text: &str) -> Vec<NormChar> {
             result.push(NormChar {
                 ch: 'v',
                 leet: true,
+                via_x_fold: false,
             });
             continue;
         }
@@ -181,6 +186,7 @@ fn normalize(text: &str) -> Vec<NormChar> {
             result.push(NormChar {
                 ch: 'f',
                 leet: true,
+                via_x_fold: false,
             });
             continue;
         }
@@ -202,10 +208,12 @@ fn normalize(text: &str) -> Vec<NormChar> {
             result.push(NormChar {
                 ch: 'c',
                 leet: true,
+                via_x_fold: true,
             });
             result.push(NormChar {
                 ch: 'k',
                 leet: true,
+                via_x_fold: true,
             });
             continue;
         }
@@ -218,11 +226,13 @@ fn normalize(text: &str) -> Vec<NormChar> {
                 result.push(NormChar {
                     ch: 'c',
                     leet: true,
+                    via_x_fold: false,
                 });
             } else {
                 result.push(NormChar {
                     ch: '(',
                     leet: false,
+                    via_x_fold: false,
                 });
             }
             continue;
@@ -234,6 +244,7 @@ fn normalize(text: &str) -> Vec<NormChar> {
                 result.push(NormChar {
                     ch: mapped,
                     leet: true,
+                    via_x_fold: false,
                 });
             }
             continue;
@@ -245,11 +256,13 @@ fn normalize(text: &str) -> Vec<NormChar> {
             result.push(NormChar {
                 ch: 'c',
                 leet: true,
+                via_x_fold: false,
             });
         }
         result.push(NormChar {
             ch: mapped,
             leet: leet || folded_is_lossy,
+            via_x_fold: false,
         });
     }
 
@@ -364,6 +377,19 @@ fn first_token(chars: &[NormChar], mut idx: usize) -> String {
     token
 }
 
+/// Alphanumeric run starting AT `idx`, with no separator skipping (#827:
+/// `Dix's` has `'` at `end`, so its glued remainder is empty and stays
+/// clean, while `dixs` flags on the glued `s`).
+fn glued_token(chars: &[NormChar], idx: usize) -> String {
+    let mut token = String::new();
+    let mut i = idx;
+    while i < chars.len() && chars[i].ch.is_alphanumeric() {
+        token.push(chars[i].ch);
+        i += 1;
+    }
+    token
+}
+
 fn contains_profanity(text: &str, extra_words: &[String]) -> bool {
     let chars = normalize(text);
 
@@ -393,6 +419,27 @@ fn contains_profanity(text: &str, extra_words: &[String]) -> bool {
             let right_clean = end >= chars.len() || !chars[end].ch.is_alphanumeric();
             if stretched && !right_clean {
                 continue;
+            }
+
+            // #827: the `di` onset of the scoped `x`-for-`ck` fold fabricates
+            // `dick` out of the surname `Dix`. Such a match only flags on a
+            // glued profane continuation (`dixs`, `dixhead`); `Dix`, `Dix's`
+            // (separator at `end`, so the glued token is empty) and `Dixon`
+            // stay clean. Scoped to the `di` onset — the other eight keep
+            // their current coverage (`fux` still reads as `fuck`).
+            if word == "dick" {
+                if let Some(rel) = chars[start..end].iter().position(|n| n.via_x_fold) {
+                    let fold_at = start + rel;
+                    let di_fold = fold_at >= 2
+                        && chars[fold_at - 2].ch == 'd'
+                        && chars[fold_at - 1].ch == 'i';
+                    // Veto only: a non-profane remainder stays clean, while a
+                    // profane one falls through to the usual boundary checks
+                    // below (so glued-left `adixs` keeps its verdict).
+                    if di_fold && !is_profane_continuation(&glued_token(&chars, end)) {
+                        continue;
+                    }
+                }
             }
 
             // Separator-spanning matches join across formatting (`Push It`
@@ -954,6 +1001,15 @@ mod tests {
         assert!(contains_profanity("(ock", &[]));
         assert!(contains_profanity("(unt", &[]));
         assert!(contains_profanity("(0ck", &[]));
+        // Issue #827: the `di` onset fabricates `dick` out of the surname
+        // `Dix`, so a bare or possessive `Dix` (and its longer forms) stays
+        // clean while a glued profane continuation still flags.
+        assert!(!contains_profanity("Dix", &[]));
+        assert!(!contains_profanity("Dix's", &[]));
+        assert!(!contains_profanity("Dixon", &[]));
+        assert!(!contains_profanity("Dixie Chicks", &[]));
+        assert!(!contains_profanity("Dickens", &[]));
+        assert!(contains_profanity("dixs", &[]));
     }
 
     // issue #579: the glued-right continuation list stopped at
