@@ -13,6 +13,7 @@ use tauri::{
 use crate::spotify::RepeatState;
 
 use crate::i18n::{self, Strings};
+use crate::menu::{ID_OPEN_LOGS, ID_QUIT, ID_SETTINGS};
 
 // Menu item IDs
 const ID_SHOW_HIDE: &str = "show_hide_window";
@@ -23,9 +24,6 @@ const ID_CURRENT_TRACK: &str = "current_track";
 /// (issue #591) — the Pause/Resume verb alone left sync state unstated, and
 /// the presence-gate badge is macOS-only.
 const ID_SYNC_STATUS: &str = "sync_status";
-const ID_OPEN_SETTINGS: &str = "settings";
-const ID_OPEN_LOGS: &str = "open_logs";
-const ID_QUIT: &str = "quit";
 // Spotify playback control (issue #3.0-P3). Device submenu items carry
 // ids of the form `{ID_DEVICES}|{spotify device id}` so the click handler
 // resolves the stable id instead of racing a list index (issue #388).
@@ -101,6 +99,464 @@ pub fn get_tray() -> Option<&'static TrayIcon> {
     TRAY.get()
 }
 
+/// Single dispatcher for every native menu click (issue #804).
+///
+/// The tray builder's `on_menu_event` is a *global* listener — Tauri calls it
+/// for window-menu events too — so this one function owns every tray-built id
+/// and delegates anything else (the app-menu-only ids) to
+/// [`crate::menu::handle_app_menu_event`]. It is registered exactly once (on
+/// the tray builder in [`setup_tray`]): one click then logs and emits exactly
+/// once, and tray-only ids never reach the app-menu handler's unknown-event
+/// warn. The second `window.on_menu_event` registration lib.rs used to carry
+/// double-fired every shared id and is gone.
+pub fn handle_menu_event(app: &AppHandle, id: &str) {
+    log::info!("[TRAY] menu event: id={}", id);
+    match id {
+        ID_SHOW_HIDE => {
+            if let Some(window) = app.get_webview_window("main") {
+                if window.is_visible().unwrap_or(false) {
+                    let _ = window.hide();
+                    // Issue #886: the dedup key reads the visibility mirror,
+                    // so the tray's own window changes must report it.
+                    note_window_visibility(false);
+                } else {
+                    let _ = window.show();
+                    note_window_visibility(true);
+                    // Issue #483: a minimized window stays minimized
+                    // after show() -- unminimize first (mirrors the
+                    // single-instance raise in lib.rs and show_window).
+                    let _ = window.unminimize();
+                    let _ = window.set_focus();
+                }
+            } else {
+                // Residual of #826: this arm is the tray's second window-raise
+                // path, and it must not stay silent about the same condition
+                // `commands::window::show_window` warns about.
+                log::warn!("[TRAY] show/hide: main window not found");
+            }
+            // Issue #587: the repaint performs blocking Spotify HTTP
+            // (devices/queue fetches, 10 s timeout each) whenever the
+            // 60 s throttle has lapsed, so it must never run on the
+            // menu-event thread — offload it like the #386 player arms.
+            refresh_tray_from_state(app);
+        }
+        ID_PAUSE_SYNC | ID_RESUME_SYNC => {
+            // Issue #588: this arm only *asks* the frontend to toggle
+            // (the frontend owns the start/stop call), so the running
+            // flag settles asynchronously. Watch it from a worker and
+            // repaint from backend truth, instead of relying on the
+            // Dashboard route being mounted to mirror the change back.
+            let before = app
+                .state::<std::sync::Arc<crate::AppState>>()
+                .polling
+                .is_syncing(Ordering::Acquire);
+            let _ = app.emit("toggle-pause", ());
+            let app_handle = app.clone();
+            std::thread::spawn(move || {
+                if !await_sync_toggle(&app_handle, before) {
+                    log::debug!(
+                        "[TRAY] pause/resume: sync flag unchanged after {:?}; repainting anyway",
+                        TOGGLE_SETTLE_TIMEOUT
+                    );
+                }
+                repaint_tray_from_state(&app_handle, "pause/resume");
+            });
+        }
+        ID_QUIT => {
+            // Issue #383: Quit must terminate the process even with no
+            // frontend listener — the old hide-only arm wedged the app
+            // in the tray with no way out. Route through the shared
+            // graceful shutdown (emits app-shutdown, then exits
+            // unconditionally after SHUTDOWN_GRACE).
+            crate::menu::request_graceful_shutdown(app);
+        }
+        // Shared with the app menu (issue #804): the tray builder's listener is
+        // global, so this arm owns every `settings` click from either surface.
+        ID_SETTINGS => {
+            let _ = app.emit("navigate", "settings");
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                note_window_visibility(true);
+                // Issue #483: mirror the unminimize in the Show arm.
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+            // Issue #592: showing the window here changes the Show/Hide
+            // label, so the tray must be repainted from backend state.
+            refresh_tray_from_state(app);
+        }
+        ID_OPEN_LOGS => {
+            let _ = app.emit("open-logs-folder", ());
+        }
+        // Spotify playback control (issue #3.0-P3). These dispatch
+        // directly against the Spotify API with the stored access
+        ID_PLAY_PAUSE => {
+            // Issue #386: the click-path blocking Spotify HTTP must not
+            // run on the menu-event thread — a slow network would wedge
+            // the tray menu. Offload everything (the currently-playing
+            // GET plus the play/pause action) to a worker thread.
+            //
+            // Issue #586: the worker resolves its token through the
+            // shared refresh-aware policy rather than snapshotting
+            // `state.tokens.spotify()`, so an expired access token is
+            // refreshed (and retried once) exactly like the command layer.
+            let app_handle = app.clone();
+            std::thread::spawn(move || {
+                // Resolve the ACTUAL playing state from the API rather
+                // than the stored track: the polling loop's `is_playing`
+                // goes stale on a same-track pause (it's only re-stored
+                // on title/artist change), and an external device may
+                // have changed state since. One extra GET per click is
+                // fine — this is user-initiated. Unknown → resume.
+                // Unconditional GET (`None`): user-initiated one-off
+                // click with no stored validator. C11 signature.
+                let state = app_handle.state::<std::sync::Arc<crate::AppState>>();
+                let should_pause = match crate::commands::playback::player_with_refresh_typed(
+                    state.inner(),
+                    &app_handle,
+                    "play/pause state",
+                    |token| crate::spotify::get_currently_playing(token, None),
+                ) {
+                    Ok(crate::spotify::CurrentlyPlaying::Modified { now: Some(now), .. }) => {
+                        now.media.is_playing
+                    }
+                    Ok(_) => false,
+                    Err(e) => {
+                        log::warn!("[TRAY] play/pause: playback state read failed: {}", e);
+                        let _ = app_handle.emit("playback-error", e.to_string());
+                        return;
+                    }
+                };
+                if should_pause {
+                    run_player_action(&app_handle, "pause", Some(false), None, |t| {
+                        crate::spotify::player_pause(t, None)
+                    });
+                } else {
+                    run_player_action(&app_handle, "play", Some(true), None, |t| {
+                        crate::spotify::player_play(t, None)
+                    });
+                }
+            });
+        }
+        ID_PREVIOUS => {
+            // Issue #386: offload the blocking Spotify HTTP off the
+            // menu-event thread. Skipping doesn't change playing state.
+            let app_handle = app.clone();
+            std::thread::spawn(move || {
+                run_player_action(&app_handle, "previous", None, None, |token| {
+                    crate::spotify::player_previous(token, None)
+                });
+            });
+        }
+        ID_NEXT => {
+            // Issue #386: offload the blocking Spotify HTTP off the
+            // menu-event thread. Skipping doesn't change playing state.
+            let app_handle = app.clone();
+            std::thread::spawn(move || {
+                run_player_action(&app_handle, "next", None, None, |token| {
+                    crate::spotify::player_next(token, None)
+                });
+            });
+        }
+        ID_SHUFFLE => {
+            // Issue #582: the target state is the inverse of the last
+            // state we know about (the poll body's `shuffle_state`, or
+            // this item's own last successful toggle). Issue #386: the
+            // blocking Spotify HTTP must not run on the menu-event
+            // thread.
+            //
+            // The new state is handed to `run_player_action` instead of
+            // being stored here: that function records it in its success
+            // arm *before* the menu rebuild it triggers, so the rebuilt
+            // item shows the state the API just accepted (storing after
+            // the call would repaint the old state and no later rebuild
+            // would correct it). On a 403 from a non-Premium account
+            // nothing is recorded and the item keeps showing the truth.
+            let app_handle = app.clone();
+            std::thread::spawn(move || {
+                let target = shuffle_toggle_target(LAST_SHUFFLE_STATE.load(Ordering::Acquire));
+                let repeat = last_repeat_state();
+                run_player_action(
+                    &app_handle,
+                    "shuffle",
+                    None,
+                    Some((target, repeat)),
+                    |token| crate::spotify::player_set_shuffle(token, target, None),
+                );
+            });
+        }
+        ID_REPEAT => {
+            // Issue #582: repeat cycles off → context → track → off,
+            // matching Spotify's own player button, so "repeat one" is
+            // reachable from the tray. Same off-thread and
+            // record-on-success discipline as Shuffle above.
+            let app_handle = app.clone();
+            std::thread::spawn(move || {
+                let target = last_repeat_state().next();
+                let shuffle = LAST_SHUFFLE_STATE.load(Ordering::Acquire);
+                run_player_action(
+                    &app_handle,
+                    "repeat",
+                    None,
+                    Some((shuffle, target)),
+                    |token| crate::spotify::player_set_repeat(token, target, None),
+                );
+            });
+        }
+        id if id.starts_with(SNOOZE_ITEM_PREFIX) => {
+            // S9 (issue #677): a snooze click writes `config.json` (atomic
+            // write + fsync), so it must run off the menu-event thread like
+            // every other arm here — a slow disk would otherwise wedge the
+            // native menu. The repaint follows the write, so it renders the
+            // new countdown, the "Resume sync now" entry and the
+            // snooze-forced cache-only fetch mode in one pass.
+            // The id is copied out of the borrowed `event` before the
+            // worker takes ownership (it is used in the unknown-id warn).
+            let raw = id.to_string();
+            let selection = parse_snooze_menu_id(&raw);
+            let app_handle = app.clone();
+            std::thread::spawn(move || {
+                match selection {
+                    Some(SnoozeMenuSelection::Preset(preset)) => {
+                        let now_utc = chrono::Utc::now();
+                        // Issue #867: the meeting-bound preset needs the
+                        // calendar cache at click time. We capture it here
+                        // (no fetch) — the entry is only built while a
+                        // meeting is active, so the cache is fresh
+                        // enough.
+                        let next_meeting_end =
+                            if preset == crate::config::SnoozePreset::UntilNextMeetingEnds {
+                                let state = app_handle.state::<std::sync::Arc<crate::AppState>>();
+                                state.calendar.current_meeting_end(now_utc)
+                            } else {
+                                None
+                            };
+                        let deadline = crate::config::snooze_preset_deadline(
+                            preset,
+                            now_utc,
+                            chrono::Local::now(),
+                            next_meeting_end,
+                        );
+                        if let Err(e) = write_snooze(&app_handle, Some(deadline)) {
+                            log::error!("[TRAY] snooze: could not store the deadline: {}", e);
+                        }
+                    }
+                    Some(SnoozeMenuSelection::Resume) => {
+                        if let Err(e) = write_snooze(&app_handle, None) {
+                            log::error!("[TRAY] snooze: could not clear the deadline: {}", e);
+                        }
+                    }
+                    None => {
+                        log::warn!("[TRAY] snooze: unrecognized menu id '{}'", raw);
+                    }
+                }
+                repaint_tray_from_state(&app_handle, "snooze");
+            });
+        }
+        id if id == ID_PROFILE_BASE || id.starts_with(PROFILE_ITEM_PREFIX) => {
+            // Issue #869: a profile click writes `config.json` (atomic
+            // write + fsync), so it must run off the menu-event thread
+            // like the snooze arm above — a slow disk would otherwise
+            // wedge the native menu. The id dispatch never has to
+            // disambiguate names because `clamp_presence_profiles`
+            // dedupes and rejects pipes at load/save, so the
+            // `{PROFILE_ITEM_PREFIX}|{name}` format is unambiguous.
+            //
+            // The id is copied out of the borrowed `event` before the
+            // worker takes ownership (it is used in the unknown-name
+            // warn and the profile-not-found path).
+            let raw = id.to_string();
+            let app_handle = app.clone();
+            std::thread::spawn(move || {
+                // Resolve the picked name from the stored config.
+                // Reading state.config here (off the menu-event thread)
+                // keeps the click handler off the config lock.
+                let state = app_handle.state::<std::sync::Arc<crate::AppState>>();
+                let target: Option<String> = if raw == ID_PROFILE_BASE {
+                    None
+                } else if let Some(stripped) = raw.strip_prefix(PROFILE_ITEM_PREFIX) {
+                    // Skip the disabled empty placeholder.
+                    if stripped == "empty" {
+                        repaint_tray_from_state(&app_handle, "profile (empty placeholder)");
+                        return;
+                    }
+                    // Validate against the clamped list — a name that
+                    // was deleted between the rebuild and the click
+                    // (or a stale menu from a previous build) must
+                    // fall back to base, not silently land on a
+                    // phantom id.
+                    let exists =
+                        state.config.get().as_ref().is_some_and(|c| {
+                            c.presence_profiles.iter().any(|p| p.name == stripped)
+                        });
+                    if !exists {
+                        log::warn!(
+                            "[TRAY] profile: {:?} not found — falling back to base",
+                            stripped
+                        );
+                        None
+                    } else {
+                        Some(stripped.to_string())
+                    }
+                } else {
+                    log::warn!("[TRAY] profile: unrecognized menu id '{}'", raw);
+                    return;
+                };
+                if let Err(e) = write_active_profile(&app_handle, target) {
+                    log::error!("[TRAY] profile: could not persist the switch: {}", e);
+                }
+                repaint_tray_from_state(&app_handle, "profile");
+            });
+        }
+        id if id == ID_MANUAL_STATUS_CLEAR => {
+            // Issue #870: the tray's "Clear manual status" entry. Routes
+            // through the same `clear_manual_status_inner` helper the
+            // Dashboard composer uses, on a worker thread — the Graph
+            // POST + the persisted record reset must not run on the
+            // menu-event thread.
+            let app_handle = app.clone();
+            std::thread::spawn(move || {
+                let state = app_handle.state::<std::sync::Arc<crate::AppState>>();
+                if let Err(e) =
+                    crate::commands::status::clear_manual_status_inner(state.inner(), &app_handle)
+                {
+                    log::error!("[TRAY] manual status clear: {}", e);
+                }
+                repaint_tray_from_state(&app_handle, "manual status clear");
+            });
+        }
+        id if id.starts_with(MANUAL_STATUS_ITEM_PREFIX) => {
+            // Issue #870: a "Recent statuses" pick. The trailing index
+            // resolves to one of the ring's slots; a stale index (the
+            // ring rotated since the menu was built) is logged and
+            // ignored. The pick carries the user's text verbatim, so the
+            // Dashboard composer and the tray share the same store.
+            let raw = id.to_string();
+            let index: usize = raw
+                .strip_prefix(MANUAL_STATUS_ITEM_PREFIX)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(99);
+            let recent = crate::commands::status::load_recent_statuses();
+            let picked = recent.get(index).cloned();
+            let app_handle = app.clone();
+            std::thread::spawn(move || {
+                let Some(entry) = picked else {
+                    log::warn!(
+                        "[TRAY] manual status pick: stale index {index}; the recent ring rotated"
+                    );
+                    repaint_tray_from_state(&app_handle, "manual status pick (stale)");
+                    return;
+                };
+                let state = app_handle.state::<std::sync::Arc<crate::AppState>>();
+                let expiry = crate::commands::status::clamp_expiry_public(60);
+                if let Err(e) = crate::commands::status::set_manual_status_inner(
+                    state.inner(),
+                    &app_handle,
+                    &entry.message,
+                    expiry,
+                ) {
+                    log::error!("[TRAY] manual status pick: {}", e);
+                }
+                repaint_tray_from_state(&app_handle, "manual status pick");
+            });
+        }
+        id if id.starts_with(VOLUME_ITEM_PREFIX) => {
+            // Issue #871: the tray's Volume submenu picked a percentage.
+            // The click handler offloads the Spotify HTTP and records the
+            // new volume so the Dashboard slider mirrors the new value
+            // on its next SyncStatus fetch. A stale id (an old build's
+            // menu) is logged and ignored.
+            let raw = id.to_string();
+            let selection = parse_volume_menu_id(&raw);
+            let app_handle = app.clone();
+            std::thread::spawn(move || {
+                let Some(VolumeMenuSelection::Percent(percent)) = selection else {
+                    log::warn!("[TRAY] volume: unrecognized menu id '{}'", raw);
+                    repaint_tray_from_state(&app_handle, "volume (stale)");
+                    return;
+                };
+                run_player_action(&app_handle, "volume", None, None, |token| {
+                    crate::spotify::player_set_volume(token, percent, None)
+                });
+            });
+        }
+        id if id.starts_with(SEEK_ITEM_PREFIX) => {
+            // Issue #871: the tray's Seek submenu picked a delta. The
+            // click handler reads the stored progress + duration from
+            // the AppState, computes the new position, and dispatches
+            // through `commands/playback::seek` so the same token
+            // refresh + retry-once policy applies. A stale id (an old
+            // build's menu) is logged and ignored.
+            let raw = id.to_string();
+            let selection = parse_seek_menu_id(&raw);
+            let app_handle = app.clone();
+            std::thread::spawn(move || {
+                let Some(SeekMenuSelection::Delta(delta)) = selection else {
+                    log::warn!("[TRAY] seek: unrecognized menu id '{}'", raw);
+                    repaint_tray_from_state(&app_handle, "seek (stale)");
+                    return;
+                };
+                let state = app_handle.state::<std::sync::Arc<crate::AppState>>();
+                let current = state
+                    .polling
+                    .current_track()
+                    .as_ref()
+                    .map(|t| (t.progress_ms, t.duration_ms));
+                let Some((progress, duration)) = current else {
+                    log::warn!("[TRAY] seek: no current track, cannot seek");
+                    repaint_tray_from_state(&app_handle, "seek (no track)");
+                    return;
+                };
+                // Spotify reports `progress_ms` as `Option` (issue #3.0-P3
+                // — the documented "Can be `null`"); the duration is
+                // always present. A missing `progress` defaults to 0 so
+                // the user still gets a forward-30s jump from the
+                // beginning of the track.
+                let progress = progress.unwrap_or(0);
+                let new_position = if delta >= 0 {
+                    progress.saturating_add(delta as u64).min(duration)
+                } else {
+                    progress.saturating_sub((-delta) as u64)
+                };
+                run_player_action(&app_handle, "seek", None, None, |token| {
+                    crate::spotify::player_seek(token, new_position as i64, None)
+                });
+            });
+        }
+        id if id.starts_with(DEVICE_ITEM_PREFIX) => {
+            // Device submenu item: `{ID_DEVICES}|{stable device id}`
+            // resolved by id (issue #388), with a live re-fetch fallback
+            // when the cached list went stale. Issue #386: the whole
+            // resolution + transfer runs on a worker thread so no HTTP
+            // touches the menu-event thread.
+            let raw = id
+                .strip_prefix(DEVICE_ITEM_PREFIX)
+                .unwrap_or("")
+                .to_string();
+            let selected = parse_device_menu_id(&raw);
+            let app_handle = app.clone();
+            std::thread::spawn(move || {
+                let device_id = resolve_device_id(&app_handle, &selected);
+                match device_id {
+                    Some(device_id) => {
+                        // Transfer starts playback on the target device.
+                        run_player_action(&app_handle, "transfer", Some(true), None, |token| {
+                            crate::spotify::player_transfer(token, &device_id, true)
+                        });
+                    }
+                    None => {
+                        log::warn!(
+                            "[TRAY] transfer: unknown or id-less device selected (id={})",
+                            selected_for_log(&selected)
+                        );
+                    }
+                }
+            });
+        }
+        _ => crate::menu::handle_app_menu_event(app, id),
+    }
+}
+
 pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
     // 4.7.0 (issue #674): the tray renders in the locale stored in the config.
     // Installed before the first menu build so the initial menu (and the
@@ -131,474 +587,7 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
         // a left click opens the AppIndicator menu unconditionally. It only
         // ever changes behaviour on Windows and macOS.
         .show_menu_on_left_click(false)
-        .on_menu_event(|app, event| match event.id().as_ref() {
-            ID_SHOW_HIDE => {
-                if let Some(window) = app.get_webview_window("main") {
-                    if window.is_visible().unwrap_or(false) {
-                        let _ = window.hide();
-                        // Issue #886: the dedup key reads the visibility mirror,
-                        // so the tray's own window changes must report it.
-                        note_window_visibility(false);
-                    } else {
-                        let _ = window.show();
-                        note_window_visibility(true);
-                        // Issue #483: a minimized window stays minimized
-                        // after show() -- unminimize first (mirrors the
-                        // single-instance raise in lib.rs and show_window).
-                        let _ = window.unminimize();
-                        let _ = window.set_focus();
-                    }
-                } else {
-                    // Residual of #826: this arm is the tray's second window-raise
-                    // path, and it must not stay silent about the same condition
-                    // `commands::window::show_window` warns about.
-                    log::warn!("[TRAY] show/hide: main window not found");
-                }
-                // Issue #587: the repaint performs blocking Spotify HTTP
-                // (devices/queue fetches, 10 s timeout each) whenever the
-                // 60 s throttle has lapsed, so it must never run on the
-                // menu-event thread — offload it like the #386 player arms.
-                refresh_tray_from_state(app);
-            }
-            ID_PAUSE_SYNC | ID_RESUME_SYNC => {
-                // Issue #588: this arm only *asks* the frontend to toggle
-                // (the frontend owns the start/stop call), so the running
-                // flag settles asynchronously. Watch it from a worker and
-                // repaint from backend truth, instead of relying on the
-                // Dashboard route being mounted to mirror the change back.
-                let before = app
-                    .state::<std::sync::Arc<crate::AppState>>()
-                    .polling
-                    .is_syncing(Ordering::Acquire);
-                let _ = app.emit("toggle-pause", ());
-                let app_handle = app.clone();
-                std::thread::spawn(move || {
-                    if !await_sync_toggle(&app_handle, before) {
-                        log::debug!(
-                            "[TRAY] pause/resume: sync flag unchanged after {:?}; repainting anyway",
-                            TOGGLE_SETTLE_TIMEOUT
-                        );
-                    }
-                    repaint_tray_from_state(&app_handle, "pause/resume");
-                });
-            }
-            ID_QUIT => {
-                // Issue #383: Quit must terminate the process even with no
-                // frontend listener — the old hide-only arm wedged the app
-                // in the tray with no way out. Route through the shared
-                // graceful shutdown (emits app-shutdown, then exits
-                // unconditionally after SHUTDOWN_GRACE).
-                crate::menu::request_graceful_shutdown(app);
-            }
-            // Menu items handled by app menu (settings, open_logs) also come through here
-            ID_OPEN_SETTINGS => {
-                let _ = app.emit("navigate", "settings");
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                    note_window_visibility(true);
-                    // Issue #483: mirror the unminimize in the Show arm.
-                    let _ = window.unminimize();
-                    let _ = window.set_focus();
-                }
-                // Issue #592: showing the window here changes the Show/Hide
-                // label, so the tray must be repainted from backend state.
-                refresh_tray_from_state(app);
-            }
-            ID_OPEN_LOGS => {
-                let _ = app.emit("open-logs-folder", ());
-            }
-            // Spotify playback control (issue #3.0-P3). These dispatch
-            // directly against the Spotify API with the stored access
-            ID_PLAY_PAUSE => {
-                // Issue #386: the click-path blocking Spotify HTTP must not
-                // run on the menu-event thread — a slow network would wedge
-                // the tray menu. Offload everything (the currently-playing
-                // GET plus the play/pause action) to a worker thread.
-                //
-                // Issue #586: the worker resolves its token through the
-                // shared refresh-aware policy rather than snapshotting
-                // `state.tokens.spotify()`, so an expired access token is
-                // refreshed (and retried once) exactly like the command layer.
-                let app_handle = app.clone();
-                std::thread::spawn(move || {
-                    // Resolve the ACTUAL playing state from the API rather
-                    // than the stored track: the polling loop's `is_playing`
-                    // goes stale on a same-track pause (it's only re-stored
-                    // on title/artist change), and an external device may
-                    // have changed state since. One extra GET per click is
-                    // fine — this is user-initiated. Unknown → resume.
-                    // Unconditional GET (`None`): user-initiated one-off
-                    // click with no stored validator. C11 signature.
-                    let state = app_handle.state::<std::sync::Arc<crate::AppState>>();
-                    let should_pause = match crate::commands::playback::player_with_refresh_typed(
-                        state.inner(),
-                        &app_handle,
-                        "play/pause state",
-                        |token| crate::spotify::get_currently_playing(token, None),
-                    ) {
-                        Ok(crate::spotify::CurrentlyPlaying::Modified {
-                            now: Some(now),
-                            ..
-                        }) => now.media.is_playing,
-                        Ok(_) => false,
-                        Err(e) => {
-                            log::warn!("[TRAY] play/pause: playback state read failed: {}", e);
-                            let _ = app_handle.emit("playback-error", e.to_string());
-                            return;
-                        }
-                    };
-                    if should_pause {
-                        run_player_action(
-                            &app_handle,
-                            "pause",
-                            Some(false),
-                            None,
-                            |t| crate::spotify::player_pause(t, None),
-                        );
-                    } else {
-                        run_player_action(
-                            &app_handle,
-                            "play",
-                            Some(true),
-                            None,
-                            |t| crate::spotify::player_play(t, None),
-                        );
-                    }
-                });
-            }
-            ID_PREVIOUS => {
-                // Issue #386: offload the blocking Spotify HTTP off the
-                // menu-event thread. Skipping doesn't change playing state.
-                let app_handle = app.clone();
-                std::thread::spawn(move || {
-                    run_player_action(&app_handle, "previous", None, None, |token| {
-                        crate::spotify::player_previous(token, None)
-                    });
-                });
-            }
-            ID_NEXT => {
-                // Issue #386: offload the blocking Spotify HTTP off the
-                // menu-event thread. Skipping doesn't change playing state.
-                let app_handle = app.clone();
-                std::thread::spawn(move || {
-                    run_player_action(&app_handle, "next", None, None, |token| {
-                        crate::spotify::player_next(token, None)
-                    });
-                });
-            }
-            ID_SHUFFLE => {
-                // Issue #582: the target state is the inverse of the last
-                // state we know about (the poll body's `shuffle_state`, or
-                // this item's own last successful toggle). Issue #386: the
-                // blocking Spotify HTTP must not run on the menu-event
-                // thread.
-                //
-                // The new state is handed to `run_player_action` instead of
-                // being stored here: that function records it in its success
-                // arm *before* the menu rebuild it triggers, so the rebuilt
-                // item shows the state the API just accepted (storing after
-                // the call would repaint the old state and no later rebuild
-                // would correct it). On a 403 from a non-Premium account
-                // nothing is recorded and the item keeps showing the truth.
-                let app_handle = app.clone();
-                std::thread::spawn(move || {
-                    let target = shuffle_toggle_target(LAST_SHUFFLE_STATE.load(Ordering::Acquire));
-                    let repeat = last_repeat_state();
-                    run_player_action(
-                        &app_handle,
-                        "shuffle",
-                        None,
-                        Some((target, repeat)),
-                        |token| crate::spotify::player_set_shuffle(token, target, None),
-                    );
-                });
-            }
-            ID_REPEAT => {
-                // Issue #582: repeat cycles off → context → track → off,
-                // matching Spotify's own player button, so "repeat one" is
-                // reachable from the tray. Same off-thread and
-                // record-on-success discipline as Shuffle above.
-                let app_handle = app.clone();
-                std::thread::spawn(move || {
-                    let target = last_repeat_state().next();
-                    let shuffle = LAST_SHUFFLE_STATE.load(Ordering::Acquire);
-                    run_player_action(
-                        &app_handle,
-                        "repeat",
-                        None,
-                        Some((shuffle, target)),
-                        |token| crate::spotify::player_set_repeat(token, target, None),
-                    );
-                });
-            }
-            id if id.starts_with(SNOOZE_ITEM_PREFIX) => {
-                // S9 (issue #677): a snooze click writes `config.json` (atomic
-                // write + fsync), so it must run off the menu-event thread like
-                // every other arm here — a slow disk would otherwise wedge the
-                // native menu. The repaint follows the write, so it renders the
-                // new countdown, the "Resume sync now" entry and the
-                // snooze-forced cache-only fetch mode in one pass.
-                // The id is copied out of the borrowed `event` before the
-                // worker takes ownership (it is used in the unknown-id warn).
-                let raw = id.to_string();
-                let selection = parse_snooze_menu_id(&raw);
-                let app_handle = app.clone();
-                std::thread::spawn(move || {
-                    match selection {
-                        Some(SnoozeMenuSelection::Preset(preset)) => {
-                            let now_utc = chrono::Utc::now();
-                            // Issue #867: the meeting-bound preset needs the
-                            // calendar cache at click time. We capture it here
-                            // (no fetch) — the entry is only built while a
-                            // meeting is active, so the cache is fresh
-                            // enough.
-                            let next_meeting_end = if preset
-                                == crate::config::SnoozePreset::UntilNextMeetingEnds
-                            {
-                                let state = app_handle
-                                    .state::<std::sync::Arc<crate::AppState>>();
-                                state.calendar.current_meeting_end(now_utc)
-                            } else {
-                                None
-                            };
-                            let deadline = crate::config::snooze_preset_deadline(
-                                preset,
-                                now_utc,
-                                chrono::Local::now(),
-                                next_meeting_end,
-                            );
-                            if let Err(e) = write_snooze(&app_handle, Some(deadline)) {
-                                log::error!("[TRAY] snooze: could not store the deadline: {}", e);
-                            }
-                        }
-                        Some(SnoozeMenuSelection::Resume) => {
-                            if let Err(e) = write_snooze(&app_handle, None) {
-                                log::error!("[TRAY] snooze: could not clear the deadline: {}", e);
-                            }
-                        }
-                        None => {
-                            log::warn!("[TRAY] snooze: unrecognized menu id '{}'", raw);
-                        }
-                    }
-                    repaint_tray_from_state(&app_handle, "snooze");
-                });
-            }
-            id if id == ID_PROFILE_BASE || id.starts_with(PROFILE_ITEM_PREFIX) => {
-                // Issue #869: a profile click writes `config.json` (atomic
-                // write + fsync), so it must run off the menu-event thread
-                // like the snooze arm above — a slow disk would otherwise
-                // wedge the native menu. The id dispatch never has to
-                // disambiguate names because `clamp_presence_profiles`
-                // dedupes and rejects pipes at load/save, so the
-                // `{PROFILE_ITEM_PREFIX}|{name}` format is unambiguous.
-                //
-                // The id is copied out of the borrowed `event` before the
-                // worker takes ownership (it is used in the unknown-name
-                // warn and the profile-not-found path).
-                let raw = id.to_string();
-                let app_handle = app.clone();
-                std::thread::spawn(move || {
-                    // Resolve the picked name from the stored config.
-                    // Reading state.config here (off the menu-event thread)
-                    // keeps the click handler off the config lock.
-                    let state = app_handle.state::<std::sync::Arc<crate::AppState>>();
-                    let target: Option<String> = if raw == ID_PROFILE_BASE {
-                        None
-                    } else if let Some(stripped) =
-                        raw.strip_prefix(PROFILE_ITEM_PREFIX)
-                    {
-                        // Skip the disabled empty placeholder.
-                        if stripped == "empty" {
-                            repaint_tray_from_state(&app_handle, "profile (empty placeholder)");
-                            return;
-                        }
-                        // Validate against the clamped list — a name that
-                        // was deleted between the rebuild and the click
-                        // (or a stale menu from a previous build) must
-                        // fall back to base, not silently land on a
-                        // phantom id.
-                        let exists = state
-                            .config
-                            .get()
-                            .as_ref()
-                            .is_some_and(|c| c.presence_profiles.iter().any(|p| p.name == stripped));
-                        if !exists {
-                            log::warn!(
-                                "[TRAY] profile: {:?} not found — falling back to base",
-                                stripped
-                            );
-                            None
-                        } else {
-                            Some(stripped.to_string())
-                        }
-                    } else {
-                        log::warn!("[TRAY] profile: unrecognized menu id '{}'", raw);
-                        return;
-                    };
-                    if let Err(e) = write_active_profile(&app_handle, target) {
-                        log::error!("[TRAY] profile: could not persist the switch: {}", e);
-                    }
-                    repaint_tray_from_state(&app_handle, "profile");
-                });
-            }
-            id if id == ID_MANUAL_STATUS_CLEAR => {
-                // Issue #870: the tray's "Clear manual status" entry. Routes
-                // through the same `clear_manual_status_inner` helper the
-                // Dashboard composer uses, on a worker thread — the Graph
-                // POST + the persisted record reset must not run on the
-                // menu-event thread.
-                let app_handle = app.clone();
-                std::thread::spawn(move || {
-                    let state = app_handle.state::<std::sync::Arc<crate::AppState>>();
-                    if let Err(e) = crate::commands::status::clear_manual_status_inner(
-                        state.inner(),
-                        &app_handle,
-                    ) {
-                        log::error!("[TRAY] manual status clear: {}", e);
-                    }
-                    repaint_tray_from_state(&app_handle, "manual status clear");
-                });
-            }
-            id if id.starts_with(MANUAL_STATUS_ITEM_PREFIX) => {
-                // Issue #870: a "Recent statuses" pick. The trailing index
-                // resolves to one of the ring's slots; a stale index (the
-                // ring rotated since the menu was built) is logged and
-                // ignored. The pick carries the user's text verbatim, so the
-                // Dashboard composer and the tray share the same store.
-                let raw = id.to_string();
-                let index: usize = raw
-                    .strip_prefix(MANUAL_STATUS_ITEM_PREFIX)
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(99);
-                let recent = crate::commands::status::load_recent_statuses();
-                let picked = recent.get(index).cloned();
-                let app_handle = app.clone();
-                std::thread::spawn(move || {
-                    let Some(entry) = picked else {
-                        log::warn!(
-                            "[TRAY] manual status pick: stale index {index}; the recent ring rotated"
-                        );
-                        repaint_tray_from_state(&app_handle, "manual status pick (stale)");
-                        return;
-                    };
-                    let state = app_handle.state::<std::sync::Arc<crate::AppState>>();
-                    let expiry = crate::commands::status::clamp_expiry_public(60);
-                    if let Err(e) = crate::commands::status::set_manual_status_inner(
-                        state.inner(),
-                        &app_handle,
-                        &entry.message,
-                        expiry,
-                    ) {
-                        log::error!("[TRAY] manual status pick: {}", e);
-                    }
-                    repaint_tray_from_state(&app_handle, "manual status pick");
-                });
-            }
-            id if id.starts_with(VOLUME_ITEM_PREFIX) => {
-                // Issue #871: the tray's Volume submenu picked a percentage.
-                // The click handler offloads the Spotify HTTP and records the
-                // new volume so the Dashboard slider mirrors the new value
-                // on its next SyncStatus fetch. A stale id (an old build's
-                // menu) is logged and ignored.
-                let raw = id.to_string();
-                let selection = parse_volume_menu_id(&raw);
-                let app_handle = app.clone();
-                std::thread::spawn(move || {
-                    let Some(VolumeMenuSelection::Percent(percent)) = selection else {
-                        log::warn!("[TRAY] volume: unrecognized menu id '{}'", raw);
-                        repaint_tray_from_state(&app_handle, "volume (stale)");
-                        return;
-                    };
-                    run_player_action(
-                        &app_handle,
-                        "volume",
-                        None,
-                        None,
-                        |token| crate::spotify::player_set_volume(token, percent, None),
-                    );
-                });
-            }
-            id if id.starts_with(SEEK_ITEM_PREFIX) => {
-                // Issue #871: the tray's Seek submenu picked a delta. The
-                // click handler reads the stored progress + duration from
-                // the AppState, computes the new position, and dispatches
-                // through `commands/playback::seek` so the same token
-                // refresh + retry-once policy applies. A stale id (an old
-                // build's menu) is logged and ignored.
-                let raw = id.to_string();
-                let selection = parse_seek_menu_id(&raw);
-                let app_handle = app.clone();
-                std::thread::spawn(move || {
-                    let Some(SeekMenuSelection::Delta(delta)) = selection else {
-                        log::warn!("[TRAY] seek: unrecognized menu id '{}'", raw);
-                        repaint_tray_from_state(&app_handle, "seek (stale)");
-                        return;
-                    };
-                    let state = app_handle.state::<std::sync::Arc<crate::AppState>>();
-                    let current = state
-                        .polling
-                        .current_track()
-                        .as_ref()
-                        .map(|t| (t.progress_ms, t.duration_ms));
-                    let Some((progress, duration)) = current else {
-                        log::warn!("[TRAY] seek: no current track, cannot seek");
-                        repaint_tray_from_state(&app_handle, "seek (no track)");
-                        return;
-                    };
-                    // Spotify reports `progress_ms` as `Option` (issue #3.0-P3
-                    // — the documented "Can be `null`"); the duration is
-                    // always present. A missing `progress` defaults to 0 so
-                    // the user still gets a forward-30s jump from the
-                    // beginning of the track.
-                    let progress = progress.unwrap_or(0);
-                    let new_position = if delta >= 0 {
-                        progress.saturating_add(delta as u64).min(duration)
-                    } else {
-                        progress.saturating_sub((-delta) as u64)
-                    };
-                    run_player_action(
-                        &app_handle,
-                        "seek",
-                        None,
-                        None,
-                        |token| {
-                            crate::spotify::player_seek(token, new_position as i64, None)
-                        },
-                    );
-                });
-            }
-            id if id.starts_with(DEVICE_ITEM_PREFIX) => {
-                // Device submenu item: `{ID_DEVICES}|{stable device id}`
-                // resolved by id (issue #388), with a live re-fetch fallback
-                // when the cached list went stale. Issue #386: the whole
-                // resolution + transfer runs on a worker thread so no HTTP
-                // touches the menu-event thread.
-                let raw = id
-                    .strip_prefix(DEVICE_ITEM_PREFIX)
-                    .unwrap_or("")
-                    .to_string();
-                let selected = parse_device_menu_id(&raw);
-                let app_handle = app.clone();
-                std::thread::spawn(move || {
-                    let device_id = resolve_device_id(&app_handle, &selected);
-                    match device_id {
-                        Some(device_id) => {
-                            // Transfer starts playback on the target device.
-                            run_player_action(&app_handle, "transfer", Some(true), None, |token| {
-                                crate::spotify::player_transfer(token, &device_id, true)
-                            });
-                        }
-                        None => {
-                            log::warn!(
-                                "[TRAY] transfer: unknown or id-less device selected (id={})",
-                                selected_for_log(&selected)
-                            );
-                        }
-                    }
-                });
-            }
-            _ => {}
-        })
+        .on_menu_event(|app, event| handle_menu_event(app, event.id().as_ref()))
         // Issue #971: Linux delivers no tray click events at all (Tauri lists
         // `TrayIconEvent::Click` as unsupported there), so the `tray-click`
         // emit below — and the frontend listener for it — are inert on that
@@ -2371,7 +2360,7 @@ fn rebuild_tray_menu(
         e.to_string()
     })?;
 
-    let open_settings = MenuItemBuilder::with_id(ID_OPEN_SETTINGS, s.open_settings)
+    let open_settings = MenuItemBuilder::with_id(ID_SETTINGS, s.open_settings)
         .build(app)
         .map_err(|e| {
             log::warn!(
@@ -2986,11 +2975,11 @@ mod tests {
     #[test]
     fn tray_click_arms_quit_and_offload() {
         let src = include_str!("tray.rs");
-        let body = body_of(prod_source(src), "pub fn setup_tray(");
+        let body = body_of(prod_source(src), "pub fn handle_menu_event(");
         // #383: Quit terminates even with no frontend listener.
         let quit_pos = body
             .find("ID_QUIT =>")
-            .expect("setup_tray must handle ID_QUIT");
+            .expect("handle_menu_event must handle ID_QUIT");
         let quit_tail = &body[quit_pos..quit_pos + 600.min(body.len() - quit_pos)];
         assert!(
             quit_tail.contains("request_graceful_shutdown"),
@@ -3025,7 +3014,7 @@ mod tests {
         // same way the #386 player arms used to.
         let show_pos = body
             .find("ID_SHOW_HIDE =>")
-            .expect("setup_tray must handle ID_SHOW_HIDE");
+            .expect("handle_menu_event must handle ID_SHOW_HIDE");
         let show_end = body[show_pos..]
             .find("ID_PAUSE_SYNC")
             .map(|i| show_pos + i)
@@ -3043,7 +3032,7 @@ mod tests {
         // the frontend's asynchronous toggle, not left to the Dashboard.
         let pause_pos = body
             .find("ID_PAUSE_SYNC | ID_RESUME_SYNC =>")
-            .expect("setup_tray must handle ID_PAUSE_SYNC | ID_RESUME_SYNC");
+            .expect("handle_menu_event must handle ID_PAUSE_SYNC | ID_RESUME_SYNC");
         let pause_end = body[pause_pos..]
             .find("ID_QUIT =>")
             .map(|i| pause_pos + i)
@@ -3063,6 +3052,96 @@ mod tests {
             !show_arm.contains("tokens.spotify()"),
             "the click path must not read the raw Spotify token snapshot"
         );
+    }
+
+    /// Issue #804: every menu click must fire exactly once. The tray
+    /// builder's `on_menu_event` is a global listener (it sees window-menu
+    /// events too), so the `window.on_menu_event` registration lib.rs carried
+    /// double-fired every shared id — and tray-only ids fell into menu.rs's
+    /// unknown-event warn. The single dispatcher `handle_menu_event` owns
+    /// every tray id and delegates the app-menu-only ids to
+    /// `menu::handle_app_menu_event`, which keeps only those three arms.
+    /// Fails pre-fix with twins (and with the second lib.rs registration).
+    #[test]
+    fn menu_events_route_through_one_dispatcher() {
+        let tray_prod = prod_source(include_str!("tray.rs"));
+        let menu_prod = prod_source(include_str!("menu.rs"));
+        let lib_prod = prod_source(include_str!("lib.rs"));
+        // One registration: the tray builder's global listener delegating to
+        // the named dispatcher; no per-window handler in lib.rs.
+        assert!(
+            tray_prod.contains(
+                ".on_menu_event(|app, event| handle_menu_event(app, event.id().as_ref()))"
+            ),
+            "setup_tray must register the single dispatcher, not an inline match"
+        );
+        assert!(
+            !lib_prod.contains("window.on_menu_event"),
+            "lib.rs must not register a second menu handler (issue #804: double-fire)"
+        );
+        let dispatcher = body_of(tray_prod, "pub fn handle_menu_event(");
+        // The dispatcher owns every tray-built id ...
+        for marker in [
+            "ID_SHOW_HIDE =>",
+            "ID_PAUSE_SYNC | ID_RESUME_SYNC =>",
+            "ID_QUIT =>",
+            "ID_SETTINGS =>",
+            "ID_OPEN_LOGS =>",
+            "ID_PLAY_PAUSE =>",
+            "ID_PREVIOUS =>",
+            "ID_NEXT =>",
+            "ID_SHUFFLE =>",
+            "ID_REPEAT =>",
+            "SNOOZE_ITEM_PREFIX",
+            "ID_PROFILE_BASE",
+            "PROFILE_ITEM_PREFIX",
+            "ID_MANUAL_STATUS_CLEAR",
+            "MANUAL_STATUS_ITEM_PREFIX",
+            "VOLUME_ITEM_PREFIX",
+            "SEEK_ITEM_PREFIX",
+            "DEVICE_ITEM_PREFIX",
+        ] {
+            assert!(
+                dispatcher.contains(marker),
+                "handle_menu_event must own `{}`",
+                marker
+            );
+        }
+        // ... and hands anything else to the app-menu handler.
+        assert!(
+            dispatcher.contains("crate::menu::handle_app_menu_event(app, id)"),
+            "handle_menu_event must delegate app-menu-only ids to menu::handle_app_menu_event"
+        );
+        // Exactly one log line per click, at the dispatcher.
+        assert!(
+            dispatcher.contains("log::info!(\"[TRAY] menu event: id={}\", id)"),
+            "the dispatcher must log each click once"
+        );
+        // setup_tray itself carries no match arms any more.
+        let setup = body_of(tray_prod, "pub fn setup_tray(");
+        assert!(
+            !setup.contains("ID_QUIT =>"),
+            "setup_tray must not keep a second copy of the dispatch arms"
+        );
+        // The app-menu handler keeps only its three window-menu-only arms, so
+        // no id is owned twice and tray-only ids never hit its unknown warn.
+        let app_menu = body_of(menu_prod, "pub fn handle_app_menu_event(");
+        for marker in ["ID_SHOW_DASHBOARD =>", "ID_SHOW_LOGS =>", "ID_ABOUT =>"] {
+            assert!(
+                app_menu.contains(marker),
+                "handle_app_menu_event must keep `{}`",
+                marker
+            );
+        }
+        // NOTE: `app_menu` is the handler body only (not the whole file),
+        // so these assertions cannot match the test module's own prose below.
+        for marker in ["ID_SETTINGS =>", "ID_OPEN_LOGS =>", "ID_QUIT =>"] {
+            assert!(
+                !app_menu.contains(marker),
+                "handle_app_menu_event must not twin `{}` (issue #804)",
+                marker
+            );
+        }
     }
 
     /// Production half of `src` — everything before the inline test module,
@@ -3140,10 +3219,10 @@ mod tests {
             !action_body.contains("tokens.spotify()"),
             "run_player_action must not snapshot the raw access token (issue #586)"
         );
-        let setup_body = body_of(prod, "pub fn setup_tray(");
+        let setup_body = body_of(prod, "pub fn handle_menu_event(");
         let play_pos = setup_body
             .find("ID_PLAY_PAUSE =>")
-            .expect("setup_tray must handle ID_PLAY_PAUSE");
+            .expect("handle_menu_event must handle ID_PLAY_PAUSE");
         let play_end = setup_body[play_pos..]
             .find("ID_PREVIOUS =>")
             .map(|i| play_pos + i)
@@ -3671,10 +3750,10 @@ mod tests {
     #[test]
     fn snooze_click_arms_write_off_thread_and_repaint() {
         let prod = prod_source(include_str!("tray.rs"));
-        let body = body_of(prod, "pub fn setup_tray(");
+        let body = body_of(prod, "pub fn handle_menu_event(");
         let arm_pos = body
             .find("id if id.starts_with(SNOOZE_ITEM_PREFIX)")
-            .expect("setup_tray must handle the snooze submenu ids");
+            .expect("handle_menu_event must handle the snooze submenu ids");
         let arm_end = body[arm_pos..]
             .find("id if id.starts_with(DEVICE_ITEM_PREFIX)")
             .map(|i| arm_pos + i)
@@ -3821,7 +3900,7 @@ mod tests {
             "the dedup key must carry the active profile id so a switch repaints"
         );
         // The click handler validates the picked name and offloads the write.
-        let setup = body_of(prod, "pub fn setup_tray(");
+        let setup = body_of(prod, "pub fn handle_menu_event(");
         assert!(
             setup.contains("ID_PROFILE_BASE") && setup.contains("PROFILE_ITEM_PREFIX"),
             "the click dispatcher must handle both the base sentinel and per-profile ids"

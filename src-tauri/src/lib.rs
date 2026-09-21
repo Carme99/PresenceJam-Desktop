@@ -2231,8 +2231,10 @@ pub fn run() {
                     log::info!("[APP] setup: System tray initialized successfully");
                 }
 
-                // Setup application menu bar using window menu (not app menu)
-                // This ensures click events are properly routed via on_menu_event
+                // Setup application menu bar using window menu (not app menu).
+                // Click events reach the single dispatcher in tray.rs (issue
+                // #804) — the tray builder's on_menu_event is global, so no
+                // per-window handler is registered here.
                 log::info!("[APP] setup: setting up application menu");
                 if let Some(window) = app.get_webview_window("main") {
                     if let Err(e) = menu::setup_app_menu(app, &window) {
@@ -2240,16 +2242,6 @@ pub fn run() {
                     } else {
                         log::info!("[APP] setup: Application menu initialized successfully");
                     }
-
-                    // Register menu event handler on the window
-                    // This is critical for macOS - window menus receive click events properly
-                    let app_handle = app.handle().clone();
-                    log::info!("[APP] setup: registering menu event handler on window");
-                    window.on_menu_event(move |_app, event| {
-                        let id = event.id().as_ref();
-                        log::info!("[APP] window.on_menu_event: id={}", id);
-                        menu::handle_app_menu_event(&app_handle, id);
-                    });
                 } else {
                     log::error!("[APP] setup: could not get main window for menu");
                 }

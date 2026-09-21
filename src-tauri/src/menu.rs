@@ -3,10 +3,13 @@ use tauri::{
     AppHandle, Emitter, Manager, Runtime, WebviewWindow,
 };
 
-// Menu item IDs — shared between tray and app menu for consistency
-const ID_SETTINGS: &str = "settings";
-const ID_OPEN_LOGS: &str = "open_logs";
-const ID_QUIT: &str = "quit";
+// Menu item IDs — shared between tray and app menu for consistency.
+// The tray's single dispatcher (issue #804) owns the clicks for the three
+// shared ids, so they live here once and tray.rs imports them: one value,
+// one name, no twin that can drift.
+pub(crate) const ID_SETTINGS: &str = "settings";
+pub(crate) const ID_OPEN_LOGS: &str = "open_logs";
+pub(crate) const ID_QUIT: &str = "quit";
 const ID_SHOW_DASHBOARD: &str = "show_dashboard";
 const ID_SHOW_LOGS: &str = "show_logs";
 const ID_ABOUT: &str = "about";
@@ -213,18 +216,13 @@ pub fn rebuild_app_menu(app: &AppHandle) -> Result<(), String> {
 }
 
 /// Handle menu events from the app menu bar.
+///
+/// Issue #804: only the window-menu-only ids live here. The tray-owned ids
+/// (`settings`, `open_logs`, `quit`) are handled by the single dispatcher
+/// [`crate::tray::handle_menu_event`], which delegates here for these three —
+/// a second copy would double-fire every shared id.
 pub fn handle_app_menu_event(app: &AppHandle, event_id: &str) {
     match event_id {
-        ID_SETTINGS => {
-            let _ = app.emit("navigate", "settings");
-            show_and_focus_main_window(app);
-        }
-        ID_OPEN_LOGS => {
-            let _ = app.emit("open-logs-folder", ());
-        }
-        ID_QUIT => {
-            request_graceful_shutdown(app);
-        }
         ID_SHOW_DASHBOARD => {
             let _ = app.emit("navigate", "dashboard");
             show_and_focus_main_window(app);
@@ -323,10 +321,14 @@ mod tests {
     /// without this test failing.
     #[test]
     fn quit_handler_routes_through_graceful_shutdown() {
-        let src = include_str!("menu.rs");
+        // Issue #804: Quit moved to the single dispatcher
+        // (`tray::handle_menu_event`) — this handler keeps only the
+        // window-menu-only arms, so the graceful-shutdown routing is pinned
+        // from the dispatcher side instead.
+        let src = include_str!("tray.rs");
         let sig_idx = src
-            .find("fn handle_app_menu_event(")
-            .expect("handle_app_menu_event must exist");
+            .find("pub fn handle_menu_event(")
+            .expect("handle_menu_event must exist");
         let brace_open_rel = src[sig_idx..]
             .find('{')
             .expect("function body must have an opening brace");
@@ -346,13 +348,13 @@ mod tests {
             }
             i += 1;
             if i >= src.len() {
-                panic!("unbalanced braces in handle_app_menu_event");
+                panic!("unbalanced braces in handle_menu_event");
             }
         };
         let body = &src[body_start + 1..body_end];
         let quit_pos = body
             .find("ID_QUIT =>")
-            .expect("handle_app_menu_event must handle ID_QUIT");
+            .expect("handle_menu_event must own ID_QUIT (issue #804)");
         let tail = &body[quit_pos..];
         assert!(
             tail.contains("request_graceful_shutdown(app)"),
