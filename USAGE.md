@@ -292,7 +292,7 @@ launches).
 
 Both `--status` and `--sync-once` read `config.json` and `tokens.json` directly, so the app
 does **not** have to be running. `--sync-once` does not take the single-instance lock either,
-so it can run next to a running app; the app's own polling keeps going. Running a one-shot
+so it can run next to a running app; the app's own polling keeps going. Like the loop, it honours an active snooze and an active quiet-hours `pause_polling` window by performing no request — there is no override flag. Running a one-shot
 while a track plays simply posts the status that track deserves — a later iteration with an
 unchanged status is deduplicated exactly as usual.
 
