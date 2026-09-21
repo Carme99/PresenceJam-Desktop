@@ -161,7 +161,6 @@ export const en = {
   'settings.themeDark': 'Dark',
   'settings.themeLight': 'Light',
   'settings.languageLabel': 'Language',
-  'settings.autostartError': 'Failed to update launch-at-login: {error}',
   'settings.saveChanges': 'Save changes',
   'settings.saving': 'Saving…',
   'settings.saved': 'Settings saved.',
@@ -529,6 +528,16 @@ export const en = {
     'Released while recording — the current binding would fire instead of being recorded',
   'settings.shortcutRejected': 'Cannot be used: {reason}',
   'settings.shortcutRegistrationFailed': 'Registration failed on this desktop: {reason}',
+  // Issue #968: typed reason codes from the Rust validator. The Settings
+  // card maps each `kind` to a dictionary entry so the rejection copy is
+  // localized; `shortcutReasonUnknown` renders the backend's free-form text
+  // for genuinely foreign refusals (compositor / app-owned combos).
+  'settings.shortcutReasonNotAKey': '“{accelerator}” is not a recognized shortcut',
+  'settings.shortcutReasonConflict':
+    'Conflicts with the {other} shortcut — one accelerator cannot drive both actions',
+  'settings.shortcutReasonAutostart':
+    'Launch-at-login failed: {cause}',
+  'settings.shortcutReasonUnknown': '{message}',
   // 4.7.0 — S12 hygiene (theme/density)
   'settings.themeSystem': 'System',
   'settings.themeHint':

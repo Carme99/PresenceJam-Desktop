@@ -3,6 +3,7 @@
 //! See issue #76. Also owns the `validate_http_url` helper used by
 //! `open_external_url` (issue #67).
 
+use crate::commands::shortcut_reason::ShortcutReason;
 use tauri::{AppHandle, Manager};
 use url::Url;
 
@@ -70,7 +71,7 @@ pub fn show_window(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn set_autostart_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
+pub async fn set_autostart_enabled(app: AppHandle, enabled: bool) -> Result<(), ShortcutReason> {
     log::debug!("{CMD} set_autostart_enabled: ENTRY - enabled={}", enabled);
 
     // #215: AutoLaunchManager touches the OS autostart registry/file
@@ -84,7 +85,7 @@ pub async fn set_autostart_enabled(app: AppHandle, enabled: bool) -> Result<(), 
                 "{CMD} set_autostart_enabled: is_enabled check FAILED - {}",
                 e
             );
-            e.to_string()
+            ShortcutReason::autostart(&e.to_string())
         })?;
 
         if is_enabled == enabled {
@@ -98,20 +99,25 @@ pub async fn set_autostart_enabled(app: AppHandle, enabled: bool) -> Result<(), 
         if enabled {
             autolaunch_manager.enable().map_err(|e| {
                 log::error!("{CMD} set_autostart_enabled: enable FAILED - {}", e);
-                e.to_string()
+                ShortcutReason::autostart(&e.to_string())
             })?;
             log::info!("{CMD} set_autostart_enabled: enable SUCCESS");
         } else {
             autolaunch_manager.disable().map_err(|e| {
                 log::error!("{CMD} set_autostart_enabled: disable FAILED - {}", e);
-                e.to_string()
+                ShortcutReason::autostart(&e.to_string())
             })?;
             log::info!("{CMD} set_autostart_enabled: disable SUCCESS");
         }
         Ok(())
     })
     .await
-    .map_err(|e| format!("set_autostart_enabled spawn_blocking panicked: {:?}", e))?
+    .map_err(|e| {
+        ShortcutReason::autostart(&format!(
+            "set_autostart_enabled spawn_blocking panicked: {:?}",
+            e
+        ))
+    })?
 }
 
 #[tauri::command]
