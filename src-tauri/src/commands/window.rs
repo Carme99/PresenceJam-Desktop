@@ -4,7 +4,9 @@
 //! `open_external_url` (issue #67).
 
 use crate::commands::shortcut_reason::ShortcutReason;
+use crate::{config, AppState};
 use std::path::Path;
+use std::sync::Arc;
 use tauri::{AppHandle, Manager};
 use url::Url;
 
@@ -71,10 +73,13 @@ pub fn show_window(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
-pub async fn set_autostart_enabled(app: AppHandle, enabled: bool) -> Result<(), ShortcutReason> {
-    log::debug!("{CMD} set_autostart_enabled: ENTRY - enabled={}", enabled);
-
+/// Issue #811: the OS half of the autostart toggle — flips the login entry
+/// without touching `config.autostart`. [`set_autostart_enabled`] (the Tauri
+/// command) calls this and then persists the flag; `config::after_persist`
+/// calls this to re-derive the entry from the persisted config. Splitting the
+/// OS write out keeps `after_persist` from re-entering the command (which
+/// would persist again and recurse).
+pub(crate) async fn apply_os_autostart(app: &AppHandle, enabled: bool) -> Result<(), ShortcutReason> {
     // #215: AutoLaunchManager touches the OS autostart registry/file
     // (disk + OS service). Offload to blocking pool so the UI thread
     // is not blocked while the manager reads/writes the autostart entry.
@@ -119,6 +124,71 @@ pub async fn set_autostart_enabled(app: AppHandle, enabled: bool) -> Result<(), 
             e
         ))
     })?
+}
+
+#[tauri::command]
+pub async fn set_autostart_enabled(
+    app: AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+    enabled: bool,
+) -> Result<(), ShortcutReason> {
+    log::debug!("{CMD} set_autostart_enabled: ENTRY - enabled={}", enabled);
+    apply_os_autostart(&app, enabled).await?;
+
+    // Issue #811: the command owns both halves — the OS login entry above
+    // and the `config.autostart` flag that `config::after_persist` re-derives
+    // the entry from after every write. Without this persist a later write
+    // from another surface (`set_locale`, `update_config`, an import) carries
+    // the still-persisted `autostart: false` and silently disables the entry
+    // the toggle just enabled. The write runs on the blocking pool under the
+    // same single write guard `save_config`/`update_config` use, so a
+    // concurrent write cannot interleave; `after_persist`'s re-sync then
+    // re-applies this same value and is idempotent. A no-op OS toggle whose
+    // flag already matches still skips the write below, but converges a
+    // drifted flag without touching the OS.
+    let state_clone = Arc::clone(state.inner());
+    let persisted = tauri::async_runtime::spawn_blocking(move || {
+        let mut config_guard = state_clone.config.get_mut();
+        let mut merged = match config_guard.as_ref() {
+            Some(current) => current.clone(),
+            None => config::load_config().map_err(|e| {
+                log::error!("{CMD} set_autostart_enabled: config load FAILED - {}", e);
+                ShortcutReason::autostart(&e)
+            })?,
+        };
+        if merged.autostart == enabled {
+            return Ok::<Option<crate::config::AppConfig>, ShortcutReason>(None);
+        }
+        merged.autostart = enabled;
+        let mut persisted = config::clamped_config(&merged);
+        config::stamp_schema_version(&mut persisted);
+        match config::save_config(&persisted) {
+            Ok(()) => {
+                *config_guard = Some(persisted.clone());
+                log::info!(
+                    "{CMD} set_autostart_enabled: config persisted (autostart={})",
+                    enabled
+                );
+                Ok::<Option<crate::config::AppConfig>, ShortcutReason>(Some(persisted))
+            }
+            Err(e) => {
+                log::error!("{CMD} set_autostart_enabled: config persist FAILED - {}", e);
+                Err(ShortcutReason::autostart(&e))
+            }
+        }
+    })
+    .await
+    .map_err(|e| {
+        ShortcutReason::autostart(&format!(
+            "set_autostart_enabled spawn_blocking panicked: {:?}",
+            e
+        ))
+    })??;
+    if let Some(persisted) = persisted {
+        super::config::after_persist(&app, &persisted).await;
+    }
+    log::info!("{CMD} set_autostart_enabled: SUCCESS - enabled={}", enabled);
+    Ok(())
 }
 
 #[tauri::command]
@@ -355,6 +425,59 @@ mod tests {
             not_found < success,
             "SUCCESS must sit on the raise path after the missing-window arm, \
              never on the exit path (issue #826)"
+        );
+    }
+    /// Issue #811: `set_autostart_enabled` must own both halves of the toggle —
+    /// the OS login entry AND the `config.autostart` flag `after_persist`
+    /// re-derives the entry from. Extract the command body by brace-counting
+    /// (order-independent: never anchor on the next fn) and require the
+    /// guarded persist plus the idempotent `after_persist` convergence.
+    #[test]
+    fn set_autostart_enabled_persists_the_flag_it_toggles() {
+        let src = include_str!("window.rs");
+        // Strip this test module so the assertions below cannot match their
+        // own literals.
+        let prod = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("window.rs must have a test module");
+        let sig_idx = prod
+            .find("pub async fn set_autostart_enabled(")
+            .expect("set_autostart_enabled must exist");
+        let brace_open_rel = prod[sig_idx..]
+            .find('{')
+            .expect("command body must have an opening brace");
+        let body_start = sig_idx + brace_open_rel;
+        let mut depth: u32 = 0;
+        let mut i = body_start;
+        let body_end = loop {
+            match prod.as_bytes()[i] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break i;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+            if i >= prod.len() {
+                panic!("unbalanced braces in set_autostart_enabled");
+            }
+        };
+        let body = &prod[body_start + 1..body_end];
+        assert!(
+            body.contains("merged.autostart = enabled"),
+            "the toggle must write config.autostart (issue #811)"
+        );
+        assert!(
+            body.contains("config::save_config("),
+            "the toggle must persist through the guarded write path (issue #811)"
+        );
+        assert!(
+            body.contains("after_persist("),
+            "the toggle must converge through after_persist so the re-sync is idempotent (issue #811)"
         );
     }
 }

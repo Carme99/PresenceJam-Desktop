@@ -382,11 +382,14 @@ fn make_off_entry(day: u8, start_minutes: u16, end_minutes: u16) -> QuietHoursEn
 /// #539 — a `logging.enabled` / `log_level` change takes effect immediately
 /// instead of at the next launch, and the level also governs whether the
 /// OS-side effects below are logged), then the native locale (4.7.0, issue
-/// #674 — see [`sync_native_locale`]), then the macOS activation policy
-/// (which borrows `app`, hence before the by-value `set_autostart_enabled`),
-/// then the OS autostart entry.
+/// #674 — see [`sync_native_locale`]), then the macOS activation policy,
+/// then the OS autostart entry. `pub(crate)` (not private) because the #811
+/// `set_autostart_enabled` command converges through this same path after it
+/// persists the flag; the OS half it shares is
+/// [`super::window::apply_os_autostart`], split out so this function never
+/// re-enters the command and recurses.
 #[cfg_attr(not(desktop), allow(unused_variables))]
-async fn after_persist(app: &AppHandle, persisted: &AppConfig) {
+pub(crate) async fn after_persist(app: &AppHandle, persisted: &AppConfig) {
     config::apply_log_level(&persisted.logging);
     sync_native_locale(app, persisted);
 
@@ -409,11 +412,13 @@ async fn after_persist(app: &AppHandle, persisted: &AppConfig) {
         let _ = app.set_activation_policy(policy);
     }
 
-    // Sync autostart state with the OS autostart manager. The command is
-    // now async (it touches the autostart registry/file), so we await it.
+    // Sync autostart state with the OS autostart manager (issue #811: the
+    // OS-only half — `apply_os_autostart`, not the `set_autostart_enabled`
+    // command, which would persist again and recurse). The command is
+    // async (it touches the autostart registry/file), so we await it.
     #[cfg(desktop)]
     {
-        if let Err(e) = super::window::set_autostart_enabled(app.clone(), persisted.autostart).await
+        if let Err(e) = super::window::apply_os_autostart(app, persisted.autostart).await
         {
             log::warn!("{CMD} failed to sync autostart state: {}", e);
         }
@@ -1115,6 +1120,20 @@ mod tests {
         assert!(
             sync.contains("tray::refresh_tray_for_locale("),
             "a changed locale must repaint the tray, not just the installed table"
+        );
+    }
+
+    /// Issue #811: `after_persist` must re-derive the OS entry through the
+    /// OS-only half (`apply_os_autostart`), never through the persisting
+    /// `set_autostart_enabled` command — calling the command from the
+    /// post-write path would persist again and recurse.
+    #[test]
+    fn after_persist_syncs_autostart_without_reentering_the_command() {
+        let prod = prod_source(include_str!("config.rs"));
+        let persisted = body_of(prod, "async fn after_persist(");
+        assert!(
+            persisted.contains("apply_os_autostart("),
+            "after_persist must sync the OS entry through the OS-only half (issue #811)"
         );
     }
 
