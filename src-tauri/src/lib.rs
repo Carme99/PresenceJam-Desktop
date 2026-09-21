@@ -319,6 +319,76 @@ impl Default for Polling {
     }
 }
 
+/// Single-flight gate for Spotify OAuth callbacks (issue #799).
+///
+/// On Windows/Linux a second-instance launch carrying a `presencejam://` URL
+/// reaches the running instance through the single-instance plugin's
+/// `deep-link` feature (`handle_cli_arguments` → `deep-link://new-url` →
+/// `on_open_url` → `handle_deep_link`). The argv scan that used to
+/// re-dispatch the same URL from `forward_launch_to_running_instance` is
+/// gone, but `handle_deep_link` keeps this gate as belt-and-braces for the
+/// pre-setup window (a `get_current` start URL followed by the same
+/// `on_open_url` event): the first delivery of a `(code, state)` pair wins,
+/// an identical repeat inside the dedup window is dropped before any token
+/// exchange is spawned, and a different pair proceeds normally.
+///
+/// **Lock encapsulation (load-bearing, issue #80):** all access goes through
+/// `claim` / `claim_at` — never via the inner field from the call site.
+pub struct DeepLinkDedup {
+    seen: Mutex<Option<(u64, Instant)>>,
+}
+
+/// Identical `(code, state)` repeats are dropped inside this window.
+const DEEP_LINK_DEDUP_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+
+impl DeepLinkDedup {
+    pub fn new() -> Self {
+        Self {
+            seen: Mutex::new(None),
+        }
+    }
+
+    /// Claim a callback key. Returns `true` when this delivery may proceed,
+    /// `false` when it is an identical repeat inside the dedup window.
+    pub fn claim(&self, key: u64) -> bool {
+        self.claim_at(key, Instant::now())
+    }
+
+    /// Deterministic core of `claim`: the clock is a parameter so tests can
+    /// drive window expiry without sleeping.
+    pub fn claim_at(&self, key: u64, now: Instant) -> bool {
+        let mut guard = self.seen.lock();
+        if let Some((prev_key, prev_at)) = *guard {
+            if prev_key == key && now.duration_since(prev_at) < DEEP_LINK_DEDUP_WINDOW {
+                return false;
+            }
+        }
+        *guard = Some((key, now));
+        true
+    }
+}
+
+impl Default for DeepLinkDedup {
+    /// Required by `clippy::new_without_default`. Equivalent to
+    /// `DeepLinkDedup::new()`.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Hash a `(code, state)` callback pair to a dedup key (issue #799). A
+/// missing `state` maps to the empty string so the key stays total; it never
+/// collides with a real delivery because a stateless callback returns early
+/// before reaching the gate.
+fn deep_link_callback_key(code: &str, state: Option<&str>) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    code.hash(&mut hasher);
+    state.unwrap_or("").hash(&mut hasher);
+    hasher.finish()
+}
+
 pub struct AppState {
     pub tokens: Tokens,
     pub polling: Polling,
@@ -346,6 +416,11 @@ pub struct AppState {
     /// through CoreServices' `LSSetDefaultHandlerForURLScheme` at every
     /// launch, which overrides a hostile app's earlier registration.
     pub launch_binding: OnceLock<crate::pkce::LaunchBinding>,
+    /// Single-flight gate for OAuth callbacks (issue #799): the first
+    /// delivery of a `(code, state)` pair wins; an identical repeat inside
+    /// the dedup window is dropped before any token exchange is spawned.
+    /// See `DeepLinkDedup`.
+    pub deep_link_seen: DeepLinkDedup,
 }
 
 impl AppState {
@@ -367,6 +442,7 @@ impl AppState {
             onboarding_cache: OnboardingCache::new(),
             calendar: crate::calendar::CalendarGate::new(),
             launch_binding,
+            deep_link_seen: DeepLinkDedup::new(),
         }
     }
 }
@@ -592,6 +668,27 @@ fn handle_deep_link(url: &str, app: AppHandle) {
                     "[DEEP_LINK] handle_deep_link: code found - code.len={}",
                     code_str.len()
                 );
+                // Issue #799: single-flight per (code, state). A Win/Linux
+                // second-instance launch reaches the running instance through
+                // `handle_cli_arguments` → `deep-link://new-url` →
+                // `on_open_url` → `handle_deep_link`; the argv scan that used
+                // to re-dispatch it from `forward_launch_to_running_instance`
+                // is gone, and this gate drops any identical repeat that still
+                // arrives inside the dedup window (e.g. a `get_current` start
+                // URL followed by the same `on_open_url` event) before a
+                // second token exchange can be spawned. Checked before
+                // validation on purpose: a repeat is byte-identical, so
+                // whatever the first delivery decides applies to it too.
+                let callback_key = deep_link_callback_key(&code_str, state_param.as_deref());
+                {
+                    let app_state = app.state::<Arc<AppState>>();
+                    if !app_state.deep_link_seen.claim(callback_key) {
+                        log::info!(
+                            "[DEEP_LINK] handle_deep_link: duplicate callback inside the dedup window — dropping before any token exchange"
+                        );
+                        return;
+                    }
+                }
                 // #66 option b + scope-3.3 §C1: per-launch secret bound into
                 // state as `<csrf>.<launch_secret>`. Spotify echoes state
                 // verbatim (https://developer.spotify.com/documentation/web-api/tutorials/code-flow),
@@ -1527,15 +1624,24 @@ fn suppress_config_windows<R: tauri::Runtime>(context: &mut tauri::Context<R>) -
     suppressed
 }
 
-/// The single-instance callback: raise the already-running window and forward
-/// a `presencejam://` deep link carried in the second launch's argv.
+/// The single-instance callback: raise the already-running window.
 ///
 /// Named rather than an inline closure (issue #679) so the registration site —
-/// which CLI mode has to skip — stays one line. Windows and Linux pass deep
-/// links as argv when the scheme is invoked; macOS goes through the deep-link
-/// plugin's `on_open_url` callback, which is wired in setup.
+/// which CLI mode has to skip — stays one line.
+///
+/// Deep-link routing (issue #799): on Windows/Linux the single-instance plugin
+/// is built with the `deep-link` cargo feature, so a second launch carrying a
+/// `presencejam://` URL is already routed through `handle_cli_arguments`,
+/// which emits `deep-link://new-url` — the same event the `on_open_url`
+/// callback wired in setup listens to. That path invokes `handle_deep_link`
+/// exactly once, so this callback must NOT scan argv for URLs and dispatch
+/// them again: the duplicate would redeem the same authorization `code`
+/// twice, and the second exchange fails with a spurious
+/// `spotify-auth-failed`. This callback therefore only raises the window and
+/// repaints the tray; it never touches argv URLs. macOS goes through the
+/// deep-link plugin's `on_open_url` callback, which is wired in setup.
 #[cfg(desktop)]
-fn forward_launch_to_running_instance(app: &AppHandle, argv: Vec<String>, _cwd: String) {
+fn forward_launch_to_running_instance(app: &AppHandle, _argv: Vec<String>, _cwd: String) {
     // Raise the existing window so the user sees it when a second
     // instance is launched (e.g., double-click the .msi shortcut
     // while the app is running, or a deep-link click from a
@@ -1553,13 +1659,6 @@ fn forward_launch_to_running_instance(app: &AppHandle, argv: Vec<String>, _cwd: 
     // drives the tray's Show/Hide label — repaint from backend state
     // on a worker (the rebuild may perform blocking Spotify HTTP).
     crate::tray::refresh_tray_from_state(app);
-    // argv[0] is the exe path; scan for a presencejam:// URL.
-    for arg in argv.iter().skip(1) {
-        if arg.starts_with("presencejam://") {
-            log::info!("[APP] single_instance: forwarding deep-link argv to handle_deep_link");
-            handle_deep_link(arg, app.clone());
-        }
-    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -3172,6 +3271,130 @@ mod tests {
         assert!(
             !store.contains("new WebviewWindow"),
             "the store must not create webview windows from the main window (issue #922)"
+        );
+    }
+
+    /// Issue #799: one Win/Linux second-instance launch must redeem the
+    /// authorization `code` exactly once. The single-instance plugin (built
+    /// with the `deep-link` feature) already routes the argv URL through
+    /// `handle_cli_arguments` → `deep-link://new-url` → `on_open_url` →
+    /// `handle_deep_link`, so the argv scan that used to live in
+    /// `forward_launch_to_running_instance` double-dispatched every callback
+    /// (the second exchange failed → spurious `spotify-auth-failed`). This
+    /// guard fails pre-fix (the body calls `handle_deep_link` on an argv
+    /// `presencejam://` URL) and passes post-fix. Brace-counted body
+    /// isolation via the shared `body_of` helper (order-independent, never
+    /// anchored on the following fn).
+    #[test]
+    fn test_forward_launch_does_not_redispatch_deep_links() {
+        let source = include_str!("lib.rs");
+        let prod_source = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("lib.rs has no #[cfg(test)] mod tests block");
+        let body = body_of(prod_source, "fn forward_launch_to_running_instance(");
+        assert!(
+            !body.contains("handle_deep_link"),
+            "forward_launch_to_running_instance must not call handle_deep_link: \
+             the single-instance plugin's deep-link feature already routes the \
+             argv URL via on_open_url, and a second dispatch redeems the same \
+             Spotify code twice (issue #799)"
+        );
+        assert!(
+            !body.contains("presencejam://"),
+            "forward_launch_to_running_instance must not scan argv for deep-link \
+             URLs (issue #799)"
+        );
+    }
+
+    /// Issue #799: `handle_deep_link` must pass every callback through the
+    /// single-flight gate before spawning the token exchange, so the two
+    /// delivery paths for one URL (`get_current` start URL + `on_open_url`
+    /// event, or any plugin re-emit) collapse to exactly one exchange.
+    #[test]
+    fn test_handle_deep_link_claims_single_flight_before_dispatch() {
+        let source = include_str!("lib.rs");
+        let prod_source = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("lib.rs has no #[cfg(test)] mod tests block");
+        let body = body_of(prod_source, "fn handle_deep_link(");
+        assert!(
+            body.contains("deep_link_callback_key("),
+            "handle_deep_link must hash the (code, state) pair for the \
+             single-flight gate (issue #799)"
+        );
+        assert!(
+            body.contains("deep_link_seen.claim("),
+            "handle_deep_link must claim the single-flight gate before spawning \
+             the token exchange (issue #799)"
+        );
+    }
+
+    /// Issue #799: the gate behind the single-flight claim. Drives one URL
+    /// through both delivery paths (same `(code, state)` key claimed twice)
+    /// and asserts exactly one proceeds; a different pair and an expired
+    /// window proceed normally so legitimate retries are never wedged.
+    /// Fails pre-fix (no gate ⇒ two spawns); passes post-fix.
+    #[test]
+    fn test_deep_link_dedup_single_flight_per_code_and_state() {
+        let key_a = deep_link_callback_key("code-abc", Some("csrf.secret"));
+        // Same inputs hash to the same key — the two delivery paths for one
+        // URL meet at the gate.
+        assert_eq!(
+            deep_link_callback_key("code-abc", Some("csrf.secret")),
+            key_a,
+            "identical (code, state) pairs must map to one dedup key"
+        );
+        // Either component differs → a different login, not a repeat.
+        assert_ne!(
+            deep_link_callback_key("code-xyz", Some("csrf.secret")),
+            key_a,
+            "a different code must not share the dedup key"
+        );
+        assert_ne!(
+            deep_link_callback_key("code-abc", Some("other.secret")),
+            key_a,
+            "a different state must not share the dedup key"
+        );
+
+        // Both delivery paths for one URL: first proceeds, repeat drops.
+        let gate = DeepLinkDedup::new();
+        let t0 = Instant::now();
+        assert!(gate.claim_at(key_a, t0), "first delivery must proceed");
+        assert!(
+            !gate.claim_at(key_a, t0 + std::time::Duration::from_secs(1)),
+            "identical repeat inside the window must be dropped"
+        );
+        assert!(
+            !gate.claim_at(
+                key_a,
+                t0 + DEEP_LINK_DEDUP_WINDOW - std::time::Duration::from_secs(1)
+            ),
+            "repeat at the window edge must still be dropped"
+        );
+
+        // A different (code, state) pair is a new login, not a repeat.
+        let gate = DeepLinkDedup::new();
+        assert!(gate.claim_at(key_a, t0), "first delivery must proceed");
+        assert!(
+            gate.claim_at(
+                deep_link_callback_key("code-xyz", Some("csrf.secret")),
+                t0 + std::time::Duration::from_secs(1)
+            ),
+            "a different (code, state) pair must proceed"
+        );
+
+        // After the window the same pair is a fresh delivery, so a retried
+        // flow can never wedge behind a stale claim.
+        let gate = DeepLinkDedup::new();
+        assert!(gate.claim_at(key_a, t0), "first delivery must proceed");
+        assert!(
+            gate.claim_at(
+                key_a,
+                t0 + DEEP_LINK_DEDUP_WINDOW + std::time::Duration::from_secs(1)
+            ),
+            "same pair past the window must proceed"
         );
     }
 }
