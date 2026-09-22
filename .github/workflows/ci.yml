@@ -505,7 +505,6 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-
       - name: Fail on untracked, unignored root paths
         run: |
           set -euo pipefail
@@ -515,3 +514,24 @@ jobs:
             echo "$stray"
             exit 1
           fi
+
+  # License + source gate (issue #776): `dep-audit` covers advisories only, so
+  # a new dependency with an incompatible license (or a git/non-crates.io
+  # source) changes what the project ships with no CI signal. `licenses` +
+  # `sources` fail the run; `bans` stays warn-only in deny.toml (duplicate
+  # versions are endemic to this tree) so it is not part of this command.
+  cargo-deny:
+    name: Cargo deny (licenses + sources)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Cargo deny (licenses + sources)
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25  # v2.1.1
+        with:
+          manifest-path: src-tauri/Cargo.toml
+          command: check
+          command-arguments: licenses sources
