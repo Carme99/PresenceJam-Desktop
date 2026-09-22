@@ -10,6 +10,9 @@ build/
 .svelte-kit/
 node_modules/
 
+# Render tooling download lands at repo root (issue #753) — never commit
+/chrome-headless-shell/
+
 # OS
 .DS_Store
 Thumbs.db

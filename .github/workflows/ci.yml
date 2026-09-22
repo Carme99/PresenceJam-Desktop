@@ -491,3 +491,27 @@ jobs:
         # ran at all). Keep the value on its own line if it cites an issue.
         run: |
           npm audit --audit-level=high || echo "::warning::npm audit found advisories (advisory-only, see issue #357)"
+
+  # No vendored binaries (issue #753): render tooling (chrome-headless-shell
+  # via mmdc) downloads into the repo root; it must stay gitignored so it
+  # never lands in git status or a commit. Read-only check: fails when a
+  # root-level path is both untracked and unignored.
+  no-vendored-binaries:
+    name: No vendored binaries
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Fail on untracked, unignored root paths
+        run: |
+          set -euo pipefail
+          stray=$(git status --porcelain | grep -E '^\?\? [^/]*/?$' || true)
+          if [ -n "$stray" ]; then
+            echo "::error::untracked, unignored root paths present — vendored binaries must be gitignored (see issue #753):"
+            echo "$stray"
+            exit 1
+          fi
