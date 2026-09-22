@@ -82,7 +82,9 @@ impl std::fmt::Display for TeamsApiError {
                 None => write!(f, "Rate limited"),
             },
             TeamsApiError::InvalidGrant => write!(f, "Refresh token is invalid or revoked"),
-            TeamsApiError::ReauthRequired(detail) => write!(f, "Teams re-authentication required: {}", detail),
+            TeamsApiError::ReauthRequired(detail) => {
+                write!(f, "Teams re-authentication required: {}", detail)
+            }
             TeamsApiError::Transient(msg) => write!(f, "{}", msg),
             TeamsApiError::Other(_status, body) => write!(f, "{}", body),
         }
@@ -586,9 +588,11 @@ fn classify_token_endpoint_error(status_code: u16, body: &str) -> TeamsApiError 
             };
             match error_resp.error.as_str() {
                 "invalid_grant" => TeamsApiError::InvalidGrant,
-                "interaction_required" | "consent_required" | "invalid_client" | "unauthorized_client" | "invalid_scope" => {
-                    TeamsApiError::ReauthRequired(detail)
-                }
+                "interaction_required"
+                | "consent_required"
+                | "invalid_client"
+                | "unauthorized_client"
+                | "invalid_scope" => TeamsApiError::ReauthRequired(detail),
                 _ => TeamsApiError::Transient(format!(
                     "token endpoint error {}: {}",
                     status_code, detail
@@ -1734,9 +1738,8 @@ mod tests {
             "unauthorized_client",
             "invalid_scope",
         ] {
-            let body = format!(
-                r#"{{"error":"{code}","error_description":"user interaction needed"}}"#
-            );
+            let body =
+                format!(r#"{{"error":"{code}","error_description":"user interaction needed"}}"#);
             match classify_token_endpoint_error(400, &body) {
                 TeamsApiError::ReauthRequired(detail) => assert!(
                     detail.contains(code),
