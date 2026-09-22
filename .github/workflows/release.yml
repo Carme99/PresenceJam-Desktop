@@ -1092,7 +1092,7 @@ jobs:
       # master; if the fork is behind (winget-pkgs master moves
       # constantly), createRef is FORBIDDEN with a misleading "does not
       # have the correct permissions" error (verified empirically).
-      - uses: vedantmgoyal2009/winget-releaser@b3a5dae0047c6180023acba3f548c55fdf6b7193
+      - uses: vedantmgoyal2009/winget-releaser@a8fff44b123f115ce4c21543edf8b677376fc7e0
         with:
           identifier: PresenceJam.PresenceJam
           token: ${{ secrets.WINGET_TOKEN }}
