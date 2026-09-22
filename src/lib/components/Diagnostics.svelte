@@ -269,6 +269,7 @@
           <dt>{t('diagnostics.keychainSpotifySecret')}</dt><dd>{boolLabel(snapshot.keychain.spotify_client_secret_present)}</dd>
           <dt>{t('diagnostics.keychainEncryptionKey')}</dt><dd>{boolLabel(snapshot.keychain.tokens_encryption_key_present)}</dd>
         </dl>
+        <p class="hint">{t('diagnostics.tokensNeverIncluded')}</p>
         {#if !resetArmed}
           <div class="reset-actions">
             <button class="btn-secondary" onclick={armTokenReset}>{t('diagnostics.resetTokenStorage')}</button>

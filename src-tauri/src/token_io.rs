@@ -781,7 +781,8 @@ pub fn read_or_create_serve_token_with_backoff(
 /// ≤ v2.10.0 plaintext sidecar — and no plaintext remnant survives the
 /// reset. The per-pid provably-gone guard still applies, so a sidecar of a
 /// still-running writer is left alone; the live `tokens.json` delete above
-/// does not depend on the sweep, and a sweep failure fails the reset.
+/// does not depend on the sweep. A per-file sweep failure fails the reset
+/// (a directory-scan failure only warns — see [`remove_stale_tokens_sidecars`]).
 pub fn clear_tokens_file(app: &tauri::AppHandle) -> Result<(), String> {
     clear_tokens_file_at(&tokens_file_path(app)?)
 }
@@ -1625,7 +1626,8 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&dir);
     }
-    // Issue #766 (wiring guard): `reset_tokens_storage` must drop the
+    // Issue #766 (wiring/mutant-killer guard, not a regression proof): this
+    // passes pre-fix by design. `reset_tokens_storage` must drop the
     // keychain key BEFORE deleting the tokens file. A failure then leaves at
     // worst an orphan ciphertext file (which `read_tokens_at` treats as
     // "start empty"); the reverse order could leave an undecryptable file

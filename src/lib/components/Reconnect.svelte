@@ -77,7 +77,7 @@
       tokenResetDone = t('reconnect.resetTokenDone');
       tokenResetArmed = false;
     } catch (e) {
-      devLog('[RECONNECT] reset_local_token_storage failed:', e);
+      console.warn('[RECONNECT] reset_local_token_storage failed:', e);
       tokenResetError = t('reconnect.resetTokenFailed', { error: String(e) });
     } finally {
       tokenResetBusy = false;
