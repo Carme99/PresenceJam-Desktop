@@ -27,7 +27,9 @@ use serde::Serialize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
-use tauri_plugin_global_shortcut::{Code, GlobalShortcut, GlobalShortcutExt, Shortcut, ShortcutState};
+use tauri_plugin_global_shortcut::{
+    Code, GlobalShortcut, GlobalShortcutExt, Shortcut, ShortcutState,
+};
 
 /// Log tag prefix for this submodule (issue #79 item 3).
 const CMD: &str = "[CMD.SHORTCUTS]";
@@ -169,7 +171,8 @@ fn key_binds_bare(key: Code) -> bool {
             | F21
             | F22
             | F23
-            | F24 | MediaPlayPause
+            | F24
+            | MediaPlayPause
             | MediaPlay
             | MediaPause
             | MediaStop
@@ -931,9 +934,9 @@ mod tests {
                         "the reason must quote the offending accelerator unchanged"
                     );
                 }
-                other => panic!(
-                    "a bare key must surface as `NeedsModifier`, got {other:?} (issue #810)"
-                ),
+                other => {
+                    panic!("a bare key must surface as `NeedsModifier`, got {other:?} (issue #810)")
+                }
             }
         }
     }
@@ -942,7 +945,15 @@ mod tests {
     /// untouched by the rule.
     #[test]
     fn function_and_media_keys_bind_bare() {
-        for accelerator in ["F1", "F8", "F12", "F24", "MediaPlayPause", "MediaStop", "MediaTrackNext"] {
+        for accelerator in [
+            "F1",
+            "F8",
+            "F12",
+            "F24",
+            "MediaPlayPause",
+            "MediaStop",
+            "MediaTrackNext",
+        ] {
             assert!(
                 validate_accelerator(ShortcutSlot::TogglePlayback, accelerator, None).is_ok(),
                 "{accelerator} must bind without a modifier (issue #810)"
