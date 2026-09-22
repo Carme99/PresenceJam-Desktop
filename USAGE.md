@@ -292,6 +292,12 @@ launches).
 | `presencejam --help` | Prints the usage text — the three flags above plus `--minimized` — and exits `0`. Fully headless. |
 | `presencejam --minimized` | Starts with the window hidden (what the autostart plugin passes at login). This is a normal GUI launch. |
 
+On Windows the release build is a GUI-subsystem executable, so it owns no console of its own:
+run the flags from a console — `cmd` or PowerShell, e.g. `cmd /c presencejam --help` — and the
+output prints in that window. A redirected stdout/stderr (a pipe or a file) is left alone, so
+`presencejam --status | jq …` keeps working; launching the exe with no console at all (for
+example by double-clicking it) still starts the GUI normally.
+
 Both `--status` and `--sync-once` read `config.json` and `tokens.json` directly, so the app
 does **not** have to be running. `--sync-once` does not take the single-instance lock either,
 so it can run next to a running app; the app's own polling keeps going. Like the loop, it honours an active snooze and an active quiet-hours `pause_polling` window by performing no request — there is no override flag. Running a one-shot

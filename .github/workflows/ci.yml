@@ -61,6 +61,92 @@ jobs:
           CARGO_INCREMENTAL: 0
         run: cargo check --manifest-path src-tauri/Cargo.toml --all-targets
 
+  # Windows CLI smoke (issue #818): the release build is a GUI-subsystem
+  # executable (`windows_subsystem = "windows"` in main.rs), so the
+  # `--help` / `--status` / `--sync-once` output used to vanish when run
+  # from a console. `lib.rs::attach_parent_console_for_cli` re-attaches
+  # to the invoking console before any CLI arm prints; this job builds
+  # the real release binary (the compile gate for the `cfg(windows)`
+  # code), guards the piped CLI surface via `cmd /c --help`, and runs
+  # the source-shape regression test below as the fails-pre-fix gate.
+  windows-cli-smoke:
+    name: Windows CLI smoke (--help prints)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6.5.0
+        with:
+          node-version: 24
+          cache: 'npm'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e  # 1.96
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      # A debug build keeps a console, so only a release build exercises
+      # the attach: `cargo build --release` honours the
+      # `windows_subsystem = "windows"` attr that `cargo check` ignores.
+      # The exe is `presence-jam.exe` (the Cargo package name); the
+      # `PresenceJam` product name only appears in bundle artefacts.
+      - name: Build release binary
+        env:
+          CARGO_INCREMENTAL: 0
+        run: cargo build --release --manifest-path src-tauri/Cargo.toml
+
+      # `cmd /c` is the point, not the shell: a GUI-subsystem exe returns
+      # to the prompt immediately, so the file is polled (up to ~30 s)
+      # instead of read once — a single read races the child on a slow
+      # runner and flakes even with the fix in place.
+      #
+      # Honest scope note: with stdout redirected to a file the OS hands
+      # the child a valid handle, so this file assert passes with or
+      # without the attach — it is a CLI-surface guard (piped output must
+      # stay intact; the attach early-returns on valid handles). The
+      # interactive-console failure (empty screen from `cmd /c`) cannot be
+      # reproduced with piped CI stdio. The fails-pre-fix gate is the
+      # regression test in the next step, which fails when the helper or
+      # its `run()` call is removed; the release build above is the
+      # compile gate for the `cfg(windows)` code itself.
+      - name: Smoke --help through cmd /c
+        shell: cmd
+        run: |
+          cmd /c "src-tauri\target\release\presence-jam.exe --help > %TEMP%\pj-help.txt"
+          set TRIES=0
+          :POLL
+          for %%A in (%TEMP%\pj-help.txt) do set SIZE=%%~zA
+          if not "%SIZE%"=="0" goto CHECKED
+          set /a TRIES+=1
+          if "%TRIES%"=="30" goto CHECKED
+          timeout /t 1 /nobreak >NUL
+          goto POLL
+          :CHECKED
+          if "%SIZE%"=="0" (echo "::error::--help printed nothing (issue #818)" & exit /b 1)
+          findstr /c:"--sync-once" %TEMP%\pj-help.txt >NUL || (echo "::error::--help output missing --sync-once" & exit /b 1)
+
+      # Fails pre-fix: the `test_windows_cli_…` source-shape guard fails
+      # when `attach_parent_console_for_cli` or its `run()` call is
+      # removed. `--release` reuses the build above, so this is cheap.
+      - name: Regression test (fails pre-fix)
+        env:
+          CARGO_INCREMENTAL: 0
+        run: cargo test --release --manifest-path src-tauri/Cargo.toml --lib test_windows_cli_attaches_parent_console_before_output
+
   # Frontend: catches Svelte/TS build errors. Mirrors the npm ci + npm run build
   # steps from release.yml. Cached via actions/setup-node cache: 'npm'.
   # Also runs `cargo test --lib` to materialise the ts-rs `#[ts(export)]`

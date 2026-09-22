@@ -1837,8 +1837,91 @@ fn forward_launch_to_running_instance(app: &AppHandle, argv: Vec<String>, _cwd: 
     crate::tray::refresh_tray_from_state(app);
 }
 
+/// Issue #818: attach a GUI-subsystem release build to the invoking console
+/// before any CLI output. Without this the `--help` / `--status` /
+/// `--sync-once` `println!` / `eprintln!` calls on Windows have nowhere to
+/// go: `main.rs` sets `windows_subsystem = "windows"` in release, so the
+/// standard handles are invalid on startup and the usage text is silently
+/// lost.
+///
+/// Best-effort by design: every native failure falls through and lets the
+/// caller print anyway (a redirected pipe or file still works, since the
+/// attach is skipped when a handle is already valid). The GUI path never
+/// calls this — only the `cli_command()` early-exit arms in `run()`.
+#[cfg(target_os = "windows")]
+fn attach_parent_console_for_cli() {
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        OPEN_EXISTING,
+    };
+    use windows::Win32::System::Console::{
+        AttachConsole, GetStdHandle, SetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE,
+        STD_OUTPUT_HANDLE,
+    };
+
+    // A valid handle already (a pipe, a file, or a debugger console) means
+    // there is nothing to re-attach — reopening CONOUT$ would steal the
+    // redirection. This keeps `presencejam --status | jq …` working.
+    let stdout_valid = unsafe { GetStdHandle(STD_OUTPUT_HANDLE).is_ok() };
+    let stderr_valid = unsafe { GetStdHandle(STD_ERROR_HANDLE).is_ok() };
+    if stdout_valid && stderr_valid {
+        return;
+    }
+    // No parent console (double-clicked from Explorer, Task Scheduler with
+    // no console): nothing to attach to, and the CLI flags exit fast
+    // anyway. Swallow the error — printing to nowhere is harmless.
+    if unsafe { AttachConsole(ATTACH_PARENT_PROCESS) }.is_err() {
+        return;
+    }
+    // Reopen the parent's screen buffer and point the missing standard
+    // handle(s) at it, mirroring the `CONOUT$` recipe (e.g. nu-ansi-term's
+    // `enable_ansi_support`). Failure of one handle must not block the
+    // other, so each arm is independent and best-effort.
+    //
+    // `CreateFileW` is `#[cfg(feature = "Win32_Security")]`-gated upstream
+    // (it takes a SECURITY_ATTRIBUTES pointer), so the
+    // `Win32_Storage_FileSystem` feature alone is not enough — the crate
+    // feature set in Cargo.toml must also enable `Win32_Security`.
+    let reopen = |handle_id| unsafe {
+        // `Param<PCWSTR>` is implemented for `&HSTRING` (not by value),
+        // so the name lives in a local the call borrows.
+        let name = windows::core::HSTRING::from("CONOUT$");
+        let handle = CreateFileW(
+            &name,
+            (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            Default::default(),
+            None,
+        )?;
+        SetStdHandle(handle_id, handle)?;
+        windows::core::Result::<()>::Ok(())
+    };
+    if !stdout_valid {
+        let _ = reopen(STD_OUTPUT_HANDLE);
+    }
+    if !stderr_valid {
+        let _ = reopen(STD_ERROR_HANDLE);
+    }
+    // Rust's stdio resolves the OS handle lazily per write on Windows, so
+    // the `println!` / `eprintln!` calls below pick up the handles we just
+    // installed — no reopen of `std::io::stdout()` is needed.
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Issue #818: on Windows the release build is a GUI-subsystem
+    // executable with no console of its own — re-attach to the invoking
+    // console before any CLI arm can print. Parsing argv twice is
+    // deliberate: it keeps the `match` below untouched, and the parse is
+    // a cheap exact-match scan. No-op on other targets, skipped when the
+    // handles are already valid (a pipe or file), and the GUI path never
+    // reaches a CLI arm, so this only ever fires for a real CLI run.
+    #[cfg(target_os = "windows")]
+    if cli_command(std::env::args_os()).is_some() {
+        attach_parent_console_for_cli();
+    }
     log::info!("[APP] run: ENTRY");
 
     // Issue #679: the CLI flags are resolved before anything else, and
@@ -3598,6 +3681,76 @@ mod tests {
             "the --sync-once early return must come before the global-shortcut \
              registration so a CLI run grabs no accelerator (issue #769)"
         );
+    }
+
+    /// Issue #818: on Windows the release build is a GUI-subsystem
+    /// executable with no console, so `run()` must re-attach to the
+    /// invoking console before any CLI arm can print. Pins the ordering
+    /// (attach call precedes the first CLI output, `cli_help_text()`) and
+    /// the helper's shape (`AttachConsole(ATTACH_PARENT_PROCESS)` +
+    /// `CONOUT$` reopen, skipped when the handles are already valid so
+    /// pipes keep working). The `Cargo.toml` feature assertion keeps the
+    /// `Win32_System_Console` / `Win32_Storage_FileSystem` / `Win32_Security`
+    /// features from being pruned as unused.
+    #[test]
+    fn test_windows_cli_attaches_parent_console_before_output() {
+        let source = include_str!("lib.rs");
+        let prod_source = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("lib.rs has no #[cfg(test)] mod tests block");
+        // The `#[cfg]` sits above a doc comment, not directly on the fn, so
+        // anchor on the fn name and assert the gate separately.
+        assert!(
+            prod_source.contains("fn attach_parent_console_for_cli()"),
+            "the console attach helper must exist (issue #818)"
+        );
+        assert!(
+            prod_source
+                .contains("#[cfg(target_os = \"windows\")]\nfn attach_parent_console_for_cli()")
+                || prod_source.contains("caller print anyway (a redirected pipe"),
+            "the console attach helper must stay Windows-gated (issue #818)"
+        );
+        let helper_body = body_of(prod_source, "fn attach_parent_console_for_cli()");
+        for marker in [
+            "AttachConsole(ATTACH_PARENT_PROCESS)",
+            "CONOUT$",
+            "GetStdHandle(STD_OUTPUT_HANDLE)",
+            "GetStdHandle(STD_ERROR_HANDLE)",
+            "SetStdHandle(handle_id, handle)",
+        ] {
+            assert!(
+                helper_body.contains(marker),
+                "the console attach helper must contain `{marker}` (issue #818)"
+            );
+        }
+        let run_body = body_of(prod_source, "pub fn run()");
+        let attach = run_body
+            .find("attach_parent_console_for_cli()")
+            .expect("run() must call the console attach helper (issue #818)");
+        // The peek `if cli_command(…)` above the match is the attach gate
+        // itself, so the ordering that matters is attach-before-first-output,
+        // not attach-before-first-parse.
+        let first_output = run_body
+            .find("cli_help_text()")
+            .expect("run() must print help text (issue #818)");
+        assert!(
+            attach < first_output,
+            "the console attach must precede the first CLI output: a flag that \
+             prints before the attach prints to nowhere on a Windows release \
+             build (issue #818)"
+        );
+        let manifest = include_str!("../Cargo.toml");
+        for feature in [
+            "Win32_System_Console",
+            "Win32_Storage_FileSystem",
+            "Win32_Security",
+        ] {
+            assert!(
+                manifest.contains(feature),
+                "Cargo.toml must enable the `windows` `{feature}` feature (issue #818)"
+            );
+        }
     }
 
     /// Issue #679: `--sync-once` must run without a window, so the windows
