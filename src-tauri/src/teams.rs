@@ -59,6 +59,11 @@ pub enum TeamsApiError {
     /// Refresh token is missing/invalid/revoked (token-endpoint 400
     /// `invalid_grant`) — permanent, re-auth required.
     InvalidGrant,
+    /// Token-endpoint 400 that only user interaction can fix
+    /// (`interaction_required`, `consent_required`, `invalid_client`,
+    /// `unauthorized_client`, `invalid_scope`) — permanent, re-auth
+    /// required (issue #787). Carries `error - description` for logs.
+    ReauthRequired(String),
     /// Network error or other transient failure (5xx, send failure)
     Transient(String),
     /// Other non-retryable error
@@ -77,6 +82,7 @@ impl std::fmt::Display for TeamsApiError {
                 None => write!(f, "Rate limited"),
             },
             TeamsApiError::InvalidGrant => write!(f, "Refresh token is invalid or revoked"),
+            TeamsApiError::ReauthRequired(detail) => write!(f, "Teams re-authentication required: {}", detail),
             TeamsApiError::Transient(msg) => write!(f, "{}", msg),
             TeamsApiError::Other(_status, body) => write!(f, "{}", body),
         }
@@ -94,7 +100,7 @@ impl TeamsApiError {
     /// generic "try again" text would send the user round a loop.
     pub fn user_message(&self) -> String {
         match self {
-            TeamsApiError::ExpiredToken(_) | TeamsApiError::InvalidGrant => {
+            TeamsApiError::ExpiredToken(_) | TeamsApiError::InvalidGrant | TeamsApiError::ReauthRequired(_) => {
                 "Your Microsoft Teams sign-in has expired. Reconnect Teams in Settings.".to_string()
             }
             TeamsApiError::Forbidden(_, _) => "Microsoft Teams refused the request: the account may be missing the Teams presence permission (Presence.ReadWrite) or a Microsoft 365 licence that includes Teams. Reconnecting will not fix this — check the account's licence and admin consent.".to_string(),
@@ -558,6 +564,45 @@ pub fn poll_teams_auth(device_code: &str, interval: u64) -> Result<TeamsTokens, 
     }
 }
 
+/// Pure token-endpoint 400 decision (issue #787): the whole 400 table from
+/// the OAuth2 token endpoint funnels through this so the re-auth policy
+/// lives in one unit-testable place. `invalid_grant` (dead refresh token)
+/// and the interaction-gated codes (`interaction_required`,
+/// `consent_required`, `invalid_client`, `unauthorized_client`,
+/// `invalid_scope` — consent withdrawn, tenant policy change, scope drift)
+/// are permanent: only a fresh user sign-in fixes them. Anything else —
+/// an unclassified error code or an unparseable body (proxy page, blip) —
+/// is `Transient` so the poller keeps the session and retries later
+/// instead of ending Teams sync on a single dropped connection.
+fn classify_token_endpoint_error(status_code: u16, body: &str) -> TeamsApiError {
+    let parsed: Result<TokenErrorResponse, _> = serde_json::from_str(body);
+    match parsed {
+        Ok(error_resp) => {
+            let detail = match error_resp.error_description.as_deref() {
+                Some(d) if !d.trim().is_empty() => {
+                    format!("{} - {}", error_resp.error, d.trim())
+                }
+                _ => error_resp.error.clone(),
+            };
+            match error_resp.error.as_str() {
+                "invalid_grant" => TeamsApiError::InvalidGrant,
+                "interaction_required" | "consent_required" | "invalid_client" | "unauthorized_client" | "invalid_scope" => {
+                    TeamsApiError::ReauthRequired(detail)
+                }
+                _ => TeamsApiError::Transient(format!(
+                    "token endpoint error {}: {}",
+                    status_code, detail
+                )),
+            }
+        }
+        Err(e) => TeamsApiError::Transient(format!(
+            "Failed to parse error response: {} (body was: {})",
+            e,
+            truncate_for_log(body)
+        )),
+    }
+}
+
 pub fn refresh_teams_token(tokens: &TeamsTokens) -> Result<TeamsTokens, TeamsApiError> {
     let refresh_token = tokens
         .refresh_token
@@ -595,30 +640,11 @@ pub fn refresh_teams_token(tokens: &TeamsTokens) -> Result<TeamsTokens, TeamsApi
             truncate_for_log(&raw_body)
         );
         if status_code == 400 {
-            // invalid_grant means the refresh token itself is dead —
-            // permanent, re-auth required. Any other 400 body is an
-            // "Other" non-retryable error.
-            let error_resp: TokenErrorResponse = serde_json::from_str(&raw_body).map_err(|e| {
-                TeamsApiError::Other(
-                    status_code,
-                    format!(
-                        "Failed to parse error response: {} (body was: {})",
-                        e,
-                        truncate_for_log(&raw_body)
-                    ),
-                )
-            })?;
-            if error_resp.error == "invalid_grant" {
-                return Err(TeamsApiError::InvalidGrant);
-            }
-            return Err(TeamsApiError::Other(
-                status_code,
-                format!(
-                    "{} - {}",
-                    error_resp.error,
-                    error_resp.error_description.unwrap_or_default()
-                ),
-            ));
+            // Issue #787: the whole 400 table routes through the pure
+            // classifier — dead grants AND interaction-gated codes end the
+            // session once (no per-poll retry loop); unclassified 400s and
+            // unparseable bodies stay Transient.
+            return Err(classify_token_endpoint_error(status_code, &raw_body));
         }
         return Err(match status_code {
             429 => TeamsApiError::RateLimited(retry_after),
@@ -631,15 +657,16 @@ pub fn refresh_teams_token(tokens: &TeamsTokens) -> Result<TeamsTokens, TeamsApi
         });
     }
 
+    // Issue #787: a 2xx body that is not the token envelope is an
+    // interposed proxy/captive-portal page, not a verdict on the
+    // credential — Transient so the poller keeps the session and retries
+    // instead of ending Teams sync on a single dropped connection.
     let token_resp: TokenResponse = serde_json::from_str(&raw_body).map_err(|e| {
-        TeamsApiError::Other(
-            200,
-            format!(
-                "Failed to parse token response: {} (body was: {})",
-                e,
-                truncate_for_log(&raw_body)
-            ),
-        )
+        TeamsApiError::Transient(format!(
+            "Failed to parse token response: {} (body was: {})",
+            e,
+            truncate_for_log(&raw_body)
+        ))
     })?;
 
     let expires_at = chrono::Utc::now() + chrono::Duration::seconds(token_resp.expires_in as i64);
@@ -1682,6 +1709,55 @@ mod tests {
         }
     }
 
+    /// Issue #787: the token-endpoint 400 table must map to typed variants —
+    /// `invalid_grant` ends the session via `InvalidGrant`, the
+    /// interaction-gated codes via `ReauthRequired`, and anything else
+    /// (unclassified code or unparseable body) stays `Transient` so the
+    /// poller keeps the session and retries. Pre-fix every non-`invalid_grant`
+    /// 400 collapsed to `Other` (per-poll retry loop, no reconnect) and an
+    /// unparseable body was also `Other`.
+    #[test]
+    fn test_classify_token_endpoint_error_maps_400_table() {
+        use super::classify_token_endpoint_error;
+        use super::TeamsApiError;
+        assert!(matches!(
+            classify_token_endpoint_error(
+                400,
+                r#"{"error":"invalid_grant","error_description":"refresh token revoked"}"#
+            ),
+            TeamsApiError::InvalidGrant
+        ));
+        for code in [
+            "interaction_required",
+            "consent_required",
+            "invalid_client",
+            "unauthorized_client",
+            "invalid_scope",
+        ] {
+            let body = format!(
+                r#"{{"error":"{code}","error_description":"user interaction needed"}}"#
+            );
+            match classify_token_endpoint_error(400, &body) {
+                TeamsApiError::ReauthRequired(detail) => assert!(
+                    detail.contains(code),
+                    "reauth detail must name the code ({code}): {detail}"
+                ),
+                other => panic!("expected ReauthRequired for {code}, got {other:?}"),
+            }
+        }
+        assert!(matches!(
+            classify_token_endpoint_error(
+                400,
+                r#"{"error":"temporarily_unavailable","error_description":"try again"}"#
+            ),
+            TeamsApiError::Transient(_)
+        ));
+        assert!(matches!(
+            classify_token_endpoint_error(400, "<html>proxy page</html>"),
+            TeamsApiError::Transient(_)
+        ));
+    }
+
     #[test]
     fn test_truncate_ascii_at_boundary() {
         // 256 ASCII chars exactly — at the limit, not over.
@@ -2569,6 +2645,7 @@ mod tests {
             TeamsApiError::RateLimited(Some(120)),
             TeamsApiError::RateLimited(None),
             TeamsApiError::InvalidGrant,
+            TeamsApiError::ReauthRequired("interaction_required - consent".to_string()),
             TeamsApiError::Transient("server error 503: <html>".to_string()),
             TeamsApiError::Other(418, body.to_string()),
         ];
@@ -2638,10 +2715,14 @@ mod tests {
             "the 403 must rule out re-auth: {forbidden}"
         );
 
-        // Both dead-token variants share the re-auth sentence, and `Other`
+        // All dead-token variants share the re-auth sentence, and `Other`
         // keeps the status code for diagnosis.
         assert_eq!(
             TeamsApiError::ExpiredToken(401).user_message(),
+            TeamsApiError::InvalidGrant.user_message()
+        );
+        assert_eq!(
+            TeamsApiError::ReauthRequired("interaction_required".to_string()).user_message(),
             TeamsApiError::InvalidGrant.user_message()
         );
         assert!(TeamsApiError::Other(418, body.to_string())
