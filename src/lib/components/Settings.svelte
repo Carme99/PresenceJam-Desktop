@@ -851,6 +851,7 @@
    * — a Wayland compositor refusal, an older backend, anything the typed
    * contract did not anticipate — and renders the backend's free-form
    * text through the unknown template.
+   */
   function shortcutReasonLabel(reason: ShortcutReason): string {
     switch (reason.kind) {
       case 'NotAKey':
