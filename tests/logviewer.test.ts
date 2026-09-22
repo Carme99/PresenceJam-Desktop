@@ -99,12 +99,12 @@ describe('LogViewer behavior (#492)', () => {
     expect(container.textContent).not.toContain('msg-0');
   });
 
-  it('Trace tab isolates level-1 logs', async () => {
+  it('Trace filter button isolates level-1 logs (#734)', async () => {
     const { container, getByRole } = render(LogViewer, { detached: false });
     emit(1, 'trace-one');
     emit(3, 'info-one');
     await Promise.resolve();
-    await fireEvent.click(getByRole('tab', { name: 'Trace' }));
+    await fireEvent.click(getByRole('button', { name: 'Trace' }));
     expect(container.textContent).toContain('trace-one');
     expect(container.textContent).not.toContain('info-one');
   });
@@ -258,5 +258,72 @@ describe('LogViewer date + locale (#969)', () => {
     // Restore the test-suite default so subsequent tests aren't pinned to fr.
     i18n.set('en');
     await tick();
+  });
+});
+
+/**
+ * #734 — the filter strip used to declare a tab widget (`role="tablist"` /
+ * `role="tab"` / `aria-selected`) without a `tabpanel`, `aria-controls`, a
+ * roving tabindex, or any arrow-key handling. It is six plain toggle buttons
+ * with `aria-pressed` inside a labelled group: every filter is a separate
+ * Tab stop and activates with the documented keys (Tab to reach, Space/Enter
+ * to press — the native button keyboard model).
+ */
+describe('LogViewer filter strip semantics (#734)', () => {
+  const FILTERS = ['All', 'Trace', 'Debug', 'Info', 'Warning', 'Error'];
+
+  it('exposes six toggle buttons with aria-pressed, never a partial tab pattern', async () => {
+    const { container } = render(LogViewer, { detached: false });
+    await Promise.resolve();
+    const group = container.querySelector('.seg');
+    expect(group).not.toBeNull();
+    // Exactly one pattern: no leftover tablist/tab/tabpanel roles.
+    expect(group?.getAttribute('role')).not.toBe('tablist');
+    expect(container.querySelectorAll('[role="tablist"]').length).toBe(0);
+    expect(container.querySelectorAll('[role="tab"]').length).toBe(0);
+    expect(container.querySelectorAll('[role="tabpanel"]').length).toBe(0);
+    expect(container.querySelectorAll('[aria-selected]').length).toBe(0);
+    expect(container.querySelectorAll('[aria-controls]').length).toBe(0);
+    // The toggle pattern: six buttons, one pressed at a time.
+    const buttons = Array.from(group?.querySelectorAll('button') ?? []);
+    expect(buttons.map((b) => b.textContent?.trim())).toEqual(FILTERS);
+    expect(buttons.length).toBe(6);
+    for (const b of buttons) {
+      expect(b.getAttribute('aria-pressed')).not.toBeNull();
+    }
+    const pressed = buttons.filter((b) => b.getAttribute('aria-pressed') === 'true');
+    expect(pressed.length).toBe(1);
+    expect(pressed[0].textContent?.trim()).toBe('All');
+  });
+
+  it('changes the filter from the keyboard (focus + Enter/Space activation)', async () => {
+    const { container } = render(LogViewer, { detached: false });
+    emit(1, 'trace-one');
+    emit(3, 'info-one');
+    await Promise.resolve();
+    const buttons = Array.from(
+      container.querySelectorAll('.seg button')
+    ) as HTMLElement[];
+    expect(buttons.length).toBe(6);
+    // Every filter is keyboard-reachable: a plain Tab-stop button, no
+    // roving-tabindex scheme to maintain.
+    for (const b of buttons) {
+      expect(b.tabIndex).toBeGreaterThanOrEqual(0);
+    }
+    // Native buttons turn Enter/Space into a click, so focus + click is the
+    // keyboard path — no arrow-key handling to document.
+    buttons[1].focus();
+    expect(document.activeElement).toBe(buttons[1]);
+    await fireEvent.click(document.activeElement as HTMLElement);
+    await tick();
+    expect(container.textContent).toContain('trace-one');
+    expect(container.textContent).not.toContain('info-one');
+    expect(buttons[1].getAttribute('aria-pressed')).toBe('true');
+    // A second keyboard activation moves the pressed state along.
+    buttons[5].focus();
+    await fireEvent.click(document.activeElement as HTMLElement);
+    await tick();
+    expect(buttons[5].getAttribute('aria-pressed')).toBe('true');
+    expect(buttons[1].getAttribute('aria-pressed')).toBe('false');
   });
 });
