@@ -1486,14 +1486,18 @@ fn spotify_refresh_plan(
 /// True when a failed Teams token refresh must force re-auth (issue #295).
 /// The policy mirrors the Teams status-update classifier and the Spotify
 /// sibling: only a genuinely dead credential — token-endpoint
-/// `invalid_grant`, or a 401 `ExpiredToken` — means re-auth. `Transient`
-/// (network/5xx), `RateLimited`, `Forbidden` and `Other(400, …)` are
-/// recoverable states that must keep the session and retry later; a single
-/// dropped connection must not end Teams sync.
+/// `invalid_grant`, the interaction-gated 400s (`ReauthRequired`, issue
+/// #787), or a 401 `ExpiredToken` — means re-auth. `Transient`
+/// (network/5xx/unclassified-400/unparseable-body), `RateLimited`,
+/// `Forbidden` and `Other(400, …)` are recoverable states that must keep
+/// the session and retry later; a single dropped connection must not end
+/// Teams sync.
 fn teams_refresh_requires_reauth(e: &TeamsApiError) -> bool {
     matches!(
         e,
-        TeamsApiError::InvalidGrant | TeamsApiError::ExpiredToken(_)
+        TeamsApiError::InvalidGrant
+            | TeamsApiError::ReauthRequired(_)
+            | TeamsApiError::ExpiredToken(_)
     )
 }
 
@@ -4565,10 +4569,13 @@ pub(crate) fn process_track(
                             teams_backoff_secs = teams_backoff_secs.max(rate_limit_sleep_secs(&e));
                             // Issue #153: classify typed TeamsApiError variants instead
                             // of string-sniffing the error body. Only a dead token
-                            // (401 / invalid_grant) means re-auth; 403 is a
+                            // (401 / invalid_grant / interaction-gated 400s,
+                            // issue #787) means re-auth; 403 is a
                             // permission/license problem re-auth cannot fix.
                             match e {
-                                TeamsApiError::ExpiredToken(_) | TeamsApiError::InvalidGrant => {
+                                TeamsApiError::ExpiredToken(_)
+                                | TeamsApiError::InvalidGrant
+                                | TeamsApiError::ReauthRequired(_) => {
                                     log::warn!("[POLLING] process_track: Teams auth failure detected, emitting teams-reconnect-required");
                                     let _ = app.emit("teams-reconnect-required", json!(null));
                                 }
@@ -5201,7 +5208,9 @@ pub(crate) fn handle_no_track(
             // Mirror the process_track classifier: only a dead token means
             // re-auth; 403 is a permission/license problem re-auth cannot fix.
             match e {
-                TeamsApiError::ExpiredToken(_) | TeamsApiError::InvalidGrant => {
+                TeamsApiError::ExpiredToken(_)
+                | TeamsApiError::InvalidGrant
+                | TeamsApiError::ReauthRequired(_) => {
                     log::warn!("[POLLING] handle_no_track: Teams auth failure detected, emitting teams-reconnect-required");
                     let _ = app.emit("teams-reconnect-required", json!(null));
                 }
@@ -6767,6 +6776,14 @@ mod tests {
         assert!(
             teams_refresh_requires_reauth(&TeamsApiError::InvalidGrant),
             "a dead refresh token (invalid_grant) must force re-auth"
+        );
+        // Issue #787: the interaction-gated 400s end the session once via
+        // `ReauthRequired` — no per-poll retry loop.
+        assert!(
+            teams_refresh_requires_reauth(&TeamsApiError::ReauthRequired(
+                "interaction_required - user interaction needed".to_string()
+            )),
+            "an interaction-gated 400 must force re-auth"
         );
         assert!(
             teams_refresh_requires_reauth(&TeamsApiError::ExpiredToken(401)),
