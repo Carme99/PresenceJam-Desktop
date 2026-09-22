@@ -11,6 +11,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, fireEvent, waitFor } from '@testing-library/svelte';
+import { get } from 'svelte/store';
 import { tick } from 'svelte';
 import type { Mock } from 'vitest';
 
@@ -532,5 +533,69 @@ describe('Settings — global shortcuts (#676)', () => {
       // copy.
       expect(body).not.toContain('Failed to update launch-at-login');
     });
+  });
+
+  /**
+   * Issue #811: the card follows the reported OS state — a successful toggle
+   * converges the shared store (via `load_config`) so a later whole-document
+   * save (even a bare language change) carries the toggled flag instead of
+   * silently reverting the OS entry; a rejection reverts the checkbox and
+   * reports the typed reason without touching the store.
+   */
+  it('converges the store on a successful toggle and reverts on rejection (#811)', async () => {
+    const defaultImpl = invokeMock.getMockImplementation();
+    // The backend's `update_config` merges the patch and echoes the converged
+    // document; the mock mirrors it by reading the patch's autostart flag
+    // (pure — no store write here, the `updateConfig()` helper adopts the
+    // return value into the store itself, so a component that never calls it
+    // leaves the store stale and this test fails pre-fix).
+    let patched: boolean | null = null;
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'set_autostart_enabled') return undefined;
+      if (cmd === 'update_config') {
+        const patch = (args as { patch?: { autostart?: boolean } } | undefined)?.patch;
+        patched = patch?.autostart ?? null;
+        const converged = structuredClone(get(configStore));
+        if (patched !== null) converged.autostart = patched;
+        return converged;
+      }
+      if (defaultImpl) return defaultImpl(cmd, args);
+      return [];
+    });
+    const { container } = await mountSettings();
+    const toggle = container.querySelector('#autostart') as HTMLInputElement | null;
+    expect(toggle).not.toBeNull();
+    expect(toggle!.checked).toBe(false);
+
+    toggle!.checked = true;
+    await fireEvent.change(toggle!);
+    await tick();
+
+    await waitFor(() => {
+      expect(patched).toBe(true);
+    });
+    await waitFor(() => {
+      expect(get(configStore).autostart).toBe(true);
+    });
+
+    // A rejection reverts the checkbox, not the store, and surfaces the
+    // typed reason.
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'set_autostart_enabled') {
+        throw { kind: 'Autostart', cause: 'permission denied' };
+      }
+      if (defaultImpl) return defaultImpl(cmd, args);
+      return [];
+    });
+
+    toggle!.checked = false;
+    await fireEvent.change(toggle!);
+    await tick();
+
+    await waitFor(() => {
+      const body = container.textContent ?? '';
+      expect(body).toContain('permission denied');
+    });
+    expect(toggle!.checked).toBe(true);
   });
 });

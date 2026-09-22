@@ -10,7 +10,7 @@
   // the pane back into the main window (closes this one); the onboarding
   // redirect forwards the navigation to the main window first.
   let { detached = false }: { detached?: boolean } = $props();
-  import { configStore, saveConfig, loadConfig, defaultConfig, clientSecretStateOf, SHORTCUT_SLOTS, shortcutBindingsOf, setShortcutBindings, type ShortcutSlot } from '$lib/stores/config';
+  import { configStore, saveConfig, loadConfig, updateConfig, defaultConfig, clientSecretStateOf, SHORTCUT_SLOTS, shortcutBindingsOf, setShortcutBindings, type ShortcutSlot } from '$lib/stores/config';
   import type { AppConfig, ShortcutReason, SyncStatus } from '$lib/types';
   import { authFlow, setSpotifyPhase, setTeamsPhase, resetSpotifyAuthFlow, resetTeamsAuthFlow, teamsPollMutex, pollTeamsAuth } from '$lib/stores/authFlow.svelte';
   import DeviceCodeBox from './DeviceCodeBox.svelte';
@@ -2683,6 +2683,7 @@
         <input
           id="autostart"
           type="checkbox"
+          data-no-draft
           checked={localConfig.autostart}
           onchange={async (e) => {
             const target = e.currentTarget as HTMLInputElement;
@@ -2691,6 +2692,18 @@
             localConfig.autostart = enabled;
             try {
               await invoke('set_autostart_enabled', { enabled });
+              // Issue #811: the command now owns the `config.autostart` flag
+              // too, so converge the store immediately — a later whole-document
+              // save (even a bare language change) carries the toggled value
+              // instead of silently reverting the OS entry. `updateConfig`
+              // merges just this field backend-side and adopts the persisted
+              // document, so unsaved edits elsewhere in the draft survive
+              // (a `loadConfig()` reload here would clobber them). The draft
+              // is kept in step with the converged value. The input carries
+              // `data-no-draft` (like the notification toggles): the toggle
+              // applies itself, so it must not mark the form dirty.
+              const converged = await updateConfig({ autostart: enabled });
+              localConfig.autostart = converged.autostart;
             } catch (err) {
               console.warn('[SETTINGS] set_autostart_enabled failed:', err);
               localConfig.autostart = previous;
