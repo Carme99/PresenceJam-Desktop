@@ -248,6 +248,14 @@ h3 { font-size: var(--fs-lg); }
 p  { color: var(--fg-muted); }
 small, .text-muted { color: var(--fg-subtle); font-size: var(--fs-sm); }
 
+/* ---------- Links ---------- */
+/* Base anchor palette (#953): classless anchors inherit app colors instead of */
+/* browser blue/visited-purple. Classed anchors (.btn-link, .verification-url, */
+/* .skip-link, About .links a) outrank this 0,0,1 selector where they differ. */
+a { color: var(--accent-text); text-decoration: underline; text-underline-offset: 3px; }
+a:hover { color: var(--accent); }
+a:visited { color: var(--accent-text); }
+
 /* ---------- Buttons ---------- */
 button {
   font-family: inherit;
