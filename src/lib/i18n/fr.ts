@@ -237,6 +237,13 @@ export const fr: Dict = {
     'Cela supprime tokens.json et ses fichiers annexes ainsi que la clé de chiffrement des tokens. Vous devrez vous reconnecter. Continuer ?',
   'diagnostics.resetTokenDone': 'Stockage des tokens réinitialisé. Reconnectez-vous pour reprendre.',
   'diagnostics.resetTokenFailed': 'Réinitialisation impossible — {error}',
+  'diagnostics.syncRunning': 'Synchronisation en cours',
+  'diagnostics.syncSnoozed': 'En pause',
+  'diagnostics.syncSnoozeMinutes': '{minutes} min restantes',
+  'diagnostics.syncManualStatusBlocks': 'Statut manuel bloquant les écritures',
+  'diagnostics.syncPresenceGateReason': 'Motif du blocage de présence',
+  'diagnostics.syncTransientFailures': 'Échecs d’authentification consécutifs',
+  'diagnostics.syncNetworkFailures': 'Échecs réseau consécutifs',
 
   // ── reconnect ─────────────────────────────────────────────────────
   'reconnect.title': 'Reconnexion',

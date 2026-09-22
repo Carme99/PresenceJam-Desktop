@@ -268,6 +268,12 @@
           <dt>{t('diagnostics.teamsRefreshTokenPresent')}</dt><dd>{boolLabel(snapshot.tokens.teams_refresh_token_present)}</dd>
           <dt>{t('diagnostics.keychainSpotifySecret')}</dt><dd>{boolLabel(snapshot.keychain.spotify_client_secret_present)}</dd>
           <dt>{t('diagnostics.keychainEncryptionKey')}</dt><dd>{boolLabel(snapshot.keychain.tokens_encryption_key_present)}</dd>
+          <dt>{t('diagnostics.syncRunning')}</dt><dd>{boolLabel(snapshot.sync_state.is_syncing)}</dd>
+          <dt>{t('diagnostics.syncSnoozed')}</dt><dd>{snapshot.sync_state.snoozed ? t('diagnostics.syncSnoozeMinutes', { minutes: Number(snapshot.sync_state.snooze_minutes_left ?? 0) }) : boolLabel(false)}</dd>
+          <dt>{t('diagnostics.syncManualStatusBlocks')}</dt><dd>{boolLabel(snapshot.sync_state.manual_status_blocks)}</dd>
+          <dt>{t('diagnostics.syncPresenceGateReason')}</dt><dd>{snapshot.sync_state.presence_gate_reason ?? '—'}</dd>
+          <dt>{t('diagnostics.syncTransientFailures')}</dt><dd>{snapshot.sync_state.transient_failure_count}</dd>
+          <dt>{t('diagnostics.syncNetworkFailures')}</dt><dd>{snapshot.sync_state.consecutive_network_failures}</dd>
         </dl>
         <p class="hint">{t('diagnostics.tokensNeverIncluded')}</p>
         {#if !resetArmed}

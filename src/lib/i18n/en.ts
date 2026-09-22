@@ -222,6 +222,13 @@ export const en = {
     'This deletes tokens.json and its sidecars plus the stored token encryption key. You will need to sign in again. Continue?',
   'diagnostics.resetTokenDone': 'Token storage reset. Sign in again to resume sync.',
   'diagnostics.resetTokenFailed': 'Reset failed — {error}',
+  'diagnostics.syncRunning': 'Sync running',
+  'diagnostics.syncSnoozed': 'Snoozed',
+  'diagnostics.syncSnoozeMinutes': '{minutes} min left',
+  'diagnostics.syncManualStatusBlocks': 'Manual status holding writes back',
+  'diagnostics.syncPresenceGateReason': 'Presence-gate reason',
+  'diagnostics.syncTransientFailures': 'Consecutive auth failures',
+  'diagnostics.syncNetworkFailures': 'Consecutive network failures',
 
   // ── reconnect ─────────────────────────────────────────────────────
   'reconnect.title': 'Reconnect',

@@ -229,6 +229,13 @@ export const de: Dict = {
     'Dadurch werden tokens.json samt Hilfsdateien und der gespeicherte Token-Verschlüsselungsschlüssel gelöscht. Sie müssen sich danach erneut anmelden. Fortfahren?',
   'diagnostics.resetTokenDone': 'Token-Speicher zurückgesetzt. Melden Sie sich erneut an, um fortzufahren.',
   'diagnostics.resetTokenFailed': 'Zurücksetzen fehlgeschlagen — {error}',
+  'diagnostics.syncRunning': 'Synchronisierung läuft',
+  'diagnostics.syncSnoozed': 'Pausiert',
+  'diagnostics.syncSnoozeMinutes': 'noch {minutes} Min.',
+  'diagnostics.syncManualStatusBlocks': 'Manueller Status hält Schreibvorgänge zurück',
+  'diagnostics.syncPresenceGateReason': 'Grund der Anwesenheitssperre',
+  'diagnostics.syncTransientFailures': 'Aufeinanderfolgende Auth-Fehler',
+  'diagnostics.syncNetworkFailures': 'Aufeinanderfolgende Netzwerkfehler',
 
   // ── reconnect ─────────────────────────────────────────────────────
   'reconnect.title': 'Erneut verbinden',

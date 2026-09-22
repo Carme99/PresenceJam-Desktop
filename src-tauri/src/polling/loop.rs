@@ -354,6 +354,23 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
             &mut clocks.force_resume_write,
         );
         super::poll_once::store_write_clocks(&clocks);
+        // Issue #863: mirror the driver's per-iteration failure counters into
+        // the shared polling-state slot (the `token_metadata` slot pattern on
+        // the consume side in `diagnostics.rs`) so the diagnostics snapshot
+        // can tell reconnect-versus-backoff apart. Relaxed atomics: best-effort
+        // triage data, read once per snapshot.
+        super::state::record_failure_counters(
+            transient_failure_count,
+            consecutive_network_failures,
+        );
+        // Issue #863: the same publish point retires the gate reason. The emit
+        // funnel records it whenever a suppression is announced; every retire
+        // path funnels through `gated_track_key = None` on the clocks just
+        // stored, so clearing here covers all of them — past and future —
+        // with no per-site edits. Reason token only, never posted text.
+        if clocks.gated_track_key.is_none() {
+            super::state::record_gate_reason(None);
+        }
 
         // Post-iteration tray sync — independent of the API result.
         let is_syncing = state.polling.is_syncing(Ordering::Acquire);
@@ -389,6 +406,11 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
     // `spotify-track-changed` emit and the `current_track` update for a track
     // that is already playing.
     super::poll_once::reset_write_clocks();
+    // Issue #863: the mirrored counters/gate reason die with the session too —
+    // a stopped poller reports zeros/`None` instead of the last session's
+    // values. Deliberately NOT `reset_exit_snapshot`: the exit residue must
+    // survive this tail (finding D1, see the comment below).
+    super::state::reset_sync_state();
     // Finding D1 (issue #684): the clocks die here, but what this session left
     // on TEAMS does not — the exit snapshot in `polling/state.rs` is
     // deliberately NOT reset on this path. `RunEvent::Exit` runs
