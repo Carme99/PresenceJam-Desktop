@@ -68,6 +68,15 @@ function snapshotWith(): DiagnosticsSnapshot {
       teams_refresh_token_present: null
     },
     keychain: { spotify_client_secret_present: false, tokens_encryption_key_present: true },
+    sync_state: {
+      is_syncing: false,
+      snoozed: false,
+      snooze_minutes_left: null,
+      manual_status_blocks: false,
+      presence_gate_reason: null,
+      transient_failure_count: 0,
+      consecutive_network_failures: 0
+    },
     recent_logs: [],
     log_source_status: 'ok: last 0 of 0 lines',
     failed_update_install: null
