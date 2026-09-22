@@ -41,13 +41,13 @@ pub(crate) use poll_once::{
 pub(crate) use poll_once::{
     track_rule_conditions_match, track_rule_hit, track_rule_schedule_matches, TrackRuleContext,
 };
+#[cfg(test)]
+pub(crate) use state::{global_state_lock, record_manual_status_blocks, reset_exit_snapshot};
 pub(crate) use state::{
     load_exit_snapshot, load_failure_counters, load_gate_reason, record_failure_counters,
     record_gate_reason, reset_sync_state,
 };
 pub use state::{start_polling, stop_polling};
-#[cfg(test)]
-pub(crate) use state::{global_state_lock, record_manual_status_blocks, reset_exit_snapshot};
 // Issue #896: the supervised `--daemon` mode is a public surface —
 // `lib::run` calls `polling::daemon::run` from the setup hook, and
 // integration tests (when they land) will exercise it directly.

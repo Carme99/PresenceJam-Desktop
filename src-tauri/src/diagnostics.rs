@@ -676,7 +676,12 @@ fn sync_state(state: &crate::AppState) -> SyncState {
         .get()
         .as_ref()
         .and_then(|cfg| crate::config::snooze_status(cfg, now))
-        .map(|s| (true, Some(crate::config::snooze_minutes_left(s.remaining_seconds))))
+        .map(|s| {
+            (
+                true,
+                Some(crate::config::snooze_minutes_left(s.remaining_seconds)),
+            )
+        })
         .unwrap_or((false, None));
     let (transient_failure_count, consecutive_network_failures) =
         crate::polling::load_failure_counters();
@@ -2005,12 +2010,20 @@ mod tests {
             (25..=30).contains(&sync.snooze_minutes_left.expect("snooze minutes")),
             "minutes left are rounded up from the deadline"
         );
-        assert!(sync.manual_status_blocks, "the manual-status verdict must travel");
+        assert!(
+            sync.manual_status_blocks,
+            "the manual-status verdict must travel"
+        );
         assert_eq!(sync.presence_gate_reason.as_deref(), Some("busy"));
         assert_eq!(sync.transient_failure_count, 3);
         assert_eq!(sync.consecutive_network_failures, 7);
         let json = serde_json::to_string(&snapshot).expect("serialize snapshot");
-        for needle in ["sync_state", "\"busy\"", "transient_failure_count", "consecutive_network_failures"] {
+        for needle in [
+            "sync_state",
+            "\"busy\"",
+            "transient_failure_count",
+            "consecutive_network_failures",
+        ] {
             assert!(json.contains(needle), "missing {needle} in {json}");
         }
         crate::polling::reset_sync_state();
