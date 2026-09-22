@@ -203,7 +203,9 @@ Two app-wide bindings, both editable in this card:
 | Toggle playback | `CmdOrCtrl+Alt+P` | Play/pause on your active Spotify device — the same refresh-aware path the tray and the Dashboard button use. |
 | Pause or resume sync | `CmdOrCtrl+Alt+S` | Starts or stops the poller, exactly like the tray's Pause / Resume Sync. |
 
-They work while the window is hidden. Click a field and press the combination you want — the field records what you press, and the current grab is released while it records so the key is captured instead of fired. **Clear** empties a slot. A combination that cannot be parsed or collides with the other slot is refused inline; a desktop that refuses the grab (some Wayland compositors, or a combination another app already owns) shows **Registration failed on this desktop** with the reason, and the other binding — and the rest of the app — keeps working.
+They work while the window is hidden. Click a field and press the combination you want — the field records what you press, and the current grab is released while it records so the key is captured instead of fired. **Clear** empties a slot. A combination that cannot be parsed, carries no modifier (see below), or collides with the other slot is refused inline; a desktop that refuses the grab (some Wayland compositors, or a combination another app already owns) shows **Registration failed on this desktop** with the reason, and the other binding — and the rest of the app — keeps working.
+
+A binding needs at least one modifier (Ctrl, Alt, Shift, or Cmd on macOS) — a bare key such as `Escape`, `Enter`, `Space`, or `P` is refused with “needs at least one modifier”, because the grab is system-wide and would swallow that key in every application. Function keys (`F1`–`F24`) and dedicated media keys (`MediaPlayPause`, `MediaStop`, `MediaTrackNext`, …) are the exception: they have no typing role, so they bind bare. While recording, pressing bare `Escape` or `Enter` cancels the capture instead of binding.
 
 ---
 

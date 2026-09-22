@@ -30,6 +30,9 @@ impl std::fmt::Display for ShortcutReason {
             ShortcutReason::Conflict { other_slot } => {
                 write!(f, "Conflict(\"{other_slot}\")")
             }
+            ShortcutReason::NeedsModifier { accelerator } => {
+                write!(f, "NeedsModifier(\"{accelerator}\")")
+            }
             ShortcutReason::Autostart { cause } => {
                 write!(f, "Autostart(\"{cause}\")")
             }
@@ -61,6 +64,11 @@ pub enum ShortcutReason {
     /// already holds — the frontend substitutes it into the localized
     /// `settings.shortcutReasonConflict` template.
     Conflict { other_slot: String },
+    /// A modifier-less binding that would grab a bare key system-wide
+    /// (issue #810). Carries the offending accelerator so the card can name
+    /// it; function keys (F1–F24) and media keys are exempt and never reach
+    /// this variant.
+    NeedsModifier { accelerator: String },
     /// `set_autostart_enabled` failed: the OS auto-launch manager refused
     /// the toggle. `cause` is the plugin's error text, captured rather than
     /// emitted verbatim so the Settings copy is renderable in every locale.
@@ -89,6 +97,14 @@ impl ShortcutReason {
         }
     }
 
+    /// A modifier-less binding that would swallow a bare key in every
+    /// application (issue #810): `Escape` needs at least one modifier.
+    pub fn needs_modifier(accelerator: &str) -> Self {
+        ShortcutReason::NeedsModifier {
+            accelerator: accelerator.trim().to_string(),
+        }
+    }
+
     /// An autostart toggle refusal: capture the plugin's text, classify it
     /// so the Settings card can localize it.
     pub fn autostart(cause: &str) -> Self {
@@ -104,7 +120,6 @@ impl ShortcutReason {
         }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,6 +141,16 @@ mod tests {
         assert_eq!(
             json,
             serde_json::json!({"kind": "Conflict", "other_slot": "toggle_sync"})
+        );
+
+        // Issue #810: the modifier-less rejection is a typed variant, so the
+        // Settings card maps it to `settings.shortcutReasonNeedsModifier`
+        // instead of dumping the backend's English text.
+        let bare = ShortcutReason::needs_modifier("Escape");
+        let json = serde_json::to_value(&bare).expect("serializable");
+        assert_eq!(
+            json,
+            serde_json::json!({"kind": "NeedsModifier", "accelerator": "Escape"})
         );
 
         let autostart = ShortcutReason::autostart("permission denied");
@@ -151,6 +176,7 @@ mod tests {
         for (variant, expected) in [
             (ShortcutReason::not_a_key("x"), "NotAKey"),
             (ShortcutReason::conflict("y"), "Conflict"),
+            (ShortcutReason::needs_modifier("z"), "NeedsModifier"),
             (ShortcutReason::autostart("z"), "Autostart"),
             (ShortcutReason::unknown("w"), "Unknown"),
         ] {
