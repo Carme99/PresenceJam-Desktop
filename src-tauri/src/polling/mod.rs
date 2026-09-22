@@ -43,10 +43,9 @@ pub(crate) use poll_once::{
 };
 #[cfg(test)]
 pub(crate) use state::{global_state_lock, record_manual_status_blocks, reset_exit_snapshot};
-pub(crate) use state::{
-    load_exit_snapshot, load_failure_counters, load_gate_reason, record_failure_counters,
-    record_gate_reason, reset_sync_state,
-};
+pub(crate) use state::{load_exit_snapshot, load_failure_counters, load_gate_reason};
+#[cfg(test)]
+pub(crate) use state::{record_failure_counters, record_gate_reason, reset_sync_state};
 pub use state::{start_polling, stop_polling};
 // Issue #896: the supervised `--daemon` mode is a public surface —
 // `lib::run` calls `polling::daemon::run` from the setup hook, and

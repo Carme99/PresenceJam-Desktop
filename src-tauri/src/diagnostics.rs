@@ -1991,9 +1991,12 @@ mod tests {
         let state = crate::AppState::default();
         state.polling.set_syncing(true, Ordering::Release);
         {
-            let mut cfg = crate::config::AppConfig::default();
-            cfg.snooze_until =
-                Some((chrono::Utc::now() + chrono::Duration::minutes(30)).to_rfc3339());
+            let cfg = crate::config::AppConfig {
+                snooze_until: Some(
+                    (chrono::Utc::now() + chrono::Duration::minutes(30)).to_rfc3339(),
+                ),
+                ..Default::default()
+            };
             *state.config.get_mut() = Some(cfg);
         }
         let snapshot = build_snapshot(
