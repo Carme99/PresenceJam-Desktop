@@ -52,6 +52,17 @@ section to the released version and opens a fresh empty one (see `docs/RELEASING
 - **An ungated track notices a meeting starting mid-play (#792).** The unchanged-track path re-checks the gate on the `last_gate_check` clock, suppressing the keepalive write and showing the chip.
 - **One-shot refreshes honour the quiet-hours pause (#793).** `run_oneshot` short-circuits on an active `pause_polling` window before any Spotify or Teams call; no override flag.
 - **A failed refresh no longer wipes a newer session installed mid-flight (#798).** The slot verdict travels the failure path, so dead-credential branches clear and prompt reconnect only when the slot still holds the token the refresh actually tried.
+- **A midnight-crossing window now owns the night it starts (#794).** Quiet hours and scheduled track rules test each half of a wrap-around window against its own day through one shared helper, so Monday 22:00–07:00 covers Monday night into Tuesday morning (behaviour change from the calendar-day reading).
+- **A matching rule's presence pair arms while nothing plays (#795).** `handle_no_track` routes a quiet-hours pair through `rule_presence_backoff` under `availability_sync`; pair-less track rules still clear their stale pair.
+- **Bare-key shortcut grabs are rejected (#810).** `validate_accelerator` requires a modifier unless F1–F24 or a media key; Escape/Enter cancel capture instead of binding system-wide.
+- **The autostart toggle persists with the OS entry (#811).** The command writes `config.autostart` through the guarded path, so later unrelated saves stop reverting the login entry.
+- **Food and place names stop tripping the profanity filter (#812).** Continuations match whole inflections only, with per-stem carve-outs — `Spices`, `Spiced`, `crapes`, `Pizzeria` post clean.
+- **The secret-conflict banner survives setup (#813).** The migration outcome persists on `AppState` and replays through `get_sync_status`, so Settings shows the reconnect prompt instead of emitting into the void.
+- **A reconnect during an in-flight device-code poll no longer strands its code (#814).** The handler routes back to the on-screen code and queues the newest request instead of dropping it.
+- **About no longer eats the onboarding wizard (#815).** `show-about` routes through the same navigation gate as every other programmatic navigation.
+- **Menu navigation respects unsaved Settings edits (#817).** Dirty drafts park the target and surface the Save/Discard banner instead of discarding.
+- **Windows CLI flags print on release builds (#818).** The runner attaches to the parent console before CLI output; a CI smoke asserts `--help` via `cmd /c`.
+- **Closing with no tray no longer strands the app (#819).** The close arm follows the recorded tray availability; a tray-less close quits for real with a notification (see TROUBLESHOOTING).
 
 ### Security
 - **Detached windows are now opened from Rust.** The main window no longer carries the unscoped `core:webview:allow-create-webview-window` grant — any script in that window could previously raise a chromed window on an arbitrary origin. The grant is removed from `src-tauri/capabilities/default.json` and the windows are built by the new `detach_pane` command from a fixed label/URL/size table (#922).
