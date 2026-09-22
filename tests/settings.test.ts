@@ -42,7 +42,7 @@ import { currentView } from '$lib/stores/app';
 import { configStore, defaultConfig } from '$lib/stores/config';
 import { notificationPreferences } from '$lib/stores/notifications';
 import { authFlow, resetSpotifyAuthFlow, resetTeamsAuthFlow, setSpotifyPhase, setTeamsPhase } from '$lib/stores/authFlow.svelte';
-import { theme } from '$lib/stores/theme';
+import { theme, density } from '$lib/stores/theme';
 import { t, i18n, type TKey, type Locale } from '$lib/i18n';
 // #955: the presence dropdown's labels are dictionary entries, so the test
 // reads the three dictionaries the app ships rather than restating the copy.
@@ -1575,5 +1575,50 @@ describe('Settings Spotify secret-conflict banner replay (#813)', () => {
     await tick();
     await tick();
     expect(hasConflictBanner(container)).toBe(false);
+  });
+});
+
+/**
+ * Issue #970: the Appearance card's "reset to default" only restored the
+ * launch-at-login flag, leaving theme, density and language on whatever the
+ * user had picked. The reset must return the whole card to defaults.
+ *
+ * Fails pre-fix: theme stays 'dark', density stays 'compact' and the locale
+ * stays 'de' — only autostart is restored.
+ */
+describe('Settings appearance reset (#970)', () => {
+  it('resets theme, density, language and launch-at-login to defaults', async () => {
+    // Autostart off-default before mount so the draft adopts it on load.
+    configStore.set({ ...configuredConfig(), autostart: true });
+    const { container } = await mountSettings();
+
+    // Drive every Appearance control off its default, the way a user would.
+    theme.set('dark');
+    density.set('compact');
+    const language = container.querySelector('#language') as HTMLSelectElement;
+    await fireEvent.change(language, { target: { value: 'de' } });
+    await tick();
+    expect(get(theme)).toBe('dark');
+    expect(get(density)).toBe('compact');
+    expect(i18n.locale).toBe('de');
+    expect((container.querySelector('#autostart') as HTMLInputElement).checked).toBe(true);
+
+    // Scope to the Appearance card: four other cards carry their own
+    // "reset to default" control.
+    const appearanceCard = [...container.querySelectorAll('section.card')].find(
+      (section) => section.querySelector('h2')?.textContent?.trim() === t('settings.sectionAppearance')
+    ) as HTMLElement;
+    const reset = appearanceCard.querySelector('button.btn-link') as HTMLButtonElement;
+    await fireEvent.click(reset);
+
+    await waitFor(() => {
+      expect(get(theme)).toBe('system');
+      expect(get(density)).toBe('comfortable');
+      expect(i18n.locale).toBe('en');
+    });
+    expect((container.querySelector('#language') as HTMLSelectElement).value).toBe('en');
+    expect((container.querySelector('#autostart') as HTMLInputElement).checked).toBe(false);
+
+    await i18n.set('en');
   });
 });

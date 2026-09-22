@@ -496,6 +496,10 @@
     return { active: effective !== raw, effective };
   });
   function resetAppearanceDefaults() {
+    theme.set('system');
+    density.set('comfortable');
+    localConfig.locale = 'en';
+    void i18n.set('en');
     localConfig.autostart = defaultConfig.autostart;
     markDirty();
   }
