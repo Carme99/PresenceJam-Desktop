@@ -423,6 +423,14 @@ pub struct AppState {
     /// the dedup window is dropped before any token exchange is spawned.
     /// See `DeepLinkDedup`.
     pub deep_link_seen: DeepLinkDedup,
+    /// Issue #813: replayable record of the startup legacy-plaintext
+    /// migration conflict (`config::LegacySecretOutcome::ConflictKeychainDiffers`).
+    /// The `spotify-secret-conflict` event is emitted from the setup hook
+    /// before any webview has mounted (issue #376), so no listener can ever
+    /// observe it; the flag persists the outcome on process state instead,
+    /// and `get_sync_status` surfaces it for late mounters. Cleared when a
+    /// Spotify reconnect succeeds.
+    pub secret_conflict: AtomicBool,
 }
 
 impl AppState {
@@ -445,6 +453,7 @@ impl AppState {
             calendar: crate::calendar::CalendarGate::new(),
             launch_binding,
             deep_link_seen: DeepLinkDedup::new(),
+            secret_conflict: AtomicBool::new(false),
         }
     }
 }
@@ -632,6 +641,12 @@ async fn handle_spotify_callback(
     // Issue #70: invalidate the onboarding cache.
     app_state.onboarding_cache.invalidate();
     log::info!("[CALLBACK] handle_spotify_callback: onboarding_cache invalidated");
+    // Issue #813: same conflict dismissal as the manual fallback below —
+    // the current secret is in the keychain now, so the replayable flag
+    // must not survive the reconnect.
+    app_state
+        .secret_conflict
+        .store(false, std::sync::atomic::Ordering::Release);
 
     log::info!("[CALLBACK] handle_spotify_callback: EMIT spotify-auth-complete event");
     let _ = app.emit("spotify-auth-complete", ());
@@ -2113,8 +2128,17 @@ pub fn run() {
             // call on every launch; no-op once the field is gone. The `_with_app`
             // variant surfaces a keychain conflict to Settings via a one-time
             // `spotify-secret-conflict` event (issue #376). See audit Q3 and
-            // issue #9.
-            config::migrate_legacy_client_secret_with_app(app.handle());
+            // issue #9. The outcome is also persisted on AppState (issue #813):
+            // the setup hook runs before any webview has mounted, so the event
+            // can never reach Settings' `onMount` listener — `get_sync_status`
+            // replays the flag for late mounters instead.
+            if config::migrate_legacy_client_secret_with_app(app.handle())
+                == config::LegacySecretOutcome::ConflictKeychainDiffers
+            {
+                state
+                    .secret_conflict
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
 
             // Load persisted tokens (Spotify + Teams) into AppState. We bypass
             // any plugin store for the tokens file and read it directly
@@ -2705,6 +2729,47 @@ mod tests {
         let handle = std::thread::Builder::new().spawn(|| {}).expect("spawn");
         *polling.handle_mut() = Some(handle);
         assert!(polling.handle().is_some());
+    }
+
+    /// Issue #813 acceptance: the setup hook must persist a
+    /// `ConflictKeychainDiffers` migration outcome on `AppState::secret_conflict`
+    /// (the one-shot `spotify-secret-conflict` event fires before any webview
+    /// has mounted, so nothing persists it otherwise), and both auth-completion
+    /// paths must clear the flag again. Fails pre-fix: no such store exists.
+    #[test]
+    fn test_secret_conflict_flag_survives_setup_and_clears_on_reconnect() {
+        use std::sync::atomic::Ordering;
+        let source = include_str!("lib.rs");
+        // Wiring half: setup persists the conflict outcome onto process state.
+        for marker in [
+            "migrate_legacy_client_secret_with_app(app.handle())",
+            "LegacySecretOutcome::ConflictKeychainDiffers",
+            "secret_conflict",
+        ] {
+            assert!(
+                source.contains(marker),
+                "setup must persist the migration conflict on AppState ({marker}) (issue #813)"
+            );
+        }
+        // Clearing half: the deep-link completion path dismisses the
+        // replayable flag here; the manual fallback does the same in
+        // commands/spotify_auth.rs (both must, or the banner survives a
+        // reconnect on one path).
+        assert!(
+            source.contains("secret_conflict"),
+            "handle_spotify_callback must clear the flag on success (issue #813)"
+        );
+        let auth_source = include_str!("commands/spotify_auth.rs");
+        assert!(
+            auth_source.contains("secret_conflict"),
+            "complete_spotify_auth_manual must clear the flag on success (issue #813)"
+        );
+        // Behaviour half: the flag defaults off.
+        let state = AppState::new();
+        assert!(
+            !state.secret_conflict.load(Ordering::Acquire),
+            "a fresh AppState must report no secret conflict (issue #813)"
+        );
     }
 
     /// Regression guard for issue #66: a future contributor must not

@@ -610,6 +610,13 @@ pub async fn complete_spotify_auth_manual(
     // Issue #70: invalidate the onboarding cache.
     state.onboarding_cache.invalidate();
     log::info!("{CMD} complete_spotify_auth_manual: onboarding_cache invalidated");
+    // Issue #813: a completed reconnect resolves the startup secret
+    // conflict (the current secret is in the keychain; the next launch
+    // strips the stale plaintext), so clear the replayable flag alongside
+    // the frontend banner dismissal.
+    state
+        .secret_conflict
+        .store(false, std::sync::atomic::Ordering::Release);
 
     log::info!("{CMD} complete_spotify_auth_manual: EMIT spotify-auth-complete event");
     let _ = app.emit("spotify-auth-complete", ());

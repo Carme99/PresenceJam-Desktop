@@ -152,6 +152,14 @@ pub struct SyncStatus {
     /// first. The Dashboard composer renders this as the quick-pick list
     /// and the tray's "Recent statuses" submenu reads the same array.
     pub recent_manual_statuses: Vec<crate::commands::status::RecentManualStatus>,
+    /// Issue #813: replay of the startup legacy-plaintext migration conflict
+    /// (`config::LegacySecretOutcome::ConflictKeychainDiffers`, persisted on
+    /// `AppState::secret_conflict`). The one-shot `spotify-secret-conflict`
+    /// event (issue #376) fires from the setup hook before any webview has
+    /// mounted, so Settings reads this field next to `get_sync_status` in
+    /// `onMount` and raises the reconnect banner from it. Cleared on a
+    /// successful Spotify reconnect.
+    pub spotify_secret_conflict: bool,
 }
 
 #[tauri::command]
@@ -586,6 +594,11 @@ pub fn sync_status_from_state(state: &AppState) -> SyncStatus {
     let config_guard = state.config.get();
     let teams_guard = state.tokens.teams();
     let is_syncing = state.polling.is_syncing(Ordering::Acquire);
+    // Issue #813: the startup migration conflict is process state, not lock
+    // state — load it alongside (not inside) the read-guard critical section
+    // so the atomic read can never join the `current_track -> spotify ->
+    // config -> teams` lock ordering above (issue #398).
+    let spotify_secret_conflict = state.secret_conflict.load(Ordering::Acquire);
     // #670: the poller's presence bookkeeping, read from the shared
     // write-decision clocks (finding PollCore#4 / #572). `WRITE_CLOCKS` is a
     // leaf lock — every production touch clones it in or out and never
@@ -627,6 +640,7 @@ pub fn sync_status_from_state(state: &AppState) -> SyncStatus {
         presence_paused,
         manual_status: crate::commands::status::load_manual_status(),
         recent_manual_statuses: crate::commands::status::load_recent_statuses(),
+        spotify_secret_conflict,
     }
 }
 #[tauri::command]
@@ -1045,6 +1059,37 @@ mod tests {
         assert!(
             state.polling.thread_id().is_none(),
             "the owner entry must be released with the flag (issue #941, F2)"
+        );
+    }
+
+    /// Issue #813: the startup migration conflict must be replayable — a
+    /// `ConflictKeychainDiffers` outcome persists on `AppState::secret_conflict`
+    /// and `sync_status_from_state` surfaces it, so a Settings view mounting
+    /// after setup (when the one-shot `spotify-secret-conflict` event has
+    /// already fired into the void) still raises the reconnect banner.
+    /// Clearing on a successful reconnect stops the banner re-appearing.
+    #[test]
+    fn test_sync_status_replays_the_secret_conflict_flag() {
+        use super::{sync_status_from_state, AppState};
+        use std::sync::atomic::Ordering;
+
+        let state = AppState::new();
+        // Fresh state: no conflict — banner stays hidden.
+        assert!(
+            !sync_status_from_state(&state).spotify_secret_conflict,
+            "a fresh AppState must report no secret conflict (issue #813)"
+        );
+        // The setup hook persists `ConflictKeychainDiffers` on the flag.
+        state.secret_conflict.store(true, Ordering::Release);
+        assert!(
+            sync_status_from_state(&state).spotify_secret_conflict,
+            "a stored conflict must surface through get_sync_status so a late-mounting Settings raises the banner (issue #813)"
+        );
+        // A completed reconnect clears it.
+        state.secret_conflict.store(false, Ordering::Release);
+        assert!(
+            !sync_status_from_state(&state).spotify_secret_conflict,
+            "clearing the flag on reconnect must hide the banner again (issue #813)"
         );
     }
 }
