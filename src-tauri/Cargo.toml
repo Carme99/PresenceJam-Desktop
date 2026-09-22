@@ -3,6 +3,9 @@ name = "presence-jam"
 version = "4.7.0"
 description = "Syncs Spotify playback to Microsoft Teams status"
 authors = ["Jack Lee"]
+# SPDX license for cargo-deny (issue #776): without this the workspace root
+# falls through to LicenseInfo::Unlicensed (Severity::Error). Matches /LICENSE.
+license = "MIT"
 edition = "2021"
 rust-version = "1.96"
 

@@ -1,0 +1,39 @@
+# cargo-deny policy for the Rust dependency tree (issue #776).
+#
+# Reproduce the CI gate locally:
+#   cargo deny --manifest-path src-tauri/Cargo.toml check licenses bans sources
+# A new crate outside `licenses.allow`, or any path/git/non-crates.io source,
+# fails the check. `bans.multiple-versions` is warn-only: the tree carries
+# dozens of duplicate versions (see Cargo.lock), so duplicates are signal,
+# not a gate — CI runs `licenses sources` only.
+#
+# Allow-list reconciled against Cargo.lock: every `license = ` value in the
+# locked tree. Adding an entry here must cite the crate that needs it.
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception", # rustix, linux-raw-sys, wasi, wasmparser, target-lexicon
+    "BSD-2-Clause", # zerocopy
+    "BSD-3-Clause", # brotli, subtle, alloc-no-stdlib
+    "ISC", # libloading, untrusted, rustls-webpki, ring
+    "Unicode-3.0", # icu_*, zerovec, litemap, tinystr
+    "MPL-2.0", # cssparser, selectors, dtoa-short, option-ext
+    "Zlib", # foldhash, bytemuck, miniz_oxide, objc2_*
+    "Unlicense", # memchr, aho-corasick, byteorder, termcolor
+    "CC0-1.0", # tiny-keccak
+    "MIT-0", # dunce (CC0-1.0 OR MIT-0 OR Apache-2.0)
+    "0BSD", # adler2
+    "BSL-1.0", # ryu (Apache-2.0 OR BSL-1.0)
+    "CDLA-Permissive-2.0", # webpki-root-certs
+]
+
+[bans]
+# Warn-only (see header): duplicates are endemic to this tree, so a deny here
+# would fail the gate on every Dependabot bump until the graph is deduplicated.
+multiple-versions = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
