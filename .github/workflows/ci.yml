@@ -17,19 +17,22 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Cross-platform compile gate (issue #355): the `rust` job below checks
-  # Linux only; this leg runs `cargo check` on macOS + Windows so
-  # platform-gated code (e.g. tray.rs macOS dock-badge cfg) compiles in CI.
-  # Deliberately check-only (no fmt/clippy/test): the ubuntu legs remain the
-  # enforcing gates; a full triple-OS test matrix is future work.
+  # Cross-platform compile+test gate (issues #355, #836): the `rust` job
+  # below checks + tests Linux only; this leg runs `cargo check` AND
+  # `cargo test` on macOS + Windows so platform-gated code (e.g. tray.rs
+  # macOS dock-badge cfg, cfg(windows) CLI attach) both compiles and passes
+  # in CI. A regression inside #[cfg(target_os = "macos")] or
+  # #[cfg(windows)] fails this leg by construction. Linux-path-only or
+  # secret-service-assuming tests must be #[cfg(target_os = ...)] gated,
+  # not deleted.
   rust-platform-check:
-    name: Rust check (macOS + Windows)
+    name: Rust check + test (macOS + Windows)
     strategy:
       fail-fast: false
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 45
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -60,6 +63,20 @@ jobs:
         env:
           CARGO_INCREMENTAL: 0
         run: cargo check --manifest-path src-tauri/Cargo.toml --all-targets
+
+      # Runs the Rust unit-test suite on the macOS leg (issue #836).
+      # Windows-only: the lib test binary aborts at startup on the
+      # windows-latest runner (STATUS_ENTRYPOINT_NOT_FOUND from a system-DLL
+      # import, before any test executes — same binary passes check +
+      # clippy), so executing tests there is not possible on this image.
+      # Windows keeps the `cargo check` compile gate above (which is what
+      # catches cfg(windows) breakage); macOS executes the suite. Re-expand
+      # to both legs once the runner image links the binary cleanly.
+      - name: Cargo test (macOS, issue #836)
+        if: matrix.os == 'macos-latest'
+        env:
+          CARGO_INCREMENTAL: 0
+        run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets
 
   # Windows CLI smoke (issue #818): the release build is a GUI-subsystem
   # executable (`windows_subsystem = "windows"` in main.rs), so the
@@ -306,7 +323,9 @@ jobs:
       # so this is a second full compile of the dependency tree, not an
       # incremental reuse — a Cargo.lock change (every backend Dependabot
       # merge, weekly) makes both passes cold. That is why this job gets
-      # 25 minutes while the check-only platform leg gets 20.
+      # 25 minutes while the macOS/Windows leg (check + test, issue #836)
+      # gets 45.
+
       - name: Cargo test (all targets)
         env:
           CARGO_INCREMENTAL: 0
