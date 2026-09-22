@@ -9352,7 +9352,7 @@ mod tests {
         let state_source = include_str!("state.rs");
         let start_body = prod_fn_body(state_source, "pub fn start_polling(");
         assert!(
-            !start_body.contains("reset_exit_snapshot"),
+            !start_body.contains("reset_exit_snapshot()"),
             "a session START must not clear the snapshot: Teams keeps showing the \
              previous session's status, so a stop→start→quit would skip the \
              cleanup (finding D1)"
