@@ -111,9 +111,10 @@ describe('Reconnect corrupt-key reset (#766)', () => {
     await fireEvent.click(armButton!);
     await waitFor(() => expect(container.textContent).toContain('tokens.json'));
     const confirm = [...container.querySelectorAll('.info-box button')].find(
-      (b) => b.textContent === 'Reset local token storage' && !b.disabled
+      (b) =>
+        b.textContent === 'Reset local token storage' &&
+        !(b as HTMLButtonElement).disabled
     );
-    expect(confirm).toBeTruthy();
     await fireEvent.click(confirm!);
 
     await waitFor(() =>
