@@ -28,7 +28,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 
 import Reconnect from '$lib/components/Reconnect.svelte';
 import { defaultConfig } from '$lib/stores/config';
-import { resetAuthFlow, setSpotifyPhase } from '$lib/stores/authFlow.svelte';
+import { authFlow, resetAuthFlow, setSpotifyPhase } from '$lib/stores/authFlow.svelte';
 import { currentView } from '$lib/stores/app';
 
 const CLIENT_ID = 'a'.repeat(32);
@@ -76,11 +76,14 @@ describe('Reconnect corrupt-key reset (#766)', () => {
   it('raises the reset banner for a corrupt-key error', async () => {
     const { container, getByRole } = render(Reconnect);
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('get_sync_status'));
+    // The autostarted OAuth flow sets phase to 'waiting' asynchronously after
+    // mount; the corrupt-key error must land after that write or the autostart
+    // clobbers it (real-world errors arrive via event, always post-mount).
+    await waitFor(() => expect(authFlow.spotify.phase).toBe('waiting'), { timeout: 3000 });
     setSpotifyPhase(
       'error',
       'The stored tokens encryption key is unusable, so tokens.json cannot be decrypted.'
     );
-
     await waitFor(() => expect(container.textContent).toContain('cannot be read'));
     const arm = getByRole('button', { name: 'Reset local token storage' });
     await fireEvent.click(arm);
@@ -93,11 +96,11 @@ describe('Reconnect corrupt-key reset (#766)', () => {
   it('resets behind the confirm and reports the re-sign-in copy', async () => {
     const { container } = render(Reconnect);
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('get_sync_status'));
+    await waitFor(() => expect(authFlow.spotify.phase).toBe('waiting'), { timeout: 3000 });
     setSpotifyPhase(
       'error',
       'tokens file failed AES-GCM authentication (corrupt ciphertext, tampered file, or key mismatch — re-authentication required)'
     );
-
     let armButton: HTMLButtonElement | undefined;
     await waitFor(() => {
       armButton = [...container.querySelectorAll('button')].find(
@@ -124,8 +127,8 @@ describe('Reconnect corrupt-key reset (#766)', () => {
   it('offers no reset for an ordinary auth error', async () => {
     const { container } = render(Reconnect);
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('get_sync_status'));
+    await waitFor(() => expect(authFlow.spotify.phase).toBe('waiting'), { timeout: 3000 });
     setSpotifyPhase('error', 'Invalid grant: refresh token is expired');
-
     await waitFor(() => expect(container.textContent).toContain('Invalid grant'));
     expect(container.textContent).not.toContain('Reset local token storage');
   });
