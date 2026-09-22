@@ -105,7 +105,41 @@
       saving = false;
     }
   }
+  /**
+   * Issue #766: corrupt-key recovery affordance, next to the connections
+   * card that shows the stored key/secret presence. The two-step shape
+   * (arm, then confirm — never a single destructive click) names what is
+   * deleted and the re-sign-in that follows; `resetting` serialises the
+   * invoke, and after a success the snapshot is reloaded so the rows below
+   * read the emptied state instead of the stale one.
+   */
+  let resetArmed = $state(false);
+  let resetting = $state(false);
 
+  function armTokenReset() {
+    resetArmed = true;
+  }
+
+  function cancelTokenReset() {
+    resetArmed = false;
+  }
+
+  async function confirmTokenReset() {
+    if (resetting) return;
+    resetting = true;
+    try {
+      await invoke('reset_local_token_storage');
+      devLog('[DIAGNOSTICS] token storage reset');
+      feedback = t('diagnostics.resetTokenDone');
+      resetArmed = false;
+      await loadSnapshot();
+    } catch (e) {
+      console.warn('[DIAGNOSTICS] reset_local_token_storage failed:', e);
+      feedback = t('diagnostics.resetTokenFailed', { error: String(e) });
+    } finally {
+      resetting = false;
+    }
+  }
   function boolLabel(v: boolean | undefined | null): string {
     return v ? t('common.yes') : t('common.no');
   }
@@ -235,7 +269,19 @@
           <dt>{t('diagnostics.keychainSpotifySecret')}</dt><dd>{boolLabel(snapshot.keychain.spotify_client_secret_present)}</dd>
           <dt>{t('diagnostics.keychainEncryptionKey')}</dt><dd>{boolLabel(snapshot.keychain.tokens_encryption_key_present)}</dd>
         </dl>
-        <p class="hint">{t('diagnostics.tokensNeverIncluded')}</p>
+        {#if !resetArmed}
+          <div class="reset-actions">
+            <button class="btn-secondary" onclick={armTokenReset}>{t('diagnostics.resetTokenStorage')}</button>
+          </div>
+        {:else}
+          <div class="reset-confirm" role="alert">
+            <span class="hint">{t('diagnostics.resetTokenConfirm')}</span>
+            <div class="reset-actions">
+              <button class="btn-secondary" onclick={confirmTokenReset} disabled={resetting}>{t('diagnostics.resetTokenStorage')}</button>
+              <button class="btn-secondary" onclick={cancelTokenReset} disabled={resetting}>{t('common.dismiss')}</button>
+            </div>
+          </div>
+        {/if}
       </section>
 
       <section aria-label={t('diagnostics.recentLogLines')}>
@@ -361,6 +407,23 @@
     width: auto;
     padding: var(--sp-2) var(--sp-4);
     font-size: var(--fs-sm);
+  }
+  .reset-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--sp-2);
+    margin-top: var(--sp-2);
+  }
+  .reset-actions .btn-secondary {
+    width: auto;
+    padding: var(--sp-2) var(--sp-4);
+    font-size: var(--fs-sm);
+  }
+  .reset-confirm {
+    margin-top: var(--sp-2);
+  }
+  .reset-confirm .hint {
+    margin-right: 0;
   }
 
   .failed-install {

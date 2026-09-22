@@ -4,6 +4,7 @@
 //! See issue #76. Currently holds:
 //! - `preview_status` — Settings-page preview renderer (issue #74)
 //! - `update_tray_menu_state` — tray menu state update from the frontend
+//! - `reset_local_token_storage` — corrupt-key recovery affordance (issue #766)
 
 use crate::spotify::TrackInfo;
 use crate::tray;
@@ -147,4 +148,41 @@ pub async fn relaunch_app(window: tauri::Window, app: AppHandle) -> Result<(), S
     })
     .await
     .map_err(|e| format!("relaunch_app spawn_blocking panicked: {:?}", e))?
+}
+/// Reset the local token storage and start over (issue #766).
+///
+/// Drops the keychain-held AES key FIRST, then deletes `tokens.json` and
+/// every stale sidecar next to it through
+/// `token_io::reset_tokens_storage` → `token_io::clear_tokens_file`.
+/// The ordering is load-bearing: deleting the key first means a failure
+/// leaves behind at worst an orphan ciphertext file, which
+/// `token_io::read_tokens_at` already treats as "start empty"; deleting
+/// the file first and then failing to drop the key would leave nothing to
+/// recover from at all. The next persist generates a fresh key, and the
+/// user signs in again — the affordance copy says so.
+///
+/// Reached from two UI entry points, both behind a two-step confirmation
+/// that names what is deleted: the Reconnect corrupt-key banner (a stored
+/// encryption failure or AES-GCM authentication failure, matched on the
+/// stable fragments of those Rust-side messages) and the Diagnostics
+/// connections card. After a reset the caller should route the user to
+/// Reconnect: tokens are gone (by design) and the session is unsigned.
+///
+/// #215: offloaded to spawn_blocking as it touches keychain + disk — the
+/// same reason `relaunch_app` and `update_tray_menu_state` offload theirs.
+#[tauri::command]
+pub async fn reset_local_token_storage(window: tauri::Window, app: AppHandle) -> Result<(), String> {
+    // Issue #241: destructive token + keychain reset is main-window-only —
+    // a detached window must never wipe credentials out from under the user.
+    super::require_main_window(&window)?;
+    log::info!("{CMD} reset_local_token_storage: ENTRY");
+    tauri::async_runtime::spawn_blocking(move || crate::token_io::reset_tokens_storage(&app))
+        .await
+        .map_err(|e| format!("reset_local_token_storage spawn_blocking panicked: {:?}", e))?
+        .map_err(|e| {
+            log::error!("{CMD} reset_local_token_storage: FAILED - {}", e);
+            e
+        })?;
+    log::info!("{CMD} reset_local_token_storage: SUCCESS");
+    Ok(())
 }

@@ -86,9 +86,9 @@ pub fn require_main_window(window: &tauri::Window) -> Result<(), String> {
 /// start_spotify_auth, start_spotify_reconnect, complete_spotify_auth_manual,
 /// refresh_spotify (spotify_auth.rs), start_teams_auth_device_code,
 /// refresh_teams (teams_auth.rs), complete_onboarding (onboarding.rs),
-/// relaunch_app (misc.rs), stage_deferred_update (updater_bg.rs).
+/// relaunch_app, reset_local_token_storage (misc.rs),
+/// stage_deferred_update (updater_bg.rs).
 ///
-/// INTENTIONALLY UNGUARDED -- main-only by caller location (no Window param):
 /// show_window (+page main route), update_tray_menu_state (Dashboard),
 /// get_diagnostics_snapshot (Diagnostics-as-main-route), preview_status
 /// (Settings preview but read-only pure computation), get_sync_status
@@ -96,7 +96,9 @@ pub fn require_main_window(window: &tauri::Window) -> Result<(), String> {
 /// (Settings scope readers, no side effect), clear_failed_update_install
 /// (Diagnostics dismiss; deletes only the marker file),
 /// is_onboarding_complete (issue #770: the boot gate in
-/// `src/routes/+page.svelte`, a main-window route).
+/// `src/routes/+page.svelte`, a main-window route). reset_local_token_storage
+/// is NOT in this list: it deletes the keychain key plus tokens.json and its
+/// sidecars, so it takes `window` and is guarded (issue #766).
 ///
 /// INTENTIONALLY UNGUARDED -- detached-legit (invoked from popped-out
 /// Settings/LogViewer by design): reconnect_teams,

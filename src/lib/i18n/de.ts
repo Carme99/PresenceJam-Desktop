@@ -224,6 +224,11 @@ export const de: Dict = {
   'diagnostics.failedInstallTimestamp': 'Versuch um',
   'diagnostics.failedInstallDismissFailed':
     'Der Eintrag zur fehlgeschlagenen Installation konnte nicht verworfen werden.',
+  'diagnostics.resetTokenStorage': 'Lokalen Token-Speicher zurücksetzen',
+  'diagnostics.resetTokenConfirm':
+    'Dadurch werden tokens.json samt Hilfsdateien und der gespeicherte Token-Verschlüsselungsschlüssel gelöscht. Sie müssen sich danach erneut anmelden. Fortfahren?',
+  'diagnostics.resetTokenDone': 'Token-Speicher zurückgesetzt. Melden Sie sich erneut an, um fortzufahren.',
+  'diagnostics.resetTokenFailed': 'Zurücksetzen fehlgeschlagen — {error}',
 
   // ── reconnect ─────────────────────────────────────────────────────
   'reconnect.title': 'Erneut verbinden',
@@ -243,6 +248,12 @@ export const de: Dict = {
   'reconnect.teamsOk': 'Teams erfolgreich neu verbunden.',
   'reconnect.clickBelowTeams':
     'Klicken Sie unten, um Ihr Microsoft-Teams-Konto neu zu verbinden.',
+  'reconnect.tokenStorageUnusable': 'Ihre gespeicherten Anmeldedaten können nicht gelesen werden — der gespeicherte Token-Verschlüsselungsschlüssel ist unbrauchbar.',
+  'reconnect.resetTokenStorage': 'Lokalen Token-Speicher zurücksetzen',
+  'reconnect.resetTokenConfirm':
+    'Dadurch werden tokens.json samt Hilfsdateien und der gespeicherte Token-Verschlüsselungsschlüssel gelöscht. Sie müssen sich danach erneut anmelden. Fortfahren?',
+  'reconnect.resetTokenDone': 'Token-Speicher zurückgesetzt. Melden Sie sich unten erneut an, um fortzufahren.',
+  'reconnect.resetTokenFailed': 'Zurücksetzen fehlgeschlagen — {error}',
   'reconnect.missingCredsTitle': 'Spotify-Anmeldedaten vergessen?',
   'reconnect.reenterCredsHint':
     'Sie müssen Ihre Client-ID und Ihr Client-Secret erneut eingeben.',
