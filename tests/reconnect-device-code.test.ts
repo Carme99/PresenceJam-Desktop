@@ -15,23 +15,73 @@
  * pre-fix markup (a live region whose text changed 30 times) fails here.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, cleanup } from '@testing-library/svelte';
+import { render, cleanup, waitFor } from '@testing-library/svelte';
+import { tick } from 'svelte';
+import { get } from 'svelte/store';
+import type { Mock } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 
-const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
+type Listener = { event: string; fn: (e: { payload: unknown }) => void };
+const listeners: Listener[] = [];
 
-vi.mock('@tauri-apps/api/core', () => ({ invoke }));
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 vi.mock('@tauri-apps/api/event', () => ({
-  // Mirror the real signature: listen(eventName, handler) → unlisten.
-  listen: vi.fn(async () => () => {})
+  // Mirror the real signature: listen(eventName, handler) → unlisten. The
+  // handler is kept so the test can emit the event the backend would send.
+  listen: vi.fn(async (event: string, fn: (e: { payload: unknown }) => void) => {
+    const entry = { event, fn };
+    listeners.push(entry);
+    return () => {
+      const i = listeners.indexOf(entry);
+      if (i >= 0) listeners.splice(i, 1);
+    };
+  })
 }));
+vi.mock('@tauri-apps/api/window', () => ({
+  getCurrentWindow: vi.fn(() => ({ label: 'main' }))
+}));
+vi.mock('@tauri-apps/api/app', () => ({ getVersion: vi.fn(async () => '4.6.0') }));
+// The layout mounts UpdatePrompt; a null answer keeps the banner out of the way.
+vi.mock('@tauri-apps/plugin-updater', () => ({ check: vi.fn(async () => null) }));
+vi.mock('@tauri-apps/plugin-notification', () => ({
+  isPermissionGranted: vi.fn(async () => true),
+  requestPermission: vi.fn(async () => 'granted'),
+  sendNotification: vi.fn()
+}));
+// The detach store reaches for WebviewWindow at import time; the layout only
+// reads the pane flags. `svelte/store` is imported inside the factory because
+// a hoisted `vi.mock` factory cannot use static imports.
+vi.mock('$lib/stores/detach', async () => {
+  const { writable } = await import('svelte/store');
+  return {
+    detachedPanes: writable({ logs: false, settings: false }),
+    focusDetached: vi.fn(async () => {}),
+    popOut: vi.fn(async () => {}),
+    popIn: vi.fn(async () => {}),
+    // The layout adopts the real window set on mount (#601).
+    reconcileDetachedPanes: vi.fn(async () => {})
+  };
+});
 
 // Static imports: the vi.mock calls above hoist, so the Tauri mocks are in
 // place before the component and its stores load.
+import { invoke } from '@tauri-apps/api/core';
 import Reconnect from '$lib/components/Reconnect.svelte';
-import { defaultConfig } from '$lib/stores/config';
-import { resetAuthFlow, setTeamsDeviceCode, setTeamsPhase } from '$lib/stores/authFlow.svelte';
+import Layout from '../src/routes/+layout.svelte';
+import { defaultConfig, configStore } from '$lib/stores/config';
+import {
+  authFlow,
+  resetAuthFlow,
+  setTeamsDeviceCode,
+  setTeamsPhase,
+  teamsPollMutex,
+  releaseTeamsPoll
+} from '$lib/stores/authFlow.svelte';
 import { currentView } from '$lib/stores/app';
+import { i18n } from '$lib/i18n';
+import { presence, INITIAL_PRESENCE } from '$lib/stores/presence';
+
+const invokeMock = invoke as unknown as Mock;
 
 const CLIENT_ID = 'a'.repeat(32);
 const USER_CODE = 'ABCD-1234';
@@ -52,7 +102,7 @@ async function settle(rounds = 24) {
 }
 
 function mockBackend() {
-  invoke.mockImplementation(async (cmd: string) => {
+  invokeMock.mockImplementation(async (cmd: string) => {
     switch (cmd) {
       case 'load_config':
         return {
@@ -101,10 +151,18 @@ function countdownText(container: HTMLElement): string | undefined {
     ?.textContent?.trim();
 }
 
-beforeEach(() => {
-  invoke.mockReset();
+beforeEach(async () => {
+  listeners.length = 0;
+  // `isTauriRuntime` is computed at component init; the layout only binds
+  // process-wide listeners inside the Tauri runtime.
+  Object.defineProperty(window, '__TAURI_INTERNALS__', { value: {}, configurable: true });
+  invokeMock.mockReset();
+  releaseTeamsPoll();
   resetAuthFlow();
   currentView.set('dashboard');
+  configStore.set(structuredClone(defaultConfig));
+  presence.set({ ...INITIAL_PRESENCE });
+  await i18n.set('en');
 });
 
 afterEach(() => {
@@ -167,6 +225,149 @@ describe('device-code block (#735, #952)', () => {
     expect(actions.map((b) => b.textContent?.trim())).toEqual(['Check sign-in status']);
     expect(actions.every((b) => b.classList.contains('btn-secondary'))).toBe(true);
     expect(actions.some((b) => b.classList.contains('btn-full'))).toBe(false);
+  });
+});
+
+/**
+ * #814 — the layout's `teams-reconnect-required` handler must not strand a
+ * displayed device code.
+ *
+ * A second poller emit landing while the first flow's long-blocking
+ * `poll_teams_auth` invoke still held the shared mutex used to replace the
+ * on-screen code and re-open the browser, then drop the new poll on the
+ * mutex — the displayed code was never polled, and Check-now (same mutex)
+ * could not rescue it either.
+ *
+ * Two rules now cover it, pinned here through the mounted layout shell:
+ *   - while the stored flow is still `waiting` on a live (unexpired) code,
+ *     the emit routes back to that code instead of starting a fresh flow;
+ *   - when a fresh code is nevertheless issued while the mutex is held (two
+ *     emits racing each other's device-code request), the newest code is
+ *     parked and re-driven once the in-flight poll settles.
+ *
+ * Fails pre-fix: the parked `poll_teams_auth` never happens (exactly one
+ * poll reaches the backend), and the first rule's emit issues a fresh
+ * `start_teams_auth_device_code` call.
+ */
+describe('teams-reconnect-required handler (#814)', () => {
+  const CODE_A = 'code-A';
+  const CODE_B = 'code-B';
+
+  function deviceCodeResponse(userCode: string, deviceCode: string) {
+    return {
+      user_code: userCode,
+      verification_url: VERIFICATION_URL,
+      device_code: deviceCode,
+      interval: 5,
+      expires_in: 900
+    };
+  }
+
+  /** Mount the always-mounted shell and wait for the reconnect listener. */
+  async function mountLayoutShell() {
+    const shell = render(Layout);
+    await waitFor(() => {
+      expect(listeners.filter((l) => l.event === 'teams-reconnect-required').length).toBe(1);
+    });
+    return shell;
+  }
+
+  /** Deliver a Tauri event to every mounted listener, then flush the mocked IPC. */
+  async function emit(event: string, payload: unknown) {
+    for (const l of [...listeners]) {
+      if (l.event === event) l.fn({ payload });
+    }
+    await tick();
+    await settle();
+  }
+
+  it('routes back to the on-screen code while its flow is still waiting', async () => {
+    setTeamsDeviceCode({
+      userCode: USER_CODE,
+      verificationUrl: VERIFICATION_URL,
+      deviceCode: CODE_A,
+      interval: 5,
+      expiresAt: Date.now() + CODE_TTL_MS
+    });
+    setTeamsPhase('waiting');
+    mockBackend();
+    await mountLayoutShell();
+    invokeMock.mockClear();
+
+    await emit('teams-reconnect-required', {});
+
+    const commands = invokeMock.mock.calls.map((call) => call[0]);
+    expect(commands).not.toContain('start_teams_auth_device_code');
+    expect(commands).not.toContain('open_external_url');
+    expect(authFlow.teams.deviceCode).toBe(CODE_A);
+    expect(authFlow.teams.userCode).toBe(USER_CODE);
+    expect(get(currentView)).toBe('settings');
+  });
+
+  it('polls the newest code once the in-flight poll settles (mutex held)', async () => {
+    let releaseStartA!: () => void;
+    let releaseStartB!: () => void;
+    let releasePollA!: () => void;
+    const startA = new Promise<void>((resolve) => (releaseStartA = resolve));
+    const startB = new Promise<void>((resolve) => (releaseStartB = resolve));
+    const pollA = new Promise<void>((resolve) => (releasePollA = resolve));
+    const polls: Array<{ deviceCode: string; interval: number }> = [];
+    let starts = 0;
+    invokeMock.mockImplementation(
+      async (cmd: string, args?: { deviceCode?: string; interval?: number }) => {
+        switch (cmd) {
+          case 'load_config':
+            return structuredClone(defaultConfig);
+          case 'check_for_update':
+            return null;
+          case 'start_teams_auth_device_code':
+            if (starts++ === 0) {
+              await startA;
+              return deviceCodeResponse('AAAA-1111', CODE_A);
+            }
+            await startB;
+            return deviceCodeResponse('BBBB-2222', CODE_B);
+          case 'poll_teams_auth':
+            polls.push({ deviceCode: args?.deviceCode ?? '', interval: args?.interval ?? 0 });
+            if (polls.length === 1) await pollA;
+            return undefined;
+          default:
+            return undefined;
+        }
+      }
+    );
+
+    await mountLayoutShell();
+    vi.useFakeTimers();
+
+    // Two poller emits race each other's device-code request: neither sees a
+    // waiting flow yet, so both issue a fresh code.
+    await emit('teams-reconnect-required', {});
+    await emit('teams-reconnect-required', {});
+
+    releaseStartA();
+    await settle();
+    // The first code is stored and its poll is now in flight.
+    expect(authFlow.teams.deviceCode).toBe(CODE_A);
+    expect(polls.map((poll) => poll.deviceCode)).toEqual([CODE_A]);
+
+    releaseStartB();
+    await settle();
+    // The second emit replaced the on-screen code while the first poll still
+    // holds the mutex — the follow-up poll is parked, not dropped.
+    expect(authFlow.teams.deviceCode).toBe(CODE_B);
+    expect(polls.map((poll) => poll.deviceCode)).toEqual([CODE_A]);
+
+    // The first poll settles (its result is superseded); the parked code is
+    // re-driven without another emit, and the mutex is free afterwards.
+    releasePollA();
+    await settle();
+    await vi.advanceTimersByTimeAsync(1000);
+    await settle();
+
+    expect(polls.map((poll) => poll.deviceCode)).toEqual([CODE_A, CODE_B]);
+    expect(authFlow.teams.deviceCode).toBe(CODE_B);
+    expect(teamsPollMutex.inFlight).toBe(false);
   });
 });
 

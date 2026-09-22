@@ -46,7 +46,7 @@
     typeof window !== 'undefined' &&
     typeof (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !== 'undefined';
   const isMainWindow = isTauriRuntime ? getCurrentWindow().label === 'main' : false;
-  import { authFlow, setTeamsPhase, setTeamsDeviceCode, setSpotifyPhase, expiresAtFromResponse, resetTeamsAuthFlow, pollTeamsAuth } from '$lib/stores/authFlow.svelte';
+  import { authFlow, setTeamsPhase, setTeamsDeviceCode, setSpotifyPhase, expiresAtFromResponse, resetTeamsAuthFlow, pollTeamsAuth, teamsPollMutex } from '$lib/stores/authFlow.svelte';
   import type { DeviceCodeResponse, AppConfig } from '$lib/types';
   devLog(`[LAYOUT] PresenceJam build: ${import.meta.env.VITE_APP_BUILD ?? 'dev build'}`);
 
@@ -83,12 +83,44 @@
     let unlistenSpotify: (() => void) | null = null;
     let unlistenPlayback: (() => void) | null = null;
     let destroyed = false;
+    // #814: the shared poll mutex lives outside this handler (it is released
+    // only when the in-flight `poll_teams_auth` invoke settles — up to 900 s
+    // — while this handler only awaits the fast device-code request). So a
+    // second poller emit landing while the first code's poll is still in
+    // flight used to replace the on-screen code and re-open the browser,
+    // then drop the new poll on the mutex: the displayed code was never
+    // polled. While the stored flow is still `waiting` on a live code, route
+    // back to that code instead of starting a fresh one.
+    function teamsCodeLive(): boolean {
+      return (
+        authFlow.teams.phase === 'waiting' &&
+        authFlow.teams.deviceCode !== '' &&
+        (authFlow.teams.expiresAt == null || authFlow.teams.expiresAt - Date.now() > 0)
+      );
+    }
+    // #814: the shared poll is a long-blocking invoke held under the store's
+    // mutex (up to 900 s), while this handler only awaits the fast
+    // device-code request. A second poller emit landing while the first
+    // code's poll is still in flight therefore used to replace the on-screen
+    // code and re-open the browser, then drop the new poll on the mutex — the
+    // displayed code was never polled. `pendingTeamsPoll` parks that newest
+    // code (read-only snapshot of the mutex: this handler never acquires or
+    // releases it, so the #933 holder count is untouched) and re-drives the
+    // shared `pollTeamsAuth` — which re-runs #429's expiry guard itself —
+    // once the in-flight poll settles. The slot holds at most one entry: a
+    // third emit replaces a still-waiting second ("newest wins").
+    let pendingTeamsPoll: string | null = null;
 
     // The reconnect the user just asked for ("Reconnect Teams") is marked
     // `user_initiated` by Rust; only the poller's dead-session emitters toast.
     listen<{ user_initiated?: boolean }>('teams-reconnect-required', async (event) => {
       devLog('[LAYOUT] teams-reconnect-required received');
       if (event.payload?.user_initiated !== true) void notifyAuthRequired();
+      if (teamsCodeLive()) {
+        devLog('[LAYOUT] teams-reconnect-required: flow already waiting on a live code, keeping it');
+        currentView.set('settings');
+        return;
+      }
       // #421: fresh entry clears this flow's stale phase only; never the sibling's.
       resetTeamsAuthFlow();
       currentView.set('settings');
@@ -109,7 +141,31 @@
         } catch (e) {
           console.warn('[LAYOUT] open_external_url failed:', e);
         }
+        // #814: snapshot the mutex BEFORE driving the shared poll (it is
+        // read-only here: the store's `pollTeamsAuth` owns acquire/release,
+        // so the #933 holder count is never touched from this handler). When
+        // a first flow's poll still holds it, the shared poll drops this
+        // code's request — park the newest code and re-drive it once the
+        // holder settles. The re-drive calls the shared poll, which re-runs
+        // #429's expiry guard itself: a wait that outlived the code offers a
+        // fresh one instead of polling a dead one. Check-now targets the same
+        // shared poll, so it starts working again once the mutex frees; the
+        const pollHeld = teamsPollMutex.inFlight;
         void pollTeamsAuth();
+        if (pollHeld) {
+          devLog('[LAYOUT] teams-reconnect-required: poll in flight, parking the new code');
+          pendingTeamsPoll = response.device_code;
+          const settleWait = setInterval(() => {
+            if (destroyed || pendingTeamsPoll !== response.device_code) {
+              clearInterval(settleWait);
+              return;
+            }
+            if (teamsPollMutex.inFlight) return;
+            pendingTeamsPoll = null;
+            clearInterval(settleWait);
+            void pollTeamsAuth();
+          }, 1000);
+        }
       } catch (e) {
         console.error('[LAYOUT] teams-reconnect-required: start_teams_auth_device_code failed:', e);
         setTeamsPhase('error', String(e));
@@ -260,6 +316,7 @@
 
     return () => {
       destroyed = true;
+      pendingTeamsPoll = null;
       unlistenTeams?.();
       unlistenSpotify?.();
       unlistenPlayback?.();
