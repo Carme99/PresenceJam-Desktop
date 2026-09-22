@@ -455,16 +455,18 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # Dependency-vulnerability gate (issue #357): surfaces new advisories on
-  # the introducing PR. Non-blocking (`continue-on-error`) until the two
-  # accepted quick-xml RUSTSEC-2026-0194/-0195 advisories clear upstream
-  # (see SECURITY.md "Accepted transitive risks"); then remove the flag to
-  # enforce. The npm audit leg stays advisory-only: `npm audit` exits
-  # non-zero on any finding, so it reports without gating.
+  # the introducing PR. The cargo leg stays advisory (`continue-on-error`
+  # scoped to that step) until the two accepted quick-xml
+  # RUSTSEC-2026-0194/-0195 advisories clear upstream (see SECURITY.md
+  # "Accepted transitive risks", issue #642); then drop the ignore IDs and
+  # the step-level flag to enforce. The npm leg gates on production
+  # advisories (`--omit=dev`); the full-tree run below stays advisory-only.
   dep-audit:
     name: Dependency audit (cargo + npm)
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    continue-on-error: true
+    permissions:
+      contents: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -473,9 +475,13 @@ jobs:
 
       - name: Cargo audit (advisory)
         uses: RustSec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998  # v2.0.0
+        continue-on-error: true
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           working-directory: src-tauri
+          # Owner: maintainer; expiry: first release where `cargo audit`
+          # shows both advisories cleared upstream (issue #642). Accepted
+          # transitive risks, see SECURITY.md "Accepted transitive risks".
           ignore: RUSTSEC-2026-0194,RUSTSEC-2026-0195
 
       - name: Setup Node
@@ -484,13 +490,12 @@ jobs:
           node-version: 24
           cache: 'npm'
 
-      - name: npm audit (advisory)
-        # `run` is a block scalar on purpose: a plain scalar cannot contain
-        # " #", so the `#357` reference used to end the YAML value early
-        # ("unexpected EOF while looking for matching \"" — the npm leg never
-        # ran at all). Keep the value on its own line if it cites an issue.
+      # Gating leg: a deliberately-vulnerable production dep fails this step
+      # (--omit=dev keeps dev-only advisories from blocking). Non-zero exit
+      # fails the job.
+      - name: npm audit (production, gating)
         run: |
-          npm audit --audit-level=high || echo "::warning::npm audit found advisories (advisory-only, see issue #357)"
+          npm audit --omit=dev --audit-level=high
 
   # No vendored binaries (issue #753): render tooling (chrome-headless-shell
   # via mmdc) downloads into the repo root; it must stay gitignored so it
@@ -535,3 +540,13 @@ jobs:
           manifest-path: src-tauri/Cargo.toml
           command: check
           command-arguments: licenses sources
+      # Advisory leg: full-tree output stays non-blocking so dev-only
+      # findings (e.g. the devalue moderate, issue #357) surface without
+      # gating. `run` is a block scalar on purpose: a plain scalar cannot
+      # contain " #", so the `#357` reference used to end the YAML value
+      # early ("unexpected EOF while looking for matching \"" — the npm leg
+      # never ran at all). Keep the value on its own line if citing an issue.
+      - name: npm audit (full tree, advisory)
+        continue-on-error: true
+        run: |
+          npm audit --audit-level=high
