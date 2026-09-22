@@ -171,7 +171,10 @@ pub async fn relaunch_app(window: tauri::Window, app: AppHandle) -> Result<(), S
 /// #215: offloaded to spawn_blocking as it touches keychain + disk — the
 /// same reason `relaunch_app` and `update_tray_menu_state` offload theirs.
 #[tauri::command]
-pub async fn reset_local_token_storage(window: tauri::Window, app: AppHandle) -> Result<(), String> {
+pub async fn reset_local_token_storage(
+    window: tauri::Window,
+    app: AppHandle,
+) -> Result<(), String> {
     // Issue #241: destructive token + keychain reset is main-window-only —
     // a detached window must never wipe credentials out from under the user.
     super::require_main_window(&window)?;
