@@ -620,7 +620,7 @@ jobs:
                    end) as $pct
                 | if $pct < want then
                     "below floor: \(name) \($pct)% < \(want)%" | halt_error(1)
-                  else "ok: \(name) \($pct)% >= \(want)%" | stderr | empty
+                  else ("ok: \(name) \($pct)% >= \(want)%" | stderr | true)
                   end;
               floor("polling/poll_once.rs"; 0),
               floor("config.rs"; 0),
