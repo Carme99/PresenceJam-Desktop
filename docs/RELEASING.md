@@ -113,6 +113,7 @@ jobs (the Name column is the check context shown on the PR's checks list):
 | `rust` | Rust (cargo check) | fmt, `cargo check`, `cargo test` on Linux |
 | `rust-clippy` | Rust clippy | `cargo clippy -- -D warnings` |
 | `changelog-links` | CHANGELOG link definitions | every `## [X]` header needs a `[X]:` definition |
+| `docs-links` | Docs links | every relative markdown link target exists and every `#anchor` resolves (`python3 docs/link-audit.py`) |
 | `version-consistency` | Version consistency | all six version literals in §1 agree, both lockfiles included |
 | `secret-scan` | Secret scan (gitleaks) | gitleaks over the history |
 | `dep-audit` | Dependency audit (cargo + npm) | **advisory only** — `continue-on-error: true` |
@@ -338,7 +339,7 @@ every Beta-channel check fall through to stable silently.
    `# State of Features — vX.Y.Z` header is missing, so a forgotten rename
    surfaces at the tag instead of as a published release with an empty body.
 4. Open the release PR and wait for `version-consistency`, `changelog-links`,
-   `rust`, `rust-clippy`, `rust-platform-check`, `frontend` and `secret-scan`.
+   `docs-links`, `rust`, `rust-clippy`, `rust-platform-check`, `frontend` and `secret-scan`.
 5. Merge, then tag the **merge commit on `main`** — tag the commit that is on the
    branch, never the local pre-merge commit:
 
