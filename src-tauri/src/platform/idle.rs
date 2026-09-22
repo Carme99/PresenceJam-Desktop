@@ -202,6 +202,8 @@ impl Drop for IdleProbeGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Issue #1041: see focus.rs — same process-global slot race.
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// A fake probe whose return value is a `Mutex<...>` so each test
     /// can drive it independently. The optional `before_input` field is
@@ -252,6 +254,7 @@ mod tests {
     /// untouched config carries (no `idle_away_after_seconds` key).
     #[test]
     fn test_zero_disables_the_gate() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         assert!(!idle_gate_active(0, Some(IdleSeconds(1))));
         assert!(!idle_gate_active(0, Some(IdleSeconds(3600))));
         assert!(!idle_gate_active(0, None));
@@ -264,6 +267,7 @@ mod tests {
     /// the regression guard for the gate's acceptance of those values.
     #[test]
     fn test_threshold_is_clamped_to_sixty_three_thousand_six_hundred() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         assert!(!idle_gate_active(30, Some(IdleSeconds(45))));
         assert!(!idle_gate_active(7200, Some(IdleSeconds(10_000))));
         assert!(!idle_gate_active(30, None));
@@ -280,6 +284,7 @@ mod tests {
     /// unavailable probe.
     #[test]
     fn test_unavailable_probe_leaves_the_gate_off() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         assert!(!idle_gate_active(60, None));
         assert!(!idle_gate_active(3600, None));
     }
@@ -292,6 +297,7 @@ mod tests {
     /// the polling-loop integration tests, not here).
     #[test]
     fn test_idle_clock_crosses_threshold_then_input_clears_it() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let threshold = 60_u64;
         let responses = vec![
             Ok(Some(IdleSeconds(120))), // crossed
@@ -316,6 +322,7 @@ mod tests {
     /// cross-test isolation the production slot needs.
     #[test]
     fn test_errored_probe_collapses_to_none() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let probe = Arc::new(FakeProbe::new(vec![Err(IdleProbeError::Native(
             0x8000_0001,
         ))]));
@@ -327,6 +334,9 @@ mod tests {
     /// `default_probe()` installs.
     #[test]
     fn test_default_probe_matches_target() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        // Issue #1041: reinstall the default first (see focus.rs).
+        *probe_slot().lock().unwrap_or_else(|e| e.into_inner()) = default_probe();
         let p = current_probe();
         let reading = p.probe();
         #[cfg(target_os = "windows")]

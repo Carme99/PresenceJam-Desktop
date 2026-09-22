@@ -225,6 +225,12 @@ impl Drop for ProbeGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Issue #1041: the probe slot is process-global (OnceLock + Mutex), so
+    // parallel tests installing fakes race — one test's fake leaks into
+    // another's `current_probe()` read (None vs Some(Unknown)). A
+    // file-local serial mutex forces these tests to run one at a time;
+    // no new dependency, no production change.
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// A fake probe whose return value is a `Mutex<...>` so each test can
     /// drive it independently and panics cannot leak state across tests.
@@ -260,6 +266,7 @@ mod tests {
     /// empty reason so the gate never fires on `None`/`Unknown`.
     #[test]
     fn test_presentation_state_gate_reason_mapping() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(PresentationState::None.gate_reason(), "");
         assert_eq!(PresentationState::Unknown.gate_reason(), "");
         assert_eq!(PresentationState::FullScreen.gate_reason(), "presenting");
@@ -272,6 +279,7 @@ mod tests {
     /// probe leaves the decision unchanged.
     #[test]
     fn test_focus_probe_full_screen_or_presentation_suppresses_via_decision() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         // `Presentation` and `FullScreen` collapse to the same wire reason
         // ("presenting"), so the gate fires regardless of which Windows
         // value the shell returned.
@@ -295,6 +303,7 @@ mod tests {
     /// "off" — the wire reason is empty so the decision path falls through.
     #[test]
     fn test_errored_probe_collapses_to_unknown() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         // A production probe call that returned an error:
         let err_probe = FakeProbe::new(Err(FocusProbeError::Native(0x8000_0001)));
         let result = err_probe.probe();
@@ -315,6 +324,7 @@ mod tests {
     /// `set_probe_for_tests`).
     #[test]
     fn test_probe_focus_returns_unknown_on_errored_probe() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = set_probe_for_tests(Arc::new(FakeProbe::new(Err(FocusProbeError::Native(
             0x1234_5678,
         )))));
@@ -326,6 +336,11 @@ mod tests {
     /// `UnsupportedFocusProbe` everywhere else.
     #[test]
     fn test_default_probe_matches_target() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        // Issue #1041: a prior test's fake lingers in the process-global
+        // slot (guard drop is a no-op by design), so reinstall the default
+        // before reading — otherwise this reads another test's fake.
+        *probe_slot().lock().unwrap_or_else(|e| e.into_inner()) = default_probe();
         let p = current_probe();
         #[cfg(not(target_os = "windows"))]
         {
