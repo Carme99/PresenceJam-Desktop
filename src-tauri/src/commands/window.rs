@@ -79,7 +79,10 @@ pub fn show_window(app: AppHandle) -> Result<(), String> {
 /// calls this to re-derive the entry from the persisted config. Splitting the
 /// OS write out keeps `after_persist` from re-entering the command (which
 /// would persist again and recurse).
-pub(crate) async fn apply_os_autostart(app: &AppHandle, enabled: bool) -> Result<(), ShortcutReason> {
+pub(crate) async fn apply_os_autostart(
+    app: &AppHandle,
+    enabled: bool,
+) -> Result<(), ShortcutReason> {
     // #215: AutoLaunchManager touches the OS autostart registry/file
     // (disk + OS service). Offload to blocking pool so the UI thread
     // is not blocked while the manager reads/writes the autostart entry.
