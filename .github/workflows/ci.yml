@@ -535,3 +535,94 @@ jobs:
           manifest-path: src-tauri/Cargo.toml
           command: check
           command-arguments: licenses sources
+
+  # Rust line-coverage gate (issue #838): publishes lcov + enforces a line
+  # floor so new untested code cannot slip in silently. The floor and the
+  # per-file floors below are 0 with a calibration TODO because the floor
+  # must be measured on the merged head (running coverage in a parallel
+  # worktree would measure the wrong tree). Calibrate in the PR body.
+  rust-coverage:
+    name: Rust coverage (llvm-cov)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6.5.0
+        with:
+          node-version: 24
+          cache: 'npm'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e  # 1.96
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@94c31af3204a9f15ab40b35ad084410b905bbc73  # v2.87.17
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            pkg-config \
+            build-essential
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      # TODO(#838): calibrate floor to the exact line coverage measured on
+      # the merged head (see PR body). Floor is 0 until then so the job
+      # publishes the report without gating.
+      - name: Coverage (fail under floor once calibrated)
+        env:
+          CARGO_INCREMENTAL: 0
+        run: |
+          cargo llvm-cov --manifest-path src-tauri/Cargo.toml --lib \
+            --fail-under-lines 0 --lcov --output-path lcov.info
+
+      - name: Upload lcov artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: rust-lcov
+          path: lcov.info
+
+      # Structural per-file floors: deleting e.g. the token_io.rs tests
+      # lowers that file's number and fails this step once calibrated.
+      # TODO(#838): calibrate each floor to the merged-head measurement
+      # (see PR body). Floors are 0 until then (report-only).
+      - name: Per-file floors (poll_once, config, token_io)
+        run: |
+          cargo llvm-cov report --manifest-path src-tauri/Cargo.toml --json \
+            | jq -e '
+              def floor(name; want):
+                ([.data[0].files[] | select(.filename | endswith(name))]
+                 | if length == 0 then "missing file: \(name)" | halt_error(1)
+                   else .[0].summary.lines.percent
+                   end) as $pct
+                | if $pct < want then
+                    "below floor: \(name) \($pct)% < \(want)%" | halt_error(1)
+                  else ("ok: \(name) \($pct)% >= \(want)%" | stderr | true)
+                  end;
+              floor("polling/poll_once.rs"; 0),
+              floor("config.rs"; 0),
+              floor("token_io.rs"; 0)
+            ' > /dev/null
