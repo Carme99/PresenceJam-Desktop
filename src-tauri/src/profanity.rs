@@ -359,10 +359,7 @@ fn is_profane_continuation(stem: &str, token: &str) -> bool {
         return true;
     }
     // Plain tails require a whole inflection.
-    if !matches!(
-        token,
-        "s" | "es" | "ed" | "ing" | "er" | "ers" | "ings"
-    ) {
+    if !matches!(token, "s" | "es" | "ed" | "ing" | "er" | "ers" | "ings") {
         return false;
     }
     // Per-stem carve-outs (#812), mirroring how `is_y_tail` scopes `y`:
