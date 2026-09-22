@@ -8,6 +8,9 @@
  * The wizard offers the same escape hatch through its own header control; this
  * covers the programmatic route, which `+page.svelte`'s navigate listener used
  * to swallow unconditionally (C2's "onboarding owns the view" guard).
+ *
+ * #815 extends the same gate to the tray's show-about event: emitted while
+ * the wizard owns the view it must leave the wizard mounted.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup } from '@testing-library/svelte';
@@ -108,6 +111,13 @@ function fireNavigate(payload: string) {
   handler({ payload });
 }
 
+/** Emit the About request the tray menu sends. */
+function fireShowAbout() {
+  const handler = listeners.get('show-about');
+  if (!handler) throw new Error('the page registered no show-about listener');
+  handler({ payload: undefined });
+}
+
 beforeEach(() => {
   invoke.mockReset();
   listeners.clear();
@@ -147,6 +157,54 @@ describe('navigate while the wizard owns the view (#967)', () => {
 
     fireNavigate('settings');
 
+    expect(get(currentView)).toBe('onboarding');
+  });
+
+  it('show-about leaves the wizard mounted while it owns the view (#815)', async () => {
+    await mountPage(true);
+    currentView.set('onboarding');
+
+    fireShowAbout();
+
+    expect(get(currentView)).toBe('onboarding');
+  });
+
+  it('show-about leaves a first-run install one-way (#815)', async () => {
+    await mountPage(false, false);
+    expect(get(currentView)).toBe('onboarding');
+
+    fireShowAbout();
+
+    expect(get(currentView)).toBe('onboarding');
+  });
+
+  it('show-about still reaches About once onboarding yields the view (#815)', async () => {
+    await mountPage(true);
+    expect(get(currentView)).not.toBe('onboarding');
+
+    fireShowAbout();
+
+    expect(get(currentView)).toBe('about');
+  });
+});
+
+describe('show-about before boot settles (#815)', () => {
+  it('leaves the view alone while ready is still false', async () => {
+    mockBackend(false, false);
+    render(Page);
+    // Wait only for onMount's listener registration (breaks after 1-2 ticks),
+    // capped at 8 — well under the 32 mountPage needs to settle boot, so
+    // `ready` is still false when we fire.
+    for (let i = 0; i < 8 && !listeners.has('show-about'); i++) {
+      await Promise.resolve();
+    }
+    if (!listeners.has('show-about')) throw new Error('show-about listener never registered');
+    fireShowAbout();
+
+    // Pre-fix this is already 'about' (unconditional set) — the gate must
+    // hold the pre-boot view instead.
+    expect(get(currentView)).not.toBe('about');
+    for (let i = 0; i < 32; i++) await Promise.resolve();
     expect(get(currentView)).toBe('onboarding');
   });
 });
