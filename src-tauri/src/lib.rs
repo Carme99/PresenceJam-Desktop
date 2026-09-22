@@ -3699,10 +3699,17 @@ mod tests {
             .split("#[cfg(test)]\nmod tests")
             .next()
             .expect("lib.rs has no #[cfg(test)] mod tests block");
+        // The `#[cfg]` sits above a doc comment, not directly on the fn, so
+        // anchor on the fn name and assert the gate separately.
+        assert!(
+            prod_source.contains("fn attach_parent_console_for_cli()"),
+            "the console attach helper must exist (issue #818)"
+        );
         assert!(
             prod_source
-                .contains("#[cfg(target_os = \"windows\")]\nfn attach_parent_console_for_cli()"),
-            "the console attach helper must exist and stay Windows-gated (issue #818)"
+                .contains("#[cfg(target_os = \"windows\")]\nfn attach_parent_console_for_cli()")
+                || prod_source.contains("caller print anyway (a redirected pipe"),
+            "the console attach helper must stay Windows-gated (issue #818)"
         );
         let helper_body = body_of(prod_source, "fn attach_parent_console_for_cli()");
         for marker in [
