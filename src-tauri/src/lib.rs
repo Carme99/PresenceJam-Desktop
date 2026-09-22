@@ -418,6 +418,14 @@ pub struct AppState {
     /// through CoreServices' `LSSetDefaultHandlerForURLScheme` at every
     /// launch, which overrides a hostile app's earlier registration.
     pub launch_binding: OnceLock<crate::pkce::LaunchBinding>,
+    /// Issue #819: whether `setup_tray` succeeded this session. Set once from
+    /// the `setup_tray` result in the setup hook (GNOME without the
+    /// AppIndicator extension — or a host missing libayatana-appindicator3 —
+    /// has no tray, in which case close-to-tray must not engage: a hidden
+    /// window would be unreachable). Defaults to true so unit-constructed
+    /// states and CLI/daemon paths (no tray setup either way) keep the
+    /// established hide-on-close behaviour.
+    pub tray_available: AtomicBool,
     /// Single-flight gate for OAuth callbacks (issue #799): the first
     /// delivery of a `(code, state)` pair wins; an identical repeat inside
     /// the dedup window is dropped before any token exchange is spawned.
@@ -452,6 +460,7 @@ impl AppState {
             onboarding_cache: OnboardingCache::new(),
             calendar: crate::calendar::CalendarGate::new(),
             launch_binding,
+            tray_available: AtomicBool::new(true),
             deep_link_seen: DeepLinkDedup::new(),
             secret_conflict: AtomicBool::new(false),
         }
@@ -855,6 +864,40 @@ fn close_hides_window(label: &str) -> bool {
     crate::commands::is_main_window_label(label)
 }
 
+/// Issue #819: the full close-to-tray verdict — the main window hides only
+/// when a tray exists to bring it back. With no tray (`setup_tray` failed,
+/// e.g. GNOME without the AppIndicator extension) the window must close for
+/// real: hiding it would strand a window-less + tray-less session with no
+/// reachable way back, and letting the close proceed quits the app (the
+/// event loop exits, sync stops). Pure over its inputs so the unit test
+/// beside the #585 guard fails pre-gate (hide-on-no-tray) and passes once
+/// the close arm consults it.
+fn should_hide_on_close(label: &str, tray_available: bool) -> bool {
+    close_hides_window(label) && tray_available
+}
+
+/// Issue #819: one-off explainer fired when the window closes for real
+/// because no tray exists. The close is a real quit — with no tray and no
+/// window left the event loop exits (`RunEvent::Exit` runs, sync stops) —
+/// so the note says sync stopped and how to get the tray back (install
+/// `libayatana-appindicator3` + the GNOME AppIndicator extension), not that
+/// anything keeps running.
+/// Best-effort: notification delivery must never block or fail the close.
+fn notify_no_tray_close(app: &tauri::AppHandle) {
+    use tauri_plugin_notification::NotificationExt;
+    log::info!("[APP] notify_no_tray_close: no tray — notifying that the close quits the app and sync stops");
+    let _ = app
+        .notification()
+        .builder()
+        .title("PresenceJam")
+        .body(
+            "No system tray is available, so the window closed for real and \
+             PresenceJam quit instead of minimizing. Sync has stopped. \
+             Install libayatana-appindicator3 and the GNOME AppIndicator \
+             extension, then re-launch to get the tray back.",
+        )
+        .show();
+}
 /// Issue #922: what `detach_pane` builds for a pane name — the label, the
 /// in-app URL, the title and the size, all decided here.
 struct DetachedPaneSpec {
@@ -2401,6 +2444,12 @@ pub fn run() {
                 log::info!("[APP] setup: setting up system tray");
                 if let Err(e) = tray::setup_tray(app) {
                     log::error!("[APP] setup: Failed to setup system tray: {}", e);
+                    // Issue #819: record the missing tray on AppState so the
+                    // CloseRequested arm can gate close-to-tray on it (a
+                    // hidden window with no tray is unreachable).
+                    app.state::<Arc<AppState>>()
+                        .tray_available
+                        .store(false, std::sync::atomic::Ordering::Release);
                 } else {
                     log::info!("[APP] setup: System tray initialized successfully");
                 }
@@ -2517,13 +2566,29 @@ pub fn run() {
                     );
                     return;
                 }
-                // Issue #927: a session whose tray failed to initialise has no
-                // reachable way back to a hidden window, so close-to-tray must
-                // not engage — the close proceeds and the app exits with it.
-                if !crate::tray::tray_available() {
+                // Issue #819 (extends #927): a session whose tray failed to
+                // initialise has no reachable way back to a hidden window, so
+                // close-to-tray must not engage — the close proceeds for real,
+                // the event loop exits and sync stops, and a one-off
+                // notification says so plus how to get the tray back. Gated
+                // on the availability recorded on AppState at setup (read via
+                // `try_state`, with the live `tray_available()` accessor as
+                // the fallback for a window firing before setup managed
+                // state), so the verdict is unit-testable beside the #585
+                // guard.
+                let tray_available = window
+                    .app_handle()
+                    .try_state::<Arc<AppState>>()
+                    .map(|s| {
+                        s.tray_available
+                            .load(std::sync::atomic::Ordering::Acquire)
+                    })
+                    .unwrap_or_else(crate::tray::tray_available);
+                if !should_hide_on_close(window.label(), tray_available) {
                     log::warn!(
                         "[APP] window_event: CloseRequested with no tray — closing instead of hiding"
                     );
+                    notify_no_tray_close(window.app_handle());
                     return;
                 }
                 log::info!("[APP] window_event: CloseRequested received, hiding window");
@@ -2976,6 +3041,80 @@ mod tests {
         assert!(
             guard < hide && hide < prevent,
             "the arm must guard on the label, hide, and then prevent the close"
+        );
+    }
+
+    /// Issue #819: the close-to-tray verdict needs the tray half too. A
+    /// `setup_tray` failure (GNOME without the AppIndicator extension, or a
+    /// host missing libayatana-appindicator3) leaves no way back to a hidden
+    /// window, so the main window must close for real — and the arm plus the
+    /// setup hook must actually consult/record it, not just define it.
+    #[test]
+    fn test_should_hide_on_close_gates_on_tray() {
+        // Pure predicate: main + tray hides; main without a tray closes for
+        // real; detached panes never hide regardless of the tray.
+        assert!(
+            should_hide_on_close("main", true),
+            "main window with a tray must stay close-to-tray"
+        );
+        assert!(
+            !should_hide_on_close("main", false),
+            "main window with no tray must close for real (issue #819)"
+        );
+        for detached in ["logs-detached", "settings-detached", "other", ""] {
+            assert!(
+                !should_hide_on_close(detached, true),
+                "detached window `{}` must really close even with a tray",
+                detached
+            );
+            assert!(
+                !should_hide_on_close(detached, false),
+                "detached window `{}` must really close without a tray",
+                detached
+            );
+        }
+        // A fresh AppState assumes a tray until setup says otherwise, so
+        // unit-constructed states and CLI/daemon paths keep the established
+        // hide-on-close behaviour.
+        assert!(
+            AppState::new()
+                .tray_available
+                .load(std::sync::atomic::Ordering::Acquire),
+            "AppState must default to tray-available until setup records a failure"
+        );
+        // The wiring: the CloseRequested arm must consult the predicate (not
+        // just the #585 label guard plus the #927 live accessor), and the
+        // setup hook must record the `setup_tray` failure onto AppState. The
+        // arm assertion fails pre-fix — the arm never named
+        // `should_hide_on_close` — and the setup assertion fails pre-fix —
+        // the setup hook only logged the error.
+        let source = include_str!("lib.rs");
+        let arm = source
+            .find("tauri::WindowEvent::CloseRequested")
+            .expect("lib.rs must handle WindowEvent::CloseRequested");
+        let tail = &source[arm..];
+        // Bound to the arm body (through `api.prevent_close()`): an
+        // unbounded tail would also cover this test module's own string
+        // literals and pass vacuously.
+        let prevent = tail
+            .find("api.prevent_close()")
+            .expect("the main window must still prevent the close (close-to-tray)");
+        let arm_body = &tail[..prevent];
+        assert!(
+            arm_body.contains("should_hide_on_close("),
+            "the CloseRequested arm must gate on should_hide_on_close (issue #819)"
+        );
+        assert!(
+            arm_body.contains("notify_no_tray_close("),
+            "the no-tray path must explain the real close (issue #819)"
+        );
+        let setup = source
+            .find("tray::setup_tray(")
+            .expect("setup must still build the tray for the GUI");
+        let setup_tail = &source[setup..setup + 800.min(source.len() - setup)];
+        assert!(
+            setup_tail.contains("tray_available"),
+            "setup must record the setup_tray result on AppState (issue #819)"
         );
     }
 
