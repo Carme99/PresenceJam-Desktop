@@ -121,7 +121,7 @@
   }
 
   // Recompute stickiness and snap when pinned. Pinned state survives
-  // content swaps (e.g. filter tabs); an unpinned view only auto-pins
+  // content swaps (e.g. filter buttons); an unpinned view only auto-pins
   // when the new content fits entirely in view, hiding the Jump button.
   function updateStickinessAndSnap() {
     if (!logContainer) return;
@@ -184,7 +184,7 @@
   // The backend clamps `limit` to this same ceiling.
   const BACKFILL_LINES = MAX_BUFFER;
 
-  /** Backend level word (`WARN`) -> the canonical name the filter tabs use. */
+  /** Backend level word (`WARN`) -> the canonical name the filter buttons use. */
   function canonicalLevel(raw: string): string {
     const l = raw.toUpperCase();
     if (l === 'TRACE') return 'Trace';
@@ -425,12 +425,12 @@
     backLabel={detached ? t('settings.popBackIn') : t('common.back')} />
 
   <div class="toolbar">
-    <div class="seg" role="tablist" aria-label={t('logs.filterAria')}>
+    <div class="seg" role="group" aria-label={t('logs.filterAria')}>
       {#each (Object.keys(LEVEL_LABELS) as (keyof typeof LEVEL_LABELS)[]) as f}
         <button type="button" class="seg-btn btn-secondary"
           class:is-active={filter === f}
-          onclick={() => selectFilter(f)} role="tab"
-          aria-selected={filter === f}>{t(LEVEL_LABELS[f])}</button>
+          onclick={() => selectFilter(f)}
+          aria-pressed={filter === f}>{t(LEVEL_LABELS[f])}</button>
       {/each}
     </div>
     <span class="count" aria-live="polite">{countLabel}</span>

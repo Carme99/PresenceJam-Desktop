@@ -9,7 +9,7 @@
  *
  * The interaction contract pinned here:
  *   - the seeded entries render with the file's levels canonicalised, so the
- *     existing filter tabs match them;
+ *     existing filter buttons match them;
  *   - a tail that lands after the user has scrolled away must NOT move the
  *     scroll position (the seed goes into the buffer, not the viewport);
  *   - a pane still pinned to the bottom follows the content, as before;
@@ -110,19 +110,19 @@ describe('LogViewer history backfill (#595)', () => {
     const rows = container.querySelectorAll('.log-entry');
     expect(rows[0].textContent).toContain('[POLLING] started');
     expect(rows[2].textContent).toContain('[TEAMS] refresh failed');
-    // The file's own level word is canonicalised to the name the filter tabs
+    // The file's own level word is canonicalised to the name the filter buttons
     // compare against, so a seeded WARN is filterable.
     expect(rows[1].querySelector('.level-badge')?.className).toContain('level-warning');
     expect(container.querySelector('.count')?.textContent).toMatch(/3 entries/i);
   });
 
-  it('filters the seeded history through the existing level tabs', async () => {
+  it('filters the seeded history through the existing level filter buttons', async () => {
     const { container, getByRole } = render(LogViewer, { detached: false });
     await listenerReady();
     resolveBackfill?.(FILE_LINES);
     await waitFor(() => expect(container.querySelectorAll('.log-entry').length).toBe(3));
 
-    await fireEvent.click(getByRole('tab', { name: 'Error' }));
+    await fireEvent.click(getByRole('button', { name: 'Error' }));
     expect(container.textContent).toContain('[TEAMS] refresh failed');
     expect(container.textContent).not.toContain('[POLLING] started');
   });
