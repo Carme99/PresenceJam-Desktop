@@ -1,7 +1,7 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { onMount, onDestroy } from 'svelte';
-  import { currentView } from '$lib/stores/app';
+  import { currentView, settingsDirty, pendingMenuNav, type View } from '$lib/stores/app';
   import { emitTo } from '@tauri-apps/api/event';
   // C7 multi-window detach: pop-out/pop-back controls.
   import { popOut, popIn } from '$lib/stores/detach';
@@ -44,9 +44,10 @@
   // replacer that comparison needed is gone with it.
   let isDirty = $state(false);
 
-  /** #890: the draft now differs from the saved config. */
+  /** #890: the draft now differs from the saved config. #817: published to the shared store so the root navigate listener can park a menu navigation. */
   function markDirty() {
     isDirty = true;
+    settingsDirty.set(true);
   }
 
   /**
@@ -1086,6 +1087,10 @@
       clearTimeout(previewDebounce);
       previewDebounce = null;
     }
+    // #817: Settings owns the shared draft state — a stale `true` after an
+    // unguarded unmount would park every later menu navigation.
+    settingsDirty.set(false);
+    pendingMenuNav.set(null);
     if (teardownAuth) void teardownAuth();
     // 4.7.0 (issue #676): the grabs are released while a field records a
     // combination. Navigating away mid-recording must not leave them released.
@@ -1128,6 +1133,7 @@
       localConfig = await saveConfig($state.snapshot(localConfig));
       extraWordsText = localConfig.teams.profanity_extra_words.join('\n');
       isDirty = false;
+      settingsDirty.set(false);
       saveMessage = t('settings.saved');
       if (saveTimeout) clearTimeout(saveTimeout);
       saveTimeout = setTimeout(() => saveMessage = '', 2000);
@@ -1220,10 +1226,10 @@
       });
       if (!outcome) return;
       // Adopt what is now on disk (the #297 invariant) — including the
-      // lexicon textarea, which is a projection of the stored list.
       localConfig = await loadConfig();
       extraWordsText = localConfig.teams.profanity_extra_words.join('\n');
       isDirty = false;
+      settingsDirty.set(false);
       saveMessage = '';
       backupMessage = t('settings.backupImported', { path: outcome.path });
     } catch (e) {
@@ -1363,8 +1369,22 @@
   // so Back and "Run onboarding" park their target here while the banner
   // asks for a choice, instead of silently dropping queued rule edits, a
   // changed status template and changed polling bounds.
-  type PendingNav = 'back' | 'onboarding';
+  // #817: menu-driven `navigate` events land in `+page.svelte`, which cannot
+  // reach this component's locals — so `navigateTo` parks the target in the
+  // shared `pendingMenuNav` store and the effect below mirrors it into the
+  // same banner choice that resolves the in-component targets.
+  // `back` is the in-component Back button (→ dashboard); every other value
+  // is a real view, including a parked menu `navigate` target.
+  type PendingNav = View | 'back';
   let pendingNav = $state<PendingNav | null>(null);
+  // #817: mirror of the parked menu target published by `+page.svelte`'s
+  // navigate listener (same choice of banner buttons resolves it). Kept as
+  // an effect — not folded into `pendingNav` reads — so the banner condition
+  // stays a single local and the store remains the cross-component channel.
+  $effect(() => {
+    const parked = $pendingMenuNav;
+    if (parked !== null && pendingNav === null) pendingNav = parked;
+  });
 
   function performBack() {
     if (detached) {
@@ -1436,13 +1456,17 @@
     performOnboarding();
   }
 
-  /** #548: run the navigation a confirmed Save / Discard asked for. */
+  /** #548: run the navigation a confirmed Save / Discard asked for. #817: a parked menu target navigates directly; `back` keeps the old Back path. */
   function leaveSettings(target: PendingNav) {
+    if (target === 'back') {
+      performBack();
+      return;
+    }
     if (target === 'onboarding') {
       performOnboarding();
       return;
     }
-    performBack();
+    currentView.set(target);
   }
 
   async function saveAndLeave() {
@@ -1450,15 +1474,27 @@
     // A failed save keeps `isDirty` set and reports the error through
     // `saveMessage`; stay on the form rather than navigating away from it.
     if (isDirty) return;
-    const target = pendingNav;
+    // #817: the parked target may live only in the shared store (menu
+    // navigation mirrored into `pendingNav` by the effect above). Prefer the
+    // local, fall back to the store, and always clear both together.
+    const target = pendingNav ?? $pendingMenuNav;
     pendingNav = null;
+    pendingMenuNav.set(null);
     if (target) leaveSettings(target);
   }
 
   function discardAndLeave() {
-    const target = pendingNav;
+    isDirty = false;
+    settingsDirty.set(false);
+    const target = pendingNav ?? $pendingMenuNav;
     pendingNav = null;
+    pendingMenuNav.set(null);
     if (target) leaveSettings(target);
+  }
+
+  function stayHere() {
+    pendingNav = null;
+    pendingMenuNav.set(null);
   }
 </script>
 
@@ -1476,7 +1512,7 @@
             {isSaving ? t('settings.saving') : t('settings.saveAndLeave')}
           </button>
           <button type="button" class="btn-link" onclick={discardAndLeave}>{t('settings.discardChanges')}</button>
-          <button type="button" class="btn-link" onclick={() => (pendingNav = null)}>{t('settings.stayHere')}</button>
+          <button type="button" class="btn-link" onclick={stayHere}>{t('settings.stayHere')}</button>
         </div>
       {/if}
     </div>
