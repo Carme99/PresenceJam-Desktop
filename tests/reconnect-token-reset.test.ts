@@ -74,15 +74,14 @@ afterEach(() => {
 
 describe('Reconnect corrupt-key reset (#766)', () => {
   it('raises the reset banner for a corrupt-key error', async () => {
+    const { container, getByRole } = render(Reconnect);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('get_sync_status'));
     setSpotifyPhase(
       'error',
       'The stored tokens encryption key is unusable, so tokens.json cannot be decrypted.'
     );
 
-    const { container, getByRole } = render(Reconnect);
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith('get_sync_status'));
-
-    expect(container.textContent).toContain('cannot be read');
+    await waitFor(() => expect(container.textContent).toContain('cannot be read'));
     const arm = getByRole('button', { name: 'Reset local token storage' });
     await fireEvent.click(arm);
     await waitFor(() => expect(container.textContent).toContain('tokens.json'));
@@ -92,18 +91,20 @@ describe('Reconnect corrupt-key reset (#766)', () => {
   });
 
   it('resets behind the confirm and reports the re-sign-in copy', async () => {
+    const { container } = render(Reconnect);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('get_sync_status'));
     setSpotifyPhase(
       'error',
       'tokens file failed AES-GCM authentication (corrupt ciphertext, tampered file, or key mismatch — re-authentication required)'
     );
 
-    const { container } = render(Reconnect);
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith('get_sync_status'));
-
-    const armButton = [...container.querySelectorAll('button')].find(
-      (b) => b.textContent === 'Reset local token storage'
-    );
-    expect(armButton).toBeTruthy();
+    let armButton: HTMLButtonElement | undefined;
+    await waitFor(() => {
+      armButton = [...container.querySelectorAll('button')].find(
+        (b) => b.textContent === 'Reset local token storage'
+      ) as HTMLButtonElement | undefined;
+      expect(armButton).toBeTruthy();
+    });
     await fireEvent.click(armButton!);
     await waitFor(() => expect(container.textContent).toContain('tokens.json'));
     const confirm = [...container.querySelectorAll('.info-box button')].find(
@@ -121,11 +122,11 @@ describe('Reconnect corrupt-key reset (#766)', () => {
   });
 
   it('offers no reset for an ordinary auth error', async () => {
-    setSpotifyPhase('error', 'Invalid grant: refresh token is expired');
-
     const { container } = render(Reconnect);
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('get_sync_status'));
+    setSpotifyPhase('error', 'Invalid grant: refresh token is expired');
 
+    await waitFor(() => expect(container.textContent).toContain('Invalid grant'));
     expect(container.textContent).not.toContain('Reset local token storage');
   });
 });
