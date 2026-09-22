@@ -642,3 +642,19 @@ jobs:
               floor("config.rs"; 0),
               floor("token_io.rs"; 0)
             ' > /dev/null
+
+  # Docs links (issue #831): stdlib-only `docs/link-audit.py` checks every
+  # relative markdown link target exists on disk and every `#anchor`
+  # resolves against the target file's headings (incl. explicit
+  # `<a name>`/`<a id>` anchors). No npm ci/node — plain python3.
+  docs-links:
+    name: Docs links
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Audit relative markdown links
+        run: python3 docs/link-audit.py
