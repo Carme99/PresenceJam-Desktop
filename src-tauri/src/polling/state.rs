@@ -16,7 +16,7 @@
 //! The actual iteration logic lives in [`super::loop_`] and
 //! [`super::poll_once`].
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -107,6 +107,59 @@ pub(crate) fn record_posted_status(status: Option<&str>) {
 pub(crate) fn record_manual_status_blocks(blocks: bool) {
     let mut snapshot = EXIT_SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner());
     snapshot.manual_status_blocks = blocks;
+}
+/// Issue #863: consecutive AUTH-credential failures toward the 5-strikes
+/// exit (`transient_failure_count`) and consecutive NETWORK failures toward
+/// the warning-only backoff (`consecutive_network_failures`). The driver owns
+/// the mutation (its loop locals); this slot only mirrors the latest values
+/// after every iteration so diagnostics can tell reconnect-versus-backoff
+/// apart — following the `token_metadata` read pattern on the consume side.
+static TRANSIENT_FAILURE_COUNT: AtomicU8 = AtomicU8::new(0);
+static CONSECUTIVE_NETWORK_FAILURES: AtomicU8 = AtomicU8::new(0);
+
+/// Issue #863: the reason the presence gate currently holds writes back
+/// (`"busy"`, `"in a call"`, `"quiet-hours"`, …). Mirrored by the driver from
+/// the newest `presence-gated` history entry while a gate is recorded;
+/// cleared when no gate is. Reason token only — never posted text.
+static LAST_GATE_REASON: Mutex<Option<String>> = Mutex::new(None);
+
+/// Mirror the driver's loop-local counters into the shared slot (issue #863).
+/// Relaxed ordering: best-effort triage data, read once per snapshot — the
+/// same laxity as the snooze/quiet atomics in `poll_once`.
+pub(crate) fn record_failure_counters(transient: u8, network: u8) {
+    TRANSIENT_FAILURE_COUNT.store(transient, Ordering::Relaxed);
+    CONSECUTIVE_NETWORK_FAILURES.store(network, Ordering::Relaxed);
+}
+
+/// Read the mirrored failure counters (issue #863).
+pub(crate) fn load_failure_counters() -> (u8, u8) {
+    (
+        TRANSIENT_FAILURE_COUNT.load(Ordering::Relaxed),
+        CONSECUTIVE_NETWORK_FAILURES.load(Ordering::Relaxed),
+    )
+}
+
+/// Publish the current presence-gate reason (`None` clears it, issue #863).
+pub(crate) fn record_gate_reason(reason: Option<String>) {
+    *LAST_GATE_REASON.lock().unwrap_or_else(|e| e.into_inner()) = reason;
+}
+
+/// Read the current presence-gate reason (issue #863).
+pub(crate) fn load_gate_reason() -> Option<String> {
+    LAST_GATE_REASON
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// Forget the mirrored sync state once the session that produced it has
+/// ended, so a stopped poller reports zeros/`None` instead of the last
+/// session's counters (issue #863). Called from the driver's exit tail next
+/// to `reset_write_clocks`; deliberately separate from `reset_exit_snapshot`,
+/// which must SURVIVE a session end (finding D1).
+pub(crate) fn reset_sync_state() {
+    record_failure_counters(0, 0);
+    record_gate_reason(None);
 }
 
 /// Issue #877: the `(title, artist)` pair the poller currently tracks,
@@ -483,5 +536,23 @@ mod tests {
             ExitSnapshot::default(),
             "a completed exit cleanup must retire the whole snapshot"
         );
+    }
+    /// Issue #863: the driver's loop-local counters and the current gate
+    /// reason round-trip through the shared slot, and the session-end reset
+    /// retires them without touching the exit residue (finding D1).
+    #[test]
+    fn test_sync_state_mirror_records_and_retires() {
+        let _guard = global_state_lock();
+        reset_exit_snapshot();
+        reset_sync_state();
+        record_failure_counters(3, 7);
+        record_gate_reason(Some("busy".to_string()));
+        let (transient, network) = load_failure_counters();
+        assert_eq!((transient, network), (3, 7));
+        assert_eq!(load_gate_reason().as_deref(), Some("busy"));
+        reset_sync_state();
+        let (transient, network) = load_failure_counters();
+        assert_eq!((transient, network), (0, 0));
+        assert!(load_gate_reason().is_none());
     }
 }

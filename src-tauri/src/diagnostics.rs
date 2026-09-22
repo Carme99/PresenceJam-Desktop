@@ -77,6 +77,11 @@ pub struct DiagnosticsSnapshot {
     pub tokens: TokenMetadata,
     /// OS keychain presence flags for the two slots the app uses.
     pub keychain: KeychainStatus,
+    /// Issue #863: what the poll loop is doing right now — running state,
+    /// snooze remaining, manual-status block, presence-gate reason and the
+    /// two failure counters that decide reconnect-versus-backoff. Reasons
+    /// and counters only, never posted text (the no-user-content rule).
+    pub sync_state: SyncState,
     /// Last [`LOG_TAIL_LINES`] lines of the on-disk log — the active file plus
     /// any rotated archive it needed (issue #874) — each passed through
     /// [`redact_sensitive`] and then [`strip_absolute_paths`] (issue #913), so
@@ -228,6 +233,30 @@ pub struct KeychainStatus {
     pub spotify_client_secret_present: bool,
     /// `tokens.json` AES-256-GCM key present (issue #140 slot).
     pub tokens_encryption_key_present: bool,
+}
+/// Issue #863: what the poll loop is doing right now. Booleans, reason
+/// tokens and counters only — never posted text (the no-user-content rule).
+#[derive(Debug, Clone, Default, Serialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
+pub struct SyncState {
+    /// Whether the polling thread is running (`is_syncing`).
+    pub is_syncing: bool,
+    /// Whether a snooze deadline is live right now.
+    pub snoozed: bool,
+    /// Whole minutes left on the live snooze, rounded up like the tray and
+    /// the Dashboard render it; `None` when no snooze is live.
+    pub snooze_minutes_left: Option<i64>,
+    /// The last observed verdict of the respect-manual-status write gate —
+    /// `true` while a status message the USER owns holds our writes back.
+    pub manual_status_blocks: bool,
+    /// The reason the presence gate currently holds writes back
+    /// (`"busy"`, `"in a call"`, `"quiet-hours"`, …); `None` when no gate
+    /// is recorded. Reason token only — never posted text.
+    pub presence_gate_reason: Option<String>,
+    /// Consecutive AUTH-credential failures toward the 5-strikes exit.
+    pub transient_failure_count: u8,
+    /// Consecutive NETWORK failures toward the warning-only backoff.
+    pub consecutive_network_failures: u8,
 }
 
 /// Quarantine state of the config file, read at the command boundary and
@@ -633,6 +662,36 @@ fn token_metadata(state: &crate::AppState) -> TokenMetadata {
         teams_refresh_token_present,
     }
 }
+/// Issue #863: assemble the poll-loop block from live state. `is_syncing`
+/// comes off the `Polling` flag; the snooze mirrors `config_summary`'s
+/// derived (not stored) deadline; `manual_status_blocks` comes off the
+/// exit-snapshot verdict the poller records at every presence sample; the
+/// gate reason and both counters come off the driver's shared polling-state
+/// slot (the `token_metadata` slot pattern). Reasons and counters only —
+/// never posted text.
+fn sync_state(state: &crate::AppState) -> SyncState {
+    let now = chrono::Utc::now();
+    let (snoozed, snooze_minutes_left) = state
+        .config
+        .get()
+        .as_ref()
+        .and_then(|cfg| crate::config::snooze_status(cfg, now))
+        .map(|s| (true, Some(crate::config::snooze_minutes_left(s.remaining_seconds))))
+        .unwrap_or((false, None));
+    let (transient_failure_count, consecutive_network_failures) =
+        crate::polling::load_failure_counters();
+    SyncState {
+        is_syncing: state
+            .polling
+            .is_syncing(std::sync::atomic::Ordering::Acquire),
+        snoozed,
+        snooze_minutes_left,
+        manual_status_blocks: crate::polling::load_exit_snapshot().manual_status_blocks,
+        presence_gate_reason: crate::polling::load_gate_reason(),
+        transient_failure_count,
+        consecutive_network_failures,
+    }
+}
 
 /// `quarantine` is read by the command (see [`ConfigQuarantine::observe`])
 /// and only projected here, so the snapshot shape is fixed in one place.
@@ -924,6 +983,7 @@ fn build_snapshot(
         config: config_summary(state, keychain.spotify_client_secret_present, &quarantine),
         tokens: token_metadata(state),
         keychain,
+        sync_state: sync_state(state),
         recent_logs,
         log_source_status,
         // Issue #603: the marker is read (and handed in) by the caller, but
@@ -1910,6 +1970,51 @@ mod tests {
             spotify_client_secret_present: false,
             tokens_encryption_key_present: false,
         }
+    }
+    /// Issue #863: plant counters + gate reason + a live snooze in the
+    /// polling state, serialize the snapshot, and assert the planted values
+    /// survive into the JSON. Pre-fix the snapshot had no `sync_state` at
+    /// all, so every assertion below fails on the old shape.
+    #[test]
+    fn test_sync_state_plants_survive_into_snapshot_json() {
+        use std::sync::atomic::Ordering;
+        let _guard = crate::polling::global_state_lock();
+        crate::polling::reset_sync_state();
+        crate::polling::record_failure_counters(3, 7);
+        crate::polling::record_gate_reason(Some("busy".to_string()));
+        crate::polling::record_manual_status_blocks(true);
+        let state = crate::AppState::default();
+        state.polling.set_syncing(true, Ordering::Release);
+        {
+            let mut cfg = crate::config::AppConfig::default();
+            cfg.snooze_until =
+                Some((chrono::Utc::now() + chrono::Duration::minutes(30)).to_rfc3339());
+            *state.config.get_mut() = Some(cfg);
+        }
+        let snapshot = build_snapshot(
+            &state,
+            None,
+            inert_keychain(),
+            None,
+            ConfigQuarantine::default(),
+        );
+        let sync = &snapshot.sync_state;
+        assert!(sync.is_syncing, "the running flag must travel");
+        assert!(sync.snoozed, "a live snooze must be visible");
+        assert!(
+            (25..=30).contains(&sync.snooze_minutes_left.expect("snooze minutes")),
+            "minutes left are rounded up from the deadline"
+        );
+        assert!(sync.manual_status_blocks, "the manual-status verdict must travel");
+        assert_eq!(sync.presence_gate_reason.as_deref(), Some("busy"));
+        assert_eq!(sync.transient_failure_count, 3);
+        assert_eq!(sync.consecutive_network_failures, 7);
+        let json = serde_json::to_string(&snapshot).expect("serialize snapshot");
+        for needle in ["sync_state", "\"busy\"", "transient_failure_count", "consecutive_network_failures"] {
+            assert!(json.contains(needle), "missing {needle} in {json}");
+        }
+        crate::polling::reset_sync_state();
+        crate::polling::reset_exit_snapshot();
     }
 
     #[test]
