@@ -3734,7 +3734,11 @@ mod tests {
              build (issue #818)"
         );
         let manifest = include_str!("../Cargo.toml");
-        for feature in ["Win32_System_Console", "Win32_Storage_FileSystem", "Win32_Security"] {
+        for feature in [
+            "Win32_System_Console",
+            "Win32_Storage_FileSystem",
+            "Win32_Security",
+        ] {
             assert!(
                 manifest.contains(feature),
                 "Cargo.toml must enable the `windows` `{feature}` feature (issue #818)"
