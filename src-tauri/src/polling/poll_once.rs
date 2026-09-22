@@ -1683,11 +1683,10 @@ fn ooo_gate_enabled(config: &Option<AppConfig>, rule_has_presence_action: bool) 
 /// Issue #432: quiet-hours evaluation. `now_minutes` is local minutes-since-
 /// midnight and `weekday` the ISO weekday number 1 (Mon)..=7 (Sun), passed
 /// in so the pure predicate stays unit-testable without clock injection.
-/// An entry matches when it is enabled, the weekday filter passes (empty =
-/// every day), and the time falls in `[start, end)` — with wrap-around
-/// (e.g. 22:00→07:00) handled as `now >= start || now < end`.
-/// Minutes are clamped to 0..=1439 so a hand-edited config can't wedge
-/// the comparison.
+/// An entry matches when it is enabled and the schedule window (see
+/// [`schedule_window_contains`] for the night-owning weekday rule) contains
+/// the local clock. Minutes are clamped to 0..=1439 so a hand-edited config
+/// can't wedge the comparison.
 fn quiet_hours_active(
     rules: &crate::config::StatusRulesConfig,
     now_minutes: u16,
@@ -1703,11 +1702,10 @@ fn quiet_hours_active(
 ///
 /// `now_minutes` is local minutes-since-midnight and `weekday` the ISO weekday
 /// number 1 (Mon)..=7 (Sun), passed in so the predicate stays unit-testable
-/// without clock injection. An entry matches when it is enabled, the weekday
-/// filter passes (empty = every day), and the time falls in `[start, end)` —
-/// with wrap-around (e.g. 22:00→07:00) handled as `now >= start || now < end`.
-/// Minutes are clamped to 0..=1439 so a hand-edited config can't wedge the
-/// comparison.
+/// without clock injection. An entry matches when it is enabled and the
+/// schedule window (see [`schedule_window_contains`] for the night-owning
+/// weekday rule) contains the local clock. Minutes are clamped to 0..=1439
+/// so a hand-edited config can't wedge the comparison.
 fn matching_quiet_hours(
     rules: &crate::config::StatusRulesConfig,
     now_minutes: u16,
@@ -1719,35 +1717,55 @@ fn matching_quiet_hours(
         .find(|entry| quiet_entry_contains(entry, now_minutes, weekday))
 }
 
-/// Whether ONE quiet-hours entry is active at the given local time: enabled, the
-/// weekday filter passes (empty = every day), and the time falls in
-/// `[start, end)` — with wrap-around (e.g. 22:00→07:00) handled as
-/// `now >= start || now < end`. Minutes are clamped to 0..=1439 so a hand-edited
-/// config cannot wedge the comparison, and a zero-length window (`start == end`)
-/// matches nothing. Extracted (S4, issue #672) so the "pause polling" gate can
-/// ask the question per entry instead of only of the first match.
+/// Issue #794: the ONE schedule-window matcher both halves of the rules model
+/// share — [`quiet_entry_contains`] and [`track_rule_schedule_matches`] route
+/// through it, so quiet hours and track rules cannot disagree about what a
+/// midnight-crossing window means. All bounds are minutes-since-midnight in
+/// `u32` (callers clamp their own field widths before delegating); `weekday`
+/// is the ISO weekday 1 (Mon)..=7 (Sun).
+///
+/// Night-owning semantics: each half of a midnight-crossing window is tested
+/// against the day it falls on. The evening half (`now >= start`) belongs to
+/// the day it starts on — `days` must contain `weekday` — and the morning
+/// half (`now < end`) belongs to the PREVIOUS day — `days` must contain the
+/// ISO day before `weekday` (wrapping 1→7). A Monday-only 22:00→07:00 window
+/// is therefore active Monday 23:00 and Tuesday 03:00, but NOT Monday 03:00
+/// (that morning belongs to the Sunday night) nor Tuesday 23:00 (that
+/// evening starts Tuesday's night, and Tuesday is not selected). A
+/// non-wrapping window is tested against `weekday` alone, and an empty
+/// `days` means every day on both halves. `start == end` matches nothing.
+fn schedule_window_contains(days: &[u8], start: u32, end: u32, now: u32, weekday: u8) -> bool {
+    if start == end {
+        return false;
+    }
+    if start < end {
+        return now >= start && now < end && (days.is_empty() || days.contains(&weekday));
+    }
+    let evening = now >= start && (days.is_empty() || days.contains(&weekday));
+    let previous = if weekday <= 1 { 7 } else { weekday - 1 };
+    let morning = now < end && (days.is_empty() || days.contains(&previous));
+    evening || morning
+}
+
+/// Whether ONE quiet-hours entry is active at the given local time: enabled,
+/// and the schedule window (see [`schedule_window_contains`] for the
+/// night-owning weekday rule) contains the local clock. Minutes are clamped
+/// to 0..=1439 so a hand-edited config cannot wedge the comparison, and a
+/// zero-length window (`start == end`) matches nothing. Extracted (S4, issue
+/// #672) so the "pause polling" gate can ask the question per entry instead
+/// of only of the first match.
 fn quiet_entry_contains(
     entry: &crate::config::QuietHoursEntry,
     now_minutes: u16,
     weekday: u8,
 ) -> bool {
-    let now = now_minutes.min(1439);
     if !entry.enabled {
         return false;
     }
-    if !entry.days.is_empty() && !entry.days.contains(&weekday) {
-        return false;
-    }
-    let start = entry.start_minutes.min(1439);
-    let end = entry.end_minutes.min(1439);
-    if start == end {
-        return false;
-    }
-    if start < end {
-        now >= start && now < end
-    } else {
-        now >= start || now < end
-    }
+    let now = u32::from(now_minutes.min(1439));
+    let start = u32::from(entry.start_minutes.min(1439));
+    let end = u32::from(entry.end_minutes.min(1439));
+    schedule_window_contains(&entry.days, start, end, now, weekday)
 }
 
 /// Finding PollCore#1 (issue #569): whether the mid-track quiet-hours ENTRY
@@ -2991,12 +3009,14 @@ fn glob_match_ignore_ascii_case(pattern: &str, haystack: &str) -> bool {
 }
 
 /// S4 (issue #672): whether a rule's `days` / `start_minutes` / `end_minutes`
-/// window contains the given local time. The semantics are
-/// [`crate::config::QuietHoursEntry`]'s, field for field: an empty `days`
-/// applies every day, the window is `[start, end)` with wrap-around
-/// (`start > end`, e.g. 22:00→07:00) honoured, and `start == end` matches
-/// nothing. `end_minutes == 1440` is the end of the day, so the default window
-/// covers every minute. Issue #868: `pub(crate)` because
+/// window contains the given local time. Delegates to
+/// [`schedule_window_contains`] — the same night-owning matcher quiet hours
+/// use — so both halves of the rules model agree on midnight-crossing
+/// windows: each half is tested against the day it falls on (the morning
+/// half against the previous ISO day, wrapping 1→7). An empty `days`
+/// applies every day, the window is `[start, end)`, and `start == end`
+/// matches nothing. `end_minutes == 1440` is the end of the day, so the
+/// default window covers every minute. Issue #868: `pub(crate)` because
 /// `commands::rules::explain_rules` runs the same walker the live
 /// `process_track` path uses.
 pub(crate) fn track_rule_schedule_matches(
@@ -3004,22 +3024,12 @@ pub(crate) fn track_rule_schedule_matches(
     now_minutes: u16,
     weekday: u8,
 ) -> bool {
-    if !rule.days.is_empty() && !rule.days.contains(&weekday) {
-        return false;
-    }
     let now = u32::from(now_minutes.min(1439));
     let start = rule
         .start_minutes
         .min(crate::config::TRACK_RULE_DAY_MINUTES);
     let end = rule.end_minutes.min(crate::config::TRACK_RULE_DAY_MINUTES);
-    if start == end {
-        return false;
-    }
-    if start < end {
-        now >= start && now < end
-    } else {
-        now >= start || now < end
-    }
+    schedule_window_contains(&rule.days, start, end, now, weekday)
 }
 
 /// Issue #432 + S4 (issue #672) + issue #868: the first enabled track
@@ -7289,6 +7299,15 @@ mod tests {
         let d = rules(vec![entry(true, 0, 1439, vec![1])]);
         assert!(quiet_hours_active(&d, 600, 1));
         assert!(!quiet_hours_active(&d, 600, 2));
+        // Issue #794: a Monday-only midnight-crossing window is owned by the
+        // night it starts on — active Mon 23:00 + Tue 03:00, inactive Mon
+        // 03:00 (that morning belongs to the Sunday night) + Tue 23:00
+        // (that evening starts the Tuesday night, which is not selected).
+        let mon_night = rules(vec![entry(true, 1320, 420, vec![1])]);
+        assert!(quiet_hours_active(&mon_night, 1380, 1));
+        assert!(quiet_hours_active(&mon_night, 180, 2));
+        assert!(!quiet_hours_active(&mon_night, 180, 1));
+        assert!(!quiet_hours_active(&mon_night, 1380, 2));
         // Disabled entry never gates; degenerate equal bounds never gate.
         assert!(!quiet_hours_active(
             &rules(vec![entry(false, 0, 1439, vec![])]),
@@ -7411,6 +7430,15 @@ mod tests {
         assert!(track_rule_schedule_matches(&night, 0, 3));
         assert!(track_rule_schedule_matches(&night, 419, 3));
         assert!(!track_rule_schedule_matches(&night, 420, 3));
+
+        // Issue #794: a Monday-only midnight-crossing window is owned by the
+        // night it starts on — active Mon 23:00 + Tue 03:00, inactive Mon
+        // 03:00 + Tue 23:00.
+        let mon_night = rule(vec![1], 1320, 420);
+        assert!(track_rule_schedule_matches(&mon_night, 1380, 1));
+        assert!(track_rule_schedule_matches(&mon_night, 180, 2));
+        assert!(!track_rule_schedule_matches(&mon_night, 180, 1));
+        assert!(!track_rule_schedule_matches(&mon_night, 1380, 2));
 
         // `start == end` is an empty window: it matches nothing, exactly as in
         // quiet hours.

@@ -447,12 +447,12 @@ export const en = {
 
   // 4.7.0 — S4 (rules engine)
   'rules.quietWindowHint':
-    'Quiet hours wrap over midnight — 22:00–07:00 runs through the night. An end time of 00:00 means midnight (the end of the day), and a start equal to the end never matches.',
+    'Quiet hours wrap over midnight — 22:00–07:00 runs through the night. Each half belongs to the night it starts on: with only Monday selected, the window covers Monday night into Tuesday morning. An end time of 00:00 means midnight (the end of the day), and a start equal to the end never matches.',
   'rules.pausePollingLabel': 'Stop polling during this window',
   'rules.pausePollingHint':
     'While this window is active Spotify is not queried at all — no status update and no Teams call. Polling resumes by itself when the window ends.',
   'rules.trackRulesOrderHint':
-    'Rules are evaluated top to bottom — the first matching one wins. A rule with no weekdays applies every day, an end time of 00:00 means the end of the day, and a start equal to the end never matches.',
+    'Rules are evaluated top to bottom — the first matching one wins. A rule with no weekdays applies every day, an end time of 00:00 means the end of the day, and a start equal to the end never matches. A midnight-crossing window belongs to the night it starts on: with only Monday selected, 22:00–07:00 covers Monday night into Tuesday morning.',
   'rules.ruleStart': 'Rule window start',
   'rules.ruleEnd': 'Rule window end',
   'rules.ruleDays': 'Active days for this rule (none selected = every day)',

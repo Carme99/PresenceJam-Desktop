@@ -1191,9 +1191,14 @@ fn migrate_config(cfg: &mut AppConfig, from: u32) {
 /// the local time falls inside `[start_minutes, end_minutes)` (minutes
 /// since midnight; wrap-around ranges like 22:00→07:00 are supported).
 /// `days` holds ISO weekday numbers 1 (Mon)..=7 (Sun); empty means every
-/// day. All fields `#[serde(default)]` individually so a hand-edited
-/// config missing one still loads, and load-time normalization of `days` and
-/// the two minutes lives in one place: [`clamp_quiet_hours_window`].
+/// day. A midnight-crossing window is NIGHT-OWNING (issue #794): each half
+/// is tested against the day it falls on — the evening half (`now >= start`)
+/// against `weekday`, the morning half (`now < end`) against the previous
+/// ISO day (wrapping 1→7) — so a Monday-only 22:00→07:00 window covers
+/// Monday night into Tuesday morning, not Sunday night. All fields
+/// `#[serde(default)]` individually so a hand-edited config missing one
+/// still loads, and load-time normalization of `days` and the two minutes
+/// lives in one place: [`clamp_quiet_hours_window`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct QuietHoursEntry {
@@ -1411,7 +1416,12 @@ pub struct TrackRuleEntry {
     /// S4 (issue #672): start of the rule's local-time window, in minutes since
     /// midnight. The window is `[start_minutes, end_minutes)` with the same
     /// wrap-around rule as [`QuietHoursEntry`] (22:00→07:00 works); the
-    /// default pair (`0`, `1440`) covers every minute of the day.
+    /// default pair (`0`, `1440`) covers every minute of the day. A
+    /// midnight-crossing window is NIGHT-OWNING (issue #794): the evening
+    /// half (`now >= start`) is tested against the selected day, the morning
+    /// half (`now < end`) against the previous ISO day (wrapping 1→7) — a
+    /// Monday-only 22:00→07:00 rule covers Monday night into Tuesday
+    /// morning.
     #[serde(default = "default_track_rule_start")]
     pub start_minutes: u32,
     /// S4 (issue #672): end of the rule's local-time window, in minutes since
