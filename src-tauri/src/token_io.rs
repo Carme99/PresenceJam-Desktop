@@ -764,17 +764,36 @@ pub fn read_or_create_serve_token_with_backoff(
     Err(last_err.unwrap_or_else(|| "no attempts made".to_string()))
 }
 
-/// Delete the tokens file. Used by [`reset_tokens_storage`]; reconnect flows
-/// clear state through the empty-`TokensFile` write path instead.
+/// Delete the tokens file and every stale sidecar next to it. Used by
+/// [`reset_tokens_storage`] (issue #766); reconnect flows clear state
+/// through the empty-`TokensFile` write path instead.
 ///
-/// The keychain-held AES key is deliberately kept: the key is a small
+/// The keychain-held AES key is deliberately kept here: the key is a small
 /// per-install secret shared by the whole app (not a per-file credential),
 /// and deleting it would gain nothing — the tokens file itself is the
-/// credential container.
+/// credential container. [`reset_tokens_storage`] deletes the key itself
+/// and then calls this for the files.
+///
+/// Sidecars are swept with a `keep` path that cannot match any real file
+/// (the live path plus a `.nonexistent-keep` suffix), so every candidate
+/// the [`remove_stale_tokens_sidecars`] prefix scan finds is removed —
+/// the fixed-name `.json.tmp`, every per-pid in-flight leftover, and the
+/// ≤ v2.10.0 plaintext sidecar — and no plaintext remnant survives the
+/// reset. The per-pid provably-gone guard still applies, so a sidecar of a
+/// still-running writer is left alone; the live `tokens.json` delete above
+/// does not depend on the sweep. A per-file sweep failure fails the reset
+/// (a directory-scan failure only warns — see [`remove_stale_tokens_sidecars`]).
 pub fn clear_tokens_file(app: &tauri::AppHandle) -> Result<(), String> {
-    let path = tokens_file_path(app)?;
+    clear_tokens_file_at(&tokens_file_path(app)?)
+}
+
+/// Path-level half of [`clear_tokens_file`] (issue #766): delete the live
+/// file, then sweep every stale sidecar next to it. Split out so the reset
+/// file-sweep is testable without a `tauri::AppHandle` — tests call this
+/// with a temp dir instead of the real config dir.
+fn clear_tokens_file_at(path: &Path) -> Result<(), String> {
     if path.exists() {
-        fs::remove_file(&path)
+        fs::remove_file(path)
             .map_err(|e| format!("Failed to delete tokens file '{}': {}", path.display(), e))?;
         log::info!("[TOKEN_IO] clear_tokens_file: deleted {}", path.display());
     } else {
@@ -783,6 +802,12 @@ pub fn clear_tokens_file(app: &tauri::AppHandle) -> Result<(), String> {
             path.display()
         );
     }
+    let keep = path.with_extension("json.nonexistent-keep");
+    remove_stale_tokens_sidecars(path, &keep)?;
+    log::info!(
+        "[TOKEN_IO] clear_tokens_file: swept sidecars next to {}",
+        path.display()
+    );
     Ok(())
 }
 
@@ -1571,6 +1596,59 @@ mod tests {
             "both slot guards must be bound before either slot is cloned, so a \
              commit landing on the second slot cannot be dropped from the file \
              (issue #800)"
+        );
+    }
+    // Issue #766: `clear_tokens_file` must sweep every sidecar next to the
+    // live file, not just delete `tokens.json`. Pre-fix it removed only the
+    // live path, so a plaintext `tokens.json.tmp` leftover from a ≤ v2.10.0
+    // crash survived the reset and this assertion fails on that shape.
+    #[test]
+    fn clear_tokens_file_sweeps_live_file_and_sidecars() {
+        let dir = unique_tmp_dir("clear-sweep");
+        let path = dir.join("tokens.json");
+        let legacy_sidecar = path.with_extension("json.tmp");
+        let foreign_sidecar = path.with_extension(format!("json.tmp.{}", u32::MAX));
+        fs::write(&path, b"ciphertext-sentinel").unwrap();
+        fs::write(&legacy_sidecar, b"{\"leaked\":\"PLAINTEXT\"}").unwrap();
+        fs::write(&foreign_sidecar, b"{\"leaked\":\"PLAINTEXT\"}").unwrap();
+
+        clear_tokens_file_at(&path).expect("reset file-sweep must succeed");
+
+        assert!(!path.exists(), "tokens.json must be gone after reset");
+        assert!(
+            !legacy_sidecar.exists(),
+            "the fixed-name plaintext sidecar must be swept"
+        );
+        #[cfg(target_os = "linux")]
+        assert!(
+            !foreign_sidecar.exists(),
+            "a dead process's sidecar must be swept"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+    // Issue #766 (wiring/mutant-killer guard, not a regression proof): this
+    // passes pre-fix by design. `reset_tokens_storage` must drop the
+    // keychain key BEFORE deleting the tokens file. A failure then leaves at
+    // worst an orphan ciphertext file (which `read_tokens_at` treats as
+    // "start empty"); the reverse order could leave an undecryptable file
+    // with no key to recover from. Keychain-touching behavior itself is not
+    // exercised here — the suite never touches the OS keychain — so the
+    // ordering is pinned by a source scan of the isolated body.
+    #[test]
+    fn reset_deletes_the_key_before_the_file() {
+        let src = include_str!("token_io.rs");
+        let body = test_scan::fn_body(src, "fn reset_tokens_storage(");
+        let drop_key = body
+            .find("delete_tokens_aes_key")
+            .expect("reset_tokens_storage must drop the keychain key");
+        let clear_file = body
+            .find("clear_tokens_file")
+            .expect("reset_tokens_storage must clear the tokens file");
+        assert!(
+            drop_key < clear_file,
+            "the keychain key must be deleted before the tokens file, or a \
+             failure leaves an undecryptable file with no recovery path \
+             (issue #766)"
         );
     }
 }

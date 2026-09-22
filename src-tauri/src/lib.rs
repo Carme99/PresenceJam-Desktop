@@ -2620,6 +2620,7 @@ pub fn run() {
             commands::misc::preview_status,
             commands::misc::update_tray_menu_state,
             commands::misc::relaunch_app,
+            commands::misc::reset_local_token_storage,
             commands::logs::get_recent_logs,
             updater_bg::check_for_update,
             updater_bg::stage_deferred_update,

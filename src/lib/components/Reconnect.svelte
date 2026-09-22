@@ -30,6 +30,59 @@
   // just now" (success wording) from "was already connected, no action
   // needed" (neutral wording) on fresh mount.
   let teamsReconnectedThisSession = $state(false);
+  // Issue #766: a corrupt-key failure (the stored token encryption key is
+  // unusable, or tokens.json fails AES-GCM authentication) surfaces through
+  // the Spotify/Teams error channels as English Rust-side copy, so the
+  // affordance below keys off stable fragments of those two messages rather
+  // than the full text. `tokenResetArmed` is the two-step confirm arm;
+  // `tokenResetBusy` serialises the reset invoke; `tokenResetDone` keeps the
+  // success copy up after the error phases below are cleared.
+  let tokenResetArmed = $state(false);
+  let tokenResetBusy = $state(false);
+  let tokenResetDone = $state('');
+  let tokenResetError = $state('');
+
+  const CORRUPT_KEY_MARKERS = [
+    'encryption key is unusable',
+    'AES-GCM authentication'
+  ];
+
+  function errorLooksLikeCorruptKey(message: string | null): boolean {
+    if (!message) return false;
+    return CORRUPT_KEY_MARKERS.some((marker) => message.includes(marker));
+  }
+
+  let corruptKeyError = $derived(
+    errorLooksLikeCorruptKey(authFlow.spotify.error) || errorLooksLikeCorruptKey(authFlow.teams.error)
+  );
+
+  function armTokenReset() {
+    tokenResetArmed = true;
+    tokenResetError = '';
+  }
+
+  function cancelTokenReset() {
+    tokenResetArmed = false;
+  }
+
+  async function confirmTokenReset() {
+    if (tokenResetBusy) return;
+    tokenResetBusy = true;
+    tokenResetError = '';
+    try {
+      await invoke('reset_local_token_storage');
+      devLog('[RECONNECT] token storage reset');
+      resetSpotifyAuthFlow();
+      resetTeamsAuthFlow();
+      tokenResetDone = t('reconnect.resetTokenDone');
+      tokenResetArmed = false;
+    } catch (e) {
+      console.warn('[RECONNECT] reset_local_token_storage failed:', e);
+      tokenResetError = t('reconnect.resetTokenFailed', { error: String(e) });
+    } finally {
+      tokenResetBusy = false;
+    }
+  }
 
   // #558: manual-paste fallback for the Spotify card. A flow stuck in
   // `waiting` (browser tab abandoned) had no way out at all — these track the
@@ -425,6 +478,43 @@
           <p class="hint">{t('reconnect.reenterCredsHint')}</p>
         </div>
         <button class="btn-secondary" onclick={goToOnboarding}>{t('reconnect.goToFullSetup')}</button>
+      </div>
+    {/if}
+    {#if corruptKeyError}
+      <!-- Issue #766: corrupt-key path — the stored encryption key is
+           unusable or tokens.json fails AES-GCM authentication, so a plain
+           reconnect cannot succeed. The reset is two-step (arm, then
+           confirm): the confirm names what is deleted and the re-sign-in
+           that follows, and after a success the flow phases above are
+           cleared so this banner gives way to the done copy. -->
+      <div class="info-box card pane-card" role="alert">
+        <div class="info-icon">⚠</div>
+        <div>
+          <strong>{t('reconnect.resetTokenStorage')}</strong>
+          <p class="hint">{t('reconnect.tokenStorageUnusable')}</p>
+          {#if tokenResetArmed}
+            <p class="hint">{t('reconnect.resetTokenConfirm')}</p>
+          {/if}
+          {#if tokenResetDone}
+            <p class="hint">{tokenResetDone}</p>
+          {/if}
+          {#if tokenResetError}
+            <p class="error-message" role="alert">{tokenResetError}</p>
+          {/if}
+        </div>
+        {#if !tokenResetArmed}
+          <button class="btn-secondary" onclick={armTokenReset}>{t('reconnect.resetTokenStorage')}</button>
+        {:else}
+          <button class="btn-secondary" onclick={confirmTokenReset} disabled={tokenResetBusy}>{t('reconnect.resetTokenStorage')}</button>
+          <button class="btn-secondary" onclick={cancelTokenReset} disabled={tokenResetBusy}>{t('common.dismiss')}</button>
+        {/if}
+      </div>
+    {:else if tokenResetDone}
+      <div class="info-box card pane-card" role="status">
+        <div class="info-icon">✓</div>
+        <div>
+          <p class="hint">{tokenResetDone}</p>
+        </div>
       </div>
     {/if}
 

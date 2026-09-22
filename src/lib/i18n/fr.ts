@@ -232,6 +232,11 @@ export const fr: Dict = {
   'diagnostics.failedInstallTimestamp': 'Tentative le',
   'diagnostics.failedInstallDismissFailed':
     'Impossible d’ignorer l’enregistrement de l’échec d’installation.',
+  'diagnostics.resetTokenStorage': 'Réinitialiser le stockage local des tokens',
+  'diagnostics.resetTokenConfirm':
+    'Cela supprime tokens.json et ses fichiers annexes ainsi que la clé de chiffrement des tokens. Vous devrez vous reconnecter. Continuer ?',
+  'diagnostics.resetTokenDone': 'Stockage des tokens réinitialisé. Reconnectez-vous pour reprendre.',
+  'diagnostics.resetTokenFailed': 'Réinitialisation impossible — {error}',
 
   // ── reconnect ─────────────────────────────────────────────────────
   'reconnect.title': 'Reconnexion',
@@ -251,6 +256,12 @@ export const fr: Dict = {
   'reconnect.teamsOk': 'Teams reconnecté avec succès.',
   'reconnect.clickBelowTeams':
     'Cliquez ci-dessous pour reconnecter votre compte Microsoft Teams.',
+  'reconnect.tokenStorageUnusable': 'Vos identifiants enregistrés sont illisibles — la clé de chiffrement des tokens est inutilisable.',
+  'reconnect.resetTokenStorage': 'Réinitialiser le stockage local des tokens',
+  'reconnect.resetTokenConfirm':
+    'Cela supprime tokens.json et ses fichiers annexes ainsi que la clé de chiffrement des tokens. Vous devrez vous reconnecter. Continuer ?',
+  'reconnect.resetTokenDone': 'Stockage des tokens réinitialisé. Reconnectez-vous ci-dessous pour reprendre.',
+  'reconnect.resetTokenFailed': 'Réinitialisation impossible — {error}',
   'reconnect.missingCredsTitle': 'Identifiants Spotify manquants ?',
   'reconnect.reenterCredsHint':
     'Vous devrez saisir à nouveau votre ID client et votre secret client.',

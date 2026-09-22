@@ -217,6 +217,11 @@ export const en = {
   'diagnostics.failedInstallError': 'Error',
   'diagnostics.failedInstallTimestamp': 'Attempted at',
   'diagnostics.failedInstallDismissFailed': 'Could not dismiss the failed-install record.',
+  'diagnostics.resetTokenStorage': 'Reset local token storage',
+  'diagnostics.resetTokenConfirm':
+    'This deletes tokens.json and its sidecars plus the stored token encryption key. You will need to sign in again. Continue?',
+  'diagnostics.resetTokenDone': 'Token storage reset. Sign in again to resume sync.',
+  'diagnostics.resetTokenFailed': 'Reset failed — {error}',
 
   // ── reconnect ─────────────────────────────────────────────────────
   'reconnect.title': 'Reconnect',
@@ -234,6 +239,12 @@ export const en = {
   'reconnect.teamsOk': 'Teams reconnected successfully.',
   'reconnect.clickBelowTeams':
     'Click below to reconnect your Microsoft Teams account.',
+  'reconnect.tokenStorageUnusable': 'Your saved sign-in data cannot be read — the stored token encryption key is unusable.',
+  'reconnect.resetTokenStorage': 'Reset local token storage',
+  'reconnect.resetTokenConfirm':
+    'This deletes tokens.json and its sidecars plus the stored token encryption key. You will need to sign in again. Continue?',
+  'reconnect.resetTokenDone': 'Token storage reset. Sign in again below to resume.',
+  'reconnect.resetTokenFailed': 'Reset failed — {error}',
   'reconnect.missingCredsTitle': 'Missing Spotify credentials?',
   'reconnect.reenterCredsHint':
     "You'll need to re-enter your Client ID and Client Secret.",
