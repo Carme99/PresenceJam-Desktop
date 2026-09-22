@@ -2297,6 +2297,11 @@ fn emit_presence_gated(app: &AppHandle, reason: &str, availability: &str, activi
             "timestamp": Utc::now().to_rfc3339()
         }),
     );
+    // Issue #863: publish the gate reason into the shared polling-state slot.
+    // This is the single funnel for every announced suppression (~7 call
+    // sites), so all presence/rule/quiet/calendar reasons are covered without
+    // touching each site. Reason token only — never posted text.
+    super::state::record_gate_reason(Some(reason.to_string()));
     // Issue #877: append to the bounded decision history. The gate
     // reason is the documented wire shape; the track fingerprint is
     // pulled off the `state.polling.current_track()` snapshot so an

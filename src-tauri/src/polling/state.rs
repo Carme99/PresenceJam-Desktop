@@ -218,6 +218,11 @@ pub fn start_polling(
     // covers the case it cannot — a previous thread that died by panic, whose
     // `catch_unwind` below never reaches the loop's own reset.
     super::poll_once::reset_write_clocks();
+    // Issue #863: the mirrored counters/gate reason start cold too — a fresh
+    // session must not inherit the previous session's values. Fresh name, so
+    // no D1/PollCore#4 structural guard trips; deliberately NOT
+    // `reset_exit_snapshot`, which must survive a session start (finding D1).
+    reset_sync_state();
     // Finding D1 (issue #684): the EXIT SNAPSHOT is deliberately NOT reset
     // here, unlike the clocks above. It is not a dedup input but a record of
     // what this app currently has live on Teams — and stopping or starting a

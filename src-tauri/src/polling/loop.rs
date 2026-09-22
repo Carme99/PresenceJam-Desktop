@@ -359,24 +359,18 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
         // the consume side in `diagnostics.rs`) so the diagnostics snapshot
         // can tell reconnect-versus-backoff apart. Relaxed atomics: best-effort
         // triage data, read once per snapshot.
-        super::state::record_failure_counters(transient_failure_count, consecutive_network_failures);
-        // Issue #863: the same publish point for the presence-gate reason.
-        // The newest `presence-gated` history entry names the gate the poller
-        // just recorded; while `gated_track_key` is set that entry IS the
-        // current suppression, so it is mirrored verbatim. Reason token only
-        // (e.g. `"busy"`) — never posted text (the no-user-content rule).
-        super::state::record_gate_reason(
-            clocks
-                .gated_track_key
-                .is_some()
-                .then(|| {
-                    crate::history::recent(1)
-                        .into_iter()
-                        .next()
-                        .and_then(|entry| entry.gate_reason)
-                })
-                .flatten(),
+        super::state::record_failure_counters(
+            transient_failure_count,
+            consecutive_network_failures,
         );
+        // Issue #863: the same publish point retires the gate reason. The emit
+        // funnel records it whenever a suppression is announced; every retire
+        // path funnels through `gated_track_key = None` on the clocks just
+        // stored, so clearing here covers all of them — past and future —
+        // with no per-site edits. Reason token only, never posted text.
+        if clocks.gated_track_key.is_none() {
+            super::state::record_gate_reason(None);
+        }
 
         // Post-iteration tray sync — independent of the API result.
         let is_syncing = state.polling.is_syncing(Ordering::Acquire);
