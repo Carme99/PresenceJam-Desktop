@@ -30,13 +30,15 @@ objc2-core-foundation = { version = "~0.3", default-features = false, features =
 # umbrella feature that re-exports the LaunchServices module.
 objc2-core-services = { version = "~0.3", default-features = false, features = ["std", "LSInfo", "LaunchServices"] }
 
-# Windows-only platform probe used by `src-tauri/src/platform/focus.rs`
-# (issue #872): `SHQueryUserNotificationState` lives in `Win32_UI_Shell`,
-# which carries its own `HRESULT`/`BOOL` aliases through `Win32_Foundation`.
-# No other Windows-specific APIs are pulled in — `platform::idle::WindowsIdleProbe`
-# for issue #873 reuses the same crate.
+# Windows-only platform APIs (issues #872, #873, #818):
+# `SHQueryUserNotificationState` lives in `Win32_UI_Shell` (with its
+# `HRESULT`/`BOOL` aliases through `Win32_Foundation`), and
+# `platform::idle::WindowsIdleProbe` reuses the same crate. The CLI
+# parent-console attach (`AttachConsole` + `CONOUT$` reopen in lib.rs,
+# issue #818) needs `Win32_System_Console` + `Win32_Storage_FileSystem`
+# (+ `Win32_Security`, which gates the `CreateFileW` overload upstream).
 [target."cfg(target_os = \"windows\")".dependencies]
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_SystemInformation", "Media_Control", "Storage_Streams"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security", "Win32_UI_Shell", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_SystemInformation", "Win32_System_Console", "Win32_Storage_FileSystem", "Media_Control", "Storage_Streams"] }
 windows-collections = "0.3"
 
 [dependencies]
