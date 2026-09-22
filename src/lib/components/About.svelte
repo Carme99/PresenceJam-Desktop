@@ -137,10 +137,9 @@
     font-size: var(--fs-sm);
   }
   .links a {
-    color: var(--accent-text);
     text-decoration: none;
     font-weight: 600;
   }
-  .links a:hover { color: var(--accent); text-decoration: underline; }
+  .links a:hover { text-decoration: underline; }
   .separator { color: var(--fg-subtle); }
 </style>

@@ -350,3 +350,17 @@ describe('theme toggle glyph describes the painted theme (#680)', () => {
     expect(toggleGlyph()).toBe('☾');
   });
 });
+
+/**
+ * #953 — base `a` rule in app.css: classless anchors (the
+ * developer.spotify.com link in Onboarding, the verification URL fallback)
+ * inherit the app palette instead of browser blue/visited-purple.
+ * Fails if the base rule is deleted: none of the three selectors match.
+ */
+describe('base anchor palette (#953)', () => {
+  it('declares base, hover, and visited `a` rules in app.css', () => {
+    expect(appCss).toMatch(/^a\s*\{[^}]*color:\s*var\(--accent-text\)/m);
+    expect(appCss).toMatch(/^a:hover\s*\{[^}]*color:\s*var\(--accent\)/m);
+    expect(appCss).toMatch(/^a:visited\s*\{[^}]*color:\s*var\(--accent-text\)/m);
+  });
+});
