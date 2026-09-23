@@ -98,12 +98,7 @@ pub(crate) struct ErrorEventPayload {
 }
 
 /// Emit an `error` event without provider-specific recovery metadata.
-pub(crate) fn emit_error(
-    app: &AppHandle,
-    source: &str,
-    message: String,
-    severity: ErrorSeverity,
-) {
+pub(crate) fn emit_error(app: &AppHandle, source: &str, message: String, severity: ErrorSeverity) {
     emit_error_with_recovery(app, source, message, severity, None);
 }
 

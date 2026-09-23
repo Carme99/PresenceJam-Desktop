@@ -1,10 +1,10 @@
+use crate::polling::{emit_error_with_recovery, ErrorRecovery, ErrorSeverity};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 use std::thread;
 use std::time::Duration as StdDuration;
 use tauri::AppHandle;
-use crate::polling::{emit_error_with_recovery, ErrorRecovery, ErrorSeverity};
 
 /// Log tag prefix for this module (mirrors the `[CFG]` / `[CMD.*]` /
 /// `[UPDATER.BG]` pattern). `CLAUDE.md` requires a square-bracket module
@@ -1749,7 +1749,10 @@ mod tests {
 
         assert_eq!(policy.severity, ErrorSeverity::Warning);
         assert_eq!(policy.recovery, ErrorRecovery::RetryScheduled);
-        assert_eq!(error.user_message(), TeamsApiError::Transient(String::new()).user_message());
+        assert_eq!(
+            error.user_message(),
+            TeamsApiError::Transient(String::new()).user_message()
+        );
         assert!(error.user_message().contains("Retrying shortly"));
     }
 
