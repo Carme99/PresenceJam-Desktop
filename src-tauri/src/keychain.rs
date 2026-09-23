@@ -16,7 +16,8 @@
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use rand::TryRngCore;
-use std::sync::{AtomicU64, LazyLock, Ordering};
+use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 const KEYRING_SERVICE: &str = "presencejam";
@@ -1155,7 +1156,7 @@ mod tests {
         delete_namespaced: impl Fn() -> Result<(), String> + Send + Sync + 'static,
         migrate_legacy: impl Fn(&str) + Send + Sync + 'static,
     ) -> TestSpotifyClientSecretBackend {
-        let drop_legacy = std::sync::Arc::new(drop_legacy);
+        let drop_legacy: TestSpotifyOperation = std::sync::Arc::new(drop_legacy);
         TestSpotifyClientSecretBackend {
             probe: std::sync::Arc::new(probe),
             read: std::sync::Arc::new(read),
