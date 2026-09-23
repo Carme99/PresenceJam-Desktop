@@ -350,14 +350,10 @@ fn match_from(
         return match_from(text, word, si + 1, wi + 1, stretched, sep_skipped, memo);
     }
     if !t.ch.is_alphanumeric() {
-        if let Some(found) =
-            match_from(text, word, si + 1, wi, stretched, true, memo)
-        {
+        if let Some(found) = match_from(text, word, si + 1, wi, stretched, true, memo) {
             return Some(found);
         }
-        if let Some((end, _, _)) =
-            match_from(text, word, si + 1, wi + 1, true, true, memo)
-        {
+        if let Some((end, _, _)) = match_from(text, word, si + 1, wi + 1, true, true, memo) {
             return Some((end, true, true));
         }
         return None;
@@ -840,7 +836,10 @@ mod tests {
         let text = normalize(&adversarial);
         let word: Vec<char> = "tits".chars().collect();
         let mut memo = MatchMemo::new(text.len(), word.len());
-        assert_eq!(match_from(&text, &word, 0, 0, false, false, &mut memo), None);
+        assert_eq!(
+            match_from(&text, &word, 0, 0, false, false, &mut memo),
+            None
+        );
         assert!(
             memo.explored() <= 128,
             "adversarial match explored {} states",
