@@ -231,6 +231,7 @@ beforeEach(() => {
   stageResolvers = [];
   downloadCb = null;
   updateStagedNotificationMock.mockClear();
+  sendNotificationMock.mockReset().mockResolvedValue(undefined);
   isPermissionGrantedMock.mockReset().mockResolvedValue(true);
   notificationPlugin.requestPermission.mockReset().mockResolvedValue('granted');
   Object.defineProperty(window, '__TAURI_INTERNALS__', { value: {}, configurable: true });
