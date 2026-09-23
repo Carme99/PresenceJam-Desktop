@@ -63,7 +63,7 @@ const TRACK_ACTIONS: NonNullable<TrackInfo['actions']> = {
   transferring_playback: true
 };
 
-/** A complete payload as emitted by the Rust `TrackInfo` event contract. */
+/** A complete generated `TrackInfo` for direct notification-store calls. */
 function makeTrack(overrides: Partial<TrackInfo> = {}): TrackInfo {
   return {
     title: 'A Track',
@@ -76,6 +76,31 @@ function makeTrack(overrides: Partial<TrackInfo> = {}): TrackInfo {
     volume_percent: 80,
     supports_volume: true,
     actions: TRACK_ACTIONS,
+    ...overrides
+  };
+}
+
+type TrackChangedEvent = Pick<
+  TrackInfo,
+  | 'title'
+  | 'artist'
+  | 'album'
+  | 'album_art_url'
+  | 'is_playing'
+  | 'progress_ms'
+  | 'duration_ms'
+>;
+
+/** The exact seven-field payload emitted by the Rust poller. */
+function makeTrackEvent(overrides: Partial<TrackChangedEvent> = {}): TrackChangedEvent {
+  return {
+    title: 'A Track',
+    artist: 'An Artist',
+    album: 'An Album',
+    album_art_url: 'https://example.com/album-art.jpg',
+    is_playing: true,
+    progress_ms: 42_000,
+    duration_ms: 240_000,
     ...overrides
   };
 }
@@ -597,7 +622,10 @@ describe('the always-mounted layout dispatches the new classes (#675)', () => {
     try {
       // The forced `invalid_grant` path (poll_once's `json!(null)` payload).
       await emit('teams-reconnect-required', null);
-      await emit('spotify-track-changed', makeTrack({ title: 'Dead Session Track', artist: 'Zed' }));
+      await emit(
+        'spotify-track-changed',
+        makeTrackEvent({ title: 'Dead Session Track', artist: 'Zed' })
+      );
       await flush();
       expect(plugin.sendNotification).toHaveBeenCalledTimes(1);
       const sent = plugin.sendNotification.mock.calls[0][0];
@@ -640,7 +668,7 @@ describe('the always-mounted layout dispatches the new classes (#675)', () => {
     await emit('sync-stopped', { self_terminated: true });
     await emit('teams-reconnect-required', null);
     await emit('update-stage-complete', { version: '4.7.0' });
-    await emit('spotify-track-changed', makeTrack());
+    await emit('spotify-track-changed', makeTrackEvent());
 
     expect(plugin.sendNotification).not.toHaveBeenCalled();
   });

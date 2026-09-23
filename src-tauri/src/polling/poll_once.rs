@@ -3606,6 +3606,19 @@ fn playback_state_changed(stored_is_playing: Option<bool>, observed_is_playing: 
     stored_is_playing != Some(observed_is_playing)
 }
 
+/// The generated `TrackInfo` value carried by `spotify-track-changed`.
+/// Device controls are useful to direct state consumers, but this event has
+/// always exposed only the seven track and playback fields consumed by the
+/// Dashboard. Strip the optional controls from the event copy rather than
+/// widening its wire contract.
+fn track_event_payload(track: &crate::spotify::TrackInfo) -> crate::spotify::TrackInfo {
+    let mut event_track = track.clone();
+    event_track.volume_percent = None;
+    event_track.supports_volume = None;
+    event_track.actions = None;
+    event_track
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn process_track(
     app: &AppHandle,
@@ -3832,16 +3845,7 @@ pub(crate) fn process_track(
         // two never disagree about what is playing.
         *LAST_NOW_PLAYING.lock() = Some(now.clone());
 
-        // Keep the event payload on the same generated `TrackInfo` contract as
-        // the frontend listener, while preserving the seven fields this event
-        // has always exposed. The device-control fields are `skip_serializing_if`
-        // options, so clearing them on this event copy leaves the wire shape
-        // unchanged instead of widening it with unrelated playback controls.
-        let mut event_track = track.clone();
-        event_track.volume_percent = None;
-        event_track.supports_volume = None;
-        event_track.actions = None;
-        let _ = app.emit("spotify-track-changed", event_track);
+        let _ = app.emit("spotify-track-changed", track_event_payload(track));
     } else if playing_changed {
         // Finding D6 (issue #689): a pause is a state change. Re-store the
         // observed item (so `current_track` — and therefore the returned sync
@@ -5614,6 +5618,46 @@ fn network_failure_backoff(count: u8) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn track_changed_event_serializes_exactly_the_seven_field_contract() {
+        let track = crate::spotify::TrackInfo {
+            title: "A Track".to_string(),
+            artist: "An Artist".to_string(),
+            album: "An Album".to_string(),
+            album_art_url: "https://example.com/album-art.jpg".to_string(),
+            is_playing: true,
+            progress_ms: Some(42_000),
+            duration_ms: 240_000,
+            volume_percent: Some(80),
+            supports_volume: Some(true),
+            actions: Some(crate::spotify::DeviceActions {
+                seeking: true,
+                ..Default::default()
+            }),
+        };
+
+        assert_eq!(
+            serde_json::to_value(track_event_payload(&track)).unwrap(),
+            json!({
+                "title": "A Track",
+                "artist": "An Artist",
+                "album": "An Album",
+                "album_art_url": "https://example.com/album-art.jpg",
+                "is_playing": true,
+                "progress_ms": 42_000,
+                "duration_ms": 240_000
+            })
+        );
+
+        let process_track = prod_fn_body(prod_source(), "pub(crate) fn process_track(");
+        assert!(
+            process_track.contains(
+                r#"app.emit("spotify-track-changed", track_event_payload(track))"#
+            ),
+            "spotify-track-changed must emit the serialized seven-field event value"
+        );
+    }
 
     /// Issue #538: the ladder with the DOCUMENTED default ceiling (300 s), so
     /// an untouched config behaves exactly as it did in 4.5.
