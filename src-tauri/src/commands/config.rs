@@ -1561,7 +1561,7 @@ mod tests {
                         serde_json::to_string_pretty(&competing).expect("serialize competitor");
                     std::fs::write(&writer_live, document).expect("competing write");
                     *guard = Some(competing);
-                }));
+                });
 
                 let imported = import
                     .join()
