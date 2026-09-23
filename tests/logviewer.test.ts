@@ -211,14 +211,11 @@ describe('LogViewer level badge column (#949)', () => {
     appStyle.textContent = densityCss;
     document.head.append(appStyle);
 
-    const densityValues: Record<string, { fontSize: number; gap: number }> = {};
+    let comfortableRendered: { fontSize: number; gap: number } | undefined;
+    let compactRendered: { fontSize: number; gap: number } | undefined;
     try {
       for (const density of ['comfortable', 'compact'] as const) {
         document.documentElement.dataset.density = density;
-        densityValues[density] = {
-          fontSize: parseCssLength('var(--fs-xs)', document.documentElement),
-          gap: parseCssLength('var(--sp-3)', document.documentElement)
-        };
         for (const locale of ['en', 'de', 'fr'] as const) {
           i18n.set(locale);
           const view = render(LogViewer, { detached: false });
@@ -240,12 +237,19 @@ describe('LogViewer level badge column (#949)', () => {
             expect(rowStyle.gridTemplateColumns).not.toBe('');
             const tracks = splitGridTracks(rowStyle.gridTemplateColumns);
             expect(tracks).toHaveLength(3);
-            const intrinsicWidth = measureBadge(badge as HTMLElement);
+            expect(isIntrinsicContentTrack(tracks[1])).toBe(true);
+            const measuredBadge = measureBadge(badge as HTMLElement);
+            const intrinsicWidth = measuredBadge.width;
             const badgeTrack = resolveBadgeTrack(tracks[1], intrinsicWidth);
             const timestampWidth = parseCssLength(tracks[0], row);
             const gapValue = rowStyle.columnGap || matchingProperty(row, 'column-gap') || matchingProperty(row, 'gap');
             expect(gapValue).not.toBe('');
             const gap = parseCssLength(gapValue, row);
+            if (locale === 'fr' && index === 3) {
+              const rendered = { fontSize: measuredBadge.fontSize, gap };
+              if (density === 'comfortable') comfortableRendered = rendered;
+              else compactRendered = rendered;
+            }
             const badgeLeft = timestampWidth + gap;
             const messageLeft = badgeLeft + badgeTrack + gap;
             patchRect(badge as HTMLElement, rect(badgeLeft, intrinsicWidth));
@@ -261,11 +265,28 @@ describe('LogViewer level badge column (#949)', () => {
           listeners.length = 0;
         }
       }
-      expect(densityValues.compact.fontSize).toBeLessThan(densityValues.comfortable.fontSize);
-      expect(densityValues.compact.gap).toBeLessThan(densityValues.comfortable.gap);
+      if (!comfortableRendered || !compactRendered) {
+        throw new Error('Expected mounted French warning metrics at both densities');
+      }
+      expect(compactRendered.fontSize).toBeLessThan(comfortableRendered.fontSize);
+      expect(compactRendered.gap).toBeLessThan(comfortableRendered.gap);
     } finally {
       appStyle.remove();
       delete document.documentElement.dataset.density;
+    }
+  });
+
+  it('accepts intrinsic-content badge track equivalents', () => {
+    const intrinsicWidth = 73;
+    for (const track of [
+      'min-content',
+      'max-content',
+      'minmax(min-content, max-content)',
+      'minmax(min-content, min-content)',
+      'minmax(max-content, max-content)'
+    ]) {
+      expect(isIntrinsicContentTrack(track)).toBe(true);
+      expect(resolveBadgeTrack(track, intrinsicWidth)).toBe(intrinsicWidth);
     }
   });
 });
@@ -286,6 +307,26 @@ function splitGridTracks(value: string): string[] {
   }
   if (current) tracks.push(current);
   return tracks;
+}
+
+function splitMinmaxBounds(value: string): string[] {
+  const bounds: string[] = [];
+  let current = '';
+  let depth = 0;
+  for (const character of value.trim()) {
+    if (character === '(') depth++;
+    if (character === ')') depth--;
+    if (character === ',' && depth === 0) {
+      if (!current.trim()) throw new Error(`Missing minmax bound in: ${value}`);
+      bounds.push(current.trim());
+      current = '';
+    } else {
+      current += character;
+    }
+  }
+  if (depth !== 0 || !current.trim()) throw new Error(`Invalid minmax bounds: ${value}`);
+  bounds.push(current.trim());
+  return bounds;
 }
 
 function parseCssLength(value: string, owner: Element, fontSize = 16): number {
@@ -336,10 +377,32 @@ function requireFinite(value: number, source: string): number {
 }
 
 function resolveBadgeTrack(track: string, intrinsicWidth: number): number {
-  if (track === 'max-content' || /^minmax\(\s*max-content\s*,\s*max-content\s*\)$/.test(track)) {
-    return intrinsicWidth;
+  const normalized = track.trim();
+  if (normalized === 'min-content' || normalized === 'max-content') return intrinsicWidth;
+
+  const minmax = normalized.match(/^minmax\((.*)\)$/);
+  if (minmax) {
+    const bounds = splitMinmaxBounds(minmax[1]);
+    if (bounds.length !== 2) throw new Error(`Expected two minmax bounds, got: ${track}`);
+    return Math.max(...bounds.map((bound) => resolveTrackBound(bound, intrinsicWidth)));
   }
-  return parseCssLength(track, document.documentElement);
+
+  return resolveTrackBound(normalized, intrinsicWidth);
+}
+
+function resolveTrackBound(bound: string, intrinsicWidth: number): number {
+  const normalized = bound.trim();
+  if (normalized === 'min-content' || normalized === 'max-content') return intrinsicWidth;
+  return parseCssLength(normalized, document.documentElement);
+}
+
+function isIntrinsicContentTrack(track: string): boolean {
+  const normalized = track.trim();
+  if (normalized === 'min-content' || normalized === 'max-content') return true;
+  const minmax = normalized.match(/^minmax\((.*)\)$/);
+  return minmax !== null && splitMinmaxBounds(minmax[1]).every(
+    (bound) => bound === 'min-content' || bound === 'max-content'
+  );
 }
 
 function paddingSide(value: string, side: 'left' | 'right'): string {
@@ -350,7 +413,7 @@ function paddingSide(value: string, side: 'left' | 'right'): string {
   return parts[3] ?? parts[1];
 }
 
-function measureBadge(badge: HTMLElement): number {
+function measureBadge(badge: HTMLElement): { width: number; fontSize: number } {
   const computed = getComputedStyle(badge);
   const fontSizeValue = computed.fontSize || matchingProperty(badge, 'font-size');
   const padding = matchingProperty(badge, 'padding');
@@ -372,7 +435,10 @@ function measureBadge(badge: HTMLElement): number {
     (width, character) => width + (/\s/.test(character) ? 0.35 : 0.62),
     0
   ) * fontSize;
-  return glyphWidth + horizontalPadding + label.length * letterSpacing;
+  return {
+    width: glyphWidth + horizontalPadding + label.length * letterSpacing,
+    fontSize
+  };
 }
 
 function rect(left: number, width: number): DOMRect {
