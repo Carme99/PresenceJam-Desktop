@@ -54,6 +54,15 @@ use url::Url;
 /// Log tag prefix for this submodule (mirrors the `[CMD.MISC]` pattern).
 const TAG: &str = "[UPDATER.BG]";
 
+/// Maximum number of accepted cancellations whose stage IPC has not reached
+/// `begin` yet. The set is never evicted: once full, new stages and unique
+/// unmatched cancellations are backpressured until a delayed stage consumes
+/// one of the retained tombstones.
+const MAX_CANCELLED_BEFORE_BEGIN: usize = 32;
+
+const PRE_BEGIN_CANCELLATIONS_FULL: &str =
+    "too many deferred-stage cancellations are awaiting acknowledgement";
+
 /// File name of the failed-install marker inside `config_dir()`.
 const MARKER_FILE_NAME: &str = "update-install-failed.json";
 
@@ -135,6 +144,7 @@ struct ActiveStage {
 enum BeginOutcome {
     Started(ActiveStage),
     Cancelled,
+    Backpressured,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,6 +170,9 @@ impl From<CancelDisposition> for CancelDeferredState {
 /// `(generation, request_id)` pair is still active. `cancelled_before_begin`
 /// closes the narrower IPC ordering where cancellation reaches the backend
 /// first: `begin` consumes that request-scoped tombstone and performs no IO.
+/// The set is explicitly bounded; when full, unrelated new stages are
+/// backpressured instead of evicting a cancellation and reviving its delayed
+/// command.
 #[derive(Debug)]
 struct PendingUpdateState<T> {
     staged: Option<T>,
@@ -192,6 +205,9 @@ impl<T> PendingUpdateState<T> {
         if self.cancelled_before_begin.remove(&request_id) {
             return BeginOutcome::Cancelled;
         }
+        if self.cancelled_before_begin.len() >= MAX_CANCELLED_BEFORE_BEGIN {
+            return BeginOutcome::Backpressured;
+        }
         let active = ActiveStage {
             generation: self.advance_generation(),
             request_id,
@@ -220,7 +236,7 @@ impl<T> PendingUpdateState<T> {
         true
     }
 
-    fn cancel_request(&mut self, request_id: &str) -> CancelDisposition {
+    fn cancel_request(&mut self, request_id: &str) -> Result<CancelDisposition, String> {
         if self
             .active
             .as_ref()
@@ -228,17 +244,21 @@ impl<T> PendingUpdateState<T> {
         {
             self.advance_generation();
             self.active = None;
-            CancelDisposition::Cancelled
+            Ok(CancelDisposition::Cancelled)
         } else if self.staged_request_id.as_deref() == Some(request_id) {
             self.staged = None;
             self.staged_request_id = None;
-            CancelDisposition::AlreadyCompleted
+            Ok(CancelDisposition::AlreadyCompleted)
+        } else if self.cancelled_before_begin.contains(request_id) {
+            Ok(CancelDisposition::Idle)
+        } else if self.cancelled_before_begin.len() >= MAX_CANCELLED_BEFORE_BEGIN {
+            Err(PRE_BEGIN_CANCELLATIONS_FULL.to_string())
         } else {
             // The stage command has not reached `begin` yet. Remember this
             // exact request under the same lock so a later begin cannot turn
             // the older invocation into a fresh, apparently uncancelled stage.
             self.cancelled_before_begin.insert(request_id.to_string());
-            CancelDisposition::Idle
+            Ok(CancelDisposition::Idle)
         }
     }
 
@@ -568,10 +588,11 @@ pub fn cancel_deferred_update(
     let disposition = {
         let state = app.state::<PendingUpdate>();
         let mut guard = state.0.lock();
-        let disposition = guard.cancel_request(&request_id).into();
+        let disposition = guard.cancel_request(&request_id)?;
         drop(guard);
         disposition
     };
+    let disposition: CancelDeferredState = disposition.into();
     match disposition {
         CancelDeferredState::AlreadyCompleted => {
             log::info!("{TAG} cancel_deferred_update: completed stage {request_id} discarded");
@@ -1193,6 +1214,13 @@ pub async fn stage_deferred_update(
                     current: env!("CARGO_PKG_VERSION").to_string(),
                     skipped: Some(SKIP_REASON_CANCELLED.to_string()),
                 });
+            }
+            BeginOutcome::Backpressured => {
+                drop(guard);
+                log::warn!(
+                    "{TAG} stage_deferred_update: pre-begin cancellation capacity is full; no IO started"
+                );
+                return Err(PRE_BEGIN_CANCELLATIONS_FULL.to_string());
             }
         };
         drop(guard);
@@ -2195,6 +2223,7 @@ mod tests {
         match state.lock().begin(request_id.to_string()) {
             BeginOutcome::Started(active) => active,
             BeginOutcome::Cancelled => panic!("uncancelled request {request_id} was tombstoned"),
+            BeginOutcome::Backpressured => panic!("cancellation capacity is full for {request_id}"),
         }
     }
 
@@ -2221,15 +2250,14 @@ mod tests {
     #[test]
     fn test_cancel_before_begin_never_stages_or_installs() {
         let slot: Mutex<PendingUpdateState<Vec<u8>>> = Mutex::new(PendingUpdateState::new());
-
         assert_eq!(
             slot.lock().cancel_request("stage-a"),
-            CancelDisposition::Idle
+            Ok(CancelDisposition::Idle)
         );
         let stage_b = start_stage(&slot, "stage-b");
         assert_eq!(
             slot.lock().cancel_request("stage-b"),
-            CancelDisposition::Cancelled
+            Ok(CancelDisposition::Cancelled)
         );
         assert!(matches!(
             slot.lock().begin("stage-a".to_string()),
@@ -2247,7 +2275,7 @@ mod tests {
         let slot: Mutex<PendingUpdateState<Vec<u8>>> = Mutex::new(PendingUpdateState::new());
         assert_eq!(
             slot.lock().cancel_request("queued-stage"),
-            CancelDisposition::Idle
+            Ok(CancelDisposition::Idle)
         );
         assert_eq!(slot.lock().cancel(), CancelDisposition::Idle);
         assert!(matches!(
@@ -2267,7 +2295,7 @@ mod tests {
 
         assert_eq!(
             slot.lock().cancel_request("stage-cancelled"),
-            CancelDisposition::Cancelled
+            Ok(CancelDisposition::Cancelled)
         );
         assert!(!slot.lock().commit(&active, vec![1, 2, 3]));
         assert!(slot.lock().take_for_exit().is_none());
@@ -2284,8 +2312,43 @@ mod tests {
         assert!(slot.lock().commit(&active, vec![4, 5, 6]));
         assert_eq!(
             slot.lock().cancel_request("stage-complete"),
-            CancelDisposition::AlreadyCompleted
+            Ok(CancelDisposition::AlreadyCompleted)
         );
+        assert!(slot.lock().take_for_exit().is_none());
+    }
+
+    /// Pre-begin cancellations never grow past their explicit bound. A full
+    /// tombstone set backpressures a new stage without dropping any accepted
+    /// cancellation, and repeated unmatched unique cancels are rejected
+    /// instead of evicting a delayed stage's protection.
+    #[test]
+    fn test_pre_begin_cancellations_are_bounded_without_reviving_stages() {
+        let slot: Mutex<PendingUpdateState<Vec<u8>>> = Mutex::new(PendingUpdateState::new());
+
+        for index in 0..MAX_CANCELLED_BEFORE_BEGIN {
+            assert_eq!(
+                slot.lock().cancel_request(&format!("queued-{index}")),
+                Ok(CancelDisposition::Idle)
+            );
+        }
+        assert!(matches!(
+            slot.lock().begin("new-stage".to_string()),
+            BeginOutcome::Backpressured
+        ));
+        for index in MAX_CANCELLED_BEFORE_BEGIN..(MAX_CANCELLED_BEFORE_BEGIN * 2) {
+            assert_eq!(
+                slot.lock().cancel_request(&format!("overflow-{index}")),
+                Err(PRE_BEGIN_CANCELLATIONS_FULL.to_string())
+            );
+        }
+        assert_eq!(
+            slot.lock().cancelled_before_begin.len(),
+            MAX_CANCELLED_BEFORE_BEGIN
+        );
+        assert!(matches!(
+            slot.lock().begin("queued-0".to_string()),
+            BeginOutcome::Cancelled
+        ));
         assert!(slot.lock().take_for_exit().is_none());
     }
 

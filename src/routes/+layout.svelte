@@ -61,10 +61,11 @@
   devLog(`[LAYOUT] PresenceJam build: ${import.meta.env.VITE_APP_BUILD ?? 'dev build'}`);
 
   // #711: completion events carry the exact stage request id. Keep a bounded
-  // LRU of request state so a cancel can suppress either a queued completion
-  // or a notification already waiting on OS permission. Entries normally
-  // disappear at their request-specific terminal acknowledgement; the limit
-  // is the final guard against a permanently lost acknowledgement.
+  // map of request state so a cancel can suppress either a queued completion
+  // or a notification already waiting on OS permission. Only terminal,
+  // acknowledged entries are evictable. If every slot is unresolved, latch
+  // backpressure for this layout lifetime so an untracked cancellation cannot
+  // become a fresh state after capacity is released.
   type UpdateStageNotificationState = {
     completionSeen: boolean;
     notificationPending: boolean;
@@ -74,26 +75,37 @@
   const MAX_TRACKED_UPDATE_STAGES = 32;
   const updateStageNotifications = new Map<string, UpdateStageNotificationState>();
   let updateNotificationDispatchDestroyed = false;
+  let updateStageTrackingSaturated = false;
 
-  function stateForUpdateStage(requestId: string): UpdateStageNotificationState {
+  function stateForUpdateStage(requestId: string): UpdateStageNotificationState | null {
     const existing = updateStageNotifications.get(requestId);
     if (existing) {
-      // Refresh insertion order so the bound evicts the oldest quiet state,
-      // not the request most recently involved in a race.
+      // Refresh insertion order so the bound evicts the oldest acknowledged
+      // state, not the request most recently involved in a race.
       updateStageNotifications.delete(requestId);
       updateStageNotifications.set(requestId, existing);
       return existing;
     }
 
+    if (updateStageTrackingSaturated) {
+      devLog('[LAYOUT] update-stage tracking saturated; unknown request suppressed');
+      return null;
+    }
+
     if (updateStageNotifications.size >= MAX_TRACKED_UPDATE_STAGES) {
-      const oldestId = updateStageNotifications.keys().next().value as string | undefined;
-      if (oldestId !== undefined) {
-        const oldest = updateStageNotifications.get(oldestId)!;
-        // An evicted pending dispatch is cancelled rather than orphaned: its
-        // permission continuation rechecks this request-owned predicate.
-        oldest.cancelled = true;
-        updateStageNotifications.delete(oldestId);
+      let acknowledgedId: string | undefined;
+      for (const [trackedId, state] of updateStageNotifications) {
+        if (state.completionSeen && !state.notificationPending) {
+          acknowledgedId = trackedId;
+          break;
+        }
       }
+      if (acknowledgedId === undefined) {
+        updateStageTrackingSaturated = true;
+        devLog('[LAYOUT] update-stage tracking saturated; notification backpressured');
+        return null;
+      }
+      updateStageNotifications.delete(acknowledgedId);
     }
     const state: UpdateStageNotificationState = {
       completionSeen: false,
@@ -107,6 +119,7 @@
   function setUpdateStageCancellation(requestId: string, cancelled: boolean) {
     if (!requestId || (!cancelled && !updateStageNotifications.has(requestId))) return;
     const state = stateForUpdateStage(requestId);
+    if (!state) return;
     state.cancelled = cancelled;
     const terminalWithoutPendingSend = cancelled
       ? state.completionSeen && !state.notificationPending
@@ -163,6 +176,10 @@
       return;
     }
     const state = stateForUpdateStage(requestId);
+    if (!state) {
+      devLog('[LAYOUT] update-stage-complete suppressed by tracking backpressure');
+      return;
+    }
     if (state.cancelled) {
       updateStageNotifications.delete(requestId);
       devLog('[LAYOUT] update-stage-complete ignored for cancelled stage');

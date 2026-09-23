@@ -342,6 +342,39 @@ describe('UpdatePrompt deferred staging (#590)', () => {
     expect(sendNotificationMock).not.toHaveBeenCalled();
   });
 
+  it('keeps a cancelled request suppressed after tracker capacity pressure', async () => {
+    const permission = Promise.withResolvers<boolean>();
+    isPermissionGrantedMock.mockReturnValue(permission.promise);
+    configStore.set(structuredClone(defaultConfig));
+    configHydrated.set(true);
+    const { container } = await mountLayout();
+    await startStage(container);
+    stageResolvers.shift()!({ staged: '4.6.0', current: '4.5.2' });
+    await waitFor(() => expect(container.querySelector('.update-staged')).not.toBeNull());
+    const requestA = stageRequestId();
+    setCancelOutcome('already-completed');
+
+    await fireEvent.click(
+      within(container).getByRole('button', { name: t('update.cancelStage') })
+    );
+    await waitFor(() => expect(cancelCall(requestA)).toBeDefined());
+
+    const laterRequestIds = Array.from({ length: 33 }, (_, index) => `later-${index}`);
+    for (const requestId of laterRequestIds) {
+      await emit('update-stage-complete', { version: '4.6.0', request_id: requestId });
+    }
+
+    // A's completion stays cancelled even though later requests filled every
+    // tracker slot. A then releases one slot, but sticky backpressure must
+    // continue suppressing the request that was refused tracking.
+    await emit('update-stage-complete', { version: '4.6.0', request_id: requestA });
+    await emit('update-stage-complete', {
+      version: '4.6.0',
+      request_id: laterRequestIds.at(-1)
+    });
+    expect(sendNotificationMock).not.toHaveBeenCalled();
+  });
+
   it('drops a notification whose permission await outlives its cancellation', async () => {
     const permission = Promise.withResolvers<boolean>();
     isPermissionGrantedMock.mockReturnValue(permission.promise);
