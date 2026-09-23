@@ -1238,6 +1238,8 @@ mod tests {
     /// so a stale staged update can never silently downgrade the app --
     /// the `is_stale_version` skip is the only downgrade path (explicit
     /// force through the quit-time confirmation surface).
+    /// Issue #924: the packaged webview CSP must also keep `base-uri 'self'`
+    /// and explicitly block form submissions with `form-action 'none'`.
     #[test]
     fn test_tauri_conf_disallows_downgrades() {
         let conf = include_str!("../tauri.conf.json");
@@ -1248,6 +1250,19 @@ mod tests {
             flag,
             Some(&serde_json::Value::Bool(false)),
             "allowDowngrades must be false (issue #484)"
+        );
+
+        let csp = value
+            .pointer("/app/security/csp")
+            .and_then(serde_json::Value::as_str)
+            .expect("app.security.csp must be a string");
+        assert!(
+            csp.contains("base-uri 'self'"),
+            "packaged webview CSP must keep base-uri 'self'"
+        );
+        assert!(
+            csp.contains("form-action 'none'"),
+            "packaged webview CSP must block all form submissions"
         );
     }
 
