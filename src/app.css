@@ -90,6 +90,9 @@
 /* ---------- Theme: dark (default) ---------- */
 :root,
 [data-theme='dark'] {
+  /* Native form controls / scrollbars follow the painted theme (#959). */
+  color-scheme: dark;
+
   /* Surfaces */
   --bg-base: #0F1226;          /* page bg, deepest */
   --bg-surface: #181B36;       /* card */
@@ -129,6 +132,9 @@
 
 /* ---------- Theme: light ---------- */
 [data-theme='light'] {
+  /* Native form controls / scrollbars follow the painted theme (#959). */
+  color-scheme: light;
+
   --bg-base: #F6F7FB;
   --bg-surface: #FFFFFF;
   --bg-elevated: #EFF1F8;
