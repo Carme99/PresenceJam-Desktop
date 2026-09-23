@@ -569,7 +569,7 @@
     background: var(--bg-elevated);
     border: 1px solid var(--accent);
     border-radius: var(--r-md);
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+    box-shadow: var(--shadow-update-banner);
   }
   /* #951: the banner is docked, never floating over the top chrome. Centred
      at `top: var(--sp-3)` it sat on the Dashboard header's icon row at the
@@ -594,7 +594,7 @@
     bottom: calc(var(--sp-10) + var(--sp-1));
     left: 50%;
     transform: translateX(-50%);
-    z-index: 1000;
+    z-index: var(--z-update-banner);
   }
   .update-info {
     display: flex;
