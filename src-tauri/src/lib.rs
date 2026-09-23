@@ -2693,6 +2693,10 @@ pub fn run() {
         Ok(app) => app,
         Err(e) => {
             log::error!("[APP] run: failed to build tauri application: {}", e);
+            // Issue #947: tauri-plugin-log's file target buffers, so exit(1)
+            // without flushing would drop the error above. Flush before the
+            // exit, matching the CLI failure path's flush-before-exit pattern.
+            log::logger().flush();
             std::process::exit(1);
         }
     };
