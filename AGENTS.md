@@ -3,7 +3,7 @@
 > Single source of truth for AI coding agents (Claude Code, Codex, Cursor, aider,
 > OpenClaw, omp, etc.). If your tool reads only one file from this repo, this is
 > the one. **CLAUDE.md is deprecated** and points here; see
-> [§ Migration from CLAUDE.md](#migration-from-claudemd) at the bottom.
+> [§ Migration from CLAUDE.md](#15-migration-from-claudemd) at the bottom.
 
 PresenceJam syncs what you're playing on Spotify into your Microsoft Teams status,
 as a Tauri 2 desktop app (Rust backend, Svelte 5 / TypeScript frontend, SvelteKit
