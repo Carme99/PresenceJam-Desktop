@@ -68,7 +68,7 @@
   }
 
   // C9: effective polling bounds, mirroring Rust `clamp_polling`
-  // (src-tauri/src/config.rs:109): minimum clamps to [5, 30] first, then
+  // (`config::clamp_polling`): minimum clamps to [5, 30] first, then
   // maximum clamps to [effectiveMinimum, 300]. Consumed twice — the
   // max-interval input's native `min` bound (issue #243) and the clamp
   // hint below it. An entered max below min is silently raised on save;
