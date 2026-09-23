@@ -78,7 +78,9 @@ function cssColor(value: string): Color {
   // Convert modern CSS color syntaxes (including oklch and alpha hex) with
   // the CSS Tools parser, then let the browser's CSSStyleDeclaration parser
   // normalize the sRGB result for the numeric channels.
-  const parsed = color(parseComponentValue(tokenize({ css: resolved })));
+  const componentValue = parseComponentValue(tokenize({ css: resolved }));
+  if (!componentValue) throw new Error(`Unsupported CSS color: ${value}`);
+  const parsed = color(componentValue);
   const normalized = parsed ? serializeRGB(parsed).toString() : resolved;
   const probe = document.createElement('span');
   probe.style.color = normalized;
