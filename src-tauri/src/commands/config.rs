@@ -1365,9 +1365,7 @@ mod tests {
             &state,
             &live,
             "{\"spotify\":{\"client_id\":\"NEW\"}}",
-            || -> Result<AppConfig, String> {
-                panic!("a failed replace must not reload")
-            },
+            || -> Result<AppConfig, String> { panic!("a failed replace must not reload") },
         )
         .expect_err("the replace cannot be staged");
         assert!(err.contains("import temp file"), "unexpected error: {err}");
@@ -1483,8 +1481,7 @@ mod tests {
 
         let dir = temp_dir("pj-test-import-write-lock");
         let live = dir.join("config.json");
-        let imported_document =
-            "{\"spotify\":{\"client_id\":\"IMPORTED\"},\"schema_version\":1}";
+        let imported_document = "{\"spotify\":{\"client_id\":\"IMPORTED\"},\"schema_version\":1}";
         let prepared = config::prepare_import(imported_document).expect("valid import");
         std::fs::write(
             &live,
@@ -1493,109 +1490,102 @@ mod tests {
         .expect("previous config");
 
         let state = Arc::new(AppState::new());
-        let (published_on_disk, published_state) =
-            thread::scope(|scope| {
-                let (import_locked_tx, import_locked_rx) = mpsc::channel();
-                let (writer_attempted_tx, writer_attempted_rx) = mpsc::channel();
-                let (writer_adopted_tx, writer_adopted_rx) = mpsc::channel();
-                let (release_writer_tx, release_writer_rx) = mpsc::channel();
-                // This guard must live inside the scope: on an assertion panic it
-                // releases the writer before scoped-thread joining begins.
-                let release_writer = WriterRelease(release_writer_tx);
+        let (published_on_disk, published_state) = thread::scope(|scope| {
+            let (import_locked_tx, import_locked_rx) = mpsc::channel();
+            let (writer_attempted_tx, writer_attempted_rx) = mpsc::channel();
+            let (writer_adopted_tx, writer_adopted_rx) = mpsc::channel();
+            let (release_writer_tx, release_writer_rx) = mpsc::channel();
+            // This guard must live inside the scope: on an assertion panic it
+            // releases the writer before scoped-thread joining begins.
+            let release_writer = WriterRelease(release_writer_tx);
 
-                let import_state = Arc::clone(&state);
-                let import_live = live.clone();
-                let import = scope.spawn(move || {
-                    replace_and_adopt_config(
-                        &import_state,
-                        &import_live,
-                        &prepared.document,
-                        || {
-                            // This callback runs only after the helper owns the
-                            // config guard and has installed the imported file.
-                            import_locked_tx
-                                .send(())
-                                .expect("test must observe the import lock");
-                            writer_attempted_rx
-                                .recv()
-                                .expect("competing writer must attempt during the reload seam");
-                            assert!(
-                                import_state.config.try_get_mut().is_none(),
-                                "the config write guard must still be held during import reload"
-                            );
-                            let raw =
-                                std::fs::read_to_string(&import_live).expect("imported config");
-                            serde_json::from_str(&raw).map_err(|error| error.to_string())
-                        },
-                    )
-                });
-
-                // Do not let scheduling decide who owns the config guard. The
-                // reload callback cannot emit this until replace_and_adopt_config
-                // has acquired it, so the writer is always launched under test.
-                import_locked_rx
-                    .recv()
-                    .expect("import must acquire the config guard");
-                let writer_state = Arc::clone(&state);
-                let writer_live = live.clone();
-                let writer = scope.spawn(move || {
-                    let import_holds_guard = writer_state.config.try_get_mut().is_none();
-                    writer_attempted_tx
+            let import_state = Arc::clone(&state);
+            let import_live = live.clone();
+            let import = scope.spawn(move || {
+                replace_and_adopt_config(&import_state, &import_live, &prepared.document, || {
+                    // This callback runs only after the helper owns the
+                    // config guard and has installed the imported file.
+                    import_locked_tx
                         .send(())
-                        .expect("import reload must receive the competing writer attempt");
-                    assert!(
-                        import_holds_guard,
-                        "competing writer must not acquire during import reload"
-                    );
-                    let mut guard = writer_state.config.get_mut();
-                    writer_adopted_tx
-                        .send(guard.as_ref().map(|cfg| cfg.spotify.client_id.clone()))
-                        .expect("test must observe the writer's adopted predecessor");
-                    release_writer_rx
+                        .expect("test must observe the import lock");
+                    writer_attempted_rx
                         .recv()
-                        .expect("test must release the competing writer");
-
-                    let mut competing = AppConfig::default();
-                    competing.spotify.client_id = "COMPETING".to_string();
-                    let document =
-                        serde_json::to_string_pretty(&competing).expect("serialize competitor");
-                    std::fs::write(&writer_live, document).expect("competing write");
-                    *guard = Some(competing);
-                });
-
-                let imported = import
-                    .join()
-                    .expect("import task")
-                    .expect("imported config must load and adopt");
-                let writer_saw = writer_adopted_rx
-                    .recv()
-                    .expect("competing writer must acquire after import adoption");
-                let on_disk_before_writer = serde_json::from_str::<AppConfig>(
-                    &std::fs::read_to_string(&live).expect("config on disk"),
-                )
-                .expect("parse config on disk");
-
-                assert_eq!(imported.spotify.client_id, "IMPORTED");
-                assert_eq!(on_disk_before_writer.spotify.client_id, "IMPORTED");
-                assert_eq!(
-                    writer_saw.as_deref(),
-                    Some("IMPORTED"),
-                    "the writer must observe the imported state before replacing it"
-                );
-                drop(release_writer);
-                writer.join().expect("competing writer task");
-
-                let published_on_disk = serde_json::from_str::<AppConfig>(
-                    &std::fs::read_to_string(&live).expect("published config on disk"),
-                )
-                .expect("parse published config on disk");
-                let published_state = state
-                    .config
-                    .get()
-                    .as_ref()
-                    .map(|cfg| cfg.spotify.client_id.clone());
-                (published_on_disk, published_state)
+                        .expect("competing writer must attempt during the reload seam");
+                    assert!(
+                        import_state.config.try_get_mut().is_none(),
+                        "the config write guard must still be held during import reload"
+                    );
+                    let raw = std::fs::read_to_string(&import_live).expect("imported config");
+                    serde_json::from_str(&raw).map_err(|error| error.to_string())
+                })
             });
+
+            // Do not let scheduling decide who owns the config guard. The
+            // reload callback cannot emit this until replace_and_adopt_config
+            // has acquired it, so the writer is always launched under test.
+            import_locked_rx
+                .recv()
+                .expect("import must acquire the config guard");
+            let writer_state = Arc::clone(&state);
+            let writer_live = live.clone();
+            let writer = scope.spawn(move || {
+                let import_holds_guard = writer_state.config.try_get_mut().is_none();
+                writer_attempted_tx
+                    .send(())
+                    .expect("import reload must receive the competing writer attempt");
+                assert!(
+                    import_holds_guard,
+                    "competing writer must not acquire during import reload"
+                );
+                let mut guard = writer_state.config.get_mut();
+                writer_adopted_tx
+                    .send(guard.as_ref().map(|cfg| cfg.spotify.client_id.clone()))
+                    .expect("test must observe the writer's adopted predecessor");
+                release_writer_rx
+                    .recv()
+                    .expect("test must release the competing writer");
+
+                let mut competing = AppConfig::default();
+                competing.spotify.client_id = "COMPETING".to_string();
+                let document =
+                    serde_json::to_string_pretty(&competing).expect("serialize competitor");
+                std::fs::write(&writer_live, document).expect("competing write");
+                *guard = Some(competing);
+            });
+
+            let imported = import
+                .join()
+                .expect("import task")
+                .expect("imported config must load and adopt");
+            let writer_saw = writer_adopted_rx
+                .recv()
+                .expect("competing writer must acquire after import adoption");
+            let on_disk_before_writer = serde_json::from_str::<AppConfig>(
+                &std::fs::read_to_string(&live).expect("config on disk"),
+            )
+            .expect("parse config on disk");
+
+            assert_eq!(imported.spotify.client_id, "IMPORTED");
+            assert_eq!(on_disk_before_writer.spotify.client_id, "IMPORTED");
+            assert_eq!(
+                writer_saw.as_deref(),
+                Some("IMPORTED"),
+                "the writer must observe the imported state before replacing it"
+            );
+            drop(release_writer);
+            writer.join().expect("competing writer task");
+
+            let published_on_disk = serde_json::from_str::<AppConfig>(
+                &std::fs::read_to_string(&live).expect("published config on disk"),
+            )
+            .expect("parse published config on disk");
+            let published_state = state
+                .config
+                .get()
+                .as_ref()
+                .map(|cfg| cfg.spotify.client_id.clone());
+            (published_on_disk, published_state)
+        });
 
         assert_eq!(published_on_disk.spotify.client_id, "COMPETING");
         assert_eq!(published_state.as_deref(), Some("COMPETING"));
