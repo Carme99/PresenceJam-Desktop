@@ -588,7 +588,7 @@
 
   .log-entry {
     display: grid;
-    grid-template-columns: 88px 80px 1fr;
+    grid-template-columns: 88px max-content 1fr;
     align-items: flex-start;
     gap: var(--sp-3);
     padding: var(--sp-2) var(--sp-3);
@@ -615,7 +615,7 @@
     justify-self: start;
     padding: 2px 8px;
     border-radius: var(--r-sm);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.04em;

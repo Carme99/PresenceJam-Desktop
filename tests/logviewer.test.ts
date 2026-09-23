@@ -10,6 +10,7 @@
  * #692 adds the listener-teardown cases at the bottom: the pane must
  * release a `log://log` registration that settles *after* it unmounts.
  */
+import { readFileSync } from 'node:fs';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, fireEvent, cleanup, waitFor } from '@testing-library/svelte';
 import { tick } from 'svelte';
@@ -83,6 +84,7 @@ afterEach(() => {
   // Unmount each render: the jsdom document is shared per file, so
   // getByRole would otherwise match tabs from earlier tests.
   cleanup();
+  i18n.set('en');
 });
 
 describe('LogViewer behavior (#492)', () => {
@@ -181,6 +183,56 @@ describe('LogViewer listener teardown (#692)', () => {
 
     expect(registrationsCreated).toBe(3);
     expect(unlistenCalls).toBe(3);
+  });
+});
+
+/**
+ * #949 — a fixed badge column let French "Avertissement" overflow into the
+ * message column. Render every severity in every shipped locale and keep the
+ * grid's content-sized badge track and density-token contract pinned at the
+ * real component boundary.
+ */
+describe('LogViewer level badge column (#949)', () => {
+  it('sizes every localized badge to its label without overlapping the message', async () => {
+    // jsdom has no layout engine or component-CSS injection. Render the real
+    // localized rows, then pin the stylesheet contract that guarantees their
+    // badge tracks are at least as wide as the rendered labels.
+    const css = readFileSync('src/lib/components/LogViewer.svelte', 'utf8');
+    const gridColumns = css.match(
+      /\.log-entry\s*\{[^}]*grid-template-columns:\s*([^;]+)/
+    )?.[1].trim();
+    expect(gridColumns).toBe('88px max-content 1fr');
+    expect(css).toMatch(/\.level-badge\s*\{[^}]*font-size:\s*var\(--fs-xs\)/);
+
+    const labelsByLocale = {
+      en: ['Trace', 'Debug', 'Info', 'Warning', 'Error'],
+      de: ['Trace', 'Debug', 'Info', 'Warnung', 'Fehler'],
+      fr: ['Trace', 'Debug', 'Info', 'Avertissement', 'Erreur']
+    } as const;
+
+    for (const locale of ['en', 'de', 'fr'] as const) {
+      i18n.set(locale);
+      const view = render(LogViewer, { detached: false });
+      for (let level = 1; level <= 5; level++) {
+        emit(level, `${locale}-message-${level}`);
+      }
+      await tick();
+
+      const rows = Array.from(
+        view.container.querySelectorAll<HTMLElement>('.log-entry')
+      );
+      expect(rows).toHaveLength(5);
+
+      for (const [index, row] of rows.entries()) {
+        const badge = row.querySelector<HTMLElement>('.level-badge');
+        const message = row.querySelector<HTMLElement>('.message');
+        expect(badge?.textContent).toBe(labelsByLocale[locale][index]);
+        expect(message?.textContent).toBe(`${locale}-message-${index + 1}`);
+      }
+
+      view.unmount();
+      listeners.length = 0;
+    }
   });
 });
 
