@@ -9,14 +9,14 @@
 //! after this change will need the user to re-enter the secret via
 //! Onboarding. See issue #9.
 //!
-//! Caching: the secret is held in a process-wide `RwLock<Option<String>>`
-//! after the first read, so the polling thread (which calls
-//! `peek_spotify_client_secret` on every 30s iteration) does not hit the
-//! OS keychain on the happy path. Issue #69.
+//! Caching: the secret and its last successful presence observation are held
+//! in a process-wide lock after the first read, so polling and normal config
+//! loads avoid another OS keychain call on the happy path. Issue #69/#881.
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use rand::TryRngCore;
 use std::sync::LazyLock;
+use std::time::{Duration, Instant};
 
 const KEYRING_SERVICE: &str = "presencejam";
 
@@ -42,10 +42,52 @@ const SERVE_TOKEN_USER: &str = "serve_token:com.presencejam.app";
 /// re-onboard after upgrading.
 const SPOTIFY_CLIENT_SECRET_USER_LEGACY: &str = "spotify_client_secret";
 
-static CACHE: LazyLock<parking_lot::RwLock<Option<String>>> =
-    LazyLock::new(|| parking_lot::RwLock::new(None));
+/// How long a successful platform presence probe may satisfy config loads.
+/// Explicit secret reads remain cache-backed independently; this TTL only
+/// bounds how long a config load can avoid revalidating an externally changed
+/// OS keychain entry.
+const SPOTIFY_CLIENT_SECRET_PRESENCE_TTL: Duration = Duration::from_secs(30);
 
-fn cache() -> &'static parking_lot::RwLock<Option<String>> {
+struct CachedSpotifyClientSecret {
+    secret: String,
+    presence_refreshed_at: Instant,
+}
+
+#[derive(Default)]
+struct SpotifyClientSecretCache {
+    secret: parking_lot::RwLock<Option<CachedSpotifyClientSecret>>,
+}
+
+impl SpotifyClientSecretCache {
+    fn peek(&self) -> Option<String> {
+        self.secret.read().as_ref().map(|cached| cached.secret.clone())
+    }
+
+    fn store(&self, secret: &str, presence_refreshed_at: Instant) {
+        *self.secret.write() = Some(CachedSpotifyClientSecret {
+            secret: secret.to_string(),
+            presence_refreshed_at,
+        });
+    }
+
+    fn clear(&self) {
+        *self.secret.write() = None;
+    }
+
+    fn has_fresh_presence(&self, now: Instant) -> bool {
+        self.secret.read().as_ref().is_some_and(|cached| {
+            now.saturating_duration_since(cached.presence_refreshed_at)
+                < SPOTIFY_CLIENT_SECRET_PRESENCE_TTL
+        })
+    }
+}
+
+static CACHE: LazyLock<SpotifyClientSecretCache> =
+    LazyLock::new(|| SpotifyClientSecretCache {
+        secret: parking_lot::RwLock::new(None),
+    });
+
+fn cache() -> &'static SpotifyClientSecretCache {
     &CACHE
 }
 
@@ -110,8 +152,9 @@ pub fn store_spotify_client_secret(secret: &str) -> Result<(), String> {
         || delete_keychain_entry(SPOTIFY_CLIENT_SECRET_USER_LEGACY),
     )?;
     // The cache assignment stays last, so the cache never serves a value a
-    // preceding step just superseded.
-    *cache().write() = Some(secret.to_string());
+    // preceding step just superseded. A successful store also starts a fresh
+    // presence window for config loads.
+    cache().store(secret, Instant::now());
     log::info!("[KEYCHAIN] Stored Spotify client_secret in OS keychain (cache updated)");
     Ok(())
 }
@@ -172,8 +215,9 @@ pub fn read_spotify_client_secret() -> Result<String, KeychainReadError> {
         // a failed migration must not block it (audit M2).
         forward_migrate_legacy_secret(&secret);
     }
-    // Populate cache for next call
-    *cache().write() = Some(secret.clone());
+    // Populate cache for next call and let config loads reuse this successful
+    // platform observation without probing again during its freshness window.
+    cache().store(&secret, Instant::now());
     log::info!("[KEYCHAIN] Loaded Spotify client_secret from OS keychain (cache populated)");
     Ok(secret)
 }
@@ -244,18 +288,17 @@ fn forward_migrate_legacy_secret(secret: &str) {
 /// call. Returns `None` if the cache is cold. Used by the polling thread
 /// to avoid the keychain prompt on every iteration. See issue #69.
 pub fn peek_spotify_client_secret() -> Option<String> {
-    cache().read().clone()
+    cache().peek()
 }
 
 /// Check whether the Spotify `client_secret` is present in the OS keychain.
 ///
-/// This consults the keychain directly and does not use the in-process
-/// cache, so it reflects the current keychain state even if the entry
-/// was deleted while the app is running (e.g. via the macOS Keychain
-/// Access app, the Windows Credential Manager UI, or `secret-tool` on
-/// Linux). Called from `is_spotify_client_secret_set` (user-action
-/// gated) and from `config::with_keychain_flags` (called only on
-/// config load), both of which are off the polling hot path.
+/// This consults the keychain directly and does not reuse the in-process
+/// presence observation, so it reflects the current keychain state even if
+/// the entry was deleted while the app is running. A successful direct probe
+/// refreshes the warm config-load cache; an unavailable result deliberately
+/// leaves any cached secret intact for explicit reads.
+/// Called from `is_spotify_client_secret_set` (user-action gated).
 ///
 /// Checks both the namespaced slot (current installs) and the legacy
 /// unnamespaced slot (v2.7.2 and earlier installs that haven't yet
@@ -387,20 +430,71 @@ const SPOTIFY_CLIENT_SECRET_NOT_FOUND_MSG: &str =
     "Spotify client secret not found in keychain. Please re-enter via Onboarding.";
 
 /// Tri-state presence of the Spotify `client_secret`, consulting the OS
-/// keychain directly (never the in-process cache) exactly like
+/// keychain directly (never a warm cache hit) exactly like
 /// [`has_spotify_client_secret`] — so it reflects a deletion made while the
 /// app runs. The namespaced slot is checked first and the legacy
 /// unnamespaced slot second, keeping the categories meaningful on both
 /// generations of installs (audit M2).
 pub fn spotify_client_secret_presence() -> KeychainPresence {
-    combine_presence(
+    refresh_spotify_client_secret_presence(cache(), probe_keychain_entry)
+}
+
+fn refresh_spotify_client_secret_presence(
+    cache: &SpotifyClientSecretCache,
+    probe: impl Fn(&str) -> Result<String, keyring::Error>,
+) -> KeychainPresence {
+    let now = Instant::now();
+    let (presence, present_secret) = probe_spotify_client_secret_presence(probe);
+    if let Some(secret) = present_secret {
+        cache.store(&secret, now);
+    } else if matches!(presence, KeychainPresence::Absent) {
+        cache.clear();
+    }
+    presence
+}
+
+/// Config-load presence: a fresh warm cache hit answers without touching the
+/// OS keychain; a cold or expired cache falls back to the direct tri-state
+/// probe above. The fallback keeps `Absent` and `Unavailable` distinct.
+pub fn cached_spotify_client_secret_presence() -> KeychainPresence {
+    cached_spotify_client_secret_presence_with(cache(), Instant::now(), || {
+        spotify_client_secret_presence()
+    })
+}
+
+fn cached_spotify_client_secret_presence_with(
+    cache: &SpotifyClientSecretCache,
+    now: Instant,
+    probe: impl FnOnce() -> KeychainPresence,
+) -> KeychainPresence {
+    if cache.has_fresh_presence(now) {
+        KeychainPresence::Present
+    } else {
+        probe()
+    }
+}
+
+/// Direct platform probe plus the readable secret, if any. Returning the
+/// secret lets the caller refresh the warm cache without ever logging it.
+fn probe_spotify_client_secret_presence(
+    probe: impl Fn(&str) -> Result<String, keyring::Error>,
+) -> (KeychainPresence, Option<String>) {
+    let mut present_secret = None;
+    let presence = combine_presence(
         [
             SPOTIFY_CLIENT_SECRET_USER,
             SPOTIFY_CLIENT_SECRET_USER_LEGACY,
         ]
         .into_iter()
-        .map(|user| classify_keychain_lookup(probe_keychain_entry(user))),
-    )
+        .map(|user| match probe(user) {
+            Ok(secret) => {
+                present_secret = Some(secret);
+                KeychainPresence::Present
+            }
+            Err(error) => classify_keychain_lookup(Err(error)),
+        }),
+    );
+    (presence, present_secret)
 }
 
 /// Raw lookup for a single slot. Failing to even build the entry handle is
@@ -423,7 +517,7 @@ pub fn delete_spotify_client_secret() -> Result<(), String> {
             e
         );
     }
-    *cache().write() = None;
+    cache().clear();
     log::info!("[KEYCHAIN] Deleted Spotify client_secret from keychain (cache cleared)");
     Ok(())
 }
@@ -789,6 +883,117 @@ mod tests {
     /// Secret Service daemon answers (or the keyring is locked).
     fn platform_failure(msg: &'static str) -> keyring::Error {
         keyring::Error::PlatformFailure(Box::new(std::io::Error::other(msg)))
+    }
+
+    /// A cold config load performs one platform probe and refreshes the warm
+    /// cache, so the immediately repeated load needs no second probe.
+    #[test]
+    fn cold_presence_probe_warms_repeated_config_loads() {
+        let cache = SpotifyClientSecretCache::default();
+        let probe_calls = std::sync::atomic::AtomicUsize::new(0);
+        let cold =
+            cached_spotify_client_secret_presence_with(&cache, Instant::now(), || {
+                refresh_spotify_client_secret_presence(&cache, |user| {
+                    assert_eq!(user, SPOTIFY_CLIENT_SECRET_USER);
+                    probe_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok("warm-secret".to_string())
+                })
+            });
+        assert_eq!(cold, KeychainPresence::Present);
+        assert_eq!(cache.peek().as_deref(), Some("warm-secret"));
+
+        let warm = cached_spotify_client_secret_presence_with(&cache, Instant::now(), || {
+            panic!("the warmed config load must not probe again")
+        });
+        assert_eq!(warm, KeychainPresence::Present);
+        assert_eq!(probe_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// A normal config load uses a fresh warm observation without a second
+    /// platform probe. Once the TTL lapses, the direct fallback runs and an
+    /// unreadable keychain remains `Unavailable`, not `Absent`.
+    #[test]
+    fn warm_presence_avoids_repeated_probes_until_ttl() {
+        let cache = SpotifyClientSecretCache::default();
+        let observed_at = Instant::now();
+        let probe_calls = std::sync::atomic::AtomicUsize::new(0);
+        cache.store("warm-secret", observed_at);
+
+        let warm = cached_spotify_client_secret_presence_with(
+            &cache,
+            observed_at + SPOTIFY_CLIENT_SECRET_PRESENCE_TTL - Duration::from_secs(1),
+            || {
+                probe_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                panic!("a fresh warm cache must not probe the platform")
+            },
+        );
+        assert_eq!(warm, KeychainPresence::Present);
+        assert_eq!(probe_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let expired = cached_spotify_client_secret_presence_with(
+            &cache,
+            observed_at + SPOTIFY_CLIENT_SECRET_PRESENCE_TTL,
+            || {
+                refresh_spotify_client_secret_presence(&cache, |_| {
+                    Err(platform_failure("keyring locked"))
+                })
+            },
+        );
+        assert!(matches!(expired, KeychainPresence::Unavailable(_)));
+        assert_eq!(
+            cache.peek().as_deref(),
+            Some("warm-secret"),
+            "an unavailable probe must not discard the explicit-read cache"
+        );
+        let after_external_delete = cached_spotify_client_secret_presence_with(
+            &cache,
+            observed_at + SPOTIFY_CLIENT_SECRET_PRESENCE_TTL + Duration::from_secs(1),
+            || {
+                refresh_spotify_client_secret_presence(&cache, |user| {
+                    assert!(matches!(
+                        user,
+                        SPOTIFY_CLIENT_SECRET_USER | SPOTIFY_CLIENT_SECRET_USER_LEGACY
+                    ));
+                    probe_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Err(keyring::Error::NoEntry)
+                })
+            },
+        );
+        assert_eq!(after_external_delete, KeychainPresence::Absent);
+        assert_eq!(cache.peek(), None);
+        assert_eq!(probe_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// Explicit store/delete operations own the cache update. A rotated
+    /// secret replaces the cached value immediately, and a delete clears the
+    /// warm hit so the very next config load re-reads the platform.
+    #[test]
+    fn explicit_cache_changes_refresh_the_next_presence_load() {
+        let cache = SpotifyClientSecretCache::default();
+        let observed_at = Instant::now();
+        cache.store("old-secret", observed_at);
+        cache.store("rotated-secret", observed_at + Duration::from_secs(1));
+
+        assert_eq!(cache.peek().as_deref(), Some("rotated-secret"));
+        assert_eq!(
+            cached_spotify_client_secret_presence_with(&cache, observed_at, || {
+                panic!("the replacement store must warm the next presence load")
+            }),
+            KeychainPresence::Present
+        );
+
+        cache.clear();
+        let probe_calls = std::sync::atomic::AtomicUsize::new(0);
+        let after_delete = cached_spotify_client_secret_presence_with(
+            &cache,
+            observed_at + Duration::from_secs(1),
+            || {
+                probe_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                KeychainPresence::Absent
+            },
+        );
+        assert_eq!(after_delete, KeychainPresence::Absent);
+        assert_eq!(probe_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     /// Issue #560: `NoEntry` is the only error that means "the user never
