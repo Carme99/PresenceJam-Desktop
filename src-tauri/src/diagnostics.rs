@@ -1427,6 +1427,8 @@ fn rename_noreplace(
     use windows::core::PCWSTR;
     use windows::Win32::Storage::FileSystem::MoveFileExW;
 
+    const HRESULT_FROM_WIN32: i32 = 0x8007_0000u32 as i32;
+
     let mut staged_wide: Vec<u16> = staged.as_os_str().encode_wide().collect();
     staged_wide.push(0);
     let mut destination_wide: Vec<u16> = destination.as_os_str().encode_wide().collect();
@@ -1446,7 +1448,7 @@ fn rename_noreplace(
             // Win32 APIs wrapped by windows-rs return HRESULT_FROM_WIN32,
             // while io::Error::from_raw_os_error needs the low Win32 code.
             let hresult = error.code().0;
-            let win32 = if (hresult & !0xffff) == 0x8007_0000 {
+            let win32 = if (hresult & !0xffff) == HRESULT_FROM_WIN32 {
                 hresult & 0xffff
             } else {
                 hresult
