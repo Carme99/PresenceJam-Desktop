@@ -1385,11 +1385,12 @@ Any other argument is ignored and the app starts normally, as it always has.
     )
 }
 
-/// Read the stored tokens without a `tauri::AppHandle` (issue #679), through
-/// the same reader the app's setup uses.
+/// Read the stored tokens without a `tauri::AppHandle` (issues #679 and
+/// #840). CLI commands are observational until their own command-specific
+/// write path, so legacy plaintext is parsed without migration or chmod.
 fn cli_read_tokens() -> Result<token_io::TokensFile, String> {
     let path = token_io::tokens_file_path_headless()?;
-    token_io::read_tokens_at_path(&path)
+    token_io::read_tokens_at_path(&path, token_io::TokenReadMode::ReadOnly)
 }
 
 /// Build the `AppState` the GUI's setup builds, without a Tauri app.
@@ -2268,16 +2269,24 @@ pub fn run() {
             }
 
             // Load persisted tokens (Spotify + Teams) into AppState. We bypass
-            // any plugin store for the tokens file and read it directly
-            // from `<app-config-dir>/PresenceJam/tokens.json` — since v3.0
-            // (issue #140) the file is AES-256-GCM ciphertext, decrypted here;
-            // a legacy plaintext file (≤ v2.10.0) is migrated on read. See
-            // issues #65 and #140.
+            // any plugin store for the tokens file and read it directly from
+            // `<app-config-dir>/PresenceJam/tokens.json`. GUI startup decrypts
+            // ciphertext and migrates legacy plaintext as before (issues #65
+            // and #140). Windowless CLI setup uses the side-effect-free
+            // headless path so merely starting a CLI mode cannot rewrite
+            // tokens.json or chmod its directory (issue #840).
             //
             // The pending_*_auth blobs (PKCE verifier, device code) are no
             // longer persisted to disk; the user re-starts the auth flow
             // after a crash mid-OAuth (cheap UX, and the disk leak is gone).
-            match token_io::read_tokens_at(app.handle()) {
+            let token_read_result = if cli_mode {
+                token_io::tokens_file_path_headless().and_then(|path| {
+                    token_io::read_tokens_at_path(&path, token_io::TokenReadMode::ReadOnly)
+                })
+            } else {
+                token_io::read_tokens_at(app.handle())
+            };
+            match token_read_result {
                 Ok(tf) => {
                     if let Some(st) = tf.spotify_tokens {
                         *state.tokens.spotify_mut() = Some(st);
