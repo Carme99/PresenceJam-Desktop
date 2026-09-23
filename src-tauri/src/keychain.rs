@@ -60,7 +60,10 @@ struct SpotifyClientSecretCache {
 
 impl SpotifyClientSecretCache {
     fn peek(&self) -> Option<String> {
-        self.secret.read().as_ref().map(|cached| cached.secret.clone())
+        self.secret
+            .read()
+            .as_ref()
+            .map(|cached| cached.secret.clone())
     }
 
     fn store(&self, secret: &str, presence_refreshed_at: Instant) {
@@ -82,10 +85,9 @@ impl SpotifyClientSecretCache {
     }
 }
 
-static CACHE: LazyLock<SpotifyClientSecretCache> =
-    LazyLock::new(|| SpotifyClientSecretCache {
-        secret: parking_lot::RwLock::new(None),
-    });
+static CACHE: LazyLock<SpotifyClientSecretCache> = LazyLock::new(|| SpotifyClientSecretCache {
+    secret: parking_lot::RwLock::new(None),
+});
 
 fn cache() -> &'static SpotifyClientSecretCache {
     &CACHE
@@ -891,14 +893,13 @@ mod tests {
     fn cold_presence_probe_warms_repeated_config_loads() {
         let cache = SpotifyClientSecretCache::default();
         let probe_calls = std::sync::atomic::AtomicUsize::new(0);
-        let cold =
-            cached_spotify_client_secret_presence_with(&cache, Instant::now(), || {
-                refresh_spotify_client_secret_presence(&cache, |user| {
-                    assert_eq!(user, SPOTIFY_CLIENT_SECRET_USER);
-                    probe_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    Ok("warm-secret".to_string())
-                })
-            });
+        let cold = cached_spotify_client_secret_presence_with(&cache, Instant::now(), || {
+            refresh_spotify_client_secret_presence(&cache, |user| {
+                assert_eq!(user, SPOTIFY_CLIENT_SECRET_USER);
+                probe_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok("warm-secret".to_string())
+            })
+        });
         assert_eq!(cold, KeychainPresence::Present);
         assert_eq!(cache.peek().as_deref(), Some("warm-secret"));
 
