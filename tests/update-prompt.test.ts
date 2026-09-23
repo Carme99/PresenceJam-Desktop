@@ -2,21 +2,19 @@
  * #590 (update-ux slice) — install-on-quit staging surface.
  *
  * The Rust half streams throttled `update-stage-progress` events while a
- * deferred stage downloads and exposes `cancel_deferred_update` to drop a
- * staged payload. This pins the frontend half:
+ * deferred stage downloads and exposes `cancel_deferred_update` to advance
+ * the same generation that protects staged bytes. This pins the frontend half:
  *   - the payload drives a live whole-percent position, and a payload with
  *     no `total` stays indeterminate instead of showing a guessed bar;
  *   - cancelling a staged update invokes the command and returns the banner
  *     to its plain offer;
- *   - a cancel issued while the download is still running cannot interrupt
- *     it, so the payload that lands afterwards is discarded rather than
- *     advertised as staged;
+ *   - cancellation advances the stage token before IPC, so the losing stage's
+ *     late command result and progress/completion event cannot restore it;
  *   - the progress subscription is released on unmount, including an unmount
  *     that races `listen()`'s promise (#287 teardown discipline).
  *
- * Fails pre-fix: the staged row listens to nothing (no percentage ever
- * renders), and the staged state offers no way back — the only exit was
- * applying the payload at the next quit.
+ * Fails pre-fix: a stage that completes after Cancel overwrites the cancelled
+ * frontend state, and the backend can still emit success/install on exit.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -92,8 +90,10 @@ async function emit(event: string, payload: unknown) {
 }
 
 /** Mount the banner and wait until the update check has rendered it. */
-async function mountBanner() {
-  const rendered = render(UpdatePrompt);
+async function mountBanner(props: {
+  onStageCancellation?: (requestId: string, cancelled: boolean) => void;
+} = {}) {
+  const rendered = render(UpdatePrompt, { props });
   await waitFor(() =>
     expect(listeners.filter((l) => l.event === 'update-stage-progress')).toHaveLength(1)
   );
@@ -170,6 +170,9 @@ beforeEach(() => {
       stageResolvers.push(outcome.resolve);
       return outcome.promise;
     }
+    if (cmd === 'cancel_deferred_update') {
+      return Promise.resolve({ state: 'cancelled' });
+    }
     return Promise.resolve(undefined);
   });
   // #678: the banner hydrates the store itself when nothing has yet; start
@@ -202,16 +205,36 @@ describe('UpdatePrompt deferred staging (#590)', () => {
     expect(row()).not.toContain('%');
   });
 
-  it('cancels a staged update through the backend and returns to the plain offer', async () => {
-    const { container } = await mountBanner();
+  it('reports and removes a stage that completed before cancellation', async () => {
+    const onStageCancellation = vi.fn();
+    const { container } = await mountBanner({ onStageCancellation });
     await startStage(container);
 
     stageResolvers.shift()!({ staged: '4.6.0', current: '4.5.2' });
     await waitFor(() => expect(container.querySelector('.update-staged')).not.toBeNull());
+    const stageCall = invokeMock.mock.calls.find(([cmd]) => cmd === 'stage_deferred_update')!;
+    const stageArgs = stageCall[1];
+    if (
+      typeof stageArgs !== 'object' ||
+      stageArgs === null ||
+      !('requestId' in stageArgs) ||
+      typeof stageArgs.requestId !== 'string'
+    ) {
+      throw new Error('stage_deferred_update must receive a requestId');
+    }
+    const { requestId } = stageArgs;
+    const base = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation((cmd: string, args?: unknown) =>
+      cmd === 'cancel_deferred_update'
+        ? Promise.resolve({ state: 'already-completed' })
+        : base(cmd, args)
+    );
 
     await fireEvent.click(
       within(container).getByRole('button', { name: t('update.cancelStage') })
     );
+    expect(onStageCancellation).toHaveBeenCalledWith(requestId, true);
+    expect(onStageCancellation).not.toHaveBeenCalledWith(requestId, false);
 
     await waitFor(() =>
       expect(invokeMock.mock.calls.map(([cmd]) => cmd)).toContain('cancel_deferred_update')
@@ -221,25 +244,51 @@ describe('UpdatePrompt deferred staging (#590)', () => {
     expect(within(container).getByRole('button', { name: t('update.installOnQuit') })).toBeTruthy();
   });
 
-  it('discards a payload that lands after the user cancelled the download', async () => {
-    const { container } = await mountBanner();
+  it('ignores a stage that loses to cancellation', async () => {
+    const onStageCancellation = vi.fn();
+    const { container } = await mountBanner({ onStageCancellation });
     await startStage(container);
 
-    await emit('update-stage-progress', { downloaded: 1_000_000, total: 100_000_000 });
+    const stageCall = invokeMock.mock.calls.find(([cmd]) => cmd === 'stage_deferred_update')!;
+    const stageArgs = stageCall[1];
+    if (
+      typeof stageArgs !== 'object' ||
+      stageArgs === null ||
+      !('requestId' in stageArgs) ||
+      typeof stageArgs.requestId !== 'string'
+    ) {
+      throw new Error('stage_deferred_update must receive a requestId');
+    }
+    const { requestId } = stageArgs;
+    expect(requestId).not.toBe('');
     await fireEvent.click(
       within(container).getByRole('button', { name: t('update.cancelStage') })
     );
+    expect(onStageCancellation).toHaveBeenCalledWith(requestId, true);
+
+    await emit('update-stage-progress', {
+      downloaded: 1_000_000,
+      total: 100_000_000,
+      request_id: requestId
+    });
     await waitFor(() => expect(container.querySelector('.update-progress')).toBeNull());
 
-    // The transfer itself cannot be interrupted Rust-side: the bytes land
-    // after the cancel, and must not be presented as a stage.
-    stageResolvers.shift()!({ staged: '4.6.0', current: '4.5.2' });
-
+    // Both the terminal progress and command result from the retired token
+    // are ignored. The backend command has already invalidated its generation,
+    // so the component must not compensate with a second cancel after bytes
+    // land.
+    await emit('update-stage-progress', {
+      downloaded: 100_000_000,
+      total: 100_000_000,
+      request_id: requestId
+    });
+    stageResolvers.shift()!({ staged: null, current: '4.5.2', skipped: 'cancelled' });
     await waitFor(() =>
       expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'cancel_deferred_update')).toHaveLength(
-        2
+        1
       )
     );
+    expect(container.querySelector('.update-progress')).toBeNull();
     expect(container.querySelector('.update-staged')).toBeNull();
     await waitFor(() =>
       expect(within(container).getByRole('button', { name: t('update.installOnQuit') })).toBeTruthy()

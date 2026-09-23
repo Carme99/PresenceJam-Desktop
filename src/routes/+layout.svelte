@@ -54,6 +54,18 @@
   import type { DeviceCodeResponse, AppConfig } from '$lib/types';
   devLog(`[LAYOUT] PresenceJam build: ${import.meta.env.VITE_APP_BUILD ?? 'dev build'}`);
 
+  // #711: completion events carry the exact stage request id. UpdatePrompt
+  // records an id synchronously when Cancel is pressed, so even an event that
+  // was already queued in the webview cannot produce a success notification
+  // after the user cancelled that stage.
+  const cancelledUpdateStages = new Set<string>();
+
+  function setUpdateStageCancellation(requestId: string, cancelled: boolean) {
+    if (!requestId) return;
+    if (cancelled) cancelledUpdateStages.add(requestId);
+    else cancelledUpdateStages.delete(requestId);
+  }
+
   let playbackError = $state('');
   let playbackErrorTimeout: ReturnType<typeof setTimeout> | null = null;
 
@@ -302,12 +314,19 @@
       })
     );
 
-    // #675: S10's deferred-stage success signal (the only emitter; the
-    // throttled `update-stage-progress` cannot distinguish success). Drives
-    // the fourth notification class from the always-mounted layout.
+    // #675 / #711: the backend emits this only from the generation that won
+    // its commit. The id filter closes the delivery window after that emit:
+    // a user cancellation recorded by the child must suppress a completion
+    // event already queued for the webview.
     presenceTeardown.add(
-      listen<{ version?: string }>('update-stage-complete', (event) => {
+      listen<{ version?: string; request_id?: string }>('update-stage-complete', (event) => {
         devLog('[LAYOUT] update-stage-complete received');
+        const requestId = String(event.payload?.request_id ?? '');
+        if (requestId && cancelledUpdateStages.has(requestId)) {
+          cancelledUpdateStages.delete(requestId);
+          devLog('[LAYOUT] update-stage-complete ignored for cancelled stage');
+          return;
+        }
         void notifyUpdateStaged(String(event.payload?.version ?? ''));
       })
     );
@@ -358,7 +377,7 @@
     <button class="toast-dismiss" onclick={() => { playbackError = ''; if (playbackErrorTimeout) { clearTimeout(playbackErrorTimeout); playbackErrorTimeout = null; } }} aria-label={t('common.dismiss')}>×</button>
   </div>
 {/if}
-{#if isMainWindow}<UpdatePrompt />{/if}
+{#if isMainWindow}<UpdatePrompt onStageCancellation={setUpdateStageCancellation} />{/if}
 
 <style>
   .playback-toast {
