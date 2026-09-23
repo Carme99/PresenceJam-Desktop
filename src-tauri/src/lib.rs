@@ -254,9 +254,10 @@ impl Polling {
     /// already set. Uses AcqRel on success and Acquire on failure so the
     /// happens-before relationship with subsequent reads of `is_syncing`
     /// (polling loop, tray menu) is preserved exactly. This is the only
-    /// site that does the CAS-equivalent operation; `polling.rs` itself
-    /// is intentionally CAS-free (see the regression guard at the
-    /// bottom of `polling.rs::tests`).
+    /// site that does the CAS-equivalent operation; the polling
+    /// submodule itself is intentionally CAS-free (see the
+    /// `test_start_polling_does_not_claim_is_syncing` regression guard
+    /// at the bottom of `polling/poll_once.rs::tests`).
     pub fn try_claim(&self) -> bool {
         self.is_syncing
             .compare_exchange(
@@ -526,8 +527,8 @@ async fn handle_spotify_callback(
     );
 
     // Re-check expiry at submit time. The expiry was set on creation
-    // (lib.rs setup, or commands.rs::start_spotify_auth) but only
-    // consulted on disk-load. If the OS suspended the process for
+    // (lib.rs setup, or `commands::spotify_auth::start_spotify_auth`)
+    // but only consulted on disk-load. If the OS suspended the process for
     // >10 minutes, the auth code may now be rejected by Spotify as
     // expired. See issue #34.
     if pending.expires_at < chrono::Utc::now() {

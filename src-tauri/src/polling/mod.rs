@@ -9,7 +9,7 @@
 //! - [`daemon`]    — supervised `--daemon` mode (issue #896): SIGTERM/
 //!   SIGINT handlers, bounded join, clean shutdown.
 //!
-//! `token_io` was historically part of `polling.rs` per the #72 issue
+//! `token_io` was historically part of `polling/loop.rs` per the #72 issue
 //! body; that surface was already extracted to the top-level
 //! `crate::token_io` module in a prior PR (see issue #65), so no
 //! `polling/token_io.rs` file is created here.
@@ -72,7 +72,7 @@ pub(crate) enum ErrorSeverity {
 /// `{ "source": <string>, "message": <string>, "severity": "warning" | "error" }`.
 ///
 /// Centralised so the field shape cannot drift between emit sites
-/// (polling.rs had 3 of them, see issue #79). All call sites in
+/// (the loop driver had 3 of them, see issue #79). All call sites in
 /// `poll_once` route through this helper.
 pub(crate) fn emit_error(app: &AppHandle, source: &str, message: String, severity: ErrorSeverity) {
     let severity_str = match severity {
