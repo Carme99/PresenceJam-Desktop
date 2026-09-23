@@ -1425,8 +1425,12 @@ mod tests {
         // fails.
         let denied = std::fs::write(inner.join("probe"), b"x").is_err();
         if denied {
-            replace_config_file(&live, "{\"spotify\":{\"client_id\":\"NEW\"}}", || {})
-                .expect_err("an unwritable directory must fail the replace");
+            let err = replace_config_file(
+                &live,
+                "{\"spotify\":{\"client_id\":\"NEW\"}}",
+                || {},
+            )
+            .expect_err("an unwritable directory must fail the replace");
             assert!(err.contains("import temp file"), "unexpected error: {err}");
         }
         assert_eq!(
@@ -1505,7 +1509,8 @@ mod tests {
         let state = Arc::new(AppState::new());
         let (published_on_disk, published_state) = thread::scope(|scope| {
             let (replaced_tx, replaced_rx) = mpsc::channel();
-            let (writer_result_tx, writer_result_rx) = mpsc::channel();
+            let (writer_result_tx, writer_result_rx): (mpsc::Sender<bool>, mpsc::Receiver<bool>) =
+                mpsc::channel();
             let (writer_adopted_tx, writer_adopted_rx) = mpsc::channel();
             let (release_writer_tx, release_writer_rx) = mpsc::channel();
             // This guard must live inside the scope: on an assertion panic it
