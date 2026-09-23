@@ -1335,7 +1335,10 @@ fn snapshot_sidecar_path(
 /// with the platform's native no-replace rename when hard-link creation is
 /// unsupported.
 #[cfg(target_os = "linux")]
-fn rename_noreplace(staged: &std::path::Path, destination: &std::path::Path) -> std::io::Result<()> {
+fn rename_noreplace(
+    staged: &std::path::Path,
+    destination: &std::path::Path,
+) -> std::io::Result<()> {
     use std::ffi::CString;
     use std::os::raw::{c_char, c_int, c_uint};
     use std::os::unix::ffi::OsStrExt;
@@ -1354,10 +1357,16 @@ fn rename_noreplace(staged: &std::path::Path, destination: &std::path::Path) -> 
     const RENAME_NOREPLACE: c_uint = 1;
 
     let staged = CString::new(staged.as_os_str().as_bytes()).map_err(|_| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "snapshot path contains NUL")
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "snapshot path contains NUL",
+        )
     })?;
     let destination = CString::new(destination.as_os_str().as_bytes()).map_err(|_| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "snapshot path contains NUL")
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "snapshot path contains NUL",
+        )
     })?;
     let result = unsafe {
         renameat2(
@@ -1376,7 +1385,10 @@ fn rename_noreplace(staged: &std::path::Path, destination: &std::path::Path) -> 
 }
 
 #[cfg(target_os = "macos")]
-fn rename_noreplace(staged: &std::path::Path, destination: &std::path::Path) -> std::io::Result<()> {
+fn rename_noreplace(
+    staged: &std::path::Path,
+    destination: &std::path::Path,
+) -> std::io::Result<()> {
     use std::ffi::CString;
     use std::os::raw::{c_char, c_int, c_uint};
     use std::os::unix::ffi::OsStrExt;
@@ -1387,10 +1399,16 @@ fn rename_noreplace(staged: &std::path::Path, destination: &std::path::Path) -> 
 
     const RENAME_EXCL: c_uint = 0x0000_0004;
     let staged = CString::new(staged.as_os_str().as_bytes()).map_err(|_| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "snapshot path contains NUL")
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "snapshot path contains NUL",
+        )
     })?;
     let destination = CString::new(destination.as_os_str().as_bytes()).map_err(|_| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "snapshot path contains NUL")
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "snapshot path contains NUL",
+        )
     })?;
     let result = unsafe { renamex_np(staged.as_ptr(), destination.as_ptr(), RENAME_EXCL) };
     if result == 0 {
@@ -1401,7 +1419,10 @@ fn rename_noreplace(staged: &std::path::Path, destination: &std::path::Path) -> 
 }
 
 #[cfg(target_os = "windows")]
-fn rename_noreplace(staged: &std::path::Path, destination: &std::path::Path) -> std::io::Result<()> {
+fn rename_noreplace(
+    staged: &std::path::Path,
+    destination: &std::path::Path,
+) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::Storage::FileSystem::MoveFileExW;
@@ -1436,7 +1457,10 @@ fn rename_noreplace(staged: &std::path::Path, destination: &std::path::Path) -> 
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-fn rename_noreplace(_staged: &std::path::Path, _destination: &std::path::Path) -> std::io::Result<()> {
+fn rename_noreplace(
+    _staged: &std::path::Path,
+    _destination: &std::path::Path,
+) -> std::io::Result<()> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "atomic no-replace rename is unsupported on this platform",
@@ -1465,8 +1489,13 @@ where
     }
 }
 
-fn publish_snapshot_file(staged: &std::path::Path, destination: &std::path::Path) -> std::io::Result<()> {
-    publish_snapshot_file_with(staged, destination, |source, target| fs::hard_link(source, target))
+fn publish_snapshot_file(
+    staged: &std::path::Path,
+    destination: &std::path::Path,
+) -> std::io::Result<()> {
+    publish_snapshot_file_with(staged, destination, |source, target| {
+        fs::hard_link(source, target)
+    })
 }
 
 fn write_snapshot_file(dir: &std::path::Path, bytes: &[u8]) -> Result<std::path::PathBuf, String> {
@@ -2180,7 +2209,8 @@ mod tests {
 
     #[test]
     fn test_publication_fallback_does_not_replace_a_collision() {
-        let dir = std::env::temp_dir().join(format!("pj-diag-fallback-race-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("pj-diag-fallback-race-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         let staged = dir.join("snapshot.tmp");
@@ -2197,10 +2227,7 @@ mod tests {
         .expect_err("fallback must reject a destination collision");
 
         assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
-        assert_eq!(
-            std::fs::read(&destination).unwrap(),
-            b"existing snapshot"
-        );
+        assert_eq!(std::fs::read(&destination).unwrap(), b"existing snapshot");
         assert_eq!(std::fs::read(&staged).unwrap(), b"new snapshot");
         std::fs::remove_dir_all(&dir).ok();
     }
