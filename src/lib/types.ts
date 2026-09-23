@@ -41,10 +41,11 @@ export type { SlotRegistration } from './types-generated/SlotRegistration';
 export type { ShortcutsStatus } from './types-generated/ShortcutsStatus';
 /**
  * Payload of the `error` event emitted by the Rust polling loop. The
- * `severity` field was added in #79 part 1; the Dashboard.svelte
- * listener uses it to gate the red banner (only `severity: "error"`
- * pops it; `severity: "warning"` is logged to the console for the
- * developer but does not alarm-fatigue the user).
+ * `severity` field was added in #79 part 1. Dashboard.svelte uses it to
+ * gate the red fatal banner: only `severity: "error"` is shown there,
+ * while a Teams `severity: "warning"` with `recovery: "retry_scheduled"`
+ * is rendered as a non-fatal `role="status"` warning banner. Other warnings
+ * are ignored by the user-facing Dashboard listener.
  */
 export interface ErrorEventPayload {
   source: string;

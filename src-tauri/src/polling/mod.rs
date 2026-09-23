@@ -86,8 +86,10 @@ pub(crate) enum ErrorRecovery {
 
 /// Canonical payload for the frontend `error` event.
 ///
-/// All error-event producers go through [`emit_error`], so the wire shape and
-/// optional recovery discriminator cannot drift between providers.
+/// Recovery-aware producers call [`emit_error_with_recovery`] directly;
+/// ordinary producers use [`emit_error`], which delegates to the same
+/// canonical emitter. The wire shape and optional recovery discriminator
+/// therefore cannot drift between providers.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ErrorEventPayload {
     pub(crate) source: String,

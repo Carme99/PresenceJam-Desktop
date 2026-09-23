@@ -1693,7 +1693,7 @@ mod tests {
     use super::truncate_for_log;
     use super::{teams_write_error_policy, TeamsApiError};
     use super::{DeviceCodeResponse, TeamsTokens, MICROSOFT_GRAPH_SCOPES};
-    use crate::polling::{ErrorRecovery, ErrorSeverity};
+    use crate::polling::{ErrorEventPayload, ErrorRecovery, ErrorSeverity};
 
     #[test]
     fn teams_write_error_policy_covers_every_api_error_variant() {
@@ -1754,6 +1754,57 @@ mod tests {
             TeamsApiError::Transient(String::new()).user_message()
         );
         assert!(error.user_message().contains("Retrying shortly"));
+    }
+
+    #[test]
+    fn error_event_wire_contract_pins_recovery_and_omits_absent_recovery() {
+        let cases = [
+            (
+                TeamsApiError::RateLimited(Some(30)),
+                serde_json::json!({
+                    "source": "teams",
+                    "message": "Microsoft Teams is temporarily limiting requests. Retrying in 30 seconds.",
+                    "severity": "warning",
+                    "recovery": "retry_scheduled"
+                }),
+            ),
+            (
+                TeamsApiError::ExpiredToken(401),
+                serde_json::json!({
+                    "source": "teams",
+                    "message": "Your Microsoft Teams sign-in has expired. Reconnect Teams in Settings.",
+                    "severity": "error",
+                    "recovery": "reconnect_required"
+                }),
+            ),
+        ];
+
+        for (error, expected) in cases {
+            let policy = teams_write_error_policy(&error);
+            let payload = ErrorEventPayload {
+                source: "teams".to_string(),
+                message: error.user_message(),
+                severity: policy.severity,
+                recovery: Some(policy.recovery),
+            };
+
+            assert_eq!(serde_json::to_value(payload).expect("serialize recovery payload"), expected);
+        }
+
+        let ordinary = ErrorEventPayload {
+            source: "spotify".to_string(),
+            message: "Failed to get currently playing".to_string(),
+            severity: ErrorSeverity::Error,
+            recovery: None,
+        };
+        assert_eq!(
+            serde_json::to_value(ordinary).expect("serialize ordinary payload"),
+            serde_json::json!({
+                "source": "spotify",
+                "message": "Failed to get currently playing",
+                "severity": "error"
+            })
+        );
     }
 
     #[test]
