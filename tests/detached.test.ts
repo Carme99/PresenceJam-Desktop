@@ -83,7 +83,7 @@ const frontendPluginUses = [
 ] as const;
 
 function grantsWithoutFrontendUse(permissions: readonly string[]): string[] {
-  const used = new Set(
+  const used = new Set<string>(
     frontendPluginUses
       .filter(({ plugin, importedApi, callPattern }) => {
         const escapedApi = importedApi.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
