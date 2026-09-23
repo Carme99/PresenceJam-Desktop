@@ -21,8 +21,8 @@ use super::{NowPlaying, PlaybackSource, PlaybackSourceId, SourceCaps, SourceErro
 
 /// `SpotifySource` — every read goes through `spotify::get_currently_playing`,
 /// which is the same HTTP call the pre-v5 polling loop made directly
-/// (issue #862, `src-tauri/src/spotify.rs:1244`). The source adds nothing
-/// beyond the trait boundary and 304 caching.
+/// (issue #862). The source adds nothing beyond the trait boundary and
+/// 304 caching.
 pub struct SpotifySource {
     /// Bearer token the next `poll` will use. Updated by the poll loop
     /// from `state.tokens.spotify()` before every iteration. `None` while

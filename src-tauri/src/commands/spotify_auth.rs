@@ -816,7 +816,7 @@ mod tests {
     // Issue #351: peek-then-validate-then-take. The peek helper never touches
     // the single-use binding, so a wrong-state paste keeps both the pending
     // and the binding slot; a correct paste then still accepts. The handler
-    // below mirrors the deep-link peek at lib.rs:559-563 (read guard for
+    // below mirrors `handle_deep_link`'s peek/bind block (read guard for
     // peek, binding after the guard drops, take + state-verify last).
     fn sample_pending(state: &str) -> PendingSpotifyAuth {
         PendingSpotifyAuth {

@@ -549,9 +549,9 @@
 
     devLog('[DASHBOARD] onMount: setting up polling-thread-panicked listener');
     teardown.add(listen('polling-thread-panicked', () => {
-      // Rust side resets is_syncing in polling.rs:321, but the JS-side
-      // mirror was not being flipped — UI would stay "Syncing" forever
-      // after a thread panic. See issue #33.
+      // Rust side clears `is_syncing` in `polling::state::start_polling`'s
+      // panic-cleanup block, but the JS-side mirror was not being flipped
+      // — UI would stay "Syncing" forever after a thread panic. See issue #33.
       devLog('[DASHBOARD] EVENT: polling-thread-panicked received');
       setSyncing(false);
       devLog('[DASHBOARD] EVENT: isSyncing=false (panic recovery)');
@@ -562,8 +562,8 @@
 
     devLog('[DASHBOARD] onMount: setting up reconnect-required listener');
     teardown.add(listen('reconnect-required', () => {
-      // Generic reconnect signal from polling.rs:633 (e.g. when the
-      // auth refresh loop has been failing for too long). The
+      // Generic reconnect signal emitted from `poll_once::run` (e.g. when
+      // the auth refresh loop has been failing for too long). The
       // provider-specific events are handled elsewhere:
       // spotify-reconnect-required in +layout.svelte (issue #220),
       // teams-reconnect-required in +layout.svelte (issue #157);

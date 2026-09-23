@@ -128,7 +128,7 @@ pub fn require_main_window(window: &tauri::Window) -> Result<(), String> {
 /// in `src/` or `tests/`, so they belong in neither list above — a command
 /// nothing can reach is not "main-only by caller location" and not
 /// "detached-legit". Reconnect.svelte reads the keychain state through
-/// `loadConfig` (#560) and Settings.svelte:872 calls
+/// `loadConfig` (#560) and the Spotify reconnect card in Settings.svelte calls
 /// `reconnect_spotify_session` (#554), which `tests/settings.test.ts` pins.
 /// Both are pending deletion (the same treatment the seven playback wrappers
 /// got here); `reconnect_spotify` is already deleted on the onboarding slice's

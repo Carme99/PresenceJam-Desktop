@@ -681,7 +681,8 @@ pub fn refresh_teams_token(tokens: &TeamsTokens) -> Result<TeamsTokens, TeamsApi
         access_token: token_resp.access_token,
         // MS may omit the refresh token on a refresh response; keep the
         // existing one rather than silently dropping refresh capability.
-        // Mirrors spotify.rs:142-144. See issue #151.
+        // Mirrors `spotify::refresh_spotify_token`'s `unwrap_or_else` fallback
+        // (inside `request_refreshed_token`). See issue #151.
         refresh_token: token_resp
             .refresh_token
             .or_else(|| tokens.refresh_token.clone()),

@@ -716,13 +716,13 @@ fn endpoint_urls(channel: UpdateChannel) -> Result<Vec<Url>, String> {
 /// none of them answered, which mirrors the plugin's `last_error` semantics
 /// and keeps an all-failed check from rendering as "already current".
 ///
-/// The difference from the plugin's loop is the log line: the plugin does log
-/// a non-2XX response (`log::error!("update endpoint did not respond with a
-/// successful status code")`, `tauri-plugin-updater 2.11.0`
-/// `src/updater.rs:554-558`), but that line names neither the endpoint nor
-/// the fall-through — with two endpoints configured you cannot tell which one
-/// was skipped, or that the second one served the release. This walk logs
-/// both.
+/// The difference from the plugin's loop is the log line: the plugin's
+/// `Updater::check` loop emits a `log::error!("update endpoint did not
+/// respond with a successful status code")` on every non-2XX response
+/// (`tauri-plugin-updater 2.11.0`), but that line names neither the
+/// endpoint nor the fall-through — with two endpoints configured you
+/// cannot tell which one was skipped, or that the second one served the
+/// release. This walk logs both.
 ///
 /// The attempt yields only the announced version: `tauri_plugin_updater::Update`
 /// has no public constructor, so keeping it out of the walk's payload is what
