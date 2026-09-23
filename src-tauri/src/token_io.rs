@@ -230,10 +230,7 @@ pub enum TokenReadMode {
 /// keychain key or undecryptable ciphertext surfaces as `Err`, which drives
 /// the same re-auth recovery.
 pub fn read_tokens_at(app: &tauri::AppHandle) -> Result<TokensFile, String> {
-    read_tokens_at_path(
-        &tokens_file_path(app)?,
-        TokenReadMode::MigrateLegacy,
-    )
+    read_tokens_at_path(&tokens_file_path(app)?, TokenReadMode::MigrateLegacy)
 }
 
 /// Read tokens from an explicit path (issues #679 and #840).
@@ -312,11 +309,7 @@ fn parse_legacy_tokens_file(bytes: &[u8], path: &Path) -> Result<TokensFile, Str
 ///   parsed first. [`TokenReadMode::MigrateLegacy`] then replaces the file
 ///   with ciphertext; [`TokenReadMode::ReadOnly`] returns the parsed value
 ///   without creating a key or changing storage.
-fn tokens_from_bytes(
-    path: &Path,
-    bytes: &[u8],
-    mode: TokenReadMode,
-) -> Result<TokensFile, String> {
+fn tokens_from_bytes(path: &Path, bytes: &[u8], mode: TokenReadMode) -> Result<TokensFile, String> {
     if bytes.starts_with(TOKENS_MAGIC) {
         let key = crate::keychain::get_tokens_aes_key()?;
         tokens_from_bytes_with_key(path, bytes, &key, mode)
@@ -1206,13 +1199,9 @@ mod tests {
         let legacy = serde_json::to_vec_pretty(&sample_file()).unwrap();
         fs::write(&path, &legacy).unwrap();
 
-        let loaded = tokens_from_bytes_with_key(
-            &path,
-            &legacy,
-            &test_key(),
-            TokenReadMode::MigrateLegacy,
-        )
-        .unwrap();
+        let loaded =
+            tokens_from_bytes_with_key(&path, &legacy, &test_key(), TokenReadMode::MigrateLegacy)
+                .unwrap();
         assert_eq!(loaded.spotify_tokens.unwrap().access_token, "at");
         assert_eq!(loaded.teams_tokens.unwrap().access_token, "tat");
 
@@ -1286,13 +1275,11 @@ mod tests {
         let legacy = serde_json::to_vec_pretty(&sample_file()).unwrap();
         fs::write(&path, &legacy).unwrap();
 
-        let loaded = decode_legacy_with_key_fetcher(
-            &path,
-            &legacy,
-            TokenReadMode::ReadOnly,
-            || panic!("read-only legacy decode must not fetch a key"),
-        )
-        .unwrap();
+        let loaded =
+            decode_legacy_with_key_fetcher(&path, &legacy, TokenReadMode::ReadOnly, || {
+                panic!("read-only legacy decode must not fetch a key")
+            })
+            .unwrap();
 
         assert_eq!(loaded.spotify_tokens.unwrap().access_token, "at");
         assert_eq!(loaded.teams_tokens.unwrap().access_token, "tat");
@@ -1381,16 +1368,12 @@ mod tests {
         // Corrupt legacy bytes: parse fails, fetcher must never run.
         let called = Cell::new(false);
         let bytes = b"{not valid json";
-        let err = decode_legacy_with_key_fetcher(
-            &path,
-            bytes,
-            TokenReadMode::MigrateLegacy,
-            || {
+        let err =
+            decode_legacy_with_key_fetcher(&path, bytes, TokenReadMode::MigrateLegacy, || {
                 called.set(true);
                 Ok(test_key())
-            },
-        )
-        .expect_err("corrupt legacy must fail");
+            })
+            .expect_err("corrupt legacy must fail");
         assert!(
             err.contains("Failed to parse legacy plaintext tokens file"),
             "parse error expected, got: {}",
@@ -1405,16 +1388,12 @@ mod tests {
         // first, so no file is created).
         let valid = serde_json::to_vec(&sample_file()).unwrap();
         let called = Cell::new(false);
-        let err = decode_legacy_with_key_fetcher(
-            &path,
-            &valid,
-            TokenReadMode::MigrateLegacy,
-            || {
+        let err =
+            decode_legacy_with_key_fetcher(&path, &valid, TokenReadMode::MigrateLegacy, || {
                 called.set(true);
                 Err::<[u8; 32], String>("keychain unavailable".to_string())
-            },
-        )
-        .expect_err("failing fetcher must fail");
+            })
+            .expect_err("failing fetcher must fail");
         assert!(called.get(), "key fetcher must run for valid legacy input");
         assert!(
             err.contains("keychain unavailable"),
@@ -1429,13 +1408,8 @@ mod tests {
     fn corrupt_legacy_plaintext_yields_parse_error() {
         let path = tmp_path("corrupt-legacy.json");
         let bytes = b"{not valid json";
-        let err = tokens_from_bytes_with_key(
-            &path,
-            bytes,
-            &test_key(),
-            TokenReadMode::ReadOnly,
-        )
-        .expect_err("corrupt legacy must fail");
+        let err = tokens_from_bytes_with_key(&path, bytes, &test_key(), TokenReadMode::ReadOnly)
+            .expect_err("corrupt legacy must fail");
         assert!(
             err.contains("Failed to parse legacy plaintext tokens file"),
             "legacy parse error expected, got: {}",
