@@ -25,7 +25,13 @@
     "@tauri-apps/plugin-updater": "^2.11.0"
   },
   "devDependencies": {
+<<<<<<< HEAD
     "@playwright/test": "^1.63.0",
+=======
+    "@csstools/css-color-parser": "^3.1.0",
+    "@csstools/css-parser-algorithms": "^3.0.5",
+    "@csstools/css-tokenizer": "^3.0.4",
+>>>>>>> 0aa217c (build(test): declare contrast parser dependencies)
     "@sveltejs/adapter-static": "^3.0.6",
     "@sveltejs/kit": "^2.70.3",
     "@sveltejs/vite-plugin-svelte": "^5.0.0",
@@ -34,6 +40,7 @@
     "@types/node": "^24.13.5",
     "@vitest/coverage-v8": "^4.1.11",
     "jsdom": "^26.1.0",
+    "postcss": "^8.5.26",
     "svelte": "^5.57.0",
     "svelte-check": "^4.7.6",
     "typescript": "~5.9.3",
