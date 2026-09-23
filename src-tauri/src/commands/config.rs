@@ -836,6 +836,28 @@ fn replace_config_file(path: &Path, json: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Replace the live document and adopt the reload under one config write
+/// guard.
+///
+/// The guard is acquired before the file replacement and held until the
+/// validated reload has been copied into `AppState`. This keeps a competing
+/// guarded writer from replacing the imported file (or publishing its own
+/// pre-import copy) between those two steps. The caller must run this helper
+/// on the blocking pool: both the atomic file replacement and the reload do
+/// blocking I/O.
+fn replace_and_adopt_config(
+    state: &AppState,
+    destination: &Path,
+    document: &str,
+    reload: impl FnOnce() -> Result<AppConfig, String>,
+) -> Result<AppConfig, String> {
+    let mut config_guard = state.config.get_mut();
+    replace_config_file(destination, document)?;
+    let persisted = reload()?;
+    *config_guard = Some(persisted.clone());
+    Ok(persisted)
+}
+
 /// Replace the stored config with a document the user picks.
 ///
 /// Validation happens before anything is written: a file that is not a
@@ -909,26 +931,20 @@ pub async fn import_config(
         }
     }
 
-    // Issue #939: the imported document is staged beside the live file and only
-    // then installed, so a replace that cannot be written leaves the previous
-    // `config.json` in place instead of wiping the user's settings.
-    let write_destination = destination.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        replace_config_file(&write_destination, &prepared.document)
-    })
-    .await
-    .map_err(|e| format!("import_config spawn_blocking panicked: {:?}", e))??;
-
-    // #215 pattern for the adoption only: the file write is done, and this guard
-    // covers the load-then-store pair so a concurrent write cannot interleave.
+    // Issue #939/#946: the imported document is staged beside the live file and
+    // only then installed, so a replace that cannot be written leaves the
+    // previous `config.json` in place. Replacement, reload/validation and
+    // AppState adoption stay in one blocking-pool critical section under the
+    // config write guard; a competing writer cannot slip between the file and
+    // the state it publishes.
     let state_clone = Arc::clone(state.inner());
     let persisted = tauri::async_runtime::spawn_blocking(move || {
-        let mut config_guard = state_clone.config.get_mut();
-        // The authoritative view of what is now on disk: a real load re-derives
-        // the keychain display fields, which never come from an imported file.
-        let persisted = config::load_config()?;
-        *config_guard = Some(persisted.clone());
-        Ok::<AppConfig, String>(persisted)
+        replace_and_adopt_config(
+            &state_clone,
+            &destination,
+            &prepared.document,
+            config::load_config,
+        )
     })
     .await
     .map_err(|e| format!("import_config spawn_blocking panicked: {:?}", e))??;
@@ -1336,13 +1352,24 @@ mod tests {
         let live = dir.join("config.json");
         let previous = "{\"spotify\":{\"client_id\":\"KEEP\"}}";
         std::fs::write(&live, previous).expect("live config");
+        let state = AppState::new();
+        let mut previous_state = AppConfig::default();
+        previous_state.spotify.client_id = "KEEP".to_string();
+        *state.config.get_mut() = Some(previous_state);
         // An obstruction at the staged sidecar name fails the stage step —
         // which is the point: it happens before the live file is touched.
         let staged = staged_config_path(&live);
         std::fs::create_dir(&staged).expect("obstruction");
 
-        let err = replace_config_file(&live, "{\"spotify\":{\"client_id\":\"NEW\"}}")
-            .expect_err("the replace cannot be staged");
+        let err = replace_and_adopt_config(
+            &state,
+            &live,
+            "{\"spotify\":{\"client_id\":\"NEW\"}}",
+            || -> Result<AppConfig, String> {
+                panic!("a failed replace must not reload")
+            },
+        )
+        .expect_err("the replace cannot be staged");
         assert!(err.contains("import temp file"), "unexpected error: {err}");
         assert_eq!(
             std::fs::read_to_string(&live).expect("live config"),
@@ -1354,6 +1381,15 @@ mod tests {
             "the live config must not have been moved aside before the write"
         );
         assert!(staged.is_dir(), "the obstruction must not be removed");
+        assert_eq!(
+            state
+                .config
+                .get()
+                .as_ref()
+                .map(|cfg| cfg.spotify.client_id.as_str()),
+            Some("KEEP"),
+            "a failed import must not replace the previously adopted config"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1425,6 +1461,99 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&fresh).expect("fresh"), next);
         assert!(!staged_config_path(&fresh).exists());
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #946: a guarded writer that is ready while the import reloads
+    /// must not acquire between the imported file replacement and AppState
+    /// adoption. It may publish only after the import has returned the value
+    /// that was on disk.
+    #[test]
+    fn import_adopts_the_reload_before_a_competing_writer_can_publish() {
+        use std::sync::mpsc;
+        use std::thread;
+
+        let dir = temp_dir("pj-test-import-write-lock");
+        let live = dir.join("config.json");
+        let imported_document =
+            "{\"spotify\":{\"client_id\":\"IMPORTED\"},\"schema_version\":1}";
+        let prepared = config::prepare_import(imported_document).expect("valid import");
+        std::fs::write(
+            &live,
+            "{\"spotify\":{\"client_id\":\"PREVIOUS\"},\"schema_version\":1}",
+        )
+        .expect("previous config");
+
+        let state = Arc::new(AppState::new());
+        let (writer_ready_tx, writer_ready_rx) = mpsc::channel();
+        let (writer_adopted_tx, writer_adopted_rx) = mpsc::channel();
+        let (release_writer_tx, release_writer_rx) = mpsc::channel();
+        let writer_state = Arc::clone(&state);
+        let writer_live = live.clone();
+        let writer = thread::spawn(move || {
+            writer_ready_tx
+                .send(())
+                .expect("import reload must receive the competing writer");
+            let mut guard = writer_state.config.get_mut();
+            writer_adopted_tx
+                .send(guard.as_ref().map(|cfg| cfg.spotify.client_id.clone()))
+                .expect("test must observe the writer's adopted predecessor");
+            release_writer_rx
+                .recv()
+                .expect("test must release the competing writer");
+
+            let mut competing = AppConfig::default();
+            competing.spotify.client_id = "COMPETING".to_string();
+            let document = serde_json::to_string_pretty(&competing).expect("serialize competitor");
+            std::fs::write(&writer_live, document).expect("competing write");
+            *guard = Some(competing);
+        });
+
+        let import_state = Arc::clone(&state);
+        let import_live = live.clone();
+        let import = thread::spawn(move || {
+            replace_and_adopt_config(
+                &import_state,
+                &import_live,
+                &prepared.document,
+                || {
+                    writer_ready_rx
+                        .recv()
+                        .expect("competing writer must start during the reload seam");
+                    assert!(
+                        import_state.config.try_get_mut().is_none(),
+                        "the config write guard must still be held during import reload"
+                    );
+                    let raw = std::fs::read_to_string(&import_live).expect("imported config");
+                    serde_json::from_str(&raw).map_err(|error| error.to_string())
+                },
+            )
+        });
+
+        let imported = import
+            .join()
+            .expect("import task")
+            .expect("imported config must load and adopt");
+        let writer_saw = writer_adopted_rx
+            .recv()
+            .expect("competing writer must acquire after import adoption");
+        let on_disk = serde_json::from_str::<AppConfig>(
+            &std::fs::read_to_string(&live).expect("config on disk"),
+        )
+        .expect("parse config on disk");
+
+        assert_eq!(imported.spotify.client_id, "IMPORTED");
+        assert_eq!(on_disk.spotify.client_id, imported.spotify.client_id);
+        assert_eq!(
+            writer_saw.as_deref(),
+            Some("IMPORTED"),
+            "the writer must observe the imported state before replacing it"
+        );
+
+        release_writer_tx
+            .send(())
+            .expect("release the competing writer");
+        writer.join().expect("competing writer task");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

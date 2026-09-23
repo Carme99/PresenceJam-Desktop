@@ -173,9 +173,9 @@ impl Default for PendingAuths {
     }
 }
 
-/// Persistent user config (`AppConfig`). `set()` is provided so the
-/// save_config read-modify-write path can hold one write guard for the
-/// whole critical section without naming the inner lock.
+/// Persistent user config (`AppConfig`). Accessors keep the inner lock
+/// private so every read-modify-write path can hold one guard across its full
+/// critical section.
 pub struct Config {
     config: RwLock<Option<crate::config::AppConfig>>,
 }
@@ -197,6 +197,16 @@ impl Config {
     /// the `config` field directly.
     pub fn get_mut(&self) -> parking_lot::RwLockWriteGuard<'_, Option<crate::config::AppConfig>> {
         self.config.write()
+    }
+
+    /// Attempt to acquire the config write guard without blocking.
+    ///
+    /// This is the deterministic concurrency-test seam for proving that a
+    /// long-running blocking section still owns the guard at its reload point.
+    pub fn try_get_mut(
+        &self,
+    ) -> Option<parking_lot::RwLockWriteGuard<'_, Option<crate::config::AppConfig>>> {
+        self.config.try_write()
     }
 }
 
