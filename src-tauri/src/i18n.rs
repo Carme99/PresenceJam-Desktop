@@ -186,10 +186,10 @@ pub const EN: Strings = Strings {
 pub const DE: Strings = Strings {
     show_window: "Fenster anzeigen",
     hide_window: "Fenster ausblenden",
-    pause_sync: "Sync pausieren",
-    resume_sync: "Sync fortsetzen",
+    pause_sync: "Synchronisierung pausieren",
+    resume_sync: "Synchronisierung fortsetzen",
     open_settings: "Einstellungen öffnen",
-    open_logs_folder: "Log-Ordner öffnen",
+    open_logs_folder: "Protokollordner öffnen",
     quit: "Beenden",
     play_pause: "Wiedergabe/Pause",
     previous: "Zurück",
@@ -202,10 +202,10 @@ pub const DE: Strings = Strings {
     no_devices: "(keine Geräte)",
     up_next: "Als Nächstes",
     queue_empty: "(Warteschlange leer)",
-    status_syncing: "Synchronisierung",
+    status_syncing: "Synchronisiert",
     status_paused: "Pausiert",
     status_not_syncing: "Nicht synchronisiert",
-    status_syncing_no_track: "Synchronisierung — kein Titel",
+    status_syncing_no_track: "Synchronisiert — kein Titel",
     menu_file: "Datei",
     menu_edit: "Bearbeiten",
     menu_view: "Ansicht",
@@ -225,7 +225,7 @@ pub const DE: Strings = Strings {
     snooze_minutes_left: "Min. verbleibend",
     manual_status_recent_menu: "Letzte Status",
     manual_status_recent_empty: "(keine letzten Status)",
-    manual_status_clear: "Manuellen Status löschen",
+    manual_status_clear: "Status löschen",
     volume_menu: "Lautstärke",
     volume_percent_label: "{percent} %",
     seek_menu: "Spulen",
@@ -234,7 +234,7 @@ pub const DE: Strings = Strings {
     // ── Profile submenu (issue #869) ──────────────────────────────────────────
     profile_menu: "Aktives Profil",
     profile_base: "Basiskonfiguration",
-    profile_empty: "(keine Profile konfiguriert)",
+    profile_empty: "(keine Profile definiert)",
 };
 
 /// French table.
