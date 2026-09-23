@@ -8,8 +8,8 @@
 //! below must stay field-for-field identical. That is enforced, not assumed:
 //! `tables_carry_an_identical_field_set` parses the struct declaration out of
 //! this file and fails when a table misses a field or falls out of order, and
-//! `no_user_visible_literal_stays_hard_coded` fails when a literal reappears
-//! in `tray.rs`/`menu.rs` outside these tables.
+//! `no_user_visible_literal_stays_hard_coded` scans production literals in
+//! `tray.rs`/`menu.rs` and fails when user-visible copy is not in these tables.
 //!
 //! Deliberate exceptions, mirroring the frontend's documented limitation:
 //! error strings surfaced through `invoke()` rejections or event payloads
@@ -506,6 +506,104 @@ mod tests {
             .join("\n")
     }
 
+    /// Returns every double-quoted literal in `src`, including escaped quotes.
+    /// Byte-wise scanning is safe here because only ASCII quote/backslash bytes
+    /// control the state and slice boundaries always follow those bytes.
+    fn double_quoted_literals(src: &str) -> Vec<&str> {
+        let bytes = src.as_bytes();
+        let mut literals = Vec::new();
+        let mut cursor = 0;
+        while cursor < bytes.len() {
+            if bytes[cursor] != b'"' {
+                cursor += 1;
+                continue;
+            }
+            let start = cursor + 1;
+            cursor = start;
+            while cursor < bytes.len() {
+                match bytes[cursor] {
+                    b'\\' => cursor = (cursor + 2).min(bytes.len()),
+                    b'"' => break,
+                    _ => cursor += 1,
+                }
+            }
+            if cursor < bytes.len() {
+                literals.push(&src[start..cursor]);
+                cursor += 1;
+            }
+        }
+        literals
+    }
+
+    /// Deliberate non-copy literals in the native modules. These are stable
+    /// menu/window/event ids, action and log context, documented English
+    /// backend errors, the product name, accelerators, or format-only pieces;
+    /// none is rendered as tray/menu copy. A new entry here needs that same
+    /// user-visible-exception justification.
+    const NATIVE_LITERAL_ALLOWLIST: &[&str] = &[
+        "show_hide_window", "pause_sync", "resume_sync", "current_track",
+        "sync_status", "play_pause", "previous", "next", "shuffle", "repeat",
+        "devices", "queue", "devices|", "snooze|30m", "snooze|1h",
+        "snooze|tomorrow", "snooze|next_meeting", "snooze|resume", "snooze|",
+        "tomorrow", "next_meeting", "resume", "manualstatus|",
+        "manualstatus|clear", "volume|", "seek|", "profile|base", "profile|",
+        "settings", "open_logs", "quit", "show_dashboard", "show_logs", "about",
+        "main", "empty", "none", "transfer", "pause", "play", "snooze", "profile",
+        "volume", "seek", "dashboard", "logs", "macos", "linux",
+        "toggle-pause", "navigate", "open-logs-folder", "play/pause state",
+        "playback-error", "tray-click", "playback-state-changed", "app-shutdown",
+        "show-about", "pause/resume", "profile (empty placeholder)",
+        "manual status clear", "manual status pick (stale)", "manual status pick",
+        "volume (stale)", "seek (stale)", "seek (no track)", "transfer device list",
+        "tray icon", "refresh_tray_from_state", "<id len={}>", "<legacy index={}>",
+        "<invalid>", "{}|none", "{}|none|{}", "{PROFILE_ITEM_PREFIX}empty",
+        "{MANUAL_STATUS_ITEM_PREFIX}{idx}", "{MANUAL_STATUS_ITEM_PREFIX}none",
+        "{VOLUME_ITEM_PREFIX}{percent}", "CmdOrCtrl+,", "CmdOrCtrl+Shift+L",
+        "CmdOrCtrl+Q", "CmdOrCtrl+1", "CmdOrCtrl+2", "PresenceJam",
+        "Tray already initialized", "No default icon", "unknown panic",
+        "Tray not initialized", "No active playback device - pick one from the tray Devices menu",
+        "Failed to set tray menu: {}", "{} unavailable: {}", "main window not found",
+        "Failed to set window menu: {}",
+    ];
+
+    /// True for copy-like literals: either whitespace makes them a phrase, or
+    /// three ASCII letters catch single-word native labels such as "Quit".
+    fn looks_like_native_copy(value: &str) -> bool {
+        value.contains(' ') || value.bytes().filter(u8::is_ascii_alphabetic).count() >= 3
+    }
+
+    /// True for format-only decorations. Once `{...}` placeholders are
+    /// removed, no ASCII letters remain (for example `🎵 {} - {}` or `✓ {}`).
+    fn is_format_only_literal(value: &str) -> bool {
+        let mut rest = value;
+        while let Some(start) = rest.find('{') {
+            let after = &rest[start..];
+            let Some(end) = after.find('}') else {
+                break;
+            };
+            rest = &after[end + 1..];
+            rest = rest.trim_start_matches('{');
+        }
+        !rest.bytes().any(|byte| byte.is_ascii_alphabetic())
+    }
+
+    /// Scans already-isolated production source and returns copy-like literals
+    /// absent from all locale tables and the explicit native exception list.
+    fn native_literal_offenders(src: &str, translated: &HashSet<&'static str>) -> Vec<String> {
+        let mut offenders: Vec<String> = double_quoted_literals(&strip_line_comments(src))
+            .into_iter()
+            .filter(|value| looks_like_native_copy(value))
+            .filter(|value| !translated.contains(*value))
+            .filter(|value| !NATIVE_LITERAL_ALLOWLIST.contains(value))
+            .filter(|value| !value.starts_with("[TRAY]") && !value.starts_with("[MENU]"))
+            .filter(|value| !is_format_only_literal(value))
+            .map(|value| format!("{:?}", value))
+            .collect();
+        offenders.sort_unstable();
+        offenders.dedup();
+        offenders
+    }
+
     /// Mirrors the frontend's `Dict` parity test: the three tables describe
     /// exactly the fields `Strings` declares, in the same order.
     #[test]
@@ -654,31 +752,47 @@ mod tests {
         assert_eq!(current().show_window, EN.show_window);
     }
 
-    /// Issue #674 acceptance: no user-visible literal may stay hard-coded in
-    /// the two modules that build the native surfaces.
+    /// Issue #843: scan forward, not only for table values reappearing in the
+    /// two modules that build native surfaces. A new English-only label must
+    /// enter all three tables before it can live there.
     #[test]
     fn no_user_visible_literal_stays_hard_coded() {
-        let modules = [
+        let translated: HashSet<&'static str> = [&EN, &DE, &FR]
+            .into_iter()
+            .flat_map(Strings::values)
+            .map(|(_, value)| value)
+            .collect();
+        let mut offenders = Vec::new();
+        for (module, src) in [
             ("tray.rs", include_str!("tray.rs")),
             ("menu.rs", include_str!("menu.rs")),
-        ];
-        let mut offenders: Vec<String> = Vec::new();
-        for table in [&EN, &DE, &FR] {
-            let seen: HashSet<&'static str> = table.values().into_iter().map(|(_, v)| v).collect();
-            for (module, src) in modules {
-                let prod = strip_line_comments(prod_source(src));
-                for value in &seen {
-                    let quoted = format!("\"{}\"", value);
-                    if prod.contains(&quoted) {
-                        offenders.push(format!("{} hard-codes {}", module, quoted));
-                    }
-                }
-            }
+        ] {
+            offenders.extend(
+                native_literal_offenders(prod_source(src), &translated)
+                    .into_iter()
+                    .map(|literal| format!("{} hard-codes {}", module, literal)),
+            );
         }
         assert!(
             offenders.is_empty(),
             "user-visible literals must come from the i18n tables: {:?}",
             offenders
+        );
+    }
+
+    /// Proves the scanner rejects unknown copy before a table can contain it,
+    /// while the same native call shape with a table-backed label is accepted.
+    #[test]
+    fn native_literal_scanner_rejects_unknown_copy_and_accepts_table_copy() {
+        let source = r#"
+            MenuItemBuilder::with_id(ID_NEW_ACTION, "Brand new action");
+            MenuItemBuilder::with_id(ID_KNOWN_ACTION, "Next");
+        "#;
+        let translated: HashSet<&'static str> = [EN.next].into_iter().collect();
+
+        assert_eq!(
+            native_literal_offenders(source, &translated),
+            vec![r#""Brand new action""#]
         );
     }
 }
