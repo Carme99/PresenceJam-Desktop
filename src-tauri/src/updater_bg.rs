@@ -44,6 +44,7 @@
 
 use crate::config::UpdateChannel;
 use parking_lot::Mutex;
+use std::collections::HashSet;
 use std::future::Future;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
@@ -105,9 +106,9 @@ pub struct StageDeferredOutcome {
 }
 
 /// What cancellation found when it acquired the pending-update lock.
-/// `already-completed` is the completion-wins case: the verified payload was
-/// already committed, so cancellation reports that fact while still removing
-/// it before the exit installer can see it.
+/// `idle` means the exact request has not begun yet and is now tombstoned;
+/// `already-completed` means its verified payload was already committed, so
+/// cancellation still removes it before the exit installer can see it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CancelDeferredState {
@@ -130,6 +131,12 @@ struct ActiveStage {
     request_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BeginOutcome {
+    Started(ActiveStage),
+    Cancelled,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CancelDisposition {
     Idle,
@@ -150,20 +157,26 @@ impl From<CancelDisposition> for CancelDeferredState {
 /// Locked state behind the deferred-stage race interlock. `generation` only
 /// moves forward. A new stage or a cancellation invalidates every completion
 /// from an older generation; `commit` accepts bytes only while its exact
-/// `(generation, request_id)` pair is still active.
+/// `(generation, request_id)` pair is still active. `cancelled_before_begin`
+/// closes the narrower IPC ordering where cancellation reaches the backend
+/// first: `begin` consumes that request-scoped tombstone and performs no IO.
 #[derive(Debug)]
 struct PendingUpdateState<T> {
     staged: Option<T>,
+    staged_request_id: Option<String>,
     generation: u64,
     active: Option<ActiveStage>,
+    cancelled_before_begin: HashSet<String>,
 }
 
 impl<T> PendingUpdateState<T> {
     fn new() -> Self {
         Self {
             staged: None,
+            staged_request_id: None,
             generation: 0,
             active: None,
+            cancelled_before_begin: HashSet::new(),
         }
     }
 
@@ -175,13 +188,16 @@ impl<T> PendingUpdateState<T> {
         self.generation
     }
 
-    fn begin(&mut self, request_id: String) -> ActiveStage {
+    fn begin(&mut self, request_id: String) -> BeginOutcome {
+        if self.cancelled_before_begin.remove(&request_id) {
+            return BeginOutcome::Cancelled;
+        }
         let active = ActiveStage {
             generation: self.advance_generation(),
             request_id,
         };
         self.active = Some(active.clone());
-        active
+        BeginOutcome::Started(active)
     }
 
     fn matches(&self, active: &ActiveStage) -> bool {
@@ -199,14 +215,42 @@ impl<T> PendingUpdateState<T> {
             return false;
         }
         self.staged = Some(staged);
+        self.staged_request_id = Some(active.request_id.clone());
         self.active = None;
         true
     }
 
+    fn cancel_request(&mut self, request_id: &str) -> CancelDisposition {
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.request_id == request_id)
+        {
+            self.advance_generation();
+            self.active = None;
+            CancelDisposition::Cancelled
+        } else if self.staged_request_id.as_deref() == Some(request_id) {
+            self.staged = None;
+            self.staged_request_id = None;
+            CancelDisposition::AlreadyCompleted
+        } else {
+            // The stage command has not reached `begin` yet. Remember this
+            // exact request under the same lock so a later begin cannot turn
+            // the older invocation into a fresh, apparently uncancelled stage.
+            self.cancelled_before_begin.insert(request_id.to_string());
+            CancelDisposition::Idle
+        }
+    }
+
+    /// Invalidate all active and staged work for paths that are not tied to
+    /// one UI request, such as an immediate-install restart. Unmatched
+    /// pre-begin tombstones stay intact: their older IPC calls may still be
+    /// queued and must not become fresh stages after this global discard.
     fn cancel(&mut self) -> CancelDisposition {
         self.advance_generation();
         let cancelled_in_flight = self.active.take().is_some();
         let completed = self.staged.take().is_some();
+        self.staged_request_id = None;
         if completed {
             CancelDisposition::AlreadyCompleted
         } else if cancelled_in_flight {
@@ -218,8 +262,10 @@ impl<T> PendingUpdateState<T> {
 
     fn take_for_exit(&mut self) -> Option<T> {
         // Exit wins the same lock as completion: invalidate anything still
-        // downloading before taking the committed payload.
+        // downloading before taking the committed payload. Pre-begin
+        // tombstones remain meaningful until any queued command consumes one.
         self.active = None;
+        self.staged_request_id = None;
         self.staged.take()
     }
 }
@@ -504,31 +550,39 @@ pub fn discard_staged_update(app: &AppHandle) {
     }
 }
 
-/// Tauri command: cancels the active deferred stage and discards any payload
-/// it already committed (issue #590). The monotonic generation invalidates a
-/// download that is still running, while the returned state distinguishes a
-/// clean cancellation from a completion that won the lock first.
+/// Tauri command: cancels one deferred-stage request and discards any payload
+/// that exact request already committed (issue #711). The request id closes
+/// both IPC orderings: an active download loses by generation, while a cancel
+/// that arrives before `begin` leaves a tombstone consumed by that request.
 #[cfg(desktop)]
 #[tauri::command]
-pub fn cancel_deferred_update(app: AppHandle) -> Result<CancelDeferredOutcome, String> {
+pub fn cancel_deferred_update(
+    app: AppHandle,
+    request_id: String,
+) -> Result<CancelDeferredOutcome, String> {
     use tauri::Manager;
 
+    if request_id.is_empty() {
+        return Err("cancel_deferred_update requires a non-empty request_id".to_string());
+    }
     let disposition = {
         let state = app.state::<PendingUpdate>();
         let mut guard = state.0.lock();
-        let disposition = guard.cancel().into();
+        let disposition = guard.cancel_request(&request_id).into();
         drop(guard);
         disposition
     };
     match disposition {
         CancelDeferredState::AlreadyCompleted => {
-            log::info!("{TAG} cancel_deferred_update: completed stage discarded");
+            log::info!("{TAG} cancel_deferred_update: completed stage {request_id} discarded");
         }
         CancelDeferredState::Cancelled => {
-            log::info!("{TAG} cancel_deferred_update: in-flight stage cancelled");
+            log::info!("{TAG} cancel_deferred_update: in-flight stage {request_id} cancelled");
         }
         CancelDeferredState::Idle => {
-            log::debug!("{TAG} cancel_deferred_update: nothing to cancel");
+            log::debug!(
+                "{TAG} cancel_deferred_update: stage {request_id} cancelled before begin"
+            );
         }
     }
     Ok(CancelDeferredOutcome { state: disposition })
@@ -1129,7 +1183,20 @@ pub async fn stage_deferred_update(
     let active = {
         let pending = app.state::<PendingUpdate>();
         let mut guard = pending.0.lock();
-        let active = guard.begin(request_id);
+        let active = match guard.begin(request_id) {
+            BeginOutcome::Started(active) => active,
+            BeginOutcome::Cancelled => {
+                drop(guard);
+                log::info!(
+                    "{TAG} stage_deferred_update: request was cancelled before begin; no IO started"
+                );
+                return Ok(StageDeferredOutcome {
+                    staged: None,
+                    current: env!("CARGO_PKG_VERSION").to_string(),
+                    skipped: Some(SKIP_REASON_CANCELLED.to_string()),
+                });
+            }
+        };
         drop(guard);
         active
     };
@@ -2126,10 +2193,20 @@ mod tests {
     // Immediate-install discard (issue #806)
     // -----------------------------------------------------------------
 
+    fn start_stage(
+        state: &Mutex<PendingUpdateState<Vec<u8>>>,
+        request_id: &str,
+    ) -> ActiveStage {
+        match state.lock().begin(request_id.to_string()) {
+            BeginOutcome::Started(active) => active,
+            BeginOutcome::Cancelled => panic!("uncancelled request {request_id} was tombstoned"),
+        }
+    }
+
     #[test]
     fn test_take_staged_empties_the_slot() {
         let slot: Mutex<PendingUpdateState<Vec<u8>>> = Mutex::new(PendingUpdateState::new());
-        let active = slot.lock().begin("stage-1".to_string());
+        let active = start_stage(&slot, "stage-1");
 
         assert!(slot.lock().commit(&active, vec![1, 2, 3]));
         assert_eq!(
@@ -2143,6 +2220,47 @@ mod tests {
         );
     }
 
+    /// Cancellation wins even when its IPC command runs before the stage
+    /// command's `begin`. Two outstanding request ids are retained separately,
+    /// so another begin/cancel pair cannot overwrite the first tombstone.
+    #[test]
+    fn test_cancel_before_begin_never_stages_or_installs() {
+        let slot: Mutex<PendingUpdateState<Vec<u8>>> = Mutex::new(PendingUpdateState::new());
+
+        assert_eq!(
+            slot.lock().cancel_request("stage-a"),
+            CancelDisposition::Idle
+        );
+        let stage_b = start_stage(&slot, "stage-b");
+        assert_eq!(
+            slot.lock().cancel_request("stage-b"),
+            CancelDisposition::Cancelled
+        );
+        assert!(matches!(
+            slot.lock().begin("stage-a".to_string()),
+            BeginOutcome::Cancelled
+        ));
+        assert!(!slot.lock().matches(&stage_b));
+        assert!(slot.lock().take_for_exit().is_none());
+    }
+
+    /// A global discard cannot prove that an older stage IPC command has
+    /// stopped. Its request tombstone therefore survives the reset and is
+    /// consumed only when that exact command eventually calls `begin`.
+    #[test]
+    fn test_global_discard_preserves_pre_begin_cancellation() {
+        let slot: Mutex<PendingUpdateState<Vec<u8>>> = Mutex::new(PendingUpdateState::new());
+        assert_eq!(
+            slot.lock().cancel_request("queued-stage"),
+            CancelDisposition::Idle
+        );
+        assert_eq!(slot.lock().cancel(), CancelDisposition::Idle);
+        assert!(matches!(
+            slot.lock().begin("queued-stage".to_string()),
+            BeginOutcome::Cancelled
+        ));
+    }
+
     /// Deterministic cancellation-wins race: cancel advances the generation
     /// while the download is active, so the completion cannot commit bytes.
     /// Exit then observes an empty slot, proving a cancelled stage cannot
@@ -2150,9 +2268,12 @@ mod tests {
     #[test]
     fn test_cancelled_completion_never_stages_or_installs() {
         let slot: Mutex<PendingUpdateState<Vec<u8>>> = Mutex::new(PendingUpdateState::new());
-        let active = slot.lock().begin("stage-cancelled".to_string());
+        let active = start_stage(&slot, "stage-cancelled");
 
-        assert_eq!(slot.lock().cancel(), CancelDisposition::Cancelled);
+        assert_eq!(
+            slot.lock().cancel_request("stage-cancelled"),
+            CancelDisposition::Cancelled
+        );
         assert!(!slot.lock().commit(&active, vec![1, 2, 3]));
         assert!(slot.lock().take_for_exit().is_none());
     }
@@ -2163,10 +2284,13 @@ mod tests {
     #[test]
     fn test_cancellation_after_completion_reports_and_removes_staged_update() {
         let slot: Mutex<PendingUpdateState<Vec<u8>>> = Mutex::new(PendingUpdateState::new());
-        let active = slot.lock().begin("stage-complete".to_string());
+        let active = start_stage(&slot, "stage-complete");
 
         assert!(slot.lock().commit(&active, vec![4, 5, 6]));
-        assert_eq!(slot.lock().cancel(), CancelDisposition::AlreadyCompleted);
+        assert_eq!(
+            slot.lock().cancel_request("stage-complete"),
+            CancelDisposition::AlreadyCompleted
+        );
         assert!(slot.lock().take_for_exit().is_none());
     }
 
@@ -2185,6 +2309,13 @@ mod tests {
             })
             .unwrap(),
             r#"{"state":"cancelled"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&CancelDeferredOutcome {
+                state: CancelDeferredState::Idle,
+            })
+            .unwrap(),
+            r#"{"state":"idle"}"#
         );
     }
 }

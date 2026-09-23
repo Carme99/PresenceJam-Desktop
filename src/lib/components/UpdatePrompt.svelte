@@ -359,7 +359,14 @@
         force,
         requestId
       });
-      if (generation !== stageGeneration) return;
+      if (generation !== stageGeneration) {
+        // A settled non-success command is the request-specific terminal
+        // acknowledgement for a cancel that arrived first. Keep the filter
+        // for a staged result: its completion event (queued or already seen)
+        // owns acknowledgement of that success path.
+        if (!outcome.staged) onStageCancellation?.(requestId, false);
+        return;
+      }
       // Backend truth for the running version — always populated, so the
       // staged state can show both versions unconditionally.
       currentVersion = outcome.current;
@@ -370,8 +377,9 @@
         confirming = false;
         staleSkippedVersion = '';
       } else if (outcome.skipped === 'cancelled' || stageAborted) {
-        // The backend generation already dropped the bytes. Keep this
-        // frontend generation retired as well so a delayed event is ignored.
+        // The backend generation already dropped the bytes. This settled
+        // request is now safe for the layout to release its tombstone.
+        onStageCancellation?.(requestId, false);
         return;
       } else if (outcome.skipped === 'current') {
         // #957: nothing to do — the manifest no longer offers the version
@@ -392,7 +400,12 @@
         confirming = false;
       }
     } catch (e) {
-      if (generation !== stageGeneration) return;
+      if (generation !== stageGeneration) {
+        // A failed command cannot emit success. Its settlement is therefore
+        // the terminal acknowledgement that makes suppression removable.
+        onStageCancellation?.(requestId, false);
+        return;
+      }
       console.error('[UPDATER] stage_deferred_update failed:', e);
       error = String(e);
     } finally {
@@ -413,9 +426,9 @@
   }
 
   // #711 cancellation is final across every asynchronous edge. Advancing the
-  // generation and recording the request id happen before awaiting the
-  // command, so a late command result or queued complete/progress event from
-  // the losing stage cannot repopulate state or fire a success notification.
+  // generation and recording the request id happen before awaiting either IPC
+  // command, so the backend can bind the cancel to this exact request and the
+  // layout can suppress a completion already queued for the webview.
   async function cancelStage() {
     if (cancelling) return;
     cancelling = true;
@@ -426,16 +439,13 @@
     if (staging) stageAborted = true;
     if (requestId) onStageCancellation?.(requestId, true);
     try {
-      const outcome = await invoke<CancelOutcome>('cancel_deferred_update');
-      // `already-completed` is the completion-wins verdict. The same command
-      // still removed the committed bytes before the exit installer can see
-      // them, so the UI returns to the plain offer in either race outcome.
+      const outcome = await invoke<CancelOutcome>('cancel_deferred_update', { requestId });
+      // Every successful response leaves the request tombstone in place:
+      // `idle`/`cancelled` are acknowledged by the older stage command's
+      // terminal result, while `already-completed` may still have a queued
+      // completion event that must be consumed before removal is safe.
       if (outcome.state === 'already-completed') {
         console.debug('[UPDATER] deferred stage completed before cancellation');
-      } else if (requestId) {
-        // Cancellation acquired the backend lock first, so no completion
-        // event exists to delay; release the layout's temporary filter id.
-        onStageCancellation?.(requestId, false);
       }
       stagedVersion = '';
       activeStageRequestId = '';

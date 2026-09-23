@@ -2,6 +2,12 @@
   import '../app.css';
   import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
+  import { get } from 'svelte/store';
+  import {
+    isPermissionGranted,
+    requestPermission,
+    sendNotification
+  } from '@tauri-apps/plugin-notification';
   import { listen } from '@tauri-apps/api/event';
   // Side-effect import — installs the module-level subscribe that
   // applies the persisted theme (and keeps it in sync with future
@@ -17,7 +23,7 @@
   import { currentView } from '$lib/stores/app';
   import { t } from '$lib/i18n';
   import { reconcileDetachedPanes } from '$lib/stores/detach';
-  import { clientSecretStateOf, loadConfig } from '$lib/stores/config';
+  import { clientSecretStateOf, configHydrated, loadConfig } from '$lib/stores/config';
   import { useListenerTeardown } from '$lib/utils/useAuthListeners';
   import {
     markStatusPosted,
@@ -31,9 +37,9 @@
   } from '$lib/stores/presence';
   import {
     migrateLegacyNotificationPreference,
+    notificationPreferences,
     notifyAuthRequired,
-    notifySyncStopped,
-    notifyUpdateStaged
+    notifySyncStopped
   } from '$lib/stores/notifications';
 
   // C7: this layout is shared by every webview window (the SPA fallback
@@ -54,16 +60,136 @@
   import type { DeviceCodeResponse, AppConfig } from '$lib/types';
   devLog(`[LAYOUT] PresenceJam build: ${import.meta.env.VITE_APP_BUILD ?? 'dev build'}`);
 
-  // #711: completion events carry the exact stage request id. UpdatePrompt
-  // records an id synchronously when Cancel is pressed, so even an event that
-  // was already queued in the webview cannot produce a success notification
-  // after the user cancelled that stage.
-  const cancelledUpdateStages = new Set<string>();
+  // #711: completion events carry the exact stage request id. Keep a bounded
+  // LRU of request state so a cancel can suppress either a queued completion
+  // or a notification already waiting on OS permission. Entries normally
+  // disappear at their request-specific terminal acknowledgement; the limit
+  // is the final guard against a permanently lost acknowledgement.
+  type UpdateStageNotificationState = {
+    completionSeen: boolean;
+    notificationPending: boolean;
+    cancelled: boolean;
+  };
+
+  const MAX_TRACKED_UPDATE_STAGES = 32;
+  const updateStageNotifications = new Map<string, UpdateStageNotificationState>();
+  let updateNotificationDispatchDestroyed = false;
+
+  function stateForUpdateStage(requestId: string): UpdateStageNotificationState {
+    const existing = updateStageNotifications.get(requestId);
+    if (existing) {
+      // Refresh insertion order so the bound evicts the oldest quiet state,
+      // not the request most recently involved in a race.
+      updateStageNotifications.delete(requestId);
+      updateStageNotifications.set(requestId, existing);
+      return existing;
+    }
+
+    if (updateStageNotifications.size >= MAX_TRACKED_UPDATE_STAGES) {
+      const oldestId = updateStageNotifications.keys().next().value as string | undefined;
+      if (oldestId !== undefined) {
+        const oldest = updateStageNotifications.get(oldestId)!;
+        // An evicted pending dispatch is cancelled rather than orphaned: its
+        // permission continuation rechecks this request-owned predicate.
+        oldest.cancelled = true;
+        updateStageNotifications.delete(oldestId);
+      }
+    }
+    const state: UpdateStageNotificationState = {
+      completionSeen: false,
+      notificationPending: false,
+      cancelled: false
+    };
+    updateStageNotifications.set(requestId, state);
+    return state;
+  }
 
   function setUpdateStageCancellation(requestId: string, cancelled: boolean) {
-    if (!requestId) return;
-    if (cancelled) cancelledUpdateStages.add(requestId);
-    else cancelledUpdateStages.delete(requestId);
+    if (!requestId || (!cancelled && !updateStageNotifications.has(requestId))) return;
+    const state = stateForUpdateStage(requestId);
+    state.cancelled = cancelled;
+    const terminalWithoutPendingSend = cancelled
+      ? state.completionSeen && !state.notificationPending
+      : !state.completionSeen || !state.notificationPending;
+    if (terminalWithoutPendingSend) updateStageNotifications.delete(requestId);
+  }
+
+  async function ensureUpdateNotificationPermission(isCancelled: () => boolean): Promise<boolean> {
+    let granted = false;
+    try {
+      granted = await isPermissionGranted();
+    } catch {
+      // Fall through to the request path.
+    }
+    if (isCancelled()) return false;
+    if (!granted) {
+      try {
+        granted = (await requestPermission()) === 'granted';
+      } catch {
+        // A refused or unavailable prompt is a no, not a crash.
+      }
+    }
+    return granted && !isCancelled();
+  }
+
+  async function dispatchUpdateStagedNotification(
+    version: string,
+    isCancelled: () => boolean
+  ): Promise<void> {
+    if (isCancelled()) return;
+    if (!get(configHydrated) || !get(notificationPreferences).update_staged) return;
+    try {
+      if (!(await ensureUpdateNotificationPermission(isCancelled))) return;
+      // This is deliberately the final cancellation check: permission IPC is
+      // asynchronous, and Cancel may run while either permission await is
+      // pending.
+      if (isCancelled()) return;
+      sendNotification({
+        title: t('notifications.updateStagedTitle'),
+        body: t('notifications.updateStagedBody', { version }),
+        id: 1004,
+        group: 'presencejam-update-staged'
+      });
+    } catch (e) {
+      console.warn('[NOTIFICATIONS] sendNotification (update_staged) failed:', e);
+    }
+  }
+
+  function handleUpdateStageComplete(version: string, requestId: string) {
+    if (!requestId) {
+      // Events from a pre-#711 backend have no request id to bind. Preserve
+      // their notification compatibility; every new backend event is scoped.
+      void dispatchUpdateStagedNotification(version, () => updateNotificationDispatchDestroyed);
+      return;
+    }
+    const state = stateForUpdateStage(requestId);
+    if (state.cancelled) {
+      updateStageNotifications.delete(requestId);
+      devLog('[LAYOUT] update-stage-complete ignored for cancelled stage');
+      return;
+    }
+    state.completionSeen = true;
+    state.notificationPending = true;
+    const finish = () => {
+      state.notificationPending = false;
+      if (state.cancelled && updateStageNotifications.get(requestId) === state) {
+        updateStageNotifications.delete(requestId);
+      }
+    };
+    void dispatchUpdateStagedNotification(
+      version,
+      () => updateNotificationDispatchDestroyed || state.cancelled
+    ).then(finish, finish);
+  }
+
+  function stopUpdateNotificationDispatch() {
+    updateNotificationDispatchDestroyed = true;
+    for (const [requestId, state] of updateStageNotifications) {
+      if (state.notificationPending) {
+        state.cancelled = true;
+        updateStageNotifications.delete(requestId);
+      }
+    }
   }
 
   let playbackError = $state('');
@@ -82,6 +208,7 @@
   // Settings no longer owns spotify-reconnect-required (issue #220) to
   // avoid missed events when the user is on Dashboard.
   onMount(() => {
+    updateNotificationDispatchDestroyed = false;
     // #498: never touch Tauri IPC outside the runtime (plain browser).
     if (!isTauriRuntime || !isMainWindow) return;
     // #601: the badge map is empty on every load, but detached windows
@@ -314,20 +441,16 @@
       })
     );
 
-    // #675 / #711: the backend emits this only from the generation that won
-    // its commit. The id filter closes the delivery window after that emit:
-    // a user cancellation recorded by the child must suppress a completion
-    // event already queued for the webview.
+    // #675 / #711: completion is request-scoped. The tracker suppresses a
+    // queued event and rechecks cancellation after notification permission
+    // before the plugin call.
     presenceTeardown.add(
       listen<{ version?: string; request_id?: string }>('update-stage-complete', (event) => {
         devLog('[LAYOUT] update-stage-complete received');
-        const requestId = String(event.payload?.request_id ?? '');
-        if (requestId && cancelledUpdateStages.has(requestId)) {
-          cancelledUpdateStages.delete(requestId);
-          devLog('[LAYOUT] update-stage-complete ignored for cancelled stage');
-          return;
-        }
-        void notifyUpdateStaged(String(event.payload?.version ?? ''));
+        handleUpdateStageComplete(
+          String(event.payload?.version ?? ''),
+          String(event.payload?.request_id ?? '')
+        );
       })
     );
 
@@ -339,6 +462,7 @@
 
     return () => {
       destroyed = true;
+      stopUpdateNotificationDispatch();
       pendingTeamsPoll = null;
       unlistenTeams?.();
       unlistenSpotify?.();
@@ -350,6 +474,7 @@
 
   onDestroy(() => {
     if (playbackErrorTimeout) clearTimeout(playbackErrorTimeout);
+    stopUpdateNotificationDispatch();
   });
 </script>
 

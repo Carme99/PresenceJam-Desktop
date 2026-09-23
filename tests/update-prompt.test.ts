@@ -25,6 +25,15 @@ import type { Mock } from 'vitest';
 
 type Listener = { event: string; fn: (e: { payload: unknown }) => void };
 const listeners: Listener[] = [];
+
+const notificationPlugin = vi.hoisted(() => ({
+  isPermissionGranted: vi.fn(),
+  requestPermission: vi.fn(),
+  sendNotification: vi.fn()
+}));
+vi.hoisted(() => {
+  Object.defineProperty(window, '__TAURI_INTERNALS__', { value: {}, configurable: true });
+});
 /** Registrations released through their unlisten handle (leak probe). */
 let released = 0;
 
@@ -38,6 +47,14 @@ vi.mock('@tauri-apps/api/event', () => ({
       released += 1;
     };
   })
+}));
+
+vi.mock('@tauri-apps/plugin-notification', () => notificationPlugin);
+vi.mock('@tauri-apps/api/window', () => ({
+  getCurrentWindow: vi.fn(() => ({ label: 'main' }))
+}));
+vi.mock('$lib/stores/detach', () => ({
+  reconcileDetachedPanes: vi.fn(async () => {})
 }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 vi.mock('@tauri-apps/api/app', () => ({ getVersion: vi.fn(async () => '4.5.2') }));
@@ -65,6 +82,11 @@ vi.mock('@tauri-apps/plugin-updater', () => ({
 
 import { invoke } from '@tauri-apps/api/core';
 import UpdatePrompt from '$lib/components/UpdatePrompt.svelte';
+import { isPermissionGranted, sendNotification } from '@tauri-apps/plugin-notification';
+import Layout from '../src/routes/+layout.svelte';
+
+const isPermissionGrantedMock = isPermissionGranted as unknown as Mock;
+const sendNotificationMock = sendNotification as unknown as Mock;
 import { i18n, t } from '$lib/i18n';
 import { configHydrated, configStore, defaultConfig } from '$lib/stores/config';
 import type { AppConfig } from '$lib/types';
@@ -113,6 +135,51 @@ async function startStage(container: HTMLElement) {
   await waitFor(() => expect(container.querySelector('.update-progress')).not.toBeNull());
 }
 
+function stageRequestId(): string {
+  const call = invokeMock.mock.calls.find(([command]) => command === 'stage_deferred_update');
+  const args = call?.[1];
+  if (
+    typeof args !== 'object' ||
+    args === null ||
+    !('requestId' in args) ||
+    typeof args.requestId !== 'string' ||
+    args.requestId === ''
+  ) {
+    throw new Error('stage_deferred_update must receive a non-empty requestId');
+  }
+  return args.requestId;
+}
+
+async function mountLayout() {
+  const rendered = render(Layout);
+  await waitFor(() =>
+    expect(listeners.filter((listener) => listener.event === 'update-stage-complete')).toHaveLength(1)
+  );
+  await waitFor(() => expect(rendered.container.querySelector('.update-banner')).not.toBeNull());
+  return rendered;
+}
+
+function setCancelOutcome(state: 'idle' | 'cancelled' | 'already-completed') {
+  const base = invokeMock.getMockImplementation()!;
+  invokeMock.mockImplementation((command: string, args?: unknown) =>
+    command === 'cancel_deferred_update'
+      ? Promise.resolve({ state })
+      : base(command, args)
+  );
+}
+
+function cancelCall(requestId: string) {
+  return invokeMock.mock.calls.find(
+    ([command, args]) =>
+      command === 'cancel_deferred_update' &&
+      typeof args === 'object' &&
+      args !== null &&
+      'requestId' in args &&
+      args.requestId === requestId
+  );
+}
+
+
 /**
  * Drive the immediate download path up to a download in flight: the button is
  * gated on a resolved channel (#678), so this waits for the gate to open.
@@ -155,6 +222,10 @@ beforeEach(() => {
   released = 0;
   stageResolvers = [];
   downloadCb = null;
+  sendNotificationMock.mockClear();
+  isPermissionGrantedMock.mockReset().mockResolvedValue(true);
+  notificationPlugin.requestPermission.mockReset().mockResolvedValue('granted');
+  Object.defineProperty(window, '__TAURI_INTERNALS__', { value: {}, configurable: true });
   i18n.set('en');
   invokeMock.mockReset();
   invokeMock.mockImplementation((cmd: string) => {
@@ -205,94 +276,96 @@ describe('UpdatePrompt deferred staging (#590)', () => {
     expect(row()).not.toContain('%');
   });
 
-  it('reports and removes a stage that completed before cancellation', async () => {
+  it('passes the active request when a completed stage is cancelled', async () => {
     const onStageCancellation = vi.fn();
     const { container } = await mountBanner({ onStageCancellation });
     await startStage(container);
 
     stageResolvers.shift()!({ staged: '4.6.0', current: '4.5.2' });
     await waitFor(() => expect(container.querySelector('.update-staged')).not.toBeNull());
-    const stageCall = invokeMock.mock.calls.find(([cmd]) => cmd === 'stage_deferred_update')!;
-    const stageArgs = stageCall[1];
-    if (
-      typeof stageArgs !== 'object' ||
-      stageArgs === null ||
-      !('requestId' in stageArgs) ||
-      typeof stageArgs.requestId !== 'string'
-    ) {
-      throw new Error('stage_deferred_update must receive a requestId');
-    }
-    const { requestId } = stageArgs;
-    const base = invokeMock.getMockImplementation()!;
-    invokeMock.mockImplementation((cmd: string, args?: unknown) =>
-      cmd === 'cancel_deferred_update'
-        ? Promise.resolve({ state: 'already-completed' })
-        : base(cmd, args)
-    );
+    const requestId = stageRequestId();
+    setCancelOutcome('already-completed');
 
     await fireEvent.click(
       within(container).getByRole('button', { name: t('update.cancelStage') })
     );
     expect(onStageCancellation).toHaveBeenCalledWith(requestId, true);
     expect(onStageCancellation).not.toHaveBeenCalledWith(requestId, false);
+    await waitFor(() => expect(cancelCall(requestId)).toBeDefined());
+    expect(cancelCall(requestId)?.[1]).toEqual({ requestId });
 
-    await waitFor(() =>
-      expect(invokeMock.mock.calls.map(([cmd]) => cmd)).toContain('cancel_deferred_update')
-    );
     await waitFor(() => expect(container.querySelector('.update-staged')).toBeNull());
     expect(container.querySelector('.update-confirm')).toBeNull();
     expect(within(container).getByRole('button', { name: t('update.installOnQuit') })).toBeTruthy();
   });
 
-  it('ignores a stage that loses to cancellation', async () => {
+  it('binds a cancel that reaches the backend before begin to the same request', async () => {
     const onStageCancellation = vi.fn();
     const { container } = await mountBanner({ onStageCancellation });
     await startStage(container);
+    const requestId = stageRequestId();
+    setCancelOutcome('idle');
 
-    const stageCall = invokeMock.mock.calls.find(([cmd]) => cmd === 'stage_deferred_update')!;
-    const stageArgs = stageCall[1];
-    if (
-      typeof stageArgs !== 'object' ||
-      stageArgs === null ||
-      !('requestId' in stageArgs) ||
-      typeof stageArgs.requestId !== 'string'
-    ) {
-      throw new Error('stage_deferred_update must receive a requestId');
-    }
-    const { requestId } = stageArgs;
-    expect(requestId).not.toBe('');
     await fireEvent.click(
       within(container).getByRole('button', { name: t('update.cancelStage') })
     );
     expect(onStageCancellation).toHaveBeenCalledWith(requestId, true);
+    expect(cancelCall(requestId)?.[1]).toEqual({ requestId });
 
-    await emit('update-stage-progress', {
-      downloaded: 1_000_000,
-      total: 100_000_000,
-      request_id: requestId
-    });
-    await waitFor(() => expect(container.querySelector('.update-progress')).toBeNull());
-
-    // Both the terminal progress and command result from the retired token
-    // are ignored. The backend command has already invalidated its generation,
-    // so the component must not compensate with a second cancel after bytes
-    // land.
-    await emit('update-stage-progress', {
-      downloaded: 100_000_000,
-      total: 100_000_000,
-      request_id: requestId
-    });
+    // The older stage command now reaches `begin`. Its request-specific
+    // cancelled outcome is the acknowledgement that makes the UI filter safe
+    // to release; no progress or completion can activate the retired request.
     stageResolvers.shift()!({ staged: null, current: '4.5.2', skipped: 'cancelled' });
-    await waitFor(() =>
-      expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'cancel_deferred_update')).toHaveLength(
-        1
-      )
-    );
+    await waitFor(() => expect(onStageCancellation).toHaveBeenCalledWith(requestId, false));
     expect(container.querySelector('.update-progress')).toBeNull();
     expect(container.querySelector('.update-staged')).toBeNull();
-    await waitFor(() =>
-      expect(within(container).getByRole('button', { name: t('update.installOnQuit') })).toBeTruthy()
+    expect(
+      invokeMock.mock.calls.filter(([command]) => command === 'cancel_deferred_update')
+    ).toHaveLength(1);
+  });
+
+  it('suppresses a queued completion that arrives after cancel', async () => {
+    configStore.set(structuredClone(defaultConfig));
+    configHydrated.set(true);
+    const { container } = await mountLayout();
+    await startStage(container);
+    stageResolvers.shift()!({ staged: '4.6.0', current: '4.5.2' });
+    await waitFor(() => expect(container.querySelector('.update-staged')).not.toBeNull());
+    const requestId = stageRequestId();
+    setCancelOutcome('already-completed');
+
+    await fireEvent.click(
+      within(container).getByRole('button', { name: t('update.cancelStage') })
     );
+    await waitFor(() => expect(cancelCall(requestId)).toBeDefined());
+    await emit('update-stage-complete', { version: '4.6.0', request_id: requestId });
+    expect(sendNotificationMock).not.toHaveBeenCalled();
+  });
+
+  it('drops a notification whose permission await outlives its cancellation', async () => {
+    const permission = Promise.withResolvers<boolean>();
+    isPermissionGrantedMock.mockReturnValue(permission.promise);
+    configStore.set(structuredClone(defaultConfig));
+    configHydrated.set(true);
+    const { container } = await mountLayout();
+    await startStage(container);
+    stageResolvers.shift()!({ staged: '4.6.0', current: '4.5.2' });
+    await waitFor(() => expect(container.querySelector('.update-staged')).not.toBeNull());
+    const requestId = stageRequestId();
+
+    await emit('update-stage-complete', { version: '4.6.0', request_id: requestId });
+    await waitFor(() => expect(isPermissionGrantedMock).toHaveBeenCalledTimes(1));
+
+    setCancelOutcome('already-completed');
+    await fireEvent.click(
+      within(container).getByRole('button', { name: t('update.cancelStage') })
+    );
+    await waitFor(() => expect(cancelCall(requestId)).toBeDefined());
+    permission.resolve(true);
+    await permission.promise;
+    for (let i = 0; i < 4; i++) await Promise.resolve();
+    await tick();
+    expect(sendNotificationMock).not.toHaveBeenCalled();
   });
 
   it('releases the progress subscription on unmount, even before listen() resolves', async () => {
