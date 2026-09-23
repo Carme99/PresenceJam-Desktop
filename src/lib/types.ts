@@ -2,7 +2,7 @@
  * Shared frontend type definitions.
  *
  * These types mirror the Rust-side structs in `src-tauri/src/spotify.rs`,
- * `src-tauri/src/teams.rs`, `src-tauri/src/commands.rs`, and
+ * `src-tauri/src/teams.rs`, `src-tauri/src/commands/`, and
  * `src-tauri/src/config.rs`. They live here (not in `src/lib/stores/`)
  * because they're pure data shapes, not reactive state.
  *
@@ -18,7 +18,7 @@
  * **`ErrorEventPayload` and `LogPayload` are still hand-written**
  * because their wire shape is not owned by a Rust struct (the polling
  * loop emits `ErrorEventPayload` via `serde_json::json!({...})` inline
- * — see `polling.rs::emit_error`; `LogPayload` comes from the
+ * — see `polling/mod.rs::emit_error`; `LogPayload` comes from the
  * `tauri-plugin-log` plugin, not from this crate's structs). See
  * issue #79 for the inline-emit rationale.
  */

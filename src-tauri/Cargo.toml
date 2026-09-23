@@ -83,9 +83,10 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "linux-
 aes-gcm = "0.11.0"
 # ts-rs generates TypeScript type declarations from Rust structs at
 # `cargo test` time. The `#[ts(export)]` attribute emits a hidden `#[test]`
-# that writes the .ts files; the explicit `#[cfg(test)] ts_rs_export` mod
-# in each module also calls `TS::export_all()` so the files are produced
-# deterministically and independently of the macro's auto-test.
+# in each source file that writes the .ts files into
+# `src/lib/types-generated/`; CI's `cargo test --manifest-path
+# src-tauri/Cargo.toml --lib` step materialises them so `npm run check`
+# reads fresh re-exports from `src/lib/types.ts`.
 # `chrono-impl` is required because `SpotifyTokens.expires_at` and
 # `TeamsTokens.expires_at` are `chrono::DateTime<Utc>`. See issue #78.
 ts-rs = { version = "12", features = ["chrono-impl"] }
