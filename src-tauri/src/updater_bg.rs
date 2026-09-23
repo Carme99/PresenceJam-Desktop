@@ -2128,8 +2128,7 @@ mod tests {
 
     #[test]
     fn test_take_staged_empties_the_slot() {
-        let slot: Mutex<PendingUpdateState<Vec<u8>>> =
-            Mutex::new(PendingUpdateState::new());
+        let slot: Mutex<PendingUpdateState<Vec<u8>>> = Mutex::new(PendingUpdateState::new());
         let active = slot.lock().begin("stage-1".to_string());
 
         assert!(slot.lock().commit(&active, vec![1, 2, 3]));
@@ -2150,8 +2149,7 @@ mod tests {
     /// become install-on-quit state.
     #[test]
     fn test_cancelled_completion_never_stages_or_installs() {
-        let slot: Mutex<PendingUpdateState<Vec<u8>>> =
-            Mutex::new(PendingUpdateState::new());
+        let slot: Mutex<PendingUpdateState<Vec<u8>>> = Mutex::new(PendingUpdateState::new());
         let active = slot.lock().begin("stage-cancelled".to_string());
 
         assert_eq!(slot.lock().cancel(), CancelDisposition::Cancelled);
@@ -2164,15 +2162,11 @@ mod tests {
     /// the exit installer cannot apply it afterwards.
     #[test]
     fn test_cancellation_after_completion_reports_and_removes_staged_update() {
-        let slot: Mutex<PendingUpdateState<Vec<u8>>> =
-            Mutex::new(PendingUpdateState::new());
+        let slot: Mutex<PendingUpdateState<Vec<u8>>> = Mutex::new(PendingUpdateState::new());
         let active = slot.lock().begin("stage-complete".to_string());
 
         assert!(slot.lock().commit(&active, vec![4, 5, 6]));
-        assert_eq!(
-            slot.lock().cancel(),
-            CancelDisposition::AlreadyCompleted
-        );
+        assert_eq!(slot.lock().cancel(), CancelDisposition::AlreadyCompleted);
         assert!(slot.lock().take_for_exit().is_none());
     }
 
