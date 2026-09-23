@@ -132,7 +132,12 @@ export function useAuthListeners(
     })
   );
   for (const [event, handler] of extraListeners) {
-    teardown.add(listen(event, handler));
+    teardown.add(
+      listen(event, (e) => {
+        if (disposed) return;
+        handler(e);
+      })
+    );
   }
 
   return () => {

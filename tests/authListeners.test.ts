@@ -126,6 +126,24 @@ describe('useAuthListeners (#615)', () => {
     expect(handlers.onTeamsFailed).not.toHaveBeenCalled();
   });
 
+  it('stops extra handlers after teardown and releases their subscriptions', async () => {
+    const extraHandler = vi.fn();
+    const teardown = useAuthListeners(noopListeners(), [
+      ['spotify-secret-conflict', extraHandler]
+    ]);
+    for (const d of deferreds) d.resolve();
+    await drain();
+
+    deferreds[4].handler({ payload: { hasSpotifySecret: true } });
+    expect(extraHandler).toHaveBeenCalledTimes(1);
+
+    await teardown();
+    // Keep the captured callback to model an event racing the async unlisten.
+    deferreds[4].handler({ payload: { hasSpotifySecret: true } });
+    expect(extraHandler).toHaveBeenCalledTimes(1);
+    expect(deferreds.map((d) => d.unlistenCalls)).toEqual([1, 1, 1, 1, 1]);
+  });
+
   it('neither rejects nor waits on in-flight siblings when one listen() fails', async () => {
     const teardown = useAuthListeners(noopListeners());
     deferreds[0].reject(new Error('listen refused'));
