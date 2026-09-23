@@ -188,10 +188,11 @@ describe('LogViewer listener teardown (#692)', () => {
 
 /**
  * #949 — a fixed badge column let French "Avertissement" overflow into the
- * message column. This case resolves the winning grid declaration from the
- * mounted row, measures the rendered label with a deterministic jsdom seam,
- * and checks the message's resulting position. It therefore catches a later
- * CSS rule that recreates the overlap without pinning CSS prose.
+ * message column. This Vitest case checks the component-derived grid tracks
+ * with a deterministic jsdom measurement seam; those synthetic rects are not
+ * browser layout. The Playwright suite in tests/browser/logviewer.spec.ts owns
+ * the real Chromium rectangle regression check, while this case retains the
+ * component and intrinsic-track coverage.
  */
 describe('LogViewer level badge column (#949)', () => {
   it('keeps localized badges clear of messages at every density', async () => {
