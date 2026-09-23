@@ -3,16 +3,15 @@ use tauri::{
     AppHandle, Emitter, Manager, Runtime, WebviewWindow,
 };
 
-// Menu item IDs — shared between tray and app menu for consistency.
-// The tray's single dispatcher (issue #804) owns the clicks for the three
-// shared ids, so they live here once and tray.rs imports them: one value,
-// one name, no twin that can drift.
+// Menu item IDs shared by the tray and app menu. The single dispatcher owns
+// the click routing; both modules import the same constants so dispatch and
+// diagnostics cannot drift onto parallel id definitions.
 pub(crate) const ID_SETTINGS: &str = "settings";
 pub(crate) const ID_OPEN_LOGS: &str = "open_logs";
 pub(crate) const ID_QUIT: &str = "quit";
-const ID_SHOW_DASHBOARD: &str = "show_dashboard";
-const ID_SHOW_LOGS: &str = "show_logs";
-const ID_ABOUT: &str = "about";
+pub(crate) const ID_SHOW_DASHBOARD: &str = "show_dashboard";
+pub(crate) const ID_SHOW_LOGS: &str = "show_logs";
+pub(crate) const ID_ABOUT: &str = "about";
 
 /// Show and focus the main window.
 fn show_and_focus_main_window(app: &AppHandle) {
@@ -235,9 +234,9 @@ pub fn handle_app_menu_event(app: &AppHandle, event_id: &str) {
             let _ = app.emit("show-about", ());
         }
         _ => {
-            log::warn!(
+            log::debug!(
                 "[MENU] handle_app_menu_event: unknown event_id={}",
-                event_id
+                crate::tray::menu_event_id_for_log(event_id)
             );
         }
     }
@@ -245,6 +244,17 @@ pub fn handle_app_menu_event(app: &AppHandle, event_id: &str) {
 
 #[cfg(test)]
 mod tests {
+    /// Issue #918: the app-menu catch-all must never write a raw unknown id.
+    #[test]
+    fn unknown_app_menu_event_log_is_redacted() {
+        let unknown = "future_action|bearerAdjacentValue";
+        let logged = crate::tray::menu_event_id_for_log(unknown);
+
+        assert_eq!(logged, "<future_action len=19>");
+        assert!(!logged.contains(unknown));
+        assert!(!logged.contains("bearerAdjacentValue"));
+    }
+
     /// Issue #415: the app-menu Quit path must give the frontend's `app_exit`
     /// drain time to run (polling stop + staged-update install) instead of a
     /// fixed 500 ms sleep-then-exit. Brace-counted body isolation
