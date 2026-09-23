@@ -5652,9 +5652,8 @@ mod tests {
 
         let process_track = prod_fn_body(prod_source(), "pub(crate) fn process_track(");
         assert!(
-            process_track.contains(
-                r#"app.emit("spotify-track-changed", track_event_payload(track))"#
-            ),
+            process_track
+                .contains(r#"app.emit("spotify-track-changed", track_event_payload(track))"#),
             "spotify-track-changed must emit the serialized seven-field event value"
         );
     }
