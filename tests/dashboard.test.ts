@@ -334,22 +334,18 @@ describe('Dashboard error-event routing (#972)', () => {
   });
 
   it('preserves Teams retry and fatal timers after an unrelated warning', async () => {
-    const retryDash = render(Dashboard);
+    const dash = render(Dashboard);
     await listenerReady('error');
     vi.useFakeTimers();
 
     await emit('error', teamsRetry);
     await emit('error', unrelatedSpotifyWarning);
-    expect(retryDash.container.querySelector('.warning-banner')?.textContent).toBe(
-      teamsRetry.message
-    );
+    expect(dash.container.querySelector('.warning-banner')?.textContent).toBe(teamsRetry.message);
+    expect(dash.container.querySelector('[role="alert"]')).toBeNull();
     await vi.advanceTimersByTimeAsync(5000);
     await tick();
-    expect(retryDash.container.querySelector('.warning-banner')).toBeNull();
+    expect(dash.container.querySelector('.warning-banner')).toBeNull();
 
-    await unmount(retryDash);
-    const fatalDash = render(Dashboard);
-    await listenerReady('error');
     await emit('error', {
       source: 'teams',
       message: 'Microsoft Teams permission was denied.',
@@ -357,12 +353,12 @@ describe('Dashboard error-event routing (#972)', () => {
       recovery: 'user_action_required'
     });
     await emit('error', unrelatedSpotifyWarning);
-    expect(fatalDash.container.querySelector('[role="alert"]')?.textContent).toBe(
+    expect(dash.container.querySelector('[role="alert"]')?.textContent).toBe(
       'Microsoft Teams permission was denied.'
     );
     await vi.advanceTimersByTimeAsync(5000);
     await tick();
-    expect(fatalDash.container.querySelector('[role="alert"]')).toBeNull();
+    expect(dash.container.querySelector('[role="alert"]')).toBeNull();
   });
 });
 
