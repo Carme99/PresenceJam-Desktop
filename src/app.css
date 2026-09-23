@@ -25,12 +25,10 @@
   --r-sm: 6px;
   --r-md: 10px;
   --r-lg: 14px;
-  --r-xl: 20px;
   --r-pill: 999px;
 
   /* Motion */
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
-  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
   --dur-fast: 120ms;
   --dur: 180ms;
   --dur-slow: 280ms;
@@ -38,6 +36,7 @@
   /* Shadows (kept conservative — Tauri windows often lack compositing) */
   --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.25);
   --shadow-2: 0 4px 16px rgba(0, 0, 0, 0.35);
+  --shadow-update-banner: 0 4px 16px rgba(0, 0, 0, 0.25);
 
   /* Typography */
   --font-sans: 'Inter', 'Segoe UI Variable', 'Segoe UI', system-ui, -apple-system,
@@ -55,8 +54,8 @@
   --lh-normal: 1.5;
 
   /* Z-stack */
-  --z-banner: 50;
   --z-tooltip: 100;
+  --z-update-banner: 1000;
 }
 
 /* ---------- Density: compact (#680) ----------
@@ -95,7 +94,6 @@
   --bg-base: #0F1226;          /* page bg, deepest */
   --bg-surface: #181B36;       /* card */
   --bg-elevated: #232852;      /* nested card / input */
-  --bg-overlay: rgba(15, 18, 38, 0.72);
 
   /* Text */
   --fg: #F5F6FF;
@@ -113,10 +111,6 @@
   --accent-press: #169C46;
   --accent-soft: rgba(29, 185, 84, 0.16);
   --accent-text: #6FE89A;
-
-  /* Teams-purple paired to the mark, used sparingly */
-  --partner: #6A4DFF;
-  --partner-soft: rgba(106, 77, 255, 0.18);
 
   /* Status */
   --success: #22C55E;
@@ -138,7 +132,6 @@
   --bg-base: #F6F7FB;
   --bg-surface: #FFFFFF;
   --bg-elevated: #EFF1F8;
-  --bg-overlay: rgba(15, 18, 38, 0.04);
 
   --fg: #0F1226;
   --fg-muted: #4B5285;
@@ -153,9 +146,6 @@
   --accent-press: #0A5724;
   --accent-soft: rgba(17, 130, 56, 0.12);
   --accent-text: #0E6B2B;       /* WCAG: darkened — 4.31:1 on accent-soft over bg-elevated */
-
-  --partner: #5A3FE0;
-  --partner-soft: rgba(90, 63, 224, 0.12);
 
   /* WCAG: status text darkened — every variant was <4.5:1 on its own soft bg */
   --success: #166534;
@@ -246,7 +236,7 @@ h1 { font-size: var(--fs-2xl); }
 h2 { font-size: var(--fs-xl); }
 h3 { font-size: var(--fs-lg); }
 p  { color: var(--fg-muted); }
-small, .text-muted { color: var(--fg-subtle); font-size: var(--fs-sm); }
+small { color: var(--fg-subtle); font-size: var(--fs-sm); }
 
 /* ---------- Links ---------- */
 /* Base anchor palette (#953): classless anchors inherit app colors instead of */
@@ -285,21 +275,16 @@ button:disabled {
 }
 
 /* Secondary: outlined / neutral */
-.btn-secondary,
-button.ghost,
-.btn-ghost {
+.btn-secondary {
   background: var(--bg-elevated);
   color: var(--fg);
   border-color: var(--border);
 }
-.btn-secondary:hover:not(:disabled),
-button.ghost:hover:not(:disabled),
-.btn-ghost:hover:not(:disabled) {
+.btn-secondary:hover:not(:disabled) {
   background: var(--bg-surface);
   border-color: var(--border-strong);
 }
-.btn-secondary:active:not(:disabled),
-.btn-ghost:active:not(:disabled) {
+.btn-secondary:active:not(:disabled) {
   background: var(--bg-elevated);
 }
 
