@@ -273,6 +273,8 @@ pub(crate) fn handle_app_menu_event(target: &impl AppMenuEventTarget, event_id: 
 
 #[cfg(test)]
 mod tests {
+    use super::{handle_app_menu_event, AppMenuEventTarget};
+
     /// Issue #918: drive the production unknown-event branch and capture the
     /// record at its logging seam. Reverting the dispatcher to interpolate the
     /// raw event id makes this fail with the leaked value in the message.
