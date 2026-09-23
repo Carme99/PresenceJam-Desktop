@@ -461,7 +461,6 @@ impl Strings {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
 
     /// Field names declared by `pub struct Strings` in this file, in order.
     /// Parsed from source so a field added without a value in the tables
@@ -493,46 +492,153 @@ mod tests {
             .unwrap_or_else(|| panic!("module has no #[cfg(test)] mod tests block"))
     }
 
-    /// Drops `//` line comments (doc comments included) so prose that quotes a
-    /// literal cannot trip the hard-coded-literal scan. Brace counting is not
-    /// involved here, so truncating a line inside a `//` is harmless.
-    fn strip_line_comments(src: &str) -> String {
-        src.lines()
-            .map(|line| match line.find("//") {
-                Some(i) => &line[..i],
-                None => line,
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    /// Returns every double-quoted literal in `src`, including escaped quotes.
-    /// Byte-wise scanning is safe here because only ASCII quote/backslash bytes
-    /// control the state and slice boundaries always follow those bytes.
-    fn double_quoted_literals(src: &str) -> Vec<&str> {
+    /// Returns every double-quoted string literal in `src` after lexing
+    /// comments, char literals, raw strings, and ordinary strings. A single
+    /// pass keeps `//` inside a URL (or a string) from changing the scan.
+    /// Byte-wise indexing is safe because every control byte examined below
+    /// is ASCII and all returned slice boundaries follow those bytes.
+    fn lexed_double_quoted_literals(src: &str) -> Vec<&str> {
         let bytes = src.as_bytes();
         let mut literals = Vec::new();
         let mut cursor = 0;
+
         while cursor < bytes.len() {
-            if bytes[cursor] != b'"' {
-                cursor += 1;
-                continue;
-            }
-            let start = cursor + 1;
-            cursor = start;
-            while cursor < bytes.len() {
-                match bytes[cursor] {
-                    b'\\' => cursor = (cursor + 2).min(bytes.len()),
-                    b'"' => break,
-                    _ => cursor += 1,
+            match bytes[cursor] {
+                b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                    cursor += 2;
+                    while cursor < bytes.len() && bytes[cursor] != b'\n' {
+                        cursor += 1;
+                    }
                 }
-            }
-            if cursor < bytes.len() {
-                literals.push(&src[start..cursor]);
-                cursor += 1;
+                b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                    cursor += 2;
+                    let mut depth = 1usize;
+                    while cursor < bytes.len() && depth > 0 {
+                        if bytes.get(cursor..cursor + 2) == Some(&b"/*"[..]) {
+                            depth += 1;
+                            cursor += 2;
+                        } else if bytes.get(cursor..cursor + 2) == Some(&b"*/"[..]) {
+                            depth -= 1;
+                            cursor += 2;
+                        } else {
+                            cursor += 1;
+                        }
+                    }
+                }
+                b'\'' => {
+                    if let Some(end) = char_literal_end(bytes, cursor) {
+                        cursor = end + 1;
+                    } else {
+                        // A lifetime such as `'static` is not a char literal.
+                        cursor += 1;
+                    }
+                }
+                b'r' if bytes.get(cursor + 1) == Some(&b'"')
+                    || bytes.get(cursor + 1) == Some(&b'#') =>
+                {
+                    let mut quote = cursor + 1;
+                    while bytes.get(quote) == Some(&b'#') {
+                        quote += 1;
+                    }
+                    if bytes.get(quote) != Some(&b'"') {
+                        cursor += 1;
+                        continue;
+                    }
+
+                    let hashes = quote - cursor - 1;
+                    let content_start = quote + 1;
+                    let mut end = content_start;
+                    let mut closed = false;
+                    while end < bytes.len() {
+                        if bytes[end] == b'"'
+                            && bytes
+                                .get(end + 1..end + 1 + hashes)
+                                .is_some_and(|suffix| suffix.iter().all(|byte| *byte == b'#'))
+                        {
+                            literals.push(&src[content_start..end]);
+                            cursor = end + 1 + hashes;
+                            closed = true;
+                            break;
+                        }
+                        end += 1;
+                    }
+                    if !closed {
+                        cursor = bytes.len();
+                    }
+                }
+                b'b' if bytes.get(cursor + 1) == Some(&b'"') => {
+                    if let Some(end) = ordinary_string_end(bytes, cursor + 1) {
+                        literals.push(&src[cursor + 2..end]);
+                        cursor = end + 1;
+                    } else {
+                        cursor = bytes.len();
+                    }
+                }
+                b'"' => {
+                    if let Some(end) = ordinary_string_end(bytes, cursor) {
+                        literals.push(&src[cursor + 1..end]);
+                        cursor = end + 1;
+                    } else {
+                        cursor = bytes.len();
+                    }
+                }
+                _ => cursor += 1,
             }
         }
+
         literals
+    }
+
+    /// Finds a char literal without mistaking a lifetime for one. ASCII chars
+    /// close immediately; escaped and non-ASCII chars may span a few bytes.
+    fn char_literal_end(bytes: &[u8], start: usize) -> Option<usize> {
+        let first = start + 1;
+        if first >= bytes.len() || bytes[first] == b'\'' {
+            return None;
+        }
+        if bytes[first] == b'\\' {
+            let mut cursor = first + 1;
+            if cursor >= bytes.len() || bytes[cursor] == b'\n' {
+                return None;
+            }
+            match bytes[cursor] {
+                b'x' => cursor = (cursor + 3).min(bytes.len()),
+                b'u' if bytes.get(cursor + 1) == Some(&b'{') => {
+                    cursor += 2;
+                    while cursor < bytes.len() && bytes[cursor] != b'}' {
+                        cursor += 1;
+                    }
+                    cursor = (cursor + 1).min(bytes.len());
+                }
+                _ => cursor = (cursor + 1).min(bytes.len()),
+            }
+            return (bytes.get(cursor) == Some(&b'\'')).then_some(cursor);
+        }
+        if bytes[first].is_ascii() {
+            return (bytes.get(first + 1) == Some(&b'\'')).then_some(first + 1);
+        }
+        let mut cursor = first;
+        while cursor < bytes.len() && cursor <= first + 4 && bytes[cursor] != b'\n' {
+            if bytes[cursor] == b'\'' {
+                return Some(cursor);
+            }
+            cursor += 1;
+        }
+        None
+    }
+
+    /// Finds the closing quote of an ordinary string, honoring backslash
+    /// escapes so escaped quotes do not terminate the literal.
+    fn ordinary_string_end(bytes: &[u8], start: usize) -> Option<usize> {
+        let mut cursor = start + 1;
+        while cursor < bytes.len() {
+            match bytes[cursor] {
+                b'\\' => cursor = (cursor + 2).min(bytes.len()),
+                b'"' => return Some(cursor),
+                _ => cursor += 1,
+            }
+        }
+        None
     }
 
     /// Deliberate non-copy literals in the native modules. These are stable
@@ -657,12 +763,12 @@ mod tests {
     }
 
     /// Scans already-isolated production source and returns copy-like literals
-    /// absent from all locale tables and the explicit native exception list.
-    fn native_literal_offenders(src: &str, translated: &HashSet<&'static str>) -> Vec<String> {
-        let mut offenders: Vec<String> = double_quoted_literals(&strip_line_comments(src))
+    /// absent from the explicit native exception list. Table values are not an
+    /// exemption: rendering a literal directly is still an i18n violation.
+    fn native_literal_offenders(src: &str) -> Vec<String> {
+        let mut offenders: Vec<String> = lexed_double_quoted_literals(src)
             .into_iter()
             .filter(|value| looks_like_native_copy(value))
-            .filter(|value| !translated.contains(*value))
             .filter(|value| !NATIVE_LITERAL_ALLOWLIST.contains(value))
             .filter(|value| !value.starts_with("[TRAY]") && !value.starts_with("[MENU]"))
             .filter(|value| !is_format_only_literal(value))
@@ -826,18 +932,13 @@ mod tests {
     /// enter all three tables before it can live there.
     #[test]
     fn no_user_visible_literal_stays_hard_coded() {
-        let translated: HashSet<&'static str> = [&EN, &DE, &FR]
-            .into_iter()
-            .flat_map(Strings::values)
-            .map(|(_, value)| value)
-            .collect();
         let mut offenders = Vec::new();
         for (module, src) in [
             ("tray.rs", include_str!("tray.rs")),
             ("menu.rs", include_str!("menu.rs")),
         ] {
             offenders.extend(
-                native_literal_offenders(prod_source(src), &translated)
+                native_literal_offenders(prod_source(src))
                     .into_iter()
                     .map(|literal| format!("{} hard-codes {}", module, literal)),
             );
@@ -849,19 +950,71 @@ mod tests {
         );
     }
 
-    /// Proves the scanner rejects unknown copy before a table can contain it,
-    /// while the same native call shape with a table-backed label is accepted.
+    /// Proves translated table values remain offenses when hard-coded, while
+    /// the same label supplied through a field reference is accepted.
     #[test]
-    fn native_literal_scanner_rejects_unknown_copy_and_accepts_table_copy() {
+    fn native_literal_scanner_rejects_translated_copy_and_accepts_field_reference() {
         let source = r#"
+            let s = crate::i18n::current();
+            MenuItemBuilder::with_id(ID_KNOWN_ACTION, s.next);
+            MenuItemBuilder::with_id(ID_ENGLISH_ACTION, "Next");
+            MenuItemBuilder::with_id(ID_FRENCH_ACTION, "Suivant");
             MenuItemBuilder::with_id(ID_NEW_ACTION, "Brand new action");
-            MenuItemBuilder::with_id(ID_KNOWN_ACTION, "Next");
         "#;
-        let translated: HashSet<&'static str> = [EN.next].into_iter().collect();
 
         assert_eq!(
-            native_literal_offenders(source, &translated),
-            vec![r#""Brand new action""#]
+            native_literal_offenders(source),
+            vec![
+                r#""Brand new action""#,
+                r#""Next""#,
+                r#""Suivant""#,
+            ]
         );
+    }
+
+    /// URL punctuation inside a string must not turn the string into a
+    /// comment, and both ordinary and raw URL strings must still be scanned.
+    #[test]
+    fn native_literal_scanner_keeps_urls_inside_strings() {
+        let source = r##"
+            let endpoint = "https://example.test/Copy";
+            let raw_endpoint = r#"https://example.test/Raw copy"#;
+        "##;
+
+        assert_eq!(
+            native_literal_offenders(source),
+            vec![
+                r#""https://example.test/Copy""#,
+                r#""https://example.test/Raw copy""#,
+            ]
+        );
+    }
+
+    /// Quoted copy in line and block comments is not a native literal.
+    #[test]
+    fn native_literal_scanner_ignores_line_and_block_comments() {
+        let source = r#"
+            // "Commented copy" https://example.test
+            /* "Block-commented copy"
+               /* nested "still commented" */
+            */
+            let s = crate::i18n::current();
+            MenuItemBuilder::with_id(ID_KNOWN_ACTION, s.next);
+        "#;
+
+        assert!(native_literal_offenders(source).is_empty());
+    }
+    /// Char literals and lifetimes must not be mistaken for string starts;
+    /// a real string after them is still scanned.
+    #[test]
+    fn native_literal_scanner_handles_char_boundaries() {
+        let source = r#"
+            let quote = '"';
+            let apostrophe = '\'';
+            let emoji = '😀';
+            let lifetime: &'static str = "Visible copy";
+        "#;
+
+        assert_eq!(native_literal_offenders(source), vec![r#""Visible copy""#]);
     }
 }
