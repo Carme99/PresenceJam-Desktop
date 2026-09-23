@@ -1189,6 +1189,7 @@ pub async fn stage_deferred_update(
                             current,
                             skipped: Some(SKIP_REASON_ALREADY_SKIPPED.to_string()),
                         });
+                    }
                 }
                 if is_stale_version(&version, &current) {
                     log::info!(
