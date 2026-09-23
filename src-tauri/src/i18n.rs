@@ -964,11 +964,7 @@ mod tests {
 
         assert_eq!(
             native_literal_offenders(source),
-            vec![
-                r#""Brand new action""#,
-                r#""Next""#,
-                r#""Suivant""#,
-            ]
+            vec![r#""Brand new action""#, r#""Next""#, r#""Suivant""#,]
         );
     }
 
