@@ -3832,18 +3832,16 @@ pub(crate) fn process_track(
         // two never disagree about what is playing.
         *LAST_NOW_PLAYING.lock() = Some(now.clone());
 
-        let _ = app.emit(
-            "spotify-track-changed",
-            json!({
-                "title": track.title,
-                "artist": track.artist,
-                "album": track.album,
-                "album_art_url": track.album_art_url,
-                "is_playing": track.is_playing,
-                "progress_ms": track.progress_ms,
-                "duration_ms": track.duration_ms
-            }),
-        );
+        // Keep the event payload on the same generated `TrackInfo` contract as
+        // the frontend listener, while preserving the seven fields this event
+        // has always exposed. The device-control fields are `skip_serializing_if`
+        // options, so clearing them on this event copy leaves the wire shape
+        // unchanged instead of widening it with unrelated playback controls.
+        let mut event_track = track.clone();
+        event_track.volume_percent = None;
+        event_track.supports_volume = None;
+        event_track.actions = None;
+        let _ = app.emit("spotify-track-changed", event_track);
     } else if playing_changed {
         // Finding D6 (issue #689): a pause is a state change. Re-store the
         // observed item (so `current_track` — and therefore the returned sync

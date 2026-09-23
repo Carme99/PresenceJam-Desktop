@@ -30,7 +30,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, waitFor } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { get } from 'svelte/store';
-import type { AppConfig } from '$lib/types';
+import type { AppConfig, TrackInfo } from '$lib/types';
 import { configHydrated, configStore, defaultConfig, loadConfig } from '$lib/stores/config';
 import {
   NOTIFICATION_CLASSES,
@@ -49,6 +49,36 @@ import {
 import { t } from '$lib/i18n';
 import Dashboard from '$lib/components/Dashboard.svelte';
 import Layout from '../src/routes/+layout.svelte';
+
+const TRACK_ACTIONS: NonNullable<TrackInfo['actions']> = {
+  seeking: true,
+  setting_volume: true,
+  toggling_shuffle: true,
+  toggling_repeat_context: true,
+  toggling_repeat_track: true,
+  skipping_prev: true,
+  skipping_next: true,
+  resuming: true,
+  pausing: true,
+  transferring_playback: true
+};
+
+/** A complete payload as emitted by the Rust `TrackInfo` event contract. */
+function makeTrack(overrides: Partial<TrackInfo> = {}): TrackInfo {
+  return {
+    title: 'A Track',
+    artist: 'An Artist',
+    album: 'An Album',
+    album_art_url: 'https://example.com/album-art.jpg',
+    is_playing: true,
+    progress_ms: 42_000,
+    duration_ms: 240_000,
+    volume_percent: 80,
+    supports_volume: true,
+    actions: TRACK_ACTIONS,
+    ...overrides
+  };
+}
 
 type Listener = { event: string; fn: (e: { payload: unknown }) => void };
 
@@ -258,7 +288,7 @@ describe('notification classes (#675)', () => {
 
   it('stays completely silent when every class is off', async () => {
     seed();
-    await notifyTrackChange({ title: 'A Track', artist: 'An Artist' });
+    await notifyTrackChange(makeTrack());
     await notifySyncStopped();
     await notifyAuthRequired();
     await notifyUpdateStaged('4.7.0');
@@ -269,7 +299,7 @@ describe('notification classes (#675)', () => {
     seed({ track_change: true });
     plugin.isPermissionGranted.mockResolvedValue(false);
     plugin.requestPermission.mockResolvedValue('denied');
-    expect(await notifyTrackChange({ title: 'Denied Track', artist: 'An Artist' })).toBe(false);
+    expect(await notifyTrackChange(makeTrack({ title: 'Denied Track' }))).toBe(false);
     expect(plugin.sendNotification).not.toHaveBeenCalled();
   });
 });
@@ -285,7 +315,7 @@ describe('track-change class: the pre-4.7 behaviour, unchanged (#675)', () => {
 
   it('throttles to one notification per 5 s and replaces in place', async () => {
     seed({ track_change: true });
-    expect(await notifyTrackChange({ title: 'A', artist: 'X', album: 'Y' })).toBe(true);
+    expect(await notifyTrackChange(makeTrack({ title: 'A', artist: 'X', album: 'Y' }))).toBe(true);
     expect(plugin.sendNotification).toHaveBeenCalledTimes(1);
     expect(plugin.sendNotification.mock.calls[0][0]).toMatchObject({
       title: 'A',
@@ -296,30 +326,30 @@ describe('track-change class: the pre-4.7 behaviour, unchanged (#675)', () => {
 
     // A different track inside the window is throttled, not queued.
     advanceClock(1_000);
-    expect(await notifyTrackChange({ title: 'B', artist: 'X' })).toBe(false);
+    expect(await notifyTrackChange(makeTrack({ title: 'B', artist: 'X' }))).toBe(false);
     expect(plugin.sendNotification).toHaveBeenCalledTimes(1);
 
     // The same track never notifies twice, even after the window elapses.
     advanceClock(9_000);
-    expect(await notifyTrackChange({ title: 'A', artist: 'X' })).toBe(false);
+    expect(await notifyTrackChange(makeTrack({ title: 'A', artist: 'X' }))).toBe(false);
     expect(plugin.sendNotification).toHaveBeenCalledTimes(1);
 
     // Once the window has elapsed the genuinely-current track gets through.
     advanceClock(10_000);
-    expect(await notifyTrackChange({ title: 'B', artist: 'X' })).toBe(true);
+    expect(await notifyTrackChange(makeTrack({ title: 'B', artist: 'X' }))).toBe(true);
     expect(plugin.sendNotification).toHaveBeenCalledTimes(2);
     expect(plugin.sendNotification.mock.calls[1][0].id).toBe(1001);
   });
 
   it('says nothing for a track change when the class is off', async () => {
     seed({ sync_stopped: true });
-    expect(await notifyTrackChange({ title: 'Class Off Track', artist: 'X' })).toBe(false);
+    expect(await notifyTrackChange(makeTrack({ title: 'Class Off Track', artist: 'X' }))).toBe(false);
     expect(plugin.sendNotification).not.toHaveBeenCalled();
   });
 
   it('ignores a payload with no title', async () => {
     seed({ track_change: true });
-    expect(await notifyTrackChange({ artist: 'X' })).toBe(false);
+    expect(await notifyTrackChange(makeTrack({ title: '' }))).toBe(false);
     expect(plugin.sendNotification).not.toHaveBeenCalled();
   });
 });
@@ -567,7 +597,7 @@ describe('the always-mounted layout dispatches the new classes (#675)', () => {
     try {
       // The forced `invalid_grant` path (poll_once's `json!(null)` payload).
       await emit('teams-reconnect-required', null);
-      await emit('spotify-track-changed', { title: 'Dead Session Track', artist: 'Zed' });
+      await emit('spotify-track-changed', makeTrack({ title: 'Dead Session Track', artist: 'Zed' }));
       await flush();
       expect(plugin.sendNotification).toHaveBeenCalledTimes(1);
       const sent = plugin.sendNotification.mock.calls[0][0];
@@ -610,7 +640,7 @@ describe('the always-mounted layout dispatches the new classes (#675)', () => {
     await emit('sync-stopped', { self_terminated: true });
     await emit('teams-reconnect-required', null);
     await emit('update-stage-complete', { version: '4.7.0' });
-    await emit('spotify-track-changed', { title: 'A Track', artist: 'An Artist' });
+    await emit('spotify-track-changed', makeTrack());
 
     expect(plugin.sendNotification).not.toHaveBeenCalled();
   });

@@ -507,7 +507,7 @@
     teardown.add(listen('presence-gated', () => { void refreshActivity(); }));
 
     devLog('[DASHBOARD] onMount: setting up spotify-track-changed listener');
-    teardown.add(listen('spotify-track-changed', (event: any) => {
+    teardown.add(listen<TrackInfo>('spotify-track-changed', (event) => {
       devLog('[DASHBOARD] EVENT: spotify-track-changed received');
       devLog('[DASHBOARD] EVENT: track.title=', event.payload.title);
       devLog('[DASHBOARD] EVENT: track.artist=', event.payload.artist);
