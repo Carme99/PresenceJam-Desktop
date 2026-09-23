@@ -1,88 +1,17 @@
-# CLAUDE.md - PresenceJam-Desktop
+# CLAUDE.md - DEPRECATED
 
-Desktop app syncing Spotify playback to Microsoft Teams status. Built with Tauri 2, Svelte 5, TypeScript.
+This file is **deprecated**. The single source of truth for AI coding agents
+(Claude Code, Codex, Cursor, aider, OpenClaw, omp, and any other tool that
+reads context from the repo root) is:
 
----
+> **[AGENTS.md](./AGENTS.md)**
 
-## Dev Commands
+It contains the full operating contract for working in this repository:
+toolchain pins, layout, gates, authoring rules (Rust + frontend), i18n
+contract, security/storage contract, CI gate map, things agents must not do,
+the per-issue workflow recipe, and the symbol glossary.
 
-```bash
-npm install           # Install dependencies
-npm run tauri dev     # Start development mode (hot reload)
-npm run tauri build   # Build release binary
-cargo check           # Check Rust compilation
-cargo test            # Run Rust unit tests
-cargo fmt             # Format Rust code
-npm run check         # Type-check Svelte/TypeScript
-```
-
----
-
-## Conventions
-
-### Commits
-
-Follow [Conventional Commits](https://www.conventionalcommits.org/):
-- `feat: add dark mode support`
-- `fix: correct token refresh logic`
-- `docs: update README`
-- `refactor: extract auth module`
-
-Types: `feat`, `fix`, `docs`, `test`, `refactor`, `chore`
-
-### Rust
-
-- Run `cargo check` before committing
-- Use `cargo fmt` to format code before committing
-- Error handling with `Result` types — no `unwrap()` on fallible I/O or parse paths in production code; the sole exception is the `tray.rs` `cached_devices` cache-hit fast path, which unwraps a snapshot it just proved is `Some`
-- Use `log::info!` / `log::debug!` over `println!`
-- Prefix module-level log tags in square brackets: `[MODULE]`
-
-### Frontend (Svelte + TypeScript)
-
-- Follow existing component patterns
-- Use existing stores for state management
-- Add TypeScript types for new interfaces
-- Use `devLog()` from `$lib/utils/dev` for debug logging — it is a no-op in production builds
-- `console.error` and `console.warn` are fine for actual errors that should always be visible
-- **All user-facing UI strings must go through `t()` from `$lib/i18n`** — keys defined in `en.ts`/`de.ts`/`fr.ts`; the shared `Dict` type enforces en/de/fr parity at compile time. Rust-side error strings stay English (documented limitation).
-
----
-
-## Key Files
-
-| File | Purpose |
-|------|---------|
-| `src-tauri/src/lib.rs` | Tauri entry, command registration, AppState setup |
-| `src-tauri/src/commands/` | All invoke() command handlers (config, auth, sync, window, playback, misc) |
-| `src-tauri/src/polling/` | Polling loop, token refresh, crash recovery, presence-gate + status-rule evaluation (`gated_track_key`, 240 s mid-track re-check) |
-| `src-tauri/src/spotify.rs` | Spotify Web API client (PKCE auth) |
-| `src-tauri/src/teams.rs` | Microsoft Graph API client (device code flow) |
-| `src-tauri/src/profanity.rs` | Profanity filter |
-| `src-tauri/src/config.rs` | AppConfig struct (incl. `status_rules` — quiet hours + track rules), JSON load/save, `clamp_polling` |
-| `src-tauri/src/tray.rs` | System tray + playback menu |
-| `src-tauri/src/diagnostics.rs` | Local, redacted support snapshot (`get_diagnostics_snapshot`) |
-| `src-tauri/src/updater_bg.rs` | Silent background update checks + stage-deferred ("Install on quit") updates |
-| `src/lib/components/` | Svelte components (Dashboard, Onboarding, Settings, Reconnect, LogViewer, Diagnostics, UpdatePrompt) |
-| `src/lib/i18n.ts` + `src/lib/i18n/` | i18n barrel — `t()` / `i18n` store with en/de/fr dictionaries |
-
----
-
-## Auth Flows
-
-- **Spotify:** PKCE OAuth — `code_verifier` generated, `code_challenge` sent to Spotify, browser redirects to `presencejam://callback`
-- **Teams:** Device Code flow — app polls `login.microsoftonline.com` at the server-provided device-code `interval` clamped to 1–15s, with +5s RFC 8628 `slow_down` backoff, while the user completes browser auth
-
----
-
-## Storage
-
-- Tokens stored as AES-256-GCM ciphertext in `%APPDATA%\com.presencejam.app\PresenceJam\tokens.json` (Windows), `~/Library/Application Support/com.presencejam.app/PresenceJam/tokens.json` (macOS), `$XDG_CONFIG_HOME/com.presencejam.app/PresenceJam/tokens.json` (Linux) via `token_io.rs` — NOT the same folder as `config.json` (issue #300: Tauri `app_config_dir()` appends the bundle id); the 256-bit key lives in the OS keychain via the `keyring` crate (DPAPI on Windows, Keychain on macOS, Secret Service on Linux)
-- Config stored as plain JSON in `%APPDATA%\PresenceJam\config.json` (Windows), `~/Library/Application Support/PresenceJam/` (macOS) or `$XDG_CONFIG_HOME/PresenceJam/` (Linux)
-- Logs: single `PresenceJam.log` via tauri-plugin-log's LogDir target (Tauri `app_log_dir()` — Windows `%LOCALAPPDATA%\com.presencejam.app\logs\`, macOS `~/Library/Logs/com.presencejam.app/`, Linux `~/.local/share/com.presencejam.app/logs/`). The bundle-id segment matches the `tokens.json` folder, not `config.json` (issue #300) — no rotation or retention pruning
-
----
-
-## Status Format Placeholders
-
-`{artist}`, `{track}`, `{album}`, `{emoji}` — default: `🎵 {artist} - {track} 🎧`
+If your tool reads only `CLAUDE.md`, point it at `AGENTS.md` explicitly. New
+agents should default to `AGENTS.md` from the start. This stub remains in
+the tree as a redirect; it will be removed in a follow-up once every external
+tool that read it has been re-pointed.
