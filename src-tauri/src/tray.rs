@@ -3000,7 +3000,8 @@ mod tests {
         assert_eq!(menu_event_id_for_log("about"), "about");
 
         let device_id = "aB3deviceCredentialValueWithThirtyTwoChars";
-        let logged_device = menu_event_id_for_log(&format!("devices|{device_id}"));
+        let formatted_device_id = format!("devices|{device_id}");
+        let logged_device = menu_event_id_for_log(&formatted_device_id);
         assert_eq!(logged_device, "<devices len=42>");
         assert!(!logged_device.contains(device_id));
         assert!(!logged_device.contains(&format!("devices|{device_id}")));
