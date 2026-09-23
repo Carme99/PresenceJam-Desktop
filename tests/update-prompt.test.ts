@@ -31,6 +31,7 @@ const notificationPlugin = vi.hoisted(() => ({
   requestPermission: vi.fn(),
   sendNotification: vi.fn()
 }));
+const updateStagedNotificationMock = vi.hoisted(() => vi.fn());
 vi.hoisted(() => {
   Object.defineProperty(window, '__TAURI_INTERNALS__', { value: {}, configurable: true });
 });
@@ -56,6 +57,11 @@ vi.mock('@tauri-apps/api/window', () => ({
 vi.mock('$lib/stores/detach', () => ({
   reconcileDetachedPanes: vi.fn(async () => {})
 }));
+vi.mock('$lib/stores/notifications', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('$lib/stores/notifications')>();
+  updateStagedNotificationMock.mockImplementation(actual.notifyUpdateStaged);
+  return { ...actual, notifyUpdateStaged: updateStagedNotificationMock };
+});
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 vi.mock('@tauri-apps/api/app', () => ({ getVersion: vi.fn(async () => '4.5.2') }));
 /**
@@ -90,6 +96,7 @@ const sendNotificationMock = sendNotification as unknown as Mock;
 import { i18n, t } from '$lib/i18n';
 import { configHydrated, configStore, defaultConfig } from '$lib/stores/config';
 import type { AppConfig } from '$lib/types';
+import { notifyUpdateStaged as notifyUpdateStagedMock } from '$lib/stores/notifications';
 
 const invokeMock = invoke as unknown as Mock;
 
@@ -222,7 +229,7 @@ beforeEach(() => {
   released = 0;
   stageResolvers = [];
   downloadCb = null;
-  sendNotificationMock.mockClear();
+  updateStagedNotificationMock.mockClear();
   isPermissionGrantedMock.mockReset().mockResolvedValue(true);
   notificationPlugin.requestPermission.mockReset().mockResolvedValue('granted');
   Object.defineProperty(window, '__TAURI_INTERNALS__', { value: {}, configurable: true });
@@ -365,14 +372,47 @@ describe('UpdatePrompt deferred staging (#590)', () => {
     }
 
     // A's completion stays cancelled even though later requests filled every
-    // tracker slot. A then releases one slot, but sticky backpressure must
-    // continue suppressing the request that was refused tracking.
+    // tracker slot. Releasing A does not make a still-pending request eligible;
+    // the capacity guard only reopens once an acknowledged entry drains.
     await emit('update-stage-complete', { version: '4.6.0', request_id: requestA });
     await emit('update-stage-complete', {
       version: '4.6.0',
       request_id: laterRequestIds.at(-1)
     });
     expect(sendNotificationMock).not.toHaveBeenCalled();
+  });
+
+  it('reopens tracking after terminal entries drain and sends one valid completion', async () => {
+    const permission = Promise.withResolvers<boolean>();
+    isPermissionGrantedMock.mockReturnValue(permission.promise);
+    notificationPlugin.requestPermission.mockResolvedValue('denied');
+    configStore.set(structuredClone(defaultConfig));
+    configHydrated.set(true);
+    await mountLayout();
+
+    const unresolved = Array.from({ length: 32 }, (_, index) => `pressure-${index}`);
+    for (const requestId of unresolved) {
+      await emit('update-stage-complete', { version: '4.6.0', request_id: requestId });
+    }
+    // The 33rd request arrives while every entry is still waiting on permission.
+    await emit('update-stage-complete', { version: '4.6.0', request_id: 'pressure-refused' });
+    expect(sendNotificationMock).not.toHaveBeenCalled();
+
+    permission.resolve(false);
+    await permission.promise;
+    for (let i = 0; i < 4; i++) await Promise.resolve();
+    await tick();
+    isPermissionGrantedMock.mockResolvedValue(true);
+
+    await emit('update-stage-complete', { version: '4.6.1', request_id: 'valid-after-drain' });
+    await emit('update-stage-complete', { version: '4.6.1', request_id: 'valid-after-drain' });
+    await waitFor(() => expect(sendNotificationMock).toHaveBeenCalledTimes(1));
+    expect(
+      notifyUpdateStagedMock.mock.calls.filter(([version]) => version === '4.6.1')
+    ).toHaveLength(1);
+    expect(sendNotificationMock).toHaveBeenCalledWith(
+      expect.objectContaining({ body: expect.stringContaining('4.6.1') })
+    );
   });
 
   it('drops a notification whose permission await outlives its cancellation', async () => {

@@ -2,12 +2,6 @@
   import '../app.css';
   import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
-  import { get } from 'svelte/store';
-  import {
-    isPermissionGranted,
-    requestPermission,
-    sendNotification
-  } from '@tauri-apps/plugin-notification';
   import { listen } from '@tauri-apps/api/event';
   // Side-effect import — installs the module-level subscribe that
   // applies the persisted theme (and keeps it in sync with future
@@ -23,7 +17,7 @@
   import { currentView } from '$lib/stores/app';
   import { t } from '$lib/i18n';
   import { reconcileDetachedPanes } from '$lib/stores/detach';
-  import { clientSecretStateOf, configHydrated, loadConfig } from '$lib/stores/config';
+  import { clientSecretStateOf, loadConfig } from '$lib/stores/config';
   import { useListenerTeardown } from '$lib/utils/useAuthListeners';
   import {
     markStatusPosted,
@@ -37,9 +31,9 @@
   } from '$lib/stores/presence';
   import {
     migrateLegacyNotificationPreference,
-    notificationPreferences,
     notifyAuthRequired,
-    notifySyncStopped
+    notifySyncStopped,
+    notifyUpdateStaged
   } from '$lib/stores/notifications';
 
   // C7: this layout is shared by every webview window (the SPA fallback
@@ -63,9 +57,8 @@
   // #711: completion events carry the exact stage request id. Keep a bounded
   // map of request state so a cancel can suppress either a queued completion
   // or a notification already waiting on OS permission. Only terminal,
-  // acknowledged entries are evictable. If every slot is unresolved, latch
-  // backpressure for this layout lifetime so an untracked cancellation cannot
-  // become a fresh state after capacity is released.
+  // acknowledged entries are evictable. If every slot is unresolved, new
+  // requests fail closed until one of those entries drains.
   type UpdateStageNotificationState = {
     completionSeen: boolean;
     notificationPending: boolean;
@@ -75,7 +68,6 @@
   const MAX_TRACKED_UPDATE_STAGES = 32;
   const updateStageNotifications = new Map<string, UpdateStageNotificationState>();
   let updateNotificationDispatchDestroyed = false;
-  let updateStageTrackingSaturated = false;
 
   function stateForUpdateStage(requestId: string): UpdateStageNotificationState | null {
     const existing = updateStageNotifications.get(requestId);
@@ -87,11 +79,6 @@
       return existing;
     }
 
-    if (updateStageTrackingSaturated) {
-      devLog('[LAYOUT] update-stage tracking saturated; unknown request suppressed');
-      return null;
-    }
-
     if (updateStageNotifications.size >= MAX_TRACKED_UPDATE_STAGES) {
       let acknowledgedId: string | undefined;
       for (const [trackedId, state] of updateStageNotifications) {
@@ -101,7 +88,6 @@
         }
       }
       if (acknowledgedId === undefined) {
-        updateStageTrackingSaturated = true;
         devLog('[LAYOUT] update-stage tracking saturated; notification backpressured');
         return null;
       }
@@ -127,57 +113,20 @@
     if (terminalWithoutPendingSend) updateStageNotifications.delete(requestId);
   }
 
-  async function ensureUpdateNotificationPermission(isCancelled: () => boolean): Promise<boolean> {
-    let granted = false;
-    try {
-      granted = await isPermissionGranted();
-    } catch {
-      // Fall through to the request path.
-    }
-    if (isCancelled()) return false;
-    if (!granted) {
-      try {
-        granted = (await requestPermission()) === 'granted';
-      } catch {
-        // A refused or unavailable prompt is a no, not a crash.
-      }
-    }
-    return granted && !isCancelled();
-  }
-
-  async function dispatchUpdateStagedNotification(
-    version: string,
-    isCancelled: () => boolean
-  ): Promise<void> {
-    if (isCancelled()) return;
-    if (!get(configHydrated) || !get(notificationPreferences).update_staged) return;
-    try {
-      if (!(await ensureUpdateNotificationPermission(isCancelled))) return;
-      // This is deliberately the final cancellation check: permission IPC is
-      // asynchronous, and Cancel may run while either permission await is
-      // pending.
-      if (isCancelled()) return;
-      sendNotification({
-        title: t('notifications.updateStagedTitle'),
-        body: t('notifications.updateStagedBody', { version }),
-        id: 1004,
-        group: 'presencejam-update-staged'
-      });
-    } catch (e) {
-      console.warn('[NOTIFICATIONS] sendNotification (update_staged) failed:', e);
-    }
-  }
-
   function handleUpdateStageComplete(version: string, requestId: string) {
     if (!requestId) {
       // Events from a pre-#711 backend have no request id to bind. Preserve
       // their notification compatibility; every new backend event is scoped.
-      void dispatchUpdateStagedNotification(version, () => updateNotificationDispatchDestroyed);
+      void notifyUpdateStaged(version, () => updateNotificationDispatchDestroyed);
       return;
     }
     const state = stateForUpdateStage(requestId);
     if (!state) {
       devLog('[LAYOUT] update-stage-complete suppressed by tracking backpressure');
+      return;
+    }
+    if (state.completionSeen) {
+      devLog('[LAYOUT] duplicate update-stage-complete ignored');
       return;
     }
     if (state.cancelled) {
@@ -193,11 +142,12 @@
         updateStageNotifications.delete(requestId);
       }
     };
-    void dispatchUpdateStagedNotification(
+    void notifyUpdateStaged(
       version,
       () => updateNotificationDispatchDestroyed || state.cancelled
     ).then(finish, finish);
   }
+
 
   function stopUpdateNotificationDispatch() {
     updateNotificationDispatchDestroyed = true;
