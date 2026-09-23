@@ -15,6 +15,10 @@
   import { t, i18n } from '$lib/i18n';
   import { useListenerTeardown } from '$lib/utils/useAuthListeners';
 
+  type DashboardErrorEventPayload = ErrorEventPayload & {
+    recovery?: 'retry_scheduled' | 'reconnect_required' | 'user_action_required';
+  };
+
   /**
    * The gate chip's copy, derived from the reason the always-mounted
    * `+layout.svelte` listener recorded in the presence store (#670): the
@@ -193,6 +197,8 @@
       : ''
   );
   let displayErrorTimeout: ReturnType<typeof setTimeout> | null = null;
+  let displayWarning = $state('');
+  let displayWarningTimeout: ReturnType<typeof setTimeout> | null = null;
   // #408: goToSetup re-enable timer must be cleared on destroy so a
   // late callback cannot touch state after unmount.
   let goToSetupTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -208,6 +214,7 @@
   onDestroy(() => {
     void teardown.dispose();
     if (displayErrorTimeout) clearTimeout(displayErrorTimeout);
+    if (displayWarningTimeout) clearTimeout(displayWarningTimeout);
     if (goToSetupTimeout) clearTimeout(goToSetupTimeout);
     if (availabilityTimeout) clearTimeout(availabilityTimeout);
   });
@@ -531,18 +538,41 @@
     // another view is on screen is no longer dropped with this component.
 
     devLog('[DASHBOARD] onMount: setting up error listener');
-    teardown.add(listen<ErrorEventPayload>('error', (event) => {
+    teardown.add(listen<DashboardErrorEventPayload>('error', (event) => {
       const payload = event.payload;
       console.error('[DASHBOARD] EVENT: error received:', payload);
-      // Issue #79: only `severity: "error"` (i.e. an error the polling
-      // loop did not automatically recover from) pops the red banner.
-      // `severity: "warning"` events (e.g. a 401 that triggered token
-      // refresh, a 429 that triggered backoff) are logged to the
-      // console for the developer but do not alarm-fatigue the user
-      // with a banner that disappears during the next successful poll.
+      // A Teams status write can fail while automatic recovery remains
+      // scheduled on the polling loop. Surface that actionable state as a polite
+      // warning, never as the red fatal banner used by terminal failures.
+      if (payload.severity === 'warning') {
+        if (displayErrorTimeout) {
+          clearTimeout(displayErrorTimeout);
+          displayErrorTimeout = null;
+        }
+        displayError = '';
+        if (displayWarningTimeout) clearTimeout(displayWarningTimeout);
+        if (payload.source === 'teams' && payload.recovery === 'retry_scheduled') {
+          displayWarning = typeof payload.message === 'string'
+            ? payload.message
+            : String(payload);
+          displayWarningTimeout = setTimeout(() => {
+            displayWarning = '';
+            displayWarningTimeout = null;
+          }, 5000);
+        } else {
+          displayWarning = '';
+          displayWarningTimeout = null;
+        }
+        return;
+      }
       if (payload.severity !== 'error') {
         return;
       }
+      if (displayWarningTimeout) {
+        clearTimeout(displayWarningTimeout);
+        displayWarningTimeout = null;
+      }
+      displayWarning = '';
       const message = typeof payload.message === 'string'
         ? payload.message
         : String(payload);
@@ -845,6 +875,10 @@
       </button>
     </div>
   </header>
+
+  {#if displayWarning}
+    <div class="warning-banner" role="status">{displayWarning}</div>
+  {/if}
 
   {#if displayError}
     <div class="error-banner" role="alert">{displayError}</div>
@@ -1170,6 +1204,16 @@
     background: var(--accent-soft);
     color: var(--accent);
     border-color: var(--accent);
+  }
+
+  .warning-banner {
+    background: var(--warning-soft);
+    color: var(--warning);
+    padding: var(--sp-3) var(--sp-5);
+    text-align: center;
+    font-size: var(--fs-sm);
+    font-weight: 600;
+    border-bottom: 1px solid var(--warning);
   }
 
   .error-banner {
