@@ -1788,7 +1788,10 @@ mod tests {
                 recovery: Some(policy.recovery),
             };
 
-            assert_eq!(serde_json::to_value(payload).expect("serialize recovery payload"), expected);
+            assert_eq!(
+                serde_json::to_value(payload).expect("serialize recovery payload"),
+                expected
+            );
         }
 
         let ordinary = ErrorEventPayload {
