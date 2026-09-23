@@ -1466,7 +1466,7 @@ where
 }
 
 fn publish_snapshot_file(staged: &std::path::Path, destination: &std::path::Path) -> std::io::Result<()> {
-    publish_snapshot_file_with(staged, destination, fs::hard_link)
+    publish_snapshot_file_with(staged, destination, |source, target| fs::hard_link(source, target))
 }
 
 fn write_snapshot_file(dir: &std::path::Path, bytes: &[u8]) -> Result<std::path::PathBuf, String> {
