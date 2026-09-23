@@ -38,6 +38,10 @@ const capability = JSON.parse(
   readFileSync(join(process.cwd(), 'src-tauri/capabilities/detached.json'), 'utf8')
 ) as { windows: string[]; permissions: string[] };
 
+const mainCapability = JSON.parse(
+  readFileSync(join(process.cwd(), 'src-tauri/capabilities/default.json'), 'utf8')
+) as { permissions: string[] };
+
 beforeEach(() => {
   winState.windows = {};
   detachedPanes.set({ logs: false, settings: false });
@@ -58,6 +62,16 @@ describe('detached capability (#594)', () => {
     expect(capability.permissions.filter((p) => p.startsWith('core:window:'))).toEqual([
       'core:window:allow-close'
     ]);
+  });
+});
+
+describe('main capability (#919)', () => {
+  it('does not expose the Rust-owned autostart and shortcut plugin commands', () => {
+    const rustOwnedPluginGrants = mainCapability.permissions.filter(
+      (permission) => permission.startsWith('autostart:') || permission.startsWith('global-shortcut:')
+    );
+
+    expect(rustOwnedPluginGrants).toEqual([]);
   });
 });
 
