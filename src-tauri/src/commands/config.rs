@@ -754,7 +754,15 @@ fn staged_config_path(path: &Path) -> PathBuf {
 /// mid-flight is pre-cleared exactly as `atomic_write_json` does for
 /// `config.json.tmp` (#135 path A) — one crash must not become a permanent
 /// import failure.
-fn replace_config_file(path: &Path, json: &str) -> Result<(), String> {
+///
+/// `after_replace` runs only after the live file has been replaced and synced,
+/// immediately before the caller reloads it. Production uses a no-op; the
+/// concurrency test uses this same seam to start a competing writer.
+fn replace_config_file(
+    path: &Path,
+    json: &str,
+    after_replace: impl FnOnce(),
+) -> Result<(), String> {
     let staged = staged_config_path(path);
 
     if let Err(e) = std::fs::remove_file(&staged) {
@@ -833,6 +841,7 @@ fn replace_config_file(path: &Path, json: &str) -> Result<(), String> {
     }
 
     sync_parent_dir(path);
+    after_replace();
     Ok(())
 }
 
@@ -849,10 +858,11 @@ fn replace_and_adopt_config(
     state: &AppState,
     destination: &Path,
     document: &str,
+    after_replace: impl FnOnce(),
     reload: impl FnOnce() -> Result<AppConfig, String>,
 ) -> Result<AppConfig, String> {
     let mut config_guard = state.config.get_mut();
-    replace_config_file(destination, document)?;
+    replace_config_file(destination, document, after_replace)?;
     let persisted = reload()?;
     *config_guard = Some(persisted.clone());
     Ok(persisted)
@@ -943,6 +953,7 @@ pub async fn import_config(
             &state_clone,
             &destination,
             &prepared.document,
+            || {},
             config::load_config,
         )
     })
@@ -1365,6 +1376,7 @@ mod tests {
             &state,
             &live,
             "{\"spotify\":{\"client_id\":\"NEW\"}}",
+            || panic!("a failed replace must not reach the post-replacement seam"),
             || -> Result<AppConfig, String> { panic!("a failed replace must not reload") },
         )
         .expect_err("the replace cannot be staged");
@@ -1413,7 +1425,7 @@ mod tests {
         // fails.
         let denied = std::fs::write(inner.join("probe"), b"x").is_err();
         if denied {
-            let err = replace_config_file(&live, "{\"spotify\":{\"client_id\":\"NEW\"}}")
+            replace_config_file(&live, "{\"spotify\":{\"client_id\":\"NEW\"}}", || {})
                 .expect_err("an unwritable directory must fail the replace");
             assert!(err.contains("import temp file"), "unexpected error: {err}");
         }
@@ -1441,7 +1453,7 @@ mod tests {
         let next = "{\n  \"spotify\": {\"client_id\": \"NEW\"}\n}";
         std::fs::write(&live, previous).expect("live config");
 
-        replace_config_file(&live, next).expect("the replace must land");
+        replace_config_file(&live, next, || {}).expect("the replace must land");
 
         assert_eq!(std::fs::read_to_string(&live).expect("live config"), next);
         assert_eq!(
@@ -1455,7 +1467,8 @@ mod tests {
 
         // A fresh install has nothing to back up and is still replaced.
         let fresh = dir.join("fresh.json");
-        replace_config_file(&fresh, next).expect("a replace into a missing file must succeed");
+        replace_config_file(&fresh, next, || {})
+            .expect("a replace into a missing file must succeed");
         assert_eq!(std::fs::read_to_string(&fresh).expect("fresh"), next);
         assert!(!staged_config_path(&fresh).exists());
 
@@ -1491,8 +1504,8 @@ mod tests {
 
         let state = Arc::new(AppState::new());
         let (published_on_disk, published_state) = thread::scope(|scope| {
-            let (import_locked_tx, import_locked_rx) = mpsc::channel();
-            let (writer_attempted_tx, writer_attempted_rx) = mpsc::channel();
+            let (replaced_tx, replaced_rx) = mpsc::channel();
+            let (writer_result_tx, writer_result_rx) = mpsc::channel();
             let (writer_adopted_tx, writer_adopted_rx) = mpsc::channel();
             let (release_writer_tx, release_writer_rx) = mpsc::channel();
             // This guard must live inside the scope: on an assertion panic it
@@ -1502,41 +1515,56 @@ mod tests {
             let import_state = Arc::clone(&state);
             let import_live = live.clone();
             let import = scope.spawn(move || {
-                replace_and_adopt_config(&import_state, &import_live, &prepared.document, || {
-                    // This callback runs only after the helper owns the
-                    // config guard and has installed the imported file.
-                    import_locked_tx
-                        .send(())
-                        .expect("test must observe the import lock");
-                    writer_attempted_rx
-                        .recv()
-                        .expect("competing writer must attempt during the reload seam");
-                    assert!(
-                        import_state.config.try_get_mut().is_none(),
-                        "the config write guard must still be held during import reload"
-                    );
-                    let raw = std::fs::read_to_string(&import_live).expect("imported config");
-                    serde_json::from_str(&raw).map_err(|error| error.to_string())
-                })
+                replace_and_adopt_config(
+                    &import_state,
+                    &import_live,
+                    &prepared.document,
+                    || {
+                        // This seam is inside the production replacement helper,
+                        // after the imported bytes are installed and before the
+                        // caller reloads them.
+                        replaced_tx
+                            .send(())
+                            .expect("test must observe the replaced import");
+                        let writer_saw_import_guard = writer_result_rx
+                            .recv()
+                            .expect("competing writer must attempt before import reload");
+                        assert!(
+                            writer_saw_import_guard,
+                            "competing writer must not acquire after replacement and before reload"
+                        );
+                        assert!(
+                            import_state.config.try_get_mut().is_none(),
+                            "the config write guard must be held after replacement and before reload"
+                        );
+                        let raw = std::fs::read_to_string(&import_live)
+                            .expect("imported config on disk at the seam");
+                        let on_disk =
+                            serde_json::from_str::<AppConfig>(&raw).expect("parse imported config");
+                        assert_eq!(on_disk.spotify.client_id, "IMPORTED");
+                    },
+                    || {
+                        let raw = std::fs::read_to_string(&import_live)
+                            .expect("imported config before reload");
+                        serde_json::from_str(&raw).map_err(|error| error.to_string())
+                    },
+                )
             });
 
-            // Do not let scheduling decide who owns the config guard. The
-            // reload callback cannot emit this until replace_and_adopt_config
-            // has acquired it, so the writer is always launched under test.
-            import_locked_rx
+            // The production seam emits only after the replacement reaches its
+            // post-rename boundary. Starting the writer here makes its first
+            // guard attempt occur with the imported bytes on disk but before
+            // reload/adoption.
+            replaced_rx
                 .recv()
-                .expect("import must acquire the config guard");
+                .expect("import must install the document before the post-replacement seam");
             let writer_state = Arc::clone(&state);
             let writer_live = live.clone();
             let writer = scope.spawn(move || {
                 let import_holds_guard = writer_state.config.try_get_mut().is_none();
-                writer_attempted_tx
-                    .send(())
-                    .expect("import reload must receive the competing writer attempt");
-                assert!(
-                    import_holds_guard,
-                    "competing writer must not acquire during import reload"
-                );
+                writer_result_tx
+                    .send(import_holds_guard)
+                    .expect("import seam must receive the competing writer result");
                 let mut guard = writer_state.config.get_mut();
                 writer_adopted_tx
                     .send(guard.as_ref().map(|cfg| cfg.spotify.client_id.clone()))

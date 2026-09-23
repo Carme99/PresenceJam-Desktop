@@ -202,7 +202,7 @@ impl Config {
     /// Attempt to acquire the config write guard without blocking.
     ///
     /// This is the deterministic concurrency-test seam for proving that a
-    /// long-running blocking section still owns the guard at its reload point.
+    /// blocking import still owns the guard after replacement and before reload.
     pub fn try_get_mut(
         &self,
     ) -> Option<parking_lot::RwLockWriteGuard<'_, Option<crate::config::AppConfig>>> {
