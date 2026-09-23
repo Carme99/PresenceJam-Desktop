@@ -1329,6 +1329,146 @@ fn snapshot_sidecar_path(
     destination.with_file_name(name)
 }
 
+/// Atomically rename `staged` to `destination` without replacing an existing
+/// path. Hard links are not available on every filesystem used for Windows
+/// Downloads folders (notably redirected volumes), so publication retries
+/// with the platform's native no-replace rename when hard-link creation is
+/// unsupported.
+#[cfg(target_os = "linux")]
+fn rename_noreplace(staged: &std::path::Path, destination: &std::path::Path) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::raw::{c_char, c_int, c_uint};
+    use std::os::unix::ffi::OsStrExt;
+
+    extern "C" {
+        fn renameat2(
+            olddirfd: c_int,
+            oldpath: *const c_char,
+            newdirfd: c_int,
+            newpath: *const c_char,
+            flags: c_uint,
+        ) -> c_int;
+    }
+
+    const AT_FDCWD: c_int = -100;
+    const RENAME_NOREPLACE: c_uint = 1;
+
+    let staged = CString::new(staged.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "snapshot path contains NUL")
+    })?;
+    let destination = CString::new(destination.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "snapshot path contains NUL")
+    })?;
+    let result = unsafe {
+        renameat2(
+            AT_FDCWD,
+            staged.as_ptr(),
+            AT_FDCWD,
+            destination.as_ptr(),
+            RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn rename_noreplace(staged: &std::path::Path, destination: &std::path::Path) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::raw::{c_char, c_int, c_uint};
+    use std::os::unix::ffi::OsStrExt;
+
+    extern "C" {
+        fn renamex_np(oldpath: *const c_char, newpath: *const c_char, flags: c_uint) -> c_int;
+    }
+
+    const RENAME_EXCL: c_uint = 0x0000_0004;
+    let staged = CString::new(staged.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "snapshot path contains NUL")
+    })?;
+    let destination = CString::new(destination.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "snapshot path contains NUL")
+    })?;
+    let result = unsafe { renamex_np(staged.as_ptr(), destination.as_ptr(), RENAME_EXCL) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn rename_noreplace(staged: &std::path::Path, destination: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::MoveFileExW;
+
+    let mut staged_wide: Vec<u16> = staged.as_os_str().encode_wide().collect();
+    staged_wide.push(0);
+    let mut destination_wide: Vec<u16> = destination.as_os_str().encode_wide().collect();
+    destination_wide.push(0);
+
+    // Omitting MOVEFILE_REPLACE_EXISTING makes MoveFileExW an atomic
+    // same-volume rename that fails when the destination already exists.
+    match unsafe {
+        MoveFileExW(
+            PCWSTR(staged_wide.as_ptr()),
+            PCWSTR(destination_wide.as_ptr()),
+            Default::default(),
+        )
+    } {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            // Win32 APIs wrapped by windows-rs return HRESULT_FROM_WIN32,
+            // while io::Error::from_raw_os_error needs the low Win32 code.
+            let hresult = error.code().0;
+            let win32 = if (hresult & !0xffff) == 0x8007_0000 {
+                hresult & 0xffff
+            } else {
+                hresult
+            };
+            Err(std::io::Error::from_raw_os_error(win32))
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn rename_noreplace(_staged: &std::path::Path, _destination: &std::path::Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "atomic no-replace rename is unsupported on this platform",
+    ))
+}
+
+fn publish_snapshot_file_with<F>(
+    staged: &std::path::Path,
+    destination: &std::path::Path,
+    hard_link: F,
+) -> std::io::Result<()>
+where
+    F: FnOnce(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+{
+    match hard_link(staged, destination) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Err(error),
+        Err(hard_link_error) => rename_noreplace(staged, destination).map_err(|rename_error| {
+            std::io::Error::new(
+                rename_error.kind(),
+                format!(
+                    "atomic no-replace rename failed after hard-link publication failed ({hard_link_error}): {rename_error}"
+                ),
+            )
+        }),
+    }
+}
+
+fn publish_snapshot_file(staged: &std::path::Path, destination: &std::path::Path) -> std::io::Result<()> {
+    publish_snapshot_file_with(staged, destination, fs::hard_link)
+}
+
 fn write_snapshot_file(dir: &std::path::Path, bytes: &[u8]) -> Result<std::path::PathBuf, String> {
     write_snapshot_file_at(dir, bytes, chrono::Utc::now(), std::process::id())
 }
@@ -1392,12 +1532,11 @@ fn write_snapshot_file_at(
         }
         drop(file);
 
-        // A same-directory hard link publishes the already-fsynced inode
-        // atomically and fails if the generated destination appeared after
-        // our existence check. Unlike rename, it can never replace an
-        // unrelated Downloads file; the private sidecar is removed after
-        // publication (or retried under a new generated name on collision).
-        if let Err(e) = fs::hard_link(&staged, &destination) {
+        // Prefer a same-directory hard link because it publishes the
+        // already-fsynced inode without changing its 0600 mode. Filesystems
+        // that do not support links fall back to the platform's atomic
+        // no-replace rename; both paths reject a destination collision.
+        if let Err(e) = publish_snapshot_file(&staged, &destination) {
             let _ = fs::remove_file(&staged);
             if e.kind() == std::io::ErrorKind::AlreadyExists {
                 continue;
@@ -1407,12 +1546,14 @@ fn write_snapshot_file_at(
                 destination.display()
             ));
         }
-        if let Err(e) = fs::remove_file(&staged) {
-            log::warn!(
+        match fs::remove_file(&staged) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => log::warn!(
                 "{CMD} save_diagnostics_snapshot: published '{}' but could not remove sidecar '{}': {e}",
                 destination.display(),
                 staged.display()
-            );
+            ),
         }
 
         #[cfg(unix)]
@@ -2016,10 +2157,67 @@ mod tests {
     }
 
     #[test]
+    fn test_publication_falls_back_when_hard_links_are_unsupported() {
+        let dir = std::env::temp_dir().join(format!("pj-diag-fallback-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let staged = dir.join("snapshot.tmp");
+        let destination = dir.join("snapshot.json");
+        std::fs::write(&staged, b"bounded snapshot").unwrap();
+
+        publish_snapshot_file_with(&staged, &destination, |_, _| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "hard links unavailable",
+            ))
+        })
+        .expect("fallback should publish without hard links");
+
+        assert_eq!(std::fs::read(&destination).unwrap(), b"bounded snapshot");
+        assert!(!staged.exists(), "fallback rename left the sidecar behind");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_publication_fallback_does_not_replace_a_collision() {
+        let dir = std::env::temp_dir().join(format!("pj-diag-fallback-race-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let staged = dir.join("snapshot.tmp");
+        let destination = dir.join("snapshot.json");
+        std::fs::write(&staged, b"new snapshot").unwrap();
+        std::fs::write(&destination, b"existing snapshot").unwrap();
+
+        let error = publish_snapshot_file_with(&staged, &destination, |_, _| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "hard links unavailable",
+            ))
+        })
+        .expect_err("fallback must reject a destination collision");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read(&destination).unwrap(),
+            b"existing snapshot"
+        );
+        assert_eq!(std::fs::read(&staged).unwrap(), b"new snapshot");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn test_oversized_snapshot_is_rejected_before_any_write() {
         let dir = std::env::temp_dir().join(format!("pj-diag-oversize-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
-        let payload = vec![b'x'; SNAPSHOT_MAX_BYTES + 1];
+        let mut snapshot: DiagnosticsSnapshot =
+            serde_json::from_slice(&valid_snapshot_bytes()).expect("deserialize snapshot fixture");
+        snapshot
+            .recent_logs
+            .push("x".repeat(SNAPSHOT_MAX_BYTES + 1));
+        let payload = serde_json::to_vec(&snapshot).expect("serialize oversize snapshot fixture");
+        assert!(payload.len() > SNAPSHOT_MAX_BYTES);
+        serde_json::from_slice::<DiagnosticsSnapshot>(&payload)
+            .expect("oversize regression payload must remain valid typed JSON");
 
         let error = write_snapshot_file(&dir, &payload).expect_err("oversized save must fail");
 
