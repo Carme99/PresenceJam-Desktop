@@ -86,12 +86,10 @@ fn teams_write_error_policy(error: &TeamsApiError) -> TeamsWriteErrorPolicy {
     match error {
         TeamsApiError::RateLimited(_)
         | TeamsApiError::Transient(_)
-        | TeamsApiError::Other(_, _) => {
-            TeamsWriteErrorPolicy {
-                severity: "warning",
-                recovery: "retry_scheduled",
-            }
-        }
+        | TeamsApiError::Other(_, _) => TeamsWriteErrorPolicy {
+            severity: "warning",
+            recovery: "retry_scheduled",
+        },
         TeamsApiError::Forbidden(_, _) => TeamsWriteErrorPolicy {
             severity: "error",
             recovery: "user_action_required",
@@ -1695,19 +1693,27 @@ fn clear_user_preferred_presence_with(
 #[cfg(test)]
 mod tests {
     use super::truncate_for_log;
-    use super::{DeviceCodeResponse, TeamsTokens, MICROSOFT_GRAPH_SCOPES};
     use super::{teams_write_error_payload, teams_write_error_policy, TeamsApiError};
+    use super::{DeviceCodeResponse, TeamsTokens, MICROSOFT_GRAPH_SCOPES};
 
     #[test]
     fn teams_write_error_policy_covers_every_api_error_variant() {
         let cases = [
-            (TeamsApiError::ExpiredToken(401), "error", "reconnect_required"),
+            (
+                TeamsApiError::ExpiredToken(401),
+                "error",
+                "reconnect_required",
+            ),
             (
                 TeamsApiError::Forbidden(403, "denied".to_string()),
                 "error",
                 "user_action_required",
             ),
-            (TeamsApiError::RateLimited(Some(60)), "warning", "retry_scheduled"),
+            (
+                TeamsApiError::RateLimited(Some(60)),
+                "warning",
+                "retry_scheduled",
+            ),
             (TeamsApiError::InvalidGrant, "error", "reconnect_required"),
             (
                 TeamsApiError::ReauthRequired("consent_required".to_string()),
@@ -1735,9 +1741,8 @@ mod tests {
 
     #[test]
     fn teams_write_warning_payload_exposes_retry_state_and_actionable_copy() {
-        let payload = teams_write_error_payload(&TeamsApiError::Transient(
-            "service unavailable".to_string(),
-        ));
+        let payload =
+            teams_write_error_payload(&TeamsApiError::Transient("service unavailable".to_string()));
 
         assert_eq!(payload["source"], "teams");
         assert_eq!(payload["severity"], "warning");
@@ -1746,12 +1751,10 @@ mod tests {
             payload["message"],
             TeamsApiError::Transient(String::new()).user_message()
         );
-        assert!(
-            payload["message"]
-                .as_str()
-                .unwrap()
-                .contains("Retrying shortly")
-        );
+        assert!(payload["message"]
+            .as_str()
+            .unwrap()
+            .contains("Retrying shortly"));
     }
 
     #[test]
