@@ -7,6 +7,10 @@
   // applies the persisted theme (and keeps it in sync with future
   // changes). Without this, theme only applies when Settings mounts.
   import '$lib/stores/theme';
+  // #959: bind the <meta name="color-scheme"> to the live, resolved theme
+  // (not the user's preference) so native form controls / scrollbars
+  // match what the app actually paints.
+  import { appliedTheme } from '$lib/stores/theme';
   import { devLog } from '$lib/utils/dev';
   import UpdatePrompt from '$lib/components/UpdatePrompt.svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -333,7 +337,7 @@
 <svelte:head>
   <link rel="icon" type="image/svg+xml" href="/icon.svg" />
   <link rel="alternate icon" type="image/png" href="/favicon.png" />
-  <meta name="color-scheme" content="dark light" />
+  <meta name="color-scheme" content={$appliedTheme} />
 </svelte:head>
 
 <a class="skip-link" href="#main-content">{t('routes.skipToMainContent')}</a>
