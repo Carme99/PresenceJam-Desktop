@@ -580,9 +580,7 @@ pub fn cancel_deferred_update(
             log::info!("{TAG} cancel_deferred_update: in-flight stage {request_id} cancelled");
         }
         CancelDeferredState::Idle => {
-            log::debug!(
-                "{TAG} cancel_deferred_update: stage {request_id} cancelled before begin"
-            );
+            log::debug!("{TAG} cancel_deferred_update: stage {request_id} cancelled before begin");
         }
     }
     Ok(CancelDeferredOutcome { state: disposition })
@@ -2193,10 +2191,7 @@ mod tests {
     // Immediate-install discard (issue #806)
     // -----------------------------------------------------------------
 
-    fn start_stage(
-        state: &Mutex<PendingUpdateState<Vec<u8>>>,
-        request_id: &str,
-    ) -> ActiveStage {
+    fn start_stage(state: &Mutex<PendingUpdateState<Vec<u8>>>, request_id: &str) -> ActiveStage {
         match state.lock().begin(request_id.to_string()) {
             BeginOutcome::Started(active) => active,
             BeginOutcome::Cancelled => panic!("uncancelled request {request_id} was tombstoned"),
