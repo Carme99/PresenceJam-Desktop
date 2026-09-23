@@ -132,7 +132,7 @@ describe('main capability (#919)', () => {
   });
 
   it('rejects arbitrary unused grants from new and already-used plugins', () => {
-    const grants = [
+    const grants: string[] = [
       ...mainCapability.permissions,
       'fs:default',
       'notification:allow-cancel'
