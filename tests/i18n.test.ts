@@ -18,7 +18,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 // Static: the i18n barrel is a pure TS module (only .svelte.ts leaf
 // imports need the svelte plugin, configured in vitest.config.js).
-import { t, tCount, i18n } from '$lib/i18n';
+import { t, tCount, i18n, WEEKDAY_KEYS } from '$lib/i18n';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
@@ -229,9 +229,23 @@ describe('i18n key coverage (#488)', () => {
     }
   });
 
+  it('the typed weekday registry exposes all seven keys to static coverage (#773)', () => {
+    expect(WEEKDAY_KEYS).toEqual({
+      1: 'rules.day1',
+      2: 'rules.day2',
+      3: 'rules.day3',
+      4: 'rules.day4',
+      5: 'rules.day5',
+      6: 'rules.day6',
+      7: 'rules.day7'
+    });
+  });
+
   it('every static t() call-site resolves against the en key set', () => {
     const enKeys = dictKeys(enSrc);
-    // Collect every t('a.b') literal across Svelte/TS sources.
+    // Collect every t('a.b') literal across Svelte/TS sources. The typed
+    // weekday registry is seeded separately so dynamic day lookups are
+    // covered without teaching this scanner how to expand templates.
     const files: string[] = [];
     const walk = (dir: string) => {
       for (const e of readdirSync(dir, { withFileTypes: true })) {
@@ -241,7 +255,9 @@ describe('i18n key coverage (#488)', () => {
       }
     };
     walk(src);
-    const missing: string[] = [];
+    const missing = Object.values(WEEKDAY_KEYS)
+      .filter((key) => !enKeys.includes(key))
+      .map((key) => `src/lib/i18n.ts: ${key}`);
     for (const f of files) {
       const body = readFileSync(f, 'utf8');
       // `tCount('a.b', n)` reads the `a.b_one` / `a.b_other` pair, so it

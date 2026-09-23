@@ -16,7 +16,7 @@
   import DeviceCodeBox from './DeviceCodeBox.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
   import PageHeader from './PageHeader.svelte';
-  import { t, i18n, type Locale, type TKey } from '$lib/i18n';
+  import { t, i18n, WEEKDAY_KEYS, type Locale, type TKey } from '$lib/i18n';
   import { theme, density } from '$lib/stores/theme';
   import {
     NOTIFICATION_CLASSES,
@@ -447,7 +447,7 @@
   function previewEntryLine(entry: WorkingHoursImportEntry, _idx: number): string {
     const days = entry.days.length === 0
       ? t('rules.dayEveryDay')
-      : entry.days.map((d) => t(`rules.day${d}` as 'rules.day1')).join(', ');
+      : entry.days.map((d) => t(WEEKDAY_KEYS[d])).join(', ');
     return `${days} · ${minutesToTime(entry.start_minutes)}–${minutesToTime(entry.end_minutes)}`;
   }
 
@@ -455,7 +455,7 @@
   function formatWorkingHoursSummary(working: WorkingHoursImportWorking): string {
     if (working.days.length === 0) return t('rules.importWorkingHoursDaysAllOff');
     const days = working.days
-      .map((d) => t(`rules.day${d}` as 'rules.day1'))
+      .map((d) => t(WEEKDAY_KEYS[d]))
       .join(', ');
     return t('rules.importWorkingHoursDaysLabel', {
       days,
@@ -1819,7 +1819,7 @@
                         : entry.days.filter((d) => d !== day);
                     }}
                   />
-                  <span>{t(`rules.day${day}` as 'rules.day1')}</span>
+                  <span>{t(WEEKDAY_KEYS[day])}</span>
                 </label>
               {/each}
             </div>
@@ -2019,7 +2019,7 @@
                         : rule.days.filter((d) => d !== day);
                     }}
                   />
-                  <span>{t(`rules.day${day}` as 'rules.day1')}</span>
+                  <span>{t(WEEKDAY_KEYS[day])}</span>
                 </label>
               {/each}
             </div>
@@ -2250,7 +2250,7 @@
             />
             <select aria-label={t('rules.testWeekdayLabel')} bind:value={ruleTest.weekday}>
               {#each [1, 2, 3, 4, 5, 6, 7] as day}
-                <option value={day}>{t(`rules.day${day}` as 'rules.day1')}</option>
+                <option value={day}>{t(WEEKDAY_KEYS[day])}</option>
               {/each}
             </select>
             <input
