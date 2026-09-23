@@ -16,8 +16,8 @@
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use rand::TryRngCore;
-use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 const KEYRING_SERVICE: &str = "presencejam";
@@ -164,7 +164,10 @@ impl SpotifyClientSecretCache {
     }
 
     fn current_presence(&self) -> Option<KeychainPresence> {
-        self.presence.read().as_ref().map(|cached| cached.presence.clone())
+        self.presence
+            .read()
+            .as_ref()
+            .map(|cached| cached.presence.clone())
     }
 }
 
@@ -189,8 +192,7 @@ fn spotify_client_secret_mutation_lock() -> &'static parking_lot::Mutex<()> {
 type TestSpotifyProbe =
     std::sync::Arc<dyn Fn(&str) -> Result<String, keyring::Error> + Send + Sync>;
 #[cfg(test)]
-type TestSpotifyStore =
-    std::sync::Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
+type TestSpotifyStore = std::sync::Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
 #[cfg(test)]
 type TestSpotifyOperation = std::sync::Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
 #[cfg(test)]
@@ -1306,7 +1308,10 @@ mod tests {
             store_spotify_client_secret("rotated-secret").unwrap();
             release_probe.wait();
 
-            assert_eq!(probe.join().expect("probe thread must not panic"), KeychainPresence::Present);
+            assert_eq!(
+                probe.join().expect("probe thread must not panic"),
+                KeychainPresence::Present
+            );
             assert_eq!(cache().peek().as_deref(), Some("rotated-secret"));
         });
     }
@@ -1343,7 +1348,10 @@ mod tests {
             delete_spotify_client_secret().unwrap();
             release_probe.wait();
 
-            assert_eq!(probe.join().expect("probe thread must not panic"), KeychainPresence::Absent);
+            assert_eq!(
+                probe.join().expect("probe thread must not panic"),
+                KeychainPresence::Absent
+            );
             assert_eq!(cache().peek(), None);
             assert!(cache().fresh_presence(Instant::now()).is_none());
         });
@@ -1381,7 +1389,10 @@ mod tests {
             release_probe.wait();
 
             assert_eq!(secret, "read-secret");
-            assert_eq!(probe.join().expect("probe thread must not panic"), KeychainPresence::Present);
+            assert_eq!(
+                probe.join().expect("probe thread must not panic"),
+                KeychainPresence::Present
+            );
             assert_eq!(cache().peek().as_deref(), Some("read-secret"));
         });
     }
@@ -1660,7 +1671,8 @@ mod tests {
             assert_eq!(spotify_client_secret_presence(), KeychainPresence::Present);
             assert_eq!(cache().peek(), None);
 
-            let secret = read_spotify_client_secret().expect("the legacy value must remain readable");
+            let secret =
+                read_spotify_client_secret().expect("the legacy value must remain readable");
             assert_eq!(secret, "legacy-secret");
             assert_eq!(migrated.load(std::sync::atomic::Ordering::SeqCst), 1);
             assert_eq!(cache().peek().as_deref(), Some("legacy-secret"));

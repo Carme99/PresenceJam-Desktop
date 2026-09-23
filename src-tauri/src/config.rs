@@ -3622,7 +3622,10 @@ mod tests {
             crate::keychain::KeychainPresence::Present
         });
         assert!(config.spotify.client_secret_set);
-        assert_eq!(config.spotify.client_secret_state, ClientSecretState::Present);
+        assert_eq!(
+            config.spotify.client_secret_state,
+            ClientSecretState::Present
+        );
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
 
         std::fs::remove_dir_all(dir).expect("the config seam test directory must be removable");
