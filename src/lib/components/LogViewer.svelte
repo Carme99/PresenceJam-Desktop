@@ -1,3 +1,4 @@
+<svelte:options css="injected" />
 <!-- Issue #434 scope: snapshot-copy ONLY — the Copy-snapshot button
   emits the backend redacted tail + version/platform. Virtualization is
   deferred (the RENDER_WINDOW tail cap below is the pre-existing #399
