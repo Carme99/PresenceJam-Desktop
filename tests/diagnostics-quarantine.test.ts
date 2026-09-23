@@ -158,3 +158,53 @@ describe('Diagnostics quarantine banner (#537)', () => {
     expect(invoke.mock.calls.map((c) => c[0])).toEqual(['get_diagnostics_snapshot']);
   });
 });
+
+describe('Diagnostics Rust-owned save (#921)', () => {
+  it('requests a save without sending JSON or a destination', async () => {
+    const snapshot = snapshotWith(false, null);
+    const { getByRole } = await mountWith(snapshot);
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'get_diagnostics_snapshot') return snapshot;
+      if (cmd === 'save_diagnostics_snapshot') return '/home/test/Downloads/report.json';
+      return undefined;
+    });
+
+    await fireEvent.click(getByRole('button', { name: 'Save to file' }));
+
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith('save_diagnostics_snapshot')
+    );
+    expect(invoke).not.toHaveBeenCalledWith(
+      'save_diagnostics_snapshot',
+      expect.anything()
+    );
+    await waitFor(() =>
+      expect(getByRole('status').textContent).toContain(
+        'Diagnostics saved to your downloads folder.'
+      )
+    );
+  });
+
+  it('shows a save failure while retaining the in-memory snapshot', async () => {
+    const snapshot = snapshotWith(false, null);
+    const { container, getByRole } = await mountWith(snapshot);
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'get_diagnostics_snapshot') return snapshot;
+      if (cmd === 'save_diagnostics_snapshot') throw new Error('disk full');
+      return undefined;
+    });
+
+    await fireEvent.click(getByRole('button', { name: 'Save to file' }));
+
+    await waitFor(() =>
+      expect(getByRole('status').textContent).toContain(
+        'Save failed — use "Copy diagnostics" instead.'
+      )
+    );
+    expect(container.querySelector('.content dl')).not.toBeNull();
+    expect(container.textContent).toContain('4.6.0');
+    expect(
+      (getByRole('button', { name: 'Save to file' }) as HTMLButtonElement).disabled
+    ).toBe(false);
+  });
+});

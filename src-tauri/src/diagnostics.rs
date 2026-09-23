@@ -27,8 +27,9 @@
 //! report; the field is intentionally absent rather than stubbed.
 
 use std::fs;
+use std::io::Write;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
 /// Log tag prefix for this module (issue #79 item 3 convention).
@@ -55,6 +56,15 @@ const LOG_FILE_STEM: &str = "PresenceJam";
 /// where the old synthetic `<a download>` click claimed to put it.
 const SNAPSHOT_FILE_STEM: &str = "presencejam-diagnostics";
 
+/// Hard cap for the Rust-serialized diagnostics payload. Snapshot sources
+/// are already bounded, but the save boundary enforces the invariant
+/// independently before creating a file (issue #921).
+const SNAPSHOT_MAX_BYTES: usize = 256 * 1024;
+
+/// How many generated names one save tries when the Downloads folder
+/// already contains a matching snapshot.
+const SNAPSHOT_WRITE_ATTEMPTS: u32 = 8;
+
 // ---------------------------------------------------------------------
 // Snapshot shape (ts-rs exported; regenerated .ts flows through
 // `$lib/types` per issue #78)
@@ -62,7 +72,7 @@ const SNAPSHOT_FILE_STEM: &str = "presencejam-diagnostics";
 
 /// Full local-only diagnostics payload returned by
 /// `get_diagnostics_snapshot`. Every field is safe to paste publicly.
-#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct DiagnosticsSnapshot {
     /// Crate version (`CARGO_PKG_VERSION`).
@@ -113,7 +123,7 @@ pub struct DiagnosticsSnapshot {
 /// `std::env::consts` plus the runtime release probed with platform APIs
 /// (no new deps; the `tauri-plugin-os` plugin is deliberately not added
 /// for this).
-#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct OsInfo {
     /// `std::env::consts::OS` (e.g. `"windows"` / `"macos"` / `"linux"`).
@@ -138,7 +148,7 @@ pub struct OsInfo {
 /// Non-secret projection of `AppConfig`, flattened field-for-field so a
 /// future config addition cannot silently leak into diagnostics without
 /// an explicit decision here.
-#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct ConfigSummary {
     /// Spotify client id. Public identifier in the OAuth flow (sent in
@@ -207,7 +217,7 @@ pub struct ConfigSummary {
 
 /// Token metadata ONLY. There is deliberately no field that could carry
 /// an access/refresh token value — see the module-level invariant.
-#[derive(Debug, Clone, Default, Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct TokenMetadata {
     pub spotify_connected: bool,
@@ -226,7 +236,7 @@ pub struct TokenMetadata {
 
 /// Presence of the two keychain slots the app owns. Booleans only — the
 /// values behind them are never read here.
-#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct KeychainStatus {
     /// Spotify `client_secret` present in the OS keychain (issue #9 slot).
@@ -236,7 +246,7 @@ pub struct KeychainStatus {
 }
 /// Issue #863: what the poll loop is doing right now. Booleans, reason
 /// tokens and counters only — never posted text (the no-user-content rule).
-#[derive(Debug, Clone, Default, Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct SyncState {
     /// Whether the polling thread is running (`is_syncing`).
@@ -1253,72 +1263,213 @@ pub async fn get_diagnostics_snapshot(app: AppHandle) -> Result<DiagnosticsSnaps
 
 /// Timestamped file name for a saved snapshot (issue #598).
 ///
-/// UTC, millisecond precision: no `:` (illegal in Windows file names) and
-/// two saves inside the same second cannot silently overwrite one another.
-/// Pure, so the naming contract is unit-testable without touching disk.
-fn snapshot_file_name(now: chrono::DateTime<chrono::Utc>) -> String {
+/// UTC, millisecond precision: no `:` (illegal in Windows file names). The
+/// process id and attempt keep concurrent saves and stale files from the
+/// same process id distinct; only Rust ever supplies any part of this name.
+fn snapshot_file_name(
+    now: chrono::DateTime<chrono::Utc>,
+    process_id: u32,
+    attempt: u32,
+) -> String {
     format!(
-        "{SNAPSHOT_FILE_STEM}-{}.json",
+        "{SNAPSHOT_FILE_STEM}-{}-{process_id}-{attempt}.json",
         now.format("%Y%m%d-%H%M%S%3f")
     )
 }
 
-/// Writes `json` into `dir` under a fresh timestamped name and returns the
-/// file that now exists on disk. Path-parameterised so the write contract
-/// is unit-testable without an `AppHandle` (same shape as
-/// `updater_bg::write_failed_install_marker_at`).
-fn write_snapshot_file(dir: &std::path::Path, json: &str) -> Result<std::path::PathBuf, String> {
-    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    let file = dir.join(snapshot_file_name(chrono::Utc::now()));
-    fs::write(&file, json.as_bytes()).map_err(|e| e.to_string())?;
-    Ok(file)
+/// Serialize the typed snapshot entirely inside Rust. No webview-provided
+/// JSON can reach this function, so malformed or wrong-shape caller payloads
+/// are not representable; serde failures and the independent size bound are
+/// returned before any filesystem write begins.
+fn serialize_snapshot(snapshot: &DiagnosticsSnapshot) -> Result<Vec<u8>, String> {
+    let bytes = serde_json::to_vec_pretty(snapshot).map_err(|e| {
+        log::error!("{CMD} save_diagnostics_snapshot: snapshot serialization failed - {e}");
+        format!("diagnostics snapshot serialization failed: {e}")
+    })?;
+    validate_snapshot_size(&bytes)?;
+    Ok(bytes)
+}
+
+fn validate_snapshot_size(bytes: &[u8]) -> Result<(), String> {
+    if bytes.len() <= SNAPSHOT_MAX_BYTES {
+        return Ok(());
+    }
+    log::warn!(
+        "{CMD} save_diagnostics_snapshot: refused oversized snapshot - {} bytes (maximum {})",
+        bytes.len(),
+        SNAPSHOT_MAX_BYTES
+    );
+    Err(format!(
+        "diagnostics snapshot is too large: {} bytes (maximum {})",
+        bytes.len(),
+        SNAPSHOT_MAX_BYTES
+    ))
+}
+
+fn validate_snapshot_json(bytes: &[u8]) -> Result<(), String> {
+    serde_json::from_slice::<DiagnosticsSnapshot>(bytes).map(|_| ()).map_err(|e| {
+        log::warn!(
+            "{CMD} save_diagnostics_snapshot: refused malformed or wrong-shape snapshot - {e}"
+        );
+        format!("diagnostics snapshot is malformed or has the wrong shape: {e}")
+    })
+}
+
+/// Private sidecar for one generated destination. It cannot collide with a
+/// user's `<name>.tmp` file because the full diagnostics name and process id
+/// are part of the sidecar name.
+fn snapshot_sidecar_path(
+    destination: &std::path::Path,
+    process_id: u32,
+    attempt: u32,
+) -> std::path::PathBuf {
+    let mut name = destination
+        .file_name()
+        .map(|name| name.to_os_string())
+        .unwrap_or_default();
+    name.push(format!(".{process_id}.{attempt}.tmp"));
+    destination.with_file_name(name)
+}
+
+fn write_snapshot_file(dir: &std::path::Path, bytes: &[u8]) -> Result<std::path::PathBuf, String> {
+    write_snapshot_file_at(dir, bytes, chrono::Utc::now(), std::process::id())
+}
+
+/// Path- and clock-parameterised save core so collision and atomicity are
+/// deterministic in tests. The size check deliberately precedes directory
+/// creation: rejected bytes leave no filesystem trace.
+fn write_snapshot_file_at(
+    dir: &std::path::Path,
+    bytes: &[u8],
+    now: chrono::DateTime<chrono::Utc>,
+    process_id: u32,
+) -> Result<std::path::PathBuf, String> {
+    validate_snapshot_size(bytes)?;
+    validate_snapshot_json(bytes)?;
+    fs::create_dir_all(dir).map_err(|e| {
+        format!(
+            "failed to create diagnostics downloads directory '{}': {e}",
+            dir.display()
+        )
+    })?;
+
+    for attempt in 0..SNAPSHOT_WRITE_ATTEMPTS {
+        let destination = dir.join(snapshot_file_name(now, process_id, attempt));
+        if destination.exists() {
+            continue;
+        }
+
+        let staged = snapshot_sidecar_path(&destination, process_id, attempt);
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = match options.open(&staged) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(format!(
+                    "failed to create diagnostics snapshot sidecar '{}': {e}",
+                    staged.display()
+                ))
+            }
+        };
+
+        if let Err(e) = file.write_all(bytes) {
+            let _ = fs::remove_file(&staged);
+            return Err(format!(
+                "failed to write diagnostics snapshot sidecar '{}': {e}",
+                staged.display()
+            ));
+        }
+        if let Err(e) = file.sync_all() {
+            let _ = fs::remove_file(&staged);
+            return Err(format!(
+                "failed to sync diagnostics snapshot sidecar '{}': {e}",
+                staged.display()
+            ));
+        }
+        drop(file);
+
+        // A same-directory hard link publishes the already-fsynced inode
+        // atomically and fails if the generated destination appeared after
+        // our existence check. Unlike rename, it can never replace an
+        // unrelated Downloads file; the private sidecar is removed after
+        // publication (or retried under a new generated name on collision).
+        if let Err(e) = fs::hard_link(&staged, &destination) {
+            let _ = fs::remove_file(&staged);
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                continue;
+            }
+            return Err(format!(
+                "failed to publish diagnostics snapshot '{}': {e}",
+                destination.display()
+            ));
+        }
+        if let Err(e) = fs::remove_file(&staged) {
+            log::warn!(
+                "{CMD} save_diagnostics_snapshot: published '{}' but could not remove sidecar '{}': {e}",
+                destination.display(),
+                staged.display()
+            );
+        }
+
+        #[cfg(unix)]
+        if let Ok(parent) = fs::File::open(dir) {
+            if let Err(e) = parent.sync_all() {
+                log::warn!(
+                    "{CMD} save_diagnostics_snapshot: failed to sync downloads directory '{}': {e}",
+                    dir.display()
+                );
+            }
+        }
+        return Ok(destination);
+    }
+
+    Err(format!(
+        "failed to save diagnostics snapshot: all {SNAPSHOT_WRITE_ATTEMPTS} generated names are taken"
+    ))
 }
 
 /// Tauri command behind the Diagnostics page's "Save to file" button.
 ///
-/// Writes the snapshot JSON the frontend hands over into the platform
-/// downloads directory and returns the absolute path of the file now on
-/// disk (issue #598). The previous frontend clicked a synthetic anchor on
-/// a `blob:` URL and reported success unconditionally: no download handler
-/// is registered anywhere in the app, so on engines that ignore an
-/// unhandled download the click wrote nothing while the user was told the
-/// snapshot had been saved. Success is reported only from a completed
-/// write.
+/// The webview supplies no bytes, JSON, or destination. Rust recollects the
+/// typed snapshot, serializes it under [`SNAPSHOT_MAX_BYTES`], chooses the
+/// filename, resolves the platform Downloads directory, and atomically
+/// publishes the file. Success is returned only after completed publication.
 ///
-/// #485: like `clear_failed_update_install`, this has a local side effect
-/// but reads no keychain/token/config state, and its only caller is the
-/// Diagnostics page (a main-window route), so it stays unguarded.
-/// #215: filesystem IO, so the write runs on the blocking pool.
+/// #215: snapshot collection, keychain access, and filesystem IO run on the
+/// blocking pool.
 #[tauri::command]
-pub async fn save_diagnostics_snapshot(app: AppHandle, json: String) -> Result<String, String> {
-    log::info!(
-        "{CMD} save_diagnostics_snapshot: ENTRY - {} bytes",
-        json.len()
-    );
-    // The command sits on the app-global `invoke` surface and the file it
-    // creates is one a user may attach to a public issue: refuse a payload
-    // that is not the snapshot JSON at all.
-    serde_json::from_str::<serde_json::Value>(&json).map_err(|e| {
-        log::error!("{CMD} save_diagnostics_snapshot: payload is not valid JSON - {e}");
-        format!("snapshot payload is not valid JSON: {e}")
-    })?;
-    let bytes = json.len();
-
+pub async fn save_diagnostics_snapshot(app: AppHandle) -> Result<String, String> {
+    log::info!("{CMD} save_diagnostics_snapshot: ENTRY");
     let app_clone = app.clone();
     let path = tauri::async_runtime::spawn_blocking(move || {
+        let state = app_clone.state::<std::sync::Arc<crate::AppState>>();
+        let log_dir = app_clone.path().app_log_dir().ok();
+        let snapshot = build_snapshot(
+            &state,
+            log_dir,
+            probe_keychain(),
+            crate::updater_bg::read_failed_install_marker(),
+            ConfigQuarantine::observe(),
+        );
+        let bytes = serialize_snapshot(&snapshot)?;
         let dir = app_clone.path().download_dir().map_err(|e| {
             log::error!("{CMD} save_diagnostics_snapshot: no downloads dir - {e}");
             e.to_string()
         })?;
-        write_snapshot_file(&dir, &json)
+        write_snapshot_file(&dir, &bytes)
     })
     .await
     .map_err(|e| format!("save_diagnostics_snapshot spawn_blocking panicked: {:?}", e))??;
 
     let path_str = path.to_string_lossy().to_string();
     log::info!(
-        "{CMD} save_diagnostics_snapshot: SUCCESS - wrote {} bytes to the downloads folder",
-        bytes
+        "{CMD} save_diagnostics_snapshot: SUCCESS - saved to the downloads folder"
     );
     Ok(path_str)
 }
@@ -1326,6 +1477,20 @@ pub async fn save_diagnostics_snapshot(app: AppHandle, json: String) -> Result<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn valid_snapshot_bytes() -> Vec<u8> {
+        serialize_snapshot(&build_snapshot(
+            &crate::AppState::default(),
+            None,
+            KeychainStatus {
+                spotify_client_secret_present: false,
+                tokens_encryption_key_present: false,
+            },
+            None,
+            ConfigQuarantine::default(),
+        ))
+        .expect("serialize valid snapshot")
+    }
 
     #[test]
     fn test_redact_query_params() {
@@ -1818,29 +1983,26 @@ mod tests {
 
     #[test]
     fn test_snapshot_file_name_is_windows_safe() {
-        // Issue #598: the saved file name must not contain a `:` and must
-        // carry a millisecond stamp, so two saves in one second do not
-        // silently overwrite each other.
         let ts = chrono::DateTime::parse_from_rfc3339("2026-09-16T10:11:12.345Z")
             .expect("parse timestamp")
             .with_timezone(&chrono::Utc);
-        let name = snapshot_file_name(ts);
-        assert_eq!(name, "presencejam-diagnostics-20260916-101112345.json");
+        let name = snapshot_file_name(ts, 4_242, 0);
+        assert_eq!(
+            name,
+            "presencejam-diagnostics-20260916-101112345-4242-0.json"
+        );
         assert!(!name.contains(':'));
-        let other = snapshot_file_name(ts + chrono::Duration::milliseconds(1));
-        assert_ne!(name, other);
+        assert_ne!(name, snapshot_file_name(ts, 4_242, 1));
     }
 
     #[test]
     fn test_write_snapshot_file_reports_a_file_that_exists() {
-        // Issue #598: the frontend now claims success only from this
-        // result, so a returned path must be a completed write.
         let dir = std::env::temp_dir().join(format!("pj-diag-save-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
-        let payload = r#"{"app_version":"4.6.0"}"#;
-        let path = write_snapshot_file(&dir, payload).expect("write snapshot");
+        let payload = valid_snapshot_bytes();
+        let path = write_snapshot_file(&dir, &payload).expect("write snapshot");
         assert!(path.exists(), "save reported a file that does not exist");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), payload);
+        assert_eq!(std::fs::read(&path).unwrap(), payload);
         let name = path
             .file_name()
             .expect("named file")
@@ -1848,6 +2010,68 @@ mod tests {
             .to_string();
         assert!(name.starts_with("presencejam-diagnostics-"));
         assert!(name.ends_with(".json"));
+        let sidecars = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+            .count();
+        assert_eq!(sidecars, 0, "atomic save left a staging file behind");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_oversized_snapshot_is_rejected_before_any_write() {
+        let dir = std::env::temp_dir().join(format!("pj-diag-oversize-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let payload = vec![b'x'; SNAPSHOT_MAX_BYTES + 1];
+
+        let error = write_snapshot_file(&dir, &payload).expect_err("oversized save must fail");
+
+        assert!(error.contains("too large"));
+        assert!(!dir.exists(), "rejected snapshot created the Downloads path");
+    }
+
+    #[test]
+    fn test_malformed_snapshot_is_rejected_before_any_write() {
+        let dir = std::env::temp_dir().join(format!("pj-diag-malformed-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+
+        let error = write_snapshot_file(&dir, b"not json").expect_err("malformed save must fail");
+
+        assert!(error.contains("malformed"));
+        assert!(!dir.exists(), "rejected snapshot created the Downloads path");
+    }
+
+    #[test]
+    fn test_wrong_shape_snapshot_is_rejected_before_any_write() {
+        let dir = std::env::temp_dir().join(format!("pj-diag-shape-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+
+        let error = write_snapshot_file(&dir, br#"{"app_version":"4.6.0"}"#)
+            .expect_err("wrong-shape save must fail");
+
+        assert!(error.contains("wrong shape"));
+        assert!(!dir.exists(), "rejected snapshot created the Downloads path");
+    }
+
+    #[test]
+    fn test_snapshot_save_retries_collision_without_overwriting() {
+        let dir = std::env::temp_dir().join(format!("pj-diag-collision-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let ts = chrono::DateTime::parse_from_rfc3339("2026-09-16T10:11:12.345Z")
+            .expect("parse timestamp")
+            .with_timezone(&chrono::Utc);
+        let occupied = dir.join(snapshot_file_name(ts, 4_242, 0));
+        std::fs::write(&occupied, b"keep me").unwrap();
+
+        let payload = valid_snapshot_bytes();
+        let saved =
+            write_snapshot_file_at(&dir, &payload, ts, 4_242).expect("retry generated destination");
+
+        assert_ne!(saved, occupied);
+        assert_eq!(std::fs::read(&occupied).unwrap(), b"keep me");
+        assert_eq!(std::fs::read(&saved).unwrap(), payload);
         std::fs::remove_dir_all(&dir).ok();
     }
 
