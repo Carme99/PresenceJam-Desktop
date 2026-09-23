@@ -124,7 +124,7 @@ pub struct CancelDeferredOutcome {
     pub state: CancelDeferredState,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ActiveStage {
     generation: u64,
     request_id: String,
@@ -512,8 +512,13 @@ pub fn discard_staged_update(app: &AppHandle) {
 pub fn cancel_deferred_update(app: AppHandle) -> Result<CancelDeferredOutcome, String> {
     use tauri::Manager;
 
-    let state = app.state::<PendingUpdate>();
-    let disposition = state.0.lock().cancel().into();
+    let disposition = {
+        let state = app.state::<PendingUpdate>();
+        let mut guard = state.0.lock();
+        let disposition = guard.cancel().into();
+        drop(guard);
+        disposition
+    };
     match disposition {
         CancelDeferredState::AlreadyCompleted => {
             log::info!("{TAG} cancel_deferred_update: completed stage discarded");
@@ -1104,6 +1109,7 @@ fn emit_stage_complete<E: FnOnce(&str)>(outcome: &StageDeferredOutcome, emit: E)
 /// [`StageProgressThrottle`] (issue #590); the payload itself is only
 /// reported once, at completion.
 #[cfg(desktop)]
+#[tauri::command]
 pub async fn stage_deferred_update(
     window: tauri::Window,
     app: AppHandle,
@@ -1121,7 +1127,10 @@ pub async fn stage_deferred_update(
     use tauri::Manager;
     let active = {
         let pending = app.state::<PendingUpdate>();
-        pending.0.lock().begin(request_id)
+        let mut guard = pending.0.lock();
+        let active = guard.begin(request_id);
+        drop(guard);
+        active
     };
     let outcome = tauri::async_runtime::spawn_blocking(move || {
         tauri::async_runtime::block_on(async move {
