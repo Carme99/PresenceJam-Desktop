@@ -1266,11 +1266,7 @@ pub async fn get_diagnostics_snapshot(app: AppHandle) -> Result<DiagnosticsSnaps
 /// UTC, millisecond precision: no `:` (illegal in Windows file names). The
 /// process id and attempt keep concurrent saves and stale files from the
 /// same process id distinct; only Rust ever supplies any part of this name.
-fn snapshot_file_name(
-    now: chrono::DateTime<chrono::Utc>,
-    process_id: u32,
-    attempt: u32,
-) -> String {
+fn snapshot_file_name(now: chrono::DateTime<chrono::Utc>, process_id: u32, attempt: u32) -> String {
     format!(
         "{SNAPSHOT_FILE_STEM}-{}-{process_id}-{attempt}.json",
         now.format("%Y%m%d-%H%M%S%3f")
@@ -1307,12 +1303,14 @@ fn validate_snapshot_size(bytes: &[u8]) -> Result<(), String> {
 }
 
 fn validate_snapshot_json(bytes: &[u8]) -> Result<(), String> {
-    serde_json::from_slice::<DiagnosticsSnapshot>(bytes).map(|_| ()).map_err(|e| {
-        log::warn!(
-            "{CMD} save_diagnostics_snapshot: refused malformed or wrong-shape snapshot - {e}"
-        );
-        format!("diagnostics snapshot is malformed or has the wrong shape: {e}")
-    })
+    serde_json::from_slice::<DiagnosticsSnapshot>(bytes)
+        .map(|_| ())
+        .map_err(|e| {
+            log::warn!(
+                "{CMD} save_diagnostics_snapshot: refused malformed or wrong-shape snapshot - {e}"
+            );
+            format!("diagnostics snapshot is malformed or has the wrong shape: {e}")
+        })
 }
 
 /// Private sidecar for one generated destination. It cannot collide with a
@@ -1468,9 +1466,7 @@ pub async fn save_diagnostics_snapshot(app: AppHandle) -> Result<String, String>
     .map_err(|e| format!("save_diagnostics_snapshot spawn_blocking panicked: {:?}", e))??;
 
     let path_str = path.to_string_lossy().to_string();
-    log::info!(
-        "{CMD} save_diagnostics_snapshot: SUCCESS - saved to the downloads folder"
-    );
+    log::info!("{CMD} save_diagnostics_snapshot: SUCCESS - saved to the downloads folder");
     Ok(path_str)
 }
 
@@ -2028,7 +2024,10 @@ mod tests {
         let error = write_snapshot_file(&dir, &payload).expect_err("oversized save must fail");
 
         assert!(error.contains("too large"));
-        assert!(!dir.exists(), "rejected snapshot created the Downloads path");
+        assert!(
+            !dir.exists(),
+            "rejected snapshot created the Downloads path"
+        );
     }
 
     #[test]
@@ -2039,7 +2038,10 @@ mod tests {
         let error = write_snapshot_file(&dir, b"not json").expect_err("malformed save must fail");
 
         assert!(error.contains("malformed"));
-        assert!(!dir.exists(), "rejected snapshot created the Downloads path");
+        assert!(
+            !dir.exists(),
+            "rejected snapshot created the Downloads path"
+        );
     }
 
     #[test]
@@ -2051,7 +2053,10 @@ mod tests {
             .expect_err("wrong-shape save must fail");
 
         assert!(error.contains("wrong shape"));
-        assert!(!dir.exists(), "rejected snapshot created the Downloads path");
+        assert!(
+            !dir.exists(),
+            "rejected snapshot created the Downloads path"
+        );
     }
 
     #[test]
