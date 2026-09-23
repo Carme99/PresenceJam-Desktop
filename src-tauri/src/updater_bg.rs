@@ -490,7 +490,8 @@ pub fn discard_staged_update(app: &AppHandle) {
     use tauri::Manager;
 
     let state = app.state::<PendingUpdate>();
-    match state.0.lock().cancel() {
+    let disposition = state.0.lock().cancel();
+    match disposition {
         CancelDisposition::AlreadyCompleted => {
             log::info!("{TAG} discard_staged_update: staged update discarded");
         }
