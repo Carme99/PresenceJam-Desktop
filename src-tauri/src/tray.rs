@@ -136,8 +136,10 @@ fn log_dispatched_menu_event_with(
     emit: impl FnOnce(&log::Record<'_>),
 ) {
     let redacted = menu_event_id_for_log(id);
+    let message = format!("[TRAY] menu event: id={redacted}");
+    let args = format_args!("{message}");
     let record = log::Record::builder()
-        .args(format_args!("[TRAY] menu event: id={redacted}"))
+        .args(args)
         .level(log::Level::Info)
         .target(module_path!())
         .build();
