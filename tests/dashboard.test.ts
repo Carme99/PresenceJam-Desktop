@@ -292,6 +292,80 @@ describe('Dashboard presence hydration (#547, #670)', () => {
   });
 });
 
+describe('Dashboard error-event routing (#972)', () => {
+  const teamsRetry = {
+    source: 'teams',
+    message: 'Teams is unavailable. Retrying shortly.',
+    severity: 'warning',
+    recovery: 'retry_scheduled'
+  } as const;
+  const unrelatedSpotifyWarning = {
+    source: 'spotify',
+    message: 'Spotify is temporarily unavailable.',
+    severity: 'warning'
+  } as const;
+
+  it('renders one Teams retry as a status and no alert', async () => {
+    const { container } = render(Dashboard);
+    await listenerReady('error');
+
+    await emit('error', teamsRetry);
+
+    expect(container.querySelectorAll('.warning-banner[role="status"]')).toHaveLength(1);
+    expect(container.querySelector('.warning-banner')?.textContent).toBe(teamsRetry.message);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it('renders a fatal Teams event as an alert and no retry status', async () => {
+    const { container } = render(Dashboard);
+    await listenerReady('error');
+
+    await emit('error', {
+      source: 'teams',
+      message: 'Microsoft Teams permission was denied.',
+      severity: 'error',
+      recovery: 'user_action_required'
+    });
+
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      'Microsoft Teams permission was denied.'
+    );
+    expect(container.querySelector('.warning-banner')).toBeNull();
+  });
+
+  it('preserves Teams retry and fatal timers after an unrelated warning', async () => {
+    const retryDash = render(Dashboard);
+    await listenerReady('error');
+    vi.useFakeTimers();
+
+    await emit('error', teamsRetry);
+    await emit('error', unrelatedSpotifyWarning);
+    expect(retryDash.container.querySelector('.warning-banner')?.textContent).toBe(
+      teamsRetry.message
+    );
+    await vi.advanceTimersByTimeAsync(5000);
+    await tick();
+    expect(retryDash.container.querySelector('.warning-banner')).toBeNull();
+
+    await unmount(retryDash);
+    const fatalDash = render(Dashboard);
+    await listenerReady('error');
+    await emit('error', {
+      source: 'teams',
+      message: 'Microsoft Teams permission was denied.',
+      severity: 'error',
+      recovery: 'user_action_required'
+    });
+    await emit('error', unrelatedSpotifyWarning);
+    expect(fatalDash.container.querySelector('[role="alert"]')?.textContent).toBe(
+      'Microsoft Teams permission was denied.'
+    );
+    await vi.advanceTimersByTimeAsync(5000);
+    await tick();
+    expect(fatalDash.container.querySelector('[role="alert"]')).toBeNull();
+  });
+});
+
 describe('A pause is not a stop (#670)', () => {
   it('keeps the track card on a pause and drops it only on a genuine stop', async () => {
     status = syncStatus({ last_posted_status: '🎵 An Artist - A Track 🎧' });

@@ -541,28 +541,24 @@
     teardown.add(listen<DashboardErrorEventPayload>('error', (event) => {
       const payload = event.payload;
       console.error('[DASHBOARD] EVENT: error received:', payload);
-      // A Teams status write can fail while automatic recovery remains
-      // scheduled on the polling loop. Surface that actionable state as a polite
-      // warning, never as the red fatal banner used by terminal failures.
+      // Only the classified Teams retry event owns warning-banner state. Other
+      // warning sources share this event channel but must not erase a Teams
+      // retry or fatal Teams error that is already on screen.
       if (payload.severity === 'warning') {
+        if (payload.source !== 'teams' || payload.recovery !== 'retry_scheduled') return;
         if (displayErrorTimeout) {
           clearTimeout(displayErrorTimeout);
           displayErrorTimeout = null;
         }
         displayError = '';
         if (displayWarningTimeout) clearTimeout(displayWarningTimeout);
-        if (payload.source === 'teams' && payload.recovery === 'retry_scheduled') {
-          displayWarning = typeof payload.message === 'string'
-            ? payload.message
-            : String(payload);
-          displayWarningTimeout = setTimeout(() => {
-            displayWarning = '';
-            displayWarningTimeout = null;
-          }, 5000);
-        } else {
+        displayWarning = typeof payload.message === 'string'
+          ? payload.message
+          : String(payload);
+        displayWarningTimeout = setTimeout(() => {
           displayWarning = '';
           displayWarningTimeout = null;
-        }
+        }, 5000);
         return;
       }
       if (payload.severity !== 'error') {
