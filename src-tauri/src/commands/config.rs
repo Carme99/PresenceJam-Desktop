@@ -1425,12 +1425,8 @@ mod tests {
         // fails.
         let denied = std::fs::write(inner.join("probe"), b"x").is_err();
         if denied {
-            let err = replace_config_file(
-                &live,
-                "{\"spotify\":{\"client_id\":\"NEW\"}}",
-                || {},
-            )
-            .expect_err("an unwritable directory must fail the replace");
+            let err = replace_config_file(&live, "{\"spotify\":{\"client_id\":\"NEW\"}}", || {})
+                .expect_err("an unwritable directory must fail the replace");
             assert!(err.contains("import temp file"), "unexpected error: {err}");
         }
         assert_eq!(
