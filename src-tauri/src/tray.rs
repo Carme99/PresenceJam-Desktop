@@ -131,10 +131,7 @@ pub(crate) fn menu_event_id_for_log(id: &str) -> Cow<'_, str> {
     }
 }
 
-fn log_dispatched_menu_event_with(
-    id: &str,
-    emit: impl FnOnce(&log::Record<'_>),
-) {
+fn log_dispatched_menu_event_with(id: &str, emit: impl FnOnce(&log::Record<'_>)) {
     let redacted = menu_event_id_for_log(id);
     let message = format!("[TRAY] menu event: id={redacted}");
     let args = format_args!("{message}");
@@ -3061,7 +3058,10 @@ mod tests {
             "the production record shape changed: {record}"
         );
         assert!(!record.contains(device_id), "device id leaked: {record}");
-        assert!(!record.contains(&event_id), "device menu id leaked: {record}");
+        assert!(
+            !record.contains(&event_id),
+            "device menu id leaked: {record}"
+        );
 
         let mut known_record = None;
         log_dispatched_menu_event_with("play_pause", |record| {

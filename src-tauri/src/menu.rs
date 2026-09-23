@@ -311,7 +311,10 @@ mod tests {
             "the production record shape changed: {record}"
         );
         assert!(!record.contains(device_id), "device id leaked: {record}");
-        assert!(!record.contains(&event_id), "device menu id leaked: {record}");
+        assert!(
+            !record.contains(&event_id),
+            "device menu id leaked: {record}"
+        );
     }
 
     /// Issue #415: the app-menu Quit path must give the frontend's `app_exit`
