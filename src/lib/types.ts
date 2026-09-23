@@ -15,12 +15,11 @@
  * struct, run `cargo test`, and the regenerated `.ts` will flow
  * through this re-export. See issue #78.
  *
- * **`ErrorEventPayload` and `LogPayload` are still hand-written**
- * because their wire shape is not owned by a Rust struct (the polling
- * loop emits `ErrorEventPayload` via `serde_json::json!({...})` inline
- * — see `polling/mod.rs::emit_error`; `LogPayload` comes from the
- * `tauri-plugin-log` plugin, not from this crate's structs). See
- * issue #79 for the inline-emit rationale.
+ * **`ErrorEventPayload` and `LogPayload` are hand-written** because the
+ * `tauri-plugin-log` payload is not owned by this crate, while the error
+ * payload mirrors the canonical Rust `ErrorEventPayload` in
+ * `polling/mod.rs`. Keep the two definitions synchronized when the wire shape
+ * changes. See issue #79 for the event rationale.
  */
 export type { SpotifyTokens } from './types-generated/SpotifyTokens';
 export type { TrackInfo } from './types-generated/TrackInfo';
@@ -51,6 +50,7 @@ export interface ErrorEventPayload {
   source: string;
   message: string;
   severity: 'warning' | 'error';
+  recovery?: 'retry_scheduled' | 'reconnect_required' | 'user_action_required';
 }
 
 /**

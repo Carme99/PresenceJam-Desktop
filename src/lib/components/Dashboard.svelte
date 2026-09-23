@@ -15,9 +15,6 @@
   import { t, i18n } from '$lib/i18n';
   import { useListenerTeardown } from '$lib/utils/useAuthListeners';
 
-  type DashboardErrorEventPayload = ErrorEventPayload & {
-    recovery?: 'retry_scheduled' | 'reconnect_required' | 'user_action_required';
-  };
 
   /**
    * The gate chip's copy, derived from the reason the always-mounted
@@ -538,7 +535,7 @@
     // another view is on screen is no longer dropped with this component.
 
     devLog('[DASHBOARD] onMount: setting up error listener');
-    teardown.add(listen<DashboardErrorEventPayload>('error', (event) => {
+    teardown.add(listen<ErrorEventPayload>('error', (event) => {
       const payload = event.payload;
       console.error('[DASHBOARD] EVENT: error received:', payload);
       // Only the classified Teams retry event owns warning-banner state. Other
