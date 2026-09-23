@@ -96,9 +96,10 @@ const sendNotificationMock = sendNotification as unknown as Mock;
 import { i18n, t } from '$lib/i18n';
 import { configHydrated, configStore, defaultConfig } from '$lib/stores/config';
 import type { AppConfig } from '$lib/types';
-import { notifyUpdateStaged as notifyUpdateStagedMock } from '$lib/stores/notifications';
+import { notifyUpdateStaged } from '$lib/stores/notifications';
 
 const invokeMock = invoke as unknown as Mock;
+const notifyUpdateStagedMock = notifyUpdateStaged as unknown as Mock;
 
 /** #678: the backend's candidate payload from `check_for_update`. */
 const CANDIDATE = {
