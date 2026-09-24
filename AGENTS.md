@@ -196,7 +196,7 @@ fail for which defect.
 6. `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`
 7. `python3 docs/link-audit.py` (only if you edited any markdown)
 
-The CI workflow runs Ubuntu, macOS, and Windows jobs. The Linux and macOS Rust jobs execute `cargo test --all-targets`; the Windows leg keeps `cargo check` because the lib test binary aborts at loader on the current `windows-latest` image (`STATUS_ENTRYPOINT_NOT_FOUND`). The fix lives in re-expanding the matrix once the runner image links the binary cleanly — track that in issue #836.
+The CI workflow runs Ubuntu, macOS, and Windows jobs. The Linux and macOS Rust jobs execute `cargo test --all-targets`; the Windows leg does not run the full all-target suite because the lib test binary aborts at loader on the current `windows-latest` image (`STATUS_ENTRYPOINT_NOT_FOUND`), but `windows-cli-smoke` still performs a real release build and runs the focused `test_windows_cli_attaches_parent_console_before_output` regression. Re-expand the full Windows matrix once the runner image links the binary cleanly — track that in issue #836.
 
 ---
 

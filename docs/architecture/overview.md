@@ -120,7 +120,7 @@ flowchart TD
    and the Chromium browser gate. `build` needs this job, so an unverified tag
    cannot produce artifacts.
 4. **Parallel matrix:** macOS (`macos-latest`), Windows (`windows-latest`),
-   and Linux (`ubuntu-latest`; .deb + .AppImage) builds run concurrently on
+   and Linux (`ubuntu-latest`; .deb + .rpm + .AppImage) builds run concurrently on
    GitHub's hosted runners. Each leg also emits a SLSA build-provenance
    attestation (`actions/attest-build-provenance`).
 5. **Artifact upload:** Each OS build uploads its Tauri-bundled artifact via
