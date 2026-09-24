@@ -140,7 +140,6 @@ fn filter_manual_status(text: &str, config: Option<&crate::config::AppConfig>) -
     profanity::filter_status_for_locale(text, placeholder, true, extra_words, locale)
 }
 
-
 /// Issue #870: the Dashboard composer / `--set-status` entry. Filters
 /// profanity, clamps the text length, clamps the expiry, POSTs to Teams,
 /// and records the result so the Dashboard and the tray can re-render.
@@ -510,5 +509,4 @@ mod tests {
             );
         }
     }
-
 }

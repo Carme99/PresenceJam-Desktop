@@ -32,7 +32,11 @@ pub(crate) fn paused_status_text(config: &Option<crate::config::AppConfig>) -> &
 
 /// Add the standard music prefix to the shared paused-text result.
 pub(crate) fn paused_status_placeholder(config: &Option<crate::config::AppConfig>) -> String {
-    format!("{} {}", crate::polling::MUSIC_EMOJI, paused_status_text(config))
+    format!(
+        "{} {}",
+        crate::polling::MUSIC_EMOJI,
+        paused_status_text(config)
+    )
 }
 
 /// Issue #870: the safe-placeholder text the manual status clear posts.
@@ -1133,5 +1137,4 @@ mod tests {
             );
         }
     }
-
 }
