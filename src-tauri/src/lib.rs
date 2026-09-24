@@ -3679,7 +3679,7 @@ mod tests {
                 config.teams.profanity_placeholder = placeholder.to_string();
                 assert_eq!(
                     filter_cli_manual_status("what the fuck", Some(&config)),
-                    format!("🎵 {localized}"),
+                    localized,
                     "a blank or shipped-English placeholder must use the loaded locale"
                 );
             }
@@ -3687,7 +3687,7 @@ mod tests {
             config.teams.profanity_placeholder = "Eigener Status".to_string();
             assert_eq!(
                 filter_cli_manual_status("what the fuck", Some(&config)),
-                "🎵 Eigener Status",
+                "Eigener Status",
                 "a custom safe placeholder must remain byte-identical"
             );
             let custom_text = "Eigener Status ✨ — café";
