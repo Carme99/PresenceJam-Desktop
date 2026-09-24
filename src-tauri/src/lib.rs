@@ -553,11 +553,11 @@ fn apply_token_load_result(
 ) {
     match result {
         Ok(tf) => {
-            state.tokens_load.mark_ready();
             let has_spotify = tf.spotify_tokens.is_some();
             let has_teams = tf.teams_tokens.is_some();
             *state.tokens.spotify_mut() = tf.spotify_tokens;
             *state.tokens.teams_mut() = tf.teams_tokens;
+            state.tokens_load.mark_ready();
             if has_spotify {
                 log::info!("[APP] setup: spotify_tokens loaded into AppState");
             } else {

@@ -729,24 +729,33 @@ fn write_tokens_atomic_with_key(
 /// a fresh refresh token on the next launch.
 pub fn persist_tokens(state: &Arc<crate::AppState>, app: &tauri::AppHandle) -> Result<(), String> {
     let path = tokens_file_path(app)?;
-    persist_tokens_at_with_writer(state, &path, write_tokens_atomic)
+    persist_tokens_at_with_retry(
+        state,
+        &path,
+        || read_tokens_at_path(&path, TokenReadMode::ReadOnly),
+        write_tokens_atomic,
+    )
 }
 
-/// Path-level persist core with the final writer injected. The guard, global
-/// lock, and consistent two-slot snapshot are identical in tests and
-/// production; only the keychain-backed final write is replaceable.
-fn persist_tokens_at_with_writer(
+/// Path-level persist core that first gives a keychain-gated snapshot one
+/// chance to recover from the same encrypted file. A successful retry installs
+/// the loaded tokens, clears the gate, and proceeds with the normal write. Any
+/// retry failure preserves the existing ciphertext and returns the original
+/// persist refusal.
+fn persist_tokens_at_with_retry(
     state: &Arc<crate::AppState>,
     path: &Path,
+    read: impl FnOnce() -> Result<TokensFile, TokensLoadError>,
     write: impl FnOnce(&Path, &TokensFile) -> Result<(), String>,
 ) -> Result<(), String> {
     with_tokens_write_lock(|| {
+        let blocked_error =
+            "Refusing to overwrite tokens.json after a keychain-unavailable load; \
+             retry the token read or reset token storage first"
+                .to_string();
         if state.tokens_load.blocks_persist() {
-            return Err(
-                "Refusing to overwrite tokens.json after a keychain-unavailable load; \
-                 retry the token read or reset token storage first"
-                    .to_string(),
-            );
+            let recovered = read().map_err(|_| blocked_error.clone())?;
+            crate::apply_token_load_result(state, Ok(recovered));
         }
         // Issue #800: bind BOTH slot guards before either clone. Cloning one
         // slot guard at a time left a window in which a commit landing on the
@@ -1119,52 +1128,76 @@ mod tests {
     }
 
     #[test]
-    fn keychain_unavailable_preserves_ciphertext_and_blocks_persist() {
-        let dir = unique_tmp_dir("keychain-unavailable");
+    fn keychain_unavailable_retry_recovers_before_next_persist() {
+        let dir = unique_tmp_dir("keychain-retry");
         let path = dir.join("tokens.json");
         write_tokens_atomic_with_key(&path, &sample_file(), &test_key()).unwrap();
-        let ciphertext = fs::read(&path).unwrap();
         let state = Arc::new(crate::AppState::new());
 
-        let result =
-            read_tokens_at_path_with_key_fetcher(&path, TokenReadMode::MigrateLegacy, || {
+        let unavailable = read_tokens_at_path_with_key_fetcher(
+            &path,
+            TokenReadMode::ReadOnly,
+            || {
                 Err(crate::keychain::KeychainReadError::Unavailable(
                     "credential store locked".to_string(),
                 ))
-            });
-        assert!(
-            matches!(
-                &result,
-                Err(TokensLoadError::KeychainUnavailable(message))
-                    if message == "credential store locked"
-            ),
-            "platform failure must remain distinct from corruption: {result:?}"
+            },
         );
-        assert_eq!(fs::read(&path).unwrap(), ciphertext);
-
-        crate::apply_token_load_result(&state, result);
+        assert!(matches!(
+            &unavailable,
+            Err(TokensLoadError::KeychainUnavailable(_))
+        ));
+        crate::apply_token_load_result(&state, unavailable);
         assert_eq!(
             state.tokens_load.state(),
             crate::TokensLoadState::KeychainUnavailable
         );
-        assert!(state.tokens.spotify().is_none());
-        assert!(state.tokens.teams().is_none());
 
         let mut writer_called = false;
-        let persist = persist_tokens_at_with_writer(&state, &path, |_path, _contents| {
-            writer_called = true;
-            Ok(())
-        });
-        assert!(persist.is_err(), "the empty snapshot must be refused");
-        assert!(
-            !writer_called,
-            "the guarded persist must not reach its writer"
+        let first = persist_tokens_at_with_retry(
+            &state,
+            &path,
+            || read_tokens_at_path_with_key_fetcher(&path, TokenReadMode::ReadOnly, || Ok(test_key())),
+            |_path, _contents| {
+                writer_called = true;
+                Ok(())
+            },
         );
-        assert_eq!(
-            fs::read(&path).unwrap(),
-            ciphertext,
-            "blocked persist must leave recoverable ciphertext byte-identical"
+        assert!(first.is_ok(), "a successful retry must make the persist writable");
+        assert!(writer_called, "the successful retry must reach the writer");
+        assert_eq!(state.tokens_load.state(), crate::TokensLoadState::Ready);
+        assert_eq!(state.tokens.spotify().as_ref().unwrap().access_token, "at");
+        assert_eq!(state.tokens.teams().as_ref().unwrap().access_token, "tat");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn keychain_unavailable_retry_preserves_ciphertext_when_still_locked() {
+        let dir = unique_tmp_dir("keychain-still-locked");
+        let path = dir.join("tokens.json");
+        write_tokens_atomic_with_key(&path, &sample_file(), &test_key()).unwrap();
+        let ciphertext = fs::read(&path).unwrap();
+        let state = Arc::new(crate::AppState::new());
+        state.tokens_load.mark_keychain_unavailable();
+
+        let mut writer_called = false;
+        let persist = persist_tokens_at_with_retry(
+            &state,
+            &path,
+            || {
+                Err(TokensLoadError::KeychainUnavailable(
+                    "credential store locked".to_string(),
+                ))
+            },
+            |_path, _contents| {
+                writer_called = true;
+                Ok(())
+            },
         );
+        assert!(persist.is_err());
+        assert!(!writer_called, "a failed retry must not reach the writer");
+        assert_eq!(fs::read(&path).unwrap(), ciphertext);
+        assert_eq!(state.tokens_load.state(), crate::TokensLoadState::KeychainUnavailable);
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1180,47 +1213,21 @@ mod tests {
 
         let result =
             read_tokens_at_path_with_key_fetcher(&path, TokenReadMode::ReadOnly, || Ok(test_key()));
-        assert!(
-            matches!(&result, Err(TokensLoadError::Corrupt(_))),
-            "authentication failure must classify as corrupt: {result:?}"
-        );
-
+        assert!(matches!(&result, Err(TokensLoadError::Corrupt(_))));
         crate::apply_token_load_result(&state, result);
         assert_eq!(state.tokens_load.state(), crate::TokensLoadState::Ready);
-        assert!(state.tokens.spotify().is_none());
-        assert!(state.tokens.teams().is_none());
 
         let mut writer_called = false;
-        persist_tokens_at_with_writer(&state, &path, |_path, _contents| {
-            writer_called = true;
-            Ok(())
-        })
+        persist_tokens_at_with_retry(
+            &state,
+            &path,
+            || Err(TokensLoadError::KeychainUnavailable("unused".to_string())),
+            |_path, _contents| {
+                writer_called = true;
+                Ok(())
+            },
+        )
         .expect("corrupt-store recovery must remain writable");
-        assert!(writer_called);
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn successful_injected_read_unblocks_persist() {
-        let dir = unique_tmp_dir("successful-retry");
-        let path = dir.join("tokens.json");
-        write_tokens_atomic_with_key(&path, &sample_file(), &test_key()).unwrap();
-        let state = Arc::new(crate::AppState::new());
-        state.tokens_load.mark_keychain_unavailable();
-
-        let result =
-            read_tokens_at_path_with_key_fetcher(&path, TokenReadMode::ReadOnly, || Ok(test_key()));
-        crate::apply_token_load_result(&state, result);
-
-        assert_eq!(state.tokens_load.state(), crate::TokensLoadState::Ready);
-        assert!(state.tokens.spotify().is_some());
-        assert!(state.tokens.teams().is_some());
-        let mut writer_called = false;
-        persist_tokens_at_with_writer(&state, &path, |_path, _contents| {
-            writer_called = true;
-            Ok(())
-        })
-        .expect("a successful read must unblock persistence");
         assert!(writer_called);
         fs::remove_dir_all(dir).unwrap();
     }
@@ -1859,7 +1866,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // Issue #800 (wiring guard): `persist_tokens_at_with_writer` must bind BOTH
+    // Issue #800 (wiring guard): `persist_tokens_at_with_retry` must bind BOTH
     // slot guards before cloning either slot, so the pair written to disk is a
     // consistent cut. A behavioral test cannot deterministically interleave a
     // Teams commit between the two clones without test-only plumbing inside
@@ -1876,16 +1883,16 @@ mod tests {
             .split_once("#[cfg(test)]")
             .expect("token_io.rs must contain its test module")
             .0;
-        let body = test_scan::fn_body(production_src, "fn persist_tokens_at_with_writer(");
+        let body = test_scan::fn_body(production_src, "fn persist_tokens_at_with_retry(");
         let spotify_guard = body
             .find("state.tokens.spotify()")
-            .expect("persist_tokens_at_with_writer must bind the Spotify slot guard");
+            .expect("persist_tokens_at_with_retry must bind the Spotify slot guard");
         let teams_guard = body
             .find("state.tokens.teams()")
-            .expect("persist_tokens_at_with_writer must bind the Teams slot guard");
+            .expect("persist_tokens_at_with_retry must bind the Teams slot guard");
         let first_clone = body
             .find(".clone()")
-            .expect("persist_tokens_at_with_writer must clone at least one slot");
+            .expect("persist_tokens_at_with_retry must clone at least one slot");
         assert!(
             spotify_guard < first_clone && teams_guard < first_clone,
             "both slot guards must be bound before either slot is cloned, so a \
