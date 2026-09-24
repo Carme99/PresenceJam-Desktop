@@ -100,26 +100,121 @@ pub(crate) struct ErrorEventPayload {
     pub(crate) recovery: Option<ErrorRecovery>,
 }
 
+impl ErrorEventPayload {
+    fn new(
+        source: &str,
+        message: String,
+        severity: ErrorSeverity,
+        recovery: Option<ErrorRecovery>,
+    ) -> Self {
+        Self {
+            source: source.to_string(),
+            message,
+            severity,
+            recovery,
+        }
+    }
+}
+
+/// Event sink used by the canonical error emitters. Production delegates to
+/// Tauri's emitter; tests capture the same production payload without a GUI
+/// runtime.
+pub(crate) trait ErrorEventEmitter {
+    fn emit_error_event(&self, event: &str, payload: ErrorEventPayload);
+}
+
+impl ErrorEventEmitter for AppHandle {
+    fn emit_error_event(&self, event: &str, payload: ErrorEventPayload) {
+        let _ = self.emit(event, payload);
+    }
+}
+
 /// Emit an `error` event without provider-specific recovery metadata.
-pub(crate) fn emit_error(app: &AppHandle, source: &str, message: String, severity: ErrorSeverity) {
-    emit_error_with_recovery(app, source, message, severity, None);
+pub(crate) fn emit_error<E: ErrorEventEmitter>(
+    emitter: &E,
+    source: &str,
+    message: String,
+    severity: ErrorSeverity,
+) {
+    emit_error_with_recovery(emitter, source, message, severity, None);
 }
 
 /// Emit an `error` event with the canonical payload and optional recovery.
-pub(crate) fn emit_error_with_recovery(
-    app: &AppHandle,
+pub(crate) fn emit_error_with_recovery<E: ErrorEventEmitter>(
+    emitter: &E,
     source: &str,
     message: String,
     severity: ErrorSeverity,
     recovery: Option<ErrorRecovery>,
 ) {
-    let _ = app.emit(
+    emitter.emit_error_event(
         "error",
-        ErrorEventPayload {
-            source: source.to_string(),
-            message,
-            severity,
-            recovery,
-        },
+        ErrorEventPayload::new(source, message, severity, recovery),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{emit_error, ErrorEventEmitter, ErrorEventPayload, ErrorSeverity};
+
+    #[derive(Default)]
+    struct RecordingErrorEmitter {
+        events: parking_lot::Mutex<Vec<(String, ErrorEventPayload)>>,
+    }
+
+    impl ErrorEventEmitter for RecordingErrorEmitter {
+        fn emit_error_event(&self, event: &str, payload: ErrorEventPayload) {
+            self.events.lock().push((event.to_string(), payload));
+        }
+    }
+
+    #[test]
+    fn emit_error_builds_the_canonical_lowercase_severity_payloads() {
+        let recorder = RecordingErrorEmitter::default();
+
+        emit_error(
+            &recorder,
+            "spotify",
+            "Retrying after a transient failure".to_string(),
+            ErrorSeverity::Warning,
+        );
+        emit_error(
+            &recorder,
+            "teams",
+            "Reconnect Teams in Settings".to_string(),
+            ErrorSeverity::Error,
+        );
+
+        let events = recorder.events.lock();
+        let serialized = events
+            .iter()
+            .map(|(event, payload)| {
+                (
+                    event.as_str(),
+                    serde_json::to_value(payload).expect("serialize canonical error payload"),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            serialized,
+            vec![
+                (
+                    "error",
+                    serde_json::json!({
+                        "source": "spotify",
+                        "message": "Retrying after a transient failure",
+                        "severity": "warning"
+                    })
+                ),
+                (
+                    "error",
+                    serde_json::json!({
+                        "source": "teams",
+                        "message": "Reconnect Teams in Settings",
+                        "severity": "error"
+                    })
+                ),
+            ]
+        );
+    }
 }

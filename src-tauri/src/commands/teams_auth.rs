@@ -57,21 +57,121 @@ fn bounded_poll_interval(interval: u64) -> u64 {
     interval.clamp(1, 15)
 }
 
-/// Whether a completed sign-in should emit a persistence warning. The poll
-/// already succeeded and updated memory, so a storage failure keeps the live
-/// session and reports the restart-only limitation on its own event.
+/// Events emitted after a device-code poll. Keeping this payload union in the
+/// command core lets production delegate to Tauri while tests observe the
+/// exact warning emitted by the persistence-failure branch.
 #[derive(Debug, PartialEq, Eq)]
-enum PersistencePolicy {
-    NoWarning,
-    Warning(String),
+enum TeamsAuthEvent {
+    PersistWarning(String),
+    Complete,
+    NavigateSettings,
+    Failed(String),
 }
 
-fn persistence_policy(result: Result<(), String>) -> PersistencePolicy {
-    match result {
-        Ok(()) => PersistencePolicy::NoWarning,
-        Err(error) => PersistencePolicy::Warning(error),
+fn emit_teams_auth_event(app: &AppHandle, event: TeamsAuthEvent) {
+    match event {
+        TeamsAuthEvent::PersistWarning(message) => {
+            let _ = app.emit("teams-auth-persist-warning", message);
+        }
+        TeamsAuthEvent::Complete => {
+            let _ = app.emit("teams-auth-complete", ());
+        }
+        TeamsAuthEvent::NavigateSettings => {
+            let _ = app.emit("navigate", "settings");
+        }
+        TeamsAuthEvent::Failed(message) => {
+            let _ = app.emit("teams-auth-failed", message);
+        }
     }
 }
+
+
+/// Production body of [`poll_teams_auth`] with its blocking poll, persistence,
+/// and event side effects injected at the command boundary. The public
+/// signature remains unchanged while these seams make both the interval clamp
+/// and the successful-token/persistence-warning branch directly executable.
+async fn poll_teams_auth_core<P, S, E>(
+    device_code: String,
+    interval: u64,
+    state: Arc<AppState>,
+    current: &Mutex<Option<String>>,
+    poll: P,
+    persist: S,
+    emit: E,
+) -> Result<(), String>
+where
+    P: FnOnce(String, u64) -> Result<crate::teams::TeamsTokens, String> + Send + 'static,
+    S: FnOnce(&Arc<AppState>) -> Result<(), String> + Send,
+    E: FnMut(TeamsAuthEvent) + Send,
+{
+    // Security: server interval is untrusted (devtools can inject u64::MAX).
+    // Clamp before the blocking side effect sees it.
+    let interval = bounded_poll_interval(interval);
+    log::info!(
+        "{CMD} poll_teams_auth: ENTRY - device_code.len={}, interval={}",
+        device_code.len(),
+        interval
+    );
+
+    let device_code_for_thread = device_code.clone();
+    let poll_result = tauri::async_runtime::spawn_blocking(move || {
+        poll(device_code_for_thread, interval)
+    })
+    .await
+    .map_err(|e| format!("poll_teams_auth task panicked: {}", e))?;
+
+    // A superseded or cancelled attempt must not commit either arm of its
+    // result: doing so would overwrite the newer flow's live session.
+    if !may_commit(current, &device_code) {
+        log::warn!(
+            "{CMD} poll_teams_auth: flow superseded or cancelled; discarding the polled result without committing"
+        );
+        return Ok(());
+    }
+
+    match poll_result {
+        Ok(tokens) => {
+            log::info!(
+                "{CMD} poll_teams_auth: poll successful - access_token.len={}",
+                tokens.access_token.len()
+            );
+            {
+                let mut guard = state.tokens.teams_mut();
+                *guard = Some(tokens);
+                log::info!("{CMD} poll_teams_auth: tokens stored in AppState");
+            }
+
+            // The sign-in already succeeded, so storage failure must not turn
+            // it into an IPC error. Keep the live token and report that it is
+            // available only until restart.
+            match persist(&state) {
+                Ok(()) => log::info!("{CMD} poll_teams_auth: tokens persisted atomically"),
+                Err(error) => {
+                    log::warn!(
+                        "{CMD} poll_teams_auth: sign-in succeeded but tokens could not be persisted (session is live until restart): {}",
+                        error
+                    );
+                    emit(TeamsAuthEvent::PersistWarning(error));
+                }
+            }
+
+            state.onboarding_cache.invalidate();
+            log::info!("{CMD} poll_teams_auth: onboarding_cache invalidated");
+            log::info!("{CMD} poll_teams_auth: EMIT teams-auth-complete event");
+            emit(TeamsAuthEvent::Complete);
+            log::info!("{CMD} poll_teams_auth: EMIT navigate -> settings");
+            emit(TeamsAuthEvent::NavigateSettings);
+            log::info!("{CMD} poll_teams_auth: SUCCESS");
+            Ok(())
+        }
+        Err(error) => {
+            log::error!("{CMD} poll_teams_auth: poll failed: {}", error);
+            emit(TeamsAuthEvent::Failed(error.clone()));
+            Err(error)
+        }
+    }
+}
+
 
 #[tauri::command]
 pub async fn start_teams_auth_device_code(
@@ -128,19 +228,17 @@ pub async fn poll_teams_auth(
     app: AppHandle,
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    // Security: server interval is untrusted (devtools can inject u64::MAX).
-    // Clamp before any use so spawn_blocking cannot sleep for hours.
-    let interval = bounded_poll_interval(interval);
-    log::info!(
-        "{CMD} poll_teams_auth: ENTRY - device_code.len={}, interval={}",
-        device_code.len(),
-        interval
-    );
-
-    let device_code_for_thread = device_code.clone();
-    let poll_result = tauri::async_runtime::spawn_blocking(move || {
-        crate::teams::poll_teams_auth(&device_code_for_thread, interval)
-    })
+    let state = Arc::clone(state.inner());
+    let app_for_persist = app.clone();
+    poll_teams_auth_core(
+        device_code,
+        interval,
+        state,
+        &CURRENT_FLOW,
+        |device_code, interval| crate::teams::poll_teams_auth(&device_code, interval),
+        move |state| token_io::persist_tokens(state, &app_for_persist),
+        move |event| emit_teams_auth_event(&app, event),
+    )
     .await
     .map_err(|e| format!("poll_teams_auth task panicked: {}", e))?;
 
@@ -379,10 +477,21 @@ pub fn get_teams_granted_scopes(state: tauri::State<'_, Arc<AppState>>) -> Vec<S
 mod tests {
     use super::{
         bounded_poll_interval, cancel_flow, clear_dead_teams_refresh, may_commit, offload_blocking,
-        persistence_policy, PersistencePolicy,
+        persistence_policy, poll_teams_auth_core, PersistencePolicy, TeamsAuthEvent,
     };
+    use crate::teams::TeamsTokens;
     use crate::AppState;
     use parking_lot::Mutex;
+    use std::sync::Arc;
+
+    fn tokens() -> TeamsTokens {
+        TeamsTokens {
+            access_token: "live-teams-token".to_string(),
+            refresh_token: Some("live-refresh-token".to_string()),
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+        }
+    }
+
 
     #[test]
     fn dead_refresh_clear_lets_replacement_win_and_clears_matching_token() {
@@ -427,19 +536,62 @@ mod tests {
     }
 
     #[test]
-    fn poll_interval_clamps_untrusted_bounds() {
-        assert_eq!(bounded_poll_interval(0), 1);
-        assert_eq!(bounded_poll_interval(20), 15);
+    fn poll_adapter_clamps_the_injected_poll_interval() {
+        let current = Mutex::new(Some("device-code".to_string()));
+
+        for (input, expected) in [(0, 1), (1, 1), (15, 15), (20, 15)] {
+            let observed = Arc::new(Mutex::new(Vec::new()));
+            let captured = Arc::clone(&observed);
+            let result = tauri::async_runtime::block_on(poll_teams_auth_core(
+                "device-code".to_string(),
+                input,
+                Arc::new(crate::AppState::new()),
+                &current,
+                move |_, interval| {
+                    captured.lock().push(interval);
+                    Err("test poll finished".to_string())
+                },
+                |_| Ok(()),
+                |_| {},
+            ));
+
+            assert_eq!(result, Err("test poll finished".to_string()));
+            assert_eq!(observed.lock().as_slice(), &[expected]);
+        }
     }
 
     #[test]
-    fn persistence_failure_warns_without_failing_the_live_sign_in() {
-        assert_eq!(persistence_policy(Ok(())), PersistencePolicy::NoWarning);
+    fn successful_poll_with_persistence_failure_keeps_live_session_and_warns() {
+        let state = Arc::new(crate::AppState::new());
+        let current = Mutex::new(Some("device-code".to_string()));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+
+        let result = tauri::async_runtime::block_on(poll_teams_auth_core(
+            "device-code".to_string(),
+            5,
+            Arc::clone(&state),
+            &current,
+            |_, _| Ok(tokens()),
+            |_| Err("keychain unavailable".to_string()),
+            move |event| captured.lock().push(event),
+        ));
+
+        assert_eq!(result, Ok(()));
         assert_eq!(
-            persistence_policy(Err("keychain unavailable".to_string())),
-            PersistencePolicy::Warning("keychain unavailable".to_string())
+            state.tokens.teams().as_ref().map(|tokens| tokens.access_token.as_str()),
+            Some("live-teams-token")
+        );
+        assert_eq!(
+            *events.lock(),
+            vec![
+                TeamsAuthEvent::PersistWarning("keychain unavailable".to_string()),
+                TeamsAuthEvent::Complete,
+                TeamsAuthEvent::NavigateSettings,
+            ]
         );
     }
+
 
     /// The command's body, sliced by the shared literal-aware scanner (so a
     /// brace inside a log string cannot end the slice early) and with the
@@ -531,11 +683,12 @@ mod tests {
     fn the_commit_gate_precedes_the_token_slot_write() {
         let body = crate::token_io::test_scan::fn_body(
             include_str!("teams_auth.rs"),
-            "fn poll_teams_auth(",
+            "async fn poll_teams_auth_core(",
         );
         let gate = body
             .find("may_commit(")
-            .expect("poll_teams_auth must gate its commit on the flow being current");
+            .expect("poll_teams_auth_core must gate its commit on the flow being current");
+        let commit = body
         let commit = body
             .find(".commit_teams(")
             .expect("poll_teams_auth must commit the tokens it polled");
