@@ -115,6 +115,10 @@ signal-hook = "0.3"
 # same trade-off as `tiny_http` for the `--serve` slice.
 [target."cfg(target_os = \"linux\")".dependencies]
 zbus = { version = "4", default-features = false, features = ["tokio"] }
+# Issue #944: `global-hotkey` 0.8's Linux worker treats a dead X11 channel as
+# success. Use the same pure-Rust client it already depends on for a real
+# connection preflight; no unsafe Xlib calls or additional lock crate.
+x11rb = "0.13"
 
 # Release profile (issue #899). Cargo builds release artefacts with 16 codegen
 # units, no cross-crate LTO and a full symbol table by default, and every

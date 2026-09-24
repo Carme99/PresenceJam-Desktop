@@ -283,9 +283,45 @@ impl ShortcutsStatus {
     }
 }
 
+/// A platform condition that prevents the shortcut backend from accepting a
+/// grab even though its asynchronous API reports success.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShortcutPreflightFailure {
+    /// Linux is running without a display that the X11 backend can connect to.
+    X11Unavailable,
+    /// An explicit liveness check reports that the plugin's private worker is
+    /// unavailable even though X11 is reachable.
+    WorkerUnavailable,
+}
+
+fn x11_preflight_result<T, E>(result: Result<T, E>) -> Result<(), ShortcutPreflightFailure> {
+    result
+        .map(|_| ())
+        .map_err(|_| ShortcutPreflightFailure::X11Unavailable)
+}
+
+fn preflight_reason(failure: ShortcutPreflightFailure) -> ShortcutReason {
+    match failure {
+        ShortcutPreflightFailure::X11Unavailable => ShortcutReason::x11_unavailable(),
+        ShortcutPreflightFailure::WorkerUnavailable => ShortcutReason::worker_unavailable(),
+    }
+}
 /// The plugin surface this module uses, narrowed so a test can inject a refused
 /// registration — the Wayland case — without a compositor or a running app.
 pub trait ShortcutRegistrar {
+    /// Checks the platform prerequisite before any release or grab is attempted.
+    /// The default performs the real X11 connection probe on Linux and is a
+    /// no-op elsewhere. A reachable X11 display is accepted; worker liveness is
+    /// only checked when a platform-specific registrar explicitly reports it.
+    fn preflight(&self) -> Result<(), ShortcutPreflightFailure> {
+        #[cfg(target_os = "linux")]
+        {
+            x11_preflight_result(x11rb::rust_connection::RustConnection::connect(None))
+        }
+        #[cfg(not(target_os = "linux"))]
+        Ok(())
+    }
+
     /// Grabs `accelerator` for `slot`, calling `handler` on every press.
     fn register(
         &self,
@@ -313,6 +349,32 @@ pub fn dispatch_event(
     true
 }
 
+fn preflight_failure_status(
+    plans: &[SlotPlan; 2],
+    failure: ShortcutPreflightFailure,
+) -> ShortcutsStatus {
+    let reason = preflight_reason(failure);
+    let mut status = ShortcutsStatus::default();
+    for (index, slot) in ShortcutSlot::ALL.into_iter().enumerate() {
+        let accelerator = match &plans[index] {
+            SlotPlan::Unbound => continue,
+            SlotPlan::Bound { accelerator, .. } | SlotPlan::Invalid { accelerator, .. } => {
+                accelerator.clone()
+            }
+        };
+        status.set(
+            slot,
+            SlotRegistration {
+                accelerator: Some(accelerator),
+                registered: false,
+                error: Some(reason.clone()),
+            },
+        );
+    }
+    log::warn!("{CMD} preflight: global shortcuts are unavailable: {failure:?}");
+    status
+}
+
 /// Applies a plan: every previously held grab is released first, so a re-apply
 /// (a config save) cannot leave a stale accelerator live — and so a
 /// re-registration of an unchanged accelerator does not trip the plugin's
@@ -325,6 +387,10 @@ pub fn apply_plan(
     plans: &[SlotPlan; 2],
     handler: &Arc<SlotHandler>,
 ) -> ShortcutsStatus {
+    if let Err(failure) = registrar.preflight() {
+        return preflight_failure_status(plans, failure);
+    }
+
     if let Err(e) = registrar.unregister_all() {
         // Not fatal: this only clears this process's own grabs, and the two
         // registrations below overwrite the plugin's bookkeeping anyway.
@@ -663,11 +729,16 @@ pub fn register_from_config(app: &AppHandle) {
 /// re-recording an existing binding impossible. The returned status still names
 /// each configured accelerator — it is simply not held right now.
 pub fn release_all(app: &AppHandle) -> ShortcutsStatus {
+    let cfg = config_or_default(app);
     let registrar = PluginRegistrar::new(app);
+    if let Err(failure) = registrar.preflight() {
+        let status = preflight_failure_status(&plan_shortcuts(&cfg.shortcuts), failure);
+        store_status(app, status.clone());
+        return status;
+    }
     if let Err(e) = registrar.unregister_all() {
         log::warn!("{CMD} release: releasing the grabs failed: {e}");
     }
-    let cfg = config_or_default(app);
     let mut status = ShortcutsStatus::default();
     for slot in ShortcutSlot::ALL {
         status.set(
@@ -767,11 +838,26 @@ mod tests {
     /// Stands in for the plugin: records what was registered, and can refuse
     /// selected accelerators — the desktop/compositor refusal this slice exists
     /// to surface.
-    #[derive(Default)]
     struct RecordingRegistrar {
         registrations: parking_lot::Mutex<Vec<(ShortcutSlot, String)>>,
         releases: parking_lot::Mutex<usize>,
         refuse: Vec<&'static str>,
+        x11_unavailable: bool,
+        worker_alive: bool,
+        preflights: parking_lot::Mutex<usize>,
+    }
+
+    impl Default for RecordingRegistrar {
+        fn default() -> Self {
+            Self {
+                registrations: parking_lot::Mutex::new(Vec::new()),
+                releases: parking_lot::Mutex::new(0),
+                refuse: Vec::new(),
+                x11_unavailable: false,
+                worker_alive: true,
+                preflights: parking_lot::Mutex::new(0),
+            }
+        }
     }
 
     impl RecordingRegistrar {
@@ -784,6 +870,20 @@ mod tests {
             }
         }
 
+        fn without_x11() -> Self {
+            Self {
+                x11_unavailable: true,
+                ..Self::default()
+            }
+        }
+
+        fn reachable_x11_without_worker() -> Self {
+            Self {
+                worker_alive: false,
+                ..Self::default()
+            }
+        }
+
         fn registered(&self) -> Vec<(ShortcutSlot, String)> {
             self.registrations.lock().clone()
         }
@@ -791,9 +891,24 @@ mod tests {
         fn release_count(&self) -> usize {
             *self.releases.lock()
         }
+
+        fn preflight_count(&self) -> usize {
+            *self.preflights.lock()
+        }
     }
 
     impl ShortcutRegistrar for RecordingRegistrar {
+        fn preflight(&self) -> Result<(), ShortcutPreflightFailure> {
+            *self.preflights.lock() += 1;
+            if self.x11_unavailable {
+                Err(ShortcutPreflightFailure::X11Unavailable)
+            } else if !self.worker_alive {
+                Err(ShortcutPreflightFailure::WorkerUnavailable)
+            } else {
+                Ok(())
+            }
+        }
+
         fn register(
             &self,
             slot: ShortcutSlot,
@@ -1192,6 +1307,7 @@ mod tests {
         let plans = plan_shortcuts(&ShortcutsConfig::default());
         let registrar = RecordingRegistrar::default();
         let status = apply_plan(&registrar, &plans, &handler());
+        assert_eq!(registrar.preflight_count(), 1);
 
         assert_eq!(
             registrar.registered(),
@@ -1210,6 +1326,90 @@ mod tests {
             }
         );
         assert!(status.toggle_sync.registered);
+    }
+    #[test]
+    fn reachable_x11_preflight_is_accepted_and_unreachable_x11_is_refused() {
+        assert_eq!(x11_preflight_result::<(), ()>(Ok(())), Ok(()));
+        assert_eq!(
+            x11_preflight_result::<(), ()>(Err(())),
+            Err(ShortcutPreflightFailure::X11Unavailable)
+        );
+    }
+
+    /// Issue #944: the Linux X11 backend can acknowledge a dead-channel grab as
+    /// success. A preflight refusal must instead stop before any plugin
+    /// release/registration and report the same stable reason for both
+    /// configured rows.
+    #[test]
+    fn missing_x11_reports_both_configured_slots_without_registration() {
+        let registrar = RecordingRegistrar::without_x11();
+        let status = apply_plan(
+            &registrar,
+            &plan_shortcuts(&ShortcutsConfig::default()),
+            &handler(),
+        );
+
+        assert!(registrar.registered().is_empty());
+        assert_eq!(
+            registrar.release_count(),
+            0,
+            "a failed preflight must not call the plugin registrar"
+        );
+        for (slot, accelerator) in [
+            (ShortcutSlot::TogglePlayback, "CmdOrCtrl+Alt+P"),
+            (ShortcutSlot::ToggleSync, "CmdOrCtrl+Alt+S"),
+        ] {
+            let registration = status.slot(slot);
+            assert_eq!(registration.accelerator.as_deref(), Some(accelerator));
+            assert!(!registration.registered);
+            assert_eq!(registration.error, Some(ShortcutReason::x11_unavailable()));
+        }
+    }
+
+    /// A reachable X11 display is accepted by the production probe. The
+    /// registrar seam models an explicit worker-liveness failure separately;
+    /// the apply path must fail closed before the potentially blocking
+    /// unregister call when that injected failure is reported.
+    #[test]
+    fn reachable_x11_with_a_dead_worker_never_registers() {
+        let registrar = RecordingRegistrar::reachable_x11_without_worker();
+        let status = apply_plan(
+            &registrar,
+            &plan_shortcuts(&ShortcutsConfig::default()),
+            &handler(),
+        );
+
+        assert!(registrar.registered().is_empty());
+        assert_eq!(
+            registrar.release_count(),
+            0,
+            "a dead worker must be detected before the plugin is called"
+        );
+        for registration in [&status.toggle_playback, &status.toggle_sync] {
+            assert!(!registration.registered);
+            assert_eq!(
+                registration.error,
+                Some(ShortcutReason::worker_unavailable())
+            );
+        }
+    }
+
+    /// A configured slot inherits the X11 prerequisite, while a deliberately
+    /// unbound slot remains unbound and receives no unrelated error.
+    #[test]
+    fn missing_x11_does_not_turn_an_unbound_slot_into_a_failure() {
+        let registrar = RecordingRegistrar::without_x11();
+        let status = apply_plan(
+            &registrar,
+            &plan_shortcuts(&cfg(Some("CmdOrCtrl+Alt+P"), None)),
+            &handler(),
+        );
+
+        assert!(!status.toggle_playback.registered);
+        assert!(status.toggle_playback.error.is_some());
+        assert_eq!(status.toggle_sync, SlotRegistration::default());
+        assert!(registrar.registered().is_empty());
+        assert_eq!(registrar.release_count(), 0);
     }
 
     /// The acceptance case for a desktop that refuses a grab (a Wayland

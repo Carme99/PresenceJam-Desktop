@@ -562,6 +562,10 @@ export const en = {
   'settings.shortcutReasonAutostart':
     'Launch-at-login failed: {cause}',
   'settings.shortcutReasonUnknown': '{message}',
+  'settings.shortcutReasonX11Unavailable':
+    'Global shortcuts need a reachable X11 display on this desktop',
+  'settings.shortcutReasonWorkerUnavailable':
+    'The global-shortcut worker could not be verified; shortcuts are unavailable',
   // 4.7.0 — S12 hygiene (theme/density)
   'settings.themeSystem': 'System',
   'settings.themeHint':

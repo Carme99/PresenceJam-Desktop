@@ -574,6 +574,10 @@ export const de: Dict = {
   'settings.shortcutReasonAutostart':
     '„Bei der Anmeldung starten“ fehlgeschlagen: {cause}',
   'settings.shortcutReasonUnknown': '{message}',
+  'settings.shortcutReasonX11Unavailable':
+    'Globale Tastenkürzel benötigen auf diesem Desktop eine erreichbare X11-Anzeige',
+  'settings.shortcutReasonWorkerUnavailable':
+    'Der Worker für globale Tastenkürzel konnte nicht überprüft werden; Tastenkürzel sind nicht verfügbar',
   // 4.7.0 — S12 Hygiene (Design/Dichte)
   'settings.themeSystem': 'System',
   'settings.themeHint':
