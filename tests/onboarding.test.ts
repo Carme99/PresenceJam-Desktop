@@ -333,6 +333,9 @@ describe('mounted wizard command contracts (#763)', () => {
     setSpotifyPhase('done');
     setTeamsPhase('done');
     const rendered = await renderWizard(false, config);
+    await fireEvent.input(rendered.container.querySelector('#client-id') as HTMLInputElement, {
+      target: { value: spotifyClientId }
+    });
     await fireEvent.click(rendered.getByRole('button', { name: t('onboarding.continue') }));
     await settle();
     await fireEvent.click(rendered.getByRole('button', { name: t('onboarding.continue') }));
@@ -367,9 +370,6 @@ describe('mounted wizard command contracts (#763)', () => {
       }
     });
 
-    await fireEvent.input(container.querySelector('#client-id') as HTMLInputElement, {
-      target: { value: spotifyClientId }
-    });
     await fireEvent.input(
       container.querySelector('#status-format-onb') as HTMLInputElement,
       { target: { value: 'Listening to {artist}' } }
