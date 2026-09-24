@@ -75,23 +75,37 @@ Two complementary rate-limits:
 
 ### Failure classification (4.6)
 
-The loop separates **dead credentials** from **network trouble**, because only the
-first may ever stop the session or pop an OAuth window (#568, finding PollCore#0):
-
-- `transient_failure_count` is bumped only for `ExpiredToken` / `InvalidGrant`
-  (`poll_once::is_auth_failure`) and exits the loop at
-  `TRANSIENT_FAILURE_EXIT_THRESHOLD` (5), emitting
-  `spotify-reconnect-required` alongside `reconnect-required`.
-- Everything else — transport errors, 5xx, JSON parse failures, 429s — lands in
-  `SpotifyApiError::Other`/`RateLimited` and feeds a **separate**
+The loop separates **auth-classified source errors** from **network trouble**.
+Only the auth path may stop the session or pop an OAuth window; network failures
+increase backoff while polling continues (#568, finding PollCore#0):
+- The poll loop counts `SourceError::Auth` as its auth/reconnect path. The
+  Spotify source maps expired and invalid credentials there, and also maps
+  `NotPremium` there; `AutoSource` tries the OS source first and consults
+  Spotify only after the OS source has no track or fails.
+- All non-auth source variants — including `SourceError::Unauthenticated`,
+  `SourceError::Transient`, and `SourceError::Other` — feed a **separate**
   `consecutive_network_failures` counter with its own higher threshold
   (`NETWORK_FAILURE_THRESHOLD` = 12) and a capped backoff
   (`NETWORK_BACKOFF_CAP_SECONDS` = 300). It escalates the backoff and logs a
   warning; it never breaks the loop.
 - `record_success` is the single place that resets both counters.
 
-The Teams write path applies the same rule: only token-endpoint `invalid_grant` or
-a 401 `ExpiredToken` asks for re-auth.
+The Teams write path classifies token-endpoint `invalid_grant`, a 401
+`ExpiredToken`, and `ReauthRequired` as reconnect-required. `Forbidden` is
+user-action-required; rate limits, transient failures, and other errors are
+warning-level retry states.
+
+### Shared Spotify Retry-After window
+
+A Spotify 429 with a positive, parseable `Retry-After` opens one
+process-wide deadline in `spotify::RateLimitWindow`. The currently-playing
+request, all player commands, device listing, and queue lookup consult that
+deadline before building a request; while it is open they return
+`RateLimited(Some(remaining_seconds))` without another HTTP call, and the
+first call after expiry clears it. A later 429 may extend the deadline but not
+shorten it. A 429 without a usable wait opens no shared window, so the poller
+still applies its own network-failure backoff without blocking other callers
+indefinitely.
 
 ### Presence gating + availability sync (v3.0)
 

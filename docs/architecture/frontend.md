@@ -15,8 +15,8 @@ matching SECURITY.md's No Telemetry promise. The snapshot contains:
   the keychain and never enters config).
 - OAuth token **metadata only** — RFC3339 expiry timestamps + presence flags;
   never a token value.
-- Keychain presence flags for both app slots (namespaced client-secret slot +
-  tokens AES-key slot).
+- Keychain presence flags for the two slots exposed by the diagnostics snapshot
+  (the Spotify client-secret slot and the tokens AES-key slot).
 - The most recent exit-time update install that failed, if any (issue #244) —
   read from the marker `updater_bg::install_pending_on_exit` writes, so a failed
   install is visible on the next launch instead of silently lost.
@@ -25,29 +25,30 @@ matching SECURITY.md's No Telemetry promise. The snapshot contains:
   `config_quarantine_backup`, the **bare file name** of the `.bak` when one is
   still next to the config. Without the flag, every value in the summary below
   reads as the user's own when it is really a factory default.
-- The last 50 lines of the on-disk `PresenceJam.log` tail, passed through a
-  defensive second-pass redaction helper (`redact_sensitive`) that reuses the `[REDACTED len N]`
-  pattern from v3.2 (#228) — a keyed allowlist (`token`, `password`/`passwd`, `id_token`, `code_verifier`/`code_challenge`, `api_key`, …) with single-quote + whitespace-gap separators, plus any ≥32-char JWT/base64 opaque run, is scrubbed.
+- The last 50 lines of the on-disk `PresenceJam.log` tail, with every line
+  passed through `redact_sensitive` and then `strip_absolute_paths`; the latter
+  reduces POSIX, Windows, and UNC absolute paths to their bare trailing
+  component before the snapshot is exposed.
 
 Two 4.6 hardening passes sit on top of that redaction. **Auth-scheme awareness:**
 `Authorization: Bearer <token>` used to have the scheme word masked and the
 credential left to the ≥32-char opaque-run heuristic, so a *short* credential was
 printed in full; `is_auth_scheme_key` (`authorization`, `bearer`) plus
 `skip_auth_scheme` (skips `bearer`/`basic`/`dpop`) now start the redaction at the
-credential itself. **Path hygiene:** the failed-install marker's `error` string is
-also run through `strip_absolute_paths`, which reduces every absolute filesystem
-path — POSIX, Windows and UNC — to its bare trailing component (#409 applied to
-#603). Documented gap: that path pass covers the updater marker and the
-log-source *status* strings only; `recent_logs` lines get `redact_sensitive`
-alone, and its opaque-character class excludes `\`, so a short Windows path
-inside a log line is not scrubbed.
+credential itself. **Path hygiene:** the failed-install marker's `error` string
+and every collected `recent_logs` line also run through `strip_absolute_paths`,
+so neither a credential nor an absolute path can reach a pasted snapshot.
 
-The command is async with `spawn_blocking` per the v3.2 main-thread-stall
-convention (file IO + keychain reads). Regression tests cover the redaction
-edge cases and assert injected fake token values never survive serialization of
-the snapshot. The frontend (`Diagnostics.svelte`) offers Copy diagnostics /
-Save to file with `role="status"` feedback, reachable from a dashboard icon
-button.
+`get_diagnostics_snapshot` and `save_diagnostics_snapshot` run collection,
+keychain access, and filesystem work on `spawn_blocking`. The save command is
+deliberately Rust-owned: the webview supplies neither JSON nor a destination. It
+recollects the typed snapshot, enforces an independent 256 KiB limit, chooses
+the timestamped filename, and atomically publishes the file in the platform
+Downloads directory. `write_snapshot_file_at` revalidates the typed JSON and
+size before creating a file, uses a 0600 sidecar on Unix, and publishes with no
+replacement. The frontend (`Diagnostics.svelte`) offers Copy diagnostics / Save
+to file with `role="status"` feedback; Copy uses the displayed snapshot, while
+Save asks Rust for a fresh one.
 
 ## Log Viewer (v4.6)
 
@@ -76,6 +77,28 @@ The Logs pane is seeded from disk before the live stream takes over (#595):
   the text no longer slides upward one row per event. The container sets
   `overflow-anchor: none` because Chromium's own scroll anchoring would apply the
   correction twice; WebKit has none and ignores the property.
+
+The level-badge grid track is `max-content`, with badge typography driven by
+`var(--fs-xs)`, so localized labels are neither clipped nor allowed to overlap
+the message column. `tests/browser/logviewer.spec.ts` is a required Playwright
+gate: it renders all five levels in en/de/fr at comfortable and compact
+densities and checks actual Chromium box geometry. This complements rather than
+replaces the Vitest suite.
+
+## Frontend test layers
+
+Vitest owns unit, component, and coverage checks. `tests/version-contrast.test.ts`
+mounts the real root page under production CSS, reads the painted
+color/opacity/background from DOM and CSSOM, composites the effective
+foreground, and requires the normal-size build-version label to clear 4.5:1 in
+both themes. Playwright owns assertions that require a real browser layout;
+`playwright.config.ts` starts the Vite dev server, runs `tests/browser/`, and
+uses Chromium. Both Vitest coverage and `npm run test:browser` are run by PR CI
+and the release `verify` job.
+
+`Dashboard.svelte` subscribes to `spotify-track-changed` with
+`listen<TrackInfo>`, so the TypeScript event payload is the generated Rust
+contract rather than an untyped object copied by hand.
 
 ## Event Bus
 
@@ -109,7 +132,7 @@ sequenceDiagram
 | `polling-thread-panicked` | `null` | Polling thread panicked and was caught by `catch_unwind` |
 | `tray-click` | — | User clicks tray icon |
 | `toggle-pause` | — | User clicks Pause in tray menu |
-| `presence-gated` | `{reason, availability, activity, timestamp}` | Status write suppressed. `reason` is one of the four rule/policy strings — `quiet-hours`, `track-rule` (v4.5.0, #432), `manual-status` (#635), `out of office` (#637, spaces) — or a presence verdict: `busy` / `Do Not Disturb` / `focusing` availability, or `in a meeting` / `in a call` / `presenting` activity (v3.0; `focusing` added in #254). The Dashboard maps the four rule/policy strings to reason-specific chip copy and falls back to the generic busy/meeting line for every presence verdict, an unknown reason and the empty reason. Six emit sites funnel through the single `emit_presence_gated` |
+| `presence-gated` | `{reason, availability, activity, timestamp}` | Status write suppressed. `reason` is one of the current rule/policy strings — `quiet-hours`, `track-rule`, `manual-status`, `calendar`, `out of office`, `presenting`, `quiet-time`, or `idle` — or a presence verdict: `busy` / `Do Not Disturb` / `focusing` availability, or `in a meeting` / `in a call` / `presenting` activity. Dashboard-specific labels exist for `quiet-hours`, `track-rule`, `manual-status`, `out of office`, `presenting`, `quiet-time`, and `idle`; `calendar`, presence verdicts, unknown reasons, and the empty reason use the generic busy/meeting line. The current emit sites share `emit_presence_gated`. |
 | `presence-availability-updated` | `{available, label, timestamp}` | Availability session armed (`Available`, or a matched rule's pair — v4.6, #634) or cleared in-session (v3.0). **Not** emitted by the exit-time cleanup |
 | `playback-error` | `string` (error message) | Tray playback command failed — no active device, non-Premium 403, etc. (v3.0) |
 | `spotify-auth-complete` | `null` | Spotify sign-in finished and tokens were persisted (no token value in the payload — #299) |
@@ -123,8 +146,8 @@ sequenceDiagram
 | `app-shutdown` | `null` | User picks Quit in the tray or app menu |
 | `spotify-secret-conflict` | `{action: "reconnect-spotify", ...}` (once per process) | Legacy plaintext secret in `config.json` conflicts with a *different* keychain secret — plaintext left untouched, Settings prompts Reconnect Spotify (#376) |
 | `show-about` | `null` | User picks About in the app menu |
-| `update-stage-progress` | `{downloaded, total}` (`total` null without `Content-Length`; not ts-rs-exported — mirrored in `UpdatePrompt.svelte`) | A deferred install-on-quit payload is downloading; throttled to 250 ms / 5 % with the first chunk always emitting (v4.6, #590) |
-| `update-stage-complete` | `{version}` | A deferred install-on-quit payload finished staging successfully — emitted once per successful stage, only when something was actually staged. `version` is the **staged** version, not the current one. Deliberately distinct from the throttled `update-stage-progress`: that fires before the payload is stored and cannot distinguish success, so it must not be used as a completion signal (v4.7.0, #678) |
+| `update-stage-progress` | `{downloaded, total, request_id}` (`total` null without `Content-Length`; not ts-rs-exported — mirrored in `UpdatePrompt.svelte`) | A deferred install-on-quit payload is downloading; throttled to 250 ms / 5 % with the first chunk always emitting. `request_id` identifies the exact stage so a cancelled or superseded download cannot overwrite the next stage's frontend position (v4.6, #590; v4.7.0, #711) |
+| `update-stage-complete` | `{version, request_id}` | A deferred install-on-quit payload finished staging successfully — emitted once per successful stage, only when something was actually staged. `version` is the **staged** version, not the current one; `request_id` lets the frontend reject a completion that was cancelled or superseded (v4.7.0, #678; #711) |
 
 ### Frontend notification throttle (C8)
 
@@ -231,16 +254,17 @@ PresenceJam-Desktop/
 │   │   └── macos_deeplink.rs              # CoreServices re-claim of presencejam:// on macOS (v4.6, #66/#628)
 │   ├── Cargo.toml                         # Rust deps + `ts-rs = { version = "12", features = ["chrono-impl"] }`
 │   ├── Cargo.lock                         # Commit-locked for reproducible builds
-│   ├── tauri.conf.json                    # Window + deep-link + bundle config
+│   ├── tauri.conf.json                    # Window + deep-link + bundle + packaged-webview CSP
 │   └── capabilities/
-│       ├── default.json                   # CSP, permissions, allowed APIs (+ runtime window creation for detach, v4.0)
-│       └── detached.json                  # Minimal mirrored permission set for logs-detached/settings-detached (v4.0)
+│       ├── default.json                   # Main-window Tauri permission allowlist
+│       └── detached.json                  # Minimal detached-window permission set
 ├── .github/workflows/
-│   ├── ci.yml                             # PR-time: cargo check/clippy/test, npm check
-│   └── release.yml                        # Tag-triggered: 3-OS matrix + homebrew + winget
+│   ├── ci.yml                             # PR-time Rust, Vitest coverage, and Playwright browser gates
+│   └── release.yml                        # Tag verification + 3-OS build + package-manager publication
 ├── homebrew/presence-jam.rb               # Homebrew tap formula template
-├── tests/                                 # vitest suite (*.test.ts) — stores, views, boot routing, log backfill
-├── vitest.config.js                       # vitest + coverage ratchet (four thresholds)
+├── tests/                                 # Vitest suite + Chromium specs under tests/browser/
+├── playwright.config.ts                   # Browser test directory, Vite server, Chromium project
+├── vitest.config.js                       # Vitest + coverage ratchet (four thresholds)
 ├── rust-toolchain.toml                    # pinned Rust toolchain, used by CI and local builds
 ├── src/app.css                            # global stylesheet: design tokens, themes, densities
 ├── docs/                                  # architecture, setup, release and state-of-features docs
