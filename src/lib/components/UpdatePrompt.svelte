@@ -8,7 +8,8 @@
   import { t } from '$lib/i18n';
   import { configHydrated, configStore, loadConfig } from '$lib/stores/config';
 
-  let { onStageCancellation }: {
+  let { onStageStart, onStageCancellation }: {
+    onStageStart?: (requestId: string) => boolean;
     onStageCancellation?: (requestId: string, cancelled: boolean) => void;
   } = $props();
   // Always-mounted update banner (3.0-P5). On mount it asks the updater
@@ -345,8 +346,12 @@
   // confirmed the install knowing both versions.
   async function stageForQuit(force: boolean) {
     if (!update || staging || downloading) return;
-    const generation = ++stageGeneration;
     const requestId = newStageRequestId();
+    // The layout must own the request before IPC starts. A full unresolved
+    // tracker refuses the request instead of creating an untracked stage that
+    // could later complete after its cancellation tombstone was lost.
+    if (onStageStart && !onStageStart(requestId)) return;
+    const generation = ++stageGeneration;
     activeStageRequestId = requestId;
     stagedStageRequestId = '';
     staging = true;
@@ -391,6 +396,7 @@
         staleSkippedVersion = '';
         confirming = false;
         update = null;
+        onStageCancellation?.(requestId, false);
       } else {
         // Declined as stale (backend recorded a skip marker, so a retry
         // short-circuits without re-downloading): show the skipped
@@ -398,6 +404,7 @@
         // re-offering the plain install prompt.
         staleSkippedVersion = update.version;
         confirming = false;
+        onStageCancellation?.(requestId, false);
       }
     } catch (e) {
       if (generation !== stageGeneration) {
@@ -408,6 +415,7 @@
       }
       console.error('[UPDATER] stage_deferred_update failed:', e);
       error = String(e);
+      onStageCancellation?.(requestId, false);
     } finally {
       if (generation === stageGeneration) {
         staging = false;

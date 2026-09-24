@@ -121,6 +121,7 @@ async function emit(event: string, payload: unknown) {
 
 /** Mount the banner and wait until the update check has rendered it. */
 async function mountBanner(props: {
+  onStageStart?: (requestId: string) => boolean;
   onStageCancellation?: (requestId: string, cancelled: boolean) => void;
 } = {}) {
   const rendered = render(UpdatePrompt, { props });
@@ -382,6 +383,65 @@ describe('UpdatePrompt deferred staging (#590)', () => {
       request_id: laterRequestIds.at(-1)
     });
     expect(sendNotificationMock).not.toHaveBeenCalled();
+  });
+
+  it('reserves the cancelled request before a full tracker refuses new stage admission', async () => {
+    const permission = Promise.withResolvers<boolean>();
+    isPermissionGrantedMock.mockReturnValue(permission.promise);
+    notificationPlugin.requestPermission.mockResolvedValue('denied');
+    configStore.set(structuredClone(defaultConfig));
+    configHydrated.set(true);
+    const { container } = await mountLayout();
+
+    await startStage(container);
+    const cancelledRequest = stageRequestId();
+    // The real UI request plus 31 pending notifications fill all 32 slots.
+    for (let index = 0; index < 31; index++) {
+      await emit('update-stage-complete', {
+        version: '4.6.0',
+        request_id: `unresolved-${index}`
+      });
+    }
+
+    setCancelOutcome('already-completed');
+    await fireEvent.click(
+      within(container).getByRole('button', { name: t('update.cancelStage') })
+    );
+    await waitFor(() => expect(cancelCall(cancelledRequest)).toBeDefined());
+
+    // A fresh UI start is refused while the cancelled request and the other
+    // 31 entries remain unresolved; no untracked command can be accepted.
+    const installOnQuit = () =>
+      within(container).getByRole('button', { name: t('update.installOnQuit') });
+    await fireEvent.click(installOnQuit());
+    await waitFor(() => expect(container.querySelector('.update-confirm')).not.toBeNull());
+    await fireEvent.click(installOnQuit());
+    await tick();
+    expect(
+      invokeMock.mock.calls.filter(([command]) => command === 'stage_deferred_update')
+    ).toHaveLength(1);
+
+    // Acknowledged permission drains open a slot. The cancelled request must
+    // still consume its reservation, while a later valid request gets exactly
+    // one notification.
+    permission.resolve(false);
+    await permission.promise;
+    for (let i = 0; i < 4; i++) await Promise.resolve();
+    await tick();
+    isPermissionGrantedMock.mockResolvedValue(true);
+
+    await emit('update-stage-complete', {
+      version: '4.6.0',
+      request_id: cancelledRequest
+    });
+    await emit('update-stage-complete', {
+      version: '4.6.1',
+      request_id: 'valid-after-refused-cancel'
+    });
+    await waitFor(() => expect(sendNotificationMock).toHaveBeenCalledTimes(1));
+    expect(
+      notifyUpdateStagedMock.mock.calls.filter(([version]) => version === '4.6.1')
+    ).toHaveLength(1);
   });
 
   it('reopens tracking after terminal entries drain and sends one valid completion', async () => {

@@ -101,11 +101,44 @@
     updateStageNotifications.set(requestId, state);
     return state;
   }
+  // A request id is reserved by the UI before its command is sent. This is
+  // deliberately separate from completion handling: cancellation must be
+  // able to find a tombstone even when all other requests are still pending.
+  function reserveUpdateStage(requestId: string): boolean {
+    if (!requestId) return false;
+    const existing = updateStageNotifications.get(requestId);
+    if (existing) {
+      updateStageNotifications.delete(requestId);
+      updateStageNotifications.set(requestId, existing);
+      return true;
+    }
+
+    if (updateStageNotifications.size >= MAX_TRACKED_UPDATE_STAGES) {
+      let acknowledgedId: string | undefined;
+      for (const [trackedId, state] of updateStageNotifications) {
+        if (state.completionSeen && !state.notificationPending) {
+          acknowledgedId = trackedId;
+          break;
+        }
+      }
+      if (acknowledgedId === undefined) {
+        devLog('[LAYOUT] update-stage start refused; tracking saturated');
+        return false;
+      }
+      updateStageNotifications.delete(acknowledgedId);
+    }
+
+    updateStageNotifications.set(requestId, {
+      completionSeen: false,
+      notificationPending: false,
+      cancelled: false
+    });
+    return true;
+  }
 
   function setUpdateStageCancellation(requestId: string, cancelled: boolean) {
-    if (!requestId || (!cancelled && !updateStageNotifications.has(requestId))) return;
-    const state = stateForUpdateStage(requestId);
-    if (!state) return;
+    if (!requestId || !updateStageNotifications.has(requestId)) return;
+    const state = updateStageNotifications.get(requestId)!;
     state.cancelled = cancelled;
     const terminalWithoutPendingSend = cancelled
       ? state.completionSeen && !state.notificationPending
@@ -469,7 +502,7 @@
     <button class="toast-dismiss" onclick={() => { playbackError = ''; if (playbackErrorTimeout) { clearTimeout(playbackErrorTimeout); playbackErrorTimeout = null; } }} aria-label={t('common.dismiss')}>×</button>
   </div>
 {/if}
-{#if isMainWindow}<UpdatePrompt onStageCancellation={setUpdateStageCancellation} />{/if}
+{#if isMainWindow}<UpdatePrompt onStageStart={reserveUpdateStage} onStageCancellation={setUpdateStageCancellation} />{/if}
 
 <style>
   .playback-toast {
