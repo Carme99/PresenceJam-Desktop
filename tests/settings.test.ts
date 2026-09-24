@@ -99,6 +99,15 @@ const backButton = (container: HTMLElement) =>
 const formatInput = (container: HTMLElement) =>
   container.querySelector('#status-format') as HTMLInputElement;
 
+function previewPayload(args: unknown): { locale?: string; profane_sample?: boolean } {
+  if (typeof args !== 'object' || args === null) return {};
+  const locale = 'locale' in args && typeof args.locale === 'string' ? args.locale : undefined;
+  const profaneSample =
+    'profane_sample' in args && typeof args.profane_sample === 'boolean'
+      ? args.profane_sample
+      : undefined;
+  return { locale, profane_sample: profaneSample };
+}
 beforeEach(() => {
   presence.set({ ...INITIAL_PRESENCE });
   currentView.set('dashboard');
@@ -1662,8 +1671,102 @@ describe('Settings status default provenance (#980)', () => {
     );
     const previewCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'preview_status');
     expect(previewCalls.at(-1)?.[1]).toMatchObject({
-      placeholder: en['settings.placeholderTextPlaceholder']
+      placeholder: en['settings.placeholderTextPlaceholder'],
+      locale: 'fr'
     });
     await i18n.set('en');
   });
-});
+
+  it('renders the selected locale while set_locale persistence is still pending', async () => {
+    await i18n.set('de');
+    const seeded = structuredClone(configuredConfig());
+    seeded.locale = 'de';
+    seeded.teams.profanity_filter = true;
+    configStore.set(seeded);
+
+    const baseInvoke = invokeMock.getMockImplementation()!;
+    const persistence = Promise.withResolvers<unknown>();
+    let backendLocale: 'de' | 'fr' = 'de';
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'set_locale') {
+        const requested = previewPayload(args).locale;
+        return persistence.promise.then(() => {
+          if (requested === 'de' || requested === 'fr') backendLocale = requested;
+          return get(configStore);
+        });
+      }
+      if (cmd === 'preview_status') {
+        const preview = previewPayload(args);
+        if (preview.profane_sample !== true) return 'backend sample status';
+        const effectiveLocale = preview.locale ?? backendLocale;
+        return effectiveLocale === 'fr'
+          ? fr['settings.placeholderTextPlaceholder']
+          : de['settings.placeholderTextPlaceholder'];
+      }
+      return baseInvoke(cmd, args);
+    });
+
+    const { container } = await mountSettings();
+    const sample = container.querySelector('#profanity-preview-sample') as HTMLInputElement;
+    await fireEvent.click(sample);
+    const language = container.querySelector('#language') as HTMLSelectElement;
+    await fireEvent.change(language, { target: { value: 'fr' } });
+
+    await waitFor(() => {
+      const call = invokeMock.mock.calls.find(
+        ([cmd, args]) =>
+          cmd === 'preview_status' &&
+          previewPayload(args).locale === 'fr' &&
+          previewPayload(args).profane_sample === true
+      );
+      expect(call).toBeTruthy();
+    });
+    await waitFor(() => {
+      expect((container.querySelector('.preview-box') as HTMLElement).textContent).toBe(
+        fr['settings.placeholderTextPlaceholder']
+      );
+    });
+    expect(i18n.locale).toBe('fr');
+
+    persistence.resolve(get(configStore));
+    await tick();
+    await i18n.set('en');
+  });
+
+  it('rejects a stale de response across a de-to-fr-to-de switch', async () => {
+    await i18n.set('de');
+    const baseInvoke = invokeMock.getMockImplementation()!;
+    const firstPreview = Promise.withResolvers<string>();
+    let previewCount = 0;
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'preview_status') {
+        previewCount += 1;
+        if (previewCount === 1) return firstPreview.promise;
+        const preview = previewPayload(args);
+        return preview.locale === 'fr'
+          ? fr['settings.placeholderTextPlaceholder']
+          : de['settings.placeholderTextPlaceholder'];
+      }
+      return baseInvoke(cmd, args);
+    });
+
+    const { container } = await mountSettings();
+    const language = container.querySelector('#language') as HTMLSelectElement;
+    await waitFor(() => expect(previewCount).toBe(1));
+    await fireEvent.change(language, { target: { value: 'fr' } });
+    await waitFor(() => expect(previewCount).toBe(2));
+    await fireEvent.change(language, { target: { value: 'de' } });
+    await waitFor(() => expect(previewCount).toBe(3));
+    await tick();
+    expect((container.querySelector('.preview-box') as HTMLElement).textContent).toBe(
+      de['settings.placeholderTextPlaceholder']
+    );
+
+    firstPreview.resolve('stale German response');
+    await tick();
+    expect((container.querySelector('.preview-box') as HTMLElement).textContent).toBe(
+      de['settings.placeholderTextPlaceholder']
+    );
+    await i18n.set('en');
+  });
+ });

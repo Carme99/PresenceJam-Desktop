@@ -683,15 +683,22 @@
     // word they just added shows no effect until the next real track.
     const extra_words = extraWordsClamp.clamped;
     if (previewDebounce) clearTimeout(previewDebounce);
+    const my = ++previewSeq;
     previewDebounce = setTimeout(async () => {
-      const my = ++previewSeq;
       try {
-        const v = await invoke<string>('preview_status', { format, filter_enabled, placeholder, profane_sample, extra_words });
+        const v = await invoke<string>('preview_status', {
+          format,
+          filter_enabled,
+          placeholder,
+          profane_sample,
+          extra_words,
+          locale
+        });
         if (my !== previewSeq || locale !== i18n.locale) return;
         // #748: an identical sample is not a new one — never rewrite the node.
         if (v !== previewText) previewText = v;
       } catch (e) {
-        if (my !== previewSeq) return;
+        if (my !== previewSeq || locale !== i18n.locale) return;
         console.warn('[SETTINGS] preview_status failed:', e);
         previewText = t('settings.previewUnavailable');
       }

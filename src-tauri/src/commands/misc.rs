@@ -31,6 +31,10 @@ const CMD: &str = "[CMD.MISC]";
 /// (`teams.profanity_extra_words`), so the preview reflects the EXTRA words
 /// too — a hint that claims they are applied must not be previewed against a
 /// matcher that ignores them.
+/// `locale` is resolved from the selected UI value by the caller and is used
+/// only for the effective safe fallback, so delayed `set_locale` persistence
+/// cannot make this preview render the previous language. Custom placeholder
+/// bytes remain authoritative.
 ///
 /// #215 decision: stays synchronous — pure string substitution, no disk,
 /// network, or keychain IO. Offloading to spawn_blocking would add
@@ -42,6 +46,7 @@ pub fn preview_status(
     placeholder: Option<String>,
     profane_sample: Option<bool>,
     extra_words: Option<Vec<String>>,
+    locale: Option<String>,
 ) -> String {
     log::debug!("{CMD} preview_status: ENTRY - format.len={}", format.len());
     let result = if filter_enabled.unwrap_or(false) {
@@ -67,11 +72,12 @@ pub fn preview_status(
         let effective_placeholder = placeholder
             .as_deref()
             .unwrap_or(crate::profanity::safe_placeholder_default());
-        crate::profanity::filter_status(
+        crate::profanity::filter_status_for_locale(
             &formatted,
             effective_placeholder,
             sample.is_playing,
             extra_words.as_deref().unwrap_or(&[]),
+            locale.as_deref(),
         )
     } else {
         crate::spotify::preview_status_with_sample(&format)
@@ -188,4 +194,39 @@ pub async fn reset_local_token_storage(
         })?;
     log::info!("{CMD} reset_local_token_storage: SUCCESS");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::preview_status;
+
+    #[test]
+    fn preview_status_uses_explicit_locale_over_stale_global_locale() {
+        let _serialised = crate::i18n::LOCALE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        crate::i18n::set_current(Some("de"));
+
+        let localized = preview_status(
+            "{track}".to_string(),
+            Some(true),
+            Some(crate::profanity::safe_placeholder_default().to_string()),
+            Some(true),
+            Some(Vec::new()),
+            Some("fr".to_string()),
+        );
+        assert_eq!(localized, "Écoute actuellement Spotify");
+
+        let custom = preview_status(
+            "{track}".to_string(),
+            Some(true),
+            Some("Eigener Status".to_string()),
+            Some(true),
+            Some(Vec::new()),
+            Some("fr".to_string()),
+        );
+        assert_eq!(custom, "Eigener Status");
+
+        crate::i18n::set_current(None);
+    }
 }
