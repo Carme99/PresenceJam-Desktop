@@ -7061,11 +7061,16 @@ mod tests {
         };
         assert_ne!(fp, status_config_fingerprint(&Some(german)));
 
-        let mut custom = crate::config::AppConfig::default();
-        custom.locale = Some("de".to_string());
-        custom.teams.profanity_placeholder = "Eigener Status".to_string();
-        custom.teams.paused_status_format = "Kurze Pause".to_string();
-        custom.teams.stopped_status_format = "Gerade nicht".to_string();
+        let custom = crate::config::AppConfig {
+            locale: Some("de".to_string()),
+            teams: crate::config::TeamsConfig {
+                profanity_placeholder: "Eigener Status".to_string(),
+                paused_status_format: "Kurze Pause".to_string(),
+                stopped_status_format: "Gerade nicht".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         assert_eq!(
             status_config_fingerprint(&Some(custom)),
             {
@@ -7078,11 +7083,16 @@ mod tests {
             "a locale cannot change user-authored status text, so it cannot change its fingerprint"
         );
 
-        let mut empty_german = crate::config::AppConfig::default();
-        empty_german.locale = Some("de".to_string());
-        empty_german.teams.profanity_placeholder = String::new();
-        empty_german.teams.paused_status_format = String::new();
-        empty_german.teams.stopped_status_format = String::new();
+        let empty_german = crate::config::AppConfig {
+            locale: Some("de".to_string()),
+            teams: crate::config::TeamsConfig {
+                profanity_placeholder: String::new(),
+                paused_status_format: String::new(),
+                stopped_status_format: String::new(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         assert_eq!(
             status_config_fingerprint(&Some(empty_german)),
             status_config_fingerprint(&Some(crate::config::AppConfig {
