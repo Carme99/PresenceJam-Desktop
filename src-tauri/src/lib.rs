@@ -3164,6 +3164,67 @@ mod tests {
     }
 
     #[test]
+    fn conditional_token_clear_replacement_wins_but_matching_stale_token_clears() {
+        let state = AppState::new();
+        let spotify = |access: &str| crate::spotify::SpotifyTokens {
+            access_token: access.to_string(),
+            refresh_token: "spotify-refresh".to_string(),
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+        };
+        let teams = |access: &str| crate::teams::TeamsTokens {
+            access_token: access.to_string(),
+            refresh_token: Some("teams-refresh".to_string()),
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+        };
+
+        state
+            .tokens_load
+            .commit_spotify(&state.tokens, spotify("old-spotify"));
+        state
+            .tokens_load
+            .commit_spotify(&state.tokens, spotify("new-spotify"));
+        assert!(!state
+            .tokens_load
+            .clear_spotify_if_current(&state.tokens, "old-spotify"));
+        assert_eq!(
+            state
+                .tokens
+                .spotify()
+                .as_ref()
+                .map(|tokens| tokens.access_token.as_str()),
+            Some("new-spotify"),
+            "a replacement must win Spotify's conditional clear",
+        );
+        assert!(state
+            .tokens_load
+            .clear_spotify_if_current(&state.tokens, "new-spotify"));
+        assert!(state.tokens.spotify().is_none());
+
+        state
+            .tokens_load
+            .commit_teams(&state.tokens, teams("old-teams"));
+        state
+            .tokens_load
+            .commit_teams(&state.tokens, teams("new-teams"));
+        assert!(!state
+            .tokens_load
+            .clear_teams_if_current(&state.tokens, "old-teams"));
+        assert_eq!(
+            state
+                .tokens
+                .teams()
+                .as_ref()
+                .map(|tokens| tokens.access_token.as_str()),
+            Some("new-teams"),
+            "a replacement must win Teams' conditional clear",
+        );
+        assert!(state
+            .tokens_load
+            .clear_teams_if_current(&state.tokens, "new-teams"));
+        assert!(state.tokens.teams().is_none());
+    }
+
+    #[test]
     fn test_polling_sub_struct_lock_and_invalidate() {
         use std::sync::atomic::Ordering;
         use std::sync::mpsc;

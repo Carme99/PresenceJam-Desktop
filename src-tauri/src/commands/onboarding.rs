@@ -200,7 +200,7 @@ fn discard_dead_session(
     pre_refresh_access_token: &str,
     state: &Arc<AppState>,
     app: &AppHandle,
-) {
+) -> bool {
     let cleared = match provider {
         crate::TokenProvider::Spotify => state
             .tokens_load
@@ -210,7 +210,10 @@ fn discard_dead_session(
             .clear_teams_if_current(&state.tokens, pre_refresh_access_token),
     };
     if !cleared {
-        return;
+        log::info!(
+            "{CMD} is_onboarding_complete: {label} clear superseded by a newer session; no-op"
+        );
+        return false;
     }
     if let Err(e) = token_io::persist_tokens(state, app) {
         log::warn!("{CMD} is_onboarding_complete: failed to persist cleared {label} tokens: {e}");
@@ -218,6 +221,15 @@ fn discard_dead_session(
     log::error!(
         "{CMD} is_onboarding_complete: {label} refresh token is dead (invalid_grant); re-auth required"
     );
+    true
+}
+
+fn conditional_dead_refresh_failure(cleared: bool) -> RefreshFailure {
+    if cleared {
+        RefreshFailure::Dead
+    } else {
+        RefreshFailure::Transient
+    }
 }
 
 /// Boot-gate check for the Spotify session (issue #530).
@@ -274,14 +286,14 @@ fn spotify_session_verdict(
                 error: SpotifyApiError::InvalidGrant,
                 replaced: false,
             } => {
-                discard_dead_session(
+                let cleared = discard_dead_session(
                     "Spotify",
                     crate::TokenProvider::Spotify,
                     &pre_refresh_access_token,
                     state,
                     app,
                 );
-                Err(RefreshFailure::Dead)
+                Err(conditional_dead_refresh_failure(cleared))
             }
             // Issue #798: the error is about a superseded token — the newer
             // session in the slot is alive.
@@ -409,14 +421,14 @@ fn teams_session_verdict(
                 error: TeamsApiError::InvalidGrant,
                 replaced: false,
             } => {
-                discard_dead_session(
+                let cleared = discard_dead_session(
                     "Teams",
                     crate::TokenProvider::Teams,
                     &pre_refresh_access_token,
                     state,
                     app,
                 );
-                Err(RefreshFailure::Dead)
+                Err(conditional_dead_refresh_failure(cleared))
             }
             // Issue #798: the error is about a superseded token — the newer
             // session in the slot is alive.
@@ -643,9 +655,9 @@ fn reconnect_teams_impl(state: &Arc<AppState>, app: &AppHandle) -> Result<(), St
 #[cfg(test)]
 mod tests {
     use super::{
-        boot_gate_client_secret, cached_verdict, missing_tokens_error, presence_from_read,
-        record_client_secret_state, session_verdict, single_flight, RefreshFailure, SessionVerdict,
-        ONBOARDING_CACHE_TTL,
+        boot_gate_client_secret, cached_verdict, conditional_dead_refresh_failure,
+        missing_tokens_error, presence_from_read, record_client_secret_state, session_verdict,
+        single_flight, RefreshFailure, SessionVerdict, ONBOARDING_CACHE_TTL,
     };
     use crate::config::{AppConfig, ClientSecretState};
     use crate::keychain::{KeychainPresence, KeychainReadError};
@@ -705,6 +717,18 @@ mod tests {
         });
         assert_eq!(verdict, SessionVerdict::Valid);
         assert_eq!(calls.get(), 0, "fresh token must not trigger a refresh");
+    }
+
+    #[test]
+    fn conditional_dead_clear_is_dead_only_when_it_actually_cleared() {
+        assert!(matches!(
+            conditional_dead_refresh_failure(true),
+            RefreshFailure::Dead
+        ));
+        assert!(matches!(
+            conditional_dead_refresh_failure(false),
+            RefreshFailure::Transient
+        ));
     }
 
     /// `invalid_grant` is the only refresh outcome that really means "sign in

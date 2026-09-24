@@ -143,9 +143,7 @@ pub async fn poll_teams_auth(
             );
 
             {
-                state
-                    .tokens_load
-                    .commit_teams(&state.tokens, tokens);
+                state.tokens_load.commit_teams(&state.tokens, tokens);
                 log::info!("{CMD} poll_teams_auth: tokens stored in AppState");
             }
             // Issue #562: the sign-in already succeeded — the token endpoint
@@ -241,6 +239,14 @@ pub async fn refresh_teams(
     offload_blocking("refresh_teams", move || refresh_teams_impl(&state, &app)).await?
 }
 
+/// Clear the exact Teams session whose refresh failed. The returned bool is
+/// the authority for every dead-session side effect at the call site.
+fn clear_dead_teams_refresh(state: &AppState, pre_refresh_access_token: &str) -> bool {
+    state
+        .tokens_load
+        .clear_teams_if_current(&state.tokens, pre_refresh_access_token)
+}
+
 /// Blocking body of [`refresh_teams`].
 fn refresh_teams_impl(state: &Arc<AppState>, app: &AppHandle) -> Result<(), String> {
     log::debug!("{CMD} refresh_teams: ENTRY");
@@ -292,13 +298,16 @@ fn refresh_teams_impl(state: &Arc<AppState>, app: &AppHandle) -> Result<(), Stri
             error: TeamsApiError::InvalidGrant,
             replaced: false,
         } => {
+            let cleared = clear_dead_teams_refresh(state, &pre_refresh_access_token);
+            if !cleared {
+                log::info!(
+                    "{CMD} refresh_teams: NOOP (slot replaced before invalid-grant clear; keeping newer session)"
+                );
+                return Ok(());
+            }
             log::error!(
                 "{CMD} refresh_teams: Teams refresh token is dead (invalid_grant); discarding tokens and requiring re-auth"
             );
-            // `clear_teams` marks the tombstone before setting None.
-            state
-                .tokens_load
-                .clear_teams_if_current(&state.tokens, &pre_refresh_access_token);
             // The gate releases its slot guard before persistence retries.
             if let Err(e) = token_io::persist_tokens(state, app) {
                 log::warn!(
@@ -344,8 +353,33 @@ pub fn get_teams_granted_scopes(state: tauri::State<'_, Arc<AppState>>) -> Vec<S
 
 #[cfg(test)]
 mod tests {
-    use super::{cancel_flow, may_commit, offload_blocking};
+    use super::{cancel_flow, clear_dead_teams_refresh, may_commit, offload_blocking};
+    use crate::AppState;
     use parking_lot::Mutex;
+
+    #[test]
+    fn dead_refresh_clear_lets_replacement_win_and_clears_matching_token() {
+        let state = AppState::new();
+        let tokens = |access: &str| crate::teams::TeamsTokens {
+            access_token: access.to_string(),
+            refresh_token: Some("refresh".to_string()),
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+        };
+        state.tokens_load.commit_teams(&state.tokens, tokens("old"));
+        state.tokens_load.commit_teams(&state.tokens, tokens("new"));
+
+        assert!(!clear_dead_teams_refresh(&state, "old"));
+        assert_eq!(
+            state
+                .tokens
+                .teams()
+                .as_ref()
+                .map(|tokens| tokens.access_token.as_str()),
+            Some("new")
+        );
+        assert!(clear_dead_teams_refresh(&state, "new"));
+        assert!(state.tokens.teams().is_none());
+    }
 
     /// Issue #878: the point of the offload is that the thread which *awaits*
     /// the request is not the thread which *runs* it. `block_on` parks the

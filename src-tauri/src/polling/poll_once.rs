@@ -639,23 +639,23 @@ fn run_inner(
                         .clear_spotify_if_current(&state.tokens, &pre_refresh_access_token);
                     if !cleared {
                         log::warn!("[POLLING] poll_once: Spotify clear superseded by a newer session; no-op");
-                        return PollIteration::Sleep { seconds: 0 };
-                    }
-                    log::error!("[POLLING] poll_once: Spotify refresh token invalid (invalid_grant), discarding tokens and requiring reconnect");
-                    if let Err(persist_err) = token_io::persist_tokens(state, app) {
-                        log::warn!(
-                            "[POLLING] poll_once: failed to persist cleared Spotify tokens: {}",
-                            persist_err
+                    } else {
+                        log::error!("[POLLING] poll_once: Spotify refresh token invalid (invalid_grant), discarding tokens and requiring reconnect");
+                        if let Err(persist_err) = token_io::persist_tokens(state, app) {
+                            log::warn!(
+                                "[POLLING] poll_once: failed to persist cleared Spotify tokens: {}",
+                                persist_err
+                            );
+                        }
+                        let _ = app.emit("spotify-reconnect-required", json!(null));
+                        let _ = app.emit("reconnect-required", json!(null));
+                        return interruptible_sleep(
+                            stop_rx,
+                            with_jitter(ERROR_RETRY_INTERVAL_SECONDS),
+                            "invalid-grant sleep",
+                            mode,
                         );
                     }
-                    let _ = app.emit("spotify-reconnect-required", json!(null));
-                    let _ = app.emit("reconnect-required", json!(null));
-                    return interruptible_sleep(
-                        stop_rx,
-                        with_jitter(ERROR_RETRY_INTERVAL_SECONDS),
-                        "invalid-grant sleep",
-                        mode,
-                    );
                 }
                 emit_error(
                     app,
@@ -1147,7 +1147,8 @@ fn run_inner(
                                     log::warn!("[POLLING] poll_once: Spotify clear superseded by a newer session; no-op");
                                     refresh_superseded = true;
                                     final_err = crate::sources::SourceError::Transient(
-                                        "Spotify refresh error superseded by a newer session".to_string(),
+                                        "Spotify refresh error superseded by a newer session"
+                                            .to_string(),
                                     );
                                 }
                             }
@@ -1155,7 +1156,8 @@ fn run_inner(
                                 log::warn!("[POLLING] poll_once: slot replaced mid-refresh, keeping newer Spotify session");
                             }
                             if !refresh_superseded {
-                                final_err = crate::sources::SourceError::Auth(refresh_err.to_string());
+                                final_err =
+                                    crate::sources::SourceError::Auth(refresh_err.to_string());
                             }
                         }
                     }
@@ -5781,6 +5783,61 @@ mod tests {
         let mut raised = crate::config::AppConfig::default();
         raised.polling.pause_backoff_max_seconds = 900;
         assert_eq!(config_pause_backoff_max(&Some(raised)), 900);
+    }
+
+    #[test]
+    fn polling_dead_refresh_clear_uses_replacement_safe_authority() {
+        let state = AppState::new();
+        let spotify = |access: &str| crate::spotify::SpotifyTokens {
+            access_token: access.to_string(),
+            refresh_token: "spotify-refresh".to_string(),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+        };
+        let teams = |access: &str| crate::teams::TeamsTokens {
+            access_token: access.to_string(),
+            refresh_token: Some("teams-refresh".to_string()),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+        };
+
+        state
+            .tokens_load
+            .commit_spotify(&state.tokens, spotify("old"));
+        state
+            .tokens_load
+            .commit_spotify(&state.tokens, spotify("new"));
+        assert!(!state
+            .tokens_load
+            .clear_spotify_if_current(&state.tokens, "old"));
+        assert_eq!(
+            state
+                .tokens
+                .spotify()
+                .as_ref()
+                .map(|tokens| tokens.access_token.as_str()),
+            Some("new")
+        );
+        assert!(state
+            .tokens_load
+            .clear_spotify_if_current(&state.tokens, "new"));
+        assert!(state.tokens.spotify().is_none());
+
+        state.tokens_load.commit_teams(&state.tokens, teams("old"));
+        state.tokens_load.commit_teams(&state.tokens, teams("new"));
+        assert!(!state
+            .tokens_load
+            .clear_teams_if_current(&state.tokens, "old"));
+        assert_eq!(
+            state
+                .tokens
+                .teams()
+                .as_ref()
+                .map(|tokens| tokens.access_token.as_str()),
+            Some("new")
+        );
+        assert!(state
+            .tokens_load
+            .clear_teams_if_current(&state.tokens, "new"));
+        assert!(state.tokens.teams().is_none());
     }
 
     /// Issue #798: a failed refresh whose slot no longer holds the token it

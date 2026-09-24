@@ -631,6 +631,14 @@ pub async fn complete_spotify_auth_manual(
 // `get_teams_tokens` have been removed — see issue #65. The webview no
 // longer has a path to read tokens.
 
+/// Clear the exact Spotify session whose refresh failed. The returned bool is
+/// the authority for every dead-session side effect at the call site.
+fn clear_dead_spotify_refresh(state: &AppState, pre_refresh_access_token: &str) -> bool {
+    state
+        .tokens_load
+        .clear_spotify_if_current(&state.tokens, pre_refresh_access_token)
+}
+
 #[tauri::command]
 pub fn refresh_spotify(
     window: tauri::Window,
@@ -714,9 +722,13 @@ pub fn refresh_spotify(
             error: crate::spotify::SpotifyApiError::InvalidGrant,
             replaced: false,
         } => {
-            state
-                .tokens_load
-                .clear_spotify_if_current(state.inner(), &pre_refresh_access_token);
+            let cleared = clear_dead_spotify_refresh(&state, &pre_refresh_access_token);
+            if !cleared {
+                log::info!(
+                    "{CMD} refresh_spotify: NOOP (slot replaced before invalid-grant clear; keeping newer session)"
+                );
+                return Ok(());
+            }
             if let Err(e) = token_io::persist_tokens(state.inner(), &app) {
                 log::warn!(
                     "{CMD} refresh_spotify: failed to persist cleared tokens - {}",
@@ -757,6 +769,34 @@ pub fn is_spotify_client_secret_set() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dead_refresh_clear_lets_replacement_win_and_clears_matching_token() {
+        let state = AppState::new();
+        let tokens = |access: &str| crate::spotify::SpotifyTokens {
+            access_token: access.to_string(),
+            refresh_token: "refresh".to_string(),
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+        };
+        state
+            .tokens_load
+            .commit_spotify(&state.tokens, tokens("old"));
+        state
+            .tokens_load
+            .commit_spotify(&state.tokens, tokens("new"));
+
+        assert!(!clear_dead_spotify_refresh(&state, "old"));
+        assert_eq!(
+            state
+                .tokens
+                .spotify()
+                .as_ref()
+                .map(|tokens| tokens.access_token.as_str()),
+            Some("new")
+        );
+        assert!(clear_dead_spotify_refresh(&state, "new"));
+        assert!(state.tokens.spotify().is_none());
+    }
 
     // Issue #354: 32+ char non-alphanumeric secrets are rejected, >512 is
     // rejected, and a 32-char alphanumeric secret passes.
