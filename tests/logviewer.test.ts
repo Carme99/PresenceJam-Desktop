@@ -100,17 +100,24 @@ describe('LogViewer behavior (#492)', () => {
     expect(container.textContent).toContain('msg-499');
     expect(container.textContent).not.toContain('msg-0');
   });
-  it('keeps the count non-live and names the keyboard viewport', async () => {
+  it('keeps the count and viewport non-live and names the keyboard viewport', async () => {
     const { container, getByRole } = render(LogViewer, { detached: false });
     await Promise.resolve();
 
     const count = container.querySelector('.count');
+    expect(count?.getAttribute('role')).toBeNull();
     expect(count?.getAttribute('aria-live')).toBeNull();
+    expect(count?.getAttribute('aria-atomic')).toBeNull();
 
     const viewport = getByRole('region', { name: 'Logs' });
     expect(viewport.classList.contains('log-list')).toBe(true);
     expect(viewport.getAttribute('tabindex')).toBe('0');
     expect(viewport.getAttribute('aria-label')).toBe('Logs');
+    expect(viewport.getAttribute('role')).toBe('region');
+    expect(viewport.getAttribute('role')).not.toBe('status');
+    expect(viewport.getAttribute('role')).not.toBe('log');
+    expect(viewport.getAttribute('aria-live')).toBeNull();
+    expect(viewport.getAttribute('aria-atomic')).toBeNull();
   });
 
   it('Trace filter button isolates level-1 logs (#734)', async () => {

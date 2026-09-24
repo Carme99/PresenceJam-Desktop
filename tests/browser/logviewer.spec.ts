@@ -134,7 +134,7 @@ test('keeps every localized level badge clear of its message in Chromium', async
   }
 });
 
-test('focuses the log viewport and navigates it with PageUp/PageDown in Chromium', async ({ browser }) => {
+test('focuses the log viewport and navigates it with PageUp/PageDown in Chromium and WebKit', async ({ browser }) => {
   const context = await browser.newContext({ baseURL: 'http://127.0.0.1:4173' });
   const page = await context.newPage();
   try {
