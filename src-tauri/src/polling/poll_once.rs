@@ -5853,9 +5853,8 @@ mod tests {
         // numbers deliberately whenever a call site is added.
         assert_eq!(
             discard_count, 1,
-            "exactly one CAS-discard log line (inside the helper) is expected in \
-             production; found {}. A second one means a call site re-implemented \
-             the discard dance instead of routing through the helper.",
+            "exactly one centralized CAS-discard log line is expected in production; found {}. \
+             A second one means a call site re-implemented the discard dance instead of routing through the typed helpers.",
             discard_count
         );
         let helper_def = prod_source.matches("fn cas_refresh_spotify").count()
@@ -5866,11 +5865,11 @@ mod tests {
         // 5 calls: Spotify proactive, Spotify 401-retry, Teams proactive,
         // Teams write-retry (issues #367/#428) and the no-track clear retry
         // (issue #455-residual).
-        // The "fn cas_refresh_or_discard(" definition is NOT counted here
-        // because the call-shape substring includes the open-paren.
+        // The typed production helpers are the only refresh entry points;
+        // the test-only unchecked helper is intentionally separate.
         assert_eq!(
             helper_call_count, 5,
-            "cas_refresh_or_discard called {} times in production; expected 5 \
+            "typed refresh helpers called {} times in production; expected 5 \
              (Spotify proactive + 401-retry + Teams proactive + Teams write-retry \
              + no-track clear retry)",
             helper_call_count
