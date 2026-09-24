@@ -1318,7 +1318,7 @@ mod tests {
             .find("teams_tokens: teams.clone()")
             .expect("Teams snapshot clone must exist");
         assert!(
-            spotify_guard < spotify_clone && teams_guard < teams_clone,
+            spotify_guard.max(teams_guard) < spotify_clone.min(teams_clone),
             "both slot guards must be acquired before either snapshot clone"
         );
     }
