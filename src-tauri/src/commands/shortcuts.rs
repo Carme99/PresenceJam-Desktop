@@ -1352,10 +1352,7 @@ mod tests {
             let registration = status.slot(slot);
             assert_eq!(registration.accelerator.as_deref(), Some(accelerator));
             assert!(!registration.registered);
-            assert_eq!(
-                registration.error,
-                Some(ShortcutReason::x11_unavailable())
-            );
+            assert_eq!(registration.error, Some(ShortcutReason::x11_unavailable()));
         }
     }
 

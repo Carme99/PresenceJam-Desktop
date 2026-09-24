@@ -948,10 +948,11 @@
     // (a tagged enum), not a free-form string. `normalizeReason` upgrades a
     // raw JS value to a typed reason; anything unrecognised becomes
     // `Unknown { message }` so a partial payload never crashes the card.
+    const error = normalizeReason(entry.error);
     return {
       accelerator: typeof entry.accelerator === 'string' ? entry.accelerator : null,
-      registered: entry.registered === true,
-      error: normalizeReason(entry.error)
+      registered: entry.registered === true && error === null,
+      error
     };
   }
 
