@@ -97,7 +97,7 @@ From the app overview page, copy:
 
 ## Step 3 — Connect to Teams
 
-Teams uses Microsoft's Device Code flow — no app registration needed on your end, just sign in with your Microsoft account.
+Teams uses Microsoft's Device Code flow. You do not need to create or register an application: PresenceJam currently borrows the public-client identity `14d82eec-204b-4c2f-b7e8-296a70dab67e` from Microsoft's **Microsoft Graph Command Line Tools** app registration rather than using a PresenceJam-owned Microsoft Entra app registration.
 
 During onboarding, PresenceJam will:
 1. Show you a short **code** and a verification URL
@@ -105,7 +105,9 @@ During onboarding, PresenceJam will:
 3. You enter the code and sign in with your Microsoft account
 4. PresenceJam picks up the auth token automatically
 
-Make sure you sign in with the **same Microsoft account** you use in Teams.
+Make sure you sign in with the **same Microsoft account** you use in Teams. The requested delegated permissions are `Presence.ReadWrite Presence.Read Calendars.ReadBasic MailboxSettings.Read openid profile offline_access`.
+
+The Microsoft consent screen and any grant or revocation entry may name **Microsoft Graph Command Line Tools**, not PresenceJam, because the identity is shared. Revoking that grant, or a policy or service change to the shared registration, can also stop PresenceJam's Teams connection. PresenceJam does not receive or store a client secret for this flow.
 
 ---
 
@@ -156,7 +158,7 @@ If a track or artist name contains profanity, PresenceJam replaces the entire st
 Upgrading to 3.0 adds new OAuth scopes on both providers, so **both** require a **one-time re-auth** after the upgrade:
 
 - **Spotify** — the new `user-modify-playback-state` scope powers the tray playback controls. Until you reconnect, Settings shows a **"Playback control needs a one-time reconnect"** banner.
-- **Teams** — the new `Presence.Read` (meeting/call-aware gating) and `profile` (object-id claim needed by the availability sync) scopes. Until you reconnect, Settings shows a **"Presence features need a one-time Teams reconnect"** banner.
+- **Teams** — the current delegated scope set is `Presence.ReadWrite Presence.Read Calendars.ReadBasic MailboxSettings.Read openid profile offline_access`. `Presence.Read` powers meeting/call-aware gating, `Calendars.ReadBasic` supports the upcoming-calendar gate, `MailboxSettings.Read` supports working-hours import, and `profile` supplies the object-id claim needed by the availability sync. Until you reconnect, Settings shows a **"Presence features need a one-time Teams reconnect"** banner.
 
 Click **Reconnect** in the banner (or Settings → reconnect the service) — you only need to do this once per provider.
 

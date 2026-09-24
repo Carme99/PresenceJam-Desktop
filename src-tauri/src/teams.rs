@@ -12,6 +12,10 @@ use tauri::AppHandle;
 /// aid diagnosis, but never in place of the tag. Issue #777.
 const TAG: &str = "[TEAMS]";
 
+/// Borrowed public-client identity owned by Microsoft's first-party
+/// Microsoft Graph Command Line Tools app registration. PresenceJam has no
+/// app registration of its own, so consent and revocation affect this shared
+/// identity rather than an isolated PresenceJam application.
 pub const MICROSOFT_GRAPH_CLIENT_ID: &str = "14d82eec-204b-4c2f-b7e8-296a70dab67e";
 /// OAuth scopes requested during the Teams device-code flow. The
 /// `Calendars.ReadBasic` (issue #867) and `MailboxSettings.Read` (issue #876)
@@ -1692,8 +1696,32 @@ fn clear_user_preferred_presence_with(
 mod tests {
     use super::truncate_for_log;
     use super::{teams_write_error_policy, TeamsApiError};
-    use super::{DeviceCodeResponse, TeamsTokens, MICROSOFT_GRAPH_SCOPES};
+    use super::{
+        DeviceCodeResponse, TeamsTokens, MICROSOFT_GRAPH_CLIENT_ID, MICROSOFT_GRAPH_SCOPES,
+    };
     use crate::polling::{ErrorEventPayload, ErrorRecovery, ErrorSeverity};
+
+    #[test]
+    fn security_disclosure_matches_borrowed_graph_identity_and_scopes() {
+        const OWNER: &str = "Microsoft Graph Command Line Tools";
+        let security = include_str!("../../SECURITY.md");
+
+        for required in [MICROSOFT_GRAPH_CLIENT_ID, OWNER] {
+            assert!(
+                security.contains(required),
+                "SECURITY.md must disclose {required:?}"
+            );
+        }
+
+        let scopes = MICROSOFT_GRAPH_SCOPES.split_whitespace().collect::<Vec<_>>();
+        assert!(!scopes.is_empty(), "Graph scope constant must not be empty");
+        for scope in scopes {
+            assert!(
+                security.contains(scope),
+                "SECURITY.md must disclose Graph scope {scope:?}"
+            );
+        }
+    }
 
     #[test]
     fn teams_write_error_policy_covers_every_api_error_variant() {
