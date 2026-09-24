@@ -10,6 +10,7 @@
  * #692 adds the listener-teardown cases at the bottom: the pane must
  * release a `log://log` registration that settles *after* it unmounts.
  */
+import '../src/app.css';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, fireEvent, cleanup, waitFor } from '@testing-library/svelte';
 import { tick } from 'svelte';
@@ -83,6 +84,7 @@ afterEach(() => {
   // Unmount each render: the jsdom document is shared per file, so
   // getByRole would otherwise match tabs from earlier tests.
   cleanup();
+  i18n.set('en');
 });
 
 describe('LogViewer behavior (#492)', () => {
@@ -183,6 +185,283 @@ describe('LogViewer listener teardown (#692)', () => {
     expect(unlistenCalls).toBe(3);
   });
 });
+
+/**
+ * #949 — a fixed badge column let French "Avertissement" overflow into the
+ * message column. This Vitest case checks the component-derived grid tracks
+ * with a deterministic jsdom measurement seam; those synthetic rects are not
+ * browser layout. The Playwright suite in tests/browser/logviewer.spec.ts owns
+ * the real Chromium rectangle regression check, while this case retains the
+ * component and intrinsic-track coverage.
+ */
+describe('LogViewer level badge column (#949)', () => {
+  it('keeps localized badges clear of messages at every density', async () => {
+    const labelsByLocale = {
+      en: ['Trace', 'Debug', 'Info', 'Warning', 'Error'],
+      de: ['Trace', 'Debug', 'Info', 'Warnung', 'Fehler'],
+      fr: ['Trace', 'Debug', 'Info', 'Avertissement', 'Erreur']
+    } as const;
+    // jsdom does not load app.css layout rules; mirror only its density token
+    // contract so the component's var() declarations resolve in both states.
+    const densityCss = `
+      :root { --fs-xs: 1em; --sp-3: 1em; }
+      [data-density='compact'] { --fs-xs: 0.9em; --sp-3: 0.75em; }
+    `;
+    const appStyle = document.createElement('style');
+    appStyle.dataset.test = 'logviewer-app-css';
+    appStyle.textContent = densityCss;
+    document.head.append(appStyle);
+
+    let comfortableRendered: { fontSize: number; gap: number } | undefined;
+    let compactRendered: { fontSize: number; gap: number } | undefined;
+    try {
+      for (const density of ['comfortable', 'compact'] as const) {
+        document.documentElement.dataset.density = density;
+        for (const locale of ['en', 'de', 'fr'] as const) {
+          i18n.set(locale);
+          const view = render(LogViewer, { detached: false });
+          for (let level = 1; level <= 5; level++) emit(level, `${locale}-message-${level}`);
+          await tick();
+
+          const rows = Array.from(view.container.querySelectorAll<HTMLElement>('.log-entry'));
+          expect(rows).toHaveLength(5);
+
+          for (const [index, row] of rows.entries()) {
+            const badge = row.querySelector<HTMLElement>('.level-badge');
+            const message = row.querySelector<HTMLElement>('.message');
+            expect(badge).not.toBeNull();
+            expect(message).not.toBeNull();
+            expect(badge?.textContent).toBe(labelsByLocale[locale][index]);
+            expect(message?.textContent).toBe(`${locale}-message-${index + 1}`);
+
+            const rowStyle = getComputedStyle(row);
+            expect(rowStyle.gridTemplateColumns).not.toBe('');
+            const tracks = splitGridTracks(rowStyle.gridTemplateColumns);
+            expect(tracks).toHaveLength(3);
+            expect(isIntrinsicContentTrack(tracks[1])).toBe(true);
+            const measuredBadge = measureBadge(badge as HTMLElement);
+            const intrinsicWidth = measuredBadge.width;
+            const badgeTrack = resolveBadgeTrack(tracks[1], intrinsicWidth);
+            const timestampWidth = parseCssLength(tracks[0], row);
+            const gapValue = rowStyle.columnGap || matchingProperty(row, 'column-gap') || matchingProperty(row, 'gap');
+            expect(gapValue).not.toBe('');
+            const gap = parseCssLength(gapValue, row);
+            if (locale === 'fr' && index === 3) {
+              const rendered = { fontSize: measuredBadge.fontSize, gap };
+              if (density === 'comfortable') comfortableRendered = rendered;
+              else compactRendered = rendered;
+            }
+            const badgeLeft = timestampWidth + gap;
+            const messageLeft = badgeLeft + badgeTrack + gap;
+            patchRect(badge as HTMLElement, rect(badgeLeft, intrinsicWidth));
+            patchRect(message as HTMLElement, rect(messageLeft, 1));
+
+            expect(badgeTrack).toBeGreaterThanOrEqual(intrinsicWidth);
+            expect((badge as HTMLElement).getBoundingClientRect().right).toBeLessThanOrEqual(
+              (message as HTMLElement).getBoundingClientRect().left
+            );
+          }
+
+          view.unmount();
+          listeners.length = 0;
+        }
+      }
+      if (!comfortableRendered || !compactRendered) {
+        throw new Error('Expected mounted French warning metrics at both densities');
+      }
+      expect(compactRendered.fontSize).toBeLessThan(comfortableRendered.fontSize);
+      expect(compactRendered.gap).toBeLessThan(comfortableRendered.gap);
+    } finally {
+      appStyle.remove();
+      delete document.documentElement.dataset.density;
+    }
+  });
+
+  it('accepts intrinsic-content badge track equivalents', () => {
+    const intrinsicWidth = 73;
+    for (const track of [
+      'min-content',
+      'max-content',
+      'minmax(min-content, max-content)',
+      'minmax(min-content, min-content)',
+      'minmax(max-content, max-content)'
+    ]) {
+      expect(isIntrinsicContentTrack(track)).toBe(true);
+      expect(resolveBadgeTrack(track, intrinsicWidth)).toBe(intrinsicWidth);
+    }
+  });
+});
+
+function splitGridTracks(value: string): string[] {
+  const tracks: string[] = [];
+  let current = '';
+  let depth = 0;
+  for (const character of value.trim()) {
+    if (character === '(') depth++;
+    if (character === ')') depth--;
+    if (/\s/.test(character) && depth === 0) {
+      if (current) tracks.push(current);
+      current = '';
+    } else {
+      current += character;
+    }
+  }
+  if (current) tracks.push(current);
+  return tracks;
+}
+
+function splitMinmaxBounds(value: string): string[] {
+  const bounds: string[] = [];
+  let current = '';
+  let depth = 0;
+  for (const character of value.trim()) {
+    if (character === '(') depth++;
+    if (character === ')') depth--;
+    if (character === ',' && depth === 0) {
+      if (!current.trim()) throw new Error(`Missing minmax bound in: ${value}`);
+      bounds.push(current.trim());
+      current = '';
+    } else {
+      current += character;
+    }
+  }
+  if (depth !== 0 || !current.trim()) throw new Error(`Invalid minmax bounds: ${value}`);
+  bounds.push(current.trim());
+  return bounds;
+}
+
+function parseCssLength(value: string, owner: Element, fontSize = 16): number {
+  const normalized = value.trim();
+  if (normalized.endsWith('px')) return requireFinite(Number.parseFloat(normalized), value);
+  if (normalized.endsWith('em')) {
+    return requireFinite(Number.parseFloat(normalized) * fontSize, value);
+  }
+  const variable = normalized.match(/^var\((--[\w-]+)\)$/);
+  if (variable) return parseCssLength(customProperty(variable[1]), owner, fontSize);
+  return requireFinite(Number.parseFloat(normalized), value);
+}
+
+function matchingProperty(element: Element, property: string): string {
+  let matched = '';
+  for (const sheet of Array.from(document.styleSheets)) {
+    for (const rule of Array.from(sheet.cssRules)) {
+      const selector = (rule as CSSStyleRule).selectorText;
+      if (selector && element.matches(selector)) {
+        const value = (rule as CSSStyleRule).style?.getPropertyValue(property).trim();
+        if (value) matched = value;
+      }
+    }
+  }
+  return matched;
+}
+
+function customProperty(token: string): string {
+  const root = document.documentElement;
+  const computed = getComputedStyle(root).getPropertyValue(token).trim();
+  if (computed) return computed;
+  let matched: string | undefined;
+  for (const sheet of Array.from(document.styleSheets)) {
+    for (const rule of Array.from(sheet.cssRules)) {
+      const style = (rule as CSSStyleRule).style;
+      const selector = (rule as CSSStyleRule).selectorText;
+      const value = style?.getPropertyValue(token).trim();
+      if (selector && value && root.matches(selector)) matched = value;
+    }
+  }
+  if (!matched) throw new Error(`No mounted stylesheet value for ${token}`);
+  return matched;
+}
+
+function requireFinite(value: number, source: string): number {
+  if (!Number.isFinite(value) || value <= 0) throw new Error(`Expected a positive CSS length, got: ${source}`);
+  return value;
+}
+
+function resolveBadgeTrack(track: string, intrinsicWidth: number): number {
+  const normalized = track.trim();
+  if (normalized === 'min-content' || normalized === 'max-content') return intrinsicWidth;
+
+  const minmax = normalized.match(/^minmax\((.*)\)$/);
+  if (minmax) {
+    const bounds = splitMinmaxBounds(minmax[1]);
+    if (bounds.length !== 2) throw new Error(`Expected two minmax bounds, got: ${track}`);
+    return Math.max(...bounds.map((bound) => resolveTrackBound(bound, intrinsicWidth)));
+  }
+
+  return resolveTrackBound(normalized, intrinsicWidth);
+}
+
+function resolveTrackBound(bound: string, intrinsicWidth: number): number {
+  const normalized = bound.trim();
+  if (normalized === 'min-content' || normalized === 'max-content') return intrinsicWidth;
+  return parseCssLength(normalized, document.documentElement);
+}
+
+function isIntrinsicContentTrack(track: string): boolean {
+  const normalized = track.trim();
+  if (normalized === 'min-content' || normalized === 'max-content') return true;
+  const minmax = normalized.match(/^minmax\((.*)\)$/);
+  return minmax !== null && splitMinmaxBounds(minmax[1]).every(
+    (bound) => bound === 'min-content' || bound === 'max-content'
+  );
+}
+
+function paddingSide(value: string, side: 'left' | 'right'): string {
+  const parts = value.trim().split(/\s+/);
+  expect(parts.length).toBeGreaterThan(0);
+  if (parts.length === 1) return parts[0];
+  if (side === 'left') return parts[1];
+  return parts[3] ?? parts[1];
+}
+
+function measureBadge(badge: HTMLElement): { width: number; fontSize: number } {
+  const computed = getComputedStyle(badge);
+  const fontSizeValue = computed.fontSize || matchingProperty(badge, 'font-size');
+  const padding = matchingProperty(badge, 'padding');
+  const paddingLeftValue = computed.paddingLeft || paddingSide(padding, 'left');
+  const paddingRightValue = computed.paddingRight || paddingSide(padding, 'right');
+  const letterSpacingValue = computed.letterSpacing || matchingProperty(badge, 'letter-spacing');
+  expect(fontSizeValue).not.toBe('');
+  expect(padding).not.toBe('');
+  const fontSize = parseCssLength(fontSizeValue, badge);
+  const horizontalPadding = parseCssLength(paddingLeftValue, badge, fontSize)
+    + parseCssLength(paddingRightValue, badge, fontSize);
+  const letterSpacing = letterSpacingValue === ''
+    ? 0
+    : parseCssLength(letterSpacingValue, badge, fontSize);
+  const label = computed.textTransform === 'uppercase'
+    ? (badge.textContent ?? '').toUpperCase()
+    : (badge.textContent ?? '');
+  const glyphWidth = [...label].reduce(
+    (width, character) => width + (/\s/.test(character) ? 0.35 : 0.62),
+    0
+  ) * fontSize;
+  return {
+    width: glyphWidth + horizontalPadding + label.length * letterSpacing,
+    fontSize
+  };
+}
+
+function rect(left: number, width: number): DOMRect {
+  return {
+    x: left,
+    y: 0,
+    left,
+    top: 0,
+    right: left + width,
+    bottom: 20,
+    width,
+    height: 20,
+    toJSON: () => ({})
+  } as DOMRect;
+}
+
+function patchRect(element: HTMLElement, value: DOMRect): void {
+  Object.defineProperty(element, 'getBoundingClientRect', {
+    configurable: true,
+    value: () => value
+  });
+}
 
 /**
  * #969 — backfilled rows from different days are distinguishable in the log

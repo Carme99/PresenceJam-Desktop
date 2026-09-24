@@ -1,3 +1,4 @@
+<svelte:options css="injected" />
 <!-- Issue #434 scope: snapshot-copy ONLY — the Copy-snapshot button
   emits the backend redacted tail + version/platform. Virtualization is
   deferred (the RENDER_WINDOW tail cap below is the pre-existing #399
@@ -588,7 +589,7 @@
 
   .log-entry {
     display: grid;
-    grid-template-columns: 88px 80px 1fr;
+    grid-template-columns: 88px max-content 1fr;
     align-items: flex-start;
     gap: var(--sp-3);
     padding: var(--sp-2) var(--sp-3);
@@ -615,7 +616,7 @@
     justify-self: start;
     padding: 2px 8px;
     border-radius: var(--r-sm);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.04em;
