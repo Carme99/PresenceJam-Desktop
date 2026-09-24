@@ -1865,29 +1865,29 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // Issue #800 (wiring guard): `persist_tokens` must bind BOTH slot guards
-    // before cloning either slot, so the pair written to disk is a consistent
-    // cut. A behavioral test cannot deterministically interleave a Teams commit
-    // between the two clones without test-only plumbing inside the production
-    // function, so the ordering is pinned by a source scan of the isolated body
-    // (the shared literal-aware scanner `test_scan`, which isolates a body by
-    // depth-counting instead of a next-function anchor — this body holds a
-    // closure and a `TokensFile { .. }` literal). Pre-fix the body cloned the
-    // Spotify slot before the Teams guard was even bound, and this assertion
-    // fails on that shape.
+    // Issue #800 (wiring guard): `persist_tokens_at_with_writer` must bind BOTH
+    // slot guards before cloning either slot, so the pair written to disk is a
+    // consistent cut. A behavioral test cannot deterministically interleave a
+    // Teams commit between the two clones without test-only plumbing inside
+    // the production function, so the ordering is pinned by a source scan of
+    // the isolated body (the shared literal-aware scanner `test_scan`, which
+    // isolates a body by depth-counting instead of a next-function anchor —
+    // this body holds a closure and a `TokensFile { .. }` literal). Pre-fix the
+    // body cloned the Spotify slot before the Teams guard was even bound, and
+    // this assertion fails on that shape.
     #[test]
     fn persist_binds_both_slot_guards_before_cloning() {
         let src = include_str!("token_io.rs");
-        let body = test_scan::fn_body(src, "fn persist_tokens(");
+        let body = test_scan::fn_body(src, "fn persist_tokens_at_with_writer(");
         let spotify_guard = body
             .find("state.tokens.spotify()")
-            .expect("persist_tokens must bind the Spotify slot guard");
+            .expect("persist_tokens_at_with_writer must bind the Spotify slot guard");
         let teams_guard = body
             .find("state.tokens.teams()")
-            .expect("persist_tokens must bind the Teams slot guard");
+            .expect("persist_tokens_at_with_writer must bind the Teams slot guard");
         let first_clone = body
             .find(".clone()")
-            .expect("persist_tokens must clone at least one slot");
+            .expect("persist_tokens_at_with_writer must clone at least one slot");
         assert!(
             spotify_guard < first_clone && teams_guard < first_clone,
             "both slot guards must be bound before either slot is cloned, so a \
