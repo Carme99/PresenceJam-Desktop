@@ -132,7 +132,7 @@ async function startDownload(container: HTMLElement) {
  * hit-tested in a real browser (see the #951 commit).
  */
 function bannerCss(): string {
-  // Vitest runs with the repo root as cwd (tests/hygiene.test.ts).
+  // Vitest runs with the repo root as cwd (tests/theme-density.test.ts).
   const source = readFileSync('src/lib/components/UpdatePrompt.svelte', 'utf8');
   return source.slice(source.indexOf('<style>'), source.indexOf('</style>'));
 }

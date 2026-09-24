@@ -377,7 +377,7 @@ describe('teams-reconnect-required handler (#814)', () => {
  * rotation is precisely where that preference matters, and the rule that stops
  * it is now global (the `.spinner` rule itself moved to app.css for #751).
  *
- * Source scan in the style of tests/hygiene.test.ts: the contract is "every
+ * Source scan in the style of tests/theme-density.test.ts: the contract is "every
  * keyframe animation the stylesheet declares is neutralised under
  * prefers-reduced-motion". Fails pre-fix (no such rule) and fails again if the
  * animation is reintroduced without it.
