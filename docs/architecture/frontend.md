@@ -42,12 +42,16 @@ log-source *status* strings only; `recent_logs` lines get `redact_sensitive`
 alone, and its opaque-character class excludes `\`, so a short Windows path
 inside a log line is not scrubbed.
 
-The command is async with `spawn_blocking` per the v3.2 main-thread-stall
-convention (file IO + keychain reads). Regression tests cover the redaction
-edge cases and assert injected fake token values never survive serialization of
-the snapshot. The frontend (`Diagnostics.svelte`) offers Copy diagnostics /
-Save to file with `role="status"` feedback, reachable from a dashboard icon
-button.
+`get_diagnostics_snapshot` and `save_diagnostics_snapshot` run collection,
+keychain access, and filesystem work on `spawn_blocking`. The save command is
+deliberately Rust-owned: the webview supplies neither JSON nor a destination. It
+recollects the typed snapshot, enforces an independent 256 KiB limit, chooses
+the timestamped filename, and atomically publishes the file in the platform
+Downloads directory. `write_snapshot_file_at` revalidates the typed JSON and
+size before creating a file, uses a 0600 sidecar on Unix, and publishes with no
+replacement. The frontend (`Diagnostics.svelte`) offers Copy diagnostics / Save
+to file with `role="status"` feedback; Copy uses the displayed snapshot, while
+Save asks Rust for a fresh one.
 
 ## Log Viewer (v4.6)
 
@@ -76,6 +80,28 @@ The Logs pane is seeded from disk before the live stream takes over (#595):
   the text no longer slides upward one row per event. The container sets
   `overflow-anchor: none` because Chromium's own scroll anchoring would apply the
   correction twice; WebKit has none and ignores the property.
+
+The level-badge grid track is `max-content`, with badge typography driven by
+`var(--fs-xs)`, so localized labels are neither clipped nor allowed to overlap
+the message column. `tests/browser/logviewer.spec.ts` is a required Playwright
+gate: it renders all five levels in en/de/fr at comfortable and compact
+densities and checks actual Chromium box geometry. This complements rather than
+replaces the Vitest suite.
+
+## Frontend test layers
+
+Vitest owns unit, component, and coverage checks. `tests/version-contrast.test.ts`
+mounts the real root page under production CSS, reads the painted
+color/opacity/background from DOM and CSSOM, composites the effective
+foreground, and requires the normal-size build-version label to clear 4.5:1 in
+both themes. Playwright owns assertions that require a real browser layout;
+`playwright.config.ts` starts the Vite dev server, runs `tests/browser/`, and
+uses Chromium. Both Vitest coverage and `npm run test:browser` are run by PR CI
+and the release `verify` job.
+
+`Dashboard.svelte` subscribes to `spotify-track-changed` with
+`listen<TrackInfo>`, so the TypeScript event payload is the generated Rust
+contract rather than an untyped object copied by hand.
 
 ## Event Bus
 
@@ -231,16 +257,17 @@ PresenceJam-Desktop/
 │   │   └── macos_deeplink.rs              # CoreServices re-claim of presencejam:// on macOS (v4.6, #66/#628)
 │   ├── Cargo.toml                         # Rust deps + `ts-rs = { version = "12", features = ["chrono-impl"] }`
 │   ├── Cargo.lock                         # Commit-locked for reproducible builds
-│   ├── tauri.conf.json                    # Window + deep-link + bundle config
+│   ├── tauri.conf.json                    # Window + deep-link + bundle + packaged-webview CSP
 │   └── capabilities/
-│       ├── default.json                   # CSP, permissions, allowed APIs (+ runtime window creation for detach, v4.0)
-│       └── detached.json                  # Minimal mirrored permission set for logs-detached/settings-detached (v4.0)
+│       ├── default.json                   # Main-window Tauri permission allowlist
+│       └── detached.json                  # Minimal detached-window permission set
 ├── .github/workflows/
-│   ├── ci.yml                             # PR-time: cargo check/clippy/test, npm check
-│   └── release.yml                        # Tag-triggered: 3-OS matrix + homebrew + winget
+│   ├── ci.yml                             # PR-time Rust, Vitest coverage, and Playwright browser gates
+│   └── release.yml                        # Tag verification + 3-OS build + package-manager publication
 ├── homebrew/presence-jam.rb               # Homebrew tap formula template
-├── tests/                                 # vitest suite (*.test.ts) — stores, views, boot routing, log backfill
-├── vitest.config.js                       # vitest + coverage ratchet (four thresholds)
+├── tests/                                 # Vitest suite + Chromium specs under tests/browser/
+├── playwright.config.ts                   # Browser test directory, Vite server, Chromium project
+├── vitest.config.js                       # Vitest + coverage ratchet (four thresholds)
 ├── rust-toolchain.toml                    # pinned Rust toolchain, used by CI and local builds
 ├── src/app.css                            # global stylesheet: design tokens, themes, densities
 ├── docs/                                  # architecture, setup, release and state-of-features docs

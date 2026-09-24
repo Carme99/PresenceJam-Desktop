@@ -58,9 +58,9 @@ on the first disagreement:
   `src-tauri/Cargo.lock`; every one of the six is compared with
   `tauri.conf.json`.
 - `release.yml`, step "Verify version consistency" in the `resolve-tag`
-  job (~lines 86-125) — the same six compared against the tag, before the
-  build matrix starts, so a tag cannot publish a lock that disagrees with the
-  binary it ships.
+  job — the same six compared against the tag, before the build matrix
+  starts, so a tag cannot publish a lock that disagrees with the binary it
+  ships.
 
 The cargo steps also run with `--locked` (fmt takes no such flag), so a
 `Cargo.lock` that has drifted from `Cargo.toml` fails the run instead of being
@@ -94,8 +94,8 @@ At release time, **in one commit**:
    [Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/vX.Y.Z...HEAD
    ```
 
-The `changelog-links` job in `ci.yml` (~lines 282-299) iterates every
-`^## [X]` header and fails on the first one whose `[X]:` definition is missing
+The `changelog-links` job in `ci.yml` iterates every `^## [X]` header and fails
+on the first one whose `[X]:` definition is missing
 (precedent: issues #437/#438). **This is the trap that shipped a broken run:**
 on `release/4.6` the section was renamed without adding the link definition in
 the same commit and CI run **#423** failed on exactly that job. Rename and
@@ -108,9 +108,9 @@ jobs (the Name column is the check context shown on the PR's checks list):
 
 | Job | Name | What it does |
 | --- | --- | --- |
-| `rust-platform-check` | Rust check (macOS + Windows) | `cargo check` on macOS + Windows (platform-gated code compiles) |
-| `frontend` | Frontend (npm build + ts-rs codegen) | `npm run build`, `npm run check`, frontend tests + coverage ratchet (`npm run test:coverage`) |
-| `rust` | Rust (cargo check) | fmt, `cargo check`, `cargo test` on Linux |
+| `rust-platform-check` | Rust check + test (macOS + Windows) | `cargo check --all-targets` on both legs; `cargo test --all-targets` on macOS only |
+| `frontend` | Frontend (npm build + ts-rs codegen) | `npm run build`, `cargo test --lib`, `npm run check`, `npm run test:coverage`, and `npm run test:browser` |
+| `rust` | Rust (cargo check) | `cargo fmt --check`, `cargo check --all-targets`, and `cargo test --all-targets` on Linux |
 | `rust-clippy` | Rust clippy | `cargo clippy -- -D warnings` |
 | `changelog-links` | CHANGELOG link definitions | every `## [X]` header needs a `[X]:` definition |
 | `docs-links` | Docs links | every relative markdown link target exists and every `#anchor` resolves (`python3 docs/link-audit.py`) |
@@ -118,17 +118,15 @@ jobs (the Name column is the check context shown on the PR's checks list):
 | `secret-scan` | Secret scan (gitleaks) | gitleaks over the history |
 | `dep-audit` | Dependency audit (cargo + npm) | **advisory only** — `continue-on-error: true` |
 
-The Rust test suite runs on **all three** platforms, not just Linux:
-`rust-platform-check` executes `cargo test --all-targets` on the macOS and
-Windows legs straight after its `cargo check` (that job's `timeout-minutes` was
-raised from 20 to 45 for the added compile and link work). Compiling
-platform-gated code is not running it — `cargo check` alone would pass while a
-regression sat inside the macOS `ActivationPolicy` branch in
-`commands/config.rs`, the dock-badge path in `tray.rs`, the macOS deep-link
-registration in `lib.rs` or the Windows tray and notification paths. The ubuntu
-leg keeps `--all-targets`. If a macOS/Windows leg is ever reduced to
-`cargo test --lib` to save runner minutes, record that reduced scope here
-rather than leaving it implied.
+The Rust test suite runs on **Linux and macOS**, not Windows. The Linux `rust`
+job executes `cargo test --all-targets`, and `rust-platform-check` executes the
+same suite on macOS after its compile check. The Windows leg keeps
+`cargo check --all-targets` because the current test binary aborts at loader
+before tests run (`STATUS_ENTRYPOINT_NOT_FOUND`). Compiling platform-gated code
+is still required there: a `cargo check` alone catches `cfg`-guarded breakage
+even though it does not execute runtime tests. Re-expand the Windows test leg
+when the runner image links the binary cleanly, and record any further
+platform-specific reduction here rather than leaving it implied.
 
 ## 4. The tag → publish chain (`release.yml`)
 
@@ -137,7 +135,7 @@ Trigger: a push of a `v*` tag, **or** `workflow_dispatch` with the `tag` input
 ref). Concurrency keys on `release-<event>-<ref>`, so a re-cut does not queue
 behind the tag-push run.
 
-1. **`resolve-tag`** (~lines 36-152) — resolves the tag (`inputs.tag` for a
+1. **`resolve-tag`** — resolves the tag (`inputs.tag` for a
    dispatch, else `GITHUB_REF_NAME`), rejects anything that is not `v*`,
    verifies the tag exists with `git ls-remote --exit-code --tags`, checks the
    repository out **at that tag**, then runs the tag/version check: `EXPECTED` =
@@ -154,14 +152,14 @@ behind the tag-push run.
    `# State of Features — vX.Y.Z` header, or the run fails with an `::error::`
    naming the missing file. A pre-release tag (`vX.Y.Z-beta.N`) is gated
    against the section of the version it will become.
-2. **`verify`** (`needs: resolve-tag`, ~lines 162-236) — checks out the same tag
-   and reruns the `ci.yml` gate set there (fmt, clippy, `cargo test`,
-   `npm run check`, `npm run test:coverage` — the coverage ratchet, not bare
-   `npm test`, with Linux system deps). `ci.yml` only runs
-   on PRs and `main`, so without this job the exact commit that produces
+2. **`verify`** (`needs: resolve-tag`) — checks out the same tag and reruns the
+   `ci.yml` gate set there (fmt, clippy, `cargo test`, `npm run check`,
+   `npm run test:coverage` — the coverage ratchet, not bare `npm test` — and
+   `npm run test:browser`, with Chromium plus Linux system deps). `ci.yml` only
+   runs on PRs and `main`, so without this job the exact commit that produces
    user-facing binaries would never be tested — worst case on a re-cut of a
    commit that never saw CI.
-3. **`build`** (`needs: [resolve-tag, verify]`, ~lines 238-544) — three-OS matrix:
+3. **`build`** (`needs: [resolve-tag, verify]`) — three-OS matrix:
 
    | OS | Target | Artifact (upload) | Packaged files |
    | --- | --- | --- | --- |
@@ -195,7 +193,7 @@ behind the tag-push run.
    `.rpm` — a package without it never appears in GNOME Software or KDE
    Discover.
 
-4. **`sign`** (`needs: [resolve-tag, build]`, `environment: release-signing`, ~lines 546-632) —
+4. **`sign`** (`needs: [resolve-tag, build]`, `environment: release-signing`) —
    the only job holding `TAURI_SIGNING_PRIVATE_KEY` and its password, exported
    to one step (`Sign updater payloads`) rather than the job, so `npm ci` and
    its lifecycle scripts never see them. It downloads the unsigned payloads and
@@ -206,7 +204,7 @@ behind the tag-push run.
    it produced them. Add required reviewers to the `release-signing`
    environment in the repository settings, or a tag push can sign and publish
    without a human — until then the environment exists but gates nothing.
-5. **`release`** (`needs: [resolve-tag, build, sign]`, ~lines 634-885) — checks the tag out (it needs
+5. **`release`** (`needs: [resolve-tag, build, sign]`) — checks the tag out (it needs
    `CHANGELOG.md`), downloads all artifacts (`digest-mismatch: error`), writes
    `SHA256SUMS.txt` (one `"<sha256>  <filename>"` line per file; unsigned, and
    deliberately not covered by the build attestation), extracts this version's
@@ -241,7 +239,7 @@ behind the tag-push run.
    platform URL as "no update" **silently**, so a missing asset would strand
    every client (the v3.1.0 → v3.2.0 Windows incident, see
    [`archive/windows-update-chain-v3.2.md`](./archive/windows-update-chain-v3.2.md)).
-6. **`homebrew`** (`needs: [resolve-tag, release]`, ~lines 887-1009) — downloads the macOS DMG
+6. **`homebrew`** (`needs: [resolve-tag, release]`) — downloads the macOS DMG
    artifact, computes its SHA-256, and updates the **cask**
    `Casks/presence-jam.rb` in `carme99/homebrew-tap` (version/url/sha256),
    creating it if absent, no-oping if it already matches, and deleting the
@@ -249,7 +247,7 @@ behind the tag-push run.
    migration (`brew uninstall presence-jam` first, then
    `brew install --cask carme99/tap/presence-jam`). Requires
    `HOMEBREW_TAP_TOKEN` with `contents:write` on the tap.
-7. **`winget`** (`needs: [resolve-tag, release]`, ~lines 1011-1073) — `vedantmgoyal2009/winget-releaser`
+7. **`winget`** (`needs: [resolve-tag, release]`) — `vedantmgoyal2009/winget-releaser`
    for `PresenceJam.PresenceJam`, submitting through the fork
    `Carme99/winget-pkgs` (`fork-user`). Requires `WINGET_TOKEN`: a **classic**
    PAT with `public_repo` **and** `workflow` scopes (fine-grained is
