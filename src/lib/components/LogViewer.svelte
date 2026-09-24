@@ -434,7 +434,7 @@
           aria-pressed={filter === f}>{t(LEVEL_LABELS[f])}</button>
       {/each}
     </div>
-    <span class="count" aria-live="polite">{countLabel}</span>
+    <span class="count">{countLabel}</span>
     {#if !detached}
       <button class="btn-secondary" onclick={handlePopOut}>{t('logs.popOut')}</button>
     {/if}
@@ -450,7 +450,8 @@
   {/if}
 
   <div class="log-wrap">
-    <div class="log-list" bind:this={logContainer} onscroll={handleScroll}>
+    <div class="log-list" bind:this={logContainer} onscroll={handleScroll}
+      tabindex="0" role="region" aria-label={t('logs.title')}>
       {#if filteredLogs.length === 0}
         <div class="empty-state">
           <p>{t('logs.empty')}</p>
