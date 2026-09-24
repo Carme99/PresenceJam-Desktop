@@ -3670,8 +3670,10 @@ mod tests {
             ("de", "Hört gerade Spotify"),
             ("fr", "Écoute actuellement Spotify"),
         ] {
-            let mut config = crate::config::AppConfig::default();
-            config.locale = Some(locale.to_string());
+            let mut config = crate::config::AppConfig {
+                locale: Some(locale.to_string()),
+                ..Default::default()
+            };
 
             for placeholder in ["", crate::profanity::safe_placeholder_default()] {
                 config.teams.profanity_placeholder = placeholder.to_string();
