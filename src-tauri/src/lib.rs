@@ -1436,10 +1436,7 @@ fn cli_headless_state() -> (Arc<AppState>, Vec<String>) {
 /// headless CLI. The locale is passed explicitly rather than installed into
 /// the process-global native-language slot, so concurrent CLI surfaces cannot
 /// race one another while a different config is being published.
-fn filter_cli_manual_status(
-    text: &str,
-    config: Option<&crate::config::AppConfig>,
-) -> String {
+fn filter_cli_manual_status(text: &str, config: Option<&crate::config::AppConfig>) -> String {
     let placeholder = config
         .map(|cfg| cfg.teams.profanity_placeholder.as_str())
         .unwrap_or_default();
@@ -1447,7 +1444,6 @@ fn filter_cli_manual_status(
     let locale = config.and_then(|cfg| cfg.locale.as_deref());
     crate::profanity::filter_status_for_locale(text, placeholder, true, extra_words, locale)
 }
-
 
 /// Issue #870: `--set-status <message>` body. Same filter + clamp + Graph
 /// POST pipeline the Dashboard composer runs, with the same error strings,
@@ -3670,7 +3666,10 @@ mod tests {
             "the headless publish path must not fall back to process-global locale state"
         );
 
-        for (locale, localized) in [("de", "Hört gerade Spotify"), ("fr", "Écoute actuellement Spotify")] {
+        for (locale, localized) in [
+            ("de", "Hört gerade Spotify"),
+            ("fr", "Écoute actuellement Spotify"),
+        ] {
             let mut config = crate::config::AppConfig::default();
             config.locale = Some(locale.to_string());
 
@@ -3697,7 +3696,6 @@ mod tests {
             );
         }
     }
-
 
     /// Issue #679: the flags must be reachable only as an alternative to the
     /// GUI, and `--sync-once` must reach its one-shot before any GUI surface is
