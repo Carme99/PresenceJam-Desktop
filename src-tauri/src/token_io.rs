@@ -24,13 +24,14 @@
 //! files and any successor format can be handled side by side (unknown
 //! versions are rejected rather than mis-decrypted).
 //!
-//! Legacy plaintext JSON files (releases ≤ v2.10.0) are migrated on first
-//! read: parsed, then immediately re-written encrypted (see
-//! `read_tokens_at`). The pending-auth blobs (PKCE verifier, device code)
-//! are intentionally NOT written here. They live in `AppState` only — a
-//! 10–15 min bearer credential is not worth a crash-recovery story that
-//! leaks the secret to disk. See issue #65 / HIGH #3 in the security
-//! review.
+//! Legacy plaintext JSON files (releases ≤ v2.10.0) are migrated by the GUI
+//! on first read: parsed, then immediately re-written encrypted. Headless
+//! CLI reads parse the same payload without touching storage, so reporting
+//! and preflight commands remain read-only. The pending-auth blobs (PKCE
+//! verifier, device code) are intentionally NOT written here. They live in
+//! `AppState` only — a 10–15 min bearer credential is not worth a
+//! crash-recovery story that leaks the secret to disk. See issue #65 / HIGH #3
+//! in the security review.
 
 use crate::spotify::SpotifyTokens;
 use crate::teams::TeamsTokens;
@@ -209,27 +210,37 @@ pub fn tokens_file_path_headless() -> Result<PathBuf, String> {
         .join("tokens.json"))
 }
 
-/// Read tokens from disk. Returns a default `TokensFile` if the file
-/// does not exist or is empty. Returns `Err(...)` if the file exists and
-/// is non-empty but cannot be decrypted or deserialised; the caller in
-/// `lib::run` setup logs the error and continues with default state,
-/// matching the previous (pre-#65) store path's behaviour.
-///
-/// Since v3.0 the file is AES-256-GCM ciphertext (issue #140); a legacy
-/// plaintext JSON file from ≤ v2.10.0 is migrated to ciphertext on first
-/// read. A missing keychain key or undecryptable ciphertext surfaces as
-/// `Err`, which drives the same re-auth recovery as a corrupt file.
-pub fn read_tokens_at(app: &tauri::AppHandle) -> Result<TokensFile, String> {
-    read_tokens_at_path(&tokens_file_path(app)?)
+/// Side effects selected when reading a legacy plaintext token file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenReadMode {
+    /// Parse legacy plaintext, then atomically replace it with ciphertext.
+    MigrateLegacy,
+    /// Parse without changing file contents, metadata, or directory entries.
+    ReadOnly,
 }
 
-/// Read tokens from an explicit path (issue #679).
+/// Migrating GUI read from the Tauri app path. Returns a default
+/// `TokensFile` if the file does not exist or is empty. Returns `Err(...)`
+/// if the file exists and is non-empty but cannot be decrypted or
+/// deserialised; the caller in `lib::run` setup logs the error and continues
+/// with default state, matching the previous (pre-#65) store path's
+/// behaviour.
 ///
-/// The body of [`read_tokens_at`], split out so the headless CLI flags read
-/// the file [`tokens_file_path_headless`] resolves through the identical
-/// decryption path — including the #135 mode tightening and the
-/// "missing/empty file reads as default" rule.
-pub fn read_tokens_at_path(path: &Path) -> Result<TokensFile, String> {
+/// Legacy plaintext from ≤ v2.10.0 is migrated on first GUI read. A missing
+/// keychain key or undecryptable ciphertext surfaces as `Err`, which drives
+/// the same re-auth recovery.
+pub fn read_tokens_at(app: &tauri::AppHandle) -> Result<TokensFile, String> {
+    read_tokens_at_path(&tokens_file_path(app)?, TokenReadMode::MigrateLegacy)
+}
+
+/// Read tokens from an explicit path (issues #679 and #840).
+///
+/// The body of [`read_tokens_at`], split out so the headless CLI flags use
+/// [`TokenReadMode::ReadOnly`]: they share the same parsing and decryption
+/// behavior, but never chmod, migrate, rename, or delete storage merely to
+/// report state. The GUI retains first-run plaintext migration through
+/// [`read_tokens_at`].
+pub fn read_tokens_at_path(path: &Path, mode: TokenReadMode) -> Result<TokensFile, String> {
     if !path.exists() {
         log::info!(
             "[TOKEN_IO] read_tokens_at: no file at {}, returning default",
@@ -239,28 +250,30 @@ pub fn read_tokens_at_path(path: &Path) -> Result<TokensFile, String> {
     }
     // Issue #135 path A: tighten the mode of any pre-existing tokens.json
     // that was created loose by an older PresenceJam version (default umask
-    // 022 → 0644). Idempotent on a file that is already 0600. Windows
-    // default ACL is user-only, so this is a no-op there.
-    #[cfg(unix)]
-    {
-        let current = fs::metadata(path)
-            .map_err(|e| format!("Failed to stat tokens file '{}': {}", path.display(), e))?
-            .permissions();
-        let current_mode = current.mode() & 0o777;
-        if current_mode != 0o600 {
-            log::warn!(
-                "[TOKEN_IO] tightening tokens.json mode from {:o} to 0600 (issue #135)",
-                current_mode
-            );
-            let mut tightened = current;
-            tightened.set_mode(0o600);
-            fs::set_permissions(path, tightened).map_err(|e| {
-                format!(
-                    "Failed to chmod tokens file '{}' to 0600: {}",
-                    path.display(),
-                    e
-                )
-            })?;
+    // 022 → 0644). This is a GUI migration side effect, so a read-only CLI
+    // must skip it even when the legacy payload itself needs no migration.
+    if mode == TokenReadMode::MigrateLegacy {
+        #[cfg(unix)]
+        {
+            let current = fs::metadata(path)
+                .map_err(|e| format!("Failed to stat tokens file '{}': {}", path.display(), e))?
+                .permissions();
+            let current_mode = current.mode() & 0o777;
+            if current_mode != 0o600 {
+                log::warn!(
+                    "[TOKEN_IO] tightening tokens.json mode from {:o} to 0600 (issue #135)",
+                    current_mode
+                );
+                let mut tightened = current;
+                tightened.set_mode(0o600);
+                fs::set_permissions(path, tightened).map_err(|e| {
+                    format!(
+                        "Failed to chmod tokens file '{}' to 0600: {}",
+                        path.display(),
+                        e
+                    )
+                })?;
+            }
         }
     }
     let bytes = fs::read(path)
@@ -269,7 +282,7 @@ pub fn read_tokens_at_path(path: &Path) -> Result<TokensFile, String> {
         log::info!("[TOKEN_IO] read_tokens_at: file is empty, returning default");
         return Ok(TokensFile::default());
     }
-    tokens_from_bytes(path, &bytes)
+    tokens_from_bytes(path, &bytes, mode)
 }
 
 /// Parse legacy ≤ v2.10.0 plaintext tokens JSON (issue #352). Shared by the
@@ -287,26 +300,30 @@ fn parse_legacy_tokens_file(bytes: &[u8], path: &Path) -> Result<TokensFile, Str
 }
 
 /// Decode the raw bytes of a `tokens.json` file into a [`TokensFile`],
-/// fetching the decryption key from the OS keychain.
+/// fetching the decryption key from the OS keychain as required.
 ///
 /// - Encrypted (starts with the `PJENC` magic): the key must already
-///   exist (`keychain::get_tokens_aes_key`); a missing key is an error
-///   that drives re-auth, exactly like a corrupt file.
+///   exist (`keychain::get_tokens_aes_key`); a missing or locked keychain is
+///   an error in every read mode, exactly like a corrupt file.
 /// - Legacy plaintext JSON (starts with `{`, i.e. any release ≤ v2.10.0):
-///   parsed (via [`parse_legacy_tokens_file`]), then immediately
-///   re-written encrypted — the atomic write replaces the plaintext file
-///   and pre-clears any stale plaintext sidecar, so the plaintext is gone
-///   from the tokens path.
-fn tokens_from_bytes(path: &Path, bytes: &[u8]) -> Result<TokensFile, String> {
+///   parsed first. [`TokenReadMode::MigrateLegacy`] then replaces the file
+///   with ciphertext; [`TokenReadMode::ReadOnly`] returns the parsed value
+///   without creating a key or changing storage.
+fn tokens_from_bytes(path: &Path, bytes: &[u8], mode: TokenReadMode) -> Result<TokensFile, String> {
     if bytes.starts_with(TOKENS_MAGIC) {
         let key = crate::keychain::get_tokens_aes_key()?;
-        tokens_from_bytes_with_key(path, bytes, &key)
+        tokens_from_bytes_with_key(path, bytes, &key, mode)
     } else if bytes.starts_with(b"{") {
         // Issue #352: parse the legacy plaintext BEFORE touching the OS
         // keychain — see `decode_legacy_with_key_fetcher`, which parses
-        // once, fetches the key only for valid JSON, and threads the value
-        // into the migration write.
-        decode_legacy_with_key_fetcher(path, bytes, crate::keychain::get_or_create_tokens_aes_key)
+        // once, fetches the key only for valid JSON in migrating mode, and
+        // threads the value into the migration write.
+        decode_legacy_with_key_fetcher(
+            path,
+            bytes,
+            mode,
+            crate::keychain::get_or_create_tokens_aes_key,
+        )
     } else {
         Err(format!(
             "tokens file '{}' is neither PJENC-encrypted nor plaintext JSON; refusing to parse",
@@ -315,18 +332,22 @@ fn tokens_from_bytes(path: &Path, bytes: &[u8]) -> Result<TokensFile, String> {
     }
 }
 
-/// Legacy `{` branch with an injectable key fetcher (issue #352). Parses
-/// the plaintext FIRST, then fetches the key, then migrates to ciphertext:
-/// a corrupt legacy file surfaces the parse error without ever touching
-/// the OS keychain. [`tokens_from_bytes`] passes the real keychain
-/// fetcher; tests inject a failing fetcher to observe the ordering
-/// behaviorally (`legacy_key_fetch_follows_parse`).
+/// Legacy `{` branch with an injectable key fetcher (issues #352 and #840).
+/// Parses the plaintext FIRST. Migrating mode then fetches the key and
+/// rewrites storage; read-only mode returns immediately, so neither the
+/// keychain nor disk is touched. [`tokens_from_bytes`] passes the real
+/// keychain fetcher; tests inject a failing or panic-on-call fetcher to
+/// observe the ordering behaviorally.
 fn decode_legacy_with_key_fetcher(
     path: &Path,
     bytes: &[u8],
+    mode: TokenReadMode,
     fetch_key: impl FnOnce() -> Result<[u8; 32], String>,
 ) -> Result<TokensFile, String> {
     let parsed = parse_legacy_tokens_file(bytes, path)?;
+    if mode == TokenReadMode::ReadOnly {
+        return Ok(parsed);
+    }
     let key = fetch_key()?;
     migrate_parsed_legacy(path, parsed, &key)
 }
@@ -349,11 +370,12 @@ fn migrate_parsed_legacy(
 
 /// Core decode with an explicit key — used by [`tokens_from_bytes`] and
 /// by the test suite (which injects a fixed key so tests never touch the
-/// OS keychain).
+/// OS keychain). Read-only legacy input is parsed but never rewritten.
 fn tokens_from_bytes_with_key(
     path: &Path,
     bytes: &[u8],
     key: &[u8; 32],
+    mode: TokenReadMode,
 ) -> Result<TokensFile, String> {
     if bytes.starts_with(TOKENS_MAGIC) {
         let plaintext = decrypt_tokens(key, bytes)?;
@@ -371,11 +393,13 @@ fn tokens_from_bytes_with_key(
         );
         Ok(tf)
     } else if bytes.starts_with(b"{") {
-        // Legacy ≤ v2.10.0 plaintext JSON → migrate to ciphertext on the
-        // spot. The gate in [`tokens_from_bytes`] already parsed before
-        // touching the keychain; this key-injected path parses here because
-        // tests inject the key directly (no keychain involved).
+        // The gate in [`tokens_from_bytes`] has already parsed before
+        // touching the keychain; this key-injected path parses because
+        // tests supply the key directly (no keychain involved).
         let tf = parse_legacy_tokens_file(bytes, path)?;
+        if mode == TokenReadMode::ReadOnly {
+            return Ok(tf);
+        }
         migrate_parsed_legacy(path, tf, key)
     } else {
         Err(format!(
@@ -940,6 +964,8 @@ pub(crate) mod test_scan {
 mod tests {
     use super::*;
     use std::env;
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
 
     /// Fixed key for tests: the suite must never touch the OS keychain,
     /// so every path under test uses the key-injected internals
@@ -1010,7 +1036,7 @@ mod tests {
         if bytes.iter().all(|b| b.is_ascii_whitespace()) {
             return Ok(TokensFile::default());
         }
-        tokens_from_bytes_with_key(path, &bytes, &test_key())
+        tokens_from_bytes_with_key(path, &bytes, &test_key(), TokenReadMode::MigrateLegacy)
     }
 
     #[test]
@@ -1173,7 +1199,9 @@ mod tests {
         let legacy = serde_json::to_vec_pretty(&sample_file()).unwrap();
         fs::write(&path, &legacy).unwrap();
 
-        let loaded = tokens_from_bytes_with_key(&path, &legacy, &test_key()).unwrap();
+        let loaded =
+            tokens_from_bytes_with_key(&path, &legacy, &test_key(), TokenReadMode::MigrateLegacy)
+                .unwrap();
         assert_eq!(loaded.spotify_tokens.unwrap().access_token, "at");
         assert_eq!(loaded.teams_tokens.unwrap().access_token, "tat");
 
@@ -1193,6 +1221,74 @@ mod tests {
         assert_eq!(reloaded.spotify_tokens.unwrap().access_token, "at");
         assert_eq!(reloaded.teams_tokens.unwrap().access_token, "tat");
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn read_only_legacy_read_returns_tokens_without_touching_storage() {
+        let dir = unique_tmp_dir("readonly-legacy");
+        let path = dir.join("tokens.json");
+        let legacy = serde_json::to_vec_pretty(&sample_file()).unwrap();
+        fs::write(&path, &legacy).unwrap();
+        let before = fs::metadata(&path).unwrap();
+        let before_modified = before.modified().unwrap();
+        #[cfg(unix)]
+        let before_mode = before.permissions().mode() & 0o777;
+        #[cfg(unix)]
+        let before_inode = before.ino();
+
+        let loaded = read_tokens_at_path(&path, TokenReadMode::ReadOnly).unwrap();
+        assert_eq!(loaded.spotify_tokens.unwrap().access_token, "at");
+        assert_eq!(loaded.teams_tokens.unwrap().access_token, "tat");
+
+        assert!(path.exists(), "read-only CLI must not delete tokens.json");
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            legacy,
+            "file bytes must be unchanged"
+        );
+        let after = fs::metadata(&path).unwrap();
+        assert_eq!(
+            after.modified().unwrap(),
+            before_modified,
+            "mtime must be unchanged"
+        );
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                after.permissions().mode() & 0o777,
+                before_mode,
+                "mode must be unchanged"
+            );
+            assert_eq!(
+                after.ino(),
+                before_inode,
+                "read must not rename tokens.json"
+            );
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn read_only_legacy_decoder_never_fetches_key_or_rewrites_file() {
+        let dir = unique_tmp_dir("readonly-legacy-decoder");
+        let path = dir.join("tokens.json");
+        let legacy = serde_json::to_vec_pretty(&sample_file()).unwrap();
+        fs::write(&path, &legacy).unwrap();
+
+        let loaded =
+            decode_legacy_with_key_fetcher(&path, &legacy, TokenReadMode::ReadOnly, || {
+                panic!("read-only legacy decode must not fetch a key")
+            })
+            .unwrap();
+
+        assert_eq!(loaded.spotify_tokens.unwrap().access_token, "at");
+        assert_eq!(loaded.teams_tokens.unwrap().access_token, "tat");
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            legacy,
+            "decoder must not rewrite tokens.json"
+        );
+        fs::remove_dir_all(dir).unwrap();
     }
 
     /// Regression guard for issue #135: a stale `.json.tmp` from a previous
@@ -1255,7 +1351,7 @@ mod tests {
         let src = include_str!("token_io.rs");
         let body = test_scan::fn_body(src, "fn tokens_from_bytes(");
         assert!(
-            body.contains("decode_legacy_with_key_fetcher(path, bytes"),
+            body.contains("decode_legacy_with_key_fetcher("),
             "legacy branch must delegate to the parse-before-keychain decoder"
         );
     }
@@ -1272,11 +1368,12 @@ mod tests {
         // Corrupt legacy bytes: parse fails, fetcher must never run.
         let called = Cell::new(false);
         let bytes = b"{not valid json";
-        let err = decode_legacy_with_key_fetcher(&path, bytes, || {
-            called.set(true);
-            Ok(test_key())
-        })
-        .expect_err("corrupt legacy must fail");
+        let err =
+            decode_legacy_with_key_fetcher(&path, bytes, TokenReadMode::MigrateLegacy, || {
+                called.set(true);
+                Ok(test_key())
+            })
+            .expect_err("corrupt legacy must fail");
         assert!(
             err.contains("Failed to parse legacy plaintext tokens file"),
             "parse error expected, got: {}",
@@ -1291,11 +1388,12 @@ mod tests {
         // first, so no file is created).
         let valid = serde_json::to_vec(&sample_file()).unwrap();
         let called = Cell::new(false);
-        let err = decode_legacy_with_key_fetcher(&path, &valid, || {
-            called.set(true);
-            Err::<[u8; 32], String>("keychain unavailable".to_string())
-        })
-        .expect_err("failing fetcher must fail");
+        let err =
+            decode_legacy_with_key_fetcher(&path, &valid, TokenReadMode::MigrateLegacy, || {
+                called.set(true);
+                Err::<[u8; 32], String>("keychain unavailable".to_string())
+            })
+            .expect_err("failing fetcher must fail");
         assert!(called.get(), "key fetcher must run for valid legacy input");
         assert!(
             err.contains("keychain unavailable"),
@@ -1310,7 +1408,7 @@ mod tests {
     fn corrupt_legacy_plaintext_yields_parse_error() {
         let path = tmp_path("corrupt-legacy.json");
         let bytes = b"{not valid json";
-        let err = tokens_from_bytes_with_key(&path, bytes, &test_key())
+        let err = tokens_from_bytes_with_key(&path, bytes, &test_key(), TokenReadMode::ReadOnly)
             .expect_err("corrupt legacy must fail");
         assert!(
             err.contains("Failed to parse legacy plaintext tokens file"),
@@ -1559,7 +1657,8 @@ mod tests {
             .join(BUNDLE_IDENTIFIER)
             .join("PresenceJam")
             .join("tokens.json");
-        let tokens = read_tokens_at_path(&absent).expect("a missing tokens file must read empty");
+        let tokens = read_tokens_at_path(&absent, TokenReadMode::ReadOnly)
+            .expect("a missing tokens file must read empty");
         assert!(tokens.spotify_tokens.is_none() && tokens.teams_tokens.is_none());
         assert!(
             !absent.parent().expect("parent dir").exists(),
