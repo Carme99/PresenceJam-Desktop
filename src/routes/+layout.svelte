@@ -54,6 +54,144 @@
   import type { DeviceCodeResponse, AppConfig } from '$lib/types';
   devLog(`[LAYOUT] PresenceJam build: ${import.meta.env.VITE_APP_BUILD ?? 'dev build'}`);
 
+  // #711: completion events carry the exact stage request id. Keep a bounded
+  // map of request state so a cancel can suppress either a queued completion
+  // or a notification already waiting on OS permission. Only terminal,
+  // acknowledged entries are evictable. If every slot is unresolved, new
+  // requests fail closed until one of those entries drains.
+  type UpdateStageNotificationState = {
+    completionSeen: boolean;
+    notificationPending: boolean;
+    cancelled: boolean;
+  };
+
+  const MAX_TRACKED_UPDATE_STAGES = 32;
+  const updateStageNotifications = new Map<string, UpdateStageNotificationState>();
+  let updateNotificationDispatchDestroyed = false;
+
+  function stateForUpdateStage(requestId: string): UpdateStageNotificationState | null {
+    const existing = updateStageNotifications.get(requestId);
+    if (existing) {
+      // Refresh insertion order so the bound evicts the oldest acknowledged
+      // state, not the request most recently involved in a race.
+      updateStageNotifications.delete(requestId);
+      updateStageNotifications.set(requestId, existing);
+      return existing;
+    }
+
+    if (updateStageNotifications.size >= MAX_TRACKED_UPDATE_STAGES) {
+      let acknowledgedId: string | undefined;
+      for (const [trackedId, state] of updateStageNotifications) {
+        if (state.completionSeen && !state.notificationPending) {
+          acknowledgedId = trackedId;
+          break;
+        }
+      }
+      if (acknowledgedId === undefined) {
+        devLog('[LAYOUT] update-stage tracking saturated; notification backpressured');
+        return null;
+      }
+      updateStageNotifications.delete(acknowledgedId);
+    }
+    const state: UpdateStageNotificationState = {
+      completionSeen: false,
+      notificationPending: false,
+      cancelled: false
+    };
+    updateStageNotifications.set(requestId, state);
+    return state;
+  }
+  // A request id is reserved by the UI before its command is sent. This is
+  // deliberately separate from completion handling: cancellation must be
+  // able to find a tombstone even when all other requests are still pending.
+  function reserveUpdateStage(requestId: string): boolean {
+    if (!requestId) return false;
+    const existing = updateStageNotifications.get(requestId);
+    if (existing) {
+      updateStageNotifications.delete(requestId);
+      updateStageNotifications.set(requestId, existing);
+      return true;
+    }
+
+    if (updateStageNotifications.size >= MAX_TRACKED_UPDATE_STAGES) {
+      let acknowledgedId: string | undefined;
+      for (const [trackedId, state] of updateStageNotifications) {
+        if (state.completionSeen && !state.notificationPending) {
+          acknowledgedId = trackedId;
+          break;
+        }
+      }
+      if (acknowledgedId === undefined) {
+        devLog('[LAYOUT] update-stage start refused; tracking saturated');
+        return false;
+      }
+      updateStageNotifications.delete(acknowledgedId);
+    }
+
+    updateStageNotifications.set(requestId, {
+      completionSeen: false,
+      notificationPending: false,
+      cancelled: false
+    });
+    return true;
+  }
+
+  function setUpdateStageCancellation(requestId: string, cancelled: boolean) {
+    if (!requestId || !updateStageNotifications.has(requestId)) return;
+    const state = updateStageNotifications.get(requestId)!;
+    state.cancelled = cancelled;
+    const terminalWithoutPendingSend = cancelled
+      ? state.completionSeen && !state.notificationPending
+      : !state.completionSeen || !state.notificationPending;
+    if (terminalWithoutPendingSend) updateStageNotifications.delete(requestId);
+  }
+
+  function handleUpdateStageComplete(version: string, requestId: string) {
+    if (!requestId) {
+      // Events from a pre-#711 backend have no request id to bind. Preserve
+      // their notification compatibility; every new backend event is scoped.
+      void notifyUpdateStaged(version, () => updateNotificationDispatchDestroyed);
+      return;
+    }
+    const state = stateForUpdateStage(requestId);
+    if (!state) {
+      devLog('[LAYOUT] update-stage-complete suppressed by tracking backpressure');
+      return;
+    }
+    if (state.completionSeen) {
+      devLog('[LAYOUT] duplicate update-stage-complete ignored');
+      return;
+    }
+    if (state.cancelled) {
+      updateStageNotifications.delete(requestId);
+      devLog('[LAYOUT] update-stage-complete ignored for cancelled stage');
+      return;
+    }
+    state.completionSeen = true;
+    state.notificationPending = true;
+    const finish = () => {
+      state.notificationPending = false;
+      if (state.cancelled && updateStageNotifications.get(requestId) === state) {
+        updateStageNotifications.delete(requestId);
+      }
+    };
+    void notifyUpdateStaged(
+      version,
+      () => updateNotificationDispatchDestroyed || state.cancelled
+    ).then(finish, finish);
+  }
+
+
+  function stopUpdateNotificationDispatch() {
+    updateNotificationDispatchDestroyed = true;
+    for (const [requestId, state] of updateStageNotifications) {
+      if (state.notificationPending) {
+        state.cancelled = true;
+        updateStageNotifications.delete(requestId);
+      }
+    }
+  }
+
   let playbackError = $state('');
   let playbackErrorTimeout: ReturnType<typeof setTimeout> | null = null;
 
@@ -70,6 +208,7 @@
   // Settings no longer owns spotify-reconnect-required (issue #220) to
   // avoid missed events when the user is on Dashboard.
   onMount(() => {
+    updateNotificationDispatchDestroyed = false;
     // #498: never touch Tauri IPC outside the runtime (plain browser).
     if (!isTauriRuntime || !isMainWindow) return;
     // #601: the badge map is empty on every load, but detached windows
@@ -302,13 +441,16 @@
       })
     );
 
-    // #675: S10's deferred-stage success signal (the only emitter; the
-    // throttled `update-stage-progress` cannot distinguish success). Drives
-    // the fourth notification class from the always-mounted layout.
+    // #675 / #711: completion is request-scoped. The tracker suppresses a
+    // queued event and rechecks cancellation after notification permission
+    // before the plugin call.
     presenceTeardown.add(
-      listen<{ version?: string }>('update-stage-complete', (event) => {
+      listen<{ version?: string; request_id?: string }>('update-stage-complete', (event) => {
         devLog('[LAYOUT] update-stage-complete received');
-        void notifyUpdateStaged(String(event.payload?.version ?? ''));
+        handleUpdateStageComplete(
+          String(event.payload?.version ?? ''),
+          String(event.payload?.request_id ?? '')
+        );
       })
     );
 
@@ -320,6 +462,7 @@
 
     return () => {
       destroyed = true;
+      stopUpdateNotificationDispatch();
       pendingTeamsPoll = null;
       unlistenTeams?.();
       unlistenSpotify?.();
@@ -331,6 +474,7 @@
 
   onDestroy(() => {
     if (playbackErrorTimeout) clearTimeout(playbackErrorTimeout);
+    stopUpdateNotificationDispatch();
   });
 </script>
 
@@ -358,7 +502,7 @@
     <button class="toast-dismiss" onclick={() => { playbackError = ''; if (playbackErrorTimeout) { clearTimeout(playbackErrorTimeout); playbackErrorTimeout = null; } }} aria-label={t('common.dismiss')}>×</button>
   </div>
 {/if}
-{#if isMainWindow}<UpdatePrompt />{/if}
+{#if isMainWindow}<UpdatePrompt onStageStart={reserveUpdateStage} onStageCancellation={setUpdateStageCancellation} />{/if}
 
 <style>
   .playback-toast {

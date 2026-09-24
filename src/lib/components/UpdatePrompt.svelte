@@ -8,6 +8,10 @@
   import { t } from '$lib/i18n';
   import { configHydrated, configStore, loadConfig } from '$lib/stores/config';
 
+  let { onStageStart, onStageCancellation }: {
+    onStageStart?: (requestId: string) => boolean;
+    onStageCancellation?: (requestId: string, cancelled: boolean) => void;
+  } = $props();
   // Always-mounted update banner (3.0-P5). On mount it asks the updater
   // plugin whether a newer release exists; if it does it shows a small
   // dismissible banner with a "Download & Install" button (immediate
@@ -33,16 +37,18 @@
   // applied on process exit by `updater_bg::install_pending_on_exit`.
   let stagedVersion = $state('');
   let staging = $state(false);
-  // #590: live position of the deferred stage, streamed on
-  // `update-stage-progress` while `stage_deferred_update` downloads.
-  // `staging` alone only drives the "Preparing…" label; `stageAborted`
-  // marks a stage the user walked away from mid-download (the Rust side
-  // owns the transfer and cannot be interrupted, so the outcome is
-  // discarded when it lands — see stageForQuit).
+  // #590: live position of the deferred download.
   let stageDownloaded = $state(0);
   let stageTotal = $state<number | null>(null);
+  // #711: `stageGeneration` is the frontend half of the backend interlock.
+  // Cancel advances it synchronously, so a command/event from the losing
+  // stage cannot repopulate staged state or announce success afterwards.
   let stageAborted = $state(false);
   let cancelling = $state(false);
+  let stageGeneration = 0;
+  let activeStageRequestId = '';
+  let stagedStageRequestId = '';
+  let stageRequestSerial = 0;
   // #431: `confirming` shows the install/skip choice surface;
   // `currentVersion` is the running build (best-effort — the banner
   // falls back to version-agnostic strings when it stays empty);
@@ -52,6 +58,11 @@
   let confirming = $state(false);
   let currentVersion = $state('');
   let staleSkippedVersion = $state('');
+
+  function newStageRequestId(): string {
+    stageRequestSerial += 1;
+    return `${Date.now()}-${stageRequestSerial}`;
+  }
 
   // Mirrors the backend `UpdateCheckOutcome` returned by `check_for_update`
   // (kept local, same convention as StageOutcome). `notes` and `pub_date`
@@ -70,15 +81,22 @@
   interface StageOutcome {
     staged: string | null;
     current: string;
-    skipped?: 'current' | 'stale' | 'already-skipped' | null;
+    skipped?: 'current' | 'stale' | 'already-skipped' | 'cancelled' | null;
   }
 
   // Mirrors the backend `StageProgress` shape emitted on
   // `update-stage-progress` (kept local, same convention as StageOutcome).
-  // `total` is `null` when the server sent no `Content-Length`.
+  // `total` is `null` when the server sent no `Content-Length`; `request_id`
+  // identifies the exact stage so a losing download cannot overwrite the next
+  // stage's progress.
   interface StageProgress {
     downloaded: number;
     total: number | null;
+    request_id?: string;
+  }
+
+  interface CancelOutcome {
+    state: 'idle' | 'cancelled' | 'already-completed';
   }
 
   // 4.7.0 (issue #678): the candidate comes from the backend, which resolves
@@ -216,6 +234,12 @@
     let destroyed = false;
     let unlistenStage: UnlistenFn | null = null;
     listen<StageProgress>('update-stage-progress', (event) => {
+      const requestId = event.payload.request_id ?? '';
+      if (
+        requestId &&
+        requestId !== activeStageRequestId &&
+        requestId !== stagedStageRequestId
+      ) return;
       stageDownloaded = event.payload.downloaded;
       stageTotal = event.payload.total;
     }).then((fn) => {
@@ -322,33 +346,46 @@
   // confirmed the install knowing both versions.
   async function stageForQuit(force: boolean) {
     if (!update || staging || downloading) return;
+    const requestId = newStageRequestId();
+    // The layout must own the request before IPC starts. A full unresolved
+    // tracker refuses the request instead of creating an untracked stage that
+    // could later complete after its cancellation tombstone was lost.
+    if (onStageStart && !onStageStart(requestId)) return;
+    const generation = ++stageGeneration;
+    activeStageRequestId = requestId;
+    stagedStageRequestId = '';
     staging = true;
     stageAborted = false;
     stageDownloaded = 0;
     stageTotal = null;
     error = '';
     try {
-      const outcome = await invoke<StageOutcome>('stage_deferred_update', { force });
-      // Backend truth for the running version — always populated, so
-      // the staged state can show both versions unconditionally.
-      currentVersion = outcome.current;
-      if (stageAborted) {
-        // #590: the user cancelled while the payload was downloading. The
-        // Rust side owns the transfer and cannot be interrupted, so the
-        // bytes landed anyway — discard them instead of advertising a
-        // stage the user already walked away from.
-        stageAborted = false;
-        if (outcome.staged) {
-          await invoke('cancel_deferred_update').catch((e) => {
-            console.error('[UPDATER] cancel_deferred_update (after cancel) failed:', e);
-          });
-        }
+      const outcome = await invoke<StageOutcome>('stage_deferred_update', {
+        force,
+        requestId
+      });
+      if (generation !== stageGeneration) {
+        // A settled non-success command is the request-specific terminal
+        // acknowledgement for a cancel that arrived first. Keep the filter
+        // for a staged result: its completion event (queued or already seen)
+        // owns acknowledgement of that success path.
+        if (!outcome.staged) onStageCancellation?.(requestId, false);
         return;
       }
+      // Backend truth for the running version — always populated, so the
+      // staged state can show both versions unconditionally.
+      currentVersion = outcome.current;
       if (outcome.staged) {
         stagedVersion = outcome.staged;
+        stagedStageRequestId = requestId;
+        activeStageRequestId = '';
         confirming = false;
         staleSkippedVersion = '';
+      } else if (outcome.skipped === 'cancelled' || stageAborted) {
+        // The backend generation already dropped the bytes. This settled
+        // request is now safe for the layout to release its tombstone.
+        onStageCancellation?.(requestId, false);
+        return;
       } else if (outcome.skipped === 'current') {
         // #957: nothing to do — the manifest no longer offers the version
         // this banner cached (a re-cut or rolled-back release), so there is
@@ -359,6 +396,7 @@
         staleSkippedVersion = '';
         confirming = false;
         update = null;
+        onStageCancellation?.(requestId, false);
       } else {
         // Declined as stale (backend recorded a skip marker, so a retry
         // short-circuits without re-downloading): show the skipped
@@ -366,13 +404,24 @@
         // re-offering the plain install prompt.
         staleSkippedVersion = update.version;
         confirming = false;
+        onStageCancellation?.(requestId, false);
       }
     } catch (e) {
+      if (generation !== stageGeneration) {
+        // A failed command cannot emit success. Its settlement is therefore
+        // the terminal acknowledgement that makes suppression removable.
+        onStageCancellation?.(requestId, false);
+        return;
+      }
       console.error('[UPDATER] stage_deferred_update failed:', e);
       error = String(e);
-      stageAborted = false;
+      onStageCancellation?.(requestId, false);
     } finally {
-      staging = false;
+      if (generation === stageGeneration) {
+        staging = false;
+        stageAborted = false;
+        activeStageRequestId = '';
+      }
     }
   }
 
@@ -384,20 +433,33 @@
     await stageForQuit(true);
   }
 
-  // #590: abandons the deferred stage and returns the banner to its plain
-  // update offer. A download already in flight cannot be stopped
-  // Rust-side, so that case marks the stage abandoned and `stageForQuit`
-  // discards the payload when it lands; an already-staged payload is
-  // dropped immediately by `cancel_deferred_update`, which also releases
-  // the verified bytes instead of holding them for the rest of the session.
+  // #711 cancellation is final across every asynchronous edge. Advancing the
+  // generation and recording the request id happen before awaiting either IPC
+  // command, so the backend can bind the cancel to this exact request and the
+  // layout can suppress a completion already queued for the webview.
   async function cancelStage() {
     if (cancelling) return;
     cancelling = true;
     error = '';
+    const requestId = staging ? activeStageRequestId : stagedStageRequestId;
+    const generationBeforeCancel = stageGeneration;
+    stageGeneration += 1;
     if (staging) stageAborted = true;
+    if (requestId) onStageCancellation?.(requestId, true);
     try {
-      await invoke('cancel_deferred_update');
+      const outcome = await invoke<CancelOutcome>('cancel_deferred_update', { requestId });
+      // Every successful response leaves the request tombstone in place:
+      // `idle`/`cancelled` are acknowledged by the older stage command's
+      // terminal result, while `already-completed` may still have a queued
+      // completion event that must be consumed before removal is safe.
+      if (outcome.state === 'already-completed') {
+        console.debug('[UPDATER] deferred stage completed before cancellation');
+      }
       stagedVersion = '';
+      activeStageRequestId = '';
+      stagedStageRequestId = '';
+      staging = false;
+      stageAborted = false;
       stageDownloaded = 0;
       stageTotal = null;
       confirming = false;
@@ -408,9 +470,12 @@
       // channel.
       checkForUpdate();
     } catch (e) {
-      // The payload is still held Rust-side, so the banner must keep
-      // saying so rather than claiming the stage is gone.
+      // IPC failure means the backend never confirmed the interlock. Restore
+      // this generation so the original command can still publish truthful
+      // completion state instead of leaving the banner permanently busy.
+      stageGeneration = generationBeforeCancel;
       if (staging) stageAborted = false;
+      if (requestId) onStageCancellation?.(requestId, false);
       console.error('[UPDATER] cancel_deferred_update failed:', e);
       error = String(e);
     } finally {

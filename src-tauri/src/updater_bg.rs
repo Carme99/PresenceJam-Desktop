@@ -44,6 +44,7 @@
 
 use crate::config::UpdateChannel;
 use parking_lot::Mutex;
+use std::collections::HashSet;
 use std::future::Future;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
@@ -52,6 +53,15 @@ use url::Url;
 
 /// Log tag prefix for this submodule (mirrors the `[CMD.MISC]` pattern).
 const TAG: &str = "[UPDATER.BG]";
+
+/// Maximum number of accepted cancellations whose stage IPC has not reached
+/// `begin` yet. The set is never evicted: once full, new stages and unique
+/// unmatched cancellations are backpressured until a delayed stage consumes
+/// one of the retained tombstones.
+const MAX_CANCELLED_BEFORE_BEGIN: usize = 32;
+
+const PRE_BEGIN_CANCELLATIONS_FULL: &str =
+    "too many deferred-stage cancellations are awaiting acknowledgement";
 
 /// File name of the failed-install marker inside `config_dir()`.
 const MARKER_FILE_NAME: &str = "update-install-failed.json";
@@ -83,8 +93,12 @@ struct StagedUpdate {
 const SKIP_REASON_CURRENT: &str = "current";
 const SKIP_REASON_STALE: &str = "stale";
 const SKIP_REASON_ALREADY_SKIPPED: &str = "already-skipped";
+/// A download lost to a cancellation that committed first. This is distinct
+/// from the stale/current outcomes: no bytes were staged, and the completion
+/// event must stay silent.
+const SKIP_REASON_CANCELLED: &str = "cancelled";
 
-/// Outcome of a `stage_deferred_update` call (issue #431): the staged
+/// Outcome of a [`StageDeferredOutcome`] (issue #431): the staged
 /// version — `None` when there was nothing to stage — plus the running
 /// version from backend truth (`CARGO_PKG_VERSION`), so the quit-time
 /// confirmation surface can show staged-vs-current without an extra
@@ -100,12 +114,189 @@ pub struct StageDeferredOutcome {
     pub skipped: Option<String>,
 }
 
-/// Managed state holding at most one staged deferred update.
-pub struct PendingUpdate(Mutex<Option<StagedUpdate>>);
+/// What cancellation found when it acquired the pending-update lock.
+/// `idle` means the exact request has not begun yet and is now tombstoned;
+/// `already-completed` means its verified payload was already committed, so
+/// cancellation still removes it before the exit installer can see it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CancelDeferredState {
+    Idle,
+    Cancelled,
+    AlreadyCompleted,
+}
+
+/// Result of cancelling the deferred stage. The discriminator is the backend
+/// race verdict, so the frontend never has to infer completion from a local
+/// promise ordering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct CancelDeferredOutcome {
+    pub state: CancelDeferredState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActiveStage {
+    generation: u64,
+    request_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BeginOutcome {
+    Started(ActiveStage),
+    Cancelled,
+    Backpressured,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CancelDisposition {
+    Idle,
+    Cancelled,
+    AlreadyCompleted,
+}
+
+impl From<CancelDisposition> for CancelDeferredState {
+    fn from(value: CancelDisposition) -> Self {
+        match value {
+            CancelDisposition::Idle => Self::Idle,
+            CancelDisposition::Cancelled => Self::Cancelled,
+            CancelDisposition::AlreadyCompleted => Self::AlreadyCompleted,
+        }
+    }
+}
+
+/// Locked state behind the deferred-stage race interlock. `generation` only
+/// moves forward. A new stage or a cancellation invalidates every completion
+/// from an older generation; `commit` accepts bytes only while its exact
+/// `(generation, request_id)` pair is still active. `cancelled_before_begin`
+/// closes the narrower IPC ordering where cancellation reaches the backend
+/// first: `begin` consumes that request-scoped tombstone and performs no IO.
+/// The set is explicitly bounded; when full, unrelated new stages are
+/// backpressured instead of evicting a cancellation and reviving its delayed
+/// command.
+#[derive(Debug)]
+struct PendingUpdateState<T> {
+    staged: Option<T>,
+    staged_request_id: Option<String>,
+    generation: u64,
+    active: Option<ActiveStage>,
+    cancelled_before_begin: HashSet<String>,
+}
+
+impl<T> PendingUpdateState<T> {
+    fn new() -> Self {
+        Self {
+            staged: None,
+            staged_request_id: None,
+            generation: 0,
+            active: None,
+            cancelled_before_begin: HashSet::new(),
+        }
+    }
+
+    fn advance_generation(&mut self) -> u64 {
+        // Saturating rather than wrapping preserves the ordering invariant
+        // even at the u64 boundary; a command cannot meaningfully issue
+        // 2^64 stages in one process lifetime.
+        self.generation = self.generation.saturating_add(1);
+        self.generation
+    }
+
+    fn begin(&mut self, request_id: String) -> BeginOutcome {
+        if self.cancelled_before_begin.remove(&request_id) {
+            return BeginOutcome::Cancelled;
+        }
+        if self.cancelled_before_begin.len() >= MAX_CANCELLED_BEFORE_BEGIN {
+            return BeginOutcome::Backpressured;
+        }
+        let active = ActiveStage {
+            generation: self.advance_generation(),
+            request_id,
+        };
+        self.active = Some(active.clone());
+        BeginOutcome::Started(active)
+    }
+
+    fn matches(&self, active: &ActiveStage) -> bool {
+        self.active.as_ref() == Some(active)
+    }
+
+    fn finish_without_staging(&mut self, active: &ActiveStage) {
+        if self.matches(active) {
+            self.active = None;
+        }
+    }
+
+    fn commit(&mut self, active: &ActiveStage, staged: T) -> bool {
+        if !self.matches(active) {
+            return false;
+        }
+        self.staged = Some(staged);
+        self.staged_request_id = Some(active.request_id.clone());
+        self.active = None;
+        true
+    }
+
+    fn cancel_request(&mut self, request_id: &str) -> Result<CancelDisposition, String> {
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.request_id == request_id)
+        {
+            self.advance_generation();
+            self.active = None;
+            Ok(CancelDisposition::Cancelled)
+        } else if self.staged_request_id.as_deref() == Some(request_id) {
+            self.staged = None;
+            self.staged_request_id = None;
+            Ok(CancelDisposition::AlreadyCompleted)
+        } else if self.cancelled_before_begin.contains(request_id) {
+            Ok(CancelDisposition::Idle)
+        } else if self.cancelled_before_begin.len() >= MAX_CANCELLED_BEFORE_BEGIN {
+            Err(PRE_BEGIN_CANCELLATIONS_FULL.to_string())
+        } else {
+            // The stage command has not reached `begin` yet. Remember this
+            // exact request under the same lock so a later begin cannot turn
+            // the older invocation into a fresh, apparently uncancelled stage.
+            self.cancelled_before_begin.insert(request_id.to_string());
+            Ok(CancelDisposition::Idle)
+        }
+    }
+
+    /// Invalidate all active and staged work for paths that are not tied to
+    /// one UI request, such as an immediate-install restart. Unmatched
+    /// pre-begin tombstones stay intact: their older IPC calls may still be
+    /// queued and must not become fresh stages after this global discard.
+    fn cancel(&mut self) -> CancelDisposition {
+        self.advance_generation();
+        let cancelled_in_flight = self.active.take().is_some();
+        let completed = self.staged.take().is_some();
+        self.staged_request_id = None;
+        if completed {
+            CancelDisposition::AlreadyCompleted
+        } else if cancelled_in_flight {
+            CancelDisposition::Cancelled
+        } else {
+            CancelDisposition::Idle
+        }
+    }
+
+    fn take_for_exit(&mut self) -> Option<T> {
+        // Exit wins the same lock as completion: invalidate anything still
+        // downloading before taking the committed payload. Pre-begin
+        // tombstones remain meaningful until any queued command consumes one.
+        self.active = None;
+        self.staged_request_id = None;
+        self.staged.take()
+    }
+}
+
+/// Managed state holding at most one staged deferred update plus the
+/// generation/cancellation interlock that protects it.
+pub struct PendingUpdate(Mutex<PendingUpdateState<StagedUpdate>>);
 
 impl PendingUpdate {
     pub fn new() -> Self {
-        Self(Mutex::new(None))
+        Self(Mutex::new(PendingUpdateState::new()))
     }
 }
 
@@ -347,20 +538,6 @@ pub fn clear_failed_update_install() -> Result<(), String> {
     log::info!("{TAG} clear_failed_update_install: SUCCESS");
     Ok(())
 }
-/// Empties an update slot, handing back whatever was staged in it — the
-/// verified payload bytes are released with it.
-///
-/// This is the take-and-report rule shared by [`cancel_deferred_update`]
-/// (issue #590: the user pressed Cancel) and [`discard_staged_update`]
-/// (issue #806: the app is about to restart into a version it just
-/// installed, so a payload staged for the deferred "Install on quit" flow
-/// must not be applied on the way out). Generic over the slot payload
-/// because `tauri_plugin_updater::Update` has no public constructor, so the
-/// rule is unit-tested on the slot rather than through an `AppHandle`.
-#[cfg(desktop)]
-fn take_staged<T>(slot: &Mutex<Option<T>>) -> Option<T> {
-    slot.lock().take()
-}
 
 /// Discards any staged deferred update, releasing the verified payload bytes
 /// (issue #806).
@@ -379,26 +556,55 @@ pub fn discard_staged_update(app: &AppHandle) {
     use tauri::Manager;
 
     let state = app.state::<PendingUpdate>();
-    if take_staged(&state.0).is_some() {
-        log::info!("{TAG} discard_staged_update: staged update discarded");
-    } else {
-        log::debug!("{TAG} discard_staged_update: nothing staged");
+    let disposition = state.0.lock().cancel();
+    match disposition {
+        CancelDisposition::AlreadyCompleted => {
+            log::info!("{TAG} discard_staged_update: staged update discarded");
+        }
+        CancelDisposition::Cancelled => {
+            log::info!("{TAG} discard_staged_update: in-flight stage cancelled");
+        }
+        CancelDisposition::Idle => {
+            log::debug!("{TAG} discard_staged_update: nothing staged");
+        }
     }
 }
 
-/// Tauri command: discards a staged deferred update (issue #590). Before
-/// this existed, staging was one-way — the only exit was applying the
-/// payload at the next quit, so an accidental click could not be undone and
-/// the verified bytes stayed resident for the rest of the session. Dropping
-/// the [`StagedUpdate`] releases that payload immediately.
-///
-/// Shares [`discard_staged_update`]'s body: the command and the immediate
-/// install path must be the same operation, or one of them will drift.
+/// Tauri command: cancels one deferred-stage request and discards any payload
+/// that exact request already committed (issue #711). The request id closes
+/// both IPC orderings: an active download loses by generation, while a cancel
+/// that arrives before `begin` leaves a tombstone consumed by that request.
 #[cfg(desktop)]
 #[tauri::command]
-pub fn cancel_deferred_update(app: AppHandle) -> Result<(), String> {
-    discard_staged_update(&app);
-    Ok(())
+pub fn cancel_deferred_update(
+    app: AppHandle,
+    request_id: String,
+) -> Result<CancelDeferredOutcome, String> {
+    use tauri::Manager;
+
+    if request_id.is_empty() {
+        return Err("cancel_deferred_update requires a non-empty request_id".to_string());
+    }
+    let disposition = {
+        let state = app.state::<PendingUpdate>();
+        let mut guard = state.0.lock();
+        let disposition = guard.cancel_request(&request_id)?;
+        drop(guard);
+        disposition
+    };
+    let disposition: CancelDeferredState = disposition.into();
+    match disposition {
+        CancelDeferredState::AlreadyCompleted => {
+            log::info!("{TAG} cancel_deferred_update: completed stage {request_id} discarded");
+        }
+        CancelDeferredState::Cancelled => {
+            log::info!("{TAG} cancel_deferred_update: in-flight stage {request_id} cancelled");
+        }
+        CancelDeferredState::Idle => {
+            log::debug!("{TAG} cancel_deferred_update: stage {request_id} cancelled before begin");
+        }
+    }
+    Ok(CancelDeferredOutcome { state: disposition })
 }
 
 // ---------------------------------------------------------------------
@@ -919,6 +1125,17 @@ pub async fn check_for_update(app: AppHandle) -> Result<Option<UpdateCheckOutcom
 // Stage completion (issue #678)
 // ---------------------------------------------------------------------
 
+/// Wire envelope for progress events. The throttle remains a pure
+/// downloaded/total state machine; the caller stamps every emission with the
+/// active request id so a cancelled or superseded download cannot overwrite
+/// the next stage's frontend position.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct StageProgressEvent {
+    #[serde(flatten)]
+    progress: StageProgress,
+    request_id: String,
+}
+
 /// Emitted once on `update-stage-complete` after a deferred update has been
 /// staged successfully, so an always-mounted consumer can notify without
 /// being the webview that invoked [`stage_deferred_update`]. No `ts_rs`
@@ -927,22 +1144,16 @@ pub async fn check_for_update(app: AppHandle) -> Result<Option<UpdateCheckOutcom
 pub struct StageComplete {
     /// Version that is now staged for install on quit.
     pub version: String,
+    /// Caller-generated token for this exact stage. The frontend keeps a
+    /// cancelled token long enough to reject an event already queued in the
+    /// webview, closing the last cross-process delivery window.
+    pub request_id: String,
 }
 
-/// Emits for a [`StageDeferredOutcome`]: hands `emit` the STAGED version iff
-/// the stage actually succeeded, and never the running one.
-///
-/// Factored out of [`stage_deferred_update`] so the rules its consumers depend
-/// on are testable without a webview. Three of them:
-/// - the payload carries the staged version, not `current` (announcing the
-///   already-installed version would make the consumer's "update ready" toast
-///   a lie);
-/// - it fires exactly once per call;
-/// - it does NOT fire for an outcome that staged nothing, whichever kind of
-///   nothing it was — `stage_deferred_update` returns `staged: None` when the
-///   app is already current, when the candidate was declined as stale, and
-///   when the persisted skip marker short-circuited it (the `skipped` reason
-///   tells those apart, issue #957).
+/// Pure event-selection regression: hands `emit` the staged version iff the
+/// stage committed, and never the running version. Outcomes that staged
+/// nothing — current, stale, already skipped, or cancelled — stay silent.
+#[cfg(test)]
 fn emit_stage_complete<E: FnOnce(&str)>(outcome: &StageDeferredOutcome, emit: E) {
     if let Some(version) = outcome.staged.as_deref() {
         emit(version);
@@ -977,15 +1188,45 @@ pub async fn stage_deferred_update(
     window: tauri::Window,
     app: AppHandle,
     force: bool,
+    request_id: String,
 ) -> Result<StageDeferredOutcome, String> {
     // Issue #241: update staging downloads + verifies payloads into managed
     // state; UpdatePrompt is main-window-only so detached windows never
     // legitimately stage. Guarded via the commands-layer helper.
     crate::commands::require_main_window(&window)?;
+    if request_id.is_empty() {
+        return Err("stage_deferred_update requires a non-empty request_id".to_string());
+    }
     log::info!("{TAG} stage_deferred_update: ENTRY");
-    let emit_app = app.clone();
+    use tauri::Manager;
+    let active = {
+        let pending = app.state::<PendingUpdate>();
+        let mut guard = pending.0.lock();
+        let active = match guard.begin(request_id) {
+            BeginOutcome::Started(active) => active,
+            BeginOutcome::Cancelled => {
+                drop(guard);
+                log::info!(
+                    "{TAG} stage_deferred_update: request was cancelled before begin; no IO started"
+                );
+                return Ok(StageDeferredOutcome {
+                    staged: None,
+                    current: env!("CARGO_PKG_VERSION").to_string(),
+                    skipped: Some(SKIP_REASON_CANCELLED.to_string()),
+                });
+            }
+            BeginOutcome::Backpressured => {
+                drop(guard);
+                log::warn!(
+                    "{TAG} stage_deferred_update: pre-begin cancellation capacity is full; no IO started"
+                );
+                return Err(PRE_BEGIN_CANCELLATIONS_FULL.to_string());
+            }
+        };
+        drop(guard);
+        active
+    };
     let outcome = tauri::async_runtime::spawn_blocking(move || {
-        use tauri::Manager;
         tauri::async_runtime::block_on(async move {
             let current = env!("CARGO_PKG_VERSION").to_string();
             let channel = crate::config::load_config()
@@ -1002,7 +1243,18 @@ pub async fn stage_deferred_update(
                 })?
                 .updates
                 .channel;
+            if !app.state::<PendingUpdate>().0.lock().matches(&active) {
+                return Ok(StageDeferredOutcome {
+                    staged: None,
+                    current,
+                    skipped: Some(SKIP_REASON_CANCELLED.to_string()),
+                });
+            }
             let Some(update) = check_with_channel(&app, channel).await? else {
+                app.state::<PendingUpdate>()
+                    .0
+                    .lock()
+                    .finish_without_staging(&active);
                 log::info!("{TAG} stage_deferred_update: no update available");
                 return Ok::<StageDeferredOutcome, String>(StageDeferredOutcome {
                     staged: None,
@@ -1010,6 +1262,13 @@ pub async fn stage_deferred_update(
                     skipped: Some(SKIP_REASON_CURRENT.to_string()),
                 });
             };
+            if !app.state::<PendingUpdate>().0.lock().matches(&active) {
+                return Ok(StageDeferredOutcome {
+                    staged: None,
+                    current,
+                    skipped: Some(SKIP_REASON_CANCELLED.to_string()),
+                });
+            }
             let version = update.version.clone();
             // Issue #431: never stage a stale update unless the user
             // explicitly forced it after seeing both versions on the
@@ -1024,6 +1283,10 @@ pub async fn stage_deferred_update(
                             version,
                             current
                         );
+                        app.state::<PendingUpdate>()
+                            .0
+                            .lock()
+                            .finish_without_staging(&active);
                         return Ok::<StageDeferredOutcome, String>(StageDeferredOutcome {
                             staged: None,
                             current,
@@ -1042,6 +1305,10 @@ pub async fn stage_deferred_update(
                         current_version: current.clone(),
                         timestamp: chrono::Utc::now().to_rfc3339(),
                     });
+                    app.state::<PendingUpdate>()
+                        .0
+                        .lock()
+                        .finish_without_staging(&active);
                     return Ok::<StageDeferredOutcome, String>(StageDeferredOutcome {
                         staged: None,
                         current,
@@ -1052,39 +1319,86 @@ pub async fn stage_deferred_update(
             // Issue #590: stream throttled progress while the payload
             // downloads, so a multi-minute stage is not a black box.
             let progress_app = app.clone();
+            let progress_request_id = active.request_id.clone();
             let mut progress = StageProgressThrottle::new();
             let bytes = update
                 .download(
                     move |chunk_len, content_length| {
-                        if let Some(event) =
+                        if let Some(progress) =
                             progress.observe(Instant::now(), chunk_len as u64, content_length)
                         {
-                            let _ = progress_app.emit("update-stage-progress", event);
+                            let _ = progress_app.emit(
+                                "update-stage-progress",
+                                StageProgressEvent {
+                                    progress,
+                                    request_id: progress_request_id.clone(),
+                                },
+                            );
                         }
                     },
                     || {},
                 )
                 .await
                 .map_err(|e| format!("update download failed: {e}"))?;
-            // Terminal event: the last throttled chunk can land short of the
-            // end (and a `total` the server never sent leaves the bar
-            // indeterminate), so the completion is announced explicitly.
-            let staged_len = bytes.len() as u64;
+            // Cancellation and this commit contend for one lock. Whichever
+            // arrives first wins: a cancelled generation drops the bytes
+            // without emitting terminal progress/completion; a commit emits
+            // both before releasing the lock, so cancel can then remove the
+            // payload and the exit installer can never observe it.
+            let state = app.state::<PendingUpdate>();
+            let mut pending = state.0.lock();
+            if !pending.commit(
+                &active,
+                StagedUpdate {
+                    update,
+                    bytes,
+                    forced: force,
+                },
+            ) {
+                log::info!(
+                    "{TAG} stage_deferred_update: v{} download completed after cancellation; discarded",
+                    version
+                );
+                return Ok(StageDeferredOutcome {
+                    staged: None,
+                    current,
+                    skipped: Some(SKIP_REASON_CANCELLED.to_string()),
+                });
+            }
+            // The last throttled chunk can land short of the end (and an
+            // unknown total leaves the bar indeterminate), so success has an
+            // explicit terminal position. It is emitted under the same lock as
+            // the commit and must not escape for a cancelled generation.
+            let staged_len = pending
+                .staged
+                .as_ref()
+                .map_or(0, |staged| staged.bytes.len() as u64);
             let _ = app.emit(
                 "update-stage-progress",
-                StageProgress {
-                    downloaded: staged_len,
-                    total: Some(staged_len),
+                StageProgressEvent {
+                    progress: StageProgress {
+                        downloaded: staged_len,
+                        total: Some(staged_len),
+                    },
+                    request_id: active.request_id.clone(),
                 },
             );
+            if let Err(e) = app.emit(
+                "update-stage-complete",
+                StageComplete {
+                    version: version.clone(),
+                    request_id: active.request_id.clone(),
+                },
+            ) {
+                log::warn!("{TAG} stage_deferred_update: update-stage-complete emit failed - {e}");
+            }
+            drop(pending);
             log::info!(
                 "{TAG} stage_deferred_update: staged v{} ({} bytes){}",
                 version,
-                bytes.len(),
+                staged_len,
                 if force { " (forced)" } else { "" }
             );
-            let state = app.state::<PendingUpdate>();
-            *state.0.lock() = Some(StagedUpdate { update, bytes, forced: force });
             // Clear any older failed-install marker now that a fresh update
             // is staged. On Windows the plugin's install_inner exits the
             // process (ShellExecuteW + process::exit(0)), so the Ok arm of
@@ -1104,14 +1418,6 @@ pub async fn stage_deferred_update(
     .await
     .map_err(|e| format!("stage_deferred_update spawn_blocking panicked: {:?}", e))??;
     log::info!("{TAG} stage_deferred_update: SUCCESS");
-    emit_stage_complete(&outcome, |version| {
-        let payload = StageComplete {
-            version: version.to_string(),
-        };
-        if let Err(e) = emit_app.emit("update-stage-complete", payload) {
-            log::warn!("{TAG} stage_deferred_update: update-stage-complete emit failed - {e}");
-        }
-    });
     Ok(outcome)
 }
 
@@ -1146,7 +1452,7 @@ pub fn install_pending_on_exit(app: &AppHandle) {
     let Some(state) = app.try_state::<PendingUpdate>() else {
         return;
     };
-    let Some(staged) = state.0.lock().take() else {
+    let Some(staged) = state.0.lock().take_for_exit() else {
         return;
     };
     let version = staged.update.version.clone();
@@ -1831,10 +2137,11 @@ mod tests {
     fn test_stage_complete_payload_shape() {
         assert_eq!(
             serde_json::to_string(&StageComplete {
-                version: "4.7.0".to_string()
+                version: "4.7.0".to_string(),
+                request_id: "stage-17".to_string(),
             })
             .unwrap(),
-            r#"{"version":"4.7.0"}"#
+            r#"{"version":"4.7.0","request_id":"stage-17"}"#
         );
     }
 
@@ -1860,6 +2167,7 @@ mod tests {
             SKIP_REASON_CURRENT,
             SKIP_REASON_STALE,
             SKIP_REASON_ALREADY_SKIPPED,
+            SKIP_REASON_CANCELLED,
         ] {
             let outcome = StageDeferredOutcome {
                 staged: None,
@@ -1911,29 +2219,161 @@ mod tests {
     // Immediate-install discard (issue #806)
     // -----------------------------------------------------------------
 
-    /// The take-and-report rule behind both discard paths. A populated slot
-    /// must be emptied — that emptiness is exactly what stops
-    /// `install_pending_on_exit` from reinstalling a payload the user has
-    /// already installed — and a second discard (the restart path can run
-    /// more than once) must find nothing rather than re-report a payload it
-    /// no longer holds.
+    fn start_stage(state: &Mutex<PendingUpdateState<Vec<u8>>>, request_id: &str) -> ActiveStage {
+        match state.lock().begin(request_id.to_string()) {
+            BeginOutcome::Started(active) => active,
+            BeginOutcome::Cancelled => panic!("uncancelled request {request_id} was tombstoned"),
+            BeginOutcome::Backpressured => panic!("cancellation capacity is full for {request_id}"),
+        }
+    }
+
     #[test]
     fn test_take_staged_empties_the_slot() {
-        let slot: Mutex<Option<Vec<u8>>> = Mutex::new(Some(vec![1, 2, 3]));
+        let slot: Mutex<PendingUpdateState<Vec<u8>>> = Mutex::new(PendingUpdateState::new());
+        let active = start_stage(&slot, "stage-1");
+
+        assert!(slot.lock().commit(&active, vec![1, 2, 3]));
+        assert_eq!(
+            slot.lock().take_for_exit(),
+            Some(vec![1, 2, 3]),
+            "the committed payload must be handed to the exit installer"
+        );
+        assert!(
+            slot.lock().take_for_exit().is_none(),
+            "PendingUpdate must be left empty so a second exit cannot reinstall it"
+        );
+    }
+
+    /// Cancellation wins even when its IPC command runs before the stage
+    /// command's `begin`. Two outstanding request ids are retained separately,
+    /// so another begin/cancel pair cannot overwrite the first tombstone.
+    #[test]
+    fn test_cancel_before_begin_never_stages_or_installs() {
+        let slot: Mutex<PendingUpdateState<Vec<u8>>> = Mutex::new(PendingUpdateState::new());
+        assert_eq!(
+            slot.lock().cancel_request("stage-a"),
+            Ok(CancelDisposition::Idle)
+        );
+        let stage_b = start_stage(&slot, "stage-b");
+        assert_eq!(
+            slot.lock().cancel_request("stage-b"),
+            Ok(CancelDisposition::Cancelled)
+        );
+        assert!(matches!(
+            slot.lock().begin("stage-a".to_string()),
+            BeginOutcome::Cancelled
+        ));
+        assert!(!slot.lock().matches(&stage_b));
+        assert!(slot.lock().take_for_exit().is_none());
+    }
+
+    /// A global discard cannot prove that an older stage IPC command has
+    /// stopped. Its request tombstone therefore survives the reset and is
+    /// consumed only when that exact command eventually calls `begin`.
+    #[test]
+    fn test_global_discard_preserves_pre_begin_cancellation() {
+        let slot: Mutex<PendingUpdateState<Vec<u8>>> = Mutex::new(PendingUpdateState::new());
+        assert_eq!(
+            slot.lock().cancel_request("queued-stage"),
+            Ok(CancelDisposition::Idle)
+        );
+        assert_eq!(slot.lock().cancel(), CancelDisposition::Idle);
+        assert!(matches!(
+            slot.lock().begin("queued-stage".to_string()),
+            BeginOutcome::Cancelled
+        ));
+    }
+
+    /// Deterministic cancellation-wins race: cancel advances the generation
+    /// while the download is active, so the completion cannot commit bytes.
+    /// Exit then observes an empty slot, proving a cancelled stage cannot
+    /// become install-on-quit state.
+    #[test]
+    fn test_cancelled_completion_never_stages_or_installs() {
+        let slot: Mutex<PendingUpdateState<Vec<u8>>> = Mutex::new(PendingUpdateState::new());
+        let active = start_stage(&slot, "stage-cancelled");
 
         assert_eq!(
-            take_staged(&slot),
-            Some(vec![1, 2, 3]),
-            "the staged payload must be handed back so it can be released"
+            slot.lock().cancel_request("stage-cancelled"),
+            Ok(CancelDisposition::Cancelled)
         );
-        assert!(
-            slot.lock().is_none(),
-            "PendingUpdate must be left empty so the exit-time install has nothing to apply"
+        assert!(!slot.lock().commit(&active, vec![1, 2, 3]));
+        assert!(slot.lock().take_for_exit().is_none());
+    }
+
+    /// Completion-wins race: the bytes commit first, cancellation reports that
+    /// precise state, and the same cancellation still removes the payload so
+    /// the exit installer cannot apply it afterwards.
+    #[test]
+    fn test_cancellation_after_completion_reports_and_removes_staged_update() {
+        let slot: Mutex<PendingUpdateState<Vec<u8>>> = Mutex::new(PendingUpdateState::new());
+        let active = start_stage(&slot, "stage-complete");
+
+        assert!(slot.lock().commit(&active, vec![4, 5, 6]));
+        assert_eq!(
+            slot.lock().cancel_request("stage-complete"),
+            Ok(CancelDisposition::AlreadyCompleted)
         );
-        assert_eq!(take_staged(&slot), None, "a second discard is a no-op");
-        assert!(
-            take_staged(&PendingUpdate::new().0).is_none(),
-            "a freshly managed PendingUpdate starts empty"
+        assert!(slot.lock().take_for_exit().is_none());
+    }
+
+    /// Pre-begin cancellations never grow past their explicit bound. A full
+    /// tombstone set backpressures a new stage without dropping any accepted
+    /// cancellation, and repeated unmatched unique cancels are rejected
+    /// instead of evicting a delayed stage's protection.
+    #[test]
+    fn test_pre_begin_cancellations_are_bounded_without_reviving_stages() {
+        let slot: Mutex<PendingUpdateState<Vec<u8>>> = Mutex::new(PendingUpdateState::new());
+
+        for index in 0..MAX_CANCELLED_BEFORE_BEGIN {
+            assert_eq!(
+                slot.lock().cancel_request(&format!("queued-{index}")),
+                Ok(CancelDisposition::Idle)
+            );
+        }
+        assert!(matches!(
+            slot.lock().begin("new-stage".to_string()),
+            BeginOutcome::Backpressured
+        ));
+        for index in MAX_CANCELLED_BEFORE_BEGIN..(MAX_CANCELLED_BEFORE_BEGIN * 2) {
+            assert_eq!(
+                slot.lock().cancel_request(&format!("overflow-{index}")),
+                Err(PRE_BEGIN_CANCELLATIONS_FULL.to_string())
+            );
+        }
+        assert_eq!(
+            slot.lock().cancelled_before_begin.len(),
+            MAX_CANCELLED_BEFORE_BEGIN
+        );
+        assert!(matches!(
+            slot.lock().begin("queued-0".to_string()),
+            BeginOutcome::Cancelled
+        ));
+        assert!(slot.lock().take_for_exit().is_none());
+    }
+
+    #[test]
+    fn test_cancel_outcome_wire_shape_reports_completion_winner() {
+        assert_eq!(
+            serde_json::to_string(&CancelDeferredOutcome {
+                state: CancelDeferredState::AlreadyCompleted,
+            })
+            .unwrap(),
+            r#"{"state":"already-completed"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&CancelDeferredOutcome {
+                state: CancelDeferredState::Cancelled,
+            })
+            .unwrap(),
+            r#"{"state":"cancelled"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&CancelDeferredOutcome {
+                state: CancelDeferredState::Idle,
+            })
+            .unwrap(),
+            r#"{"state":"idle"}"#
         );
     }
 }

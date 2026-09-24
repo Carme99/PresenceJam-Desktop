@@ -190,18 +190,24 @@ export async function migrateLegacyNotificationPreference(cfg: AppConfig): Promi
   }
 }
 
+const NEVER_CANCELLED = () => false;
+
 /**
  * The #549 rule, now shared by every class: the OS prompt's answer decides
  * whether the class may notify. Denied (or a plugin that throws, e.g. outside
  * the Tauri runtime) means no notification, never a silent checkbox.
  */
-async function ensurePermission(): Promise<boolean> {
+async function ensurePermission(
+  isCancelled: () => boolean = NEVER_CANCELLED
+): Promise<boolean> {
+  if (isCancelled()) return false;
   let granted = false;
   try {
     granted = await isPermissionGranted();
   } catch {
     // Fall through to the request path.
   }
+  if (isCancelled()) return false;
   if (!granted) {
     try {
       granted = (await requestPermission()) === 'granted';
@@ -209,7 +215,7 @@ async function ensurePermission(): Promise<boolean> {
       // A refused/there-is-no-prompt answer is a "no", not a crash.
     }
   }
-  return granted;
+  return granted && !isCancelled();
 }
 
 /**
@@ -221,15 +227,19 @@ async function sendNow(
   cls: NotificationClass,
   title: string,
   body?: string,
-  icon?: string
+  icon?: string,
+  isCancelled: () => boolean = NEVER_CANCELLED
 ): Promise<boolean> {
   // Issue #789: no config on disk may have been read yet, so the class flags
   // are still the compiled-in defaults — dispatching on them could notify a
   // class the user turned off. After a failed `load_config` the store holds
   // those same defaults, and a disabled class must stay silent.
+  if (isCancelled()) return false;
   if (!get(configHydrated)) return false;
   if (!get(notificationPreferences)[cls]) return false;
-  if (!(await ensurePermission())) return false;
+  if (!(await ensurePermission(isCancelled))) return false;
+  // Permission IPC is asynchronous; cancellation may win either await.
+  if (isCancelled()) return false;
   const target = CLASS_TARGETS[cls];
   try {
     sendNotification({ title, body, icon: icon || undefined, id: target.id, group: target.group });
@@ -239,6 +249,7 @@ async function sendNow(
     return false;
   }
 }
+
 
 let lastNotifiedId = '';
 let lastNotifiedAt = 0;
@@ -296,11 +307,16 @@ export async function notifyAuthRequired(): Promise<boolean> {
 }
 
 /** An update finished staging and will install on quit. */
-export async function notifyUpdateStaged(version: string): Promise<boolean> {
+export async function notifyUpdateStaged(
+  version: string,
+  isCancelled: () => boolean = NEVER_CANCELLED
+): Promise<boolean> {
   return sendNow(
     'update_staged',
     t('notifications.updateStagedTitle'),
-    t('notifications.updateStagedBody', { version })
+    t('notifications.updateStagedBody', { version }),
+    undefined,
+    isCancelled
   );
 }
 
