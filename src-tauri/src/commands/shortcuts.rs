@@ -1336,7 +1336,6 @@ mod tests {
         );
     }
 
-
     /// Issue #944: the Linux X11 backend can acknowledge a dead-channel grab as
     /// success. A preflight refusal must instead stop before any plugin
     /// release/registration and report the same stable reason for both
