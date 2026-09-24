@@ -189,8 +189,8 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Install Chromium for Playwright
-        run: npx playwright install --with-deps chromium
+      - name: Install Chromium + WebKit for Playwright
+        run: npx playwright install --with-deps chromium webkit
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e  # 1.96
@@ -255,8 +255,8 @@ jobs:
       - name: Frontend unit tests + coverage ratchet (npm run test:coverage)
         run: npm run test:coverage
 
-      # Playwright exercises the real log-column geometry in a Chromium
-      # browser, complementing (not replacing) the Vitest coverage ratchet.
+      # Playwright exercises the real log-column geometry in Chromium and
+      # WebKit, complementing (not replacing) the Vitest coverage ratchet.
       - name: Browser geometry regression (npm run test:browser)
         run: npm run test:browser
 
