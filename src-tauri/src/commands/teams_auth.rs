@@ -445,9 +445,9 @@ mod tests {
         );
     }
 
-    /// The gate has to sit before the commit: a check placed after
-    /// `*guard = Some(tokens)` would already have overwritten the newer flow's
-    /// tokens. Structural because reaching those lines needs a live
+    /// The gate has to sit before the recovery-aware commit wrapper. A check
+    /// placed after `commit_teams` would already have overwritten the newer
+    /// flow's tokens. Structural because reaching those lines needs a live
     /// `AppHandle` and the blocking poll loop.
     #[test]
     fn the_commit_gate_precedes_the_token_slot_write() {
@@ -459,7 +459,7 @@ mod tests {
             .find("may_commit(")
             .expect("poll_teams_auth must gate its commit on the flow being current");
         let commit = body
-            .find("*guard = Some(tokens)")
+            .find(".commit_teams(")
             .expect("poll_teams_auth must commit the tokens it polled");
         assert!(
             gate < commit,
