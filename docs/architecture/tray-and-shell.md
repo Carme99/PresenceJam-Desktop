@@ -9,12 +9,13 @@
 Logs and Settings can each be *popped out* into their own window (and popped
 back in), VS Code detached-panel style:
 
-- **Creation is JS-side:** the main window constructs child windows via the
-  `@tauri-apps/api/webviewWindow` constructor with stable labels
-  `logs-detached` / `settings-detached` and URL `/detached/<pane>`; a SvelteKit
-  route (`src/routes/detached/[pane]/+page.svelte`) renders `LogViewer` or
-  `Settings` in detached mode. `tauri.conf.json`'s `app.windows` is untouched —
-  the app still boots single-window.
+- **Creation is Rust-side:** `src/lib/stores/detach.ts` invokes the
+  `detach_pane` command; `src-tauri/src/lib.rs` matches a fixed
+  `DetachedPaneSpec` table for the stable labels `logs-detached` /
+  `settings-detached`, their `/detached/<pane>` URLs, and their window sizes.
+  A SvelteKit route (`src/routes/detached/[pane]/+page.svelte`) renders
+  `LogViewer` or `Settings` in detached mode. `tauri.conf.json`'s `app.windows`
+  is untouched — the app still boots single-window.
 - **Main window stays the source of truth:** `currentView` remains
   main-window-only. Detached panes read and write the same app-global state —
   they call `save_config` / `load_config`, `reconnect_spotify` /
@@ -38,11 +39,11 @@ back in), VS Code detached-panel style:
   detached render reaches, because **Pop back in** is `popIn()` →
   `WebviewWindow.close()`, which Tauri resolves against the *calling* webview's
   ACL, and `core:window:default` does not include it. Without that explicit entry
-  the close rejected and the pane was marked not-detached while its window stayed
+  the close is rejected and the pane is marked not-detached while its window stays
   on screen; a refused close now leaves the badge alone instead of lying
-  (`detach.ts::popIn`, with `reconcileDetachedPanes()` on boot). `default.json`
-  gains `core:window:allow-create` + `core:webview:allow-create-webview-window`
-  for runtime creation.
+  (`detach.ts::popIn`, with `reconcileDetachedPanes()` on boot). The main
+  `default.json` capability has no `core:window:allow-create` or
+  `core:webview:allow-create-webview-window` grant; Rust owns window creation.
 - **Listener hygiene:** `+layout.svelte` guards its always-mounted
   reconnect/auth/update listeners (and `UpdatePrompt`) behind a window-label
   check so detached windows never double-register handlers.
