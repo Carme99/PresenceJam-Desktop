@@ -269,6 +269,50 @@ fn normalize(text: &str) -> Vec<NormChar> {
     collapse_repeated_chars(&result)
 }
 
+/// Memoizes failed full matcher states for one normalized-text/word pair.
+/// Both boundary flags are part of the key: a result reached with a stretched
+/// or separator-spanning match is not interchangeable with the same position
+/// reached through exact characters.
+struct MatchMemo {
+    seen: Vec<bool>,
+    word_len: usize,
+    #[cfg(test)]
+    explored: usize,
+}
+
+impl MatchMemo {
+    fn new(text_len: usize, word_len: usize) -> Self {
+        Self {
+            // Four flag combinations per (text index, word index), including
+            // the terminal positions. Vec<bool> keeps this table bit-packed.
+            seen: vec![false; (text_len + 1) * (word_len + 1) * 4],
+            word_len,
+            #[cfg(test)]
+            explored: 0,
+        }
+    }
+
+    fn visit(&mut self, si: usize, wi: usize, stretched: bool, sep_skipped: bool) -> bool {
+        let flags = usize::from(stretched) | (usize::from(sep_skipped) << 1);
+        let index = ((si * (self.word_len + 1) + wi) * 4) + flags;
+        if self.seen[index] {
+            return false;
+        }
+
+        self.seen[index] = true;
+        #[cfg(test)]
+        {
+            self.explored += 1;
+        }
+        true
+    }
+
+    #[cfg(test)]
+    fn explored(&self) -> usize {
+        self.explored
+    }
+}
+
 /// Recursive matcher with backtracking. At a mismatch the matcher may:
 /// - skip a separator (insertion reading, e.g. `f.u.c.k`), or consume it
 ///   as a single-char wildcard (substitution reading, e.g. `f*ck`);
@@ -280,7 +324,9 @@ fn normalize(text: &str) -> Vec<NormChar> {
 /// (#332: `shiitake` must stay clean). Any separator skip (or wildcard
 /// consumption) also sets `sep_skipped`, which callers must gate on
 /// original-string word boundaries on BOTH sides (`Push It` joins to
-/// `pushit`, which fabricates `shit`).
+/// `pushit`, which fabricates `shit`). The memo turns the DAG into work
+/// linear in its full state space, so overlapping backtracking branches cannot
+/// repeatedly explore the same failed sub-tree.
 fn match_from(
     text: &[NormChar],
     word: &[char],
@@ -288,7 +334,11 @@ fn match_from(
     wi: usize,
     stretched: bool,
     sep_skipped: bool,
+    memo: &mut MatchMemo,
 ) -> Option<(usize, bool, bool)> {
+    if !memo.visit(si, wi, stretched, sep_skipped) {
+        return None;
+    }
     if wi == word.len() {
         return Some((si, stretched, sep_skipped));
     }
@@ -297,29 +347,29 @@ fn match_from(
     }
     let t = text[si];
     if t.ch == word[wi] {
-        return match_from(text, word, si + 1, wi + 1, stretched, sep_skipped);
+        return match_from(text, word, si + 1, wi + 1, stretched, sep_skipped, memo);
     }
     if !t.ch.is_alphanumeric() {
-        if let Some(found) = match_from(text, word, si + 1, wi, stretched, true) {
+        if let Some(found) = match_from(text, word, si + 1, wi, stretched, true, memo) {
             return Some(found);
         }
-        if let Some((end, _, _)) = match_from(text, word, si + 1, wi + 1, true, true) {
+        if let Some((end, _, _)) = match_from(text, word, si + 1, wi + 1, true, true, memo) {
             return Some((end, true, true));
         }
         return None;
     }
     if si > 0 && t.ch == text[si - 1].ch {
-        if let Some(found) = match_from(text, word, si + 1, wi, true, sep_skipped) {
+        if let Some(found) = match_from(text, word, si + 1, wi, true, sep_skipped, memo) {
             return Some(found);
         }
     }
     if t.leet {
-        if let Some(found) = match_from(text, word, si + 1, wi, true, sep_skipped) {
+        if let Some(found) = match_from(text, word, si + 1, wi, true, sep_skipped, memo) {
             return Some(found);
         }
     }
     if word[..wi].contains(&t.ch) {
-        if let Some(found) = match_from(text, word, si + 1, wi, true, sep_skipped) {
+        if let Some(found) = match_from(text, word, si + 1, wi, true, sep_skipped, memo) {
             return Some(found);
         }
     }
@@ -327,7 +377,11 @@ fn match_from(
 }
 
 fn matches_at_pos(text: &[NormChar], word: &[char], start: usize) -> Option<(usize, bool, bool)> {
-    match_from(text, word, start, 0, false, false)
+    // A successful path may later be rejected by the caller's boundary gates.
+    // Keep that result private to this start position; otherwise a later start
+    // could mistake the seen success state for a previously-proven failure.
+    let mut memo = MatchMemo::new(text.len(), word.len());
+    match_from(text, word, start, 0, false, false, &mut memo)
 }
 
 /// Whitelist scoped per stem: only `cock` + `tail` is a known-clean
@@ -763,6 +817,34 @@ mod tests {
     fn test_repeated_char_collapse() {
         assert!(contains_profanity("shiiit", &[]));
         assert!(contains_profanity("fuuuuck", &[]));
+    }
+
+    #[test]
+    fn test_adversarial_leet_input_has_bounded_exploration() {
+        let adversarial = format!("tit{}", "71".repeat(28));
+        assert_eq!(adversarial.len(), 59);
+        assert!(!contains_profanity(&adversarial, &[]));
+
+        // The issue's 60-character boundary variant remains clean as well.
+        let sixty_chars = format!("{adversarial} ");
+        assert_eq!(sixty_chars.len(), 60);
+        assert!(!contains_profanity(&sixty_chars, &[]));
+
+        // Pin the work, rather than relying on a timing-sensitive assertion.
+        // Before memoization this failed `tits` search repeatedly entered the
+        // same leet/stretch sub-tree; now it stays far below this budget.
+        let text = normalize(&adversarial);
+        let word: Vec<char> = "tits".chars().collect();
+        let mut memo = MatchMemo::new(text.len(), word.len());
+        assert_eq!(
+            match_from(&text, &word, 0, 0, false, false, &mut memo),
+            None
+        );
+        assert!(
+            memo.explored() <= 128,
+            "adversarial match explored {} states",
+            memo.explored()
+        );
     }
 
     #[test]
