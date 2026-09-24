@@ -590,7 +590,7 @@ export const fr: Dict = {
   'settings.shortcutReasonX11Unavailable':
     'Les raccourcis globaux nécessitent un affichage X11 accessible sur ce bureau',
   'settings.shortcutReasonWorkerUnavailable':
-    'Le processus des raccourcis globaux n’a pas pu être vérifié ; les raccourcis sont indisponibles',
+    'Le processus des raccourcis globaux n’a pas pu être vérifié ; les raccourcis sont indisponibles',
   // 4.7.0 — S12 hygiène (thème/densité)
   'settings.themeSystem': 'Système',
   'settings.themeHint':
