@@ -309,3 +309,88 @@ describe('theme cross-window runtime (#423)', () => {
     unsub();
   });
 });
+
+describe('presence store no-op guards (#891)', () => {
+  it('setSyncing skips identical events and only advances revision on a transition', async () => {
+    const { get } = await import('svelte/store');
+    const p = await import('$lib/stores/presence');
+    p.presence.set({ ...p.INITIAL_PRESENCE });
+    let notifications = 0;
+    const unsub = p.presence.subscribe(() => {
+      notifications++;
+    });
+    notifications = 0;
+
+    const initialRevision = get(p.presence).revision;
+    p.setSyncing(false);
+    expect(notifications).toBe(0);
+    expect(get(p.presence).revision).toBe(initialRevision);
+
+    p.setSyncing(true);
+    expect(notifications).toBe(1);
+    expect(get(p.presence)).toMatchObject({ syncing: true, revision: initialRevision + 1 });
+
+    p.setSyncing(true);
+    expect(notifications).toBe(1);
+    expect(get(p.presence).revision).toBe(initialRevision + 1);
+    unsub();
+  });
+
+  it('setPlaybackState skips identical events and advances revision only on transitions', async () => {
+    const { get } = await import('svelte/store');
+    const p = await import('$lib/stores/presence');
+    p.presence.set({ ...p.INITIAL_PRESENCE });
+    let notifications = 0;
+    const unsub = p.presence.subscribe(() => {
+      notifications++;
+    });
+    notifications = 0;
+
+    const initialRevision = get(p.presence).revision;
+    p.setPlaybackState(true);
+    expect(notifications).toBe(0);
+    expect(get(p.presence).revision).toBe(initialRevision);
+
+    p.setPlaybackState(false);
+    expect(notifications).toBe(1);
+    expect(get(p.presence)).toMatchObject({ paused: true, revision: initialRevision + 1 });
+
+    p.setPlaybackState(false);
+    expect(notifications).toBe(1);
+    expect(get(p.presence).revision).toBe(initialRevision + 1);
+
+    p.setPlaybackState(true);
+    expect(notifications).toBe(2);
+    expect(get(p.presence)).toMatchObject({ paused: false, revision: initialRevision + 2 });
+
+    p.setPlaybackState(true);
+    expect(notifications).toBe(2);
+    expect(get(p.presence).revision).toBe(initialRevision + 2);
+    unsub();
+  });
+
+  it('setAvailabilityListening keeps event-only revision semantics while skipping identical events', async () => {
+    const { get } = await import('svelte/store');
+    const p = await import('$lib/stores/presence');
+    p.presence.set({ ...p.INITIAL_PRESENCE });
+    let notifications = 0;
+    const unsub = p.presence.subscribe(() => {
+      notifications++;
+    });
+    notifications = 0;
+
+    const initialRevision = get(p.presence).revision;
+    p.setAvailabilityListening(false);
+    expect(notifications).toBe(0);
+    expect(get(p.presence).revision).toBe(initialRevision);
+
+    p.setAvailabilityListening(true);
+    expect(notifications).toBe(1);
+    expect(get(p.presence)).toMatchObject({ availabilityListening: true, revision: initialRevision });
+
+    p.setAvailabilityListening(true);
+    expect(notifications).toBe(1);
+    expect(get(p.presence).revision).toBe(initialRevision);
+    unsub();
+  });
+});

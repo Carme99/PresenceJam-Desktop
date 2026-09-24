@@ -1,4 +1,4 @@
-import { writable } from 'svelte/store';
+import { get, writable } from 'svelte/store';
 import { devLog } from '$lib/utils/dev';
 import type { SyncStatus } from '$lib/types';
 
@@ -84,9 +84,9 @@ export const presence = writable<PresenceState>({ ...INITIAL_PRESENCE });
  * `SyncStatus.is_syncing` when a view hydrates).
  */
 export function setSyncing(value: boolean): void {
-  presence.update((s) =>
-    s.syncing === value ? s : { ...s, syncing: value, revision: s.revision + 1 }
-  );
+  const current = get(presence);
+  if (current.syncing === value) return;
+  presence.update((s) => ({ ...s, syncing: value, revision: s.revision + 1 }));
 }
 
 /**
@@ -176,21 +176,21 @@ export function markPresenceCleared(): void {
  * consumed: the card this drives is the Dashboard's own hydrated track.
  */
 export function setPlaybackState(isPlaying: boolean): void {
+  const current = get(presence);
+  if (isPlaying ? !current.paused && !current.stopped : current.paused) return;
   presence.update((s) => {
     if (isPlaying) {
-      if (!s.paused && !s.stopped) return s;
       return { ...s, paused: false, pausedStatus: null, stopped: false, revision: s.revision + 1 };
     }
-    if (s.paused) return s;
     return { ...s, paused: true, revision: s.revision + 1 };
   });
 }
 
 /** `presence-availability-updated`, from the payload's structured flag. */
 export function setAvailabilityListening(listening: boolean): void {
-  presence.update((s) =>
-    s.availabilityListening === listening ? s : { ...s, availabilityListening: listening }
-  );
+  const current = get(presence);
+  if (current.availabilityListening === listening) return;
+  presence.update((s) => ({ ...s, availabilityListening: listening }));
 }
 
 /**
