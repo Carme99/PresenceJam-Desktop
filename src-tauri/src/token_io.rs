@@ -738,8 +738,9 @@ pub fn persist_tokens(state: &Arc<crate::AppState>, app: &tauri::AppHandle) -> R
 }
 
 /// Path-level persist core that first gives a keychain-gated snapshot one
-/// chance to recover from the same encrypted file. A successful retry installs
-/// the loaded tokens, clears the gate, and proceeds with the normal write. Any
+/// chance to recover from the same encrypted file. A successful retry hydrates
+/// empty in-memory slots, preserves present token values committed since the
+/// blocked persist, clears the gate, and proceeds with the normal write. Any
 /// retry failure preserves the existing ciphertext and returns the original
 /// persist refusal.
 fn persist_tokens_at_with_retry(
@@ -754,7 +755,20 @@ fn persist_tokens_at_with_retry(
             .to_string();
         if state.tokens_load.blocks_persist() {
             let recovered = read().map_err(|_| blocked_error.clone())?;
-            crate::apply_token_load_result(state, Ok(recovered));
+            // `None` is the only safe slot to hydrate: it may represent either
+            // an unrecovered provider or a session that has not been populated
+            // in memory. A present value is necessarily a token commit and
+            // must win over the older on-disk snapshot. Persist the merged
+            // pair only after both slot guards are held.
+            let mut spotify = state.tokens.spotify_mut();
+            let mut teams = state.tokens.teams_mut();
+            if spotify.is_none() {
+                *spotify = recovered.spotify_tokens;
+            }
+            if teams.is_none() {
+                *teams = recovered.teams_tokens;
+            }
+            state.tokens_load.mark_ready();
         }
         // Issue #800: bind BOTH slot guards before either clone. Cloning one
         // slot guard at a time left a window in which a commit landing on the
@@ -1171,6 +1185,63 @@ mod tests {
         assert_eq!(state.tokens_load.state(), crate::TokensLoadState::Ready);
         assert_eq!(state.tokens.spotify().as_ref().unwrap().access_token, "at");
         assert_eq!(state.tokens.teams().as_ref().unwrap().access_token, "tat");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn keychain_unavailable_retry_preserves_post_failure_token_changes() {
+        let dir = unique_tmp_dir("keychain-retry-fresh-token");
+        let path = dir.join("tokens.json");
+        write_tokens_atomic_with_key(&path, &sample_file(), &test_key()).unwrap();
+        let state = Arc::new(crate::AppState::new());
+        state.tokens_load.mark_keychain_unavailable();
+
+        let blocked = persist_tokens_at_with_retry(
+            &state,
+            &path,
+            || {
+                Err(TokensLoadError::KeychainUnavailable(
+                    "credential store locked".to_string(),
+                ))
+            },
+            |_path, _contents| panic!("blocked recovery must not reach the writer"),
+        );
+        assert!(blocked.is_err());
+
+        let fresh_spotify = SpotifyTokens {
+            access_token: "fresh-spotify-access".to_string(),
+            refresh_token: "fresh-spotify-refresh".to_string(),
+            expires_at: chrono::Utc::now() + chrono::Duration::seconds(7200),
+        };
+        let fresh_teams = TeamsTokens {
+            access_token: "fresh-teams-access".to_string(),
+            refresh_token: Some("fresh-teams-refresh".to_string()),
+            expires_at: chrono::Utc::now() + chrono::Duration::seconds(7200),
+        };
+        *state.tokens.spotify_mut() = Some(fresh_spotify.clone());
+        *state.tokens.teams_mut() = Some(fresh_teams.clone());
+
+        let mut written = None;
+        persist_tokens_at_with_retry(
+            &state,
+            &path,
+            || Ok(sample_file()),
+            |_path, contents| {
+                written = Some(contents.clone());
+                Ok(())
+            },
+        )
+        .expect("the recovered keychain must unblock persistence");
+
+        let written = written.expect("the recovered persist must reach the writer");
+        assert_eq!(written.spotify_tokens, Some(fresh_spotify));
+        assert_eq!(written.teams_tokens, Some(fresh_teams));
+        assert_eq!(state.tokens_load.state(), crate::TokensLoadState::Ready);
+        assert_eq!(
+            state.tokens.spotify().as_ref(),
+            written.spotify_tokens.as_ref()
+        );
+        assert_eq!(state.tokens.teams().as_ref(), written.teams_tokens.as_ref());
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1872,40 +1943,6 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // Issue #800 (wiring guard): `persist_tokens_at_with_retry` must bind BOTH
-    // slot guards before cloning either slot, so the pair written to disk is a
-    // consistent cut. A behavioral test cannot deterministically interleave a
-    // Teams commit between the two clones without test-only plumbing inside
-    // the production function, so the ordering is pinned by a source scan of
-    // the isolated body (the shared literal-aware scanner `test_scan`, which
-    // isolates a body by depth-counting instead of a next-function anchor —
-    // this body holds a closure and a `TokensFile { .. }` literal). Pre-fix the
-    // body cloned the Spotify slot before the Teams guard was even bound, and
-    // this assertion fails on that shape.
-    #[test]
-    fn persist_binds_both_slot_guards_before_cloning() {
-        let src = include_str!("token_io.rs");
-        let production_src = src
-            .split_once("#[cfg(test)]")
-            .expect("token_io.rs must contain its test module")
-            .0;
-        let body = test_scan::fn_body(production_src, "fn persist_tokens_at_with_retry(");
-        let spotify_guard = body
-            .find("state.tokens.spotify()")
-            .expect("persist_tokens_at_with_retry must bind the Spotify slot guard");
-        let teams_guard = body
-            .find("state.tokens.teams()")
-            .expect("persist_tokens_at_with_retry must bind the Teams slot guard");
-        let first_clone = body
-            .find(".clone()")
-            .expect("persist_tokens_at_with_retry must clone at least one slot");
-        assert!(
-            spotify_guard < first_clone && teams_guard < first_clone,
-            "both slot guards must be bound before either slot is cloned, so a \
-             commit landing on the second slot cannot be dropped from the file \
-             (issue #800)"
-        );
-    }
     // Issue #766: `clear_tokens_file` must sweep every sidecar next to the
     // live file, not just delete `tokens.json`. Pre-fix it removed only the
     // live path, so a plaintext `tokens.json.tmp` leftover from a ≤ v2.10.0
