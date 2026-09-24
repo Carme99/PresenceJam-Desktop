@@ -553,7 +553,7 @@ export const fr: Dict = {
   'settings.updateChannelStable': 'Stable',
   'settings.updateChannelBeta': 'Bêta',
   'settings.updateChannelHint':
-    'Aucune version bêta n’est encore publiée : le canal Bêta retombe donc sur la version stable — ce repli est enregistré à chaque vérification. Les versions bêta s’installent uniquement à la fermeture.',
+    'Les versions bêta utilisent le flux bêta roulant lorsqu’il est disponible ; s’il est absent ou ne propose pas de version plus récente, le canal Bêta revient à la version stable. Les versions bêta s’installent uniquement à la fermeture.',
   'update.betaOnQuitOnly':
     'Canal Bêta : les mises à jour s’installent à la fermeture — il n’y a pas de téléchargement suivi d’un redémarrage sur ce canal.',
   // 4.7.0 — S8 global hotkeys

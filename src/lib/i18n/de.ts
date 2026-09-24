@@ -542,7 +542,7 @@ export const de: Dict = {
   'settings.updateChannelStable': 'Stabil',
   'settings.updateChannelBeta': 'Beta',
   'settings.updateChannelHint':
-    'Es ist noch kein Beta-Build veröffentlicht, daher greift der Beta-Kanal derzeit auf die stabile Version zurück — der Rückfall wird bei jeder Prüfung protokolliert. Beta-Builds werden nur beim Beenden installiert.',
+    'Beta-Builds verwenden den rollierenden Beta-Feed, wenn er verfügbar ist; fehlt er oder ist er nicht neuer, greift der Beta-Kanal auf die stabile Version zurück. Beta-Builds werden nur beim Beenden installiert.',
   'update.betaOnQuitOnly':
     'Beta-Kanal: Updates werden beim Beenden installiert — auf Beta gibt es keinen Download-und-Neustart-Pfad.',
   // 4.7.0 — S8 global hotkeys

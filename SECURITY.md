@@ -266,7 +266,7 @@ All API communication happens over **HTTPS/TLS**:
 | Spotify Web API | `https://api.spotify.com` |
 | Microsoft Auth | `https://login.microsoftonline.com` |
 | Microsoft Graph | `https://graph.microsoft.com` |
-| GitHub Releases (update check) | `https://github.com/Carme99/PresenceJam-Desktop/releases/latest/download/latest.json` — the beta channel uses `latest-beta.json` in the same directory |
+| GitHub Releases (update check) | `https://github.com/Carme99/PresenceJam-Desktop/releases/latest/download/latest.json`; Beta uses `https://github.com/Carme99/PresenceJam-Desktop/releases/download/beta/latest-beta.json` |
 
 No data is sent to any third-party server other than Spotify and Microsoft Graph APIs and the GitHub Releases update check listed above — the update request carries no user data beyond the app version and this machine's IP address.
 
