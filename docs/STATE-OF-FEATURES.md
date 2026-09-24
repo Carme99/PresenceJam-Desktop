@@ -1,4 +1,4 @@
-# State of Features — current main + wave-8
+# State of Features — current main + wave-9
 
 Quick, no-hedge answers to "does this thing actually work in *my* setup?"
 Most of the answers below are tied to a code path or a docs file you can read
@@ -9,7 +9,7 @@ end-to-end; the few rows that can't be sourced inline are explicitly flagged
 > row that's stale, the right place to flag it is in a PR against this file;
 > do not edit the underlying behavior silently.
 
-## Tested in main (wave-8 source audit)
+## Tested in main (wave-9 source audit)
 
 | Feature                                               | Status | Where it's wired / verified                                                                                             |
 |-------------------------------------------------------|--------|--------------------------------------------------------------------------------------------------------------------------|
@@ -45,6 +45,10 @@ end-to-end; the few rows that can't be sourced inline are explicitly flagged
 | Silent background update checks (C3a)                   | ✅     | `UpdatePrompt.svelte` re-checks every ~24h; failed silent checks stay console-only. |
 | Install-on-quit updates (C3c)                           | ⚠ Partial | `updater_bg.rs` stages a signature-verified payload in memory and applies it on exit. Cancellation is request-scoped: the frontend advances its generation, the backend cancels the exact request, and a completion after cancellation cannot be stored or installed; the published click-to-stage/quit/relaunch smoke is still pending. |
 | Release build-provenance attestations (C10)             | ✅ Verified | `release.yml` attests artifacts via SHA-pinned `actions/attest-build-provenance`; exercised live on the v4.0.0 and v4.1.0 tag runs (attest step green both times). `workflow_dispatch` with a `tag` input allows re-cutting an existing `v*` tag. |
+| Wave-9 token recovery hardening (#935)                  | ✅     | `token_io.rs::persist_tokens_at_with_retry` keeps blocked ciphertext, transitions a corrupt retry to a writable current-slot snapshot, preserves explicit provider tombstones, and holds both slot guards through snapshot/write. Command and polling clears use `clear_*_if_current` so a replacement wins without re-auth side effects. |
+| Wave-9 localized status fallback (#980)                  | ✅     | `commands/misc.rs::preview_status` takes the captured UI locale; `commands/sync.rs` resolves the paused fallback and `polling/poll_once.rs` resolves the stopped fallback through the locale tables, including whitespace-only defaults. `i18n/store.svelte.ts` serializes locale persistence latest-wins; reset keeps canonical default provenance across later locale changes. |
+| Wave-9 command adapters (#761)                          | ✅     | Device-code polling, auth event emission, and blocking IO adapters are split into testable production cores; `polling/mod.rs` exposes the Spotify/Teams typed CAS seams. Behavioral tests exercise interval clamping, persistence warnings, and commit ordering. |
+| Wave-9 diagnostics and browser coverage                 | ✅     | Diagnostics reports OS release and install flavour; `LogViewer.svelte` exposes a named focusable viewport, and CI/release workflows install Chromium plus WebKit before the browser gate. |
 | Dependency prune: shell/store plugins gone (C13)        | ✅     | `package.json`/`package-lock.json` and Cargo lock pruned of `tauri-plugin-shell`/`tauri-plugin-store` + npm shell plugin; ACKNOWLEDGEMENTS rows removed. No imports or capability grants existed. |
 | h2 0.4.18                                               | ✅     | RUSTSEC-2026-0258 cleared via lockfile bump (`ed88008`). |
 | i18n en/de/fr language picker (C6)                      | ✅ Verified | Shipped in v4.0.0 (`src/lib/i18n/` barrel, `Dict`-typed en/de/fr dictionaries, Settings language picker persisted to `config.locale` — the tray and the native application menu render from the same field, with `localStorage.locale` kept as a pre-paint mirror only, #674). 4.6 adds CLDR plural/number formatting (`Intl.PluralRules` / `Intl.NumberFormat`, built once per locale — French puts `0` in `one`, #616), `<html lang>` retagging on boot and on every switch, and cross-window convergence through a `storage` listener (#620). Wave-8 adds a typed `WEEKDAY_KEYS` registry consumed by Settings, with `tests/i18n.test.ts` pinning all seven weekday keys and including them in literal call-site coverage (#773). Rust-side error strings remain English (documented limitation). |

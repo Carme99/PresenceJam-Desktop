@@ -33,6 +33,16 @@ settings:
   truncated. A *schema-version* mismatch is **not** a quarantine — it goes through
   `migrate_config` in place.
 
+Wave-9 config writes are revision-stamped and serialized across processes:
+`config.rs::with_config_lock` holds the sidecar lock across the marker read,
+stale/terminal-revision check, clamped document preparation, and atomic replace.
+`MAX_CONFIG_REVISION` is the JavaScript-safe integer boundary; values above it
+are refused rather than rounded across the IPC boundary. `commands/config.rs`
+publishes the exact accepted document through `config-changed`, and the frontend
+store adopts it monotonically across Settings windows. The headless `--profile`
+path uses the same file transaction but remains next-load-only because this
+early-exit CLI path has no live `AppHandle` event channel.
+
   > **Surfaced on the Diagnostics page (#537, completing #379):**
   > `ConfigSummary` carries `config_quarantined` and
   > `config_quarantine_backup`, injected at the command boundary from

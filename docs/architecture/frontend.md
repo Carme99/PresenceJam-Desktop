@@ -82,7 +82,7 @@ The level-badge grid track is `max-content`, with badge typography driven by
 `var(--fs-xs)`, so localized labels are neither clipped nor allowed to overlap
 the message column. `tests/browser/logviewer.spec.ts` is a required Playwright
 gate: it renders all five levels in en/de/fr at comfortable and compact
-densities and checks actual Chromium box geometry. This complements rather than
+densities and checks actual Chromium and WebKit box geometry. This complements rather than
 replaces the Vitest suite.
 
 ## Frontend test layers
@@ -92,13 +92,14 @@ mounts the real root page under production CSS, reads the painted
 color/opacity/background from DOM and CSSOM, composites the effective
 foreground, and requires the normal-size build-version label to clear 4.5:1 in
 both themes. Playwright owns assertions that require a real browser layout;
-`playwright.config.ts` starts the Vite dev server, runs `tests/browser/`, and
-uses Chromium. Both Vitest coverage and `npm run test:browser` are run by PR CI
-and the release `verify` job.
+`playwright.config.ts` defines Chromium and WebKit projects, and the LogViewer
+keyboard/focus regression runs in both engines. PR CI and the release `verify`
+job install both browser engines before running `npm run test:browser`.
 
 `Dashboard.svelte` subscribes to `spotify-track-changed` with
 `listen<TrackInfo>`, so the TypeScript event payload is the generated Rust
 contract rather than an untyped object copied by hand.
+
 
 ## Event Bus
 
