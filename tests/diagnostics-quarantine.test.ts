@@ -37,7 +37,13 @@ function snapshotWith(quarantined: boolean, backup: string | null): DiagnosticsS
   return {
     app_version: '4.6.0',
     tauri_version: '2.0.0',
-    os: { platform: 'linux', arch: 'x86_64', family: 'unix' },
+    os: {
+      platform: 'linux',
+      arch: 'x86_64',
+      family: 'unix',
+      os_version: 'Ubuntu 24.04.1 LTS',
+      install_flavor: 'AppImage'
+    },
     config: {
       spotify_client_id: '',
       redirect_uri: 'http://127.0.0.1:8899/callback',
@@ -59,7 +65,14 @@ function snapshotWith(quarantined: boolean, backup: string | null): DiagnosticsS
       track_rules_count: 0,
       track_rules_enabled_count: 0,
       config_quarantined: quarantined,
-      config_quarantine_backup: backup
+      config_quarantine_backup: backup,
+      respect_manual_status: true,
+      gate_when_out_of_office: false,
+      profanity_extra_words_count: 4,
+      locale: 'de-DE',
+      update_channel: 'beta',
+      snoozed: true,
+      snooze_minutes_left: 17,
     },
     tokens: {
       spotify_connected: false,
@@ -101,6 +114,16 @@ async function mountWith(snapshot: DiagnosticsSnapshot) {
 
 function banner(container: HTMLElement): HTMLElement | null {
   return container.querySelector('.quarantine');
+}
+
+function diagnosticRow(container: HTMLElement, label: string): string {
+  const term = [...container.querySelectorAll('dt')].find(
+    (item) => item.textContent?.trim() === label
+  );
+  expect(term).toBeDefined();
+  const value = term?.nextElementSibling?.textContent?.trim();
+  expect(value).toBeDefined();
+  return value ?? '';
 }
 
 beforeEach(() => {
@@ -156,6 +179,59 @@ describe('Diagnostics quarantine banner (#537)', () => {
     // dismiss must not be able to destroy it (unlike #244's failed-install
     // record, whose only purpose was to be acknowledged).
     expect(invoke.mock.calls.map((c) => c[0])).toEqual(['get_diagnostics_snapshot']);
+  });
+});
+
+describe('Diagnostics runtime and config summary (#875, #786, #864)', () => {
+  it('shows every requested runtime and config row', async () => {
+    const { container } = await mountWith(snapshotWith(false, null));
+
+    expect(diagnosticRow(container, 'OS')).toBe(
+      'linux (x86_64, unix); Release: Ubuntu 24.04.1 LTS; Install flavor: appimage'
+    );
+    expect(diagnosticRow(container, 'Respect manual status')).toBe('Yes');
+    expect(diagnosticRow(container, 'Gate while out of office')).toBe('No');
+    expect(diagnosticRow(container, 'Locale')).toBe('de-DE');
+    expect(diagnosticRow(container, 'Update channel')).toBe('beta');
+    expect(diagnosticRow(container, 'Extra profanity words')).toBe('4');
+    expect(diagnosticRow(container, 'Sync snoozed')).toBe('Yes');
+  });
+
+  it('marks every new row unknown when an older payload omits its metadata', async () => {
+    const snapshot = snapshotWith(false, null);
+    Reflect.deleteProperty(snapshot.os, 'os_version');
+    Reflect.deleteProperty(snapshot.os, 'install_flavor');
+    for (const field of [
+      'respect_manual_status',
+      'gate_when_out_of_office',
+      'profanity_extra_words_count',
+      'locale',
+      'update_channel',
+      'snoozed'
+    ]) {
+      Reflect.deleteProperty(snapshot.config, field);
+    }
+
+    const { container } = await mountWith(snapshot);
+
+    expect(diagnosticRow(container, 'OS')).toBe(
+      'linux (x86_64, unix); Release: unknown; Install flavor: unknown'
+    );
+    expect(diagnosticRow(container, 'Respect manual status')).toBe('unknown');
+    expect(diagnosticRow(container, 'Gate while out of office')).toBe('unknown');
+    expect(diagnosticRow(container, 'Extra profanity words')).toBe('unknown');
+    expect(diagnosticRow(container, 'Locale')).toBe('unknown');
+    expect(diagnosticRow(container, 'Update channel')).toBe('unknown');
+    expect(diagnosticRow(container, 'Sync snoozed')).toBe('unknown');
+  });
+
+  it('keeps the documented English locale default for an explicit null', async () => {
+    const snapshot = snapshotWith(false, null);
+    snapshot.config.locale = null;
+
+    const { container } = await mountWith(snapshot);
+
+    expect(diagnosticRow(container, 'Locale')).toBe('en');
   });
 });
 
