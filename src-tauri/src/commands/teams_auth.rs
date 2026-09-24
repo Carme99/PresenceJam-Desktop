@@ -609,8 +609,7 @@ mod tests {
     fn the_commit_gate_precedes_the_token_slot_write() {
         let src = include_str!("teams_auth.rs");
         let production = &src[..src.find("\n#[cfg(test)]").expect("a test module")];
-        let body =
-            crate::token_io::test_scan::fn_body(production, "async fn poll_teams_auth_core(");
+        let body = crate::token_io::test_scan::fn_body(production, "async fn poll_teams_auth_core");
         let gate = body
             .find("may_commit(")
             .expect("poll_teams_auth_core must gate its commit on the flow being current");
