@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::atomic::Ordering;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -13,7 +14,7 @@ use tauri::{
 use crate::spotify::RepeatState;
 
 use crate::i18n::{self, Strings};
-use crate::menu::{ID_OPEN_LOGS, ID_QUIT, ID_SETTINGS};
+use crate::menu::{ID_ABOUT, ID_OPEN_LOGS, ID_QUIT, ID_SETTINGS, ID_SHOW_DASHBOARD, ID_SHOW_LOGS};
 
 // Menu item IDs
 const ID_SHOW_HIDE: &str = "show_hide_window";
@@ -92,6 +93,71 @@ const SEEK_FORWARD_30_MS: u64 = 30_000;
 const ID_PROFILE_BASE: &str = "profile|base";
 const PROFILE_ITEM_PREFIX: &str = "profile|";
 
+/// A safe diagnostic label for a native menu event id.
+///
+/// Fixed action ids remain readable so support diagnostics keep their useful
+/// dispatch context. Ids carrying a menu payload expose only the stable prefix
+/// and suffix length; unknown fixed ids expose only their length. This follows
+/// the device-selection redaction discipline and keeps bearer-adjacent Spotify
+/// device ids out of every dispatcher log line.
+pub(crate) fn menu_event_id_for_log(id: &str) -> Cow<'_, str> {
+    if matches!(
+        id,
+        ID_SHOW_HIDE
+            | ID_PAUSE_SYNC
+            | ID_RESUME_SYNC
+            | ID_CURRENT_TRACK
+            | ID_SYNC_STATUS
+            | ID_PLAY_PAUSE
+            | ID_PREVIOUS
+            | ID_NEXT
+            | ID_SHUFFLE
+            | ID_REPEAT
+            | ID_QUIT
+            | ID_DEVICES
+            | ID_QUEUE
+            | ID_SETTINGS
+            | ID_OPEN_LOGS
+            | ID_SHOW_DASHBOARD
+            | ID_SHOW_LOGS
+            | ID_ABOUT
+    ) {
+        return Cow::Borrowed(id);
+    }
+
+    match id.split_once('|') {
+        Some((prefix, suffix)) => Cow::Owned(format!("<{prefix} len={}>", suffix.len())),
+        None => Cow::Owned(format!("<unknown len={}>", id.len())),
+    }
+}
+
+fn log_dispatched_menu_event_with(id: &str, emit: impl FnOnce(&log::Record<'_>)) {
+    let redacted = menu_event_id_for_log(id);
+    let message = format!("[TRAY] menu event: id={redacted}");
+    let args = format_args!("{message}");
+    let record = log::Record::builder()
+        .args(args)
+        .level(log::Level::Info)
+        .target(module_path!())
+        .build();
+    emit(&record);
+}
+
+fn log_dispatched_menu_event(id: &str) {
+    let level = log::Level::Info;
+    if level > log::STATIC_MAX_LEVEL || level > log::max_level() {
+        return;
+    }
+    let metadata = log::Metadata::builder()
+        .level(level)
+        .target(module_path!())
+        .build();
+    if !log::logger().enabled(&metadata) {
+        return;
+    }
+    log_dispatched_menu_event_with(id, |record| log::Log::log(log::logger(), record));
+}
+
 static TRAY: OnceLock<TrayIcon> = OnceLock::new();
 
 /// Get the global TrayIcon instance.
@@ -106,11 +172,11 @@ pub fn get_tray() -> Option<&'static TrayIcon> {
 /// and delegates anything else (the app-menu-only ids) to
 /// [`crate::menu::handle_app_menu_event`]. It is registered exactly once (on
 /// the tray builder in [`setup_tray`]): one click then logs and emits exactly
-/// once, and tray-only ids never reach the app-menu handler's unknown-event
-/// warn. The second `window.on_menu_event` registration lib.rs used to carry
+/// once, and tray-only ids never reach the app-menu handler's unknown-event log.
+/// The second `window.on_menu_event` registration lib.rs used to carry
 /// double-fired every shared id and is gone.
 pub fn handle_menu_event(app: &AppHandle, id: &str) {
-    log::info!("[TRAY] menu event: id={}", id);
+    log_dispatched_menu_event(id);
     match id {
         ID_SHOW_HIDE => {
             if let Some(window) = app.get_webview_window("main") {
@@ -347,7 +413,10 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
                         }
                     }
                     None => {
-                        log::warn!("[TRAY] snooze: unrecognized menu id '{}'", raw);
+                        log::warn!(
+                            "[TRAY] snooze: unrecognized menu id '{}'",
+                            menu_event_id_for_log(&raw)
+                        );
                     }
                 }
                 repaint_tray_from_state(&app_handle, "snooze");
@@ -392,14 +461,17 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
                     if !exists {
                         log::warn!(
                             "[TRAY] profile: {:?} not found — falling back to base",
-                            stripped
+                            menu_event_id_for_log(&raw)
                         );
                         None
                     } else {
                         Some(stripped.to_string())
                     }
                 } else {
-                    log::warn!("[TRAY] profile: unrecognized menu id '{}'", raw);
+                    log::warn!(
+                        "[TRAY] profile: unrecognized menu id '{}'",
+                        menu_event_id_for_log(&raw)
+                    );
                     return;
                 };
                 if let Err(e) = write_active_profile(&app_handle, target) {
@@ -471,7 +543,10 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
             let app_handle = app.clone();
             std::thread::spawn(move || {
                 let Some(VolumeMenuSelection::Percent(percent)) = selection else {
-                    log::warn!("[TRAY] volume: unrecognized menu id '{}'", raw);
+                    log::warn!(
+                        "[TRAY] volume: unrecognized menu id '{}'",
+                        menu_event_id_for_log(&raw)
+                    );
                     repaint_tray_from_state(&app_handle, "volume (stale)");
                     return;
                 };
@@ -492,7 +567,10 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
             let app_handle = app.clone();
             std::thread::spawn(move || {
                 let Some(SeekMenuSelection::Delta(delta)) = selection else {
-                    log::warn!("[TRAY] seek: unrecognized menu id '{}'", raw);
+                    log::warn!(
+                        "[TRAY] seek: unrecognized menu id '{}'",
+                        menu_event_id_for_log(&raw)
+                    );
                     repaint_tray_from_state(&app_handle, "seek (stale)");
                     return;
                 };
@@ -2941,6 +3019,72 @@ mod tests {
         );
     }
 
+    /// Issue #918: the dispatcher's normal log must preserve known action ids
+    /// while reducing payload-bearing and unknown ids to their shape.
+    #[test]
+    fn menu_event_log_redacts_payload_and_unknown_ids() {
+        assert_eq!(menu_event_id_for_log("play_pause"), "play_pause");
+        assert_eq!(menu_event_id_for_log("about"), "about");
+
+        let device_id = "aB3deviceCredentialValueWithThirtyTwoChars";
+        let formatted_device_id = format!("devices|{device_id}");
+        let logged_device = menu_event_id_for_log(&formatted_device_id);
+        assert_eq!(logged_device, "<devices len=42>");
+        assert!(!logged_device.contains(device_id));
+        assert!(!logged_device.contains(&format!("devices|{device_id}")));
+
+        let logged_unknown = menu_event_id_for_log("mystery");
+        assert_eq!(logged_unknown, "<unknown len=7>");
+        assert!(!logged_unknown.contains("mystery"));
+    }
+
+    /// Issue #918: capture the production global-dispatcher record, then bind
+    /// the real handler to that seam. A raw-id call at the handler is therefore
+    /// a regression even when the formatter itself still behaves correctly.
+    #[test]
+    fn dispatched_menu_event_record_redacts_device_id() {
+        let device_id = "aB3deviceCredentialValueWithThirtyTwoChars";
+        let event_id = format!("devices|{device_id}");
+        let mut captured = None;
+
+        log_dispatched_menu_event_with(&event_id, |record| {
+            assert_eq!(record.level(), log::Level::Info);
+            captured = Some(record.args().to_string());
+        });
+
+        let record = captured.expect("the dispatcher seam must emit one record");
+        assert!(
+            record.contains("[TRAY] menu event: id="),
+            "the production record shape changed: {record}"
+        );
+        assert!(!record.contains(device_id), "device id leaked: {record}");
+        assert!(
+            !record.contains(&event_id),
+            "device menu id leaked: {record}"
+        );
+
+        let mut known_record = None;
+        log_dispatched_menu_event_with("play_pause", |record| {
+            known_record = Some(record.args().to_string());
+        });
+        assert_eq!(
+            known_record.as_deref(),
+            Some("[TRAY] menu event: id=play_pause")
+        );
+
+        let prod = prod_source(include_str!("tray.rs"));
+        let dispatcher = body_of(prod, "pub fn handle_menu_event(");
+        assert!(
+            dispatcher.contains("log_dispatched_menu_event(id);"),
+            "handle_menu_event must emit through the captured production seam"
+        );
+        let wrapper = body_of(prod, "fn log_dispatched_menu_event(");
+        assert!(
+            wrapper.contains("log_dispatched_menu_event_with(id,"),
+            "the production wrapper must delegate to the captured record seam"
+        );
+    }
+
     /// Issue #388: the click handler must resolve by id with a live
     /// re-fetch fallback instead of `devices.get(i)`. Issue #586: that
     /// re-fetch must resolve its token through the shared refresh-aware
@@ -3112,11 +3256,6 @@ mod tests {
             dispatcher.contains("crate::menu::handle_app_menu_event(app, id)"),
             "handle_menu_event must delegate app-menu-only ids to menu::handle_app_menu_event"
         );
-        // Exactly one log line per click, at the dispatcher.
-        assert!(
-            dispatcher.contains("log::info!(\"[TRAY] menu event: id={}\", id)"),
-            "the dispatcher must log each click once"
-        );
         // setup_tray itself carries no match arms any more.
         let setup = body_of(tray_prod, "pub fn setup_tray(");
         assert!(
@@ -3125,7 +3264,7 @@ mod tests {
         );
         // The app-menu handler keeps only its three window-menu-only arms, so
         // no id is owned twice and tray-only ids never hit its unknown warn.
-        let app_menu = body_of(menu_prod, "pub fn handle_app_menu_event(");
+        let app_menu = body_of(menu_prod, "pub(crate) fn handle_app_menu_event(");
         for marker in ["ID_SHOW_DASHBOARD =>", "ID_SHOW_LOGS =>", "ID_ABOUT =>"] {
             assert!(
                 app_menu.contains(marker),

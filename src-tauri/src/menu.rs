@@ -3,16 +3,15 @@ use tauri::{
     AppHandle, Emitter, Manager, Runtime, WebviewWindow,
 };
 
-// Menu item IDs — shared between tray and app menu for consistency.
-// The tray's single dispatcher (issue #804) owns the clicks for the three
-// shared ids, so they live here once and tray.rs imports them: one value,
-// one name, no twin that can drift.
+// Menu item IDs shared by the tray and app menu. The single dispatcher owns
+// the click routing; both modules import the same constants so dispatch and
+// diagnostics cannot drift onto parallel id definitions.
 pub(crate) const ID_SETTINGS: &str = "settings";
 pub(crate) const ID_OPEN_LOGS: &str = "open_logs";
 pub(crate) const ID_QUIT: &str = "quit";
-const ID_SHOW_DASHBOARD: &str = "show_dashboard";
-const ID_SHOW_LOGS: &str = "show_logs";
-const ID_ABOUT: &str = "about";
+pub(crate) const ID_SHOW_DASHBOARD: &str = "show_dashboard";
+pub(crate) const ID_SHOW_LOGS: &str = "show_logs";
+pub(crate) const ID_ABOUT: &str = "about";
 
 /// Show and focus the main window.
 fn show_and_focus_main_window(app: &AppHandle) {
@@ -215,36 +214,109 @@ pub fn rebuild_app_menu(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Effects performed for an app-menu event.
+///
+/// Production uses [`AppHandle`]. Keeping the sink at this boundary lets the
+/// unknown-event regression drive the real dispatcher and capture the exact
+/// message that would be emitted without constructing a GUI runtime.
+pub(crate) trait AppMenuEventTarget {
+    fn emit_navigate(&self, destination: &str);
+    fn show_and_focus(&self);
+    fn emit_about(&self);
+    fn log_unknown_event(&self, record: &str);
+}
+
+impl AppMenuEventTarget for AppHandle {
+    fn emit_navigate(&self, destination: &str) {
+        let _ = self.emit("navigate", destination);
+    }
+
+    fn show_and_focus(&self) {
+        show_and_focus_main_window(self);
+    }
+
+    fn emit_about(&self) {
+        let _ = self.emit("show-about", ());
+    }
+
+    fn log_unknown_event(&self, record: &str) {
+        log::debug!("{record}");
+    }
+}
+
+///
 /// Handle menu events from the app menu bar.
 ///
 /// Issue #804: only the window-menu-only ids live here. The tray-owned ids
 /// (`settings`, `open_logs`, `quit`) are handled by the single dispatcher
 /// [`crate::tray::handle_menu_event`], which delegates here for these three —
 /// a second copy would double-fire every shared id.
-pub fn handle_app_menu_event(app: &AppHandle, event_id: &str) {
+pub(crate) fn handle_app_menu_event(target: &impl AppMenuEventTarget, event_id: &str) {
     match event_id {
         ID_SHOW_DASHBOARD => {
-            let _ = app.emit("navigate", "dashboard");
-            show_and_focus_main_window(app);
+            target.emit_navigate("dashboard");
+            target.show_and_focus();
         }
         ID_SHOW_LOGS => {
-            let _ = app.emit("navigate", "logs");
-            show_and_focus_main_window(app);
+            target.emit_navigate("logs");
+            target.show_and_focus();
         }
-        ID_ABOUT => {
-            let _ = app.emit("show-about", ());
-        }
+        ID_ABOUT => target.emit_about(),
         _ => {
-            log::warn!(
+            target.log_unknown_event(&format!(
                 "[MENU] handle_app_menu_event: unknown event_id={}",
-                event_id
-            );
+                crate::tray::menu_event_id_for_log(event_id)
+            ));
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::{handle_app_menu_event, AppMenuEventTarget};
+
+    /// Issue #918: drive the production unknown-event branch and capture the
+    /// record at its logging seam. Reverting the dispatcher to interpolate the
+    /// raw event id makes this fail with the leaked value in the message.
+    #[test]
+    fn unknown_app_menu_event_record_redacts_device_id() {
+        #[derive(Default)]
+        struct RecordingTarget {
+            records: std::cell::RefCell<Vec<String>>,
+        }
+
+        impl AppMenuEventTarget for RecordingTarget {
+            fn emit_navigate(&self, _destination: &str) {}
+
+            fn show_and_focus(&self) {}
+
+            fn emit_about(&self) {}
+
+            fn log_unknown_event(&self, record: &str) {
+                self.records.borrow_mut().push(record.to_owned());
+            }
+        }
+
+        let device_id = "aB3deviceCredentialValueWithThirtyTwoChars";
+        let event_id = format!("devices|{device_id}");
+        let target = RecordingTarget::default();
+
+        handle_app_menu_event(&target, &event_id);
+
+        let records = target.records.into_inner();
+        assert_eq!(records.len(), 1, "the unknown branch must emit one record");
+        let record = &records[0];
+        assert!(
+            record.contains("handle_app_menu_event: unknown event_id="),
+            "the production record shape changed: {record}"
+        );
+        assert!(!record.contains(device_id), "device id leaked: {record}");
+        assert!(
+            !record.contains(&event_id),
+            "device menu id leaked: {record}"
+        );
+    }
+
     /// Issue #415: the app-menu Quit path must give the frontend's `app_exit`
     /// drain time to run (polling stop + staged-update install) instead of a
     /// fixed 500 ms sleep-then-exit. Brace-counted body isolation
