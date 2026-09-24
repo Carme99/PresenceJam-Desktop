@@ -531,7 +531,7 @@ export const en = {
   'settings.updateChannelStable': 'Stable',
   'settings.updateChannelBeta': 'Beta',
   'settings.updateChannelHint':
-    'No beta build is published yet, so the Beta channel falls back to the stable release — the app logs the fall-through on every check. Beta builds install on quit only.',
+    'Beta builds use the rolling beta feed when available; if it is missing or has no newer version, Beta falls back to the stable release. Beta builds install on quit only.',
   'update.betaOnQuitOnly':
     'Beta channel: updates install when you quit — there is no download-and-relaunch path on Beta.',
   // 4.7.0 — S8 global hotkeys

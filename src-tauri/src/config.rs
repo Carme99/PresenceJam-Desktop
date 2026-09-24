@@ -1655,13 +1655,12 @@ fn default_notification_class() -> bool {
 #[serde(rename_all = "lowercase")]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
 pub enum UpdateChannel {
-    /// Published releases (`releases/latest`): the default, and the only
-    /// channel with a published manifest in 4.7.0.
+    /// Published stable releases (`releases/latest`): the default channel.
     #[default]
     Stable,
-    /// Pre-release builds. 4.7.0 ships the switch only — no
-    /// `latest-beta.json` is published yet, so a beta check falls through to
-    /// the stable manifest (see `updater_bg::update_endpoints`).
+    /// Rolling prerelease builds (`releases/download/beta`). A missing or
+    /// non-newer beta manifest falls back to the stable manifest through
+    /// `updater_bg::update_endpoints`.
     Beta,
 }
 

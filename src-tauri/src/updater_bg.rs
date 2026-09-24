@@ -877,12 +877,13 @@ fn clear_stale_skipped_marker() {
 const STABLE_ENDPOINT: &str =
     "https://github.com/Carme99/PresenceJam-Desktop/releases/latest/download/latest.json";
 
-/// Beta-channel update manifest: the stable URL with `latest-beta.json`.
+/// Beta-channel update manifest: the rolling prerelease asset published at
+/// the beta release tag.
 ///
-/// 4.7.0 ships the channel switch without publishing a beta build, so this
-/// URL answers `404` and the check falls through to [`STABLE_ENDPOINT`].
+/// Beta releases publish this manifest under the rolling `beta` tag; the
+/// stable manifest remains the fallback when no beta build is available.
 const BETA_ENDPOINT: &str =
-    "https://github.com/Carme99/PresenceJam-Desktop/releases/latest/download/latest-beta.json";
+    "https://github.com/Carme99/PresenceJam-Desktop/releases/download/beta/latest-beta.json";
 
 /// Ordered update-endpoint list for `channel` (issue #678).
 ///
@@ -1926,7 +1927,7 @@ mod tests {
 
     /// Issue #678: the endpoint lists and their order are the contract the
     /// beta fall-through rests on — the stable manifest must stay last, and
-    /// the beta URL must be the stable URL's `latest-beta.json` sibling.
+    /// the beta URL must use the rolling beta release path.
     #[test]
     fn test_update_endpoints_lists_and_order() {
         assert_eq!(
@@ -1940,8 +1941,12 @@ mod tests {
         );
         assert_eq!(
             BETA_ENDPOINT,
-            STABLE_ENDPOINT.replace("latest.json", "latest-beta.json"),
-            "the beta manifest is the same release path with the beta file name"
+            "https://github.com/Carme99/PresenceJam-Desktop/releases/download/beta/latest-beta.json",
+            "the beta manifest must use the rolling beta release path"
+        );
+        assert!(
+            !BETA_ENDPOINT.contains("/releases/latest/"),
+            "a prerelease manifest must not resolve through the stable latest path"
         );
         assert_eq!(
             endpoint_urls(UpdateChannel::Beta).map(|urls| urls.len()),
@@ -1959,9 +1964,8 @@ mod tests {
         ]
     }
 
-    /// Issue #678: a failing endpoint must not abort the check — that is the
-    /// entire point of listing the stable manifest after the (unpublished)
-    /// beta one.
+    /// Issue #895: a failing rolling beta endpoint must not abort the check —
+    /// the stable manifest remains the fallback.
     #[test]
     fn test_check_walks_past_a_failing_endpoint() {
         let urls = test_endpoints();
@@ -1970,7 +1974,7 @@ mod tests {
         let found = tauri::async_runtime::block_on(walk_endpoints(&urls, move |url| {
             let seen = seen.clone();
             async move {
-                // What the real repo answers today: no beta manifest.
+                // Synthetic endpoint: simulate an unavailable beta manifest.
                 let beta = url.path().ends_with("latest-beta.json");
                 seen.lock().push(url.to_string());
                 if beta {
