@@ -219,28 +219,70 @@ pub enum TokenReadMode {
     ReadOnly,
 }
 
-/// Migrating GUI read from the Tauri app path. Returns a default
-/// `TokensFile` if the file does not exist or is empty. Returns `Err(...)`
-/// if the file exists and is non-empty but cannot be decrypted or
-/// deserialised; the caller in `lib::run` setup logs the error and continues
-/// with default state, matching the previous (pre-#65) store path's
-/// behaviour.
+/// Why an existing token store could not be loaded.
 ///
-/// Legacy plaintext from ≤ v2.10.0 is migrated on first GUI read. A missing
-/// keychain key or undecryptable ciphertext surfaces as `Err`, which drives
-/// the same re-auth recovery.
-pub fn read_tokens_at(app: &tauri::AppHandle) -> Result<TokensFile, String> {
-    read_tokens_at_path(&tokens_file_path(app)?, TokenReadMode::MigrateLegacy)
+/// `KeychainUnavailable` is transient: the encrypted file may become readable
+/// once the platform credential store unlocks, so callers must not replace it
+/// with an empty in-memory snapshot. `Corrupt` retains the established
+/// recovery behavior: start empty and allow an explicit re-auth/reset to write
+/// a fresh store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TokensLoadError {
+    KeychainUnavailable(String),
+    Corrupt(String),
+}
+
+impl TokensLoadError {
+    pub fn into_message(self) -> String {
+        match self {
+            Self::KeychainUnavailable(message) | Self::Corrupt(message) => message,
+        }
+    }
+}
+
+impl From<crate::keychain::KeychainReadError> for TokensLoadError {
+    fn from(error: crate::keychain::KeychainReadError) -> Self {
+        match error {
+            crate::keychain::KeychainReadError::Unavailable(message) => {
+                Self::KeychainUnavailable(message)
+            }
+            crate::keychain::KeychainReadError::Absent => {
+                Self::Corrupt(crate::keychain::TOKENS_AES_KEY_NOT_FOUND_MSG.to_string())
+            }
+            crate::keychain::KeychainReadError::Corrupt(message) => Self::Corrupt(message),
+        }
+    }
+}
+
+/// Migrating GUI read from the Tauri app path. Returns a default
+/// [`TokensFile`] if the file does not exist or is empty. A platform keychain
+/// failure remains typed so setup can protect the recoverable ciphertext from
+/// an empty-state persist.
+pub fn read_tokens_at(app: &tauri::AppHandle) -> Result<TokensFile, TokensLoadError> {
+    let path = tokens_file_path(app).map_err(TokensLoadError::Corrupt)?;
+    read_tokens_at_path(&path, TokenReadMode::MigrateLegacy)
 }
 
 /// Read tokens from an explicit path (issues #679 and #840).
 ///
-/// The body of [`read_tokens_at`], split out so the headless CLI flags use
-/// [`TokenReadMode::ReadOnly`]: they share the same parsing and decryption
-/// behavior, but never chmod, migrate, rename, or delete storage merely to
-/// report state. The GUI retains first-run plaintext migration through
-/// [`read_tokens_at`].
-pub fn read_tokens_at_path(path: &Path, mode: TokenReadMode) -> Result<TokensFile, String> {
+/// The body of [`read_tokens_at`], split out so headless CLI flags use
+/// [`TokenReadMode::ReadOnly`]: they share parsing and decryption but never
+/// chmod, migrate, rename, or delete storage merely to report state.
+pub fn read_tokens_at_path(
+    path: &Path,
+    mode: TokenReadMode,
+) -> Result<TokensFile, TokensLoadError> {
+    read_tokens_at_path_with_key_fetcher(path, mode, crate::keychain::read_tokens_aes_key)
+}
+
+/// Read an explicit token path with the encrypted-store key lookup injected.
+/// Production passes [`crate::keychain::read_tokens_aes_key`]; tests inject
+/// platform failures and fixed keys without touching the OS credential store.
+fn read_tokens_at_path_with_key_fetcher(
+    path: &Path,
+    mode: TokenReadMode,
+    fetch_key: impl FnOnce() -> Result<[u8; 32], crate::keychain::KeychainReadError>,
+) -> Result<TokensFile, TokensLoadError> {
     if !path.exists() {
         log::info!(
             "[TOKEN_IO] read_tokens_at: no file at {}, returning default",
@@ -256,7 +298,13 @@ pub fn read_tokens_at_path(path: &Path, mode: TokenReadMode) -> Result<TokensFil
         #[cfg(unix)]
         {
             let current = fs::metadata(path)
-                .map_err(|e| format!("Failed to stat tokens file '{}': {}", path.display(), e))?
+                .map_err(|e| {
+                    TokensLoadError::Corrupt(format!(
+                        "Failed to stat tokens file '{}': {}",
+                        path.display(),
+                        e
+                    ))
+                })?
                 .permissions();
             let current_mode = current.mode() & 0o777;
             if current_mode != 0o600 {
@@ -267,22 +315,27 @@ pub fn read_tokens_at_path(path: &Path, mode: TokenReadMode) -> Result<TokensFil
                 let mut tightened = current;
                 tightened.set_mode(0o600);
                 fs::set_permissions(path, tightened).map_err(|e| {
-                    format!(
+                    TokensLoadError::Corrupt(format!(
                         "Failed to chmod tokens file '{}' to 0600: {}",
                         path.display(),
                         e
-                    )
+                    ))
                 })?;
             }
         }
     }
-    let bytes = fs::read(path)
-        .map_err(|e| format!("Failed to read tokens file '{}': {}", path.display(), e))?;
+    let bytes = fs::read(path).map_err(|e| {
+        TokensLoadError::Corrupt(format!(
+            "Failed to read tokens file '{}': {}",
+            path.display(),
+            e
+        ))
+    })?;
     if bytes.iter().all(|b| b.is_ascii_whitespace()) {
         log::info!("[TOKEN_IO] read_tokens_at: file is empty, returning default");
         return Ok(TokensFile::default());
     }
-    tokens_from_bytes(path, &bytes, mode)
+    tokens_from_bytes(path, &bytes, mode, fetch_key)
 }
 
 /// Parse legacy ≤ v2.10.0 plaintext tokens JSON (issue #352). Shared by the
@@ -299,20 +352,21 @@ fn parse_legacy_tokens_file(bytes: &[u8], path: &Path) -> Result<TokensFile, Str
     })
 }
 
-/// Decode the raw bytes of a `tokens.json` file into a [`TokensFile`],
-/// fetching the decryption key from the OS keychain as required.
+/// Decode the raw bytes of a `tokens.json` file, fetching the encrypted-store
+/// key through the injected typed keychain reader.
 ///
-/// - Encrypted (starts with the `PJENC` magic): the key must already
-///   exist (`keychain::get_tokens_aes_key`); a missing or locked keychain is
-///   an error in every read mode, exactly like a corrupt file.
-/// - Legacy plaintext JSON (starts with `{`, i.e. any release ≤ v2.10.0):
-///   parsed first. [`TokenReadMode::MigrateLegacy`] then replaces the file
-///   with ciphertext; [`TokenReadMode::ReadOnly`] returns the parsed value
-///   without creating a key or changing storage.
-fn tokens_from_bytes(path: &Path, bytes: &[u8], mode: TokenReadMode) -> Result<TokensFile, String> {
+/// A platform-unavailable key lookup is kept distinct from a present key that
+/// fails authentication or a malformed token payload. This distinction is what
+/// lets setup protect recoverable ciphertext from an empty-state overwrite.
+fn tokens_from_bytes(
+    path: &Path,
+    bytes: &[u8],
+    mode: TokenReadMode,
+    fetch_key: impl FnOnce() -> Result<[u8; 32], crate::keychain::KeychainReadError>,
+) -> Result<TokensFile, TokensLoadError> {
     if bytes.starts_with(TOKENS_MAGIC) {
-        let key = crate::keychain::get_tokens_aes_key()?;
-        tokens_from_bytes_with_key(path, bytes, &key, mode)
+        let key = fetch_key().map_err(TokensLoadError::from)?;
+        tokens_from_bytes_with_key(path, bytes, &key, mode).map_err(TokensLoadError::Corrupt)
     } else if bytes.starts_with(b"{") {
         // Issue #352: parse the legacy plaintext BEFORE touching the OS
         // keychain — see `decode_legacy_with_key_fetcher`, which parses
@@ -322,13 +376,13 @@ fn tokens_from_bytes(path: &Path, bytes: &[u8], mode: TokenReadMode) -> Result<T
             path,
             bytes,
             mode,
-            crate::keychain::get_or_create_tokens_aes_key,
+            crate::keychain::read_or_create_tokens_aes_key,
         )
     } else {
-        Err(format!(
+        Err(TokensLoadError::Corrupt(format!(
             "tokens file '{}' is neither PJENC-encrypted nor plaintext JSON; refusing to parse",
             path.display()
-        ))
+        )))
     }
 }
 
@@ -342,14 +396,14 @@ fn decode_legacy_with_key_fetcher(
     path: &Path,
     bytes: &[u8],
     mode: TokenReadMode,
-    fetch_key: impl FnOnce() -> Result<[u8; 32], String>,
-) -> Result<TokensFile, String> {
-    let parsed = parse_legacy_tokens_file(bytes, path)?;
+    fetch_key: impl FnOnce() -> Result<[u8; 32], crate::keychain::KeychainReadError>,
+) -> Result<TokensFile, TokensLoadError> {
+    let parsed = parse_legacy_tokens_file(bytes, path).map_err(TokensLoadError::Corrupt)?;
     if mode == TokenReadMode::ReadOnly {
         return Ok(parsed);
     }
     let key = fetch_key()?;
-    migrate_parsed_legacy(path, parsed, &key)
+    migrate_parsed_legacy(path, parsed, &key).map_err(TokensLoadError::Corrupt)
 }
 
 /// Re-write an already-parsed legacy [`TokensFile`] as ciphertext (issue
@@ -360,7 +414,7 @@ fn migrate_parsed_legacy(
     parsed: TokensFile,
     key: &[u8; 32],
 ) -> Result<TokensFile, String> {
-    write_tokens_atomic_with_key(&path.to_path_buf(), &parsed, key)?;
+    write_tokens_atomic_with_key(path, &parsed, key)?;
     log::info!(
         "[TOKEN_IO] migrated legacy plaintext tokens.json to AES-256-GCM ciphertext at {}",
         path.display()
@@ -556,7 +610,7 @@ fn platform_pid_exists(_pid: u32) -> Option<bool> {
 /// generated on first use and stored in the OS keychain (issue #140); a
 /// missing/unavailable keychain is a hard error here — silently falling
 /// back to plaintext would regress #140.
-pub fn write_tokens_atomic(path: &PathBuf, contents: &TokensFile) -> Result<(), String> {
+pub fn write_tokens_atomic(path: &Path, contents: &TokensFile) -> Result<(), String> {
     let key = crate::keychain::get_or_create_tokens_aes_key()?;
     write_tokens_atomic_with_key(path, contents, &key)
 }
@@ -565,7 +619,7 @@ pub fn write_tokens_atomic(path: &PathBuf, contents: &TokensFile) -> Result<(), 
 /// and by the test suite (which injects a fixed key so tests never touch
 /// the OS keychain).
 fn write_tokens_atomic_with_key(
-    path: &PathBuf,
+    path: &Path,
     contents: &TokensFile,
     key: &[u8; 32],
 ) -> Result<(), String> {
@@ -675,20 +729,70 @@ fn write_tokens_atomic_with_key(
 /// a fresh refresh token on the next launch.
 pub fn persist_tokens(state: &Arc<crate::AppState>, app: &tauri::AppHandle) -> Result<(), String> {
     let path = tokens_file_path(app)?;
+    persist_tokens_at_with_retry(
+        state,
+        &path,
+        || read_tokens_at_path(&path, TokenReadMode::ReadOnly),
+        write_tokens_atomic,
+    )
+}
+
+/// Path-level persist core that first gives a keychain-gated snapshot one
+/// chance to recover from the same encrypted file. A successful retry hydrates
+/// empty in-memory slots, preserves present token values committed since the
+/// blocked persist, clears the gate, and proceeds with the normal write. Any
+/// retry failure preserves the existing ciphertext and returns the original
+/// persist refusal.
+fn persist_tokens_at_with_retry(
+    state: &Arc<crate::AppState>,
+    path: &Path,
+    read: impl FnOnce() -> Result<TokensFile, TokensLoadError>,
+    write: impl FnOnce(&Path, &TokensFile) -> Result<(), String>,
+) -> Result<(), String> {
     with_tokens_write_lock(|| {
-        // Issue #800: bind BOTH slot guards before either clone. Cloning one
-        // slot guard at a time left a window in which a commit landing on the
-        // second slot stayed in memory while the older value was written to
-        // disk — a torn pair (stale access token + fresh refresh token) on the
-        // next launch. `Tokens` holds two independent `RwLock`s and nothing
-        // takes them in the opposite order, so holding both cannot deadlock.
-        let spotify = state.tokens.spotify();
-        let teams = state.tokens.teams();
+        let blocked_error = "Refusing to overwrite tokens.json after a keychain-unavailable load; \
+             retry the token read or reset token storage first"
+            .to_string();
+        // The marker mutex is the lock-order root. Every token commit/clear
+        // takes it before a slot guard, and this persist keeps it through
+        // recovery, both slot guards, the snapshot, and the disk write.
+        let recovery = state.tokens_load.recovery_guard();
+        let mut spotify = state.tokens.spotify_mut();
+        let mut teams = state.tokens.teams_mut();
+        if state.tokens_load.blocks_persist() {
+            let recovered = match read() {
+                Ok(recovered) => Some(recovered),
+                Err(TokensLoadError::KeychainUnavailable(_)) => {
+                    return Err(blocked_error);
+                }
+                Err(TokensLoadError::Corrupt(message)) => {
+                    log::warn!(
+                        "[TOKEN_IO] persist retry: token store is corrupt; persisting current in-memory slots: {}",
+                        message
+                    );
+                    None
+                }
+            };
+            if let Some(recovered) = recovered {
+                if spotify.is_none() && !recovery.blocks(crate::TokenProvider::Spotify) {
+                    *spotify = recovered.spotify_tokens;
+                }
+                if teams.is_none() && !recovery.blocks(crate::TokenProvider::Teams) {
+                    *teams = recovered.teams_tokens;
+                }
+            }
+            // Do not clear provider tombstones here: an explicit None must
+            // continue to win over stale ciphertext after the gate opens.
+            state.tokens_load.mark_ready_locked();
+        }
+        // Both slot guards are acquired before either clone. The write stays
+        // inside this critical section so a racing clear cannot be overwritten
+        // by a stale snapshot.
         let contents = TokensFile {
             spotify_tokens: spotify.clone(),
             teams_tokens: teams.clone(),
         };
-        write_tokens_atomic(&path, &contents)
+        write(path, &contents)
     })
 }
 
@@ -704,8 +808,13 @@ pub fn persist_tokens(state: &Arc<crate::AppState>, app: &tauri::AppHandle) -> R
 /// from at all. The next persist generates a fresh key, and the user signs
 /// in again.
 pub fn reset_tokens_storage(app: &tauri::AppHandle) -> Result<(), String> {
-    crate::keychain::delete_tokens_aes_key()?;
-    clear_tokens_file(app)
+    with_tokens_write_lock(|| {
+        crate::keychain::delete_tokens_aes_key()?;
+        clear_tokens_file(app)?;
+        let state = app.state::<Arc<crate::AppState>>();
+        state.tokens_load.clear_all(&state.tokens);
+        Ok(())
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1037,6 +1146,319 @@ mod tests {
             return Ok(TokensFile::default());
         }
         tokens_from_bytes_with_key(path, &bytes, &test_key(), TokenReadMode::MigrateLegacy)
+    }
+
+    #[test]
+    fn keychain_unavailable_retry_recovers_before_next_persist() {
+        let dir = unique_tmp_dir("keychain-retry");
+        let path = dir.join("tokens.json");
+        write_tokens_atomic_with_key(&path, &sample_file(), &test_key()).unwrap();
+        let state = Arc::new(crate::AppState::new());
+
+        let unavailable =
+            read_tokens_at_path_with_key_fetcher(&path, TokenReadMode::ReadOnly, || {
+                Err(crate::keychain::KeychainReadError::Unavailable(
+                    "credential store locked".to_string(),
+                ))
+            });
+        assert!(matches!(
+            &unavailable,
+            Err(TokensLoadError::KeychainUnavailable(_))
+        ));
+        crate::apply_token_load_result(&state, unavailable);
+        assert_eq!(
+            state.tokens_load.state(),
+            crate::TokensLoadState::KeychainUnavailable
+        );
+
+        let mut writer_called = false;
+        let first = persist_tokens_at_with_retry(
+            &state,
+            &path,
+            || {
+                read_tokens_at_path_with_key_fetcher(&path, TokenReadMode::ReadOnly, || {
+                    Ok(test_key())
+                })
+            },
+            |_path, _contents| {
+                writer_called = true;
+                Ok(())
+            },
+        );
+        assert!(
+            first.is_ok(),
+            "a successful retry must make the persist writable"
+        );
+        assert!(writer_called, "the successful retry must reach the writer");
+        assert_eq!(state.tokens_load.state(), crate::TokensLoadState::Ready);
+        assert_eq!(state.tokens.spotify().as_ref().unwrap().access_token, "at");
+        assert_eq!(state.tokens.teams().as_ref().unwrap().access_token, "tat");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn keychain_unavailable_retry_preserves_post_failure_token_changes() {
+        let dir = unique_tmp_dir("keychain-retry-fresh-token");
+        let path = dir.join("tokens.json");
+        write_tokens_atomic_with_key(&path, &sample_file(), &test_key()).unwrap();
+        let state = Arc::new(crate::AppState::new());
+        state.tokens_load.mark_keychain_unavailable();
+
+        let blocked = persist_tokens_at_with_retry(
+            &state,
+            &path,
+            || {
+                Err(TokensLoadError::KeychainUnavailable(
+                    "credential store locked".to_string(),
+                ))
+            },
+            |_path, _contents| panic!("blocked recovery must not reach the writer"),
+        );
+        assert!(blocked.is_err());
+
+        let fresh_spotify = SpotifyTokens {
+            access_token: "fresh-spotify-access".to_string(),
+            refresh_token: "fresh-spotify-refresh".to_string(),
+            expires_at: chrono::Utc::now() + chrono::Duration::seconds(7200),
+        };
+        let fresh_teams = TeamsTokens {
+            access_token: "fresh-teams-access".to_string(),
+            refresh_token: Some("fresh-teams-refresh".to_string()),
+            expires_at: chrono::Utc::now() + chrono::Duration::seconds(7200),
+        };
+        *state.tokens.spotify_mut() = Some(fresh_spotify.clone());
+        *state.tokens.teams_mut() = Some(fresh_teams.clone());
+
+        let mut written = None;
+        persist_tokens_at_with_retry(
+            &state,
+            &path,
+            || Ok(sample_file()),
+            |_path, contents| {
+                written = Some(contents.clone());
+                Ok(())
+            },
+        )
+        .expect("the recovered keychain must unblock persistence");
+
+        let written = written.expect("the recovered persist must reach the writer");
+        let written_spotify = written.spotify_tokens.as_ref().expect("Spotify write");
+        assert_eq!(written_spotify.access_token, fresh_spotify.access_token);
+        assert_eq!(written_spotify.refresh_token, fresh_spotify.refresh_token);
+        assert_eq!(written_spotify.expires_at, fresh_spotify.expires_at);
+        let written_teams = written.teams_tokens.as_ref().expect("Teams write");
+        assert_eq!(written_teams.access_token, fresh_teams.access_token);
+        assert_eq!(written_teams.refresh_token, fresh_teams.refresh_token);
+        assert_eq!(written_teams.expires_at, fresh_teams.expires_at);
+        assert_eq!(state.tokens_load.state(), crate::TokensLoadState::Ready);
+        let spotify_guard = state.tokens.spotify();
+        let state_spotify = spotify_guard.as_ref().expect("Spotify state");
+        assert_eq!(state_spotify.access_token, written_spotify.access_token);
+        assert_eq!(state_spotify.refresh_token, written_spotify.refresh_token);
+        assert_eq!(state_spotify.expires_at, written_spotify.expires_at);
+        let teams_guard = state.tokens.teams();
+        let state_teams = teams_guard.as_ref().expect("Teams state");
+        assert_eq!(state_teams.access_token, written_teams.access_token);
+        assert_eq!(state_teams.refresh_token, written_teams.refresh_token);
+        assert_eq!(state_teams.expires_at, written_teams.expires_at);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn corrupt_retry_unblocks_and_persists_fresh_oauth_slots() {
+        let state = Arc::new(crate::AppState::new());
+        crate::apply_token_load_result(
+            &state,
+            Err(TokensLoadError::KeychainUnavailable(
+                "credential store locked".to_string(),
+            )),
+        );
+        assert_eq!(
+            state.tokens_load.state(),
+            crate::TokensLoadState::KeychainUnavailable
+        );
+
+        let fresh_spotify = SpotifyTokens {
+            access_token: "fresh-oauth-spotify".to_string(),
+            refresh_token: "fresh-oauth-spotify-refresh".to_string(),
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(2),
+        };
+        let fresh_teams = TeamsTokens {
+            access_token: "fresh-oauth-teams".to_string(),
+            refresh_token: Some("fresh-oauth-teams-refresh".to_string()),
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(2),
+        };
+        state
+            .tokens_load
+            .commit_spotify(&state.tokens, fresh_spotify.clone());
+        state
+            .tokens_load
+            .commit_teams(&state.tokens, fresh_teams.clone());
+
+        let mut written = None;
+        persist_tokens_at_with_retry(
+            &state,
+            Path::new("unused.json"),
+            || Err(TokensLoadError::Corrupt("damaged ciphertext".to_string())),
+            |_path, contents| {
+                written = Some(contents.clone());
+                Ok(())
+            },
+        )
+        .expect("corrupt recovery must unblock the current in-memory snapshot");
+
+        assert_eq!(state.tokens_load.state(), crate::TokensLoadState::Ready);
+        let written = written.expect("corrupt recovery must reach the writer");
+        assert_eq!(
+            written
+                .spotify_tokens
+                .as_ref()
+                .map(|tokens| &tokens.access_token),
+            Some(&fresh_spotify.access_token)
+        );
+        assert_eq!(
+            written
+                .teams_tokens
+                .as_ref()
+                .map(|tokens| &tokens.access_token),
+            Some(&fresh_teams.access_token)
+        );
+    }
+
+    #[test]
+    fn keychain_unavailable_retry_keeps_explicit_provider_clear() {
+        let dir = unique_tmp_dir("keychain-retry-explicit-clear");
+        let path = dir.join("tokens.json");
+        write_tokens_atomic_with_key(&path, &sample_file(), &test_key()).unwrap();
+        let state = Arc::new(crate::AppState::new());
+        state.tokens_load.mark_keychain_unavailable();
+
+        let blocked = persist_tokens_at_with_retry(
+            &state,
+            &path,
+            || Err(TokensLoadError::KeychainUnavailable("locked".to_string())),
+            |_path, _contents| panic!("blocked recovery must not write"),
+        );
+        assert!(blocked.is_err());
+
+        let fresh_spotify = SpotifyTokens {
+            access_token: "fresh-spotify-access".to_string(),
+            refresh_token: "fresh-spotify-refresh".to_string(),
+            expires_at: chrono::Utc::now() + chrono::Duration::seconds(7200),
+        };
+        state
+            .tokens_load
+            .commit_spotify(&state.tokens, fresh_spotify.clone());
+        state.tokens_load.clear_teams(&state.tokens);
+
+        let mut written = None;
+        persist_tokens_at_with_retry(
+            &state,
+            &path,
+            || Ok(sample_file()),
+            |_path, contents| {
+                written = Some(contents.clone());
+                Ok(())
+            },
+        )
+        .expect("a successful retry must persist the merged state");
+
+        let written = written.expect("retry must reach writer");
+        let written_spotify = written.spotify_tokens.as_ref().expect("Spotify write");
+        assert_eq!(written_spotify.access_token, fresh_spotify.access_token);
+        assert_eq!(written_spotify.refresh_token, fresh_spotify.refresh_token);
+        assert_eq!(written_spotify.expires_at, fresh_spotify.expires_at);
+        assert!(written.teams_tokens.is_none());
+        assert_eq!(state.tokens_load.state(), crate::TokensLoadState::Ready);
+        assert!(state.tokens.teams().is_none());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn persist_holds_both_token_guards_before_cloning() {
+        let body = test_scan::fn_body(
+            include_str!("token_io.rs"),
+            "fn persist_tokens_at_with_retry(",
+        );
+        let spotify_guard = body
+            .find("let mut spotify = state.tokens.spotify_mut();")
+            .expect("Spotify guard must be acquired");
+        let teams_guard = body
+            .find("let mut teams = state.tokens.teams_mut();")
+            .expect("Teams guard must be acquired");
+        let spotify_clone = body
+            .find("spotify_tokens: spotify.clone()")
+            .expect("Spotify snapshot clone must exist");
+        let teams_clone = body
+            .find("teams_tokens: teams.clone()")
+            .expect("Teams snapshot clone must exist");
+        assert!(
+            spotify_guard.max(teams_guard) < spotify_clone.min(teams_clone),
+            "both slot guards must be acquired before either snapshot clone"
+        );
+    }
+    #[test]
+    fn keychain_unavailable_retry_preserves_ciphertext_when_still_locked() {
+        let dir = unique_tmp_dir("keychain-still-locked");
+        let path = dir.join("tokens.json");
+        write_tokens_atomic_with_key(&path, &sample_file(), &test_key()).unwrap();
+        let ciphertext = fs::read(&path).unwrap();
+        let state = Arc::new(crate::AppState::new());
+        state.tokens_load.mark_keychain_unavailable();
+
+        let mut writer_called = false;
+        let persist = persist_tokens_at_with_retry(
+            &state,
+            &path,
+            || {
+                Err(TokensLoadError::KeychainUnavailable(
+                    "credential store locked".to_string(),
+                ))
+            },
+            |_path, _contents| {
+                writer_called = true;
+                Ok(())
+            },
+        );
+        assert!(persist.is_err());
+        assert!(!writer_called, "a failed retry must not reach the writer");
+        assert_eq!(fs::read(&path).unwrap(), ciphertext);
+        assert_eq!(
+            state.tokens_load.state(),
+            crate::TokensLoadState::KeychainUnavailable
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn corrupt_ciphertext_is_separate_and_keeps_recovery_persistence() {
+        let dir = unique_tmp_dir("corrupt-ciphertext");
+        let path = dir.join("tokens.json");
+        write_tokens_atomic_with_key(&path, &sample_file(), &test_key()).unwrap();
+        let mut ciphertext = fs::read(&path).unwrap();
+        *ciphertext.last_mut().unwrap() ^= 1;
+        fs::write(&path, &ciphertext).unwrap();
+        let state = Arc::new(crate::AppState::new());
+
+        let result =
+            read_tokens_at_path_with_key_fetcher(&path, TokenReadMode::ReadOnly, || Ok(test_key()));
+        assert!(matches!(&result, Err(TokensLoadError::Corrupt(_))));
+        crate::apply_token_load_result(&state, result);
+        assert_eq!(state.tokens_load.state(), crate::TokensLoadState::Ready);
+
+        let mut writer_called = false;
+        persist_tokens_at_with_retry(
+            &state,
+            &path,
+            || Err(TokensLoadError::KeychainUnavailable("unused".to_string())),
+            |_path, _contents| {
+                writer_called = true;
+                Ok(())
+            },
+        )
+        .expect("corrupt-store recovery must remain writable");
+        assert!(writer_called);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1374,10 +1796,13 @@ mod tests {
                 Ok(test_key())
             })
             .expect_err("corrupt legacy must fail");
+        let message = match err {
+            TokensLoadError::Corrupt(message) => message,
+            other => panic!("parse failure must be corrupt, got {other:?}"),
+        };
         assert!(
-            err.contains("Failed to parse legacy plaintext tokens file"),
-            "parse error expected, got: {}",
-            err
+            message.contains("Failed to parse legacy plaintext tokens file"),
+            "parse error expected, got: {message}"
         );
         assert!(
             !called.get(),
@@ -1391,14 +1816,17 @@ mod tests {
         let err =
             decode_legacy_with_key_fetcher(&path, &valid, TokenReadMode::MigrateLegacy, || {
                 called.set(true);
-                Err::<[u8; 32], String>("keychain unavailable".to_string())
+                Err::<[u8; 32], crate::keychain::KeychainReadError>(
+                    crate::keychain::KeychainReadError::Unavailable(
+                        "keychain unavailable".to_string(),
+                    ),
+                )
             })
             .expect_err("failing fetcher must fail");
         assert!(called.get(), "key fetcher must run for valid legacy input");
         assert!(
-            err.contains("keychain unavailable"),
-            "fetcher error expected, got: {}",
-            err
+            matches!(&err, TokensLoadError::KeychainUnavailable(message) if message == "keychain unavailable"),
+            "typed unavailable error expected, got: {err:?}"
         );
     }
 
@@ -1667,36 +2095,6 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // Issue #800 (wiring guard): `persist_tokens` must bind BOTH slot guards
-    // before cloning either slot, so the pair written to disk is a consistent
-    // cut. A behavioral test cannot deterministically interleave a Teams commit
-    // between the two clones without test-only plumbing inside the production
-    // function, so the ordering is pinned by a source scan of the isolated body
-    // (the shared literal-aware scanner `test_scan`, which isolates a body by
-    // depth-counting instead of a next-function anchor — this body holds a
-    // closure and a `TokensFile { .. }` literal). Pre-fix the body cloned the
-    // Spotify slot before the Teams guard was even bound, and this assertion
-    // fails on that shape.
-    #[test]
-    fn persist_binds_both_slot_guards_before_cloning() {
-        let src = include_str!("token_io.rs");
-        let body = test_scan::fn_body(src, "fn persist_tokens(");
-        let spotify_guard = body
-            .find("state.tokens.spotify()")
-            .expect("persist_tokens must bind the Spotify slot guard");
-        let teams_guard = body
-            .find("state.tokens.teams()")
-            .expect("persist_tokens must bind the Teams slot guard");
-        let first_clone = body
-            .find(".clone()")
-            .expect("persist_tokens must clone at least one slot");
-        assert!(
-            spotify_guard < first_clone && teams_guard < first_clone,
-            "both slot guards must be bound before either slot is cloned, so a \
-             commit landing on the second slot cannot be dropped from the file \
-             (issue #800)"
-        );
-    }
     // Issue #766: `clear_tokens_file` must sweep every sidecar next to the
     // live file, not just delete `tokens.json`. Pre-fix it removed only the
     // live path, so a plaintext `tokens.json.tmp` leftover from a ≤ v2.10.0

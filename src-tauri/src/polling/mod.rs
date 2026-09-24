@@ -29,7 +29,8 @@ mod state;
 
 pub(crate) use poll_once::MUSIC_EMOJI;
 pub(crate) use poll_once::{
-    cas_refresh_or_discard, clear_presence_on_exit, load_write_clocks, run_oneshot, CasOutcome,
+    cas_refresh_spotify, cas_refresh_teams, clear_presence_on_exit, load_write_clocks, run_oneshot,
+    CasOutcome,
 };
 // Issue #868: the rule walker (TrackRuleContext, track_rule_hit,
 // track_rule_conditions_match, track_rule_schedule_matches) is the
