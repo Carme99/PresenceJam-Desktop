@@ -14,9 +14,10 @@
 //! `crate::token_io` module in a prior PR (see issue #65), so no
 //! `polling/token_io.rs` file is created here.
 //!
-//! `ErrorSeverity` + `emit_error` live in this file (issue #117 / #79)
-//! because they are the single canonical shape for the `error` event
-//! and must be reachable from every submodule.
+//! `ErrorSeverity`, `ErrorRecovery`, `ErrorEventPayload`, and the error
+//! emitters live in this file (issue #117 / #79) because they are the single
+//! canonical contract for the `error` event and must be reachable from every
+//! submodule.
 
 // `loop` is a Rust keyword so the module identifier is `loop_`; the file is
 // still named `loop.rs` per the #72 issue spec via the `#[path]` attribute.
@@ -52,6 +53,7 @@ pub use state::{start_polling, stop_polling};
 // integration tests (when they land) will exercise it directly.
 pub use daemon::run as run_daemon;
 
+use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
 /// Severity tier for `error` events emitted to the frontend.
@@ -62,29 +64,61 @@ use tauri::{AppHandle, Emitter};
 /// (e.g. a 401 that triggers token refresh, a 429 that triggers
 /// back-off) is `warning`; an error that ended the current attempt
 /// with no automatic recovery is `error`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub(crate) enum ErrorSeverity {
     Warning,
     Error,
 }
 
-/// Emit an `error` event to the frontend with a stable shape:
-/// `{ "source": <string>, "message": <string>, "severity": "warning" | "error" }`.
+/// Recovery action advertised by an error event, when the producer has one.
 ///
-/// Centralised so the field shape cannot drift between emit sites
-/// (the loop driver had 3 of them, see issue #79). All call sites in
-/// `poll_once` route through this helper.
+/// This is optional because the polling loop's ordinary retry warnings do
+/// not carry a provider-specific action. Teams uses it to distinguish a
+/// scheduled automatic retry from failures that require user action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ErrorRecovery {
+    RetryScheduled,
+    ReconnectRequired,
+    UserActionRequired,
+}
+
+/// Canonical payload for the frontend `error` event.
+///
+/// Recovery-aware producers call [`emit_error_with_recovery`] directly;
+/// ordinary producers use [`emit_error`], which delegates to the same
+/// canonical emitter. The wire shape and optional recovery discriminator
+/// therefore cannot drift between providers.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ErrorEventPayload {
+    pub(crate) source: String,
+    pub(crate) message: String,
+    pub(crate) severity: ErrorSeverity,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) recovery: Option<ErrorRecovery>,
+}
+
+/// Emit an `error` event without provider-specific recovery metadata.
 pub(crate) fn emit_error(app: &AppHandle, source: &str, message: String, severity: ErrorSeverity) {
-    let severity_str = match severity {
-        ErrorSeverity::Warning => "warning",
-        ErrorSeverity::Error => "error",
-    };
+    emit_error_with_recovery(app, source, message, severity, None);
+}
+
+/// Emit an `error` event with the canonical payload and optional recovery.
+pub(crate) fn emit_error_with_recovery(
+    app: &AppHandle,
+    source: &str,
+    message: String,
+    severity: ErrorSeverity,
+    recovery: Option<ErrorRecovery>,
+) {
     let _ = app.emit(
         "error",
-        serde_json::json!({
-            "source": source,
-            "message": message,
-            "severity": severity_str,
-        }),
+        ErrorEventPayload {
+            source: source.to_string(),
+            message,
+            severity,
+            recovery,
+        },
     );
 }

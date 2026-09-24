@@ -33,7 +33,7 @@ use crate::spotify::{
 use crate::teams::{
     clear_teams_presence, clear_teams_presence_quick, clear_teams_status_message,
     clear_teams_status_message_quick, clear_user_preferred_presence,
-    clear_user_preferred_presence_quick, get_teams_presence,
+    clear_user_preferred_presence_quick, emit_teams_write_error, get_teams_presence,
     is_token_expired as is_teams_token_expired, presence_gate_reason, refresh_teams_token,
     set_teams_presence, set_teams_status_message, set_user_preferred_presence, TeamsApiError,
     TeamsTokens, GATE_REASON_CALENDAR, GATE_REASON_IDLE, GATE_REASON_MANUAL_STATUS,
@@ -4570,7 +4570,7 @@ pub(crate) fn process_track(
                             // never `Display`. `Display` carries the raw Graph body for
                             // 403/418 — useful in logs, useless to a user staring at a
                             // five-second banner.
-                            emit_error(app, "teams", e.user_message(), ErrorSeverity::Error);
+                            emit_teams_write_error(app, &e);
                             // Issue #154: a 429 extends the next poll to the
                             // server-directed delay.
                             teams_backoff_secs = teams_backoff_secs.max(rate_limit_sleep_secs(&e));

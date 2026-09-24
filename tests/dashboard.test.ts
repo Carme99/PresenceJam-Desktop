@@ -292,6 +292,185 @@ describe('Dashboard presence hydration (#547, #670)', () => {
   });
 });
 
+describe('Dashboard error-event routing (#972)', () => {
+  const teamsRetry = {
+    source: 'teams',
+    message: 'Teams is unavailable. Retrying shortly.',
+    severity: 'warning',
+    recovery: 'retry_scheduled'
+  } as const;
+  const unrelatedSpotifyWarning = {
+    source: 'spotify',
+    message: 'Spotify is temporarily unavailable.',
+    severity: 'warning'
+  } as const;
+
+  it('renders one Teams retry as a status and no alert', async () => {
+    const { container } = render(Dashboard);
+    await listenerReady('error');
+
+    await emit('error', teamsRetry);
+
+    expect(container.querySelectorAll('.warning-banner[role="status"]')).toHaveLength(1);
+    expect(container.querySelector('.warning-banner')?.textContent).toBe(teamsRetry.message);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it('renders a fatal Teams event as an alert and no retry status', async () => {
+    const { container } = render(Dashboard);
+    await listenerReady('error');
+
+    await emit('error', {
+      source: 'teams',
+      message: 'Microsoft Teams permission was denied.',
+      severity: 'error',
+      recovery: 'user_action_required'
+    });
+
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      'Microsoft Teams permission was denied.'
+    );
+    expect(container.querySelector('.warning-banner')).toBeNull();
+  });
+
+  it('preserves Teams retry and fatal timers after an unrelated warning', async () => {
+    const dash = render(Dashboard);
+    await listenerReady('error');
+    vi.useFakeTimers();
+
+    await emit('error', teamsRetry);
+    await emit('error', unrelatedSpotifyWarning);
+    expect(dash.container.querySelector('.warning-banner')?.textContent).toBe(teamsRetry.message);
+    expect(dash.container.querySelector('[role="alert"]')).toBeNull();
+    await vi.advanceTimersByTimeAsync(5000);
+    await tick();
+    expect(dash.container.querySelector('.warning-banner')).toBeNull();
+
+    await emit('error', {
+      source: 'teams',
+      message: 'Microsoft Teams permission was denied.',
+      severity: 'error',
+      recovery: 'user_action_required'
+    });
+    await emit('error', unrelatedSpotifyWarning);
+    expect(dash.container.querySelector('[role="alert"]')?.textContent).toBe(
+      'Microsoft Teams permission was denied.'
+    );
+    await vi.advanceTimersByTimeAsync(5000);
+    await tick();
+    expect(dash.container.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  const teamsFatal = {
+    source: 'teams',
+    message: 'Microsoft Teams permission was denied.',
+    severity: 'error',
+    recovery: 'user_action_required'
+  } as const;
+
+  it('replaces a Teams retry warning with a fatal alert', async () => {
+    const { container } = render(Dashboard);
+    await listenerReady('error');
+
+    await emit('error', teamsRetry);
+    await emit('error', teamsFatal);
+
+    expect(container.querySelector('.warning-banner')).toBeNull();
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(teamsFatal.message);
+  });
+
+  it('does not let a retry warning replace an existing fatal alert', async () => {
+    const { container } = render(Dashboard);
+    await listenerReady('error');
+    vi.useFakeTimers();
+
+    await emit('error', teamsFatal);
+    await emit('error', teamsRetry);
+
+    expect(container.querySelector('.warning-banner')).toBeNull();
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(teamsFatal.message);
+    await vi.advanceTimersByTimeAsync(4999);
+    await tick();
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(teamsFatal.message);
+    await vi.advanceTimersByTimeAsync(1);
+    await tick();
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it('clears a retry warning when polling reports a fatal panic', async () => {
+    const { container } = render(Dashboard);
+    await listenerReady('error');
+    await emit('error', teamsRetry);
+
+    await emit('polling-thread-panicked', {});
+
+    expect(container.querySelector('.warning-banner')).toBeNull();
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(t('dashboard.syncCrashed'));
+  });
+
+  it('clears a retry warning when sync toggle fails', async () => {
+    status = syncStatus({ is_syncing: false });
+    const { container } = render(Dashboard);
+    await listenerReady('error');
+    await emit('error', teamsRetry);
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'start_syncing') throw new Error('toggle failed');
+      if (cmd === 'get_sync_status') return status;
+      if (cmd === 'load_config') return get(configStore);
+      return undefined;
+    });
+
+    (container.querySelector('.header-right .icon-btn.primary') as HTMLButtonElement).click();
+
+    await waitFor(() => expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      t('dashboard.syncToggleFailed')
+    ));
+    expect(container.querySelector('.warning-banner')).toBeNull();
+  });
+
+  it('clears a retry warning when snooze resume fails', async () => {
+    configStore.set({ ...get(configStore), snooze_until: new Date(Date.now() + 60_000).toISOString() });
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'save_config') throw new Error('resume failed');
+      if (cmd === 'get_sync_status') return status;
+      if (cmd === 'load_config') return get(configStore);
+      return undefined;
+    });
+    const { container } = render(Dashboard);
+    await listenerReady('error');
+    await waitFor(() => expect(container.querySelector('.snooze-resume')).not.toBeNull());
+    await emit('error', teamsRetry);
+
+    (container.querySelector('.snooze-resume') as HTMLButtonElement).click();
+
+    await waitFor(() => expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      t('dashboard.snoozeResumeFailed')
+    ));
+    expect(container.querySelector('.warning-banner')).toBeNull();
+  });
+
+  it('clears a retry warning when status refresh fails', async () => {
+    presence.set({ ...get(presence), syncing: true });
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'refresh_status') throw new Error('refresh failed');
+      if (cmd === 'get_sync_status') return status;
+      if (cmd === 'load_config') return get(configStore);
+      return undefined;
+    });
+    const { container } = render(Dashboard);
+    await listenerReady('error');
+    await waitFor(() => expect(container.querySelector('.btn-refresh')).not.toBeNull());
+    await emit('error', teamsRetry);
+
+    (container.querySelector('.btn-refresh') as HTMLButtonElement).click();
+
+    await waitFor(() => expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      t('dashboard.refreshFailed')
+    ));
+    expect(container.querySelector('.warning-banner')).toBeNull();
+  });
+});
+
 describe('A pause is not a stop (#670)', () => {
   it('keeps the track card on a pause and drops it only on a genuine stop', async () => {
     status = syncStatus({ last_posted_status: '🎵 An Artist - A Track 🎧' });

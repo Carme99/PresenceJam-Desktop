@@ -15,12 +15,11 @@
  * struct, run `cargo test`, and the regenerated `.ts` will flow
  * through this re-export. See issue #78.
  *
- * **`ErrorEventPayload` and `LogPayload` are still hand-written**
- * because their wire shape is not owned by a Rust struct (the polling
- * loop emits `ErrorEventPayload` via `serde_json::json!({...})` inline
- * — see `polling/mod.rs::emit_error`; `LogPayload` comes from the
- * `tauri-plugin-log` plugin, not from this crate's structs). See
- * issue #79 for the inline-emit rationale.
+ * **`ErrorEventPayload` and `LogPayload` are hand-written** because the
+ * `tauri-plugin-log` payload is not owned by this crate, while the error
+ * payload mirrors the canonical Rust `ErrorEventPayload` in
+ * `polling/mod.rs`. Keep the two definitions synchronized when the wire shape
+ * changes. See issue #79 for the event rationale.
  */
 export type { SpotifyTokens } from './types-generated/SpotifyTokens';
 export type { TrackInfo } from './types-generated/TrackInfo';
@@ -42,15 +41,17 @@ export type { SlotRegistration } from './types-generated/SlotRegistration';
 export type { ShortcutsStatus } from './types-generated/ShortcutsStatus';
 /**
  * Payload of the `error` event emitted by the Rust polling loop. The
- * `severity` field was added in #79 part 1; the Dashboard.svelte
- * listener uses it to gate the red banner (only `severity: "error"`
- * pops it; `severity: "warning"` is logged to the console for the
- * developer but does not alarm-fatigue the user).
+ * `severity` field was added in #79 part 1. Dashboard.svelte uses it to
+ * gate the red fatal banner: only `severity: "error"` is shown there,
+ * while a Teams `severity: "warning"` with `recovery: "retry_scheduled"`
+ * is rendered as a non-fatal `role="status"` warning banner. Other warnings
+ * are ignored by the user-facing Dashboard listener.
  */
 export interface ErrorEventPayload {
   source: string;
   message: string;
   severity: 'warning' | 'error';
+  recovery?: 'retry_scheduled' | 'reconnect_required' | 'user_action_required';
 }
 
 /**

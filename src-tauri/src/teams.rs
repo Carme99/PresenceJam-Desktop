@@ -1,8 +1,10 @@
+use crate::polling::{emit_error_with_recovery, ErrorRecovery, ErrorSeverity};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 use std::thread;
 use std::time::Duration as StdDuration;
+use tauri::AppHandle;
 
 /// Log tag prefix for this module (mirrors the `[CFG]` / `[CMD.*]` /
 /// `[UPDATER.BG]` pattern). `CLAUDE.md` requires a square-bracket module
@@ -66,8 +68,54 @@ pub enum TeamsApiError {
     ReauthRequired(String),
     /// Network error or other transient failure (5xx, send failure)
     Transient(String),
-    /// Other non-retryable error
+    /// Unexpected response; the polling loop keeps retrying on the next pass.
     Other(u16, String),
+}
+
+/// UI severity and recovery contract for a failed playing-status write.
+/// Transient failures stay on the polling loop and therefore use the warning
+/// tier; dead credentials and permission/licence failures need user action and
+/// remain fatal. The recovery state travels on the event so the Dashboard can
+/// render an automatic-retry notice without treating it as a failed sync.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TeamsWriteErrorPolicy {
+    severity: ErrorSeverity,
+    recovery: ErrorRecovery,
+}
+
+fn teams_write_error_policy(error: &TeamsApiError) -> TeamsWriteErrorPolicy {
+    match error {
+        TeamsApiError::RateLimited(_)
+        | TeamsApiError::Transient(_)
+        | TeamsApiError::Other(_, _) => TeamsWriteErrorPolicy {
+            severity: ErrorSeverity::Warning,
+            recovery: ErrorRecovery::RetryScheduled,
+        },
+        TeamsApiError::Forbidden(_, _) => TeamsWriteErrorPolicy {
+            severity: ErrorSeverity::Error,
+            recovery: ErrorRecovery::UserActionRequired,
+        },
+        TeamsApiError::ExpiredToken(_)
+        | TeamsApiError::InvalidGrant
+        | TeamsApiError::ReauthRequired(_) => TeamsWriteErrorPolicy {
+            severity: ErrorSeverity::Error,
+            recovery: ErrorRecovery::ReconnectRequired,
+        },
+    }
+}
+
+/// Emit one classified `error` event for a failed Teams status write.
+/// `error` remains the established event name; `recovery` lets consumers
+/// distinguish an automatic retry from terminal user-action failures.
+pub(crate) fn emit_teams_write_error(app: &AppHandle, error: &TeamsApiError) {
+    let policy = teams_write_error_policy(error);
+    emit_error_with_recovery(
+        app,
+        "teams",
+        error.user_message(),
+        policy.severity,
+        Some(policy.recovery),
+    );
 }
 
 impl std::fmt::Display for TeamsApiError {
@@ -1643,7 +1691,124 @@ fn clear_user_preferred_presence_with(
 #[cfg(test)]
 mod tests {
     use super::truncate_for_log;
+    use super::{teams_write_error_policy, TeamsApiError};
     use super::{DeviceCodeResponse, TeamsTokens, MICROSOFT_GRAPH_SCOPES};
+    use crate::polling::{ErrorEventPayload, ErrorRecovery, ErrorSeverity};
+
+    #[test]
+    fn teams_write_error_policy_covers_every_api_error_variant() {
+        let cases = [
+            (
+                TeamsApiError::ExpiredToken(401),
+                ErrorSeverity::Error,
+                ErrorRecovery::ReconnectRequired,
+            ),
+            (
+                TeamsApiError::Forbidden(403, "denied".to_string()),
+                ErrorSeverity::Error,
+                ErrorRecovery::UserActionRequired,
+            ),
+            (
+                TeamsApiError::RateLimited(Some(60)),
+                ErrorSeverity::Warning,
+                ErrorRecovery::RetryScheduled,
+            ),
+            (
+                TeamsApiError::InvalidGrant,
+                ErrorSeverity::Error,
+                ErrorRecovery::ReconnectRequired,
+            ),
+            (
+                TeamsApiError::ReauthRequired("consent_required".to_string()),
+                ErrorSeverity::Error,
+                ErrorRecovery::ReconnectRequired,
+            ),
+            (
+                TeamsApiError::Transient("service unavailable".to_string()),
+                ErrorSeverity::Warning,
+                ErrorRecovery::RetryScheduled,
+            ),
+            (
+                TeamsApiError::Other(418, "unexpected".to_string()),
+                ErrorSeverity::Warning,
+                ErrorRecovery::RetryScheduled,
+            ),
+        ];
+
+        for (error, severity, recovery) in cases {
+            let policy = teams_write_error_policy(&error);
+            assert_eq!(policy.severity, severity, "wrong severity for {error:?}");
+            assert_eq!(policy.recovery, recovery, "wrong recovery for {error:?}");
+        }
+    }
+
+    #[test]
+    fn teams_write_warning_policy_exposes_retry_state_and_actionable_copy() {
+        let error = TeamsApiError::Transient("service unavailable".to_string());
+        let policy = teams_write_error_policy(&error);
+
+        assert_eq!(policy.severity, ErrorSeverity::Warning);
+        assert_eq!(policy.recovery, ErrorRecovery::RetryScheduled);
+        assert_eq!(
+            error.user_message(),
+            TeamsApiError::Transient(String::new()).user_message()
+        );
+        assert!(error.user_message().contains("Retrying shortly"));
+    }
+
+    #[test]
+    fn error_event_wire_contract_pins_recovery_and_omits_absent_recovery() {
+        let cases = [
+            (
+                TeamsApiError::RateLimited(Some(30)),
+                serde_json::json!({
+                    "source": "teams",
+                    "message": "Microsoft Teams is temporarily limiting requests. Retrying in 30 seconds.",
+                    "severity": "warning",
+                    "recovery": "retry_scheduled"
+                }),
+            ),
+            (
+                TeamsApiError::ExpiredToken(401),
+                serde_json::json!({
+                    "source": "teams",
+                    "message": "Your Microsoft Teams sign-in has expired. Reconnect Teams in Settings.",
+                    "severity": "error",
+                    "recovery": "reconnect_required"
+                }),
+            ),
+        ];
+
+        for (error, expected) in cases {
+            let policy = teams_write_error_policy(&error);
+            let payload = ErrorEventPayload {
+                source: "teams".to_string(),
+                message: error.user_message(),
+                severity: policy.severity,
+                recovery: Some(policy.recovery),
+            };
+
+            assert_eq!(
+                serde_json::to_value(payload).expect("serialize recovery payload"),
+                expected
+            );
+        }
+
+        let ordinary = ErrorEventPayload {
+            source: "spotify".to_string(),
+            message: "Failed to get currently playing".to_string(),
+            severity: ErrorSeverity::Error,
+            recovery: None,
+        };
+        assert_eq!(
+            serde_json::to_value(ordinary).expect("serialize ordinary payload"),
+            serde_json::json!({
+                "source": "spotify",
+                "message": "Failed to get currently playing",
+                "severity": "error"
+            })
+        );
+    }
 
     #[test]
     fn teams_oauth_profile_scope_also_requests_openid() {
@@ -2732,35 +2897,6 @@ mod tests {
         assert!(TeamsApiError::Other(418, body.to_string())
             .user_message()
             .contains("418"));
-    }
-
-    /// Issue #974: the poller must format Teams failures through
-    /// `user_message()`, never `Display`. `Display` carries the raw Graph
-    /// body for 403/418 — useful in logs, useless in the Dashboard banner.
-    /// A regression that re-uses `format!("… {}", e)` (which calls
-    /// `Display`) would reintroduce the issue #974 symptom: a JSON body
-    /// appearing in a five-second error toast.
-    ///
-    /// Source-grep is brittle on purpose: the previous shape was a single
-    /// `format!` line that slipped past tests, and the only place this
-    /// regresses is exactly that line, so a structural assertion is the
-    /// cheapest, most reliable check we have.
-    #[test]
-    fn poll_once_routes_teams_errors_through_user_message() {
-        let poll = include_str!("polling/poll_once.rs");
-        // The body-printing shape that produced issue #974. Reintroducing
-        // it would silently restore the raw Graph body in a Dashboard
-        // banner, so we explicitly assert it's gone.
-        assert!(
-            !poll.contains("Failed to update status: {}"),
-            "the body-printing `format!` must be gone — use `e.user_message()` instead"
-        );
-        // And the routing is in place: the poller's Teams emit uses
-        // `user_message()` so a 403 reaches the user as a sentence.
-        assert!(
-            poll.contains(".user_message()"),
-            "the poller must call `user_message()` somewhere on the Teams error path"
-        );
     }
 
     /// Issue #884: the shared Graph client must stay memoized. Reintroducing a

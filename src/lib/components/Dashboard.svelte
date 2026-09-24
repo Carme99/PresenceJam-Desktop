@@ -15,6 +15,7 @@
   import { t, i18n } from '$lib/i18n';
   import { useListenerTeardown } from '$lib/utils/useAuthListeners';
 
+
   /**
    * The gate chip's copy, derived from the reason the always-mounted
    * `+layout.svelte` listener recorded in the presence store (#670): the
@@ -193,6 +194,40 @@
       : ''
   );
   let displayErrorTimeout: ReturnType<typeof setTimeout> | null = null;
+  let displayWarning = $state('');
+  let displayWarningTimeout: ReturnType<typeof setTimeout> | null = null;
+  const BANNER_DISMISS_MS = 5000;
+
+  function clearRetryWarning(): void {
+    if (displayWarningTimeout) clearTimeout(displayWarningTimeout);
+    displayWarningTimeout = null;
+    displayWarning = '';
+  }
+
+  function showFatal(message: string): void {
+    clearRetryWarning();
+    if (displayErrorTimeout) clearTimeout(displayErrorTimeout);
+    displayErrorTimeout = null;
+    displayError = message;
+    displayErrorTimeout = setTimeout(() => {
+      displayError = '';
+      displayErrorTimeout = null;
+    }, BANNER_DISMISS_MS);
+  }
+
+  function errorEventMessage(payload: ErrorEventPayload): string {
+    return typeof payload.message === 'string' ? payload.message : String(payload);
+  }
+
+  function showTeamsRetryWarning(message: string): void {
+    if (displayError) return;
+    if (displayWarningTimeout) clearTimeout(displayWarningTimeout);
+    displayWarning = message;
+    displayWarningTimeout = setTimeout(() => {
+      displayWarning = '';
+      displayWarningTimeout = null;
+    }, BANNER_DISMISS_MS);
+  }
   // #408: goToSetup re-enable timer must be cleared on destroy so a
   // late callback cannot touch state after unmount.
   let goToSetupTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -208,6 +243,7 @@
   onDestroy(() => {
     void teardown.dispose();
     if (displayErrorTimeout) clearTimeout(displayErrorTimeout);
+    if (displayWarningTimeout) clearTimeout(displayWarningTimeout);
     if (goToSetupTimeout) clearTimeout(goToSetupTimeout);
     if (availabilityTimeout) clearTimeout(availabilityTimeout);
   });
@@ -534,21 +570,18 @@
     teardown.add(listen<ErrorEventPayload>('error', (event) => {
       const payload = event.payload;
       console.error('[DASHBOARD] EVENT: error received:', payload);
-      // Issue #79: only `severity: "error"` (i.e. an error the polling
-      // loop did not automatically recover from) pops the red banner.
-      // `severity: "warning"` events (e.g. a 401 that triggered token
-      // refresh, a 429 that triggered backoff) are logged to the
-      // console for the developer but do not alarm-fatigue the user
-      // with a banner that disappears during the next successful poll.
+      // Only the classified Teams retry event owns warning-banner state. Other
+      // warning sources share this event channel but must not erase a Teams
+      // retry or fatal Teams error that is already on screen.
+      if (payload.severity === 'warning') {
+        if (payload.source !== 'teams' || payload.recovery !== 'retry_scheduled') return;
+        showTeamsRetryWarning(errorEventMessage(payload));
+        return;
+      }
       if (payload.severity !== 'error') {
         return;
       }
-      const message = typeof payload.message === 'string'
-        ? payload.message
-        : String(payload);
-      if (displayErrorTimeout) clearTimeout(displayErrorTimeout);
-      displayError = message;
-      displayErrorTimeout = setTimeout(() => { displayError = ''; displayErrorTimeout = null; }, 5000);
+      showFatal(errorEventMessage(payload));
     }));
 
     // toggle-pause is now handled in +page.svelte (always-mounted) — Dashboard no longer owns it (#230).
@@ -564,9 +597,7 @@
       devLog('[DASHBOARD] EVENT: polling-thread-panicked received');
       setSyncing(false);
       devLog('[DASHBOARD] EVENT: isSyncing=false (panic recovery)');
-      if (displayErrorTimeout) clearTimeout(displayErrorTimeout);
-      displayError = t('dashboard.syncCrashed');
-      displayErrorTimeout = setTimeout(() => { displayError = ''; displayErrorTimeout = null; }, 5000);
+      showFatal(t('dashboard.syncCrashed'));
     }));
 
     devLog('[DASHBOARD] onMount: setting up reconnect-required listener');
@@ -626,9 +657,7 @@
       }
     } catch (e) {
       console.error('[DASHBOARD] toggleSync failed:', e);
-      if (displayErrorTimeout) clearTimeout(displayErrorTimeout);
-      displayError = t('dashboard.syncToggleFailed');
-      displayErrorTimeout = setTimeout(() => { displayError = ''; displayErrorTimeout = null; }, 5000);
+      showFatal(t('dashboard.syncToggleFailed'));
     } finally {
       isToggling = false;
     }
@@ -660,9 +689,7 @@
       devLog('[DASHBOARD] resumeSnooze: snooze cleared');
     } catch (e) {
       console.error('[DASHBOARD] resumeSnooze failed:', e);
-      if (displayErrorTimeout) clearTimeout(displayErrorTimeout);
-      displayError = t('dashboard.snoozeResumeFailed');
-      displayErrorTimeout = setTimeout(() => { displayError = ''; displayErrorTimeout = null; }, 5000);
+      showFatal(t('dashboard.snoozeResumeFailed'));
     } finally {
       isResuming = false;
     }
@@ -687,9 +714,7 @@
       hydrate(status, snapshotRevision);
     } catch (e) {
       console.error('[DASHBOARD] refreshStatus failed:', e);
-      if (displayErrorTimeout) clearTimeout(displayErrorTimeout);
-      displayError = t('dashboard.refreshFailed');
-      displayErrorTimeout = setTimeout(() => { displayError = ''; displayErrorTimeout = null; }, 5000);
+      showFatal(t('dashboard.refreshFailed'));
     } finally {
       isRefreshing = false;
     }
@@ -845,6 +870,10 @@
       </button>
     </div>
   </header>
+
+  {#if displayWarning}
+    <div class="warning-banner" role="status">{displayWarning}</div>
+  {/if}
 
   {#if displayError}
     <div class="error-banner" role="alert">{displayError}</div>
@@ -1170,6 +1199,16 @@
     background: var(--accent-soft);
     color: var(--accent);
     border-color: var(--accent);
+  }
+
+  .warning-banner {
+    background: var(--warning-soft);
+    color: var(--warning);
+    padding: var(--sp-3) var(--sp-5);
+    text-align: center;
+    font-size: var(--fs-sm);
+    font-weight: 600;
+    border-bottom: 1px solid var(--warning);
   }
 
   .error-banner {
