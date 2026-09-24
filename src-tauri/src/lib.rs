@@ -499,9 +499,7 @@ impl TokensLoadGate {
         self.state() == TokensLoadState::KeychainUnavailable
     }
 
-    pub(crate) fn recovery_guard(
-        &self,
-    ) -> parking_lot::MutexGuard<'_, RecoveryMarkers> {
+    pub(crate) fn recovery_guard(&self) -> parking_lot::MutexGuard<'_, RecoveryMarkers> {
         self.recovery.lock()
     }
 
@@ -526,11 +524,7 @@ impl TokensLoadGate {
         self.mark_ready_locked();
     }
 
-    pub(crate) fn commit_spotify(
-        &self,
-        tokens: &Tokens,
-        value: crate::spotify::SpotifyTokens,
-    ) {
+    pub(crate) fn commit_spotify(&self, tokens: &Tokens, value: crate::spotify::SpotifyTokens) {
         let mut recovery = self.recovery.lock();
         recovery.clear(TokenProvider::Spotify);
         *tokens.spotify_mut() = Some(value);
@@ -620,7 +614,6 @@ impl TokensLoadGate {
             .as_ref()
             .is_some_and(|t| t.access_token == pre_refresh_access_token)
     }
-
 }
 
 pub struct AppState {

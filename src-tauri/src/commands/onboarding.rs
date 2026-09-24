@@ -380,12 +380,10 @@ fn teams_session_verdict(
 
     session_verdict(is_token_expired(tokens), || {
         let pre_refresh_access_token = tokens.access_token.clone();
-        let outcome = cas_refresh_teams(
-            state,
-            "teams-onboarding",
-            &pre_refresh_access_token,
-            || refresh_teams_token(tokens),
-        );
+        let outcome =
+            cas_refresh_teams(state, "teams-onboarding", &pre_refresh_access_token, || {
+                refresh_teams_token(tokens)
+            });
         match outcome {
             CasOutcome::Committed(_) => {
                 persist_refreshed(state, app, "Teams");

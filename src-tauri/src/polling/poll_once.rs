@@ -581,12 +581,10 @@ fn run_inner(
         match refresh_spotify_token(&spotify_tokens, &client_id, &client_secret) {
             Ok(new_tokens) => {
                 log::info!("[POLLING] poll_once: token refresh SUCCESS");
-                let cas_outcome = cas_refresh_spotify(
-                    state,
-                    "spotify",
-                    &pre_refresh_access_token,
-                    || Ok::<_, SpotifyApiError>(new_tokens.clone()),
-                );
+                let cas_outcome =
+                    cas_refresh_spotify(state, "spotify", &pre_refresh_access_token, || {
+                        Ok::<_, SpotifyApiError>(new_tokens.clone())
+                    });
                 // Issue #180: the write guard reborrowed above is a temporary
                 // that lives only until the end of this statement. Persist in
                 // a LATER statement, when the guard is provably dropped —
@@ -1436,7 +1434,10 @@ where
                 .tokens_load
                 .provider_matches_spotify(&state.tokens, pre_refresh_access_token);
             if replaced {
-                log::warn!("[POLLING] poll_once: {} state changed during refresh", label);
+                log::warn!(
+                    "[POLLING] poll_once: {} state changed during refresh",
+                    label
+                );
             }
             CasOutcome::RefreshFailed { error, replaced }
         }
@@ -1447,7 +1448,10 @@ where
         ) {
             crate::TokenCommitOutcome::Committed(_) => CasOutcome::Committed(new_tokens),
             crate::TokenCommitOutcome::Discarded(current) => {
-                log::warn!("[POLLING] poll_once: {} state changed during refresh", label);
+                log::warn!(
+                    "[POLLING] poll_once: {} state changed during refresh",
+                    label
+                );
                 CasOutcome::Discarded { current }
             }
         },
@@ -1470,7 +1474,10 @@ where
                 .tokens_load
                 .provider_matches_teams(&state.tokens, pre_refresh_access_token);
             if replaced {
-                log::warn!("[POLLING] poll_once: {} state changed during refresh", label);
+                log::warn!(
+                    "[POLLING] poll_once: {} state changed during refresh",
+                    label
+                );
             }
             CasOutcome::RefreshFailed { error, replaced }
         }
@@ -1481,7 +1488,10 @@ where
         ) {
             crate::TokenCommitOutcome::Committed(_) => CasOutcome::Committed(new_tokens),
             crate::TokenCommitOutcome::Discarded(current) => {
-                log::warn!("[POLLING] poll_once: {} state changed during refresh", label);
+                log::warn!(
+                    "[POLLING] poll_once: {} state changed during refresh",
+                    label
+                );
                 CasOutcome::Discarded { current }
             }
         },
@@ -3360,12 +3370,10 @@ fn teams_token_for_write(app: &AppHandle, state: &Arc<AppState>) -> Option<Teams
             // The refresh error stays typed (`CasOutcome<T, E>` is generic
             // over `E`) so the re-auth policy below can classify it instead
             // of string-sniffing.
-            let teams_refresh_outcome = cas_refresh_teams(
-                state,
-                "teams",
-                &pre_refresh_access_token,
-                || refresh_teams_token(tok),
-            );
+            let teams_refresh_outcome =
+                cas_refresh_teams(state, "teams", &pre_refresh_access_token, || {
+                    refresh_teams_token(tok)
+                });
             match teams_refresh_outcome {
                 CasOutcome::Committed(new_tokens) => {
                     // Issue #180: the write guard reborrowed into the CAS
@@ -5133,18 +5141,16 @@ pub(crate) fn handle_no_track(
             let pre_refresh_access_token = teams_tok.access_token.clone();
             match refresh_teams_token(&teams_tok) {
                 Ok(new_tokens) => {
-                    let committed = match cas_refresh_teams(
-                        state,
-                        "teams",
-                        &pre_refresh_access_token,
-                        || Ok::<_, TeamsApiError>(new_tokens.clone()),
-                    ) {
-                        CasOutcome::Committed(_) => true,
-                        CasOutcome::Discarded { .. } => false,
-                        CasOutcome::RefreshFailed { .. } => {
-                            unreachable!("inner refresh_fn is Ok-wrapping")
-                        }
-                    };
+                    let committed =
+                        match cas_refresh_teams(state, "teams", &pre_refresh_access_token, || {
+                            Ok::<_, TeamsApiError>(new_tokens.clone())
+                        }) {
+                            CasOutcome::Committed(_) => true,
+                            CasOutcome::Discarded { .. } => false,
+                            CasOutcome::RefreshFailed { .. } => {
+                                unreachable!("inner refresh_fn is Ok-wrapping")
+                            }
+                        };
                     if committed {
                         // Issue #180: the write guard reborrowed into the
                         // CAS call above is dropped at the end of that
@@ -5916,12 +5922,10 @@ mod tests {
             // Exact production call shape (Spotify proactive refresh): the
             // write guard is a temporary reborrowed into the CAS helper; it
             // stays alive until the end of this statement.
-            let outcome = cas_refresh_spotify(
-                &state2,
-                "spotify",
-                &pre_refresh_access_token,
-                || Ok::<_, SpotifyApiError>(new_tokens.clone()),
-            );
+            let outcome =
+                cas_refresh_spotify(&state2, "spotify", &pre_refresh_access_token, || {
+                    Ok::<_, SpotifyApiError>(new_tokens.clone())
+                });
             let committed = matches!(outcome, CasOutcome::Committed(_));
             if committed {
                 // Persist step: re-lock the SAME RwLock for reading, exactly

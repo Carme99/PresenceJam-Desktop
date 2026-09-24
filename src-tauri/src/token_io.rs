@@ -761,9 +761,7 @@ fn persist_tokens_at_with_retry(
         let mut teams = state.tokens.teams_mut();
         if state.tokens_load.blocks_persist() {
             let recovered = read().map_err(|_| blocked_error.clone())?;
-            if spotify.is_none()
-                && !recovery.blocks(crate::TokenProvider::Spotify)
-            {
+            if spotify.is_none() && !recovery.blocks(crate::TokenProvider::Spotify) {
                 *spotify = recovered.spotify_tokens;
             }
             if teams.is_none() && !recovery.blocks(crate::TokenProvider::Teams) {
@@ -1283,10 +1281,9 @@ mod tests {
         assert_eq!(written.spotify_tokens, Some(fresh_spotify));
         assert_eq!(written.teams_tokens, None);
         assert_eq!(state.tokens_load.state(), crate::TokensLoadState::Ready);
-        assert_eq!(state.tokens.teams(), &None);
+        assert!(state.tokens.teams().is_none());
         fs::remove_dir_all(dir).unwrap();
     }
-
 
     #[test]
     fn persist_holds_both_token_guards_before_cloning() {

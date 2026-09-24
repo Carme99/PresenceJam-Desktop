@@ -600,7 +600,9 @@ pub async fn complete_spotify_auth_manual(
     }
 
     {
-        state.tokens_load.commit_spotify(&state.inner().tokens, tokens);
+        state
+            .tokens_load
+            .commit_spotify(&state.inner().tokens, tokens);
         log::info!("{CMD} complete_spotify_auth_manual: tokens stored in AppState");
     }
     token_io::persist_tokens(state.inner(), &app)?;

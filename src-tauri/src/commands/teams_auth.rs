@@ -143,7 +143,9 @@ pub async fn poll_teams_auth(
             );
 
             {
-                state.tokens_load.commit_teams(&state.inner().tokens, tokens);
+                state
+                    .tokens_load
+                    .commit_teams(&state.inner().tokens, tokens);
                 log::info!("{CMD} poll_teams_auth: tokens stored in AppState");
             }
             // Issue #562: the sign-in already succeeded — the token endpoint
@@ -259,12 +261,9 @@ fn refresh_teams_impl(state: &Arc<AppState>, app: &AppHandle) -> Result<(), Stri
     // refresh token stayed in AppState and in tokens.json while the UI saw a
     // generic failure.
     let pre_refresh_access_token = current_tokens.access_token.clone();
-    let outcome = cas_refresh_teams(
-        state,
-        "teams-command",
-        &pre_refresh_access_token,
-        || crate::teams::refresh_teams_token(&current_tokens),
-    );
+    let outcome = cas_refresh_teams(state, "teams-command", &pre_refresh_access_token, || {
+        crate::teams::refresh_teams_token(&current_tokens)
+    });
     match outcome {
         // Issue #180: the write guard reborrowed into the CAS call above dies
         // at the end of that statement, so persisting here cannot re-lock the
