@@ -47,7 +47,7 @@ see [`docs/RELEASING.md`](./docs/RELEASING.md).
 | Frontend framework | SvelteKit with `@sveltejs/adapter-static` | Svelte `5.57`, SvelteKit `2.70` |
 | Frontend language | TypeScript | `5.9` |
 | Build / bundler | Vite | `6.4` |
-| Test runner | Vitest (`@vitest/coverage-v8`) | `4.1` |
+| Test runners | Vitest (`@vitest/coverage-v8`) + Playwright Chromium | `4.1` / `1.63` |
 | Type checker | `svelte-check` | `4.7` |
 | Node | npm | `engines.node >= 22`; CI installs Node 24 |
 
@@ -108,7 +108,8 @@ frontend type-check reads stale generated types.
 │   ├── Cargo.toml           # version + MSRV + deps
 │   ├── deny.toml            # cargo-deny license + source policy
 │   ├── capabilities/
-│   │   └── default.json     # the webview capability allowlist (issue #919)
+│   │   ├── default.json     # main-window capability allowlist
+│   │   └── detached.json    # minimal detached-window permissions
 │   ├── icons/
 │   ├── tauri.conf.json      # bundle id, window size, CSP, updater config
 │   └── src/
@@ -140,7 +141,8 @@ frontend type-check reads stale generated types.
 │       ├── commands/        # one file per command family (config, auth, sync,
 │       │                    #   window, playback, rules, shortcuts, misc)
 │       └── sources/         # Spotify + MPRIS + SMTC (Windows) playback sources
-├── tests/                   # vitest suite (`tests/*.test.ts`)
+├── tests/                   # Vitest (*.test.ts) + Playwright (tests/browser/*.spec.ts)
+├── playwright.config.ts     # Chromium browser test configuration
 ├── vitest.config.js         # derives from vite.config.js (issue #839)
 ├── vite.config.js
 ├── svelte.config.js
@@ -157,7 +159,7 @@ A **reader** lands on the docs in this order:
 
 An **author** lands on these surfaces:
 
-- `src-tauri/src/` for Rust, `src/` for the frontend, `tests/` for vitest.
+- `src-tauri/src/` for Rust, `src/` for the frontend, `tests/*.test.ts` for Vitest, and `tests/browser/*.spec.ts` for Playwright browser geometry.
 - `src-tauri/Cargo.toml` and `package.json` for versions (both kept in lock-step).
 - `src-tauri/tauri.conf.json` for bundle id, window geometry, CSP, updater config.
 - `src-tauri/capabilities/default.json` for the webview capability allowlist.
@@ -175,8 +177,9 @@ An **author** lands on these surfaces:
 | Frontend type-check | `npm run check` |
 | Frontend unit tests | `npm test` |
 | Frontend tests + coverage (CI ratchet) | `npm run test:coverage` |
+| Browser geometry regression | `npm run test:browser` |
 | Rust compile gate | `cargo check --manifest-path src-tauri/Cargo.toml --all-targets` |
-| Rust unit tests (also materialises ts-rs codegen) | `cargo test --manifest-path src-tauri/Cargo.toml --lib` |
+| Rust tests (also materialises ts-rs codegen) | `cargo test --manifest-path src-tauri/Cargo.toml --all-targets` |
 | Format Rust | `cargo fmt --manifest-path src-tauri/Cargo.toml` |
 | Lint Rust | `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings` |
 | Markdown link audit (CI `docs-links` job) | `python3 docs/link-audit.py` |
@@ -186,19 +189,14 @@ An **author** lands on these surfaces:
 fail for which defect.
 
 1. `cargo check --manifest-path src-tauri/Cargo.toml --all-targets`
-2. `cargo test --manifest-path src-tauri/Cargo.toml --lib` (also materialises ts-rs codegen)
+2. `cargo test --manifest-path src-tauri/Cargo.toml --all-targets`
 3. `npm run check`
 4. `npm test`
-5. `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`
-6. `python3 docs/link-audit.py` (only if you edited any markdown)
+5. `npm run test:browser`
+6. `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`
+7. `python3 docs/link-audit.py` (only if you edited any markdown)
 
-The CI matrix (`.github/workflows/ci.yml`) runs jobs in two OS dimensions
-(`ubuntu-latest`, `macos-latest`, `windows-latest`) and fails fast on the
-first red. The macOS leg executes `cargo test --all-targets`; the Windows leg
-keeps `cargo check` because the lib test binary aborts at loader on the current
-`windows-latest` image (`STATUS_ENTRYPOINT_NOT_FOUND`). The fix lives in
-re-expanding the matrix once the runner image links the binary cleanly — track
-that in issue #836.
+The CI workflow runs Ubuntu, macOS, and Windows jobs. The Linux and macOS Rust jobs execute `cargo test --all-targets`; the Windows leg keeps `cargo check` because the lib test binary aborts at loader on the current `windows-latest` image (`STATUS_ENTRYPOINT_NOT_FOUND`). The fix lives in re-expanding the matrix once the runner image links the binary cleanly — track that in issue #836.
 
 ---
 
@@ -312,10 +310,9 @@ for the precedent.
 
 ### Test surface
 
-Vitest is the only test runner on the frontend. New component tests live next
-to other `tests/*.test.ts` files. Coverage ratchet: per-file floors in
-`vitest.config.js` are an absolute floor, not a target — coverage drops fail
-the `frontend` CI job.
+Vitest is the default frontend unit/component runner; new tests that do not need real browser layout live in `tests/*.test.ts`. Use Playwright for behavior whose contract is browser geometry: tests live in `tests/browser/*.spec.ts`, run through `npm run test:browser`, and the `frontend` CI job plus release verification both install Chromium and run them. The current browser gate proves every localized LogViewer level badge stays clear of its message in en/de/fr at comfortable and compact densities. Keep that real-layout check in Playwright rather than approximating it in JSDOM.
+
+The Vitest coverage ratchet remains a separate gate: per-file floors in `vitest.config.js` are an absolute floor, not a target — coverage drops fail the `frontend` CI job.
 
 ### Debug logging
 
@@ -381,27 +378,17 @@ tokens in `config.json` (which is plaintext JSON by design).
 
 ### Capability allowlist
 
-`src-tauri/capabilities/default.json` lists every Tauri command the webview
-may invoke. Dead grants are removed by the v5 epic (#919 drops the unused
-`global-shortcut:allow-*` triplet); keep this list lean. If you add a new
-IPC command, the **only** way the webview can call it is by being listed here.
+`src-tauri/capabilities/default.json` lists every Tauri command the webview may invoke. The main capability is least-privilege: unused global-shortcut and autostart grants are absent, and the updater/notification grants match the commands the webview actually uses. If you add a new IPC command, the only way the webview can call it is by being listed here.
 
 ### CSP
 
-`tauri.conf.json` sets `csp` to the explicit allowlist `default-src 'self'; …`
-covering `connect-src 'self' https://api.spotify.com https://login.microsoftonline.com https://graph.microsoft.com https://accounts.spotify.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'`.
-`form-action` is missing by default and does not fall back to `default-src` —
-issue #924 tracks adding `form-action 'none'`. Do not loosen any directive
-without a security review.
+`tauri.conf.json` sets `csp` to an explicit allowlist: `default-src 'self'` governs scripts; Spotify image origins; `style-src 'self' 'unsafe-inline'`; the Spotify, Microsoft login, and Microsoft Graph connect origins; `object-src 'none'`; `base-uri 'self'`; `frame-ancestors 'none'`; and `form-action 'none'`. The app submits state through Tauri IPC rather than HTML forms, so the explicit form ban breaks no supported flow. `updater_bg::test_tauri_conf_disallows_downgrades` pins both `base-uri 'self'` and `form-action 'none'`. Do not loosen any directive without a security review.
 
 ### Diagnostics
 
-`get_diagnostics_snapshot` writes to memory only by default; the opt-in
-`save_diagnostics_snapshot` writes into the user's Downloads directory under
-`presencejam-diagnostics-*.json`. The save path is bounded and shape-checked
-in the v5 epic (#921); do not relax the bounds. The snapshot is redacted on
-the way out — never put a token, refresh token, client secret, PKCE verifier,
-session id, or bearer token into the snapshot.
+`get_diagnostics_snapshot` builds a redacted, typed snapshot in memory. The opt-in `save_diagnostics_snapshot` command accepts neither bytes nor a destination: Rust recollects the typed snapshot, serializes it under the independent 256 KiB cap, chooses the `presencejam-diagnostics-*.json` filename, and atomically publishes it in the platform Downloads directory. The webview supplies no JSON to save; do not weaken this into a caller-supplied-content write.
+
+The snapshot is redacted on the way out — never put a token, refresh token, client secret, PKCE verifier, session id, or bearer token into the snapshot.
 
 ---
 
@@ -510,8 +497,7 @@ The review rubric:
 - Style — log tags in `[BRACKETS]`, no `println!`, no `unwrap()` on
   fallible paths, no hard-coded hex outside `app.css`, no new one-off
   button styles.
-- Verification — the local gate set has been run (`cargo check`, `cargo test
-  --lib`, `npm run check`, `npm test`); the CI matrix outcome is green.
+- Verification — the local gate set has been run (`cargo check`, `cargo test --all-targets`, `npm run check`, `npm test`, `npm run test:browser`); the CI matrix outcome is green.
 
 ### Issue hygiene
 
@@ -533,8 +519,8 @@ fix:
 | --- | --- | --- | --- |
 | `rust-platform-check` | macOS + Windows | `cargo check --all-targets` on both legs, `cargo test --all-targets` on macOS only | cfg-gated code path breaks on one OS; Linux-only test runs on macOS |
 | `windows-cli-smoke` | Windows | Real release build + `cmd /c --help` smoke + regression test | `cfg(windows)` code path regressed; CLI arm does not print |
-| `frontend` | Ubuntu | `npm run build`, `cargo test --lib` (materialises ts-rs codegen), `npm run check`, `npm run test:coverage` | Generated types are stale; new `t()` call missing a key; coverage floor dropped |
-| `rust` | Ubuntu | `cargo check` over the workspace | compile error / warning in any source file |
+| `frontend` | Ubuntu | `npm run build`, `cargo test --lib` (materialises ts-rs codegen), `npm run check`, `npm run test:coverage`, `npm run test:browser` | Generated types are stale; new `t()` call missing a key; coverage floor dropped; browser geometry regressed |
+| `rust` | Ubuntu | `cargo fmt --check`, `cargo check --all-targets`, `cargo test --all-targets` | compile error / warning / failing Rust test |
 | `lint` | Ubuntu | `cargo fmt --check`, `cargo clippy -D warnings` | formatting drift; new clippy lint |
 | `dep-audit` | Ubuntu | `cargo deny check`, `npm audit --omit=dev --audit-level=high` | new advisory not on the ignore list (issue #642) |
 | `docs-links` | Ubuntu | `python3 docs/link-audit.py` | relative markdown link broken (depth counting, see §12) |
