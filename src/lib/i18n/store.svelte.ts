@@ -45,8 +45,12 @@ const KNOWN: readonly Locale[] = ['en', 'de', 'fr'];
  */
 const DEFAULT_LOCALE: Locale = 'en';
 
-function isLocale(value: unknown): value is Locale {
-  return typeof value === 'string' && (KNOWN as readonly string[]).includes(value);
+function resolveLocale(value: unknown): Locale | null {
+  if (typeof value !== 'string') return null;
+  const raw = value.trim();
+  if (raw.length === 0) return null;
+  const base = raw.split(/[-_]/, 1)[0].trim().toLowerCase();
+  return (KNOWN as readonly string[]).includes(base) ? (base as Locale) : null;
 }
 
 /**
@@ -58,9 +62,9 @@ function isLocale(value: unknown): value is Locale {
 function migrateLegacyStorageKey(): void {
   try {
     const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
-    if (legacy === null) return;
-    if (isLocale(legacy) && localStorage.getItem(STORAGE_KEY) === null) {
-      localStorage.setItem(STORAGE_KEY, legacy);
+    const legacyLocale = resolveLocale(legacy);
+    if (legacyLocale !== null && localStorage.getItem(STORAGE_KEY) === null) {
+      localStorage.setItem(STORAGE_KEY, legacyLocale);
     }
     localStorage.removeItem(LEGACY_STORAGE_KEY);
   } catch {
@@ -76,9 +80,9 @@ migrateLegacyStorageKey();
  */
 function detectInitialLocale(): Locale {
   try {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (isLocale(stored)) {
-      return stored;
+    const storedLocale = resolveLocale(localStorage.getItem(STORAGE_KEY));
+    if (storedLocale !== null) {
+      return storedLocale;
     }
   } catch {
     // localStorage unavailable — fall through to browser detection.
@@ -88,9 +92,8 @@ function detectInitialLocale(): Locale {
       ? navigator.languages ?? [navigator.language]
       : [];
   for (const lang of candidates) {
-    const base = (lang ?? '').toLowerCase();
-    if (base.startsWith('de')) return 'de';
-    if (base.startsWith('fr')) return 'fr';
+    const resolved = resolveLocale(lang);
+    if (resolved !== null) return resolved;
   }
   return DEFAULT_LOCALE;
 }
@@ -178,13 +181,14 @@ function migrateLegacyLocale(): void {
  * on disk.
  */
 function reconcile(cfg: AppConfig, hydrated: boolean): void {
-  if (isLocale(cfg.locale)) {
+  const locale = resolveLocale(cfg.locale);
+  if (locale !== null) {
     // #892: an unrelated config write (a Settings save, a toggle, a snooze)
     // carries the same locale — no locale work at all for it.
-    if (cfg.locale !== current) applyLocale(cfg.locale);
+    if (locale !== current) applyLocale(locale);
     return;
   }
-  if (typeof cfg.locale === 'string' && cfg.locale.length > 0) {
+  if (typeof cfg.locale === 'string') {
     applyLocale(DEFAULT_LOCALE);
     return;
   }
@@ -217,9 +221,10 @@ export const i18n = {
    * of truth) via the `set_locale` command. An unknown value is ignored.
    */
   async set(next: Locale): Promise<void> {
-    if (!isLocale(next)) return;
-    applyLocale(next);
-    await persistLocale(next);
+    const locale = resolveLocale(next);
+    if (locale === null) return;
+    applyLocale(locale);
+    await persistLocale(locale);
   }
 };
 
@@ -231,8 +236,8 @@ export const i18n = {
 if (typeof window !== 'undefined') {
   window.addEventListener('storage', (e) => {
     if (e.key !== STORAGE_KEY) return;
-    const next = e.newValue;
-    if (next === null || !isLocale(next)) return;
+    const next = resolveLocale(e.newValue);
+    if (next === null) return;
     // Same-value guard: `applyLocale` would re-tag the document.
     if (next === current) return;
     // Local only — the window that switched already wrote the config, so

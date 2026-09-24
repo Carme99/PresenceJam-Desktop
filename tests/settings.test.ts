@@ -1622,3 +1622,48 @@ describe('Settings appearance reset (#970)', () => {
     await i18n.set('en');
   });
 });
+
+describe('Settings status default provenance (#980)', () => {
+  it('resets to the English sentinel, then follows a later locale switch', async () => {
+    await i18n.set('de');
+    const seeded = structuredClone(configuredConfig());
+    seeded.locale = 'de';
+    seeded.teams.profanity_placeholder = 'Eigener Status';
+    configStore.set(seeded);
+
+    const { container, getByRole } = await mountSettings();
+    const statusCard = [...container.querySelectorAll('section.card')].find(
+      (section) => section.querySelector('h2')?.textContent?.trim() === t('settings.sectionStatusFormat')
+    ) as HTMLElement;
+    const reset = statusCard.querySelector('button.btn-link') as HTMLButtonElement;
+    const input = container.querySelector('#profanity-placeholder') as HTMLInputElement;
+
+    await fireEvent.click(reset);
+    expect(input.value).toBe(de['settings.placeholderTextPlaceholder']);
+    await fireEvent.click(getByRole('button', { name: t('settings.saveChanges') }));
+
+    await waitFor(() => expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'save_config')).toBe(true));
+    const saved = invokeMock.mock.calls.filter(([cmd]) => cmd === 'save_config').at(-1)?.[1] as {
+      config: { teams: { profanity_placeholder: string } };
+    };
+    expect(saved.config.teams.profanity_placeholder).toBe(
+      en['settings.placeholderTextPlaceholder']
+    );
+    const previewCount = invokeMock.mock.calls.filter(([cmd]) => cmd === 'preview_status').length;
+    await i18n.set('fr');
+    await tick();
+    expect(i18n.locale).toBe('fr');
+    expect(input.value).toBe(fr['settings.placeholderTextPlaceholder']);
+    expect(get(configStore).teams.profanity_placeholder).toBe(
+      en['settings.placeholderTextPlaceholder']
+    );
+    await waitFor(() =>
+      expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'preview_status').length).toBeGreaterThan(previewCount)
+    );
+    const previewCalls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'preview_status');
+    expect(previewCalls.at(-1)?.[1]).toMatchObject({
+      placeholder: en['settings.placeholderTextPlaceholder']
+    });
+    await i18n.set('en');
+  });
+});

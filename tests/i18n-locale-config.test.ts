@@ -19,8 +19,6 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(async () => undefined) })
 
 import { defaultConfig } from '$lib/stores/config';
 import { en } from '$lib/i18n/en';
-import { de } from '$lib/i18n/de';
-import { fr } from '$lib/i18n/fr';
 
 type ConfigModule = typeof import('$lib/stores/config');
 type I18nModule = typeof import('$lib/i18n');
@@ -145,11 +143,11 @@ describe('locale source of truth (#674)', () => {
     expect(setLocaleCalls()).toEqual([]);
   });
 
-  it('derives the frontend reset default from the hydrated locale without changing custom values', async () => {
+  it('keeps the shipped placeholder sentinel while custom values survive locale changes', async () => {
     const { config } = await loadStores();
     const key = 'settings.placeholderTextPlaceholder' as const;
 
-    // A locale-shaped default before hydration is not authoritative.
+    // A locale-shaped value before hydration is not authoritative.
     config.configStore.set({ ...config.defaultConfig, locale: 'de' });
     expect(config.defaultConfig.teams.profanity_placeholder).toBe(en[key]);
     expect(config.DEFAULT_PROFANITY_PLACEHOLDER).toBe(en[key]);
@@ -160,34 +158,28 @@ describe('locale source of truth (#674)', () => {
     hydrated.teams.profanity_placeholder = custom;
     config.configStore.set(hydrated);
     config.configHydrated.set(true);
-    expect(config.defaultConfig.teams.profanity_placeholder).toBe(de[key]);
-    expect(config.DEFAULT_PROFANITY_PLACEHOLDER).toBe(de[key]);
+    expect(config.defaultConfig.teams.profanity_placeholder).toBe(en[key]);
+    expect(config.DEFAULT_PROFANITY_PLACEHOLDER).toBe(en[key]);
     expect(get(config.configStore).teams.profanity_placeholder).toBe(custom);
 
     config.configStore.set({ ...hydrated, locale: 'fr' });
-    expect(config.defaultConfig.teams.profanity_placeholder).toBe(fr[key]);
-    expect(config.DEFAULT_PROFANITY_PLACEHOLDER).toBe(fr[key]);
-    expect(get(config.configStore).teams.profanity_placeholder).toBe(custom);
-
-    config.configHydrated.set(false);
     expect(config.defaultConfig.teams.profanity_placeholder).toBe(en[key]);
     expect(config.DEFAULT_PROFANITY_PLACEHOLDER).toBe(en[key]);
+    expect(get(config.configStore).teams.profanity_placeholder).toBe(custom);
   });
 
-  it('resolves regional config locales to localized frontend status defaults', async () => {
-    const { config } = await loadStores();
-    const key = 'settings.placeholderTextPlaceholder' as const;
-
+  it('normalizes regional config locales in the actual webview i18n path', async () => {
+    const { config, i18n } = await loadStores();
     const regionalGerman = structuredClone(config.defaultConfig);
     regionalGerman.locale = 'de-AT';
     config.configStore.set(regionalGerman);
     config.configHydrated.set(true);
-    expect(config.defaultConfig.teams.profanity_placeholder).toBe(de[key]);
-    expect(config.DEFAULT_PROFANITY_PLACEHOLDER).toBe(de[key]);
+    expect(i18n.locale).toBe('de');
+    expect(document.documentElement.lang).toBe('de');
 
-    config.configStore.set({ ...regionalGerman, locale: 'fr-CA' });
-    expect(config.defaultConfig.teams.profanity_placeholder).toBe(fr[key]);
-    expect(config.DEFAULT_PROFANITY_PLACEHOLDER).toBe(fr[key]);
+    config.configStore.set({ ...regionalGerman, locale: ' fr_CA ' });
+    expect(i18n.locale).toBe('fr');
+    expect(document.documentElement.lang).toBe('fr');
   });
 
   /**

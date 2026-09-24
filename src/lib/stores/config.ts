@@ -2,19 +2,9 @@ import { writable } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
 import type { AppConfig } from '../types';
 import { en } from '../i18n/en';
-import { de } from '../i18n/de';
-import { fr } from '../i18n/fr';
-
-type FrontendLocale = 'en' | 'de' | 'fr';
 
 const PROFANITY_PLACEHOLDER_KEY = 'settings.placeholderTextPlaceholder' as const;
-const PROFANITY_PLACEHOLDERS: Record<FrontendLocale, string> = {
-  en: en[PROFANITY_PLACEHOLDER_KEY],
-  de: de[PROFANITY_PLACEHOLDER_KEY],
-  fr: fr[PROFANITY_PLACEHOLDER_KEY]
-};
-
-let activeFrontendLocale: FrontendLocale = 'en';
+const SHIPPED_PROFANITY_PLACEHOLDER = en[PROFANITY_PLACEHOLDER_KEY];
 
 
 /**
@@ -56,12 +46,10 @@ export const defaultConfig: AppConfig = {
     status_format: '🎵 {artist} - {track} 🎧',
     clear_on_pause: true,
     profanity_filter: true,
-    // Frontend-only reset/preview default. Its text comes from the locale
-    // dictionaries rather than a second literal; the Rust backend keeps the
-    // persisted English config default unchanged.
-    get profanity_placeholder(): string {
-      return PROFANITY_PLACEHOLDERS[activeFrontendLocale];
-    },
+    // Persist the shipped English sentinel: Rust treats this value as the
+    // default and localizes it at post time, so locale changes cannot freeze
+    // a reset into bytes from the language active when Reset was clicked.
+    profanity_placeholder: SHIPPED_PROFANITY_PLACEHOLDER,
     start_minimized: false,
     availability_sync: false,
     presence_gate: true,
@@ -212,15 +200,11 @@ export function clientSecretStateOf(cfg: AppConfig): ClientSecretState {
 }
 
 /**
- * Live frontend default for the profanity placeholder (issue #980). The
- * config store keeps this in step with the hydrated locale; importing it gets
- * the current canonical dictionary value without importing the i18n store
- * back into this module (which would form an initialization cycle).
- *
- * The setup wizard continues to merge into the stored config, so it never
- * seeds a placeholder of its own.
+ * The shipped English default is also the persisted provenance sentinel. The
+ * Settings UI localizes its display from the active i18n locale, but Reset
+ * stores this value so Rust can localize it again after a later locale switch.
  */
-export let DEFAULT_PROFANITY_PLACEHOLDER = PROFANITY_PLACEHOLDERS.en;
+export const DEFAULT_PROFANITY_PLACEHOLDER = SHIPPED_PROFANITY_PLACEHOLDER;
 
 
 /** The two bindable actions, in the order the Settings card shows them. */
@@ -308,34 +292,9 @@ export const configStore = writable<AppConfig>(structuredClone(defaultConfig));
  */
 export const configHydrated = writable(false);
 
-// `defaultConfig` is a frontend view of defaults, not a persisted document.
-// Keep its one locale-dependent field derived from the canonical dictionaries
-// while leaving the hydrated config document — including custom values — alone.
-let latestConfig: AppConfig = defaultConfig;
-let configLoaded = false;
-
-function frontendDefaultLocale(locale: string | null | undefined): FrontendLocale {
-  const baseTag = locale?.split(/[-_]/, 1)[0].trim().toLowerCase();
-  return baseTag === 'de' || baseTag === 'fr' ? baseTag : 'en';
-}
-
-function applyFrontendDefaultLocale(locale: FrontendLocale): void {
-  if (locale === activeFrontendLocale) return;
-  activeFrontendLocale = locale;
-  DEFAULT_PROFANITY_PLACEHOLDER = PROFANITY_PLACEHOLDERS[locale];
-}
-
-configStore.subscribe((cfg) => {
-  latestConfig = cfg;
-  if (!configLoaded) return;
-  applyFrontendDefaultLocale(frontendDefaultLocale(cfg.locale));
-});
-configHydrated.subscribe((hydrated) => {
-  configLoaded = hydrated;
-  applyFrontendDefaultLocale(
-    hydrated ? frontendDefaultLocale(latestConfig.locale) : 'en'
-  );
-});
+// The shipped defaults are intentionally locale-independent. The i18n store
+// owns runtime locale reconciliation; config data is only persisted, never
+// rewritten as a side effect of a config-store emission.
 
 /**
  * Rust `u64` fields are ts-rs `bigint` on the wire, and every one of them
