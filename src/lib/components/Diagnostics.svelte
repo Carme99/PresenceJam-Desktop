@@ -214,7 +214,7 @@
         <dl>
           <dt>{t('diagnostics.app')}</dt><dd>{snapshot.app_version}</dd>
           <dt>{t('diagnostics.tauri')}</dt><dd>{snapshot.tauri_version}</dd>
-          <dt>{t('diagnostics.os')}</dt><dd>{snapshot.os.platform} ({snapshot.os.arch}, {snapshot.os.family}); {t('diagnostics.osRelease')}: {snapshot.os.os_version}; {t('diagnostics.installFlavor')}: {snapshot.os.install_flavor.toLowerCase()}</dd>
+          <dt>{t('diagnostics.os')}</dt><dd>{snapshot.os.platform} ({snapshot.os.arch}, {snapshot.os.family}); {t('diagnostics.osRelease')}: {snapshot.os.os_version ?? 'unknown'}; {t('diagnostics.installFlavor')}: {snapshot.os.install_flavor?.toLowerCase() ?? 'unknown'}</dd>
         </dl>
       </section>
 

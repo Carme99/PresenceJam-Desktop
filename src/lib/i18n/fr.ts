@@ -197,7 +197,7 @@ export const fr: Dict = {
   'diagnostics.tauri': 'Tauri',
   'diagnostics.os': 'Système',
   'diagnostics.osRelease': 'Version',
-  'diagnostics.installFlavor': "Type d'installation",
+  'diagnostics.installFlavor': 'Type d’installation',
   'diagnostics.spotifyClientId': 'ID client Spotify',
   'diagnostics.redirectUri': 'URI de redirection',
   'diagnostics.notSet': '(non défini)',
