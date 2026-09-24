@@ -3142,7 +3142,6 @@ fn stopped_status_text(config: &Option<AppConfig>) -> &str {
     )
 }
 
-
 /// S4 (issue #672): the paused-clear placeholder. The emoji is ours; the text is
 /// `teams.paused_status_format` (default "Paused"), so the default renders
 /// byte-identically to the pre-4.7 literal `"🎵 Paused"`.
@@ -3157,6 +3156,7 @@ fn paused_status_placeholder(config: &Option<AppConfig>) -> String {
 fn stopped_status_placeholder(config: &Option<AppConfig>) -> String {
     format!("{MUSIC_EMOJI} {}", stopped_status_text(config))
 }
+
 /// Issue #343: fingerprint of the status-shaping config. Embedded in the
 /// track change key so a filter/placeholder/format flip mid-track reads as
 /// a change and forces one rewrite on the next poll, instead of leaving
@@ -7055,8 +7055,10 @@ mod tests {
         // Locale changes move the fingerprint only when they change effective
         // posted text. Untouched defaults are localized; user-authored copy
         // remains byte-identical.
-        let mut german = crate::config::AppConfig::default();
-        german.locale = Some("de".to_string());
+        let german = crate::config::AppConfig {
+            locale: Some("de".to_string()),
+            ..Default::default()
+        };
         assert_ne!(fp, status_config_fingerprint(&Some(german)));
 
         let mut custom = crate::config::AppConfig::default();
@@ -7847,29 +7849,52 @@ mod tests {
             ("de", "Pausiert", "Nichts läuft auf Spotify"),
             ("fr", "En pause", "Rien ne joue sur Spotify"),
         ] {
-            let mut defaults = AppConfig::default();
-            defaults.locale = Some(locale.to_string());
-            assert_eq!(paused_status_placeholder(&Some(defaults.clone())), format!("🎵 {paused}"));
-            assert_eq!(stopped_status_placeholder(&Some(defaults.clone())), format!("🎵 {stopped}"));
+            let defaults = AppConfig {
+                locale: Some(locale.to_string()),
+                ..Default::default()
+            };
+            assert_eq!(
+                paused_status_placeholder(&Some(defaults.clone())),
+                format!("🎵 {paused}")
+            );
+            assert_eq!(
+                stopped_status_placeholder(&Some(defaults.clone())),
+                format!("🎵 {stopped}")
+            );
 
             let mut empty = defaults.clone();
             empty.teams.paused_status_format.clear();
             empty.teams.stopped_status_format.clear();
-            assert_eq!(paused_status_placeholder(&Some(empty.clone())), format!("🎵 {paused}"));
-            assert_eq!(stopped_status_placeholder(&Some(empty)), format!("🎵 {stopped}"));
+            assert_eq!(
+                paused_status_placeholder(&Some(empty.clone())),
+                format!("🎵 {paused}")
+            );
+            assert_eq!(
+                stopped_status_placeholder(&Some(empty)),
+                format!("🎵 {stopped}")
+            );
 
             let mut custom = defaults;
             custom.teams.paused_status_format = "Kurze Pause".to_string();
             custom.teams.stopped_status_format = "Gerade nicht".to_string();
-            assert_eq!(paused_status_placeholder(&Some(custom.clone())), "🎵 Kurze Pause");
+            assert_eq!(
+                paused_status_placeholder(&Some(custom.clone())),
+                "🎵 Kurze Pause"
+            );
             assert_eq!(stopped_status_placeholder(&Some(custom)), "🎵 Gerade nicht");
         }
 
         let english = Some(AppConfig::default());
         assert_eq!(paused_status_placeholder(&english), "🎵 Paused");
-        assert_eq!(stopped_status_placeholder(&english), "🎵 Nothing playing on Spotify");
+        assert_eq!(
+            stopped_status_placeholder(&english),
+            "🎵 Nothing playing on Spotify"
+        );
         assert_eq!(paused_status_placeholder(&None), "🎵 Paused");
-        assert_eq!(stopped_status_placeholder(&None), "🎵 Nothing playing on Spotify");
+        assert_eq!(
+            stopped_status_placeholder(&None),
+            "🎵 Nothing playing on Spotify"
+        );
     }
 
     /// S4 (issue #672) acceptance (c) structural guard: the driver consults the

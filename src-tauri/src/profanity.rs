@@ -951,13 +951,7 @@ mod tests {
                 expected
             );
             assert_eq!(
-                filter_status_for_locale(
-                    "fuck",
-                    SAFE_PLACEHOLDER_DEFAULT,
-                    true,
-                    &[],
-                    Some(locale)
-                ),
+                filter_status_for_locale("fuck", SAFE_PLACEHOLDER_DEFAULT, true, &[], Some(locale)),
                 expected
             );
         }
@@ -978,9 +972,15 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         crate::i18n::set_current(Some("de"));
-        assert_eq!(super::filter_status("fuck", "", true, &[]), "Hört gerade Spotify");
+        assert_eq!(
+            super::filter_status("fuck", "", true, &[]),
+            "Hört gerade Spotify"
+        );
         crate::i18n::set_current(None);
-        assert_eq!(super::filter_status("fuck", "", true, &[]), SAFE_PLACEHOLDER_DEFAULT);
+        assert_eq!(
+            super::filter_status("fuck", "", true, &[]),
+            SAFE_PLACEHOLDER_DEFAULT
+        );
     }
 
     #[test]
