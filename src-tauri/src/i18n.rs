@@ -8,8 +8,8 @@
 //! below must stay field-for-field identical. That is enforced, not assumed:
 //! `tables_carry_an_identical_field_set` parses the struct declaration out of
 //! this file and fails when a table misses a field or falls out of order, and
-//! `no_user_visible_literal_stays_hard_coded` fails when a literal reappears
-//! in `tray.rs`/`menu.rs` outside these tables.
+//! `no_user_visible_literal_stays_hard_coded` scans production literals in
+//! `tray.rs`/`menu.rs` and fails when user-visible copy is not in these tables.
 //!
 //! Deliberate exceptions, mirroring the frontend's documented limitation:
 //! error strings surfaced through `invoke()` rejections or event payloads
@@ -461,7 +461,6 @@ impl Strings {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
 
     /// Field names declared by `pub struct Strings` in this file, in order.
     /// Parsed from source so a field added without a value in the tables
@@ -493,17 +492,291 @@ mod tests {
             .unwrap_or_else(|| panic!("module has no #[cfg(test)] mod tests block"))
     }
 
-    /// Drops `//` line comments (doc comments included) so prose that quotes a
-    /// literal cannot trip the hard-coded-literal scan. Brace counting is not
-    /// involved here, so truncating a line inside a `//` is harmless.
-    fn strip_line_comments(src: &str) -> String {
-        src.lines()
-            .map(|line| match line.find("//") {
-                Some(i) => &line[..i],
-                None => line,
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+    /// Returns every double-quoted string literal in `src` after lexing
+    /// comments, char literals, raw strings, and ordinary strings. A single
+    /// pass keeps `//` inside a URL (or a string) from changing the scan.
+    /// Byte-wise indexing is safe because every control byte examined below
+    /// is ASCII and all returned slice boundaries follow those bytes.
+    fn lexed_double_quoted_literals(src: &str) -> Vec<&str> {
+        let bytes = src.as_bytes();
+        let mut literals = Vec::new();
+        let mut cursor = 0;
+
+        while cursor < bytes.len() {
+            match bytes[cursor] {
+                b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                    cursor += 2;
+                    while cursor < bytes.len() && bytes[cursor] != b'\n' {
+                        cursor += 1;
+                    }
+                }
+                b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                    cursor += 2;
+                    let mut depth = 1usize;
+                    while cursor < bytes.len() && depth > 0 {
+                        if bytes.get(cursor..cursor + 2) == Some(&b"/*"[..]) {
+                            depth += 1;
+                            cursor += 2;
+                        } else if bytes.get(cursor..cursor + 2) == Some(&b"*/"[..]) {
+                            depth -= 1;
+                            cursor += 2;
+                        } else {
+                            cursor += 1;
+                        }
+                    }
+                }
+                b'\'' => {
+                    if let Some(end) = char_literal_end(bytes, cursor) {
+                        cursor = end + 1;
+                    } else {
+                        // A lifetime such as `'static` is not a char literal.
+                        cursor += 1;
+                    }
+                }
+                b'r' if bytes.get(cursor + 1) == Some(&b'"')
+                    || bytes.get(cursor + 1) == Some(&b'#') =>
+                {
+                    let mut quote = cursor + 1;
+                    while bytes.get(quote) == Some(&b'#') {
+                        quote += 1;
+                    }
+                    if bytes.get(quote) != Some(&b'"') {
+                        cursor += 1;
+                        continue;
+                    }
+
+                    let hashes = quote - cursor - 1;
+                    let content_start = quote + 1;
+                    let mut end = content_start;
+                    let mut closed = false;
+                    while end < bytes.len() {
+                        if bytes[end] == b'"'
+                            && bytes
+                                .get(end + 1..end + 1 + hashes)
+                                .is_some_and(|suffix| suffix.iter().all(|byte| *byte == b'#'))
+                        {
+                            literals.push(&src[content_start..end]);
+                            cursor = end + 1 + hashes;
+                            closed = true;
+                            break;
+                        }
+                        end += 1;
+                    }
+                    if !closed {
+                        cursor = bytes.len();
+                    }
+                }
+                b'b' if bytes.get(cursor + 1) == Some(&b'"') => {
+                    if let Some(end) = ordinary_string_end(bytes, cursor + 1) {
+                        literals.push(&src[cursor + 2..end]);
+                        cursor = end + 1;
+                    } else {
+                        cursor = bytes.len();
+                    }
+                }
+                b'"' => {
+                    if let Some(end) = ordinary_string_end(bytes, cursor) {
+                        literals.push(&src[cursor + 1..end]);
+                        cursor = end + 1;
+                    } else {
+                        cursor = bytes.len();
+                    }
+                }
+                _ => cursor += 1,
+            }
+        }
+
+        literals
+    }
+
+    /// Finds a char literal without mistaking a lifetime for one. ASCII chars
+    /// close immediately; escaped and non-ASCII chars may span a few bytes.
+    fn char_literal_end(bytes: &[u8], start: usize) -> Option<usize> {
+        let first = start + 1;
+        if first >= bytes.len() || bytes[first] == b'\'' {
+            return None;
+        }
+        if bytes[first] == b'\\' {
+            let mut cursor = first + 1;
+            if cursor >= bytes.len() || bytes[cursor] == b'\n' {
+                return None;
+            }
+            match bytes[cursor] {
+                b'x' => cursor = (cursor + 3).min(bytes.len()),
+                b'u' if bytes.get(cursor + 1) == Some(&b'{') => {
+                    cursor += 2;
+                    while cursor < bytes.len() && bytes[cursor] != b'}' {
+                        cursor += 1;
+                    }
+                    cursor = (cursor + 1).min(bytes.len());
+                }
+                _ => cursor = (cursor + 1).min(bytes.len()),
+            }
+            return (bytes.get(cursor) == Some(&b'\'')).then_some(cursor);
+        }
+        if bytes[first].is_ascii() {
+            return (bytes.get(first + 1) == Some(&b'\'')).then_some(first + 1);
+        }
+        let mut cursor = first;
+        while cursor < bytes.len() && cursor <= first + 4 && bytes[cursor] != b'\n' {
+            if bytes[cursor] == b'\'' {
+                return Some(cursor);
+            }
+            cursor += 1;
+        }
+        None
+    }
+
+    /// Finds the closing quote of an ordinary string, honoring backslash
+    /// escapes so escaped quotes do not terminate the literal.
+    fn ordinary_string_end(bytes: &[u8], start: usize) -> Option<usize> {
+        let mut cursor = start + 1;
+        while cursor < bytes.len() {
+            match bytes[cursor] {
+                b'\\' => cursor = (cursor + 2).min(bytes.len()),
+                b'"' => return Some(cursor),
+                _ => cursor += 1,
+            }
+        }
+        None
+    }
+
+    /// Deliberate non-copy literals in the native modules. These are stable
+    /// menu/window/event ids, action and log context, documented English
+    /// backend errors, the product name, accelerators, or format-only pieces;
+    /// none is rendered as tray/menu copy. A new entry here needs that same
+    /// user-visible-exception justification.
+    const NATIVE_LITERAL_ALLOWLIST: &[&str] = &[
+        "show_hide_window",
+        "pause_sync",
+        "resume_sync",
+        "current_track",
+        "sync_status",
+        "play_pause",
+        "previous",
+        "next",
+        "shuffle",
+        "repeat",
+        "devices",
+        "queue",
+        "devices|",
+        "snooze|30m",
+        "snooze|1h",
+        "snooze|tomorrow",
+        "snooze|next_meeting",
+        "snooze|resume",
+        "snooze|",
+        "tomorrow",
+        "next_meeting",
+        "resume",
+        "manualstatus|",
+        "manualstatus|clear",
+        "volume|",
+        "seek|",
+        "profile|base",
+        "profile|",
+        "settings",
+        "open_logs",
+        "quit",
+        "show_dashboard",
+        "show_logs",
+        "about",
+        "main",
+        "empty",
+        "none",
+        "transfer",
+        "pause",
+        "play",
+        "snooze",
+        "profile",
+        "volume",
+        "seek",
+        "dashboard",
+        "logs",
+        "macos",
+        "linux",
+        "toggle-pause",
+        "navigate",
+        "open-logs-folder",
+        "play/pause state",
+        "playback-error",
+        "tray-click",
+        "playback-state-changed",
+        "app-shutdown",
+        "show-about",
+        "pause/resume",
+        "profile (empty placeholder)",
+        "manual status clear",
+        "manual status pick (stale)",
+        "manual status pick",
+        "volume (stale)",
+        "seek (stale)",
+        "seek (no track)",
+        "transfer device list",
+        "tray icon",
+        "refresh_tray_from_state",
+        "<id len={}>",
+        "<legacy index={}>",
+        "<invalid>",
+        "{}|none",
+        "{}|none|{}",
+        "{PROFILE_ITEM_PREFIX}empty",
+        "{MANUAL_STATUS_ITEM_PREFIX}{idx}",
+        "{MANUAL_STATUS_ITEM_PREFIX}none",
+        "{VOLUME_ITEM_PREFIX}{percent}",
+        "CmdOrCtrl+,",
+        "CmdOrCtrl+Shift+L",
+        "CmdOrCtrl+Q",
+        "CmdOrCtrl+1",
+        "CmdOrCtrl+2",
+        "PresenceJam",
+        "Tray already initialized",
+        "No default icon",
+        "unknown panic",
+        "Tray not initialized",
+        "No active playback device - pick one from the tray Devices menu",
+        "Failed to set tray menu: {}",
+        "{} unavailable: {}",
+        "main window not found",
+        "Failed to set window menu: {}",
+    ];
+
+    /// True for copy-like literals: either whitespace makes them a phrase, or
+    /// three ASCII letters catch single-word native labels such as "Quit".
+    fn looks_like_native_copy(value: &str) -> bool {
+        value.contains(' ') || value.bytes().filter(u8::is_ascii_alphabetic).count() >= 3
+    }
+
+    /// True for format-only decorations. Once `{...}` placeholders are
+    /// removed, no ASCII letters remain (for example `🎵 {} - {}` or `✓ {}`).
+    fn is_format_only_literal(value: &str) -> bool {
+        let mut rest = value;
+        while let Some(start) = rest.find('{') {
+            let after = &rest[start..];
+            let Some(end) = after.find('}') else {
+                break;
+            };
+            rest = &after[end + 1..];
+            rest = rest.trim_start_matches('{');
+        }
+        !rest.bytes().any(|byte| byte.is_ascii_alphabetic())
+    }
+
+    /// Scans already-isolated production source and returns copy-like literals
+    /// absent from the explicit native exception list. Table values are not an
+    /// exemption: rendering a literal directly is still an i18n violation.
+    fn native_literal_offenders(src: &str) -> Vec<String> {
+        let mut offenders: Vec<String> = lexed_double_quoted_literals(src)
+            .into_iter()
+            .filter(|value| looks_like_native_copy(value))
+            .filter(|value| !NATIVE_LITERAL_ALLOWLIST.contains(value))
+            .filter(|value| !value.starts_with("[TRAY]") && !value.starts_with("[MENU]"))
+            .filter(|value| !is_format_only_literal(value))
+            .map(|value| format!("{:?}", value))
+            .collect();
+        offenders.sort_unstable();
+        offenders.dedup();
+        offenders
     }
 
     /// Mirrors the frontend's `Dict` parity test: the three tables describe
@@ -654,31 +927,90 @@ mod tests {
         assert_eq!(current().show_window, EN.show_window);
     }
 
-    /// Issue #674 acceptance: no user-visible literal may stay hard-coded in
-    /// the two modules that build the native surfaces.
+    /// Issue #843: scan forward, not only for table values reappearing in the
+    /// two modules that build native surfaces. A new English-only label must
+    /// enter all three tables before it can live there.
     #[test]
     fn no_user_visible_literal_stays_hard_coded() {
-        let modules = [
+        let mut offenders = Vec::new();
+        for (module, src) in [
             ("tray.rs", include_str!("tray.rs")),
             ("menu.rs", include_str!("menu.rs")),
-        ];
-        let mut offenders: Vec<String> = Vec::new();
-        for table in [&EN, &DE, &FR] {
-            let seen: HashSet<&'static str> = table.values().into_iter().map(|(_, v)| v).collect();
-            for (module, src) in modules {
-                let prod = strip_line_comments(prod_source(src));
-                for value in &seen {
-                    let quoted = format!("\"{}\"", value);
-                    if prod.contains(&quoted) {
-                        offenders.push(format!("{} hard-codes {}", module, quoted));
-                    }
-                }
-            }
+        ] {
+            offenders.extend(
+                native_literal_offenders(prod_source(src))
+                    .into_iter()
+                    .map(|literal| format!("{} hard-codes {}", module, literal)),
+            );
         }
         assert!(
             offenders.is_empty(),
             "user-visible literals must come from the i18n tables: {:?}",
             offenders
         );
+    }
+
+    /// Proves translated table values remain offenses when hard-coded, while
+    /// the same label supplied through a field reference is accepted.
+    #[test]
+    fn native_literal_scanner_rejects_translated_copy_and_accepts_field_reference() {
+        let source = r#"
+            let s = crate::i18n::current();
+            MenuItemBuilder::with_id(ID_KNOWN_ACTION, s.next);
+            MenuItemBuilder::with_id(ID_ENGLISH_ACTION, "Next");
+            MenuItemBuilder::with_id(ID_FRENCH_ACTION, "Suivant");
+            MenuItemBuilder::with_id(ID_NEW_ACTION, "Brand new action");
+        "#;
+
+        assert_eq!(
+            native_literal_offenders(source),
+            vec![r#""Brand new action""#, r#""Next""#, r#""Suivant""#,]
+        );
+    }
+
+    /// URL punctuation inside a string must not turn the string into a
+    /// comment, and both ordinary and raw URL strings must still be scanned.
+    #[test]
+    fn native_literal_scanner_keeps_urls_inside_strings() {
+        let source = r##"
+            let endpoint = "https://example.test/Copy";
+            let raw_endpoint = r#"https://example.test/Raw copy"#;
+        "##;
+
+        assert_eq!(
+            native_literal_offenders(source),
+            vec![
+                r#""https://example.test/Copy""#,
+                r#""https://example.test/Raw copy""#,
+            ]
+        );
+    }
+
+    /// Quoted copy in line and block comments is not a native literal.
+    #[test]
+    fn native_literal_scanner_ignores_line_and_block_comments() {
+        let source = r#"
+            // "Commented copy" https://example.test
+            /* "Block-commented copy"
+               /* nested "still commented" */
+            */
+            let s = crate::i18n::current();
+            MenuItemBuilder::with_id(ID_KNOWN_ACTION, s.next);
+        "#;
+
+        assert!(native_literal_offenders(source).is_empty());
+    }
+    /// Char literals and lifetimes must not be mistaken for string starts;
+    /// a real string after them is still scanned.
+    #[test]
+    fn native_literal_scanner_handles_char_boundaries() {
+        let source = r#"
+            let quote = '"';
+            let apostrophe = '\'';
+            let emoji = '😀';
+            let lifetime: &'static str = "Visible copy";
+        "#;
+
+        assert_eq!(native_literal_offenders(source), vec![r#""Visible copy""#]);
     }
 }
