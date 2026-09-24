@@ -3093,10 +3093,6 @@ pub(crate) fn matching_track_rule_at_with_ctx<'a>(
 /// (issue #870) can mirror it without copying the literal — a future
 /// "make the prefix configurable" change should land in one place.
 pub(crate) const MUSIC_EMOJI: &str = "\u{1F3B5}";
-/// Shipped English defaults remain byte-identical to the pre-localization
-/// values. They identify untouched fields at POST time; they are never written
-/// back into the user's configuration.
-const DEFAULT_PAUSED_STATUS_FORMAT: &str = crate::i18n::EN.status_paused_default;
 const DEFAULT_STOPPED_STATUS_FORMAT: &str = crate::i18n::EN.status_stopped_default;
 
 fn config_locale(config: &Option<AppConfig>) -> Option<&str> {
@@ -3119,14 +3115,7 @@ fn localized_status_fallback<'a>(
 /// The configured paused text, localized at post time when the stored value
 /// is empty or still the shipped English default.
 fn paused_status_text(config: &Option<AppConfig>) -> &str {
-    let strings = crate::i18n::strings_for(crate::i18n::resolve_tag(config_locale(config)));
-    localized_status_fallback(
-        config
-            .as_ref()
-            .map(|cfg| cfg.teams.paused_status_format.as_str()),
-        DEFAULT_PAUSED_STATUS_FORMAT,
-        strings.status_paused_default,
-    )
+    crate::commands::sync::paused_status_text(config)
 }
 
 /// [`paused_status_text`]'s no-track sibling, with the same untouched-default
@@ -3145,8 +3134,8 @@ fn stopped_status_text(config: &Option<AppConfig>) -> &str {
 /// S4 (issue #672): the paused-clear placeholder. The emoji is ours; the text is
 /// `teams.paused_status_format` (default "Paused"), so the default renders
 /// byte-identically to the pre-4.7 literal `"🎵 Paused"`.
-fn paused_status_placeholder(config: &Option<AppConfig>) -> String {
-    format!("{MUSIC_EMOJI} {}", paused_status_text(config))
+pub(crate) fn paused_status_placeholder(config: &Option<AppConfig>) -> String {
+    crate::commands::sync::paused_status_placeholder(config)
 }
 
 /// S4 (issue #672): the no-track clear's placeholder — the same emoji contract

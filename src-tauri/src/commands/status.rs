@@ -128,6 +128,18 @@ fn clear_manual_status_record() {
 fn clamp_expiry_minutes(minutes: u32) -> u32 {
     minutes.clamp(MIN_MANUAL_EXPIRY_MINUTES, MAX_MANUAL_EXPIRY_MINUTES)
 }
+/// Apply the manual-status filter from one config snapshot. Passing both the
+/// locale and custom lexicon explicitly keeps this GUI path aligned with the
+/// headless CLI and independent of the process-global native-language slot.
+fn filter_manual_status(text: &str, config: Option<&crate::config::AppConfig>) -> String {
+    let placeholder = config
+        .map(|cfg| cfg.teams.profanity_placeholder.as_str())
+        .unwrap_or_default();
+    let extra_words = profanity_extra_words_for_filter(config);
+    let locale = config.and_then(|cfg| cfg.locale.as_deref());
+    profanity::filter_status_for_locale(text, placeholder, true, extra_words, locale)
+}
+
 
 /// Issue #870: the Dashboard composer / `--set-status` entry. Filters
 /// profanity, clamps the text length, clamps the expiry, POSTs to Teams,
@@ -163,16 +175,11 @@ pub fn set_manual_status_inner(
         });
     }
 
-    // Step 2: profanity filter. The user's lexicon (`teams.profanity_extra_words`,
-    // issue #538) is read through the same accessor the poller uses, so the
-    // Settings pane and the composer cannot drift.
+    // Step 2: profanity filter. Locale and the user's lexicon come from the
+    // same config snapshot as the headless CLI and polling paths; no
+    // process-global locale is consulted by this native GUI consumer.
     let config_guard = state.config.get();
-    let placeholder = config_guard
-        .as_ref()
-        .map(|c| c.teams.profanity_placeholder.clone())
-        .unwrap_or_default();
-    let extra_words = profanity_extra_words_for_filter(config_guard.as_ref());
-    let posted_text = profanity::filter_status(&text, &placeholder, true, extra_words);
+    let posted_text = filter_manual_status(&text, config_guard.as_ref());
     let filtered = posted_text != text;
 
     // Step 3: POST to Teams. The expiry is the ISO 8601 the docs document
@@ -234,18 +241,6 @@ pub fn clear_manual_status_inner(state: &AppState, app: &AppHandle) -> Result<()
         );
         return Ok(());
     };
-    if state
-        .config
-        .get()
-        .as_ref()
-        .is_some_and(|c| !c.teams.profanity_placeholder.is_empty())
-    {
-        // Issue #870: the clear posts the safe placeholder, not an empty
-        // string. That mirrors the paused / stopped clear paths and keeps
-        // Teams from showing its default "no status" line — which would be
-        // indistinguishable from "user cleared their status", a regression
-        // for the shipped 4.6 behaviour.
-    }
     teams::clear_teams_status_message(
         &tokens.access_token,
         &crate::commands::sync::safe_placeholder_text(state),
@@ -486,4 +481,34 @@ mod tests {
         assert_eq!(buf.chars().count(), MAX_RULE_STATUS_CHARS);
         assert_eq!(buf, expected);
     }
+    #[test]
+    fn manual_status_filter_uses_config_locale_and_custom_copy() {
+        for (locale, fallback, custom) in [
+            ("de", "Hört gerade Spotify", "Eigener ✨ Status"),
+            ("fr", "Écoute actuellement Spotify", "Statut ✨ personnel"),
+        ] {
+            let mut config = crate::config::AppConfig {
+                locale: Some(locale.to_string()),
+                ..Default::default()
+            };
+            for configured in ["", profanity::safe_placeholder_default()] {
+                config.teams.profanity_placeholder = configured.to_string();
+                assert_eq!(
+                    filter_manual_status("fuck", Some(&config)),
+                    fallback,
+                    "empty and shipped-English placeholders use the config locale"
+                );
+            }
+
+            config.teams.profanity_placeholder = custom.to_string();
+            config.teams.profanity_extra_words = vec!["verboten".to_string()];
+            assert_eq!(filter_manual_status("verboten", Some(&config)), custom);
+            assert_eq!(
+                filter_manual_status("Français ✨ intact", Some(&config)),
+                "Français ✨ intact",
+                "clean user copy remains byte-identical"
+            );
+        }
+    }
+
 }
