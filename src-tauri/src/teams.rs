@@ -1704,25 +1704,42 @@ mod tests {
     #[test]
     fn security_disclosure_matches_borrowed_graph_identity_and_scopes() {
         const OWNER: &str = "Microsoft Graph Command Line Tools";
+        const SCOPE_PREFIX: &str =
+            "The exact delegated scope set in `MICROSOFT_GRAPH_SCOPES` is `";
         let security = include_str!("../../SECURITY.md");
+
+        let block_start = security
+            .find("#### Borrowed Microsoft identity\n")
+            .expect("SECURITY.md must contain the borrowed-identity disclosure");
+        let block_end = security[block_start..]
+            .find("\nReview these links")
+            .map(|offset| block_start + offset)
+            .expect("borrowed-identity disclosure must precede the provider links");
+        let disclosure = &security[block_start..block_end];
 
         for required in [MICROSOFT_GRAPH_CLIENT_ID, OWNER] {
             assert!(
-                security.contains(required),
-                "SECURITY.md must disclose {required:?}"
+                disclosure.contains(required),
+                "borrowed-identity disclosure must contain {required:?}"
             );
         }
 
-        let scopes = MICROSOFT_GRAPH_SCOPES
+        let scopes_start = block_start
+            + disclosure
+                .find(SCOPE_PREFIX)
+                .expect("borrowed-identity disclosure must contain the exact scope set")
+            + SCOPE_PREFIX.len();
+        let scopes_end = security[scopes_start..]
+            .find('`')
+            .map(|offset| scopes_start + offset)
+            .expect("disclosed scope set must be delimited by backticks");
+        let disclosed_scopes = security[scopes_start..scopes_end]
             .split_whitespace()
-            .collect::<Vec<_>>();
-        assert!(!scopes.is_empty(), "Graph scope constant must not be empty");
-        for scope in scopes {
-            assert!(
-                security.contains(scope),
-                "SECURITY.md must disclose Graph scope {scope:?}"
-            );
-        }
+            .collect::<std::collections::BTreeSet<_>>();
+        let source_scopes = MICROSOFT_GRAPH_SCOPES
+            .split_whitespace()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(disclosed_scopes, source_scopes);
     }
 
     #[test]

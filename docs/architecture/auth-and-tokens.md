@@ -81,7 +81,7 @@ The app polls Microsoft's token endpoint at the server-provided device-code `int
 
 The device-code flow does **not** use a PresenceJam-owned Microsoft Entra app registration. `teams.rs::MICROSOFT_GRAPH_CLIENT_ID` borrows the public-client id `14d82eec-204b-4c2f-b7e8-296a70dab67e` from Microsoft's first-party **Microsoft Graph Command Line Tools** application registration. The id is not a secret, and this flow does not use a client secret or tenant credential.
 
-That shared identity has shared consequences: Microsoft consent, attribution, policy, and service changes apply to PresenceJam and other consumers together. A user grant or revocation entry may be named Microsoft Graph Command Line Tools even when PresenceJam initiated it, and revoking that grant or the shared registration affects PresenceJam as well. Tokens issued to PresenceJam remain in the encrypted local token store; credentials are not logged or copied into documentation.
+That shared identity has shared consequences: Microsoft consent, attribution, policy, and service changes apply to PresenceJam and other consumers together. A user grant or revocation entry may be named Microsoft Graph Command Line Tools even when PresenceJam initiated it, and revoking that grant or the shared registration affects PresenceJam as well. Tokens issued to PresenceJam are persisted in the encrypted local token store. Runtime token-endpoint logs truncate response bodies but do not redact token fields, so those truncated logs may contain token material; this documentation does not reproduce credentials.
 
 The exact delegated scope set in `MICROSOFT_GRAPH_SCOPES` is `Presence.ReadWrite Presence.Read Calendars.ReadBasic MailboxSettings.Read openid profile offline_access`.
 
