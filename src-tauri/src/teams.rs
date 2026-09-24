@@ -1713,7 +1713,9 @@ mod tests {
             );
         }
 
-        let scopes = MICROSOFT_GRAPH_SCOPES.split_whitespace().collect::<Vec<_>>();
+        let scopes = MICROSOFT_GRAPH_SCOPES
+            .split_whitespace()
+            .collect::<Vec<_>>();
         assert!(!scopes.is_empty(), "Graph scope constant must not be empty");
         for scope in scopes {
             assert!(
