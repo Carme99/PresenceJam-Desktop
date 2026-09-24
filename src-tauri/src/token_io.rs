@@ -1228,14 +1228,23 @@ mod tests {
         .expect("the recovered keychain must unblock persistence");
 
         let written = written.expect("the recovered persist must reach the writer");
-        assert_eq!(written.spotify_tokens, Some(fresh_spotify));
-        assert_eq!(written.teams_tokens, Some(fresh_teams));
+        let written_spotify = written.spotify_tokens.as_ref().expect("Spotify write");
+        assert_eq!(written_spotify.access_token, fresh_spotify.access_token);
+        assert_eq!(written_spotify.refresh_token, fresh_spotify.refresh_token);
+        assert_eq!(written_spotify.expires_at, fresh_spotify.expires_at);
+        let written_teams = written.teams_tokens.as_ref().expect("Teams write");
+        assert_eq!(written_teams.access_token, fresh_teams.access_token);
+        assert_eq!(written_teams.refresh_token, fresh_teams.refresh_token);
+        assert_eq!(written_teams.expires_at, fresh_teams.expires_at);
         assert_eq!(state.tokens_load.state(), crate::TokensLoadState::Ready);
-        assert_eq!(
-            state.tokens.spotify().as_ref(),
-            written.spotify_tokens.as_ref()
-        );
-        assert_eq!(state.tokens.teams().as_ref(), written.teams_tokens.as_ref());
+        let state_spotify = state.tokens.spotify().as_ref().expect("Spotify state");
+        assert_eq!(state_spotify.access_token, written_spotify.access_token);
+        assert_eq!(state_spotify.refresh_token, written_spotify.refresh_token);
+        assert_eq!(state_spotify.expires_at, written_spotify.expires_at);
+        let state_teams = state.tokens.teams().as_ref().expect("Teams state");
+        assert_eq!(state_teams.access_token, written_teams.access_token);
+        assert_eq!(state_teams.refresh_token, written_teams.refresh_token);
+        assert_eq!(state_teams.expires_at, written_teams.expires_at);
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1278,8 +1287,11 @@ mod tests {
         .expect("a successful retry must persist the merged state");
 
         let written = written.expect("retry must reach writer");
-        assert_eq!(written.spotify_tokens, Some(fresh_spotify));
-        assert_eq!(written.teams_tokens, None);
+        let written_spotify = written.spotify_tokens.as_ref().expect("Spotify write");
+        assert_eq!(written_spotify.access_token, fresh_spotify.access_token);
+        assert_eq!(written_spotify.refresh_token, fresh_spotify.refresh_token);
+        assert_eq!(written_spotify.expires_at, fresh_spotify.expires_at);
+        assert!(written.teams_tokens.is_none());
         assert_eq!(state.tokens_load.state(), crate::TokensLoadState::Ready);
         assert!(state.tokens.teams().is_none());
         fs::remove_dir_all(dir).unwrap();
