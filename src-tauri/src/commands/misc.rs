@@ -229,4 +229,49 @@ mod tests {
 
         crate::i18n::set_current(None);
     }
+
+    #[test]
+    fn preview_renders_every_sample_format_token() {
+        assert_eq!(
+            preview_status(
+                "{emoji}|{artist}|{track}|{album}|{device}|{playlist}|{context}|{progress}|{shuffle}|{repeat}|{show}|{episode}|{publisher}".to_string(),
+                Some(false),
+                None,
+                None,
+                None,
+                Some("en".to_string()),
+            ),
+            "🎵|Sample Artist|Sample Track|Sample Album|Kitchen speaker|Workout Mix|Workout Mix|0:00|🔀|🔁|||"
+        );
+    }
+
+    #[test]
+    fn enabled_filter_replaces_the_profane_sample() {
+        assert_eq!(
+            preview_status(
+                "{track} — {artist}".to_string(),
+                Some(true),
+                Some("Filtered".to_string()),
+                Some(true),
+                None,
+                Some("en".to_string()),
+            ),
+            "Filtered"
+        );
+    }
+
+    #[test]
+    fn enabled_filter_applies_a_custom_extra_word() {
+        assert_eq!(
+            preview_status(
+                "{artist} — {track}".to_string(),
+                Some(true),
+                Some("Filtered".to_string()),
+                Some(false),
+                Some(vec!["Sample".to_string()]),
+                Some("en".to_string()),
+            ),
+            "Filtered"
+        );
+    }
 }
