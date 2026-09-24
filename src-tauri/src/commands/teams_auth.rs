@@ -489,7 +489,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn dead_refresh_clear_lets_replacement_win_and_clears_matching_token() {
         let state = AppState::new();
@@ -687,7 +686,6 @@ mod tests {
         let gate = body
             .find("may_commit(")
             .expect("poll_teams_auth_core must gate its commit on the flow being current");
-        let commit = body
         let commit = body
             .find(".commit_teams(")
             .expect("poll_teams_auth must commit the tokens it polled");
