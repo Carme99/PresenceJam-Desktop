@@ -81,10 +81,10 @@ increase backoff while polling continues (#568, finding PollCore#0):
 - The poll loop counts `SourceError::Auth` as its auth/reconnect path. The
   Spotify source maps expired and invalid credentials there, and also maps
   `NotPremium` there so Auto mode can fall back to an OS playback source.
-- Transport errors, 5xx, JSON parse failures, 429s, and other non-auth source
-  failures arrive as `SourceError::Transient` or `SourceError::Other` and feed
-  a **separate** `consecutive_network_failures` counter with its own higher
-  threshold (`NETWORK_FAILURE_THRESHOLD` = 12) and a capped backoff
+- All non-auth source variants — including `SourceError::Unauthenticated`,
+  `SourceError::Transient`, and `SourceError::Other` — feed a **separate**
+  `consecutive_network_failures` counter with its own higher threshold
+  (`NETWORK_FAILURE_THRESHOLD` = 12) and a capped backoff
   (`NETWORK_BACKOFF_CAP_SECONDS` = 300). It escalates the backoff and logs a
   warning; it never breaks the loop.
 - `record_success` is the single place that resets both counters.
