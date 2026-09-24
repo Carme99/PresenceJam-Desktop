@@ -340,6 +340,11 @@
     confirming = false;
   }
 
+  function dismissPrompt() {
+    if (stagedVersion) return;
+    dismissed = true;
+  }
+
   // Stages the deferred update Rust-side and holds it until the process
   // exits (`updater_bg::install_pending_on_exit` on RunEvent::Exit).
   // `force` is true only from the stale-skipped surface, where the user
@@ -613,10 +618,10 @@
       <button
         type="button"
         class="icon-btn dismiss-btn"
-        onclick={() => (dismissed = true)}
+        onclick={dismissPrompt}
         aria-label={t('update.dismissAria')}
         title={t('common.dismiss')}
-        disabled={downloading || staging}
+        disabled={downloading || staging || stagedVersion}
       >
         ×
       </button>
