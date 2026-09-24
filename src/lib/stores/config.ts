@@ -314,6 +314,11 @@ export const configHydrated = writable(false);
 let latestConfig: AppConfig = defaultConfig;
 let configLoaded = false;
 
+function frontendDefaultLocale(locale: string | null | undefined): FrontendLocale {
+  const baseTag = locale?.split(/[-_]/, 1)[0].trim().toLowerCase();
+  return baseTag === 'de' || baseTag === 'fr' ? baseTag : 'en';
+}
+
 function applyFrontendDefaultLocale(locale: FrontendLocale): void {
   if (locale === activeFrontendLocale) return;
   activeFrontendLocale = locale;
@@ -323,17 +328,13 @@ function applyFrontendDefaultLocale(locale: FrontendLocale): void {
 configStore.subscribe((cfg) => {
   latestConfig = cfg;
   if (!configLoaded) return;
-  const next: FrontendLocale =
-    cfg.locale === 'de' || cfg.locale === 'fr' ? cfg.locale : 'en';
-  applyFrontendDefaultLocale(next);
+  applyFrontendDefaultLocale(frontendDefaultLocale(cfg.locale));
 });
 configHydrated.subscribe((hydrated) => {
   configLoaded = hydrated;
-  const next: FrontendLocale =
-    hydrated && (latestConfig.locale === 'de' || latestConfig.locale === 'fr')
-      ? latestConfig.locale
-      : 'en';
-  applyFrontendDefaultLocale(next);
+  applyFrontendDefaultLocale(
+    hydrated ? frontendDefaultLocale(latestConfig.locale) : 'en'
+  );
 });
 
 /**

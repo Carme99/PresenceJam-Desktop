@@ -174,6 +174,22 @@ describe('locale source of truth (#674)', () => {
     expect(config.DEFAULT_PROFANITY_PLACEHOLDER).toBe(en[key]);
   });
 
+  it('resolves regional config locales to localized frontend status defaults', async () => {
+    const { config } = await loadStores();
+    const key = 'settings.placeholderTextPlaceholder' as const;
+
+    const regionalGerman = structuredClone(config.defaultConfig);
+    regionalGerman.locale = 'de-AT';
+    config.configStore.set(regionalGerman);
+    config.configHydrated.set(true);
+    expect(config.defaultConfig.teams.profanity_placeholder).toBe(de[key]);
+    expect(config.DEFAULT_PROFANITY_PLACEHOLDER).toBe(de[key]);
+
+    config.configStore.set({ ...regionalGerman, locale: 'fr-CA' });
+    expect(config.defaultConfig.teams.profanity_placeholder).toBe(fr[key]);
+    expect(config.DEFAULT_PROFANITY_PLACEHOLDER).toBe(fr[key]);
+  });
+
   /**
    * #892 — the store subscribes to `configStore` at module level and every
    * emission used to re-write the mirror and the document language, even when
