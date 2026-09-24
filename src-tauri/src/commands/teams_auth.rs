@@ -401,8 +401,8 @@ pub fn get_teams_granted_scopes(state: tauri::State<'_, Arc<AppState>>) -> Vec<S
 #[cfg(test)]
 mod tests {
     use super::{
-        bounded_poll_interval, cancel_flow, clear_dead_teams_refresh, may_commit, offload_blocking,
-        poll_teams_auth_core, TeamsAuthEvent,
+        cancel_flow, clear_dead_teams_refresh, may_commit, offload_blocking, poll_teams_auth_core,
+        TeamsAuthEvent,
     };
     use crate::teams::TeamsTokens;
     use crate::AppState;
