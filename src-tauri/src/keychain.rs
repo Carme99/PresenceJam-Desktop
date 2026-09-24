@@ -429,7 +429,6 @@ fn read_spotify_client_secret_platform() -> (Result<String, KeychainReadError>, 
 /// Core of [`read_spotify_client_secret`] with the lookup and migration
 /// operations injected. A presence-only probe intentionally does not enter
 /// this path: it cannot prime the reusable secret cache.
-
 fn read_spotify_client_secret_with_outcome(
     cache: &SpotifyClientSecretCache,
     lookup: impl FnOnce() -> Result<(String, SecretSlot), KeychainReadError>,
