@@ -831,6 +831,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sync_status_reports_every_connection_combination() {
+        use super::{sync_status_from_state, AppState};
+
+        let state = AppState::new();
+        let mut config = crate::config::AppConfig::default();
+        config.spotify.client_id = "spotify-client".to_string();
+        *state.config.get_mut() = Some(config);
+
+        let spotify_tokens = crate::spotify::SpotifyTokens {
+            access_token: "spotify-access".to_string(),
+            refresh_token: "spotify-refresh".to_string(),
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+        };
+        let teams_tokens = crate::teams::TeamsTokens {
+            access_token: "teams-access".to_string(),
+            refresh_token: Some("teams-refresh".to_string()),
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+        };
+
+        let connections = |state: &AppState| {
+            let status = sync_status_from_state(state);
+            (status.spotify_connected, status.teams_connected)
+        };
+
+        assert_eq!(connections(&state), (false, false));
+
+        *state.tokens.spotify_mut() = Some(spotify_tokens.clone());
+        assert_eq!(connections(&state), (true, false));
+
+        *state.tokens.spotify_mut() = None;
+        *state.tokens.teams_mut() = Some(teams_tokens);
+        assert_eq!(connections(&state), (false, true));
+
+        *state.tokens.spotify_mut() = Some(spotify_tokens);
+        assert_eq!(connections(&state), (true, true));
+    }
+
     /// Issue #809 acceptance: the guard runs before the flag is claimed, so a
     /// refusal can never leave a claimed `is_syncing` behind.
     #[test]

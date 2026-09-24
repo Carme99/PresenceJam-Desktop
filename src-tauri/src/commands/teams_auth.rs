@@ -51,6 +51,28 @@ fn may_commit(current: &Mutex<Option<String>>, device_code: &str) -> bool {
     current.lock().as_deref() == Some(device_code)
 }
 
+/// Bound an untrusted device-code polling interval before it reaches the
+/// blocking poll loop.
+fn bounded_poll_interval(interval: u64) -> u64 {
+    interval.clamp(1, 15)
+}
+
+/// Whether a completed sign-in should emit a persistence warning. The poll
+/// already succeeded and updated memory, so a storage failure keeps the live
+/// session and reports the restart-only limitation on its own event.
+#[derive(Debug, PartialEq, Eq)]
+enum PersistencePolicy {
+    NoWarning,
+    Warning(String),
+}
+
+fn persistence_policy(result: Result<(), String>) -> PersistencePolicy {
+    match result {
+        Ok(()) => PersistencePolicy::NoWarning,
+        Err(error) => PersistencePolicy::Warning(error),
+    }
+}
+
 #[tauri::command]
 pub async fn start_teams_auth_device_code(
     window: tauri::Window,
@@ -108,7 +130,7 @@ pub async fn poll_teams_auth(
 ) -> Result<(), String> {
     // Security: server interval is untrusted (devtools can inject u64::MAX).
     // Clamp before any use so spawn_blocking cannot sleep for hours.
-    let interval = interval.clamp(1, 15);
+    let interval = bounded_poll_interval(interval);
     log::info!(
         "{CMD} poll_teams_auth: ENTRY - device_code.len={}, interval={}",
         device_code.len(),
@@ -154,9 +176,11 @@ pub async fn poll_teams_auth(
             // a brand-new code even though sync works until restart. Keep the
             // in-memory commit and surface the persistence gap on its own
             // event, mirroring the polling loop's policy (poll_once.rs).
-            match token_io::persist_tokens(state.inner(), &app) {
-                Ok(()) => log::info!("{CMD} poll_teams_auth: tokens persisted atomically"),
-                Err(e) => {
+            match persistence_policy(token_io::persist_tokens(state.inner(), &app)) {
+                PersistencePolicy::NoWarning => {
+                    log::info!("{CMD} poll_teams_auth: tokens persisted atomically")
+                }
+                PersistencePolicy::Warning(e) => {
                     log::warn!(
                         "{CMD} poll_teams_auth: sign-in succeeded but tokens could not be persisted (session is live until restart): {}",
                         e
@@ -353,7 +377,10 @@ pub fn get_teams_granted_scopes(state: tauri::State<'_, Arc<AppState>>) -> Vec<S
 
 #[cfg(test)]
 mod tests {
-    use super::{cancel_flow, clear_dead_teams_refresh, may_commit, offload_blocking};
+    use super::{
+        bounded_poll_interval, cancel_flow, clear_dead_teams_refresh, may_commit, offload_blocking,
+        persistence_policy, PersistencePolicy,
+    };
     use crate::AppState;
     use parking_lot::Mutex;
 
@@ -396,6 +423,21 @@ mod tests {
             "the device-code request must not run on the thread that awaits it: \
              that thread is the IPC thread, and the HTTPS round-trip would \
              freeze the window until the request answered"
+        );
+    }
+
+    #[test]
+    fn poll_interval_clamps_untrusted_bounds() {
+        assert_eq!(bounded_poll_interval(0), 1);
+        assert_eq!(bounded_poll_interval(20), 15);
+    }
+
+    #[test]
+    fn persistence_failure_warns_without_failing_the_live_sign_in() {
+        assert_eq!(persistence_policy(Ok(())), PersistencePolicy::NoWarning);
+        assert_eq!(
+            persistence_policy(Err("keychain unavailable".to_string())),
+            PersistencePolicy::Warning("keychain unavailable".to_string())
         );
     }
 
