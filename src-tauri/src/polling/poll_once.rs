@@ -633,17 +633,15 @@ fn run_inner(
                 // this refresh ran from — a mid-flight replacement means the
                 // error is about a superseded token and the newer session is
                 // alive.
-                let refresh_superseded = state
-                    .tokens
-                    .spotify()
-                    .as_ref()
-                    .map(|t| t.access_token.as_str())
-                    != Some(pre_refresh_access_token.as_str());
-                if matches!(e, SpotifyApiError::InvalidGrant) && !refresh_superseded {
-                    log::error!("[POLLING] poll_once: Spotify refresh token invalid (invalid_grant), discarding tokens and requiring reconnect");
-                    state
+                if matches!(e, SpotifyApiError::InvalidGrant) {
+                    let cleared = state
                         .tokens_load
                         .clear_spotify_if_current(&state.tokens, &pre_refresh_access_token);
+                    if !cleared {
+                        log::warn!("[POLLING] poll_once: Spotify clear superseded by a newer session; no-op");
+                        return PollIteration::Sleep { seconds: 0 };
+                    }
+                    log::error!("[POLLING] poll_once: Spotify refresh token invalid (invalid_grant), discarding tokens and requiring reconnect");
                     if let Err(persist_err) = token_io::persist_tokens(state, app) {
                         log::warn!(
                             "[POLLING] poll_once: failed to persist cleared Spotify tokens: {}",
@@ -658,9 +656,6 @@ fn run_inner(
                         "invalid-grant sleep",
                         mode,
                     );
-                }
-                if matches!(e, SpotifyApiError::InvalidGrant) && refresh_superseded {
-                    log::warn!("[POLLING] poll_once: slot replaced mid-refresh, keeping newer Spotify session");
                 }
                 emit_error(
                     app,
@@ -1127,37 +1122,41 @@ fn run_inner(
                             // attempt does not feed the 5-strikes reconnect exit.
                             // Only clear when the slot still holds the token this
                             // refresh ran from.
-                            let refresh_superseded = state
+                            let mut refresh_superseded = state
                                 .tokens
                                 .spotify()
                                 .as_ref()
                                 .map(|t| t.access_token.as_str())
                                 != Some(pre_refresh_access_token.as_str());
-                            if matches!(refresh_err, SpotifyApiError::InvalidGrant)
-                                && !refresh_superseded
-                            {
-                                log::warn!("[POLLING] poll_once: Spotify refresh token invalid (invalid_grant), discarding tokens and requiring reconnect");
-                                state.tokens_load.clear_spotify_if_current(
+                            if matches!(refresh_err, SpotifyApiError::InvalidGrant) {
+                                let cleared = state.tokens_load.clear_spotify_if_current(
                                     &state.tokens,
                                     &pre_refresh_access_token,
                                 );
-                                if let Err(persist_err) = token_io::persist_tokens(state, app) {
-                                    log::warn!(
-                                        "[POLLING] poll_once: failed to persist cleared Spotify tokens: {}",
-                                        persist_err
+                                if cleared {
+                                    log::warn!("[POLLING] poll_once: Spotify refresh token invalid (invalid_grant), discarding tokens and requiring reconnect");
+                                    if let Err(persist_err) = token_io::persist_tokens(state, app) {
+                                        log::warn!(
+                                            "[POLLING] poll_once: failed to persist cleared Spotify tokens: {}",
+                                            persist_err
+                                        );
+                                    }
+                                    let _ = app.emit("spotify-reconnect-required", json!(null));
+                                    let _ = app.emit("reconnect-required", json!(null));
+                                } else {
+                                    log::warn!("[POLLING] poll_once: Spotify clear superseded by a newer session; no-op");
+                                    refresh_superseded = true;
+                                    final_err = crate::sources::SourceError::Transient(
+                                        "Spotify refresh error superseded by a newer session".to_string(),
                                     );
                                 }
-                                let _ = app.emit("spotify-reconnect-required", json!(null));
-                                let _ = app.emit("reconnect-required", json!(null));
                             }
                             if refresh_superseded {
                                 log::warn!("[POLLING] poll_once: slot replaced mid-refresh, keeping newer Spotify session");
                             }
-                            final_err = if refresh_superseded {
-                                final_err
-                            } else {
-                                crate::sources::SourceError::Auth(refresh_err.to_string())
-                            };
+                            if !refresh_superseded {
+                                final_err = crate::sources::SourceError::Auth(refresh_err.to_string());
+                            }
                         }
                     }
                 }
@@ -3424,10 +3423,16 @@ fn teams_token_for_write(app: &AppHandle, state: &Arc<AppState>) -> Option<Teams
                     // single dropped connection must not send the user
                     // through a full device-code browser re-auth.
                     if teams_refresh_requires_reauth(&e) {
-                        log::warn!("[POLLING] teams_token_for_write: Teams refresh token is dead, discarding tokens and requiring reconnect");
-                        state
+                        let cleared = state
                             .tokens_load
                             .clear_teams_if_current(&state.tokens, &pre_refresh_access_token);
+                        if !cleared {
+                            log::warn!(
+                                "[POLLING] teams_token_for_write: Teams clear superseded by a newer session; no-op"
+                            );
+                            return None;
+                        }
+                        log::warn!("[POLLING] teams_token_for_write: Teams refresh token is dead, discarding tokens and requiring reconnect");
                         // Issue #180: the write guard in the clearing
                         // statement above dies at the end of that statement.
                         // Persist in a LATER statement, when the guard is
@@ -4568,37 +4573,38 @@ pub(crate) fn process_track(
                                         .as_ref()
                                         .map(|t| t.access_token.as_str())
                                         != Some(pre_refresh_access_token.as_str());
-                                    if refresh_superseded {
-                                        log::warn!("[POLLING] process_track: slot replaced mid-refresh, keeping newer Teams session");
-                                        // Issue #798: the error is about a superseded token —
-                                        // yield a transient (not `return`: this arm's value
-                                        // feeds `write_outcome`, whose classifier below
-                                        // then treats it as transient — no clear, no
-                                        // reconnect event) instead of blaming the live
-                                        // session.
-                                        Err(TeamsApiError::Transient(format!(
-                                            "slot replaced mid-refresh; superseded refresh error ignored: {refresh_err}"
-                                        )))
-                                    } else if teams_refresh_requires_reauth(&refresh_err) {
-                                        log::warn!("[POLLING] process_track: Teams refresh token is dead, discarding tokens");
-                                        state.tokens_load.clear_teams_if_current(
+                                    if teams_refresh_requires_reauth(&refresh_err) {
+                                        let cleared = state.tokens_load.clear_teams_if_current(
                                             &state.tokens,
                                             &pre_refresh_access_token,
                                         );
-                                        // Issue #180: the write guard in the
-                                        // clearing statement above dies at
-                                        // the end of that statement. Persist
-                                        // in a LATER statement, when the
-                                        // guard is provably dropped.
-                                        if let Err(persist_err) =
-                                            token_io::persist_tokens(state, app)
-                                        {
-                                            log::warn!(
-                                                "[POLLING] process_track: failed to persist cleared teams tokens: {}",
-                                                persist_err
-                                            );
+                                        if !cleared {
+                                            log::warn!("[POLLING] process_track: Teams clear superseded by a newer session; no-op");
+                                            Err(TeamsApiError::Transient(format!(
+                                                "slot replaced before clear; superseded refresh error ignored: {refresh_err}"
+                                            )))
+                                        } else {
+                                            log::warn!("[POLLING] process_track: Teams refresh token is dead, discarding tokens");
+                                            // Issue #180: the write guard in the
+                                            // clearing statement above dies at
+                                            // the end of that statement. Persist
+                                            // in a LATER statement, when the
+                                            // guard is provably dropped.
+                                            if let Err(persist_err) =
+                                                token_io::persist_tokens(state, app)
+                                            {
+                                                log::warn!(
+                                                    "[POLLING] process_track: failed to persist cleared teams tokens: {}",
+                                                    persist_err
+                                                );
+                                            }
+                                            Err(refresh_err)
                                         }
-                                        Err(refresh_err)
+                                    } else if refresh_superseded {
+                                        log::warn!("[POLLING] process_track: slot replaced mid-refresh, keeping newer Teams session");
+                                        Err(TeamsApiError::Transient(format!(
+                                            "slot replaced mid-refresh; superseded refresh error ignored: {refresh_err}"
+                                        )))
                                     } else {
                                         log::warn!("[POLLING] process_track: Teams reactive refresh failed (transient), keeping session");
                                         Err(refresh_err)
@@ -5200,44 +5206,45 @@ pub(crate) fn handle_no_track(
                     );
                     // Issue #295 policy: only a dead credential clears the
                     // session; a transient refresh failure keeps it. Either
-                    // way the typed refresh error (not the stale write
-                    // error) is what gets classified.
-                    // Issue #798: only clear when the slot still holds the
-                    // token this refresh ran from — a mid-flight replacement
-                    // means the error is about a superseded token and the
-                    // newer session is alive.
                     let refresh_superseded = state
                         .tokens
                         .teams()
                         .as_ref()
                         .map(|t| t.access_token.as_str())
                         != Some(pre_refresh_access_token.as_str());
-                    if refresh_superseded {
-                        log::warn!("[POLLING] handle_no_track: slot replaced mid-refresh, keeping newer Teams session");
-                        // Issue #798: the error is about a superseded token —
-                        // yield a transient (not `return`: this arm's value feeds
-                        // `clear_outcome`, whose classifier below then treats it
-                        // as transient — no clear, no reconnect event) instead
-                        // of blaming the live session.
-                        Err(TeamsApiError::Transient(format!(
-                            "slot replaced mid-refresh; superseded refresh error ignored: {refresh_err}"
-                        )))
-                    } else if teams_refresh_requires_reauth(&refresh_err) {
-                        log::warn!("[POLLING] handle_no_track: Teams refresh token is dead, discarding tokens");
-                        state
+                    if teams_refresh_requires_reauth(&refresh_err) {
+                        let cleared = state
                             .tokens_load
                             .clear_teams_if_current(&state.tokens, &pre_refresh_access_token);
-                        // Issue #180: the write guard in the clearing
-                        // statement above dies at the end of that
-                        // statement. Persist in a LATER statement, when
-                        // the guard is provably dropped.
-                        if let Err(persist_err) = token_io::persist_tokens(state, app) {
+                        if !cleared {
                             log::warn!(
+                                "[POLLING] handle_no_track: Teams clear superseded by a newer session; no-op"
+                            );
+                            Err(TeamsApiError::Transient(format!(
+                                "slot replaced before clear; superseded refresh error ignored: {refresh_err}"
+                            )))
+                        } else {
+                            log::warn!("[POLLING] handle_no_track: Teams refresh token is dead, discarding tokens");
+                            // Issue #180: the write guard in the clearing
+                            // statement above dies at the end of that
+                            // statement. Persist in a LATER statement, when
+                            // the guard is provably dropped.
+                            if let Err(persist_err) = token_io::persist_tokens(state, app) {
+                                log::warn!(
                                     "[POLLING] handle_no_track: failed to persist cleared teams tokens: {}",
                                     persist_err
                                 );
+                            }
+                            Err(refresh_err)
                         }
-                        Err(refresh_err)
+                    } else if refresh_superseded {
+                        log::warn!("[POLLING] handle_no_track: slot replaced mid-refresh, keeping newer Teams session");
+                        // The error is about a superseded token; classify it
+                        // as transient so the later classifier emits no
+                        // reconnect signal.
+                        Err(TeamsApiError::Transient(format!(
+                            "slot replaced mid-refresh; superseded refresh error ignored: {refresh_err}"
+                        )))
                     } else {
                         log::warn!("[POLLING] handle_no_track: Teams reactive refresh failed (transient), keeping session");
                         Err(refresh_err)
@@ -5855,23 +5862,14 @@ mod tests {
             .split("#[cfg(test)]\nmod tests")
             .next()
             .expect("poll_once.rs has no #[cfg(test)] mod tests block");
-        let discard_count = prod_source
-            .matches("state changed during refresh, discarding result")
-            .count();
-        // Finding PollCore#8 (issue #574): pin the EXACT counts. The old
-        // lower-bound assertions (`>= 1`, `>= 3`) passed even when a call site
-        // — or the helper itself — was deleted, so the #72 anti-drift
-        // guarantee this test exists to provide was vacuous. Update these
-        // numbers deliberately whenever a call site is added.
-        assert_eq!(
-            discard_count, 1,
-            "exactly one centralized CAS-discard log line is expected in production; found {}. \
-             A second one means a call site re-implemented the discard dance instead of routing through the typed helpers.",
-            discard_count
-        );
         let helper_def = prod_source.matches("fn cas_refresh_spotify").count()
             + prod_source.matches("fn cas_refresh_teams").count();
         assert_eq!(helper_def, 2, "typed helpers defined {} times", helper_def);
+        assert_eq!(
+            prod_source.matches("fn cas_refresh_or_discard<").count(),
+            0,
+            "the removed generic helper must not remain in production code"
+        );
         let helper_call_count = prod_source.matches("cas_refresh_spotify(").count()
             + prod_source.matches("cas_refresh_teams(").count();
         // 5 calls: Spotify proactive, Spotify 401-retry, Teams proactive,
