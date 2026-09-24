@@ -96,7 +96,7 @@ async fn poll_teams_auth_core<P, S, E>(
     current: &Mutex<Option<String>>,
     poll: P,
     persist: S,
-    emit: E,
+    mut emit: E,
 ) -> Result<(), String>
 where
     P: FnOnce(String, u64) -> Result<crate::teams::TeamsTokens, String> + Send + 'static,
