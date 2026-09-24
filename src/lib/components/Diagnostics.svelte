@@ -136,8 +136,13 @@
       resetting = false;
     }
   }
-  function boolLabel(v: boolean | undefined | null): string {
-    return v ? t('common.yes') : t('common.no');
+  function boolLabel(value: boolean | undefined | null): string {
+    if (value === undefined || value === null) return t('diagnostics.unknown');
+    return value ? t('common.yes') : t('common.no');
+  }
+
+  function metadataLabel(value: string | number | undefined | null): string {
+    return value === undefined || value === null ? t('diagnostics.unknown') : String(value);
   }
 
   /**
@@ -214,7 +219,7 @@
         <dl>
           <dt>{t('diagnostics.app')}</dt><dd>{snapshot.app_version}</dd>
           <dt>{t('diagnostics.tauri')}</dt><dd>{snapshot.tauri_version}</dd>
-          <dt>{t('diagnostics.os')}</dt><dd>{snapshot.os.platform} ({snapshot.os.arch}, {snapshot.os.family}); {t('diagnostics.osRelease')}: {snapshot.os.os_version ?? 'unknown'}; {t('diagnostics.installFlavor')}: {snapshot.os.install_flavor?.toLowerCase() ?? 'unknown'}</dd>
+          <dt>{t('diagnostics.os')}</dt><dd>{snapshot.os.platform} ({snapshot.os.arch}, {snapshot.os.family}); {t('diagnostics.osRelease')}: {metadataLabel(snapshot.os.os_version)}; {t('diagnostics.installFlavor')}: {metadataLabel(snapshot.os.install_flavor?.toLowerCase())}</dd>
         </dl>
       </section>
 
@@ -241,9 +246,9 @@
           <dt>{t('diagnostics.clientSecretKeychain')}</dt><dd>{boolLabel(snapshot.config.client_secret_set)}</dd>
           <dt>{t('diagnostics.clearOnPause')}</dt><dd>{boolLabel(snapshot.config.clear_on_pause)}</dd>
           <dt>{t('diagnostics.profanityFilter')}</dt><dd>{boolLabel(snapshot.config.profanity_filter)}</dd>
-          <dt>{t('diagnostics.extraProfanityWords')}</dt><dd>{snapshot.config.profanity_extra_words_count}</dd>
-          <dt>{t('diagnostics.locale')}</dt><dd class="mono">{snapshot.config.locale ?? 'en'}</dd>
-          <dt>{t('diagnostics.updateChannel')}</dt><dd class="mono">{snapshot.config.update_channel}</dd>
+          <dt>{t('diagnostics.extraProfanityWords')}</dt><dd>{metadataLabel(snapshot.config.profanity_extra_words_count)}</dd>
+          <dt>{t('diagnostics.locale')}</dt><dd class="mono">{snapshot.config.locale === null ? 'en' : metadataLabel(snapshot.config.locale)}</dd>
+          <dt>{t('diagnostics.updateChannel')}</dt><dd class="mono">{metadataLabel(snapshot.config.update_channel)}</dd>
           <dt>{t('diagnostics.configSnoozed')}</dt><dd>{boolLabel(snapshot.config.snoozed)}</dd>
           <dt>{t('diagnostics.startMinimized')}</dt><dd>{boolLabel(snapshot.config.start_minimized)}</dd>
           <dt>{t('diagnostics.availabilitySync')}</dt><dd>{boolLabel(snapshot.config.availability_sync)}</dd>

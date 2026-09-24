@@ -196,6 +196,43 @@ describe('Diagnostics runtime and config summary (#875, #786, #864)', () => {
     expect(diagnosticRow(container, 'Extra profanity words')).toBe('4');
     expect(diagnosticRow(container, 'Sync snoozed')).toBe('Yes');
   });
+
+  it('marks every new row unknown when an older payload omits its metadata', async () => {
+    const snapshot = snapshotWith(false, null);
+    Reflect.deleteProperty(snapshot.os, 'os_version');
+    Reflect.deleteProperty(snapshot.os, 'install_flavor');
+    for (const field of [
+      'respect_manual_status',
+      'gate_when_out_of_office',
+      'profanity_extra_words_count',
+      'locale',
+      'update_channel',
+      'snoozed'
+    ]) {
+      Reflect.deleteProperty(snapshot.config, field);
+    }
+
+    const { container } = await mountWith(snapshot);
+
+    expect(diagnosticRow(container, 'OS')).toBe(
+      'linux (x86_64, unix); Release: unknown; Install flavor: unknown'
+    );
+    expect(diagnosticRow(container, 'Respect manual status')).toBe('unknown');
+    expect(diagnosticRow(container, 'Gate while out of office')).toBe('unknown');
+    expect(diagnosticRow(container, 'Extra profanity words')).toBe('unknown');
+    expect(diagnosticRow(container, 'Locale')).toBe('unknown');
+    expect(diagnosticRow(container, 'Update channel')).toBe('unknown');
+    expect(diagnosticRow(container, 'Sync snoozed')).toBe('unknown');
+  });
+
+  it('keeps the documented English locale default for an explicit null', async () => {
+    const snapshot = snapshotWith(false, null);
+    snapshot.config.locale = null;
+
+    const { container } = await mountWith(snapshot);
+
+    expect(diagnosticRow(container, 'Locale')).toBe('en');
+  });
 });
 
 describe('Diagnostics Rust-owned save (#921)', () => {

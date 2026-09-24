@@ -188,6 +188,7 @@ export const en = {
   'diagnostics.os': 'OS',
   'diagnostics.osRelease': 'Release',
   'diagnostics.installFlavor': 'Install flavor',
+  'diagnostics.unknown': 'unknown',
   'diagnostics.spotifyClientId': 'Spotify client ID',
   'diagnostics.redirectUri': 'Redirect URI',
   'diagnostics.notSet': '(not set)',

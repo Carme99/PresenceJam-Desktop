@@ -198,6 +198,7 @@ export const fr: Dict = {
   'diagnostics.os': 'Système',
   'diagnostics.osRelease': 'Version',
   'diagnostics.installFlavor': 'Type d’installation',
+  'diagnostics.unknown': 'inconnu',
   'diagnostics.spotifyClientId': 'ID client Spotify',
   'diagnostics.redirectUri': 'URI de redirection',
   'diagnostics.notSet': '(non défini)',
