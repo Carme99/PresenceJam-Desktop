@@ -97,6 +97,28 @@ pub struct TrackFingerprint {
 /// covered by `export_bindings_presencehistoryentry` for free.
 static HISTORY: Mutex<VecDeque<PresenceHistoryEntry>> = Mutex::new(VecDeque::new());
 
+fn push_bounded(ring: &mut VecDeque<PresenceHistoryEntry>, entry: PresenceHistoryEntry) {
+    while ring.len() >= PRESENCE_HISTORY_CAPACITY {
+        ring.pop_front();
+    }
+    ring.push_back(entry);
+}
+
+fn recent_from_ring(ring: &VecDeque<PresenceHistoryEntry>, n: usize) -> Vec<PresenceHistoryEntry> {
+    ring.iter().rev().take(n.min(ring.len())).cloned().collect()
+}
+
+fn redacted_lines_from_ring(ring: &VecDeque<PresenceHistoryEntry>) -> Vec<String> {
+    ring.iter()
+        .rev()
+        .map(|entry| {
+            serde_json::to_string(entry)
+                .map(|line| redact_sensitive(&line))
+                .unwrap_or_else(|e| format!("{{HISTORY_SERIALIZE_ERROR: {e}}}"))
+        })
+        .collect()
+}
+
 /// Issue #877: append one entry to the ring. The cap is enforced at write
 /// time (no allocation past `PRESENCE_HISTORY_CAPACITY`), and the entry
 /// is mirrored to the JSONL file when the user has opted in.
@@ -108,10 +130,7 @@ pub fn append(entry: PresenceHistoryEntry, config: Option<&AppConfig>) -> Presen
     // entries; the oldest entry is dropped on overflow so the ring is
     // always "the last 200 decisions".
     if let Ok(mut guard) = HISTORY.lock() {
-        while guard.len() >= PRESENCE_HISTORY_CAPACITY {
-            guard.pop_front();
-        }
-        guard.push_back(entry.clone());
+        push_bounded(&mut guard, entry.clone());
     }
     // Step 2: optional JSONL mirror. The mirror is opt-in to keep a noisy
     // user's `PresenceJam.log` folder from filling up; when the user opts
@@ -184,10 +203,7 @@ fn mirror_entry(entry: &PresenceHistoryEntry) -> Result<(), String> {
 /// renders top-down reads the array end-first.
 pub fn recent(n: usize) -> Vec<PresenceHistoryEntry> {
     let guard = HISTORY.lock().unwrap_or_else(|e| e.into_inner());
-    let total = guard.len();
-    let take = n.min(total);
-    // Reverse-chronological: newest entries live at the back of the deque.
-    guard.iter().rev().take(take).cloned().collect()
+    recent_from_ring(&guard, n)
 }
 
 /// Issue #877: the read path the Diagnostics snapshot uses. Every entry
@@ -197,14 +213,8 @@ pub fn recent(n: usize) -> Vec<PresenceHistoryEntry> {
 /// dashboard already gets the structured `Vec<PresenceHistoryEntry>` via
 /// `recent`.
 pub fn redacted_lines() -> Vec<String> {
-    recent(PRESENCE_HISTORY_CAPACITY)
-        .into_iter()
-        .map(|entry| {
-            serde_json::to_string(&entry)
-                .map(|line| redact_sensitive(&line))
-                .unwrap_or_else(|e| format!("{{HISTORY_SERIALIZE_ERROR: {e}}}",))
-        })
-        .collect()
+    let guard = HISTORY.lock().unwrap_or_else(|e| e.into_inner());
+    redacted_lines_from_ring(&guard)
 }
 
 /// Issue #877: the Dashboard's "Activity" card front-end fetches the
@@ -259,15 +269,13 @@ mod tests {
 
     /// Issue #877: the documented cap is enforced. After 200 + 1 pushes
     /// the ring holds exactly 200 entries and the oldest is gone.
-    /// Goes through [`append`] so the cap is enforced at the writer.
+    /// Exercises the same bounded writer helper used by [`append`].
     #[test]
     fn ring_caps_at_documented_capacity() {
-        {
-            let mut guard = HISTORY.lock().unwrap_or_else(|e| e.into_inner());
-            guard.clear();
-        }
+        let mut ring = VecDeque::new();
         for i in 0..(PRESENCE_HISTORY_CAPACITY + 1) {
-            append(
+            push_bounded(
+                &mut ring,
                 PresenceHistoryEntry {
                     at: Utc::now() + ChronoDuration::seconds(i as i64),
                     kind: "test".to_string(),
@@ -276,13 +284,10 @@ mod tests {
                     posted_status: None,
                     gate_reason: None,
                 },
-                None,
             );
         }
-        let guard = HISTORY.lock().unwrap_or_else(|e| e.into_inner());
-        assert_eq!(guard.len(), PRESENCE_HISTORY_CAPACITY);
-        // The oldest push (entry 0) is evicted.
-        assert!(guard.iter().all(|e| !e.note.starts_with("entry 0 ")));
+        assert_eq!(ring.len(), PRESENCE_HISTORY_CAPACITY);
+        assert!(ring.iter().all(|e| !e.note.starts_with("entry 0 ")));
     }
 
     /// Issue #877: `recent(n)` returns at most `n` entries in
@@ -290,23 +295,19 @@ mod tests {
     /// yields the three newest, in newest-first order.
     #[test]
     fn recent_returns_newest_first() {
-        {
-            let mut guard = HISTORY.lock().unwrap_or_else(|e| e.into_inner());
-            guard.clear();
-            for i in 0..5 {
-                guard.push_back(PresenceHistoryEntry {
-                    at: Utc::now() + ChronoDuration::seconds(i as i64),
-                    kind: "test".to_string(),
-                    note: format!("entry {i}"),
-                    track_fingerprint: None,
-                    posted_status: None,
-                    gate_reason: None,
-                });
-            }
+        let mut ring = VecDeque::new();
+        for i in 0..5 {
+            ring.push_back(PresenceHistoryEntry {
+                at: Utc::now() + ChronoDuration::seconds(i as i64),
+                kind: "test".to_string(),
+                note: format!("entry {i}"),
+                track_fingerprint: None,
+                posted_status: None,
+                gate_reason: None,
+            });
         }
-        let top = recent(3);
+        let top = recent_from_ring(&ring, 3);
         assert_eq!(top.len(), 3);
-        // Newest first: entry 4, 3, 2.
         assert_eq!(top[0].note, "entry 4");
         assert_eq!(top[1].note, "entry 3");
         assert_eq!(top[2].note, "entry 2");
@@ -317,27 +318,18 @@ mod tests {
     /// field must NOT reach the snapshot output.
     #[test]
     fn diagnostics_lines_redact_credential_shaped_strings() {
-        {
-            let mut guard = HISTORY.lock().unwrap_or_else(|e| e.into_inner());
-            guard.clear();
-            // Long opaque run that triggers the `>= 32 chars` redaction
-            // pass (issue #228). The token must NOT survive in the
-            // snapshot output.
-            guard.push_back(PresenceHistoryEntry {
-                at: Utc::now(),
-                kind: "presence-updated".to_string(),
-                note: "secret=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef0123456789xyz in the posted status"
-                    .to_string(),
-                track_fingerprint: None,
-                posted_status: None,
-                gate_reason: None,
-            });
-        }
-        let lines = redacted_lines_for_diagnostics();
+        let mut ring = VecDeque::new();
+        ring.push_back(PresenceHistoryEntry {
+            at: Utc::now(),
+            kind: "presence-updated".to_string(),
+            note: "secret=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef0123456789xyz in the posted status"
+                .to_string(),
+            track_fingerprint: None,
+            posted_status: None,
+            gate_reason: None,
+        });
+        let lines = redacted_lines_from_ring(&ring);
         assert_eq!(lines.len(), 1);
-        // `redact_sensitive` collapses credential-shaped runs into the
-        // `[REDACTED len N]` sentinel — the documented replacement for
-        // the diagnostics snapshot. The raw token must NOT survive.
         assert!(lines[0].contains("[REDACTED"));
         assert!(!lines[0].contains("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef0123456789xyz"));
     }
