@@ -44,13 +44,16 @@ import { currentView } from '$lib/stores/app';
 import { resetSpotifyAuthFlow, resetTeamsAuthFlow } from '$lib/stores/authFlow.svelte';
 import { presence, INITIAL_PRESENCE } from '$lib/stores/presence';
 import { theme } from '$lib/stores/theme';
-import { t } from '$lib/i18n';
+import { i18n, t } from '$lib/i18n';
 import type { ShortcutReason } from '$lib/types';
 
 const invokeMock = invoke as unknown as Mock;
 
-/** One slot as the backend reports it (mirrors the Rust `SlotRegistration`). */
-type SlotStatus = { accelerator: string | null; registered: boolean; error: string | null };
+type SlotStatus = {
+  accelerator: string | null;
+  registered: boolean;
+  error: ShortcutReason | null;
+};
 type Status = { toggle_playback: SlotStatus; toggle_sync: SlotStatus };
 
 /** The bindings the backend has persisted — what registration reads from. */
@@ -80,7 +83,8 @@ function configWith(bindings: ShortcutBindings) {
 function registrationStatus(): Status {
   const slot = (accelerator: string | null): SlotStatus => {
     if (accelerator === null) return { accelerator: null, registered: false, error: null };
-    const error = refusals[accelerator] ?? null;
+    const message = refusals[accelerator] ?? null;
+    const error = message === null ? null : { kind: 'Unknown' as const, message };
     return { accelerator, registered: error === null, error };
   };
   return {
