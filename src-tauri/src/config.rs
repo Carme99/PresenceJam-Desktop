@@ -2485,7 +2485,11 @@ fn tighten_config_permissions(path: &std::path::Path) {
 }
 
 pub fn load_config() -> Result<AppConfig, String> {
-    load_config_from(&get_config_path()?).map(with_keychain_flags)
+    load_config_from(&get_config_path()?).map(|config| {
+        with_keychain_flags(config, || {
+            crate::keychain::cached_spotify_client_secret_presence()
+        })
+    })
 }
 
 /// Path-taking core of [`load_config`]: the file I/O, the section-by-section
@@ -2630,17 +2634,26 @@ pub fn logging_config_for_startup() -> LoggingConfig {
 /// `Present`-only flag) and `client_secret_state` (the tri-state that can say
 /// "the keychain could not answer"). See issues #9 and #560.
 ///
-/// One probe feeds both: `spotify_client_secret_presence` never reads the
-/// in-process cache, so it still notices a credential deleted from the OS UI
-/// while the app runs — and this function only runs on config load, off the
-/// polling hot path (issue #69).
-fn with_keychain_flags(mut config: AppConfig) -> AppConfig {
-    let presence = crate::keychain::spotify_client_secret_presence();
+/// One presence result feeds both. A fresh warm keychain observation avoids
+/// an OS round trip; a cold or expired cache falls back to the direct
+/// tri-state probe, which still notices credentials changed through the OS UI.
+fn with_keychain_flags(
+    config: AppConfig,
+    presence: impl FnOnce() -> crate::keychain::KeychainPresence,
+) -> AppConfig {
+    stamp_keychain_flags(config, presence())
+}
+
+fn stamp_keychain_flags(
+    mut config: AppConfig,
+    presence: crate::keychain::KeychainPresence,
+) -> AppConfig {
     config.spotify.client_secret_set =
         matches!(presence, crate::keychain::KeychainPresence::Present);
     config.spotify.client_secret_state = ClientSecretState::from(&presence);
     config
 }
+
 /// Frontend event emitted (once per process) when the legacy-plaintext
 /// migration finds a *different* secret already in the OS keychain.
 ///
@@ -3571,6 +3584,51 @@ mod tests {
             ClientSecretState::from(&KeychainPresence::Unavailable("keyring locked".into())),
             ClientSecretState::Unavailable
         );
+    }
+
+    /// A locked keychain remains distinct from a missing secret on the full
+    /// config shape: only `Present` sets the legacy bool, while the tri-state
+    /// carries `Unavailable` to the UI.
+    #[test]
+    fn unavailable_keychain_is_not_collapsed_into_absent() {
+        let config = stamp_keychain_flags(
+            AppConfig::default(),
+            crate::keychain::KeychainPresence::Unavailable("keyring locked".into()),
+        );
+        assert!(!config.spotify.client_secret_set);
+        assert_eq!(
+            config.spotify.client_secret_state,
+            ClientSecretState::Unavailable
+        );
+    }
+
+    /// The config-load seam stamps both derived fields from one presence
+    /// observation. This exercises the same function that `load_config` uses,
+    /// rather than testing the keychain cache in isolation.
+    #[test]
+    fn config_presence_flags_use_the_cached_config_seam() {
+        let dir = std::env::temp_dir().join(format!(
+            "presencejam-keychain-config-seam-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("the config seam test directory must be creatable");
+        let path = dir.join("config.json");
+        std::fs::write(&path, "{}\n").expect("the config seam fixture must be writable");
+
+        let loaded = load_config_from(&path).expect("the real config file seam must load");
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let config = with_keychain_flags(loaded, || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            crate::keychain::KeychainPresence::Present
+        });
+        assert!(config.spotify.client_secret_set);
+        assert_eq!(
+            config.spotify.client_secret_state,
+            ClientSecretState::Present
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        std::fs::remove_dir_all(dir).expect("the config seam test directory must be removable");
     }
 
     /// The frontend switches on these three literals, so the spelling is part
