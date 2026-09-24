@@ -749,10 +749,9 @@ fn persist_tokens_at_with_retry(
     write: impl FnOnce(&Path, &TokensFile) -> Result<(), String>,
 ) -> Result<(), String> {
     with_tokens_write_lock(|| {
-        let blocked_error =
-            "Refusing to overwrite tokens.json after a keychain-unavailable load; \
+        let blocked_error = "Refusing to overwrite tokens.json after a keychain-unavailable load; \
              retry the token read or reset token storage first"
-                .to_string();
+            .to_string();
         if state.tokens_load.blocks_persist() {
             let recovered = read().map_err(|_| blocked_error.clone())?;
             crate::apply_token_load_result(state, Ok(recovered));
@@ -1134,15 +1133,12 @@ mod tests {
         write_tokens_atomic_with_key(&path, &sample_file(), &test_key()).unwrap();
         let state = Arc::new(crate::AppState::new());
 
-        let unavailable = read_tokens_at_path_with_key_fetcher(
-            &path,
-            TokenReadMode::ReadOnly,
-            || {
+        let unavailable =
+            read_tokens_at_path_with_key_fetcher(&path, TokenReadMode::ReadOnly, || {
                 Err(crate::keychain::KeychainReadError::Unavailable(
                     "credential store locked".to_string(),
                 ))
-            },
-        );
+            });
         assert!(matches!(
             &unavailable,
             Err(TokensLoadError::KeychainUnavailable(_))
@@ -1157,13 +1153,20 @@ mod tests {
         let first = persist_tokens_at_with_retry(
             &state,
             &path,
-            || read_tokens_at_path_with_key_fetcher(&path, TokenReadMode::ReadOnly, || Ok(test_key())),
+            || {
+                read_tokens_at_path_with_key_fetcher(&path, TokenReadMode::ReadOnly, || {
+                    Ok(test_key())
+                })
+            },
             |_path, _contents| {
                 writer_called = true;
                 Ok(())
             },
         );
-        assert!(first.is_ok(), "a successful retry must make the persist writable");
+        assert!(
+            first.is_ok(),
+            "a successful retry must make the persist writable"
+        );
         assert!(writer_called, "the successful retry must reach the writer");
         assert_eq!(state.tokens_load.state(), crate::TokensLoadState::Ready);
         assert_eq!(state.tokens.spotify().as_ref().unwrap().access_token, "at");
@@ -1197,7 +1200,10 @@ mod tests {
         assert!(persist.is_err());
         assert!(!writer_called, "a failed retry must not reach the writer");
         assert_eq!(fs::read(&path).unwrap(), ciphertext);
-        assert_eq!(state.tokens_load.state(), crate::TokensLoadState::KeychainUnavailable);
+        assert_eq!(
+            state.tokens_load.state(),
+            crate::TokensLoadState::KeychainUnavailable
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 
