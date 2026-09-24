@@ -133,11 +133,8 @@ where
                 "{CMD} poll_teams_auth: poll successful - access_token.len={}",
                 tokens.access_token.len()
             );
-            {
-                let mut guard = state.tokens.teams_mut();
-                *guard = Some(tokens);
-                log::info!("{CMD} poll_teams_auth: tokens stored in AppState");
-            }
+            state.tokens_load.commit_teams(&state.tokens, tokens);
+            log::info!("{CMD} poll_teams_auth: tokens stored in AppState");
 
             // The sign-in already succeeded, so storage failure must not turn
             // it into an IPC error. Keep the live token and report that it is
