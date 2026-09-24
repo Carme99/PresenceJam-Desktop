@@ -303,6 +303,39 @@ describe('Settings — global shortcuts (#676)', () => {
     expect(commandsCalled('save_config')).toBe(0);
   });
 
+  it('renders a typed X11 prerequisite without backend English identity copy', async () => {
+    const defaultImpl = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'register_shortcuts') {
+        return {
+          toggle_playback: {
+            accelerator: 'CmdOrCtrl+Alt+P',
+            registered: false,
+            error: { kind: 'X11Unavailable' }
+          },
+          toggle_sync: {
+            accelerator: 'CmdOrCtrl+Alt+S',
+            registered: false,
+            error: { kind: 'X11Unavailable' }
+          }
+        };
+      }
+      if (defaultImpl) return defaultImpl(cmd, args);
+      return [];
+    });
+
+    const { container } = await mountSettings();
+    await waitFor(() => {
+      const expected = t('settings.shortcutRegistrationFailed', {
+        reason: t('settings.shortcutReasonX11Unavailable')
+      });
+      expect(rowText(container, 'toggle_playback')).toContain(expected);
+      expect(rowText(container, 'toggle_sync')).toContain(expected);
+    });
+    const body = container.textContent ?? '';
+    expect(body).not.toContain('Global shortcuts need a reachable X11 display; this desktop has no X11 session.');
+  });
+
   /**
    * A desktop that refuses the grab (Wayland, or a combination another
    * application owns). The row must say so, and the other binding — and the

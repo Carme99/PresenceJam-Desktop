@@ -838,6 +838,12 @@
     if (obj.kind === 'Autostart' && typeof obj.cause === 'string') {
       return { kind: 'Autostart', cause: obj.cause };
     }
+    if (obj.kind === 'X11Unavailable') {
+      return { kind: 'X11Unavailable' };
+    }
+    if (obj.kind === 'WorkerUnavailable') {
+      return { kind: 'WorkerUnavailable' };
+    }
     if (obj.kind === 'Unknown' && typeof obj.message === 'string') {
       return { kind: 'Unknown', message: obj.message };
     }
@@ -869,6 +875,10 @@
         return t('settings.shortcutReasonNeedsModifier', { accelerator: reason.accelerator });
       case 'Autostart':
         return t('settings.shortcutReasonAutostart', { cause: reason.cause });
+      case 'X11Unavailable':
+        return t('settings.shortcutReasonX11Unavailable');
+      case 'WorkerUnavailable':
+        return t('settings.shortcutReasonWorkerUnavailable');
       case 'Unknown':
         return t('settings.shortcutReasonUnknown', { message: reason.message });
     }

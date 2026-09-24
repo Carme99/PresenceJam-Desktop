@@ -289,27 +289,32 @@ impl ShortcutsStatus {
 pub enum ShortcutPreflightFailure {
     /// Linux is running without a display that the X11 backend can connect to.
     X11Unavailable,
+    /// X11 is reachable, but the plugin's private worker cannot be proven alive
+    /// through the public Tauri API. The backend must fail closed in this case.
+    WorkerUnavailable,
 }
 
-/// Stable Settings-card copy for a desktop where the X11-only backend cannot
-/// make a connection. `Unknown` is intentional: this module does not own the
-/// shared localized `ShortcutReason` vocabulary, while the exact message keeps
-/// the backend failure deterministic for every configured slot.
-const X11_UNAVAILABLE_REASON: &str =
-    "Global shortcuts need a reachable X11 display; this desktop has no X11 session.";
-
+fn preflight_reason(failure: ShortcutPreflightFailure) -> ShortcutReason {
+    match failure {
+        ShortcutPreflightFailure::X11Unavailable => ShortcutReason::x11_unavailable(),
+        ShortcutPreflightFailure::WorkerUnavailable => ShortcutReason::worker_unavailable(),
+    }
+}
 /// The plugin surface this module uses, narrowed so a test can inject a refused
 /// registration — the Wayland case — without a compositor or a running app.
 pub trait ShortcutRegistrar {
     /// Checks the platform prerequisite before any release or grab is attempted.
     /// The default performs the real X11 connection probe on Linux and is a
-    /// no-op elsewhere; tests override it through this same seam.
+    /// no-op elsewhere. The public Tauri plugin API does not expose its private
+    /// worker for a liveness check, so a reachable X11 display is deliberately
+    /// treated as unverified and fails closed until a real worker probe exists.
     fn preflight(&self) -> Result<(), ShortcutPreflightFailure> {
         #[cfg(target_os = "linux")]
         {
-            x11rb::rust_connection::RustConnection::connect(None)
-                .map(|_| ())
-                .map_err(|_| ShortcutPreflightFailure::X11Unavailable)
+            match x11rb::rust_connection::RustConnection::connect(None) {
+                Ok(_) => Err(ShortcutPreflightFailure::WorkerUnavailable),
+                Err(_) => Err(ShortcutPreflightFailure::X11Unavailable),
+            }
         }
         #[cfg(not(target_os = "linux"))]
         Ok(())
@@ -342,6 +347,32 @@ pub fn dispatch_event(
     true
 }
 
+fn preflight_failure_status(
+    plans: &[SlotPlan; 2],
+    failure: ShortcutPreflightFailure,
+) -> ShortcutsStatus {
+    let reason = preflight_reason(failure);
+    let mut status = ShortcutsStatus::default();
+    for (index, slot) in ShortcutSlot::ALL.into_iter().enumerate() {
+        let accelerator = match &plans[index] {
+            SlotPlan::Unbound => continue,
+            SlotPlan::Bound { accelerator, .. } | SlotPlan::Invalid { accelerator, .. } => {
+                accelerator.clone()
+            }
+        };
+        status.set(
+            slot,
+            SlotRegistration {
+                accelerator: Some(accelerator),
+                registered: false,
+                error: Some(reason.clone()),
+            },
+        );
+    }
+    log::warn!("{CMD} preflight: global shortcuts are unavailable: {failure:?}");
+    status
+}
+
 /// Applies a plan: every previously held grab is released first, so a re-apply
 /// (a config save) cannot leave a stale accelerator live — and so a
 /// re-registration of an unchanged accelerator does not trip the plugin's
@@ -354,27 +385,8 @@ pub fn apply_plan(
     plans: &[SlotPlan; 2],
     handler: &Arc<SlotHandler>,
 ) -> ShortcutsStatus {
-    if let Err(ShortcutPreflightFailure::X11Unavailable) = registrar.preflight() {
-        let mut status = ShortcutsStatus::default();
-        let reason = ShortcutReason::unknown(X11_UNAVAILABLE_REASON);
-        for (index, slot) in ShortcutSlot::ALL.into_iter().enumerate() {
-            let accelerator = match &plans[index] {
-                SlotPlan::Unbound => continue,
-                SlotPlan::Bound { accelerator, .. } | SlotPlan::Invalid { accelerator, .. } => {
-                    accelerator.clone()
-                }
-            };
-            status.set(
-                slot,
-                SlotRegistration {
-                    accelerator: Some(accelerator),
-                    registered: false,
-                    error: Some(reason.clone()),
-                },
-            );
-        }
-        log::warn!("{CMD} apply: global shortcuts require a reachable X11 display");
-        return status;
+    if let Err(failure) = registrar.preflight() {
+        return preflight_failure_status(plans, failure);
     }
 
     if let Err(e) = registrar.unregister_all() {
@@ -715,11 +727,16 @@ pub fn register_from_config(app: &AppHandle) {
 /// re-recording an existing binding impossible. The returned status still names
 /// each configured accelerator — it is simply not held right now.
 pub fn release_all(app: &AppHandle) -> ShortcutsStatus {
+    let cfg = config_or_default(app);
     let registrar = PluginRegistrar::new(app);
+    if let Err(failure) = registrar.preflight() {
+        let status = preflight_failure_status(&plan_shortcuts(&cfg.shortcuts), failure);
+        store_status(app, status.clone());
+        return status;
+    }
     if let Err(e) = registrar.unregister_all() {
         log::warn!("{CMD} release: releasing the grabs failed: {e}");
     }
-    let cfg = config_or_default(app);
     let mut status = ShortcutsStatus::default();
     for slot in ShortcutSlot::ALL {
         status.set(
@@ -819,13 +836,26 @@ mod tests {
     /// Stands in for the plugin: records what was registered, and can refuse
     /// selected accelerators — the desktop/compositor refusal this slice exists
     /// to surface.
-    #[derive(Default)]
     struct RecordingRegistrar {
         registrations: parking_lot::Mutex<Vec<(ShortcutSlot, String)>>,
         releases: parking_lot::Mutex<usize>,
         refuse: Vec<&'static str>,
         x11_unavailable: bool,
+        worker_alive: bool,
         preflights: parking_lot::Mutex<usize>,
+    }
+
+    impl Default for RecordingRegistrar {
+        fn default() -> Self {
+            Self {
+                registrations: parking_lot::Mutex::new(Vec::new()),
+                releases: parking_lot::Mutex::new(0),
+                refuse: Vec::new(),
+                x11_unavailable: false,
+                worker_alive: true,
+                preflights: parking_lot::Mutex::new(0),
+            }
+        }
     }
 
     impl RecordingRegistrar {
@@ -841,6 +871,13 @@ mod tests {
         fn without_x11() -> Self {
             Self {
                 x11_unavailable: true,
+                ..Self::default()
+            }
+        }
+
+        fn reachable_x11_without_worker() -> Self {
+            Self {
+                worker_alive: false,
                 ..Self::default()
             }
         }
@@ -863,6 +900,8 @@ mod tests {
             *self.preflights.lock() += 1;
             if self.x11_unavailable {
                 Err(ShortcutPreflightFailure::X11Unavailable)
+            } else if !self.worker_alive {
+                Err(ShortcutPreflightFailure::WorkerUnavailable)
             } else {
                 Ok(())
             }
@@ -1315,7 +1354,35 @@ mod tests {
             assert!(!registration.registered);
             assert_eq!(
                 registration.error,
-                Some(ShortcutReason::unknown(X11_UNAVAILABLE_REASON))
+                Some(ShortcutReason::x11_unavailable())
+            );
+        }
+    }
+
+    /// A reachable X11 display is not proof that the plugin's worker is alive:
+    /// its public API does not expose a liveness handle. The registrar seam
+    /// models that reachable-but-dead state explicitly, and the apply path
+    /// must fail closed before the potentially blocking unregister call.
+    #[test]
+    fn reachable_x11_with_a_dead_worker_never_registers() {
+        let registrar = RecordingRegistrar::reachable_x11_without_worker();
+        let status = apply_plan(
+            &registrar,
+            &plan_shortcuts(&ShortcutsConfig::default()),
+            &handler(),
+        );
+
+        assert!(registrar.registered().is_empty());
+        assert_eq!(
+            registrar.release_count(),
+            0,
+            "a dead worker must be detected before the plugin is called"
+        );
+        for registration in [&status.toggle_playback, &status.toggle_sync] {
+            assert!(!registration.registered);
+            assert_eq!(
+                registration.error,
+                Some(ShortcutReason::worker_unavailable())
             );
         }
     }

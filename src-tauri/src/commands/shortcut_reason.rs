@@ -36,6 +36,12 @@ impl std::fmt::Display for ShortcutReason {
             ShortcutReason::Autostart { cause } => {
                 write!(f, "Autostart(\"{cause}\")")
             }
+            ShortcutReason::X11Unavailable => {
+                write!(f, "X11Unavailable")
+            }
+            ShortcutReason::WorkerUnavailable => {
+                write!(f, "WorkerUnavailable")
+            }
             ShortcutReason::Unknown { message } => {
                 write!(f, "Unknown(\"{message}\")")
             }
@@ -73,6 +79,14 @@ pub enum ShortcutReason {
     /// the toggle. `cause` is the plugin's error text, captured rather than
     /// emitted verbatim so the Settings copy is renderable in every locale.
     Autostart { cause: String },
+    /// Linux has no reachable X11 display for the X11-only shortcut backend.
+    /// This is a stable platform prerequisite, not plugin error prose, so the
+    /// Settings card can localize it in every shipped language.
+    X11Unavailable,
+    /// X11 is reachable, but the plugin's private worker could not be proven
+    /// alive through the public Tauri API. Registration must fail closed
+    /// rather than claim a grab is active when the worker may be dead.
+    WorkerUnavailable,
     /// A genuinely foreign reason — a plugin refusal we cannot translate
     /// (the Wayland case: the compositor owns the combo and the plugin
     /// answers with whatever it answers with). The `message` is what the
@@ -111,6 +125,16 @@ impl ShortcutReason {
         ShortcutReason::Autostart {
             cause: cause.to_string(),
         }
+    }
+
+    /// Linux cannot reach the X11 display required by global shortcuts.
+    pub fn x11_unavailable() -> Self {
+        ShortcutReason::X11Unavailable
+    }
+
+    /// The X11 display is reachable, but the plugin worker is not verifiable.
+    pub fn worker_unavailable() -> Self {
+        ShortcutReason::WorkerUnavailable
     }
 
     /// A foreign reason: render verbatim through the unknown template.
@@ -160,6 +184,14 @@ mod tests {
             serde_json::json!({"kind": "Autostart", "cause": "permission denied"})
         );
 
+        let x11 = ShortcutReason::x11_unavailable();
+        let json = serde_json::to_value(&x11).expect("serializable");
+        assert_eq!(json, serde_json::json!({"kind": "X11Unavailable"}));
+
+        let worker = ShortcutReason::worker_unavailable();
+        let json = serde_json::to_value(&worker).expect("serializable");
+        assert_eq!(json, serde_json::json!({"kind": "WorkerUnavailable"}));
+
         let unknown = ShortcutReason::unknown("some plugin error");
         let json = serde_json::to_value(&unknown).expect("serializable");
         assert_eq!(
@@ -178,6 +210,8 @@ mod tests {
             (ShortcutReason::conflict("y"), "Conflict"),
             (ShortcutReason::needs_modifier("z"), "NeedsModifier"),
             (ShortcutReason::autostart("z"), "Autostart"),
+            (ShortcutReason::x11_unavailable(), "X11Unavailable"),
+            (ShortcutReason::worker_unavailable(), "WorkerUnavailable"),
             (ShortcutReason::unknown("w"), "Unknown"),
         ] {
             let json = serde_json::to_value(variant).expect("serializable");
