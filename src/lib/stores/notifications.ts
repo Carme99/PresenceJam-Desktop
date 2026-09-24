@@ -6,7 +6,7 @@ import {
 } from '@tauri-apps/plugin-notification';
 import { configHydrated, configStore, defaultConfig, loadConfig, saveConfig, updateConfig } from './config';
 import { t } from '$lib/i18n';
-import type { AppConfig } from '../types';
+import type { AppConfig, TrackInfo } from '../types';
 
 /**
  * Desktop-notification classes (#675, 4.7.0).
@@ -63,14 +63,6 @@ const CLASS_TARGETS: Record<NotificationClass, { id: number; group: string }> = 
   auth_required: { id: 1003, group: 'presencejam-auth-required' },
   update_staged: { id: 1004, group: 'presencejam-update-staged' }
 };
-
-/** The track payload `spotify-track-changed` carries (the fields we render). */
-export interface NotificationTrack {
-  title?: string | null;
-  artist?: string | null;
-  album?: string | null;
-  album_art_url?: string | null;
-}
 
 export const notificationPreferences = writable<NotificationPreferences>({
   ...defaultConfig.notifications
@@ -259,7 +251,7 @@ let lastNotifiedAt = 0;
  * still notify. The bookkeeping is claimed before the permission check, as it
  * was in Dashboard, so a denied permission cannot retry on every track.
  */
-export async function notifyTrackChange(track: NotificationTrack): Promise<boolean> {
+export async function notifyTrackChange(track: TrackInfo): Promise<boolean> {
   if (!track?.title) return false;
   // Issue #789: same hydration gate as `sendNow` — this helper returns
   // before reaching it, so it must check directly.

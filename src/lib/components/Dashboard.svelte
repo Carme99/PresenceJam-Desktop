@@ -232,7 +232,16 @@
   // `recentManualStatuses`) is re-hydrated from the `SyncStatus` snapshot
   // and from a `manual-status-updated` listener so a pick on another
   // surface lands here without a remount.
-  let manualStatus = $state<{ message: string; expires_at: string; set_at: string } | null>(null);
+  type ManualStatus = { message: string; expires_at: string; set_at: string };
+  type ManualStatusUpdatedPayload = {
+    manual_status?: ManualStatus;
+    cleared?: boolean;
+    expired?: boolean;
+    filtered?: boolean;
+    user_text?: string;
+    expires_at?: string;
+  };
+  let manualStatus = $state<ManualStatus | null>(null);
   let recentManualStatuses = $state<{ message: string; used_at: string }[]>([]);
   let composerDraft = $state('');
   let composerExpiryMinutes = $state<number>(60);
@@ -488,7 +497,7 @@
     // the new ManualStatus (or `{ cleared: true }`); the listener
     // hydrates the local mirror and triggers the next-tick refresh
     // of the recent ring.
-    teardown.add(listen('manual-status-updated', (event: any) => {
+    teardown.add(listen<ManualStatusUpdatedPayload>('manual-status-updated', (event) => {
       const payload = event.payload ?? {};
       if (payload.cleared === true || payload.expired === true) {
         manualStatus = null;
@@ -507,7 +516,7 @@
     teardown.add(listen('presence-gated', () => { void refreshActivity(); }));
 
     devLog('[DASHBOARD] onMount: setting up spotify-track-changed listener');
-    teardown.add(listen('spotify-track-changed', (event: any) => {
+    teardown.add(listen<TrackInfo>('spotify-track-changed', (event) => {
       devLog('[DASHBOARD] EVENT: spotify-track-changed received');
       devLog('[DASHBOARD] EVENT: track.title=', event.payload.title);
       devLog('[DASHBOARD] EVENT: track.artist=', event.payload.artist);
