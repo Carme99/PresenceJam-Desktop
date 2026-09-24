@@ -55,14 +55,9 @@ type SlotStatus = {
   error: ShortcutReason | null;
 };
 type Status = { toggle_playback: SlotStatus; toggle_sync: SlotStatus };
-
-/** The bindings the backend has persisted — what registration reads from. */
-let persisted: ShortcutBindings;
 /** Accelerators this fake desktop refuses to grab, keyed to the reason
- * string the plugin answered with. Rust wraps the plugin text as
- * `ShortcutReason::Unknown { message }` (issue #968), so the harness still
- * produces a free-form string here and lets the wrap happen Rust-side;
- * the rejected slot will surface as `Unknown { message }`.
+ * string the plugin answered with. The harness models the Rust boundary by
+ * wrapping that text in `ShortcutReason::Unknown { message }`.
  */
 let refusals: Record<string, string>;
 /** Accelerators the backend's validator rejects, keyed to the typed
@@ -71,6 +66,7 @@ let refusals: Record<string, string>;
  * `normalizeReason` parses it back to a typed reason.
  */
 let rejections: Record<string, ShortcutReason>;
+let persisted: ShortcutBindings;
 
 /** A configured install with the given bindings. */
 function configWith(bindings: ShortcutBindings) {
@@ -176,7 +172,8 @@ beforeEach(() => {
   });
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await i18n.set('en');
   cleanup();
 });
 
@@ -307,7 +304,7 @@ describe('Settings — global shortcuts (#676)', () => {
     expect(commandsCalled('save_config')).toBe(0);
   });
 
-  it('renders a typed X11 prerequisite without backend English identity copy', async () => {
+  it('localizes typed X11 prerequisites in German and French without claiming active', async () => {
     const defaultImpl = invokeMock.getMockImplementation();
     invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
       if (cmd === 'register_shortcuts') {
@@ -328,16 +325,68 @@ describe('Settings — global shortcuts (#676)', () => {
       return [];
     });
 
+    await i18n.set('de');
     const { container } = await mountSettings();
-    await waitFor(() => {
-      const expected = t('settings.shortcutRegistrationFailed', {
-        reason: t('settings.shortcutReasonX11Unavailable')
+    for (const locale of ['de', 'fr'] as const) {
+      await i18n.set(locale);
+      await waitFor(() => {
+        const expected = t('settings.shortcutRegistrationFailed', {
+          reason: t('settings.shortcutReasonX11Unavailable')
+        });
+        expect(rowText(container, 'toggle_playback')).toContain(expected);
+        expect(rowText(container, 'toggle_sync')).toContain(expected);
+        expect(rowText(container, 'toggle_playback')).not.toContain(
+          t('settings.shortcutRegistered')
+        );
+        expect(rowText(container, 'toggle_sync')).not.toContain(
+          t('settings.shortcutRegistered')
+        );
       });
-      expect(rowText(container, 'toggle_playback')).toContain(expected);
-      expect(rowText(container, 'toggle_sync')).toContain(expected);
+      expect(container.textContent ?? '').not.toContain(
+        'Global shortcuts need a reachable X11 display; this desktop has no X11 session.'
+      );
+    }
+  });
+
+  it('localizes an unverified worker failure in German and French', async () => {
+    const defaultImpl = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'register_shortcuts') {
+        return {
+          toggle_playback: {
+            accelerator: 'CmdOrCtrl+Alt+P',
+            registered: true,
+            error: { kind: 'WorkerUnavailable' }
+          },
+          toggle_sync: {
+            accelerator: 'CmdOrCtrl+Alt+S',
+            registered: true,
+            error: { kind: 'WorkerUnavailable' }
+          }
+        };
+      }
+      if (defaultImpl) return defaultImpl(cmd, args);
+      return [];
     });
-    const body = container.textContent ?? '';
-    expect(body).not.toContain('Global shortcuts need a reachable X11 display; this desktop has no X11 session.');
+
+    await i18n.set('de');
+    const { container } = await mountSettings();
+    for (const locale of ['de', 'fr'] as const) {
+      await i18n.set(locale);
+      await waitFor(() => {
+        const expected = t('settings.shortcutRegistrationFailed', {
+          reason: t('settings.shortcutReasonWorkerUnavailable')
+        });
+        expect(rowText(container, 'toggle_playback')).toContain(expected);
+        expect(rowText(container, 'toggle_sync')).toContain(expected);
+        expect(rowText(container, 'toggle_playback')).not.toContain(
+          t('settings.shortcutRegistered')
+        );
+        expect(rowText(container, 'toggle_sync')).not.toContain(
+          t('settings.shortcutRegistered')
+        );
+      });
+    }
   });
 
   /**
