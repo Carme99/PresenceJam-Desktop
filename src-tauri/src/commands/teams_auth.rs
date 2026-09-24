@@ -85,7 +85,6 @@ fn emit_teams_auth_event(app: &AppHandle, event: TeamsAuthEvent) {
     }
 }
 
-
 /// Production body of [`poll_teams_auth`] with its blocking poll, persistence,
 /// and event side effects injected at the command boundary. The public
 /// signature remains unchanged while these seams make both the interval clamp
@@ -114,11 +113,10 @@ where
     );
 
     let device_code_for_thread = device_code.clone();
-    let poll_result = tauri::async_runtime::spawn_blocking(move || {
-        poll(device_code_for_thread, interval)
-    })
-    .await
-    .map_err(|e| format!("poll_teams_auth task panicked: {}", e))?;
+    let poll_result =
+        tauri::async_runtime::spawn_blocking(move || poll(device_code_for_thread, interval))
+            .await
+            .map_err(|e| format!("poll_teams_auth task panicked: {}", e))?;
 
     // A superseded or cancelled attempt must not commit either arm of its
     // result: doing so would overwrite the newer flow's live session.
@@ -171,7 +169,6 @@ where
         }
     }
 }
-
 
 #[tauri::command]
 pub async fn start_teams_auth_device_code(
@@ -516,7 +513,6 @@ mod tests {
         assert!(clear_dead_teams_refresh(&state, "new"));
         assert!(state.tokens.teams().is_none());
     }
-
     /// Issue #878: the point of the offload is that the thread which *awaits*
     /// the request is not the thread which *runs* it. `block_on` parks the
     /// calling thread, so work that ran inline would report the caller's own
@@ -579,7 +575,11 @@ mod tests {
 
         assert_eq!(result, Ok(()));
         assert_eq!(
-            state.tokens.teams().as_ref().map(|tokens| tokens.access_token.as_str()),
+            state
+                .tokens
+                .teams()
+                .as_ref()
+                .map(|tokens| tokens.access_token.as_str()),
             Some("live-teams-token")
         );
         assert_eq!(
@@ -591,7 +591,6 @@ mod tests {
             ]
         );
     }
-
 
     /// The command's body, sliced by the shared literal-aware scanner (so a
     /// brace inside a log string cannot end the slice early) and with the
