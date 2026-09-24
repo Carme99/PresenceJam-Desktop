@@ -15,7 +15,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { get } from 'svelte/store';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 interface FakeWindow {
@@ -38,6 +38,71 @@ const capability = JSON.parse(
   readFileSync(join(process.cwd(), 'src-tauri/capabilities/detached.json'), 'utf8')
 ) as { windows: string[]; permissions: string[] };
 
+const mainCapability = JSON.parse(
+  readFileSync(join(process.cwd(), 'src-tauri/capabilities/default.json'), 'utf8')
+) as { permissions: string[] };
+
+const frontendSourceFiles = readdirSync(join(process.cwd(), 'src'), {
+  recursive: true,
+  encoding: 'utf8'
+})
+  .filter((path) => /\.(?:svelte|ts)$/.test(path))
+  .map((path) => readFileSync(join(process.cwd(), 'src', path), 'utf8'));
+
+const frontendPluginUses = [
+  {
+    plugin: 'updater',
+    permission: 'updater:allow-check',
+    importedApi: 'check',
+    callPattern: /\bawait check\s*\(/,
+  },
+  {
+    plugin: 'updater',
+    permission: 'updater:allow-download-and-install',
+    importedApi: 'check',
+    callPattern: /\.downloadAndInstall\s*\(/,
+  },
+  {
+    plugin: 'notification',
+    permission: 'notification:allow-is-permission-granted',
+    importedApi: 'isPermissionGranted',
+    callPattern: /\bawait isPermissionGranted\s*\(/,
+  },
+  {
+    plugin: 'notification',
+    permission: 'notification:allow-request-permission',
+    importedApi: 'requestPermission',
+    callPattern: /\brequestPermission\s*\(/,
+  },
+  {
+    plugin: 'notification',
+    permission: 'notification:allow-notify',
+    importedApi: 'sendNotification',
+    callPattern: /\bsendNotification\s*\(/,
+  }
+] as const;
+
+function grantsWithoutFrontendUse(permissions: readonly string[]): string[] {
+  const used = new Set<string>(
+    frontendPluginUses
+      .filter(({ plugin, importedApi, callPattern }) => {
+        const escapedApi = importedApi.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const importPattern = new RegExp(
+          `import\\s*{[^}]*\\b${escapedApi}\\b[^}]*}\\s*from\\s*['"]@tauri-apps/plugin-${plugin}['"]`,
+          's'
+        );
+        return frontendSourceFiles.some(
+          (source) => importPattern.test(source) && callPattern.test(source)
+        );
+      })
+      .map(({ permission }) => permission)
+  );
+
+  return permissions.filter(
+    (permission) => !permission.startsWith('core:') && !used.has(permission)
+  );
+}
+
 beforeEach(() => {
   winState.windows = {};
   detachedPanes.set({ logs: false, settings: false });
@@ -57,6 +122,25 @@ describe('detached capability (#594)', () => {
   it('grants core:window:allow-close and no other window command', () => {
     expect(capability.permissions.filter((p) => p.startsWith('core:window:'))).toEqual([
       'core:window:allow-close'
+    ]);
+  });
+});
+
+describe('main capability (#919)', () => {
+  it('grants only plugin commands invoked by the frontend', () => {
+    expect(grantsWithoutFrontendUse(mainCapability.permissions)).toEqual([]);
+  });
+
+  it('rejects arbitrary unused grants from new and already-used plugins', () => {
+    const grants: string[] = [
+      ...mainCapability.permissions,
+      'fs:default',
+      'notification:allow-cancel'
+    ];
+
+    expect(grantsWithoutFrontendUse(grants)).toEqual([
+      'fs:default',
+      'notification:allow-cancel'
     ]);
   });
 });
