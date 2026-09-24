@@ -714,7 +714,9 @@ pub fn refresh_spotify(
             error: crate::spotify::SpotifyApiError::InvalidGrant,
             replaced: false,
         } => {
-            state.tokens_load.clear_spotify(&state.tokens);
+            state
+                .tokens_load
+                .clear_spotify_if_current(state.inner(), &pre_refresh_access_token);
             if let Err(e) = token_io::persist_tokens(state.inner(), &app) {
                 log::warn!(
                     "{CMD} refresh_spotify: failed to persist cleared tokens - {}",

@@ -641,7 +641,9 @@ fn run_inner(
                     != Some(pre_refresh_access_token.as_str());
                 if matches!(e, SpotifyApiError::InvalidGrant) && !refresh_superseded {
                     log::error!("[POLLING] poll_once: Spotify refresh token invalid (invalid_grant), discarding tokens and requiring reconnect");
-                    state.tokens_load.clear_spotify(&state.tokens);
+                    state
+                        .tokens_load
+                        .clear_spotify_if_current(&state.tokens, &pre_refresh_access_token);
                     if let Err(persist_err) = token_io::persist_tokens(state, app) {
                         log::warn!(
                             "[POLLING] poll_once: failed to persist cleared Spotify tokens: {}",
@@ -1135,7 +1137,10 @@ fn run_inner(
                                 && !refresh_superseded
                             {
                                 log::warn!("[POLLING] poll_once: Spotify refresh token invalid (invalid_grant), discarding tokens and requiring reconnect");
-                                state.tokens_load.clear_spotify(&state.tokens);
+                                state.tokens_load.clear_spotify_if_current(
+                                    &state.tokens,
+                                    &pre_refresh_access_token,
+                                );
                                 if let Err(persist_err) = token_io::persist_tokens(state, app) {
                                     log::warn!(
                                         "[POLLING] poll_once: failed to persist cleared Spotify tokens: {}",
@@ -3420,7 +3425,9 @@ fn teams_token_for_write(app: &AppHandle, state: &Arc<AppState>) -> Option<Teams
                     // through a full device-code browser re-auth.
                     if teams_refresh_requires_reauth(&e) {
                         log::warn!("[POLLING] teams_token_for_write: Teams refresh token is dead, discarding tokens and requiring reconnect");
-                        state.tokens_load.clear_teams(&state.tokens);
+                        state
+                            .tokens_load
+                            .clear_teams_if_current(&state.tokens, &pre_refresh_access_token);
                         // Issue #180: the write guard in the clearing
                         // statement above dies at the end of that statement.
                         // Persist in a LATER statement, when the guard is
@@ -4574,7 +4581,10 @@ pub(crate) fn process_track(
                                         )))
                                     } else if teams_refresh_requires_reauth(&refresh_err) {
                                         log::warn!("[POLLING] process_track: Teams refresh token is dead, discarding tokens");
-                                        state.tokens_load.clear_teams(&state.tokens);
+                                        state.tokens_load.clear_teams_if_current(
+                                            &state.tokens,
+                                            &pre_refresh_access_token,
+                                        );
                                         // Issue #180: the write guard in the
                                         // clearing statement above dies at
                                         // the end of that statement. Persist
@@ -5214,7 +5224,9 @@ pub(crate) fn handle_no_track(
                         )))
                     } else if teams_refresh_requires_reauth(&refresh_err) {
                         log::warn!("[POLLING] handle_no_track: Teams refresh token is dead, discarding tokens");
-                        state.tokens_load.clear_teams(&state.tokens);
+                        state
+                            .tokens_load
+                            .clear_teams_if_current(&state.tokens, &pre_refresh_access_token);
                         // Issue #180: the write guard in the clearing
                         // statement above dies at the end of that
                         // statement. Persist in a LATER statement, when

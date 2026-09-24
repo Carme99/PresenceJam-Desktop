@@ -515,6 +515,44 @@ impl TokensLoadGate {
         *tokens.teams_mut() = None;
     }
 
+    pub(crate) fn clear_spotify_if_current(
+        &self,
+        tokens: &Tokens,
+        pre_refresh_access_token: &str,
+    ) -> bool {
+        let mut recovery = self.recovery.lock();
+        let mut guard = tokens.spotify_mut();
+        if guard
+            .as_ref()
+            .is_some_and(|tokens| tokens.access_token == pre_refresh_access_token)
+        {
+            recovery.mark(TokenProvider::Spotify);
+            *guard = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn clear_teams_if_current(
+        &self,
+        tokens: &Tokens,
+        pre_refresh_access_token: &str,
+    ) -> bool {
+        let mut recovery = self.recovery.lock();
+        let mut guard = tokens.teams_mut();
+        if guard
+            .as_ref()
+            .is_some_and(|tokens| tokens.access_token == pre_refresh_access_token)
+        {
+            recovery.mark(TokenProvider::Teams);
+            *guard = None;
+            true
+        } else {
+            false
+        }
+    }
+
     pub(crate) fn clear_all(&self, tokens: &Tokens) {
         let mut recovery = self.recovery.lock();
         recovery.spotify = true;

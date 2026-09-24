@@ -197,12 +197,20 @@ fn persist_refreshed(state: &Arc<AppState>, app: &AppHandle, label: &str) {
 fn discard_dead_session(
     label: &str,
     provider: crate::TokenProvider,
+    pre_refresh_access_token: &str,
     state: &Arc<AppState>,
     app: &AppHandle,
 ) {
-    match provider {
-        crate::TokenProvider::Spotify => state.tokens_load.clear_spotify(&state.tokens),
-        crate::TokenProvider::Teams => state.tokens_load.clear_teams(&state.tokens),
+    let cleared = match provider {
+        crate::TokenProvider::Spotify => state
+            .tokens_load
+            .clear_spotify_if_current(&state.tokens, pre_refresh_access_token),
+        crate::TokenProvider::Teams => state
+            .tokens_load
+            .clear_teams_if_current(&state.tokens, pre_refresh_access_token),
+    };
+    if !cleared {
+        return;
     }
     if let Err(e) = token_io::persist_tokens(state, app) {
         log::warn!("{CMD} is_onboarding_complete: failed to persist cleared {label} tokens: {e}");
@@ -266,7 +274,13 @@ fn spotify_session_verdict(
                 error: SpotifyApiError::InvalidGrant,
                 replaced: false,
             } => {
-                discard_dead_session("Spotify", crate::TokenProvider::Spotify, state, app);
+                discard_dead_session(
+                    "Spotify",
+                    crate::TokenProvider::Spotify,
+                    &pre_refresh_access_token,
+                    state,
+                    app,
+                );
                 Err(RefreshFailure::Dead)
             }
             // Issue #798: the error is about a superseded token — the newer
@@ -395,7 +409,13 @@ fn teams_session_verdict(
                 error: TeamsApiError::InvalidGrant,
                 replaced: false,
             } => {
-                discard_dead_session("Teams", crate::TokenProvider::Teams, state, app);
+                discard_dead_session(
+                    "Teams",
+                    crate::TokenProvider::Teams,
+                    &pre_refresh_access_token,
+                    state,
+                    app,
+                );
                 Err(RefreshFailure::Dead)
             }
             // Issue #798: the error is about a superseded token — the newer

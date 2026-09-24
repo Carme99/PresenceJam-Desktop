@@ -296,7 +296,9 @@ fn refresh_teams_impl(state: &Arc<AppState>, app: &AppHandle) -> Result<(), Stri
                 "{CMD} refresh_teams: Teams refresh token is dead (invalid_grant); discarding tokens and requiring re-auth"
             );
             // `clear_teams` marks the tombstone before setting None.
-            state.tokens_load.clear_teams(&state.tokens);
+            state
+                .tokens_load
+                .clear_teams_if_current(&state.tokens, &pre_refresh_access_token);
             // The gate releases its slot guard before persistence retries.
             if let Err(e) = token_io::persist_tokens(state, app) {
                 log::warn!(
