@@ -12,6 +12,10 @@ use tauri::AppHandle;
 /// aid diagnosis, but never in place of the tag. Issue #777.
 const TAG: &str = "[TEAMS]";
 
+/// Borrowed public-client identity owned by Microsoft's first-party
+/// Microsoft Graph Command Line Tools app registration. PresenceJam has no
+/// app registration of its own, so consent and revocation affect this shared
+/// identity rather than an isolated PresenceJam application.
 pub const MICROSOFT_GRAPH_CLIENT_ID: &str = "14d82eec-204b-4c2f-b7e8-296a70dab67e";
 /// OAuth scopes requested during the Teams device-code flow. The
 /// `Calendars.ReadBasic` (issue #867) and `MailboxSettings.Read` (issue #876)
@@ -480,7 +484,8 @@ fn classify_device_code_response(status: u16, retry_after: Option<u64>, body: &s
                 .map(str::trim)
                 .filter(|d| !d.is_empty())
                 .unwrap_or(error_resp.error.as_str());
-            PollAction::Fail(format!("Microsoft sign-in failed: {}", detail))
+            let message = format!("Microsoft sign-in failed: {detail}");
+            PollAction::Fail(truncate_for_log(&message))
         }
     }
 }
@@ -634,6 +639,14 @@ fn classify_token_endpoint_error(status_code: u16, body: &str) -> TeamsApiError 
                 }
                 _ => error_resp.error.clone(),
             };
+            let detail = truncate_for_log(&match error_resp.error.as_str() {
+                "interaction_required"
+                | "consent_required"
+                | "invalid_client"
+                | "unauthorized_client"
+                | "invalid_scope" => detail,
+                _ => format!("token endpoint error {}: {}", status_code, detail),
+            });
             match error_resp.error.as_str() {
                 "invalid_grant" => TeamsApiError::InvalidGrant,
                 "interaction_required"
@@ -641,10 +654,7 @@ fn classify_token_endpoint_error(status_code: u16, body: &str) -> TeamsApiError 
                 | "invalid_client"
                 | "unauthorized_client"
                 | "invalid_scope" => TeamsApiError::ReauthRequired(detail),
-                _ => TeamsApiError::Transient(format!(
-                    "token endpoint error {}: {}",
-                    status_code, detail
-                )),
+                _ => TeamsApiError::Transient(detail),
             }
         }
         Err(e) => TeamsApiError::Transient(format!(
@@ -1692,8 +1702,50 @@ fn clear_user_preferred_presence_with(
 mod tests {
     use super::truncate_for_log;
     use super::{teams_write_error_policy, TeamsApiError};
-    use super::{DeviceCodeResponse, TeamsTokens, MICROSOFT_GRAPH_SCOPES};
+    use super::{
+        DeviceCodeResponse, TeamsTokens, MICROSOFT_GRAPH_CLIENT_ID, MICROSOFT_GRAPH_SCOPES,
+    };
     use crate::polling::{ErrorEventPayload, ErrorRecovery, ErrorSeverity};
+
+    #[test]
+    fn security_disclosure_matches_borrowed_graph_identity_and_scopes() {
+        const OWNER: &str = "Microsoft Graph Command Line Tools";
+        const SCOPE_PREFIX: &str = "The exact delegated scope set in `MICROSOFT_GRAPH_SCOPES` is `";
+        let security = include_str!("../../SECURITY.md");
+
+        let block_start = security
+            .find("#### Borrowed Microsoft identity\n")
+            .expect("SECURITY.md must contain the borrowed-identity disclosure");
+        let block_end = security[block_start..]
+            .find("\nReview these links")
+            .map(|offset| block_start + offset)
+            .expect("borrowed-identity disclosure must precede the provider links");
+        let disclosure = &security[block_start..block_end];
+
+        for required in [MICROSOFT_GRAPH_CLIENT_ID, OWNER] {
+            assert!(
+                disclosure.contains(required),
+                "borrowed-identity disclosure must contain {required:?}"
+            );
+        }
+
+        let scopes_start = block_start
+            + disclosure
+                .find(SCOPE_PREFIX)
+                .expect("borrowed-identity disclosure must contain the exact scope set")
+            + SCOPE_PREFIX.len();
+        let scopes_end = security[scopes_start..]
+            .find('`')
+            .map(|offset| scopes_start + offset)
+            .expect("disclosed scope set must be delimited by backticks");
+        let disclosed_scopes = security[scopes_start..scopes_end]
+            .split_whitespace()
+            .collect::<std::collections::BTreeSet<_>>();
+        let source_scopes = MICROSOFT_GRAPH_SCOPES
+            .split_whitespace()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(disclosed_scopes, source_scopes);
+    }
 
     #[test]
     fn teams_write_error_policy_covers_every_api_error_variant() {
@@ -1925,6 +1977,40 @@ mod tests {
             classify_token_endpoint_error(400, "<html>proxy page</html>"),
             TeamsApiError::Transient(_)
         ));
+    }
+
+    #[test]
+    fn token_endpoint_errors_bound_untrusted_descriptions() {
+        use super::{classify_token_endpoint_error, truncate_for_log, TeamsApiError};
+
+        let description = "d".repeat(300);
+
+        let reauth = classify_token_endpoint_error(
+            400,
+            &format!(r#"{{"error":"interaction_required","error_description":"{description}"}}"#),
+        );
+        assert!(matches!(&reauth, TeamsApiError::ReauthRequired(_)));
+        assert_eq!(
+            reauth.to_string(),
+            format!(
+                "Teams re-authentication required: {}",
+                truncate_for_log(&format!("interaction_required - {description}"))
+            )
+        );
+
+        let transient = classify_token_endpoint_error(
+            400,
+            &format!(
+                r#"{{"error":"temporarily_unavailable","error_description":"{description}"}}"#
+            ),
+        );
+        assert!(matches!(&transient, TeamsApiError::Transient(_)));
+        assert_eq!(
+            transient.to_string(),
+            truncate_for_log(&format!(
+                "token endpoint error 400: temporarily_unavailable - {description}"
+            ))
+        );
     }
 
     #[test]
@@ -2776,6 +2862,24 @@ mod tests {
             }
             other => panic!("unauthorized_client must end the flow, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn device_code_failure_bounds_untrusted_description() {
+        use super::{classify_device_code_response, truncate_for_log, PollAction};
+
+        let description = "d".repeat(300);
+        let body =
+            format!(r#"{{"error":"bad_verification_code","error_description":"{description}"}}"#);
+        let message = match classify_device_code_response(400, None, &body) {
+            PollAction::Fail(message) => message,
+            other => panic!("expected terminal device-code failure, got {other:?}"),
+        };
+
+        assert_eq!(
+            message,
+            truncate_for_log(&format!("Microsoft sign-in failed: {description}"))
+        );
     }
 
     /// Issue #797: the retry path is bounded. A server `Retry-After` (clamped

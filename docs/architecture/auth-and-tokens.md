@@ -77,15 +77,25 @@ sequenceDiagram
 
 The app polls Microsoft's token endpoint at the server-provided device-code `interval`, clamped to 1-15s per RFC 8628 §3.5 (+5s on each `slow_down` response), while the user completes the browser auth. Once authorized, tokens are stored and the status message is set via Graph API.
 
+#### Borrowed application identity
+
+The device-code flow does **not** use a PresenceJam-owned Microsoft Entra app registration. `teams.rs::MICROSOFT_GRAPH_CLIENT_ID` borrows the public-client id `14d82eec-204b-4c2f-b7e8-296a70dab67e` from Microsoft's first-party **Microsoft Graph Command Line Tools** application registration. The id is not a secret, and this flow does not use a client secret or tenant credential.
+
+That shared identity has shared consequences: Microsoft consent, attribution, policy, and service changes apply to PresenceJam and other consumers together. A user grant or revocation entry may be named Microsoft Graph Command Line Tools even when PresenceJam initiated it, and revoking that grant or the shared registration affects PresenceJam as well. When persistence succeeds, tokens issued to PresenceJam are stored in the encrypted local token store; if persistence fails, they remain only in `AppState` until restart. Runtime token-endpoint logging is bounded by `truncate_for_log`: bodies of 256 characters or fewer are logged unchanged, while longer bodies retain their first 256 Unicode scalar values plus a suffix containing the original byte count. The same helper bounds server-supplied descriptions before they are placed in user-visible sign-in failure messages. The helper does not separately redact `access_token` or `refresh_token` fields, so logs may contain those values in either an unchanged short body or a retained prefix.
+
+The exact delegated scope set in `MICROSOFT_GRAPH_SCOPES` is `Presence.ReadWrite Presence.Read Calendars.ReadBasic MailboxSettings.Read openid profile offline_access`.
+
 ### Teams Presence APIs (v3.0)
 
 The Graph **presence** surface (`setPresence` / `clearPresence` /
-`getPresence`) is v1.0, delegated via the Teams scope string
-`Presence.ReadWrite Presence.Read profile offline_access` (`teams.rs`) —
-`Presence.Read` powers the status gate, `profile` adds the `oid` claim to
-the access-token JWT. All three endpoints hit `graph.microsoft.com/v1.0`,
-and `sessionId` is always the app's Azure AD client id
-(`MICROSOFT_GRAPH_CLIENT_ID`) — the stable per-app session key.
+`getPresence`) is v1.0, delegated through that scope set. `Presence.ReadWrite`
+powers status writes, `Presence.Read` powers the status gate, and `profile`
+adds the `oid` claim used by the `/users/{oid}` fallback to the access-token
+JWT. `Calendars.ReadBasic` and `MailboxSettings.Read` support the calendar
+gate and working-hours import. All three endpoints hit
+`graph.microsoft.com/v1.0`, and `sessionId` is always the borrowed
+Microsoft Graph Command Line Tools client id (`MICROSOFT_GRAPH_CLIENT_ID`),
+which must remain stable across status set and clear operations.
 
 - **`set_teams_presence(availability, activity, expiration_duration)`** —
   `POST /me/presence/setPresence` first, falling back to
