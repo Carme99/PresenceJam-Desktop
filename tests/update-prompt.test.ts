@@ -309,6 +309,33 @@ describe('UpdatePrompt deferred staging (#590)', () => {
     expect(within(container).getByRole('button', { name: t('update.installOnQuit') })).toBeTruthy();
   });
 
+  it('keeps the staged banner and Cancel stage visible through a dismiss attempt', async () => {
+    const { container } = await mountBanner();
+    await startStage(container);
+
+    stageResolvers.shift()!({ staged: '4.6.0', current: '4.5.2' });
+    await waitFor(() => expect(container.querySelector('.update-staged')).not.toBeNull());
+
+    const requestId = stageRequestId();
+    const dismiss = within(container).getByRole('button', { name: t('update.dismissAria') });
+    const cancelStage = () =>
+      within(container).getByRole('button', { name: t('update.cancelStage') });
+
+    expect((dismiss as HTMLButtonElement).disabled).toBe(true);
+    await fireEvent.click(dismiss);
+    expect(container.querySelector('.update-banner')).not.toBeNull();
+    expect(container.querySelector('.update-staged')).not.toBeNull();
+    expect(cancelStage().isConnected).toBe(true);
+
+    await fireEvent.click(cancelStage());
+
+    await waitFor(() => expect(cancelCall(requestId)).toBeDefined());
+    await waitFor(() => expect(container.querySelector('.update-staged')).toBeNull());
+    expect(
+      within(container).queryByRole('button', { name: t('update.cancelStage') })
+    ).toBeNull();
+  });
+
   it('binds a cancel that reaches the backend before begin to the same request', async () => {
     const onStageCancellation = vi.fn();
     const { container } = await mountBanner({ onStageCancellation });
