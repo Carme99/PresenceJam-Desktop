@@ -173,7 +173,7 @@ jobs:
   frontend:
     name: Frontend (npm build + ts-rs codegen)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -188,6 +188,9 @@ jobs:
 
       - name: Install frontend dependencies
         run: npm ci
+
+      - name: Install Chromium for Playwright
+        run: npx playwright install --with-deps chromium
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e  # 1.96
@@ -251,6 +254,11 @@ jobs:
       # `continue-on-error` — a ratchet that cannot fail the job is not one.
       - name: Frontend unit tests + coverage ratchet (npm run test:coverage)
         run: npm run test:coverage
+
+      # Playwright exercises the real log-column geometry in a Chromium
+      # browser, complementing (not replacing) the Vitest coverage ratchet.
+      - name: Browser geometry regression (npm run test:browser)
+        run: npm run test:browser
 
   # Rust: cargo check + cargo test on all targets (lib + bins + tests + benches) catches
   # type errors, borrow errors, missing imports, and broken test code.
