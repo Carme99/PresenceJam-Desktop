@@ -1964,9 +1964,8 @@ mod tests {
         ]
     }
 
-    /// Issue #678: a failing endpoint must not abort the check — that is the
-    /// entire point of listing the stable manifest after the (unpublished)
-    /// beta one.
+    /// Issue #895: a failing rolling beta endpoint must not abort the check —
+    /// the stable manifest remains the fallback.
     #[test]
     fn test_check_walks_past_a_failing_endpoint() {
         let urls = test_endpoints();
@@ -1975,7 +1974,7 @@ mod tests {
         let found = tauri::async_runtime::block_on(walk_endpoints(&urls, move |url| {
             let seen = seen.clone();
             async move {
-                // What the real repo answers today: no beta manifest.
+                // Synthetic endpoint: simulate an unavailable beta manifest.
                 let beta = url.path().ends_with("latest-beta.json");
                 seen.lock().push(url.to_string());
                 if beta {

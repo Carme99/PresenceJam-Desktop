@@ -98,26 +98,29 @@ The UI is localized to **English, German, and French** via the i18n barrel
 
 ## Auto-Update (v3.0)
 
-Updates are delivered through `tauri-plugin-updater` (registered in
-`lib.rs`; `updater:default` in `capabilities/default.json`). `tauri.conf.json`
-carries the **stable** endpoint,
-`https://github.com/Carme99/PresenceJam-Desktop/releases/latest/download/latest.json`,
-but since 4.7.0 (#678) the endpoints the app actually uses come from
-`updater_bg.rs::update_endpoints(AppConfig.updates.channel)`: Stable is that URL
-and Beta is its `latest-beta.json` sibling **followed by** the stable URL, so a
-missing beta manifest falls through to the stable release. The manifest is
-hand-assembled by `release.yml` and maps each platform to its signed artifact
-on the GitHub Release:
+Updates are delivered through `tauri-plugin-updater` (registered in `lib.rs`).
+The main capability grants exactly `updater:allow-check` and
+`updater:allow-download-and-install`, plus the notification permissions the
+webview uses. The endpoints the app actually uses come from
+`updater_bg.rs::update_endpoints(AppConfig.updates.channel)`: Stable is
+`https://github.com/Carme99/PresenceJam-Desktop/releases/latest/download/latest.json`;
+Beta is the rolling prerelease asset
+`https://github.com/Carme99/PresenceJam-Desktop/releases/download/beta/latest-beta.json`
+followed by the stable URL, so a missing or non-newer beta manifest falls through
+to stable. The manifest is hand-assembled by `release.yml` and maps each platform
+to its signed updater artifact on the GitHub Release:
 
 - `darwin-aarch64` → `PresenceJam-<tag>.app.tar.gz` (+ `.sig`)
-- `windows-x86_64` → `PresenceJam-<tag>.msi` (+ `.msi.sig`)
-- `linux-x86_64` → `PresenceJam-linux-amd64.AppImage` (+ `.AppImage.sig`)
+- `windows-x86_64` → `PresenceJam-<tag>-setup.exe` (+ `.sig`); the `.msi` is
+  also published for managed installations (+ `.msi.sig`)
+- `linux-x86_64` → `PresenceJam-linux-amd64.AppImage` (+ `.AppImage.sig`); the
+  `.deb` and `.rpm` packages are also published
 
-`latest.json` carries the minisign `signature` (the `.sig` file
-*content*, not a path), `version` (tag without the leading `v`), and
-`pub_date`. The build matrix signs artifacts via the
-`TAURI_SIGNING_PRIVATE_KEY` / `_PASSWORD` secrets; the app's updater
-pubkey is inlined in `tauri.conf.json`, so the plugin rejects tampered
+`latest.json` carries the minisign `signature` (the `.sig` file *content*, not
+a path), `version` (tag without the leading `v`), and `pub_date`. The build
+matrix produces the unsigned artifacts; the separate `sign` job signs updater
+payloads with the `TAURI_SIGNING_PRIVATE_KEY` / `_PASSWORD` secrets. The app's
+updater pubkey is inlined in `tauri.conf.json`, so the plugin rejects tampered
 payloads.
 
 **Flow:** `UpdatePrompt.svelte` invokes the Rust `updater_bg.rs::check_for_update`
