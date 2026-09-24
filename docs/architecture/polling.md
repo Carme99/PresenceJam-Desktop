@@ -93,6 +93,18 @@ first may ever stop the session or pop an OAuth window (#568, finding PollCore#0
 The Teams write path applies the same rule: only token-endpoint `invalid_grant` or
 a 401 `ExpiredToken` asks for re-auth.
 
+### Shared Spotify Retry-After window
+
+A Spotify 429 with a positive, parseable `Retry-After` opens one
+process-wide deadline in `spotify::RateLimitWindow`. The currently-playing
+request, all player commands, device listing, and queue lookup consult that
+deadline before building a request; while it is open they return
+`RateLimited(Some(remaining_seconds))` without another HTTP call, and the
+first call after expiry clears it. A later 429 may extend the deadline but not
+shorten it. A 429 without a usable wait opens no shared window, so the poller
+still applies its own network-failure backoff without blocking other callers
+indefinitely.
+
 ### Presence gating + availability sync (v3.0)
 
 Two `TeamsConfig` flags shape what the polling loop writes, and

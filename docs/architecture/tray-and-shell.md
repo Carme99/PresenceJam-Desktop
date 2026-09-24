@@ -164,11 +164,28 @@ endpoint, signature mismatch) is silent — never blocks the UI.
   `Vec<u8>` instead of holding it for the rest of the session. The payload is
   deliberately memory-resident rather than file-backed: the plugin verifies the
   signature inside `Update::download`, so a file could be swapped after the
-  verification and before the exit-time install. A cancel issued while the
-  download is still in flight **cannot** interrupt the Rust transfer — the banner
-  marks the stage abandoned and discards the payload the moment it lands
-  (`UpdatePrompt.svelte::cancelStage` → `stageAbort` → `stageForQuit`), and after a
-  successful cancel the banner simply returns to its plain offer.
+  verification and before exit-time install.
+  Cancellation is request-scoped and final across the asynchronous boundary.
+  `stage_deferred_update` begins under the `PendingUpdateState` lock with a
+  generated request id and generation. `cancel_deferred_update` either
+  invalidates that active generation, removes the same request's
+  already-committed payload, or leaves a bounded pre-begin tombstone when
+  cancellation reaches IPC first. A full tombstone set backpressures new
+  stages rather than evicting an unmatched cancellation. The download can
+  therefore still run after Cancel—the Rust transfer is not interrupted—but
+  its bytes cannot commit after cancellation, terminal progress/completion are
+  suppressed, and exit installation can never observe them. The frontend also
+  filters already-queued progress/completion by request id; this last delivery
+  guard complements rather than replaces the backend interlock.
+
+  Notification suppression uses the same request id. The always-mounted
+  layout reserves bounded request state before stage IPC; Cancel marks that
+  request cancelled, so a queued completion is discarded and a notification
+  already awaiting OS permission is suppressed by its cancellation predicate.
+  Entries drain after a no-stage result or download failure settles, or after
+  a successful notification finishes. Only acknowledged entries may be
+  evicted; if all bounded slots are unresolved, a new stage is refused rather
+  than creating untracked cancellation state.
 
 Payload signing is independent of OS code signing: the updater works on
 unsigned builds, and the macOS unsigned/Gatekeeper story (README
@@ -205,7 +222,7 @@ matrix builds **aarch64 macOS only** — Intel Macs never receive updates
   Devices/Queue listings; those are display fetches, not playback commands.
 - **Refresh cadence:** the polling loop calls `update_tray_menu` after every
   iteration, behind a dedup key built by `tray_snapshot_for`
-  (`src-tauri/src/tray.rs:535`) from `(is_syncing, is_window_visible,
+  (`src-tauri/src/tray.rs::tray_snapshot_for`) from `(is_syncing, is_window_visible,
   "artist|title|is_playing", shuffle, repeat, snooze deadline + minute bucket)`.
   The mode atoms and the snooze key are in the key on purpose: a Shuffle/Repeat
   change made from another Spotify client has to force a rebuild, otherwise the
