@@ -1237,11 +1237,13 @@ mod tests {
         assert_eq!(written_teams.refresh_token, fresh_teams.refresh_token);
         assert_eq!(written_teams.expires_at, fresh_teams.expires_at);
         assert_eq!(state.tokens_load.state(), crate::TokensLoadState::Ready);
-        let state_spotify = state.tokens.spotify().as_ref().expect("Spotify state");
+        let spotify_guard = state.tokens.spotify();
+        let state_spotify = spotify_guard.as_ref().expect("Spotify state");
         assert_eq!(state_spotify.access_token, written_spotify.access_token);
         assert_eq!(state_spotify.refresh_token, written_spotify.refresh_token);
         assert_eq!(state_spotify.expires_at, written_spotify.expires_at);
-        let state_teams = state.tokens.teams().as_ref().expect("Teams state");
+        let teams_guard = state.tokens.teams();
+        let state_teams = teams_guard.as_ref().expect("Teams state");
         assert_eq!(state_teams.access_token, written_teams.access_token);
         assert_eq!(state_teams.refresh_token, written_teams.refresh_token);
         assert_eq!(state_teams.expires_at, written_teams.expires_at);
