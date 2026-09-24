@@ -8,6 +8,11 @@ const LOG_LINES = [
   '[2026-01-01][12:00:04][browser][ERROR] error message'
 ] as const;
 
+const SCROLL_LINES = Array.from(
+  { length: 80 },
+  (_, index) => `[2026-01-01][12:${String(index).padStart(2, '0')}:00][browser][INFO] line ${index}`
+);
+
 const LOCALES = ['en', 'de', 'fr'] as const;
 const DENSITIES = ['comfortable', 'compact'] as const;
 const LABELS_BY_LOCALE: Record<(typeof LOCALES)[number], readonly string[]> = {
@@ -20,7 +25,8 @@ const LABELS_BY_LOCALE: Record<(typeof LOCALES)[number], readonly string[]> = {
 async function openLogViewer(
   page: Page,
   locale: (typeof LOCALES)[number],
-  density: (typeof DENSITIES)[number]
+  density: (typeof DENSITIES)[number],
+  lines: readonly string[] = LOG_LINES
 ): Promise<void> {
   await page.addInitScript(
     ({ locale: selectedLocale, density: selectedDensity, lines }) => {
@@ -52,11 +58,11 @@ async function openLogViewer(
         value: internals
       });
     },
-    { locale, density, lines: LOG_LINES }
+    { locale, density, lines }
   );
 
   await page.goto('/detached/logs');
-  await expect(page.locator('.log-entry')).toHaveCount(5);
+  await expect(page.locator('.log-entry')).toHaveCount(lines.length);
   await expect(page.locator('html')).toHaveAttribute('data-density', density);
   await expect(page.locator('html')).toHaveAttribute('lang', locale);
 }
@@ -125,5 +131,37 @@ test('keeps every localized level badge clear of its message in Chromium', async
         await context.close();
       }
     }
+  }
+});
+
+test('focuses the log viewport and navigates it with PageUp/PageDown in Chromium', async ({ browser }) => {
+  const context = await browser.newContext({ baseURL: 'http://127.0.0.1:4173' });
+  const page = await context.newPage();
+  try {
+    await openLogViewer(page, 'en', 'comfortable', SCROLL_LINES);
+    const viewport = page.locator('.log-list');
+
+    await viewport.focus();
+    await expect(viewport).toBeFocused();
+    await expect(viewport).toHaveAttribute('role', 'region');
+    await expect(viewport).toHaveAttribute('aria-label', 'Logs');
+    await expect(viewport).toHaveAttribute('tabindex', '0');
+
+    await viewport.evaluate((element) => {
+      element.scrollTop = 0;
+    });
+    const geometry = await viewport.evaluate((element) => ({
+      scrollHeight: element.scrollHeight,
+      clientHeight: element.clientHeight
+    }));
+    expect(geometry.scrollHeight).toBeGreaterThan(geometry.clientHeight);
+    await page.keyboard.press('PageDown');
+    await expect.poll(() => viewport.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+    const afterPageDown = await viewport.evaluate((element) => element.scrollTop);
+
+    await page.keyboard.press('PageUp');
+    await expect.poll(() => viewport.evaluate((element) => element.scrollTop)).toBeLessThan(afterPageDown);
+  } finally {
+    await context.close();
   }
 });
