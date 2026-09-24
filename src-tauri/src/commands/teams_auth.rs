@@ -3,7 +3,7 @@
 //! See issue #76. Teams uses an OAuth 2.0 device-code flow rather than the
 //! PKCE/redirect flow that Spotify uses.
 
-use crate::polling::{cas_refresh_or_discard, CasOutcome};
+use crate::polling::{cas_refresh_teams, CasOutcome};
 use crate::teams::{decode_teams_granted_scopes, DeviceCodeResponse, TeamsApiError};
 use crate::token_io;
 use crate::AppState;
@@ -143,8 +143,7 @@ pub async fn poll_teams_auth(
             );
 
             {
-                let mut guard = state.tokens.teams_mut();
-                *guard = Some(tokens);
+                state.tokens_load.commit_teams(&state.inner().tokens, tokens);
                 log::info!("{CMD} poll_teams_auth: tokens stored in AppState");
             }
             // Issue #562: the sign-in already succeeded — the token endpoint
@@ -260,12 +259,11 @@ fn refresh_teams_impl(state: &Arc<AppState>, app: &AppHandle) -> Result<(), Stri
     // refresh token stayed in AppState and in tokens.json while the UI saw a
     // generic failure.
     let pre_refresh_access_token = current_tokens.access_token.clone();
-    let outcome = cas_refresh_or_discard(
+    let outcome = cas_refresh_teams(
+        state,
         "teams-command",
-        &mut *state.tokens.teams_mut(),
         &pre_refresh_access_token,
         || crate::teams::refresh_teams_token(&current_tokens),
-        |t| &t.access_token,
     );
     match outcome {
         // Issue #180: the write guard reborrowed into the CAS call above dies
@@ -298,9 +296,9 @@ fn refresh_teams_impl(state: &Arc<AppState>, app: &AppHandle) -> Result<(), Stri
             log::error!(
                 "{CMD} refresh_teams: Teams refresh token is dead (invalid_grant); discarding tokens and requiring re-auth"
             );
-            *state.tokens.teams_mut() = None;
-            // Issue #180: the clearing statement above drops its guard at the
-            // end of that statement, so this persist cannot self-deadlock.
+            // `clear_teams` marks the tombstone before setting None.
+            state.tokens_load.clear_teams(&state.tokens);
+            // The gate releases its slot guard before persistence retries.
             if let Err(e) = token_io::persist_tokens(state, app) {
                 log::warn!(
                     "{CMD} refresh_teams: failed to persist cleared teams tokens: {}",

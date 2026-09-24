@@ -415,18 +415,59 @@ pub enum TokensLoadState {
     KeychainUnavailable,
 }
 
-/// Process-local gate around token persistence after a failed platform-key
-/// read. The payload is deliberately not stored: the existing keychain error
-/// help is logged at setup, while persisting it would risk duplicating
-/// credential-adjacent diagnostics in state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TokenProvider {
+    Spotify,
+    Teams,
+}
+
+#[derive(Debug)]
+pub(crate) enum TokenCommitOutcome<T> {
+    Committed(T),
+    Discarded(Option<T>),
+}
+
+/// Per-provider markers for an explicit clear that happened after the
+/// keychain-unavailable load. The marker mutex is the lock-order root for
+#[derive(Default)]
+pub(crate) struct RecoveryMarkers {
+    pub(crate) spotify: bool,
+    pub(crate) teams: bool,
+}
+
+impl RecoveryMarkers {
+    pub(crate) fn blocks(&self, provider: TokenProvider) -> bool {
+        match provider {
+            TokenProvider::Spotify => self.spotify,
+            TokenProvider::Teams => self.teams,
+        }
+    }
+
+    pub(crate) fn clear(&mut self, provider: TokenProvider) {
+        match provider {
+            TokenProvider::Spotify => self.spotify = false,
+            TokenProvider::Teams => self.teams = false,
+        }
+    }
+
+    pub(crate) fn mark(&mut self, provider: TokenProvider) {
+        match provider {
+            TokenProvider::Spotify => self.spotify = true,
+            TokenProvider::Teams => self.teams = true,
+        }
+    }
+}
+
 pub struct TokensLoadGate {
     state: AtomicU8,
+    recovery: Mutex<RecoveryMarkers>,
 }
 
 impl TokensLoadGate {
     fn new() -> Self {
         Self {
             state: AtomicU8::new(TokensLoadState::Ready as u8),
+            recovery: Mutex::new(RecoveryMarkers::default()),
         }
     }
 
@@ -438,6 +479,7 @@ impl TokensLoadGate {
     }
 
     pub fn mark_keychain_unavailable(&self) {
+        let _recovery = self.recovery.lock();
         self.state.store(
             TokensLoadState::KeychainUnavailable as u8,
             Ordering::Release,
@@ -445,6 +487,10 @@ impl TokensLoadGate {
     }
 
     pub fn mark_ready(&self) {
+        let _recovery = self.recovery.lock();
+        self.mark_ready_locked();
+    }
+    pub(crate) fn mark_ready_locked(&self) {
         self.state
             .store(TokensLoadState::Ready as u8, Ordering::Release);
     }
@@ -452,6 +498,129 @@ impl TokensLoadGate {
     pub fn blocks_persist(&self) -> bool {
         self.state() == TokensLoadState::KeychainUnavailable
     }
+
+    pub(crate) fn recovery_guard(
+        &self,
+    ) -> parking_lot::MutexGuard<'_, RecoveryMarkers> {
+        self.recovery.lock()
+    }
+
+    pub(crate) fn clear_spotify(&self, tokens: &Tokens) {
+        let mut recovery = self.recovery.lock();
+        recovery.mark(TokenProvider::Spotify);
+        *tokens.spotify_mut() = None;
+    }
+
+    pub(crate) fn clear_teams(&self, tokens: &Tokens) {
+        let mut recovery = self.recovery.lock();
+        recovery.mark(TokenProvider::Teams);
+        *tokens.teams_mut() = None;
+    }
+
+    pub(crate) fn clear_all(&self, tokens: &Tokens) {
+        let mut recovery = self.recovery.lock();
+        recovery.spotify = true;
+        recovery.teams = true;
+        *tokens.spotify_mut() = None;
+        *tokens.teams_mut() = None;
+        self.mark_ready_locked();
+    }
+
+    pub(crate) fn commit_spotify(
+        &self,
+        tokens: &Tokens,
+        value: crate::spotify::SpotifyTokens,
+    ) {
+        let mut recovery = self.recovery.lock();
+        recovery.clear(TokenProvider::Spotify);
+        *tokens.spotify_mut() = Some(value);
+    }
+
+    pub(crate) fn commit_teams(&self, tokens: &Tokens, value: crate::teams::TeamsTokens) {
+        let mut recovery = self.recovery.lock();
+        recovery.clear(TokenProvider::Teams);
+        *tokens.teams_mut() = Some(value);
+    }
+
+    pub(crate) fn install_loaded(&self, tokens: &Tokens, loaded: token_io::TokensFile) {
+        let mut recovery = self.recovery.lock();
+        if loaded.spotify_tokens.is_some() {
+            recovery.clear(TokenProvider::Spotify);
+        }
+        if loaded.teams_tokens.is_some() {
+            recovery.clear(TokenProvider::Teams);
+        }
+        *tokens.spotify_mut() = loaded.spotify_tokens;
+        *tokens.teams_mut() = loaded.teams_tokens;
+        self.mark_ready_locked();
+    }
+
+    pub(crate) fn cas_spotify(
+        &self,
+        tokens: &Tokens,
+        pre_refresh_access_token: &str,
+        new_tokens: crate::spotify::SpotifyTokens,
+    ) -> TokenCommitOutcome<crate::spotify::SpotifyTokens> {
+        let mut recovery = self.recovery.lock();
+        let mut guard = tokens.spotify_mut();
+        if guard
+            .as_ref()
+            .map(|t| t.access_token.as_str())
+            .is_some_and(|access| access == pre_refresh_access_token)
+        {
+            recovery.clear(TokenProvider::Spotify);
+            *guard = Some(new_tokens.clone());
+            TokenCommitOutcome::Committed(new_tokens)
+        } else {
+            TokenCommitOutcome::Discarded(guard.clone())
+        }
+    }
+
+    pub(crate) fn cas_teams(
+        &self,
+        tokens: &Tokens,
+        pre_refresh_access_token: &str,
+        new_tokens: crate::teams::TeamsTokens,
+    ) -> TokenCommitOutcome<crate::teams::TeamsTokens> {
+        let mut recovery = self.recovery.lock();
+        let mut guard = tokens.teams_mut();
+        if guard
+            .as_ref()
+            .map(|t| t.access_token.as_str())
+            .is_some_and(|access| access == pre_refresh_access_token)
+        {
+            recovery.clear(TokenProvider::Teams);
+            *guard = Some(new_tokens.clone());
+            TokenCommitOutcome::Committed(new_tokens)
+        } else {
+            TokenCommitOutcome::Discarded(guard.clone())
+        }
+    }
+
+    pub(crate) fn provider_matches_spotify(
+        &self,
+        tokens: &Tokens,
+        pre_refresh_access_token: &str,
+    ) -> bool {
+        let _recovery = self.recovery.lock();
+        tokens
+            .spotify()
+            .as_ref()
+            .is_some_and(|t| t.access_token == pre_refresh_access_token)
+    }
+
+    pub(crate) fn provider_matches_teams(
+        &self,
+        tokens: &Tokens,
+        pre_refresh_access_token: &str,
+    ) -> bool {
+        let _recovery = self.recovery.lock();
+        tokens
+            .teams()
+            .as_ref()
+            .is_some_and(|t| t.access_token == pre_refresh_access_token)
+    }
+
 }
 
 pub struct AppState {
@@ -555,9 +724,9 @@ fn apply_token_load_result(
         Ok(tf) => {
             let has_spotify = tf.spotify_tokens.is_some();
             let has_teams = tf.teams_tokens.is_some();
-            *state.tokens.spotify_mut() = tf.spotify_tokens;
-            *state.tokens.teams_mut() = tf.teams_tokens;
-            state.tokens_load.mark_ready();
+            // The gate installs both slots under its recovery-marker mutex.
+            // Keep the load flags captured before the gate consumes the file.
+            state.tokens_load.install_loaded(&state.tokens, tf);
             if has_spotify {
                 log::info!("[APP] setup: spotify_tokens loaded into AppState");
             } else {
@@ -574,9 +743,10 @@ fn apply_token_load_result(
             log::warn!("[APP] setup: token store deferred: {}", message);
         }
         Err(token_io::TokensLoadError::Corrupt(message)) => {
-            *state.tokens.spotify_mut() = None;
-            *state.tokens.teams_mut() = None;
-            state.tokens_load.mark_ready();
+            // `clear_all` owns both tombstones and slot writes.
+            state
+                .tokens_load
+                .install_loaded(&state.tokens, token_io::TokensFile::default());
             log::warn!("[APP] setup: failed to load tokens.json: {}", message);
         }
     }
@@ -748,8 +918,9 @@ async fn handle_spotify_callback(
     }
 
     {
-        let mut guard = app_state.tokens.spotify_mut();
-        *guard = Some(tokens.clone());
+        app_state
+            .tokens_load
+            .commit_spotify(&app_state.tokens, tokens.clone());
         log::info!("[CALLBACK] handle_spotify_callback: tokens stored in AppState");
     }
     token_io::persist_tokens(&app_state, app)?;
@@ -1520,10 +1691,7 @@ fn cli_headless_state() -> (Arc<AppState>, Vec<String>) {
         )),
     }
     match cli_read_tokens() {
-        Ok(tokens) => {
-            *state.tokens.spotify_mut() = tokens.spotify_tokens;
-            *state.tokens.teams_mut() = tokens.teams_tokens;
-        }
+        Ok(tokens) => state.tokens_load.install_loaded(&state.tokens, tokens),
         Err(e) => failures.push(format!(
             "no tokens loaded ({e}); reporting both providers as disconnected"
         )),

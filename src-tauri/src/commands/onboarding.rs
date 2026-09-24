@@ -5,7 +5,7 @@
 
 use crate::config;
 use crate::keychain::{self, KeychainPresence};
-use crate::polling::{cas_refresh_or_discard, CasOutcome};
+use crate::polling::{cas_refresh_spotify, cas_refresh_teams, CasOutcome};
 use crate::token_io;
 use crate::AppState;
 use parking_lot::Mutex;
@@ -194,8 +194,16 @@ fn persist_refreshed(state: &Arc<AppState>, app: &AppHandle, label: &str) {
 /// re-auth reason loud — the same policy the polling loop applies to a dead
 /// refresh token (#160/#219). `clear` takes the write guard, so the guard is
 /// dropped before `persist_tokens` re-locks the slot for reading (issue #180).
-fn discard_dead_session(label: &str, clear: impl FnOnce(), state: &Arc<AppState>, app: &AppHandle) {
-    clear();
+fn discard_dead_session(
+    label: &str,
+    provider: crate::TokenProvider,
+    state: &Arc<AppState>,
+    app: &AppHandle,
+) {
+    match provider {
+        crate::TokenProvider::Spotify => state.tokens_load.clear_spotify(&state.tokens),
+        crate::TokenProvider::Teams => state.tokens_load.clear_teams(&state.tokens),
+    }
     if let Err(e) = token_io::persist_tokens(state, app) {
         log::warn!("{CMD} is_onboarding_complete: failed to persist cleared {label} tokens: {e}");
     }
@@ -233,23 +241,15 @@ fn spotify_session_verdict(
         // the flattened `Result<String, String>` threw away the difference
         // between "no secret stored" and "the keychain cannot answer".
         let read = keychain::read_spotify_client_secret();
-        // Issue #560: this is the only keychain read the boot gate makes, and
-        // it runs before any frontend config surface has loaded. Leave its
-        // answer in the in-memory config so a later save cannot hand the UI a
-        // `client_secret_state` that contradicts it.
         record_client_secret_state(state, &presence_from_read(&read));
         let client_secret = boot_gate_client_secret(read)?;
 
         let pre_refresh_access_token = tokens.access_token.clone();
-        // Shared CAS guard (ARCHITECTURE.md § Token-refresh concurrency): a
-        // concurrent poll-thread refresh must win, and its newer token must not
-        // be clobbered by ours.
-        let outcome = cas_refresh_or_discard(
+        let outcome = cas_refresh_spotify(
+            state,
             "spotify-onboarding",
-            &mut *state.tokens.spotify_mut(),
             &pre_refresh_access_token,
             || refresh_spotify_token(tokens, client_id, &client_secret),
-            |t| &t.access_token,
         );
         match outcome {
             // The guard above is a temporary that died at the end of the
@@ -266,7 +266,7 @@ fn spotify_session_verdict(
                 error: SpotifyApiError::InvalidGrant,
                 replaced: false,
             } => {
-                discard_dead_session("Spotify", || *state.tokens.spotify_mut() = None, state, app);
+                discard_dead_session("Spotify", crate::TokenProvider::Spotify, state, app);
                 Err(RefreshFailure::Dead)
             }
             // Issue #798: the error is about a superseded token — the newer
@@ -380,12 +380,11 @@ fn teams_session_verdict(
 
     session_verdict(is_token_expired(tokens), || {
         let pre_refresh_access_token = tokens.access_token.clone();
-        let outcome = cas_refresh_or_discard(
+        let outcome = cas_refresh_teams(
+            state,
             "teams-onboarding",
-            &mut *state.tokens.teams_mut(),
             &pre_refresh_access_token,
             || refresh_teams_token(tokens),
-            |t| &t.access_token,
         );
         match outcome {
             CasOutcome::Committed(_) => {
@@ -398,7 +397,7 @@ fn teams_session_verdict(
                 error: TeamsApiError::InvalidGrant,
                 replaced: false,
             } => {
-                discard_dead_session("Teams", || *state.tokens.teams_mut() = None, state, app);
+                discard_dead_session("Teams", crate::TokenProvider::Teams, state, app);
                 Err(RefreshFailure::Dead)
             }
             // Issue #798: the error is about a superseded token — the newer
@@ -531,10 +530,10 @@ pub async fn reconnect_spotify(
 /// Blocking body of [`reconnect_spotify`]: drop the session, persist the
 /// cleared file, forget the keychain secret, and ask the UI to re-auth.
 fn reconnect_spotify_impl(state: &Arc<AppState>, app: &AppHandle) -> Result<(), String> {
-    log::debug!("{CMD} reconnect_spotify: ENTRY");
+    state.tokens_load.clear_spotify(&state.tokens);
 
     // Clear Spotify tokens from state
-    *state.tokens.spotify_mut() = None;
+    state.tokens_load.clear_spotify(&state.tokens);
     log::info!("{CMD} reconnect_spotify: cleared spotify_tokens");
 
     // Clear pending Spotify auth
@@ -590,10 +589,10 @@ pub async fn reconnect_teams(
 /// Blocking body of [`reconnect_teams`]: drop the session, persist the cleared
 /// file, and ask the UI to re-auth.
 fn reconnect_teams_impl(state: &Arc<AppState>, app: &AppHandle) -> Result<(), String> {
-    log::debug!("{CMD} reconnect_teams: ENTRY");
+    state.tokens_load.clear_teams(&state.tokens);
 
     // Clear Teams tokens from state
-    *state.tokens.teams_mut() = None;
+    state.tokens_load.clear_teams(&state.tokens);
     log::info!("{CMD} reconnect_teams: cleared teams_tokens");
 
     // Persist the cleared state to disk atomically.

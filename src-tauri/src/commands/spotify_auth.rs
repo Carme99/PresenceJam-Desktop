@@ -348,7 +348,7 @@ pub fn start_spotify_reconnect(
 /// re-authorize contract stays unit-testable (the persist step below needs a
 /// Tauri `AppHandle`).
 fn clear_spotify_session_state(state: &AppState) {
-    *state.tokens.spotify_mut() = None;
+    state.tokens_load.clear_spotify(&state.tokens);
     *state.pending.spotify_mut() = None;
 }
 
@@ -600,8 +600,7 @@ pub async fn complete_spotify_auth_manual(
     }
 
     {
-        let mut tokens_guard = state.tokens.spotify_mut();
-        *tokens_guard = Some(tokens);
+        state.tokens_load.commit_spotify(&state.inner().tokens, tokens);
         log::info!("{CMD} complete_spotify_auth_manual: tokens stored in AppState");
     }
     token_io::persist_tokens(state.inner(), &app)?;
@@ -681,12 +680,11 @@ pub fn refresh_spotify(
     // later statement cannot re-lock the slot it held (parking_lot is not
     // reentrant).
     let pre_refresh_access_token = current_tokens.access_token.clone();
-    let outcome = crate::polling::cas_refresh_or_discard(
+    let outcome = crate::polling::cas_refresh_spotify(
+        state.inner(),
         "spotify-refresh-cmd",
-        &mut *state.tokens.spotify_mut(),
         &pre_refresh_access_token,
         || crate::spotify::refresh_spotify_token(&current_tokens, &client_id, &client_secret),
-        |t| &t.access_token,
     );
     match outcome {
         crate::polling::CasOutcome::Committed(_) => {
@@ -714,7 +712,7 @@ pub fn refresh_spotify(
             error: crate::spotify::SpotifyApiError::InvalidGrant,
             replaced: false,
         } => {
-            *state.tokens.spotify_mut() = None;
+            state.tokens_load.clear_spotify(&state.tokens);
             if let Err(e) = token_io::persist_tokens(state.inner(), &app) {
                 log::warn!(
                     "{CMD} refresh_spotify: failed to persist cleared tokens - {}",

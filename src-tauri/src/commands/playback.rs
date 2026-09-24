@@ -118,19 +118,18 @@ fn try_refresh_spotify_token(
     }
     let pre_refresh_access_token = current.access_token.clone();
     let new_tokens = refresh_spotify_token(current, &client_id, &client_secret)?;
-    // CAS: only commit if state still holds the token we refreshed from.
-    let committed = {
-        let mut guard = state.tokens.spotify_mut();
-        if guard.as_ref().map(|t| &t.access_token) == Some(&pre_refresh_access_token) {
-            *guard = Some(new_tokens.clone());
-            true
-        } else {
-            log::warn!(
-                "{CMD} try_refresh_spotify_token: state changed during refresh, keeping current tokens"
-            );
-            false
-        }
-    };
+    // CAS: the recovery marker mutex owns both the compare and Some write.
+    let committed = matches!(
+        state
+            .tokens_load
+            .cas_spotify(&state.tokens, &pre_refresh_access_token, new_tokens.clone()),
+        crate::TokenCommitOutcome::Committed(_)
+    );
+    if !committed {
+        log::warn!(
+            "{CMD} try_refresh_spotify_token: state changed during refresh, keeping current tokens"
+        );
+    }
     if committed {
         if let Err(e) = crate::token_io::persist_tokens(state, app) {
             log::warn!(

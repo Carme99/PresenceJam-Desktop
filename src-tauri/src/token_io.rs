@@ -753,31 +753,29 @@ fn persist_tokens_at_with_retry(
         let blocked_error = "Refusing to overwrite tokens.json after a keychain-unavailable load; \
              retry the token read or reset token storage first"
             .to_string();
+        // The marker mutex is the lock-order root. Every token commit/clear
+        // takes it before a slot guard, and this persist keeps it through
+        // recovery, both slot guards, the snapshot, and the disk write.
+        let recovery = state.tokens_load.recovery_guard();
+        let mut spotify = state.tokens.spotify_mut();
+        let mut teams = state.tokens.teams_mut();
         if state.tokens_load.blocks_persist() {
             let recovered = read().map_err(|_| blocked_error.clone())?;
-            // `None` is the only safe slot to hydrate: it may represent either
-            // an unrecovered provider or a session that has not been populated
-            // in memory. A present value is necessarily a token commit and
-            // must win over the older on-disk snapshot. Persist the merged
-            // pair only after both slot guards are held.
-            let mut spotify = state.tokens.spotify_mut();
-            let mut teams = state.tokens.teams_mut();
-            if spotify.is_none() {
+            if spotify.is_none()
+                && !recovery.blocks(crate::TokenProvider::Spotify)
+            {
                 *spotify = recovered.spotify_tokens;
             }
-            if teams.is_none() {
+            if teams.is_none() && !recovery.blocks(crate::TokenProvider::Teams) {
                 *teams = recovered.teams_tokens;
             }
-            state.tokens_load.mark_ready();
+            // Do not clear provider tombstones here: an explicit None must
+            // continue to win over stale ciphertext after the gate opens.
+            state.tokens_load.mark_ready_locked();
         }
-        // Issue #800: bind BOTH slot guards before either clone. Cloning one
-        // slot guard at a time left a window in which a commit landing on the
-        // second slot stayed in memory while the older value was written to
-        // disk — a torn pair (stale access token + fresh refresh token) on the
-        // next launch. `Tokens` holds two independent `RwLock`s and nothing
-        // takes them in the opposite order, so holding both cannot deadlock.
-        let spotify = state.tokens.spotify();
-        let teams = state.tokens.teams();
+        // Both slot guards are acquired before either clone. The write stays
+        // inside this critical section so a racing clear cannot be overwritten
+        // by a stale snapshot.
         let contents = TokensFile {
             spotify_tokens: spotify.clone(),
             teams_tokens: teams.clone(),
@@ -802,9 +800,7 @@ pub fn reset_tokens_storage(app: &tauri::AppHandle) -> Result<(), String> {
         crate::keychain::delete_tokens_aes_key()?;
         clear_tokens_file(app)?;
         let state = app.state::<Arc<crate::AppState>>();
-        *state.tokens.spotify_mut() = None;
-        *state.tokens.teams_mut() = None;
-        state.tokens_load.mark_ready();
+        state.tokens_load.clear_all(&state.tokens);
         Ok(())
     })
 }
@@ -1245,6 +1241,76 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
+    #[test]
+    fn keychain_unavailable_retry_keeps_explicit_provider_clear() {
+        let dir = unique_tmp_dir("keychain-retry-explicit-clear");
+        let path = dir.join("tokens.json");
+        write_tokens_atomic_with_key(&path, &sample_file(), &test_key()).unwrap();
+        let state = Arc::new(crate::AppState::new());
+        state.tokens_load.mark_keychain_unavailable();
+
+        let blocked = persist_tokens_at_with_retry(
+            &state,
+            &path,
+            || Err(TokensLoadError::KeychainUnavailable("locked".to_string())),
+            |_path, _contents| panic!("blocked recovery must not write"),
+        );
+        assert!(blocked.is_err());
+
+        let fresh_spotify = SpotifyTokens {
+            access_token: "fresh-spotify-access".to_string(),
+            refresh_token: "fresh-spotify-refresh".to_string(),
+            expires_at: chrono::Utc::now() + chrono::Duration::seconds(7200),
+        };
+        state
+            .tokens_load
+            .commit_spotify(&state.tokens, fresh_spotify.clone());
+        state.tokens_load.clear_teams(&state.tokens);
+
+        let mut written = None;
+        persist_tokens_at_with_retry(
+            &state,
+            &path,
+            || Ok(sample_file()),
+            |_path, contents| {
+                written = Some(contents.clone());
+                Ok(())
+            },
+        )
+        .expect("a successful retry must persist the merged state");
+
+        let written = written.expect("retry must reach writer");
+        assert_eq!(written.spotify_tokens, Some(fresh_spotify));
+        assert_eq!(written.teams_tokens, None);
+        assert_eq!(state.tokens_load.state(), crate::TokensLoadState::Ready);
+        assert_eq!(state.tokens.teams(), &None);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+
+    #[test]
+    fn persist_holds_both_token_guards_before_cloning() {
+        let body = test_scan::fn_body(
+            include_str!("token_io.rs"),
+            "fn persist_tokens_at_with_retry(",
+        );
+        let spotify_guard = body
+            .find("let mut spotify = state.tokens.spotify_mut();")
+            .expect("Spotify guard must be acquired");
+        let teams_guard = body
+            .find("let mut teams = state.tokens.teams_mut();")
+            .expect("Teams guard must be acquired");
+        let spotify_clone = body
+            .find("spotify_tokens: spotify.clone()")
+            .expect("Spotify snapshot clone must exist");
+        let teams_clone = body
+            .find("teams_tokens: teams.clone()")
+            .expect("Teams snapshot clone must exist");
+        assert!(
+            spotify_guard < spotify_clone && teams_guard < teams_clone,
+            "both slot guards must be acquired before either snapshot clone"
+        );
+    }
     #[test]
     fn keychain_unavailable_retry_preserves_ciphertext_when_still_locked() {
         let dir = unique_tmp_dir("keychain-still-locked");

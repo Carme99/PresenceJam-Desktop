@@ -581,16 +581,11 @@ fn run_inner(
         match refresh_spotify_token(&spotify_tokens, &client_id, &client_secret) {
             Ok(new_tokens) => {
                 log::info!("[POLLING] poll_once: token refresh SUCCESS");
-                let cas_outcome = cas_refresh_or_discard(
+                let cas_outcome = cas_refresh_spotify(
+                    state,
                     "spotify",
-                    &mut *state.tokens.spotify_mut(),
                     &pre_refresh_access_token,
-                    // `Ok`-wrapping closure: annotate the error type so `E`
-                    // is inferable (this arm never fails, so nothing else
-                    // pins it) and matches the sibling `Err` arm's
-                    // `SpotifyApiError`.
                     || Ok::<_, SpotifyApiError>(new_tokens.clone()),
-                    |t| &t.access_token,
                 );
                 // Issue #180: the write guard reborrowed above is a temporary
                 // that lives only until the end of this statement. Persist in
@@ -648,7 +643,7 @@ fn run_inner(
                     != Some(pre_refresh_access_token.as_str());
                 if matches!(e, SpotifyApiError::InvalidGrant) && !refresh_superseded {
                     log::error!("[POLLING] poll_once: Spotify refresh token invalid (invalid_grant), discarding tokens and requiring reconnect");
-                    *state.tokens.spotify_mut() = None;
+                    state.tokens_load.clear_spotify(&state.tokens);
                     if let Err(persist_err) = token_io::persist_tokens(state, app) {
                         log::warn!(
                             "[POLLING] poll_once: failed to persist cleared Spotify tokens: {}",
@@ -943,13 +938,11 @@ fn run_inner(
                     let pre_refresh_access_token = tokens.access_token.clone();
                     match refresh_spotify_token(&tokens, &client_id, &client_secret) {
                         Ok(new_tokens) => {
-                            log::info!("[POLLING] poll_once: token refresh SUCCESS, retrying");
-                            let committed = match cas_refresh_or_discard(
+                            let committed = match cas_refresh_spotify(
+                                state,
                                 "spotify",
-                                &mut *state.tokens.spotify_mut(),
                                 &pre_refresh_access_token,
                                 || Ok::<_, SpotifyApiError>(new_tokens.clone()),
-                                |t| &t.access_token,
                             ) {
                                 CasOutcome::Committed(_) => true,
                                 CasOutcome::Discarded { .. } => false,
@@ -1144,7 +1137,7 @@ fn run_inner(
                                 && !refresh_superseded
                             {
                                 log::warn!("[POLLING] poll_once: Spotify refresh token invalid (invalid_grant), discarding tokens and requiring reconnect");
-                                *state.tokens.spotify_mut() = None;
+                                state.tokens_load.clear_spotify(&state.tokens);
                                 if let Err(persist_err) = token_io::persist_tokens(state, app) {
                                     log::warn!(
                                         "[POLLING] poll_once: failed to persist cleared Spotify tokens: {}",
@@ -1389,7 +1382,8 @@ pub(crate) enum CasOutcome<T, E> {
 /// Generic over the refresh error type `E` so each caller keeps its
 /// provider's typed error (`SpotifyApiError` / `TeamsApiError`) for the
 /// re-auth policy, instead of a pre-stringified message.
-pub(crate) fn cas_refresh_or_discard<T, E, F, G>(
+#[cfg(test)]
+pub(crate) fn cas_refresh_or_discard_unchecked<T, E, F, G>(
     label: &str,
     lock: &mut Option<T>,
     pre_refresh_access_token: &str,
@@ -1401,23 +1395,6 @@ where
     F: FnOnce() -> Result<T, E>,
     G: Fn(&T) -> &str,
 {
-    // Issue #180: this helper must NEVER persist tokens itself. Callers pass
-    // `&mut *state.tokens.X_mut()` — a reborrow of the parking_lot write
-    // guard, which stays alive for the whole call statement. Persisting here
-    // would re-lock the SAME RwLock for reading (token_io::persist_tokens)
-    // while the write guard is still held; parking_lot has no same-thread
-    // reentrancy detection, so write→read on the same lock from the same
-    // thread parks forever on every successful refresh. The call sites
-    // therefore persist in a statement AFTER this call returns, when the
-    // guard is provably dropped.
-    //
-    // Issue #798: run the refresh FIRST, then compare the slot. The
-    // comparison must observe a replacement installed while `refresh_fn`
-    // was in flight (the lock-free reactive paths refresh without the
-    // tokens lock), so computing it before the call would be blind to the
-    // very interleave this guards. The verdict travels on the failure path
-    // too, so a dead-credential error about a superseded token cannot clear
-    // a newer session.
     let result = refresh_fn();
     let replaced = lock.as_ref().map(access_token_of) != Some(pre_refresh_access_token);
     if replaced {
@@ -1437,6 +1414,77 @@ where
                 CasOutcome::Discarded { current }
             }
         }
+    }
+}
+
+/// Refresh and commit through the recovery marker mutex. The network call
+/// runs first; the marker mutex then owns the CAS compare and `Some` write, so
+/// a fresh commit cannot race a recovery hydration or explicit clear.
+pub(crate) fn cas_refresh_spotify<E, F>(
+    state: &AppState,
+    label: &str,
+    pre_refresh_access_token: &str,
+    refresh_fn: F,
+) -> CasOutcome<crate::spotify::SpotifyTokens, E>
+where
+    F: FnOnce() -> Result<crate::spotify::SpotifyTokens, E>,
+{
+    let result = refresh_fn();
+    match result {
+        Err(error) => {
+            let replaced = !state
+                .tokens_load
+                .provider_matches_spotify(&state.tokens, pre_refresh_access_token);
+            if replaced {
+                log::warn!("[POLLING] poll_once: {} state changed during refresh", label);
+            }
+            CasOutcome::RefreshFailed { error, replaced }
+        }
+        Ok(new_tokens) => match state.tokens_load.cas_spotify(
+            &state.tokens,
+            pre_refresh_access_token,
+            new_tokens.clone(),
+        ) {
+            crate::TokenCommitOutcome::Committed(_) => CasOutcome::Committed(new_tokens),
+            crate::TokenCommitOutcome::Discarded(current) => {
+                log::warn!("[POLLING] poll_once: {} state changed during refresh", label);
+                CasOutcome::Discarded { current }
+            }
+        },
+    }
+}
+
+pub(crate) fn cas_refresh_teams<E, F>(
+    state: &AppState,
+    label: &str,
+    pre_refresh_access_token: &str,
+    refresh_fn: F,
+) -> CasOutcome<crate::teams::TeamsTokens, E>
+where
+    F: FnOnce() -> Result<crate::teams::TeamsTokens, E>,
+{
+    let result = refresh_fn();
+    match result {
+        Err(error) => {
+            let replaced = !state
+                .tokens_load
+                .provider_matches_teams(&state.tokens, pre_refresh_access_token);
+            if replaced {
+                log::warn!("[POLLING] poll_once: {} state changed during refresh", label);
+            }
+            CasOutcome::RefreshFailed { error, replaced }
+        }
+        Ok(new_tokens) => match state.tokens_load.cas_teams(
+            &state.tokens,
+            pre_refresh_access_token,
+            new_tokens.clone(),
+        ) {
+            crate::TokenCommitOutcome::Committed(_) => CasOutcome::Committed(new_tokens),
+            crate::TokenCommitOutcome::Discarded(current) => {
+                log::warn!("[POLLING] poll_once: {} state changed during refresh", label);
+                CasOutcome::Discarded { current }
+            }
+        },
     }
 }
 
@@ -3312,12 +3360,11 @@ fn teams_token_for_write(app: &AppHandle, state: &Arc<AppState>) -> Option<Teams
             // The refresh error stays typed (`CasOutcome<T, E>` is generic
             // over `E`) so the re-auth policy below can classify it instead
             // of string-sniffing.
-            let teams_refresh_outcome = cas_refresh_or_discard(
+            let teams_refresh_outcome = cas_refresh_teams(
+                state,
                 "teams",
-                &mut *state.tokens.teams_mut(),
                 &pre_refresh_access_token,
                 || refresh_teams_token(tok),
-                |t| &t.access_token,
             );
             match teams_refresh_outcome {
                 CasOutcome::Committed(new_tokens) => {
@@ -3365,7 +3412,7 @@ fn teams_token_for_write(app: &AppHandle, state: &Arc<AppState>) -> Option<Teams
                     // through a full device-code browser re-auth.
                     if teams_refresh_requires_reauth(&e) {
                         log::warn!("[POLLING] teams_token_for_write: Teams refresh token is dead, discarding tokens and requiring reconnect");
-                        *state.tokens.teams_mut() = None;
+                        state.tokens_load.clear_teams(&state.tokens);
                         // Issue #180: the write guard in the clearing
                         // statement above dies at the end of that statement.
                         // Persist in a LATER statement, when the guard is
@@ -4435,12 +4482,11 @@ pub(crate) fn process_track(
                             let pre_refresh_access_token = teams_tok.access_token.clone();
                             match refresh_teams_token(&teams_tok) {
                                 Ok(new_tokens) => {
-                                    let committed = match cas_refresh_or_discard(
+                                    let committed = match cas_refresh_teams(
+                                        state,
                                         "teams",
-                                        &mut *state.tokens.teams_mut(),
                                         &pre_refresh_access_token,
                                         || Ok::<_, TeamsApiError>(new_tokens.clone()),
-                                        |t| &t.access_token,
                                     ) {
                                         CasOutcome::Committed(_) => true,
                                         CasOutcome::Discarded { .. } => false,
@@ -4520,7 +4566,7 @@ pub(crate) fn process_track(
                                         )))
                                     } else if teams_refresh_requires_reauth(&refresh_err) {
                                         log::warn!("[POLLING] process_track: Teams refresh token is dead, discarding tokens");
-                                        *state.tokens.teams_mut() = None;
+                                        state.tokens_load.clear_teams(&state.tokens);
                                         // Issue #180: the write guard in the
                                         // clearing statement above dies at
                                         // the end of that statement. Persist
@@ -5087,12 +5133,11 @@ pub(crate) fn handle_no_track(
             let pre_refresh_access_token = teams_tok.access_token.clone();
             match refresh_teams_token(&teams_tok) {
                 Ok(new_tokens) => {
-                    let committed = match cas_refresh_or_discard(
+                    let committed = match cas_refresh_teams(
+                        state,
                         "teams",
-                        &mut *state.tokens.teams_mut(),
                         &pre_refresh_access_token,
                         || Ok::<_, TeamsApiError>(new_tokens.clone()),
-                        |t| &t.access_token,
                     ) {
                         CasOutcome::Committed(_) => true,
                         CasOutcome::Discarded { .. } => false,
@@ -5163,7 +5208,7 @@ pub(crate) fn handle_no_track(
                         )))
                     } else if teams_refresh_requires_reauth(&refresh_err) {
                         log::warn!("[POLLING] handle_no_track: Teams refresh token is dead, discarding tokens");
-                        *state.tokens.teams_mut() = None;
+                        state.tokens_load.clear_teams(&state.tokens);
                         // Issue #180: the write guard in the clearing
                         // statement above dies at the end of that
                         // statement. Persist in a LATER statement, when
@@ -5726,7 +5771,7 @@ mod tests {
         // `replaced: false` — slot untouched: the error is about the stored
         // session, so callers may clear.
         let mut slot: Option<String> = Some("old-access".to_string());
-        let outcome: CasOutcome<String, &str> = cas_refresh_or_discard(
+        let outcome: CasOutcome<String, &str> = cas_refresh_or_discard_unchecked(
             "test",
             &mut slot,
             "old-access",
@@ -5747,7 +5792,7 @@ mod tests {
         // `replaced: true` — the slot moved while the refresh was in flight:
         // the error is about a superseded token, so callers must NOT clear.
         let mut slot: Option<String> = Some("new-access".to_string());
-        let outcome: CasOutcome<String, &str> = cas_refresh_or_discard(
+        let outcome: CasOutcome<String, &str> = cas_refresh_or_discard_unchecked(
             "test",
             &mut slot,
             "old-access",
@@ -5767,7 +5812,7 @@ mod tests {
         // Success path keeps its CAS verdict too: racing a replacement
         // discards the winner instead of clobbering it.
         let mut slot: Option<String> = Some("new-access".to_string());
-        let outcome: CasOutcome<String, &str> = cas_refresh_or_discard(
+        let outcome: CasOutcome<String, &str> = cas_refresh_or_discard_unchecked(
             "test",
             &mut slot,
             "old-access",
@@ -5807,9 +5852,11 @@ mod tests {
              the discard dance instead of routing through the helper.",
             discard_count
         );
-        let helper_def = prod_source.matches("fn cas_refresh_or_discard").count();
-        assert_eq!(helper_def, 1, "helper defined {} times", helper_def);
-        let helper_call_count = prod_source.matches("cas_refresh_or_discard(").count();
+        let helper_def = prod_source.matches("fn cas_refresh_spotify").count()
+            + prod_source.matches("fn cas_refresh_teams").count();
+        assert_eq!(helper_def, 2, "typed helpers defined {} times", helper_def);
+        let helper_call_count = prod_source.matches("cas_refresh_spotify(").count()
+            + prod_source.matches("cas_refresh_teams(").count();
         // 5 calls: Spotify proactive, Spotify 401-retry, Teams proactive,
         // Teams write-retry (issues #367/#428) and the no-track clear retry
         // (issue #455-residual).
@@ -5869,12 +5916,11 @@ mod tests {
             // Exact production call shape (Spotify proactive refresh): the
             // write guard is a temporary reborrowed into the CAS helper; it
             // stays alive until the end of this statement.
-            let outcome = cas_refresh_or_discard(
+            let outcome = cas_refresh_spotify(
+                &state2,
                 "spotify",
-                &mut *state2.tokens.spotify_mut(),
                 &pre_refresh_access_token,
                 || Ok::<_, SpotifyApiError>(new_tokens.clone()),
-                |t| &t.access_token,
             );
             let committed = matches!(outcome, CasOutcome::Committed(_));
             if committed {
@@ -5926,12 +5972,12 @@ mod tests {
         // format placeholders inside string literals are balanced, so they
         // do not perturb the count.
         let after_sig = prod_source
-            .split("fn cas_refresh_or_discard<T, E, F, G>(")
+            .split("fn cas_refresh_spotify<E, F>(")
             .nth(1)
-            .expect("cas_refresh_or_discard definition not found");
+            .expect("cas_refresh_spotify definition not found");
         let open = after_sig
             .find('{')
-            .expect("cas_refresh_or_discard has no opening brace");
+            .expect("cas_refresh_spotify has no opening brace");
         let mut depth = 0usize;
         let mut end = None;
         for (i, ch) in after_sig[open..].char_indices() {
@@ -5947,12 +5993,10 @@ mod tests {
                 _ => {}
             }
         }
-        let body = &after_sig[..end.expect("cas_refresh_or_discard body never closed")];
+        let body = &after_sig[..end.expect("cas_refresh_spotify body never closed")];
         assert!(
             !body.contains("persist_tokens("),
-            "cas_refresh_or_discard must not persist tokens inside its body (issue #180: \
-             the caller's write guard is alive for the whole call, so persist_tokens' \
-             read lock on the same RwLock self-deadlocks). Body:\n{}",
+            "cas_refresh_spotify must not persist tokens inside its body (issue #180). Body:\n{}",
             body
         );
         // All persistence must happen at the call sites, after the CAS call
