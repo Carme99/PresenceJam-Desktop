@@ -360,8 +360,9 @@ pub fn apply_plan(
         for (index, slot) in ShortcutSlot::ALL.into_iter().enumerate() {
             let accelerator = match &plans[index] {
                 SlotPlan::Unbound => continue,
-                SlotPlan::Bound { accelerator, .. }
-                | SlotPlan::Invalid { accelerator, .. } => accelerator.clone(),
+                SlotPlan::Bound { accelerator, .. } | SlotPlan::Invalid { accelerator, .. } => {
+                    accelerator.clone()
+                }
             };
             status.set(
                 slot,
