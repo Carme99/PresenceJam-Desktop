@@ -48,24 +48,22 @@ jq -r .version package.json                                 # and must match thi
 
 ### How the six literals are gated
 
-Two jobs read **all six** — the three manifests and both lockfiles — and fail
-on the first disagreement:
+The PR-time and tag-time gates compare different sets of version literals:
 
-- `ci.yml`, job `version-consistency` — the PR-time gate. `jq -r .version`
-  from `src-tauri/tauri.conf.json`, `package.json` and `package-lock.json`,
-  `jq -r '.packages[""].version'` for the lockfile's own root entry, `sed` for
-  `src-tauri/Cargo.toml`, and an `awk` over the `presence-jam` block of
-  `src-tauri/Cargo.lock`; every one of the six is compared with
-  `tauri.conf.json`.
-- `release.yml`, step "Verify version consistency" in the `resolve-tag`
-  job — the same six compared against the tag, before the build matrix
-  starts, so a tag cannot publish a lock that disagrees with the binary it
-  ships.
+- `ci.yml`, job `version-consistency` — the PR-time gate compares the three
+  release-facing manifests: `src-tauri/tauri.conf.json`, `package.json`, and
+  `src-tauri/Cargo.toml`. It fails on the first disagreement.
+- `release.yml`, step "Verify version consistency" in the `resolve-tag` job —
+  the tag-time gate compares all six literals: the three manifests plus both
+  lockfiles' root versions. It runs before the build matrix, so a tag cannot
+  publish a lock that disagrees with the binary it ships.
 
-The cargo steps also run with `--locked` (fmt takes no such flag), so a
-`Cargo.lock` that has drifted from `Cargo.toml` fails the run instead of being
-quietly rewritten on the runner. A legitimate dependency update therefore lands
-in the PR that changes the lock, never in a release build.
+The PR-time job does not read either lockfile; the tag-time job does. The cargo
+steps also run with `--locked` (fmt takes no such flag), so a `Cargo.lock` that
+has drifted from `Cargo.toml` fails the run instead of being quietly rewritten
+on the runner. A legitimate dependency update therefore lands in the PR that
+changes the lock, never in a release build.
+
 
 Bump all six literals, every time.
 
@@ -109,14 +107,18 @@ jobs (the Name column is the check context shown on the PR's checks list):
 | Job | Name | What it does |
 | --- | --- | --- |
 | `rust-platform-check` | Rust check + test (macOS + Windows) | `cargo check --all-targets` on both legs; `cargo test --all-targets` on macOS only |
+| `windows-cli-smoke` | Windows CLI smoke (--help prints) | Real release build + `cmd /c --help` smoke + regression test |
 | `frontend` | Frontend (npm build + ts-rs codegen) | `npm run build`, `cargo test --lib`, `npm run check`, `npm run test:coverage`, and `npm run test:browser` |
 | `rust` | Rust (cargo check) | `cargo fmt --check`, `cargo check --all-targets`, and `cargo test --all-targets` on Linux |
 | `rust-clippy` | Rust clippy | `cargo clippy -- -D warnings` |
-| `changelog-links` | CHANGELOG link definitions | every `## [X]` header needs a `[X]:` definition |
-| `docs-links` | Docs links | every relative markdown link target exists and every `#anchor` resolves (`python3 docs/link-audit.py`) |
-| `version-consistency` | Version consistency | all six version literals in §1 agree, both lockfiles included |
-| `secret-scan` | Secret scan (gitleaks) | gitleaks over the history |
-| `dep-audit` | Dependency audit (cargo + npm) | **advisory only** — `continue-on-error: true` |
+| `changelog-links` | CHANGELOG link definitions | Every `## [X]` header needs a matching `[X]:` definition |
+| `docs-links` | Docs links | Relative markdown links and `#anchor` targets resolve |
+| `version-consistency` | Version consistency | The three release-facing manifest versions agree at PR time |
+| `secret-scan` | Secret scan (gitleaks) | Gitleaks scans repository history |
+| `dep-audit` | Dependency audit (cargo + npm) | npm production audit gates; Cargo audit and the full npm tree are advisory |
+| `no-vendored-binaries` | No vendored binaries | Fails on untracked, unignored root paths |
+| `cargo-deny` | Cargo deny (licenses + sources) | Cargo-deny checks licenses and sources |
+| `rust-coverage` | Rust coverage (llvm-cov) | Line coverage and per-file floors |
 
 The Rust test suite runs on **Linux and macOS**, not Windows. The Linux `rust`
 job executes `cargo test --all-targets`, and `rust-platform-check` executes the
@@ -337,7 +339,9 @@ every Beta-channel check fall through to stable silently.
    `# State of Features — vX.Y.Z` header is missing, so a forgotten rename
    surfaces at the tag instead of as a published release with an empty body.
 4. Open the release PR and wait for `version-consistency`, `changelog-links`,
-   `docs-links`, `rust`, `rust-clippy`, `rust-platform-check`, `frontend` and `secret-scan`.
+   `docs-links`, `rust`, `rust-clippy`, `rust-platform-check`, `windows-cli-smoke`,
+   `frontend`, `secret-scan`, `dep-audit`, `no-vendored-binaries`, `cargo-deny`,
+   and `rust-coverage`.
 5. Merge, then tag the **merge commit on `main`** — tag the commit that is on the
    branch, never the local pre-merge commit:
 

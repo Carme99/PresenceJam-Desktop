@@ -99,8 +99,8 @@ flowchart TD
     subgraph Build["🔨 Build Matrix (parallel)"]
         direction LR
         MacBuild["macOS Build<br/>macos-latest, aarch64-apple-darwin → .dmg"]
-        WinBuild["Windows Build<br/>windows-latest → .msi"]
-        LinBuild["Linux Build<br/>ubuntu-latest → .deb + .AppImage"]
+        WinBuild["Windows Build<br/>windows-latest → .exe + .msi"]
+        LinBuild["Linux Build<br/>ubuntu-latest → .deb + .rpm + .AppImage"]
     end
     Release["🚀 release<br/>SHA256SUMS.txt + GitHub Release<br/>+ latest.json updater manifest"]
     Brew["🍺 homebrew<br/>update carme99/homebrew-tap"]

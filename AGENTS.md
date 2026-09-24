@@ -517,14 +517,19 @@ fix:
 
 | Job | OS | What it does | Common failure modes |
 | --- | --- | --- | --- |
-| `rust-platform-check` | macOS + Windows | `cargo check --all-targets` on both legs, `cargo test --all-targets` on macOS only | cfg-gated code path breaks on one OS; Linux-only test runs on macOS |
+| `rust-platform-check` | macOS + Windows | `cargo check --all-targets` on both legs; `cargo test --all-targets` on macOS only | cfg-gated code path breaks on one OS; Linux-only test runs on macOS |
 | `windows-cli-smoke` | Windows | Real release build + `cmd /c --help` smoke + regression test | `cfg(windows)` code path regressed; CLI arm does not print |
 | `frontend` | Ubuntu | `npm run build`, `cargo test --lib` (materialises ts-rs codegen), `npm run check`, `npm run test:coverage`, `npm run test:browser` | Generated types are stale; new `t()` call missing a key; coverage floor dropped; browser geometry regressed |
-| `rust` | Ubuntu | `cargo fmt --check`, `cargo check --all-targets`, `cargo test --all-targets` | compile error / warning / failing Rust test |
-| `lint` | Ubuntu | `cargo fmt --check`, `cargo clippy -D warnings` | formatting drift; new clippy lint |
-| `dep-audit` | Ubuntu | `cargo deny check`, `npm audit --omit=dev --audit-level=high` | new advisory not on the ignore list (issue #642) |
-| `docs-links` | Ubuntu | `python3 docs/link-audit.py` | relative markdown link broken (depth counting, see §12) |
-| `rust-coverage` | Ubuntu | llvm-cov + per-file floor | per-file floor dropped below the ratchet |
+| `rust` | Ubuntu | `cargo fmt --check`, `cargo check --all-targets`, `cargo test --all-targets` | compile error, warning, or failing Rust test |
+| `rust-clippy` | Ubuntu | `cargo clippy --all-targets -- -D warnings` | new clippy lint |
+| `changelog-links` | Ubuntu | Every `## [X]` header has a matching `[X]:` definition | malformed changelog link section |
+| `docs-links` | Ubuntu | `python3 docs/link-audit.py` | relative markdown link or anchor is broken |
+| `version-consistency` | Ubuntu | The three release-facing manifest versions agree | version drift between `tauri.conf.json`, `package.json`, and `Cargo.toml` |
+| `secret-scan` | Ubuntu | Gitleaks scans repository history | credential-shaped content in history |
+| `dep-audit` | Ubuntu | npm production audit gates; Cargo audit and the full npm tree are advisory | new production npm advisory or audit step failure |
+| `no-vendored-binaries` | Ubuntu | Fails on untracked, unignored root paths | vendored browser/build binary enters the tree |
+| `cargo-deny` | Ubuntu | Cargo-deny checks dependency licenses and sources | incompatible license or disallowed source |
+| `rust-coverage` | Ubuntu | llvm-cov line coverage and per-file floors | coverage falls below the ratchet |
 
 The `rust-platform-check` job is the one that catches **cross-platform
 regressions**: a regression inside `#[cfg(target_os = "macos")]` fails the

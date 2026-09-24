@@ -80,7 +80,8 @@ Only the auth path may stop the session or pop an OAuth window; network failures
 increase backoff while polling continues (#568, finding PollCore#0):
 - The poll loop counts `SourceError::Auth` as its auth/reconnect path. The
   Spotify source maps expired and invalid credentials there, and also maps
-  `NotPremium` there so Auto mode can fall back to an OS playback source.
+  `NotPremium` there; `AutoSource` tries the OS source first and consults
+  Spotify only after the OS source has no track or fails.
 - All non-auth source variants — including `SourceError::Unauthenticated`,
   `SourceError::Transient`, and `SourceError::Other` — feed a **separate**
   `consecutive_network_failures` counter with its own higher threshold
