@@ -263,8 +263,8 @@ PresenceJam-Desktop/
 │   ├── ci.yml                             # PR-time Rust, Vitest coverage, and Playwright browser gates
 │   └── release.yml                        # Tag verification + 3-OS build + package-manager publication
 ├── homebrew/presence-jam.rb               # Homebrew tap formula template
-├── tests/                                 # Vitest suite + Chromium specs under tests/browser/
-├── playwright.config.ts                   # Browser test directory, Vite server, Chromium project
+├── tests/                                 # Vitest suite + Chromium/WebKit browser specs under tests/browser/
+├── playwright.config.ts                   # Browser test directory, Vite server, Chromium + WebKit projects
 ├── vitest.config.js                       # Vitest + coverage ratchet (four thresholds)
 ├── rust-toolchain.toml                    # pinned Rust toolchain, used by CI and local builds
 ├── src/app.css                            # global stylesheet: design tokens, themes, densities

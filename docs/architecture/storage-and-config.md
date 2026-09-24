@@ -33,15 +33,12 @@ settings:
   truncated. A *schema-version* mismatch is **not** a quarantine — it goes through
   `migrate_config` in place.
 
-Wave-9 config writes are revision-stamped and serialized across processes:
-`config.rs::with_config_lock` holds the sidecar lock across the marker read,
-stale/terminal-revision check, clamped document preparation, and atomic replace.
-`MAX_CONFIG_REVISION` is the JavaScript-safe integer boundary; values above it
-are refused rather than rounded across the IPC boundary. `commands/config.rs`
-publishes the exact accepted document through `config-changed`, and the frontend
-store adopts it monotonically across Settings windows. The headless `--profile`
-path uses the same file transaction but remains next-load-only because this
-early-exit CLI path has no live `AppHandle` event channel.
+The current config writer has a monotonic `revision` field and rejects stale
+whole-document payloads. The cross-process sidecar lock, the reserved
+JavaScript-safe terminal boundary, `config-changed` publication, and live
+frontend adoption are **not present at this main checkout**. The headless
+`--profile` path is a direct next-load write because it exits before the Tauri
+event path; it does not publish a live profile change to a running GUI.
 
   > **Surfaced on the Diagnostics page (#537, completing #379):**
   > `ConfigSummary` carries `config_quarantined` and
