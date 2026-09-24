@@ -329,6 +329,47 @@ describe('mounted wizard command contracts (#763)', () => {
     expect(authFlow.teams.phase).toBe('done');
   });
 
+  it('does not delegate polling when a mounted Teams device code is already expired', async () => {
+    setSpotifyPhase('done');
+    const { getByRole } = await renderWizard(false);
+    await fireEvent.click(getByRole('button', { name: t('onboarding.continue') }));
+    await settle();
+    invoke.mockClear();
+
+    invoke.mockImplementation(async (command: string) => {
+      switch (command) {
+        case 'start_teams_auth_device_code':
+          return {
+            user_code: 'EXPIRED-CODE',
+            device_code: 'expired-device-code',
+            verification_url: 'https://microsoft.com/devicelogin',
+            interval: 5,
+            expires_in: 0
+          };
+        case 'open_external_url':
+        case 'poll_teams_auth':
+          return undefined;
+        default:
+          return undefined;
+      }
+    });
+
+    await fireEvent.click(
+      getByRole('button', { name: t('onboarding.startMicrosoftSignIn') })
+    );
+    await settle();
+
+    expect(invoke.mock.calls.map(([command]) => command)).toEqual([
+      'start_teams_auth_device_code',
+      'open_external_url'
+    ]);
+    expect(invoke).not.toHaveBeenCalledWith(
+      'poll_teams_auth',
+      expect.anything()
+    );
+    expect(authFlow.teams.phase).toBe('waiting');
+  });
+
   async function renderFinishStep(config: AppConfig) {
     setSpotifyPhase('done');
     setTeamsPhase('done');
