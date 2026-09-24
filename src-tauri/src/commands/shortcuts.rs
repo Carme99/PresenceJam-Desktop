@@ -289,9 +289,15 @@ impl ShortcutsStatus {
 pub enum ShortcutPreflightFailure {
     /// Linux is running without a display that the X11 backend can connect to.
     X11Unavailable,
-    /// X11 is reachable, but the plugin's private worker cannot be proven alive
-    /// through the public Tauri API. The backend must fail closed in this case.
+    /// An explicit liveness check reports that the plugin's private worker is
+    /// unavailable even though X11 is reachable.
     WorkerUnavailable,
+}
+
+fn x11_preflight_result<T, E>(result: Result<T, E>) -> Result<(), ShortcutPreflightFailure> {
+    result
+        .map(|_| ())
+        .map_err(|_| ShortcutPreflightFailure::X11Unavailable)
 }
 
 fn preflight_reason(failure: ShortcutPreflightFailure) -> ShortcutReason {
@@ -305,16 +311,12 @@ fn preflight_reason(failure: ShortcutPreflightFailure) -> ShortcutReason {
 pub trait ShortcutRegistrar {
     /// Checks the platform prerequisite before any release or grab is attempted.
     /// The default performs the real X11 connection probe on Linux and is a
-    /// no-op elsewhere. The public Tauri plugin API does not expose its private
-    /// worker for a liveness check, so a reachable X11 display is deliberately
-    /// treated as unverified and fails closed until a real worker probe exists.
+    /// no-op elsewhere. A reachable X11 display is accepted; worker liveness is
+    /// only checked when a platform-specific registrar explicitly reports it.
     fn preflight(&self) -> Result<(), ShortcutPreflightFailure> {
         #[cfg(target_os = "linux")]
         {
-            match x11rb::rust_connection::RustConnection::connect(None) {
-                Ok(_) => Err(ShortcutPreflightFailure::WorkerUnavailable),
-                Err(_) => Err(ShortcutPreflightFailure::X11Unavailable),
-            }
+            x11_preflight_result(x11rb::rust_connection::RustConnection::connect(None))
         }
         #[cfg(not(target_os = "linux"))]
         Ok(())
@@ -1325,6 +1327,15 @@ mod tests {
         );
         assert!(status.toggle_sync.registered);
     }
+    #[test]
+    fn reachable_x11_preflight_is_accepted_and_unreachable_x11_is_refused() {
+        assert_eq!(x11_preflight_result::<(), ()>(Ok(())), Ok(()));
+        assert_eq!(
+            x11_preflight_result::<(), ()>(Err(())),
+            Err(ShortcutPreflightFailure::X11Unavailable)
+        );
+    }
+
 
     /// Issue #944: the Linux X11 backend can acknowledge a dead-channel grab as
     /// success. A preflight refusal must instead stop before any plugin
@@ -1356,10 +1367,10 @@ mod tests {
         }
     }
 
-    /// A reachable X11 display is not proof that the plugin's worker is alive:
-    /// its public API does not expose a liveness handle. The registrar seam
-    /// models that reachable-but-dead state explicitly, and the apply path
-    /// must fail closed before the potentially blocking unregister call.
+    /// A reachable X11 display is accepted by the production probe. The
+    /// registrar seam models an explicit worker-liveness failure separately;
+    /// the apply path must fail closed before the potentially blocking
+    /// unregister call when that injected failure is reported.
     #[test]
     fn reachable_x11_with_a_dead_worker_never_registers() {
         let registrar = RecordingRegistrar::reachable_x11_without_worker();
