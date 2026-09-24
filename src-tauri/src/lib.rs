@@ -1,7 +1,7 @@
 use parking_lot::{Mutex, RwLock};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -402,6 +402,56 @@ fn deep_link_callback_key(code: &str, state: Option<&str>) -> u64 {
     hasher.finish()
 }
 
+/// Whether the current process may persist the in-memory token snapshot.
+///
+/// A keychain-unavailable read leaves the encrypted file intact but the
+/// in-memory token slots empty. Persisting that empty snapshot would destroy
+/// sessions that become readable when the platform keychain unlocks, so the
+/// transient load failure is retained until a later read succeeds or the user
+/// explicitly resets token storage (issue #935).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokensLoadState {
+    Ready,
+    KeychainUnavailable,
+}
+
+/// Process-local gate around token persistence after a failed platform-key
+/// read. The payload is deliberately not stored: the existing keychain error
+/// help is logged at setup, while persisting it would risk duplicating
+/// credential-adjacent diagnostics in state.
+pub struct TokensLoadGate {
+    state: AtomicU8,
+}
+
+impl TokensLoadGate {
+    fn new() -> Self {
+        Self {
+            state: AtomicU8::new(TokensLoadState::Ready as u8),
+        }
+    }
+
+    pub fn state(&self) -> TokensLoadState {
+        match self.state.load(Ordering::Acquire) {
+            1 => TokensLoadState::KeychainUnavailable,
+            _ => TokensLoadState::Ready,
+        }
+    }
+
+    pub fn mark_keychain_unavailable(&self) {
+        self.state
+            .store(TokensLoadState::KeychainUnavailable as u8, Ordering::Release);
+    }
+
+    pub fn mark_ready(&self) {
+        self.state
+            .store(TokensLoadState::Ready as u8, Ordering::Release);
+    }
+
+    pub fn blocks_persist(&self) -> bool {
+        self.state() == TokensLoadState::KeychainUnavailable
+    }
+}
+
 pub struct AppState {
     pub tokens: Tokens,
     pub polling: Polling,
@@ -442,6 +492,10 @@ pub struct AppState {
     /// the dedup window is dropped before any token exchange is spawned.
     /// See `DeepLinkDedup`.
     pub deep_link_seen: DeepLinkDedup,
+
+    /// Transient protection for recoverable token ciphertext after a
+    /// platform-keychain-unavailable startup read (issue #935).
+    pub tokens_load: TokensLoadGate,
     /// Issue #813: replayable record of the startup legacy-plaintext
     /// migration conflict (`config::LegacySecretOutcome::ConflictKeychainDiffers`).
     /// The `spotify-secret-conflict` event is emitted from the setup hook
@@ -473,6 +527,7 @@ impl AppState {
             launch_binding,
             tray_available: AtomicBool::new(true),
             deep_link_seen: DeepLinkDedup::new(),
+            tokens_load: TokensLoadGate::new(),
             secret_conflict: AtomicBool::new(false),
         }
     }
@@ -482,6 +537,46 @@ impl Default for AppState {
     fn default() -> Self {
         // Routes through `new()` so the AppState creation log line still fires.
         Self::new()
+    }
+}
+
+/// Apply one token-store read to process state. A successful read unblocks
+/// persistence and installs the recovered snapshot. A platform-unavailable
+/// read blocks persistence while leaving the encrypted file untouched. Any
+/// other read failure is treated as a corrupt store: token state stays empty,
+/// but normal recovery/re-auth persistence remains available.
+fn apply_token_load_result(
+    state: &AppState,
+    result: Result<token_io::TokensFile, token_io::TokensLoadError>,
+) {
+    match result {
+        Ok(tf) => {
+            state.tokens_load.mark_ready();
+            let has_spotify = tf.spotify_tokens.is_some();
+            let has_teams = tf.teams_tokens.is_some();
+            *state.tokens.spotify_mut() = tf.spotify_tokens;
+            *state.tokens.teams_mut() = tf.teams_tokens;
+            if has_spotify {
+                log::info!("[APP] setup: spotify_tokens loaded into AppState");
+            } else {
+                log::info!("[APP] setup: no spotify_tokens in tokens.json");
+            }
+            if has_teams {
+                log::info!("[APP] setup: teams_tokens loaded into AppState");
+            } else {
+                log::info!("[APP] setup: no teams_tokens in tokens.json");
+            }
+        }
+        Err(token_io::TokensLoadError::KeychainUnavailable(message)) => {
+            state.tokens_load.mark_keychain_unavailable();
+            log::warn!("[APP] setup: token store deferred: {}", message);
+        }
+        Err(token_io::TokensLoadError::Corrupt(message)) => {
+            *state.tokens.spotify_mut() = None;
+            *state.tokens.teams_mut() = None;
+            state.tokens_load.mark_ready();
+            log::warn!("[APP] setup: failed to load tokens.json: {}", message);
+        }
     }
 }
 
@@ -1401,6 +1496,7 @@ Any other argument is ignored and the app starts normally, as it always has.
 fn cli_read_tokens() -> Result<token_io::TokensFile, String> {
     let path = token_io::tokens_file_path_headless()?;
     token_io::read_tokens_at_path(&path, token_io::TokenReadMode::ReadOnly)
+        .map_err(token_io::TokensLoadError::into_message)
 }
 
 /// Build the `AppState` the GUI's setup builds, without a Tauri app.
@@ -2290,31 +2386,15 @@ pub fn run() {
             // longer persisted to disk; the user re-starts the auth flow
             // after a crash mid-OAuth (cheap UX, and the disk leak is gone).
             let token_read_result = if cli_mode {
-                token_io::tokens_file_path_headless().and_then(|path| {
-                    token_io::read_tokens_at_path(&path, token_io::TokenReadMode::ReadOnly)
-                })
+                token_io::tokens_file_path_headless()
+                    .map_err(token_io::TokensLoadError::Corrupt)
+                    .and_then(|path| {
+                        token_io::read_tokens_at_path(&path, token_io::TokenReadMode::ReadOnly)
+                    })
             } else {
                 token_io::read_tokens_at(app.handle())
             };
-            match token_read_result {
-                Ok(tf) => {
-                    if let Some(st) = tf.spotify_tokens {
-                        *state.tokens.spotify_mut() = Some(st);
-                        log::info!("[APP] setup: spotify_tokens loaded into AppState");
-                    } else {
-                        log::info!("[APP] setup: no spotify_tokens in tokens.json");
-                    }
-                    if let Some(tt) = tf.teams_tokens {
-                        *state.tokens.teams_mut() = Some(tt);
-                        log::info!("[APP] setup: teams_tokens loaded into AppState");
-                    } else {
-                        log::info!("[APP] setup: no teams_tokens in tokens.json");
-                    }
-                }
-                Err(e) => {
-                    log::warn!("[APP] setup: failed to load tokens.json: {}", e);
-                }
-            }
+            apply_token_load_result(&state, token_read_result);
 
             // Issue #679: `--sync-once` has everything it needs — the app is
             // built windowless in CLI mode, and the state above is loaded — so

@@ -920,8 +920,29 @@ pub fn get_tokens_aes_key() -> Result<[u8; 32], String> {
 /// The re-auth text for an absent tokens key: without it the ciphertext on disk
 /// cannot be decrypted, so the safest recovery is to discard the tokens and
 /// re-onboard. Kept byte-identical to the pre-#935 message.
-const TOKENS_AES_KEY_NOT_FOUND_MSG: &str =
+pub(crate) const TOKENS_AES_KEY_NOT_FOUND_MSG: &str =
     "Tokens encryption key not found in OS keychain; cannot decrypt tokens.json (re-authentication required).";
+
+/// Typed read-or-create variant used by legacy token migration. Keeping the
+/// classification at this boundary lets the token loader distinguish a locked
+/// platform store from a malformed on-disk store before migration can touch
+/// the file.
+pub fn read_or_create_tokens_aes_key() -> Result<[u8; 32], KeychainReadError> {
+    // The slot is opened lazily, inside the closures: a keychain that cannot be
+    // opened at all must not defeat the revalidation below, which deliberately
+    // keeps a cached key when the keychain does not answer.
+    let key = get_or_create_tokens_aes_key_with(
+        cached_tokens_aes_key(),
+        || probe_keychain_entry(TOKENS_AES_KEY_USER),
+        |b64| {
+            let entry = keyring::Entry::new(KEYRING_SERVICE, TOKENS_AES_KEY_USER)?;
+            entry.set_password(b64)
+        },
+        generate_tokens_aes_key,
+    )?;
+    *tokens_key_cache().lock() = Some(key);
+    Ok(key)
+}
 
 /// Read the tokens.json AES-256-GCM key, generating and storing a fresh
 /// random 256-bit key on first use.
@@ -947,21 +968,10 @@ const TOKENS_AES_KEY_NOT_FOUND_MSG: &str =
 /// keychain UI — would otherwise make every later persist encrypt with a key
 /// the keychain no longer holds, so tokens.json fails GCM authentication at the
 /// next launch and the user is pushed through onboarding with no explanation.
+/// String-presenting wrapper for write callers that do not need the transient
+/// load classification.
 pub fn get_or_create_tokens_aes_key() -> Result<[u8; 32], String> {
-    // The slot is opened lazily, inside the closures: a keychain that cannot be
-    // opened at all must not defeat the revalidation below, which deliberately
-    // keeps a cached key when the keychain does not answer.
-    let key = get_or_create_tokens_aes_key_with(
-        cached_tokens_aes_key(),
-        || probe_keychain_entry(TOKENS_AES_KEY_USER),
-        |b64| {
-            let entry = keyring::Entry::new(KEYRING_SERVICE, TOKENS_AES_KEY_USER)?;
-            entry.set_password(b64)
-        },
-        generate_tokens_aes_key,
-    )?;
-    *tokens_key_cache().lock() = Some(key);
-    Ok(key)
+    read_or_create_tokens_aes_key().map_err(|e| e.into_message(TOKENS_AES_KEY_NOT_FOUND_MSG))
 }
 
 /// Core of [`get_or_create_tokens_aes_key`]: cached-key revalidation (issue
@@ -985,7 +995,7 @@ fn get_or_create_tokens_aes_key_with(
     read: impl Fn() -> Result<String, keyring::Error>,
     store: impl Fn(&str) -> Result<(), keyring::Error>,
     generate: impl FnOnce() -> Result<[u8; 32], String>,
-) -> Result<[u8; 32], String> {
+) -> Result<[u8; 32], KeychainReadError> {
     if let Some(cached) = cached {
         match read() {
             Ok(b64) if decode_tokens_aes_key(&b64) == Ok(cached) => return Ok(cached),
@@ -1025,21 +1035,24 @@ fn create_or_adopt_tokens_key(
     read: impl Fn() -> Result<String, keyring::Error>,
     store: impl Fn(&str) -> Result<(), keyring::Error>,
     generate: impl FnOnce() -> Result<[u8; 32], String>,
-) -> Result<[u8; 32], String> {
+) -> Result<[u8; 32], KeychainReadError> {
     let _guard = tokens_key_create_lock().lock();
     match read() {
-        Ok(b64) => decode_tokens_aes_key(&b64).map_err(corrupt_tokens_aes_key_help),
+        Ok(b64) => decode_tokens_aes_key(&b64).map_err(|detail| {
+            KeychainReadError::Corrupt(corrupt_tokens_aes_key_help(detail))
+        }),
         Err(keyring::Error::NoEntry) => {
-            let key = generate()?;
+            let key = generate().map_err(KeychainReadError::Unavailable)?;
             let b64 = STANDARD.encode(key);
-            map_keychain_err(store(&b64))?;
+            store(&b64).map_err(classify_read_failure)?;
             log::info!("[KEYCHAIN] Generated + stored tokens.json AES key in OS keychain");
             // Verify-after-set: a lost write would otherwise leave ciphertext
             // under a key the keychain does not hold.
             match read() {
                 Ok(stored) => {
-                    let stored_key =
-                        decode_tokens_aes_key(&stored).map_err(corrupt_tokens_aes_key_help)?;
+                    let stored_key = decode_tokens_aes_key(&stored).map_err(|detail| {
+                        KeychainReadError::Corrupt(corrupt_tokens_aes_key_help(detail))
+                    })?;
                     if stored_key != key {
                         log::warn!(
                             "[KEYCHAIN] tokens AES key store raced with another writer; adopting the stored key"
@@ -1056,9 +1069,7 @@ fn create_or_adopt_tokens_key(
                 }
             }
         }
-        Err(e) => Err(keychain_error_help(&e).unwrap_or_else(|| {
-            format!("Failed to read tokens encryption key from keychain: {}", e)
-        })),
+        Err(e) => Err(classify_read_failure(e)),
     }
 }
 
@@ -1559,11 +1570,30 @@ mod tests {
                 || panic!("a corrupt entry must never be regenerated"),
             )
             .expect_err("a corrupt key entry must be a hard error");
+            let message = match err {
+                KeychainReadError::Corrupt(message) => message,
+                other => panic!("corrupt entry must classify as Corrupt, got {other:?}"),
+            };
             assert!(
-                err.contains(LINUX_KEYRING_DOC),
-                "corrupt-key error must carry a recovery pointer, got: {err}"
+                message.contains(LINUX_KEYRING_DOC),
+                "corrupt-key error must carry a recovery pointer, got: {message}"
             );
         }
+    }
+
+    #[test]
+    fn creator_preserves_platform_unavailable_classification() {
+        let err = create_or_adopt_tokens_key(
+            || Err::<String, _>(platform_failure("no secret service")),
+            |_| panic!("an unavailable keychain must not be written"),
+            || panic!("an unavailable keychain must not regenerate a key"),
+        )
+        .expect_err("a platform read failure must stop legacy migration");
+        let message = match err {
+            KeychainReadError::Unavailable(message) => message,
+            other => panic!("platform failure must classify as Unavailable, got {other:?}"),
+        };
+        assert!(message.contains(LINUX_KEYRING_DOC));
     }
 
     /// Issue #801: the legacy-slot fallback must classify its failures. Only

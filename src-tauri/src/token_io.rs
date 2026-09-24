@@ -219,28 +219,76 @@ pub enum TokenReadMode {
     ReadOnly,
 }
 
-/// Migrating GUI read from the Tauri app path. Returns a default
-/// `TokensFile` if the file does not exist or is empty. Returns `Err(...)`
-/// if the file exists and is non-empty but cannot be decrypted or
-/// deserialised; the caller in `lib::run` setup logs the error and continues
-/// with default state, matching the previous (pre-#65) store path's
-/// behaviour.
+/// Why an existing token store could not be loaded.
 ///
-/// Legacy plaintext from ≤ v2.10.0 is migrated on first GUI read. A missing
-/// keychain key or undecryptable ciphertext surfaces as `Err`, which drives
-/// the same re-auth recovery.
-pub fn read_tokens_at(app: &tauri::AppHandle) -> Result<TokensFile, String> {
-    read_tokens_at_path(&tokens_file_path(app)?, TokenReadMode::MigrateLegacy)
+/// `KeychainUnavailable` is transient: the encrypted file may become readable
+/// once the platform credential store unlocks, so callers must not replace it
+/// with an empty in-memory snapshot. `Corrupt` retains the established
+/// recovery behavior: start empty and allow an explicit re-auth/reset to write
+/// a fresh store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TokensLoadError {
+    KeychainUnavailable(String),
+    Corrupt(String),
+}
+
+impl TokensLoadError {
+    pub fn into_message(self) -> String {
+        match self {
+            Self::KeychainUnavailable(message) | Self::Corrupt(message) => message,
+        }
+    }
+}
+
+impl From<crate::keychain::KeychainReadError> for TokensLoadError {
+    fn from(error: crate::keychain::KeychainReadError) -> Self {
+        match error {
+            crate::keychain::KeychainReadError::Unavailable(message) => {
+                Self::KeychainUnavailable(message)
+            }
+            crate::keychain::KeychainReadError::Absent => Self::Corrupt(
+                crate::keychain::TOKENS_AES_KEY_NOT_FOUND_MSG.to_string(),
+            ),
+            crate::keychain::KeychainReadError::Corrupt(message) => Self::Corrupt(message),
+        }
+    }
+}
+
+/// Migrating GUI read from the Tauri app path. Returns a default
+/// [`TokensFile`] if the file does not exist or is empty. A platform keychain
+/// failure remains typed so setup can protect the recoverable ciphertext from
+/// an empty-state persist.
+pub fn read_tokens_at(
+    app: &tauri::AppHandle,
+) -> Result<TokensFile, TokensLoadError> {
+    let path = tokens_file_path(app).map_err(TokensLoadError::Corrupt)?;
+    read_tokens_at_path(&path, TokenReadMode::MigrateLegacy)
 }
 
 /// Read tokens from an explicit path (issues #679 and #840).
 ///
-/// The body of [`read_tokens_at`], split out so the headless CLI flags use
-/// [`TokenReadMode::ReadOnly`]: they share the same parsing and decryption
-/// behavior, but never chmod, migrate, rename, or delete storage merely to
-/// report state. The GUI retains first-run plaintext migration through
-/// [`read_tokens_at`].
-pub fn read_tokens_at_path(path: &Path, mode: TokenReadMode) -> Result<TokensFile, String> {
+/// The body of [`read_tokens_at`], split out so headless CLI flags use
+/// [`TokenReadMode::ReadOnly`]: they share parsing and decryption but never
+/// chmod, migrate, rename, or delete storage merely to report state.
+pub fn read_tokens_at_path(
+    path: &Path,
+    mode: TokenReadMode,
+) -> Result<TokensFile, TokensLoadError> {
+    read_tokens_at_path_with_key_fetcher(
+        path,
+        mode,
+        crate::keychain::read_tokens_aes_key,
+    )
+}
+
+/// Read an explicit token path with the encrypted-store key lookup injected.
+/// Production passes [`crate::keychain::read_tokens_aes_key`]; tests inject
+/// platform failures and fixed keys without touching the OS credential store.
+fn read_tokens_at_path_with_key_fetcher(
+    path: &Path,
+    mode: TokenReadMode,
+    fetch_key: impl FnOnce() -> Result<[u8; 32], crate::keychain::KeychainReadError>,
+) -> Result<TokensFile, TokensLoadError> {
     if !path.exists() {
         log::info!(
             "[TOKEN_IO] read_tokens_at: no file at {}, returning default",
@@ -256,7 +304,13 @@ pub fn read_tokens_at_path(path: &Path, mode: TokenReadMode) -> Result<TokensFil
         #[cfg(unix)]
         {
             let current = fs::metadata(path)
-                .map_err(|e| format!("Failed to stat tokens file '{}': {}", path.display(), e))?
+                .map_err(|e| {
+                    TokensLoadError::Corrupt(format!(
+                        "Failed to stat tokens file '{}': {}",
+                        path.display(),
+                        e
+                    ))
+                })?
                 .permissions();
             let current_mode = current.mode() & 0o777;
             if current_mode != 0o600 {
@@ -267,22 +321,27 @@ pub fn read_tokens_at_path(path: &Path, mode: TokenReadMode) -> Result<TokensFil
                 let mut tightened = current;
                 tightened.set_mode(0o600);
                 fs::set_permissions(path, tightened).map_err(|e| {
-                    format!(
+                    TokensLoadError::Corrupt(format!(
                         "Failed to chmod tokens file '{}' to 0600: {}",
                         path.display(),
                         e
-                    )
+                    ))
                 })?;
             }
         }
     }
-    let bytes = fs::read(path)
-        .map_err(|e| format!("Failed to read tokens file '{}': {}", path.display(), e))?;
+    let bytes = fs::read(path).map_err(|e| {
+        TokensLoadError::Corrupt(format!(
+            "Failed to read tokens file '{}': {}",
+            path.display(),
+            e
+        ))
+    })?;
     if bytes.iter().all(|b| b.is_ascii_whitespace()) {
         log::info!("[TOKEN_IO] read_tokens_at: file is empty, returning default");
         return Ok(TokensFile::default());
     }
-    tokens_from_bytes(path, &bytes, mode)
+    tokens_from_bytes(path, &bytes, mode, fetch_key)
 }
 
 /// Parse legacy ≤ v2.10.0 plaintext tokens JSON (issue #352). Shared by the
@@ -299,20 +358,21 @@ fn parse_legacy_tokens_file(bytes: &[u8], path: &Path) -> Result<TokensFile, Str
     })
 }
 
-/// Decode the raw bytes of a `tokens.json` file into a [`TokensFile`],
-/// fetching the decryption key from the OS keychain as required.
+/// Decode the raw bytes of a `tokens.json` file, fetching the encrypted-store
+/// key through the injected typed keychain reader.
 ///
-/// - Encrypted (starts with the `PJENC` magic): the key must already
-///   exist (`keychain::get_tokens_aes_key`); a missing or locked keychain is
-///   an error in every read mode, exactly like a corrupt file.
-/// - Legacy plaintext JSON (starts with `{`, i.e. any release ≤ v2.10.0):
-///   parsed first. [`TokenReadMode::MigrateLegacy`] then replaces the file
-///   with ciphertext; [`TokenReadMode::ReadOnly`] returns the parsed value
-///   without creating a key or changing storage.
-fn tokens_from_bytes(path: &Path, bytes: &[u8], mode: TokenReadMode) -> Result<TokensFile, String> {
+/// A platform-unavailable key lookup is kept distinct from a present key that
+/// fails authentication or a malformed token payload. This distinction is what
+/// lets setup protect recoverable ciphertext from an empty-state overwrite.
+fn tokens_from_bytes(
+    path: &Path,
+    bytes: &[u8],
+    mode: TokenReadMode,
+    fetch_key: impl FnOnce() -> Result<[u8; 32], crate::keychain::KeychainReadError>,
+) -> Result<TokensFile, TokensLoadError> {
     if bytes.starts_with(TOKENS_MAGIC) {
-        let key = crate::keychain::get_tokens_aes_key()?;
-        tokens_from_bytes_with_key(path, bytes, &key, mode)
+        let key = fetch_key().map_err(TokensLoadError::from)?;
+        tokens_from_bytes_with_key(path, bytes, &key, mode).map_err(TokensLoadError::Corrupt)
     } else if bytes.starts_with(b"{") {
         // Issue #352: parse the legacy plaintext BEFORE touching the OS
         // keychain — see `decode_legacy_with_key_fetcher`, which parses
@@ -322,13 +382,13 @@ fn tokens_from_bytes(path: &Path, bytes: &[u8], mode: TokenReadMode) -> Result<T
             path,
             bytes,
             mode,
-            crate::keychain::get_or_create_tokens_aes_key,
+            crate::keychain::read_or_create_tokens_aes_key,
         )
     } else {
-        Err(format!(
+        Err(TokensLoadError::Corrupt(format!(
             "tokens file '{}' is neither PJENC-encrypted nor plaintext JSON; refusing to parse",
             path.display()
-        ))
+        )))
     }
 }
 
@@ -342,14 +402,14 @@ fn decode_legacy_with_key_fetcher(
     path: &Path,
     bytes: &[u8],
     mode: TokenReadMode,
-    fetch_key: impl FnOnce() -> Result<[u8; 32], String>,
-) -> Result<TokensFile, String> {
-    let parsed = parse_legacy_tokens_file(bytes, path)?;
+    fetch_key: impl FnOnce() -> Result<[u8; 32], crate::keychain::KeychainReadError>,
+) -> Result<TokensFile, TokensLoadError> {
+    let parsed = parse_legacy_tokens_file(bytes, path).map_err(TokensLoadError::Corrupt)?;
     if mode == TokenReadMode::ReadOnly {
         return Ok(parsed);
     }
     let key = fetch_key()?;
-    migrate_parsed_legacy(path, parsed, &key)
+    migrate_parsed_legacy(path, parsed, &key).map_err(TokensLoadError::Corrupt)
 }
 
 /// Re-write an already-parsed legacy [`TokensFile`] as ciphertext (issue
@@ -556,7 +616,7 @@ fn platform_pid_exists(_pid: u32) -> Option<bool> {
 /// generated on first use and stored in the OS keychain (issue #140); a
 /// missing/unavailable keychain is a hard error here — silently falling
 /// back to plaintext would regress #140.
-pub fn write_tokens_atomic(path: &PathBuf, contents: &TokensFile) -> Result<(), String> {
+pub fn write_tokens_atomic(path: &Path, contents: &TokensFile) -> Result<(), String> {
     let key = crate::keychain::get_or_create_tokens_aes_key()?;
     write_tokens_atomic_with_key(path, contents, &key)
 }
@@ -565,7 +625,7 @@ pub fn write_tokens_atomic(path: &PathBuf, contents: &TokensFile) -> Result<(), 
 /// and by the test suite (which injects a fixed key so tests never touch
 /// the OS keychain).
 fn write_tokens_atomic_with_key(
-    path: &PathBuf,
+    path: &Path,
     contents: &TokensFile,
     key: &[u8; 32],
 ) -> Result<(), String> {
@@ -675,7 +735,25 @@ fn write_tokens_atomic_with_key(
 /// a fresh refresh token on the next launch.
 pub fn persist_tokens(state: &Arc<crate::AppState>, app: &tauri::AppHandle) -> Result<(), String> {
     let path = tokens_file_path(app)?;
+    persist_tokens_at_with_writer(state, &path, write_tokens_atomic)
+}
+
+/// Path-level persist core with the final writer injected. The guard, global
+/// lock, and consistent two-slot snapshot are identical in tests and
+/// production; only the keychain-backed final write is replaceable.
+fn persist_tokens_at_with_writer(
+    state: &Arc<crate::AppState>,
+    path: &Path,
+    write: impl FnOnce(&Path, &TokensFile) -> Result<(), String>,
+) -> Result<(), String> {
     with_tokens_write_lock(|| {
+        if state.tokens_load.blocks_persist() {
+            return Err(
+                "Refusing to overwrite tokens.json after a keychain-unavailable load; \
+                 retry the token read or reset token storage first"
+                    .to_string(),
+            );
+        }
         // Issue #800: bind BOTH slot guards before either clone. Cloning one
         // slot guard at a time left a window in which a commit landing on the
         // second slot stayed in memory while the older value was written to
@@ -688,7 +766,7 @@ pub fn persist_tokens(state: &Arc<crate::AppState>, app: &tauri::AppHandle) -> R
             spotify_tokens: spotify.clone(),
             teams_tokens: teams.clone(),
         };
-        write_tokens_atomic(&path, &contents)
+        write(path, &contents)
     })
 }
 
@@ -704,8 +782,15 @@ pub fn persist_tokens(state: &Arc<crate::AppState>, app: &tauri::AppHandle) -> R
 /// from at all. The next persist generates a fresh key, and the user signs
 /// in again.
 pub fn reset_tokens_storage(app: &tauri::AppHandle) -> Result<(), String> {
-    crate::keychain::delete_tokens_aes_key()?;
-    clear_tokens_file(app)
+    with_tokens_write_lock(|| {
+        crate::keychain::delete_tokens_aes_key()?;
+        clear_tokens_file(app)?;
+        let state = app.state::<Arc<crate::AppState>>();
+        *state.tokens.spotify_mut() = None;
+        *state.tokens.teams_mut() = None;
+        state.tokens_load.mark_ready();
+        Ok(())
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1037,6 +1122,113 @@ mod tests {
             return Ok(TokensFile::default());
         }
         tokens_from_bytes_with_key(path, &bytes, &test_key(), TokenReadMode::MigrateLegacy)
+    }
+
+    #[test]
+    fn keychain_unavailable_preserves_ciphertext_and_blocks_persist() {
+        let dir = unique_tmp_dir("keychain-unavailable");
+        let path = dir.join("tokens.json");
+        write_tokens_atomic_with_key(&path, &sample_file(), &test_key()).unwrap();
+        let ciphertext = fs::read(&path).unwrap();
+        let state = Arc::new(crate::AppState::new());
+
+        let result = read_tokens_at_path_with_key_fetcher(
+            &path,
+            TokenReadMode::MigrateLegacy,
+            || {
+                Err(crate::keychain::KeychainReadError::Unavailable(
+                    "credential store locked".to_string(),
+                ))
+            },
+        );
+        assert!(
+            matches!(
+                &result,
+                Err(TokensLoadError::KeychainUnavailable(message))
+                    if message == "credential store locked"
+            ),
+            "platform failure must remain distinct from corruption: {result:?}"
+        );
+        assert_eq!(fs::read(&path).unwrap(), ciphertext);
+
+        crate::apply_token_load_result(&state, result);
+        assert_eq!(
+            state.tokens_load.state(),
+            crate::TokensLoadState::KeychainUnavailable
+        );
+        assert!(state.tokens.spotify().is_none());
+        assert!(state.tokens.teams().is_none());
+
+        let mut writer_called = false;
+        let persist = persist_tokens_at_with_writer(&state, &path, |_path, _contents| {
+            writer_called = true;
+            Ok(())
+        });
+        assert!(persist.is_err(), "the empty snapshot must be refused");
+        assert!(!writer_called, "the guarded persist must not reach its writer");
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            ciphertext,
+            "blocked persist must leave recoverable ciphertext byte-identical"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn corrupt_ciphertext_is_separate_and_keeps_recovery_persistence() {
+        let dir = unique_tmp_dir("corrupt-ciphertext");
+        let path = dir.join("tokens.json");
+        write_tokens_atomic_with_key(&path, &sample_file(), &test_key()).unwrap();
+        let mut ciphertext = fs::read(&path).unwrap();
+        *ciphertext.last_mut().unwrap() ^= 1;
+        fs::write(&path, &ciphertext).unwrap();
+        let state = Arc::new(crate::AppState::new());
+
+        let result =
+            read_tokens_at_path_with_key_fetcher(&path, TokenReadMode::ReadOnly, || Ok(test_key()));
+        assert!(
+            matches!(&result, Err(TokensLoadError::Corrupt(_))),
+            "authentication failure must classify as corrupt: {result:?}"
+        );
+
+        crate::apply_token_load_result(&state, result);
+        assert_eq!(state.tokens_load.state(), crate::TokensLoadState::Ready);
+        assert!(state.tokens.spotify().is_none());
+        assert!(state.tokens.teams().is_none());
+
+        let mut writer_called = false;
+        persist_tokens_at_with_writer(&state, &path, |_path, _contents| {
+            writer_called = true;
+            Ok(())
+        })
+        .expect("corrupt-store recovery must remain writable");
+        assert!(writer_called);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn successful_injected_read_unblocks_persist() {
+        let dir = unique_tmp_dir("successful-retry");
+        let path = dir.join("tokens.json");
+        write_tokens_atomic_with_key(&path, &sample_file(), &test_key()).unwrap();
+        let state = Arc::new(crate::AppState::new());
+        state.tokens_load.mark_keychain_unavailable();
+
+        let result =
+            read_tokens_at_path_with_key_fetcher(&path, TokenReadMode::ReadOnly, || Ok(test_key()));
+        crate::apply_token_load_result(&state, result.expect("an available key must load tokens"));
+
+        assert_eq!(state.tokens_load.state(), crate::TokensLoadState::Ready);
+        assert!(state.tokens.spotify().is_some());
+        assert!(state.tokens.teams().is_some());
+        let mut writer_called = false;
+        persist_tokens_at_with_writer(&state, &path, |_path, _contents| {
+            writer_called = true;
+            Ok(())
+        })
+        .expect("a successful read must unblock persistence");
+        assert!(writer_called);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1374,10 +1566,13 @@ mod tests {
                 Ok(test_key())
             })
             .expect_err("corrupt legacy must fail");
+        let message = match err {
+            TokensLoadError::Corrupt(message) => message,
+            other => panic!("parse failure must be corrupt, got {other:?}"),
+        };
         assert!(
-            err.contains("Failed to parse legacy plaintext tokens file"),
-            "parse error expected, got: {}",
-            err
+            message.contains("Failed to parse legacy plaintext tokens file"),
+            "parse error expected, got: {message}"
         );
         assert!(
             !called.get(),
@@ -1391,14 +1586,17 @@ mod tests {
         let err =
             decode_legacy_with_key_fetcher(&path, &valid, TokenReadMode::MigrateLegacy, || {
                 called.set(true);
-                Err::<[u8; 32], String>("keychain unavailable".to_string())
+                Err::<[u8; 32], crate::keychain::KeychainReadError>(
+                    crate::keychain::KeychainReadError::Unavailable(
+                        "keychain unavailable".to_string(),
+                    ),
+                )
             })
             .expect_err("failing fetcher must fail");
         assert!(called.get(), "key fetcher must run for valid legacy input");
         assert!(
-            err.contains("keychain unavailable"),
-            "fetcher error expected, got: {}",
-            err
+            matches!(err, TokensLoadError::KeychainUnavailable(message) if message == "keychain unavailable"),
+            "typed unavailable error expected, got: {err:?}"
         );
     }
 
