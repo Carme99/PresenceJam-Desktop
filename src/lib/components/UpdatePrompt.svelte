@@ -621,7 +621,7 @@
         onclick={dismissPrompt}
         aria-label={t('update.dismissAria')}
         title={t('common.dismiss')}
-        disabled={downloading || staging || stagedVersion}
+        disabled={downloading || staging || Boolean(stagedVersion)}
       >
         ×
       </button>
