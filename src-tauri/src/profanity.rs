@@ -4,10 +4,41 @@ const PROFANITY_LIST: &[&str] = &[
     "faggot", "douche", "asshole", "tits", "twat",
 ];
 
-const SAFE_PLACEHOLDER_DEFAULT: &str = "Currently Listening to Spotify";
+/// Shipped English default retained for config construction and English callers.
+const SAFE_PLACEHOLDER_DEFAULT: &str = crate::i18n::EN.placeholder_default;
 
 pub fn safe_placeholder_default() -> &'static str {
     SAFE_PLACEHOLDER_DEFAULT
+}
+
+/// The safe replacement fallback for a selected locale. Stored configuration
+/// is intentionally not consulted: this is resolved at post time.
+pub fn safe_placeholder_default_for_locale(locale: Option<&str>) -> &'static str {
+    crate::i18n::strings_for(crate::i18n::resolve_tag(locale)).placeholder_default
+}
+
+fn resolve_placeholder<'a>(placeholder: &'a str, locale: Option<&str>) -> &'a str {
+    if placeholder.trim().is_empty() || placeholder == SAFE_PLACEHOLDER_DEFAULT {
+        safe_placeholder_default_for_locale(locale)
+    } else {
+        placeholder
+    }
+}
+
+/// The exact placeholder text a profane status will post. Blank and shipped
+/// English defaults resolve to the selected locale; a resolved custom value
+/// that is itself profane also resolves to the locale's safe fallback.
+pub fn effective_placeholder<'a>(
+    placeholder: &'a str,
+    extra_words: &[String],
+    locale: Option<&str>,
+) -> &'a str {
+    let resolved = resolve_placeholder(placeholder, locale);
+    if contains_profanity(resolved, extra_words) {
+        safe_placeholder_default_for_locale(locale)
+    } else {
+        resolved
+    }
 }
 
 /// A normalized character plus whether it arrived via a lossy fold
@@ -707,25 +738,40 @@ fn apply_placeholder(template: &str, is_playing: bool) -> String {
 ///
 /// `extra_words` is the user's own lexicon (`teams.profanity_extra_words`,
 /// issue #538): it is matched with the same boundary/evasion rules as the
-/// built-in list (see [`contains_extra_word`]). An empty slice reproduces the
-/// pre-#538 behaviour exactly.
+/// built-in list (see [`contains_extra_word`]).
 pub fn filter_status(
     text: &str,
     placeholder: &str,
     is_playing: bool,
     extra_words: &[String],
 ) -> String {
+    filter_status_for_locale(
+        text,
+        placeholder,
+        is_playing,
+        extra_words,
+        Some(crate::i18n::current_tag()),
+    )
+}
+
+/// Locale-explicit form used by the polling write path, whose config snapshot
+/// is authoritative even while another native surface is repainting.
+pub fn filter_status_for_locale(
+    text: &str,
+    placeholder: &str,
+    is_playing: bool,
+    extra_words: &[String],
+    locale: Option<&str>,
+) -> String {
     if contains_profanity(text, extra_words) {
-        let mut effective_placeholder = if placeholder.trim().is_empty() {
-            SAFE_PLACEHOLDER_DEFAULT
-        } else {
-            placeholder
-        };
-        if contains_profanity(effective_placeholder, extra_words) {
+        let resolved = resolve_placeholder(placeholder, locale);
+        if contains_profanity(resolved, extra_words) {
             log::debug!("[PROFANITY] placeholder flagged; falling back to default");
-            effective_placeholder = SAFE_PLACEHOLDER_DEFAULT;
         }
-        apply_placeholder(effective_placeholder, is_playing)
+        apply_placeholder(
+            effective_placeholder(placeholder, extra_words, locale),
+            is_playing,
+        )
     } else {
         text.to_string()
     }
@@ -734,6 +780,17 @@ pub fn filter_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Existing English behavior tests use an explicit locale so a parallel
+    /// native-locale test cannot change their result through process state.
+    fn filter_status(
+        text: &str,
+        placeholder: &str,
+        is_playing: bool,
+        extra_words: &[String],
+    ) -> String {
+        filter_status_for_locale(text, placeholder, is_playing, extra_words, Some("en"))
+    }
 
     fn norm_str(s: &str) -> String {
         normalize(s).iter().map(|n| n.ch).collect()
@@ -881,6 +938,49 @@ mod tests {
     fn test_profane_placeholder_falls_back() {
         let result = filter_status("fuck you", "my shit mix", true, &[]);
         assert_eq!(result, SAFE_PLACEHOLDER_DEFAULT);
+    }
+
+    #[test]
+    fn localized_blank_and_shipped_defaults_post_translated_text() {
+        for (locale, expected) in [
+            ("de", "Hört gerade Spotify"),
+            ("fr", "Écoute actuellement Spotify"),
+        ] {
+            assert_eq!(
+                filter_status_for_locale("fuck", "", true, &[], Some(locale)),
+                expected
+            );
+            assert_eq!(
+                filter_status_for_locale("fuck", SAFE_PLACEHOLDER_DEFAULT, true, &[], Some(locale)),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn localized_profane_placeholder_and_custom_text_contract() {
+        assert_eq!(
+            filter_status_for_locale("fuck", "my shit mix", true, &[], Some("de")),
+            "Hört gerade Spotify"
+        );
+        assert_eq!(
+            filter_status_for_locale("fuck", "Eigener Status", true, &[], Some("de")),
+            "Eigener Status"
+        );
+
+        let _serialised = crate::i18n::LOCALE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        crate::i18n::set_current(Some("de"));
+        assert_eq!(
+            super::filter_status("fuck", "", true, &[]),
+            "Hört gerade Spotify"
+        );
+        crate::i18n::set_current(None);
+        assert_eq!(
+            super::filter_status("fuck", "", true, &[]),
+            SAFE_PLACEHOLDER_DEFAULT
+        );
     }
 
     #[test]

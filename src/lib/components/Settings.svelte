@@ -10,7 +10,7 @@
   // the pane back into the main window (closes this one); the onboarding
   // redirect forwards the navigation to the main window first.
   let { detached = false }: { detached?: boolean } = $props();
-  import { configStore, saveConfig, loadConfig, updateConfig, defaultConfig, clientSecretStateOf, SHORTCUT_SLOTS, shortcutBindingsOf, setShortcutBindings, type ShortcutSlot } from '$lib/stores/config';
+  import { configStore, saveConfig, loadConfig, updateConfig, defaultConfig, clientSecretStateOf, SHORTCUT_SLOTS, shortcutBindingsOf, setShortcutBindings, DEFAULT_PROFANITY_PLACEHOLDER, type ShortcutSlot } from '$lib/stores/config';
   import type { AppConfig, ShortcutReason, SyncStatus } from '$lib/types';
   import { authFlow, setSpotifyPhase, setTeamsPhase, resetSpotifyAuthFlow, resetTeamsAuthFlow, teamsPollMutex, pollTeamsAuth } from '$lib/stores/authFlow.svelte';
   import DeviceCodeBox from './DeviceCodeBox.svelte';
@@ -98,12 +98,25 @@
   function resetStatusFormatDefaults() {
     localConfig.teams.status_format = defaultConfig.teams.status_format;
     localConfig.teams.profanity_filter = defaultConfig.teams.profanity_filter;
-    localConfig.teams.profanity_placeholder = defaultConfig.teams.profanity_placeholder;
+    // Keep the shipped English sentinel in the draft. The input displays the
+    // localized default below, while Rust receives provenance it can localize
+    // again after a later language switch.
+    localConfig.teams.profanity_placeholder = DEFAULT_PROFANITY_PLACEHOLDER;
     // Issue #538: the custom lexicon belongs to this card too.
     localConfig.teams.profanity_extra_words = [...defaultConfig.teams.profanity_extra_words];
     extraWordsText = '';
     markDirty();
   }
+
+  function isDefaultProfanityPlaceholder(value: string): boolean {
+    return value.trim() === '' || value === DEFAULT_PROFANITY_PLACEHOLDER;
+  }
+
+  let profanityPlaceholderDisplay = $derived(
+    isDefaultProfanityPlaceholder(localConfig.teams.profanity_placeholder)
+      ? t('settings.placeholderTextPlaceholder')
+      : localConfig.teams.profanity_placeholder
+  );
   // Issue #432: reset the rules section to its (empty) default. Rules are
   // additive with serde defaults, so a default section is always valid.
   function resetRulesDefaults() {
@@ -664,20 +677,28 @@
     const format = localConfig.teams.status_format;
     const filter_enabled = localConfig.teams.profanity_filter;
     const placeholder = localConfig.teams.profanity_placeholder;
+    const locale = i18n.locale;
     const profane_sample = previewProfaneSample;
     // Issue #538: the preview must run the user's own lexicon too, otherwise a
     // word they just added shows no effect until the next real track.
     const extra_words = extraWordsClamp.clamped;
     if (previewDebounce) clearTimeout(previewDebounce);
+    const my = ++previewSeq;
     previewDebounce = setTimeout(async () => {
-      const my = ++previewSeq;
       try {
-        const v = await invoke<string>('preview_status', { format, filter_enabled, placeholder, profane_sample, extra_words });
-        if (my !== previewSeq) return;
+        const v = await invoke<string>('preview_status', {
+          format,
+          filter_enabled,
+          placeholder,
+          profane_sample,
+          extra_words,
+          locale
+        });
+        if (my !== previewSeq || locale !== i18n.locale) return;
         // #748: an identical sample is not a new one — never rewrite the node.
         if (v !== previewText) previewText = v;
       } catch (e) {
-        if (my !== previewSeq) return;
+        if (my !== previewSeq || locale !== i18n.locale) return;
         console.warn('[SETTINGS] preview_status failed:', e);
         previewText = t('settings.previewUnavailable');
       }
@@ -2559,7 +2580,10 @@
           <input
             id="profanity-placeholder"
             type="text"
-            bind:value={localConfig.teams.profanity_placeholder}
+            value={profanityPlaceholderDisplay}
+            oninput={(e) => {
+              localConfig.teams.profanity_placeholder = (e.currentTarget as HTMLInputElement).value;
+            }}
             placeholder={t('settings.placeholderTextPlaceholder')}
           />
         </div>

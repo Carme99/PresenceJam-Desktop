@@ -13,23 +13,37 @@ use tauri::{AppHandle, Emitter};
 /// Log tag prefix for this submodule (issue #79 item 3).
 const CMD: &str = "[CMD.SYNC]";
 
-/// Issue #870: the safe-placeholder text the manual status clear posts.
-/// Mirrors the paused-clear placeholder so a user who clears a manual
-/// status ends up looking identical to a user whose Spotify paused — that
-/// was the shipped 4.6 behaviour, and the regression risk is high enough
-/// that the text is anchored here rather than duplicated at the call site.
-///
-/// The emoji prefix comes from the polling-side helper so a future
-/// "make the prefix a config knob" change does not need to revisit the
-/// manual status clear.
-pub fn safe_placeholder_text(state: &AppState) -> String {
-    let cfg = state.config.get();
-    let text = cfg
+/// Shipped English values identify untouched paused-status fields at post
+/// time; they are never written back into the user's configuration.
+const DEFAULT_PAUSED_STATUS_FORMAT: &str = crate::i18n::EN.status_paused_default;
+
+/// Resolve the paused text from one locale-explicit config snapshot. Only an
+/// empty field or a byte-equal shipped English value is localized; every other
+pub(crate) fn paused_status_text(config: &Option<crate::config::AppConfig>) -> &str {
+    let locale = config.as_ref().and_then(|cfg| cfg.locale.as_deref());
+    let configured = config
         .as_ref()
-        .map(|c| c.teams.paused_status_format.clone())
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "Paused".to_string());
-    format!("{} {text}", crate::polling::MUSIC_EMOJI)
+        .map(|cfg| cfg.teams.paused_status_format.as_str());
+    match configured {
+        Some(value) if !value.trim().is_empty() && value != DEFAULT_PAUSED_STATUS_FORMAT => value,
+        _ => crate::i18n::strings_for(crate::i18n::resolve_tag(locale)).status_paused_default,
+    }
+}
+
+/// Add the standard music prefix to the shared paused-text result.
+pub(crate) fn paused_status_placeholder(config: &Option<crate::config::AppConfig>) -> String {
+    format!(
+        "{} {}",
+        crate::polling::MUSIC_EMOJI,
+        paused_status_text(config)
+    )
+}
+
+/// Issue #870: the safe-placeholder text the manual status clear posts.
+/// Uses the same snapshot resolver as polling and the headless clear.
+pub fn safe_placeholder_text(state: &AppState) -> String {
+    let config = state.config.get();
+    paused_status_placeholder(&config)
 }
 
 /// Issue #870: the placeholder expiry the manual status clear carries —
@@ -1091,5 +1105,36 @@ mod tests {
             !sync_status_from_state(&state).spotify_secret_conflict,
             "clearing the flag on reconnect must hide the banner again (issue #813)"
         );
+    }
+    #[test]
+    fn manual_status_clear_uses_config_paused_fallback() {
+        use super::{safe_placeholder_text, AppState};
+        let state = AppState::new();
+        for (locale, fallback, custom) in [
+            ("de", "Pausiert", "Kurze Pause ✨"),
+            ("fr", "En pause", "Pause ✨ personnalisée"),
+        ] {
+            let mut config = crate::config::AppConfig {
+                locale: Some(locale.to_string()),
+                ..Default::default()
+            };
+            for configured in ["", "Paused", "   "] {
+                config.teams.paused_status_format = configured.to_string();
+                *state.config.get_mut() = Some(config.clone());
+                assert_eq!(
+                    safe_placeholder_text(&state),
+                    format!("🎵 {fallback}"),
+                    "empty, whitespace-only, and shipped-English paused text use the config locale"
+                );
+            }
+
+            config.teams.paused_status_format = custom.to_string();
+            *state.config.get_mut() = Some(config);
+            assert_eq!(
+                safe_placeholder_text(&state),
+                format!("🎵 {custom}"),
+                "custom paused text remains byte-identical"
+            );
+        }
     }
 }

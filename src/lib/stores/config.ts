@@ -1,6 +1,11 @@
 import { writable } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
 import type { AppConfig } from '../types';
+import { en } from '../i18n/en';
+
+const PROFANITY_PLACEHOLDER_KEY = 'settings.placeholderTextPlaceholder' as const;
+const SHIPPED_PROFANITY_PLACEHOLDER = en[PROFANITY_PLACEHOLDER_KEY];
+
 
 /**
  * Frontend mirror of Rust's `ShortcutsConfig::default()` (issue #676).
@@ -41,12 +46,10 @@ export const defaultConfig: AppConfig = {
     status_format: '🎵 {artist} - {track} 🎧',
     clear_on_pause: true,
     profanity_filter: true,
-    // Canonical frontend default for the profanity placeholder (issue
-    // #342). Onboarding and Settings import it from here instead of
-    // hardcoding their own copies. The Rust backend's canonical default
-    // (profanity::safe_placeholder_default, via config.rs) carries the
-    // same text at runtime and owns the whitespace fallback.
-    profanity_placeholder: 'Currently Listening to Spotify',
+    // Persist the shipped English sentinel: Rust treats this value as the
+    // default and localizes it at post time, so locale changes cannot freeze
+    // a reset into bytes from the language active when Reset was clicked.
+    profanity_placeholder: SHIPPED_PROFANITY_PLACEHOLDER,
     start_minimized: false,
     availability_sync: false,
     presence_gate: true,
@@ -197,14 +200,11 @@ export function clientSecretStateOf(cfg: AppConfig): ClientSecretState {
 }
 
 /**
- * Single frontend canonical source for the profanity placeholder default
- * (issue #342). Import this instead of hardcoding the string; Settings'
- * reset-to-default reads the same value through `defaultConfig`.
- *
- * The setup wizard no longer imports it: since #531/#542 it merges into the
- * STORED config, so it never seeds a placeholder of its own.
+ * The shipped English default is also the persisted provenance sentinel. The
+ * Settings UI localizes its display from the active i18n locale, but Reset
+ * stores this value so Rust can localize it again after a later locale switch.
  */
-export const DEFAULT_PROFANITY_PLACEHOLDER = defaultConfig.teams.profanity_placeholder;
+export const DEFAULT_PROFANITY_PLACEHOLDER = SHIPPED_PROFANITY_PLACEHOLDER;
 
 
 /** The two bindable actions, in the order the Settings card shows them. */
@@ -291,6 +291,10 @@ export const configStore = writable<AppConfig>(structuredClone(defaultConfig));
  * not truth, and nothing may be written back on their behalf.
  */
 export const configHydrated = writable(false);
+
+// The shipped defaults are intentionally locale-independent. The i18n store
+// owns runtime locale reconciliation; config data is only persisted, never
+// rewritten as a side effect of a config-store emission.
 
 /**
  * Rust `u64` fields are ts-rs `bigint` on the wire, and every one of them

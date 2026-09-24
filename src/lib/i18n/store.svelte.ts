@@ -45,8 +45,12 @@ const KNOWN: readonly Locale[] = ['en', 'de', 'fr'];
  */
 const DEFAULT_LOCALE: Locale = 'en';
 
-function isLocale(value: unknown): value is Locale {
-  return typeof value === 'string' && (KNOWN as readonly string[]).includes(value);
+function resolveLocale(value: unknown): Locale | null {
+  if (typeof value !== 'string') return null;
+  const raw = value.trim();
+  if (raw.length === 0) return null;
+  const base = raw.split(/[-_]/, 1)[0].trim().toLowerCase();
+  return (KNOWN as readonly string[]).includes(base) ? (base as Locale) : null;
 }
 
 /**
@@ -58,9 +62,9 @@ function isLocale(value: unknown): value is Locale {
 function migrateLegacyStorageKey(): void {
   try {
     const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
-    if (legacy === null) return;
-    if (isLocale(legacy) && localStorage.getItem(STORAGE_KEY) === null) {
-      localStorage.setItem(STORAGE_KEY, legacy);
+    const legacyLocale = resolveLocale(legacy);
+    if (legacyLocale !== null && localStorage.getItem(STORAGE_KEY) === null) {
+      localStorage.setItem(STORAGE_KEY, legacyLocale);
     }
     localStorage.removeItem(LEGACY_STORAGE_KEY);
   } catch {
@@ -76,9 +80,9 @@ migrateLegacyStorageKey();
  */
 function detectInitialLocale(): Locale {
   try {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (isLocale(stored)) {
-      return stored;
+    const storedLocale = resolveLocale(localStorage.getItem(STORAGE_KEY));
+    if (storedLocale !== null) {
+      return storedLocale;
     }
   } catch {
     // localStorage unavailable — fall through to browser detection.
@@ -88,15 +92,25 @@ function detectInitialLocale(): Locale {
       ? navigator.languages ?? [navigator.language]
       : [];
   for (const lang of candidates) {
-    const base = (lang ?? '').toLowerCase();
-    if (base.startsWith('de')) return 'de';
-    if (base.startsWith('fr')) return 'fr';
+    const resolved = resolveLocale(lang);
+    if (resolved !== null) return resolved;
   }
   return DEFAULT_LOCALE;
 }
 
 const initialLocale = detectInitialLocale();
 let current = $state<Locale>(initialLocale);
+
+type LocalePersistenceRequest = {
+  locale: Locale;
+  generation: number;
+  settled: Promise<void>;
+  resolve: () => void;
+};
+
+let localePersistenceGeneration = 0;
+let pendingLocalePersistence: LocalePersistenceRequest | null = null;
+let localePersistenceDraining = false;
 
 // #620: `<html lang>` drives screen-reader pronunciation and `:lang()`
 // styling. `app.html` ships the pre-hydration `lang="en"`; from the first
@@ -133,19 +147,57 @@ function applyLocale(next: Locale): void {
  * `set_locale` command, which also relabels the tray and the native
  * application menu without a restart.
  *
- * Best-effort: the webview has already switched, so a failed write must not
- * surface an error for what is a cosmetic change — the next launch simply
- * falls back to the stored value.
+ * Requests are serialized so native surfaces cannot apply an older completion
+ * after a newer selection. While one write is in flight, only the latest
+ * requested locale remains queued. A generation guard then lets only the
+ * current request update the shared config store after its IPC succeeds.
  */
-async function persistLocale(next: Locale): Promise<void> {
+async function drainLocalePersistence(): Promise<void> {
   try {
-    await invoke('set_locale', { locale: next });
-    // Keep the shared config store in step, so Settings is not left comparing
-    // its own draft against a stale locale.
-    configStore.update((cfg) => ({ ...cfg, locale: next }));
-  } catch (err) {
-    devLog(`[I18N] set_locale failed (locale stays mirror-only): ${String(err)}`);
+    while (pendingLocalePersistence !== null) {
+      const request = pendingLocalePersistence;
+      pendingLocalePersistence = null;
+      try {
+        await invoke('set_locale', { locale: request.locale });
+        if (request.generation === localePersistenceGeneration) {
+          // Keep the shared config store in step, so Settings is not left
+          // comparing its own draft against a stale locale.
+          configStore.update((cfg) => ({ ...cfg, locale: request.locale }));
+        }
+      } catch (err) {
+        devLog(
+          `[I18N] set_locale failed for '${request.locale}' ` +
+            `(current locale remains '${current}'): ${String(err)}`
+        );
+      } finally {
+        request.resolve();
+      }
+    }
+  } finally {
+    localePersistenceDraining = false;
   }
+}
+
+function persistLocale(next: Locale): Promise<void> {
+  let resolveRequest!: () => void;
+  const request: LocalePersistenceRequest = {
+    locale: next,
+    generation: ++localePersistenceGeneration,
+    settled: new Promise<void>((resolve) => {
+      resolveRequest = resolve;
+    }),
+    resolve: () => resolveRequest()
+  };
+
+  // A request that has not started is superseded immediately; the in-flight
+  // request retains its own promise until its IPC finishes.
+  pendingLocalePersistence?.resolve();
+  pendingLocalePersistence = request;
+  if (!localePersistenceDraining) {
+    localePersistenceDraining = true;
+    void drainLocalePersistence();
+  }
+  return request.settled;
 }
 
 /**
@@ -178,13 +230,14 @@ function migrateLegacyLocale(): void {
  * on disk.
  */
 function reconcile(cfg: AppConfig, hydrated: boolean): void {
-  if (isLocale(cfg.locale)) {
+  const locale = resolveLocale(cfg.locale);
+  if (locale !== null) {
     // #892: an unrelated config write (a Settings save, a toggle, a snooze)
     // carries the same locale — no locale work at all for it.
-    if (cfg.locale !== current) applyLocale(cfg.locale);
+    if (locale !== current) applyLocale(locale);
     return;
   }
-  if (typeof cfg.locale === 'string' && cfg.locale.length > 0) {
+  if (typeof cfg.locale === 'string') {
     applyLocale(DEFAULT_LOCALE);
     return;
   }
@@ -217,9 +270,10 @@ export const i18n = {
    * of truth) via the `set_locale` command. An unknown value is ignored.
    */
   async set(next: Locale): Promise<void> {
-    if (!isLocale(next)) return;
-    applyLocale(next);
-    await persistLocale(next);
+    const locale = resolveLocale(next);
+    if (locale === null) return;
+    applyLocale(locale);
+    await persistLocale(locale);
   }
 };
 
@@ -231,8 +285,8 @@ export const i18n = {
 if (typeof window !== 'undefined') {
   window.addEventListener('storage', (e) => {
     if (e.key !== STORAGE_KEY) return;
-    const next = e.newValue;
-    if (next === null || !isLocale(next)) return;
+    const next = resolveLocale(e.newValue);
+    if (next === null) return;
     // Same-value guard: `applyLocale` would re-tag the document.
     if (next === current) return;
     // Local only — the window that switched already wrote the config, so

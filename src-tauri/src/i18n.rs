@@ -1,8 +1,8 @@
 //! Rust-side UI string table for the native surfaces (4.7.0, issue #674).
 //!
 //! The webview owns its own dictionaries (`src/lib/i18n/{en,de,fr}.ts`); this
-//! module is the Rust counterpart for the literals the webview never renders:
-//! the tray menu (`tray.rs`) and the native application menu (`menu.rs`).
+//! module is the Rust counterpart for literals rendered outside the webview:
+//! the tray menu, native application menu, and posted Teams fallbacks.
 //!
 //! [`Strings`] carries one field per user-visible literal and the three tables
 //! below must stay field-for-field identical. That is enforced, not assumed:
@@ -61,6 +61,14 @@ pub struct Strings {
     pub status_not_syncing: &'static str,
     /// Whole status line while syncing with nothing playing.
     pub status_syncing_no_track: &'static str,
+    // ── Posted Teams status fallbacks (issue #980) ─────────────────────────
+    /// Safe text used when a profane track needs a replacement and the
+    /// configured placeholder is blank, shipped English, or itself profane.
+    pub placeholder_default: &'static str,
+    /// Shipped default posted while playback is paused.
+    pub status_paused_default: &'static str,
+    /// Shipped default posted when no track is playing.
+    pub status_stopped_default: &'static str,
     // ── Native application menu ─────────────────────────────────────────────
     pub menu_file: &'static str,
     pub menu_edit: &'static str,
@@ -151,6 +159,9 @@ pub const EN: Strings = Strings {
     status_paused: "Paused",
     status_not_syncing: "Not syncing",
     status_syncing_no_track: "Syncing — no track",
+    placeholder_default: "Currently Listening to Spotify",
+    status_paused_default: "Paused",
+    status_stopped_default: "Nothing playing on Spotify",
     menu_file: "File",
     menu_edit: "Edit",
     menu_view: "View",
@@ -206,6 +217,9 @@ pub const DE: Strings = Strings {
     status_paused: "Pausiert",
     status_not_syncing: "Nicht synchronisiert",
     status_syncing_no_track: "Synchronisiert — kein Titel",
+    placeholder_default: "Hört gerade Spotify",
+    status_paused_default: "Pausiert",
+    status_stopped_default: "Nichts läuft auf Spotify",
     menu_file: "Datei",
     menu_edit: "Bearbeiten",
     menu_view: "Ansicht",
@@ -261,6 +275,9 @@ pub const FR: Strings = Strings {
     status_paused: "En pause",
     status_not_syncing: "Non synchronisé",
     status_syncing_no_track: "Synchronisation — aucun titre",
+    placeholder_default: "Écoute actuellement Spotify",
+    status_paused_default: "En pause",
+    status_stopped_default: "Rien ne joue sur Spotify",
     menu_file: "Fichier",
     menu_edit: "Édition",
     menu_view: "Affichage",
@@ -335,6 +352,12 @@ pub fn strings_for(tag: &str) -> &'static Strings {
         "fr" => &FR,
         _ => &EN,
     }
+}
+
+/// Canonical tag of the process-wide installed table.
+pub fn current_tag() -> &'static str {
+    let index = CURRENT.load(Ordering::Relaxed) as usize % LOCALES.len();
+    LOCALES[index]
 }
 
 /// Index into [`LOCALES`] of the locale the native surfaces render in.
@@ -420,6 +443,9 @@ impl Strings {
             ("status_paused", self.status_paused),
             ("status_not_syncing", self.status_not_syncing),
             ("status_syncing_no_track", self.status_syncing_no_track),
+            ("placeholder_default", self.placeholder_default),
+            ("status_paused_default", self.status_paused_default),
+            ("status_stopped_default", self.status_stopped_default),
             ("menu_file", self.menu_file),
             ("menu_edit", self.menu_edit),
             ("menu_view", self.menu_view),

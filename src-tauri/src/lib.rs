@@ -1729,6 +1729,18 @@ fn cli_headless_state() -> (Arc<AppState>, Vec<String>) {
     }
     (state, failures)
 }
+/// Apply the manual-status filter using the config snapshot loaded by the
+/// headless CLI. The locale is passed explicitly rather than installed into
+/// the process-global native-language slot, so concurrent CLI surfaces cannot
+/// race one another while a different config is being published.
+fn filter_cli_manual_status(text: &str, config: Option<&crate::config::AppConfig>) -> String {
+    let placeholder = config
+        .map(|cfg| cfg.teams.profanity_placeholder.as_str())
+        .unwrap_or_default();
+    let extra_words = crate::config::profanity_extra_words_for_filter(config);
+    let locale = config.and_then(|cfg| cfg.locale.as_deref());
+    crate::profanity::filter_status_for_locale(text, placeholder, true, extra_words, locale)
+}
 
 /// Issue #870: `--set-status <message>` body. Same filter + clamp + Graph
 /// POST pipeline the Dashboard composer runs, with the same error strings,
@@ -1765,15 +1777,8 @@ fn cli_set_manual_status_from_disk(message: &str, expiry_minutes: u32) -> Result
         // Same UX as the Dashboard: blank submit clears.
         return cli_clear_manual_status_from_disk();
     }
-    let placeholder = state
-        .config
-        .get()
-        .as_ref()
-        .map(|c| c.teams.profanity_placeholder.clone())
-        .unwrap_or_default();
     let cfg_guard = state.config.get();
-    let extra_words = crate::config::profanity_extra_words_for_filter(cfg_guard.as_ref());
-    let posted_text = crate::profanity::filter_status(&text, &placeholder, true, extra_words);
+    let posted_text = filter_cli_manual_status(&text, cfg_guard.as_ref());
 
     let now = chrono::Utc::now();
     let expires_at = now + chrono::Duration::minutes(expiry_minutes as i64);
@@ -3985,6 +3990,55 @@ mod tests {
             reason.contains("Teams"),
             "the reason must name Teams, got: {reason}"
         );
+    }
+    #[test]
+    fn test_headless_manual_status_uses_loaded_locale_for_safe_fallbacks() {
+        let source = include_str!("lib.rs");
+        let prod_source = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("lib.rs has no #[cfg(test)] mod tests block");
+        let cli_body = body_of(prod_source, "fn cli_set_manual_status_from_disk(");
+        assert!(
+            cli_body.contains("filter_cli_manual_status(&text, cfg_guard.as_ref())"),
+            "the real headless publish path must pass its loaded config snapshot to the locale-aware filter"
+        );
+        assert!(
+            !cli_body.contains("profanity::filter_status("),
+            "the headless publish path must not fall back to process-global locale state"
+        );
+
+        for (locale, localized) in [
+            ("de", "Hört gerade Spotify"),
+            ("fr", "Écoute actuellement Spotify"),
+        ] {
+            let mut config = crate::config::AppConfig {
+                locale: Some(locale.to_string()),
+                ..Default::default()
+            };
+
+            for placeholder in ["", crate::profanity::safe_placeholder_default()] {
+                config.teams.profanity_placeholder = placeholder.to_string();
+                assert_eq!(
+                    filter_cli_manual_status("what the fuck", Some(&config)),
+                    localized,
+                    "a blank or shipped-English placeholder must use the loaded locale"
+                );
+            }
+
+            config.teams.profanity_placeholder = "Eigener Status".to_string();
+            assert_eq!(
+                filter_cli_manual_status("what the fuck", Some(&config)),
+                "Eigener Status",
+                "a custom safe placeholder must remain byte-identical"
+            );
+            let custom_text = "Eigener Status ✨ — café";
+            assert_eq!(
+                filter_cli_manual_status(custom_text, Some(&config)),
+                custom_text,
+                "a clean custom status must remain byte-identical"
+            );
+        }
     }
 
     /// Issue #679: the flags must be reachable only as an alternative to the
