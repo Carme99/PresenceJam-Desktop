@@ -35,7 +35,7 @@ Expected response time: within 7 days.
 | Token Type | Storage Location | Encryption |
 |-----------|----------------|------------|
 | Spotify access/refresh tokens | `<app-config-dir>/PresenceJam/tokens.json` (hand-rolled atomic write via `src-tauri/src/token_io.rs`) | **AES-256-GCM ciphertext** (issue #140). The file is `b"PJENC" \| version byte (0x01) \| 12-byte random nonce \| AES-256-GCM ciphertext`; the 256-bit key is generated on first use and held in the OS keychain (Windows Credential Manager, macOS Keychain, Linux Secret Service via the `keyring` crate) under the namespaced slot `tokens_aes_key:com.presencejam.app`. See "Encrypted tokens.json" below. |
-| Teams access/refresh tokens | `<app-config-dir>/PresenceJam/tokens.json` (same hand-rolled atomic write) | **AES-256-GCM ciphertext** — same as Spotify above. |
+| Teams access/refresh tokens | `<app-config-dir>/PresenceJam/tokens.json` when persistence succeeds (same hand-rolled atomic write); otherwise only in `AppState` until restart | **AES-256-GCM ciphertext** — same as Spotify above. |
 | Spotify OAuth pending state (PKCE verifier, state) | **Not persisted to disk.** Lives in `AppState::PendingSpotifyAuth.state` only (in-memory); the deep-link callback resolves it before the user closes the app. If the process is killed mid-OAuth, the user re-starts the OAuth flow and Spotify issues a fresh code. | N/A — in-memory only. |
 
 **Encrypted tokens.json on disk (v3.0 — issue #140):** OAuth access/refresh
@@ -253,7 +253,7 @@ A Spotify token response without `refresh_token` surfaces the precise `token res
 
 Logs are written to the `tauri-plugin-log` log directory (`app_log_dir()` + the bundle id — see [`docs/architecture/storage-and-config.md`](./docs/architecture/storage-and-config.md)). Since **4.7.0 (#673)** rotation and retention are real and user-configurable: `lib.rs::log_rotation_strategy` maps `logging.keep_files` (1–20, default 3) to `RotationStrategy::KeepSome(n)` and the file target sets `.max_file_size(max_file_size_mb * 1024 * 1024)` (1–500 MB, default 10), both clamped by `config.rs::clamp_logging` and editable in Settings → Logging. `keep_files` counts **archived** files only, so the folder holds at most `keep_files + 1` files. A previous version of this document claimed logs were "rotated daily and retained for 30 days"; that claim was removed because no rotation code existed at the time — the v2.5.0 `logging.retention_days` config field was a no-op and was removed in v2.6.0.
 
-**Token response logging is bounded, not redacted (v2.6.3):** The `poll_teams_auth` debug log and the failed-response and parse-error paths in `refresh_teams_token` pass token-endpoint bodies through `truncate_for_log`. Bodies of 256 characters or fewer are logged unchanged; longer bodies are reduced to their first 256 Unicode scalar values plus a suffix containing the original byte count. The helper does not separately redact `access_token` or `refresh_token` fields, so logs may contain those values when they occur in the unchanged short body or the retained prefix. Treat application logs as sensitive. `start_teams_auth_device_code` does not log its response body. The helper is char-boundary-safe (`body.char_indices().nth(256)`) and unit-tested against the multibyte-UTF-8 case. See [issue #62](https://github.com/Carme99/PresenceJam-Desktop/issues/62).
+**Token response logging is bounded, not redacted (v2.6.3):** The `poll_teams_auth` debug log and the failed-response and parse-error paths in `refresh_teams_token` pass token-endpoint bodies through `truncate_for_log`. Bodies of 256 characters or fewer are logged unchanged; longer bodies are reduced to their first 256 Unicode scalar values plus a suffix containing the original byte count. The same helper bounds server-supplied descriptions before they are placed in user-visible sign-in failure messages. The helper does not separately redact `access_token` or `refresh_token` fields, so logs may contain those values when they occur in the unchanged short body or the retained prefix. Treat application logs as sensitive. `start_teams_auth_device_code` does not log its response body. The helper is char-boundary-safe (`body.char_indices().nth(256)`) and unit-tested against the multibyte-UTF-8 case. See [issue #62](https://github.com/Carme99/PresenceJam-Desktop/issues/62).
 
 
 ## Network Security
@@ -302,7 +302,7 @@ PresenceJam's device-code flow uses client id `14d82eec-204b-4c2f-b7e8-296a70dab
 
 The exact delegated scope set in `MICROSOFT_GRAPH_SCOPES` is `Presence.ReadWrite Presence.Read Calendars.ReadBasic MailboxSettings.Read openid profile offline_access`. `Presence.ReadWrite` covers status writes; `Presence.Read` covers presence gating; `Calendars.ReadBasic` supports the upcoming-calendar gate; `MailboxSettings.Read` supports working-hours import; `profile` supplies the `oid` claim used by the `/users/{oid}` presence fallback; and `openid` plus `offline_access` provide identity and refresh-token issuance.
 
-Because that application identity is shared with Microsoft Graph CLI and any other consumer of the same first-party registration, Microsoft-side consent, policy, service, and revocation changes can affect PresenceJam along with those other consumers. PresenceJam's own grant may therefore be attributed to Microsoft Graph Command Line Tools, but that owner name alone does not prove that a particular grant came from PresenceJam because other consumers share the identity. Revoking PresenceJam's grant stops this flow, while changing or revoking the shared registration also affects other consumers; there is no isolated PresenceJam app-specific revocation. Token persistence uses the encrypted local token store described above. Runtime token-endpoint logs may contain truncated token fields as described under **Logs**, but this documentation does not reproduce credentials.
+Because that application identity is shared with Microsoft Graph CLI and any other consumer of the same first-party registration, Microsoft-side consent, policy, service, and revocation changes can affect PresenceJam along with those other consumers. PresenceJam's own grant may therefore be attributed to Microsoft Graph Command Line Tools, but that owner name alone does not prove that a particular grant came from PresenceJam because other consumers share the identity. Revoking PresenceJam's grant stops this flow, while changing or revoking the shared registration also affects other consumers; there is no isolated PresenceJam app-specific revocation. When persistence succeeds, Teams tokens use the encrypted local token store described above; otherwise they remain only in `AppState` until restart. Runtime token-endpoint logs may contain truncated token fields as described under **Logs**, but this documentation does not reproduce credentials.
 
 Review these links to understand how your data is handled by each service.
 
@@ -310,15 +310,17 @@ Review these links to understand how your data is handled by each service.
 
 ### Token Storage
 
-Since v3.0 (issue #140), OAuth tokens (`tokens.json`) are **AES-256-GCM
-ciphertext on disk** in `<app-config-dir>/PresenceJam/tokens.json`
-(encrypted and written atomically by
-`src-tauri/src/token_io.rs::write_tokens_atomic`; decrypted by
-`read_tokens_at`). The 256-bit key is generated on first use and stored in
-the OS keychain (Windows Credential Manager, macOS Keychain, Linux Secret
-Service) under the namespaced slot `tokens_aes_key:com.presencejam.app`
-(`src-tauri/src/keychain.rs::get_or_create_tokens_aes_key`). Legacy
-plaintext files (≤ v2.10.0) are migrated on first read. See "Encrypted
+Since v3.0 (issue #140), successfully persisted OAuth tokens (`tokens.json`)
+are **AES-256-GCM ciphertext on disk** in
+`<app-config-dir>/PresenceJam/tokens.json` (encrypted and written atomically by
+`src-tauri/src/token_io.rs::write_tokens_atomic`; decrypted by `read_tokens_at`).
+The 256-bit key is generated on first use and stored in the OS keychain
+(Windows Credential Manager, macOS Keychain, Linux Secret Service) under the
+namespaced slot `tokens_aes_key:com.presencejam.app`
+(`src-tauri/src/keychain.rs::get_or_create_tokens_aes_key`). Legacy plaintext
+files (≤ v2.10.0) are migrated on first read. Teams device-code sign-in keeps
+new tokens in `AppState` and reports a warning if persistence fails, so an
+unpersisted session remains available only until restart. See "Encrypted
 tokens.json" under "Data Storage" for the format and source citations.
 
 **Residual exposure:** the encryption key is protected by the OS keychain,

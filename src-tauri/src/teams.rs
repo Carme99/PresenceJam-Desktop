@@ -484,7 +484,8 @@ fn classify_device_code_response(status: u16, retry_after: Option<u64>, body: &s
                 .map(str::trim)
                 .filter(|d| !d.is_empty())
                 .unwrap_or(error_resp.error.as_str());
-            PollAction::Fail(format!("Microsoft sign-in failed: {}", detail))
+            let message = format!("Microsoft sign-in failed: {detail}");
+            PollAction::Fail(truncate_for_log(&message))
         }
     }
 }
@@ -638,6 +639,14 @@ fn classify_token_endpoint_error(status_code: u16, body: &str) -> TeamsApiError 
                 }
                 _ => error_resp.error.clone(),
             };
+            let detail = truncate_for_log(&match error_resp.error.as_str() {
+                "interaction_required"
+                | "consent_required"
+                | "invalid_client"
+                | "unauthorized_client"
+                | "invalid_scope" => detail,
+                _ => format!("token endpoint error {}: {}", status_code, detail),
+            });
             match error_resp.error.as_str() {
                 "invalid_grant" => TeamsApiError::InvalidGrant,
                 "interaction_required"
@@ -645,10 +654,7 @@ fn classify_token_endpoint_error(status_code: u16, body: &str) -> TeamsApiError 
                 | "invalid_client"
                 | "unauthorized_client"
                 | "invalid_scope" => TeamsApiError::ReauthRequired(detail),
-                _ => TeamsApiError::Transient(format!(
-                    "token endpoint error {}: {}",
-                    status_code, detail
-                )),
+                _ => TeamsApiError::Transient(detail),
             }
         }
         Err(e) => TeamsApiError::Transient(format!(
@@ -1974,6 +1980,42 @@ mod tests {
     }
 
     #[test]
+    fn token_endpoint_errors_bound_untrusted_descriptions() {
+        use super::{classify_token_endpoint_error, truncate_for_log, TeamsApiError};
+
+        let description = "d".repeat(300);
+
+        let reauth = classify_token_endpoint_error(
+            400,
+            &format!(
+                r#"{{"error":"interaction_required","error_description":"{description}"}}"#
+            ),
+        );
+        assert!(matches!(&reauth, TeamsApiError::ReauthRequired(_)));
+        assert_eq!(
+            reauth.to_string(),
+            format!(
+                "Teams re-authentication required: {}",
+                truncate_for_log(&format!("interaction_required - {description}"))
+            )
+        );
+
+        let transient = classify_token_endpoint_error(
+            400,
+            &format!(
+                r#"{{"error":"temporarily_unavailable","error_description":"{description}"}}"#
+            ),
+        );
+        assert!(matches!(&transient, TeamsApiError::Transient(_)));
+        assert_eq!(
+            transient.to_string(),
+            truncate_for_log(&format!(
+                "token endpoint error 400: temporarily_unavailable - {description}"
+            ))
+        );
+    }
+
+    #[test]
     fn test_truncate_ascii_at_boundary() {
         // 256 ASCII chars exactly — at the limit, not over.
         // The helper takes "the first 256 chars", and the body has exactly
@@ -2822,6 +2864,25 @@ mod tests {
             }
             other => panic!("unauthorized_client must end the flow, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn device_code_failure_bounds_untrusted_description() {
+        use super::{classify_device_code_response, truncate_for_log, PollAction};
+
+        let description = "d".repeat(300);
+        let body = format!(
+            r#"{{"error":"bad_verification_code","error_description":"{description}"}}"#
+        );
+        let message = match classify_device_code_response(400, None, &body) {
+            PollAction::Fail(message) => message,
+            other => panic!("expected terminal device-code failure, got {other:?}"),
+        };
+
+        assert_eq!(
+            message,
+            truncate_for_log(&format!("Microsoft sign-in failed: {description}"))
+        );
     }
 
     /// Issue #797: the retry path is bounded. A server `Retry-After` (clamped
