@@ -528,8 +528,6 @@ pub async fn reconnect_spotify(
 /// Blocking body of [`reconnect_spotify`]: drop the session, persist the
 /// cleared file, forget the keychain secret, and ask the UI to re-auth.
 fn reconnect_spotify_impl(state: &Arc<AppState>, app: &AppHandle) -> Result<(), String> {
-    state.tokens_load.clear_spotify(&state.tokens);
-
     // Clear Spotify tokens from state
     state.tokens_load.clear_spotify(&state.tokens);
     log::info!("{CMD} reconnect_spotify: cleared spotify_tokens");
@@ -587,8 +585,6 @@ pub async fn reconnect_teams(
 /// Blocking body of [`reconnect_teams`]: drop the session, persist the cleared
 /// file, and ask the UI to re-auth.
 fn reconnect_teams_impl(state: &Arc<AppState>, app: &AppHandle) -> Result<(), String> {
-    state.tokens_load.clear_teams(&state.tokens);
-
     // Clear Teams tokens from state
     state.tokens_load.clear_teams(&state.tokens);
     log::info!("{CMD} reconnect_teams: cleared teams_tokens");
