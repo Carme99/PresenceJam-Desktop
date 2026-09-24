@@ -760,12 +760,26 @@ fn persist_tokens_at_with_retry(
         let mut spotify = state.tokens.spotify_mut();
         let mut teams = state.tokens.teams_mut();
         if state.tokens_load.blocks_persist() {
-            let recovered = read().map_err(|_| blocked_error.clone())?;
-            if spotify.is_none() && !recovery.blocks(crate::TokenProvider::Spotify) {
-                *spotify = recovered.spotify_tokens;
-            }
-            if teams.is_none() && !recovery.blocks(crate::TokenProvider::Teams) {
-                *teams = recovered.teams_tokens;
+            let recovered = match read() {
+                Ok(recovered) => Some(recovered),
+                Err(TokensLoadError::KeychainUnavailable(_)) => {
+                    return Err(blocked_error);
+                }
+                Err(TokensLoadError::Corrupt(message)) => {
+                    log::warn!(
+                        "[TOKEN_IO] persist retry: token store is corrupt; persisting current in-memory slots: {}",
+                        message
+                    );
+                    None
+                }
+            };
+            if let Some(recovered) = recovered {
+                if spotify.is_none() && !recovery.blocks(crate::TokenProvider::Spotify) {
+                    *spotify = recovered.spotify_tokens;
+                }
+                if teams.is_none() && !recovery.blocks(crate::TokenProvider::Teams) {
+                    *teams = recovered.teams_tokens;
+                }
             }
             // Do not clear provider tombstones here: an explicit None must
             // continue to win over stale ciphertext after the gate opens.
@@ -1248,6 +1262,67 @@ mod tests {
         assert_eq!(state_teams.refresh_token, written_teams.refresh_token);
         assert_eq!(state_teams.expires_at, written_teams.expires_at);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn corrupt_retry_unblocks_and_persists_fresh_oauth_slots() {
+        let state = Arc::new(crate::AppState::new());
+        crate::apply_token_load_result(
+            &state,
+            Err(TokensLoadError::KeychainUnavailable(
+                "credential store locked".to_string(),
+            )),
+        );
+        assert_eq!(
+            state.tokens_load.state(),
+            crate::TokensLoadState::KeychainUnavailable
+        );
+
+        let fresh_spotify = SpotifyTokens {
+            access_token: "fresh-oauth-spotify".to_string(),
+            refresh_token: "fresh-oauth-spotify-refresh".to_string(),
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(2),
+        };
+        let fresh_teams = TeamsTokens {
+            access_token: "fresh-oauth-teams".to_string(),
+            refresh_token: Some("fresh-oauth-teams-refresh".to_string()),
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(2),
+        };
+        state
+            .tokens_load
+            .commit_spotify(&state.tokens, fresh_spotify.clone());
+        state
+            .tokens_load
+            .commit_teams(&state.tokens, fresh_teams.clone());
+
+        let mut written = None;
+        persist_tokens_at_with_retry(
+            &state,
+            Path::new("unused.json"),
+            || Err(TokensLoadError::Corrupt("damaged ciphertext".to_string())),
+            |_path, contents| {
+                written = Some(contents.clone());
+                Ok(())
+            },
+        )
+        .expect("corrupt recovery must unblock the current in-memory snapshot");
+
+        assert_eq!(state.tokens_load.state(), crate::TokensLoadState::Ready);
+        let written = written.expect("corrupt recovery must reach the writer");
+        assert_eq!(
+            written
+                .spotify_tokens
+                .as_ref()
+                .map(|tokens| &tokens.access_token),
+            Some(&fresh_spotify.access_token)
+        );
+        assert_eq!(
+            written
+                .teams_tokens
+                .as_ref()
+                .map(|tokens| &tokens.access_token),
+            Some(&fresh_teams.access_token)
+        );
     }
 
     #[test]
