@@ -1704,8 +1704,7 @@ mod tests {
     #[test]
     fn security_disclosure_matches_borrowed_graph_identity_and_scopes() {
         const OWNER: &str = "Microsoft Graph Command Line Tools";
-        const SCOPE_PREFIX: &str =
-            "The exact delegated scope set in `MICROSOFT_GRAPH_SCOPES` is `";
+        const SCOPE_PREFIX: &str = "The exact delegated scope set in `MICROSOFT_GRAPH_SCOPES` is `";
         let security = include_str!("../../SECURITY.md");
 
         let block_start = security
