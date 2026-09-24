@@ -420,7 +420,7 @@ fn migrate_parsed_legacy(
     parsed: TokensFile,
     key: &[u8; 32],
 ) -> Result<TokensFile, String> {
-    write_tokens_atomic_with_key(&path.to_path_buf(), &parsed, key)?;
+    write_tokens_atomic_with_key(path, &parsed, key)?;
     log::info!(
         "[TOKEN_IO] migrated legacy plaintext tokens.json to AES-256-GCM ciphertext at {}",
         path.display()
@@ -1216,7 +1216,7 @@ mod tests {
 
         let result =
             read_tokens_at_path_with_key_fetcher(&path, TokenReadMode::ReadOnly, || Ok(test_key()));
-        crate::apply_token_load_result(&state, result.expect("an available key must load tokens"));
+        crate::apply_token_load_result(&state, result);
 
         assert_eq!(state.tokens_load.state(), crate::TokensLoadState::Ready);
         assert!(state.tokens.spotify().is_some());
@@ -1595,7 +1595,7 @@ mod tests {
             .expect_err("failing fetcher must fail");
         assert!(called.get(), "key fetcher must run for valid legacy input");
         assert!(
-            matches!(err, TokensLoadError::KeychainUnavailable(message) if message == "keychain unavailable"),
+            matches!(&err, TokensLoadError::KeychainUnavailable(message) if message == "keychain unavailable"),
             "typed unavailable error expected, got: {err:?}"
         );
     }
