@@ -25,7 +25,7 @@ pub(crate) fn paused_status_text(config: &Option<crate::config::AppConfig>) -> &
         .as_ref()
         .map(|cfg| cfg.teams.paused_status_format.as_str());
     match configured {
-        Some(value) if !value.is_empty() && value != DEFAULT_PAUSED_STATUS_FORMAT => value,
+        Some(value) if !value.trim().is_empty() && value != DEFAULT_PAUSED_STATUS_FORMAT => value,
         _ => crate::i18n::strings_for(crate::i18n::resolve_tag(locale)).status_paused_default,
     }
 }
@@ -1118,13 +1118,13 @@ mod tests {
                 locale: Some(locale.to_string()),
                 ..Default::default()
             };
-            for configured in ["", "Paused"] {
+            for configured in ["", "Paused", "   "] {
                 config.teams.paused_status_format = configured.to_string();
                 *state.config.get_mut() = Some(config.clone());
                 assert_eq!(
                     safe_placeholder_text(&state),
                     format!("🎵 {fallback}"),
-                    "empty and shipped-English paused text use the config locale"
+                    "empty, whitespace-only, and shipped-English paused text use the config locale"
                 );
             }
 
