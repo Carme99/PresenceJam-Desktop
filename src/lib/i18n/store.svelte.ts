@@ -101,6 +101,17 @@ function detectInitialLocale(): Locale {
 const initialLocale = detectInitialLocale();
 let current = $state<Locale>(initialLocale);
 
+type LocalePersistenceRequest = {
+  locale: Locale;
+  generation: number;
+  settled: Promise<void>;
+  resolve: () => void;
+};
+
+let localePersistenceGeneration = 0;
+let pendingLocalePersistence: LocalePersistenceRequest | null = null;
+let localePersistenceDraining = false;
+
 // #620: `<html lang>` drives screen-reader pronunciation and `:lang()`
 // styling. `app.html` ships the pre-hydration `lang="en"`; from the first
 // paint on, the active locale owns it.
@@ -136,19 +147,57 @@ function applyLocale(next: Locale): void {
  * `set_locale` command, which also relabels the tray and the native
  * application menu without a restart.
  *
- * Best-effort: the webview has already switched, so a failed write must not
- * surface an error for what is a cosmetic change — the next launch simply
- * falls back to the stored value.
+ * Requests are serialized so native surfaces cannot apply an older completion
+ * after a newer selection. While one write is in flight, only the latest
+ * requested locale remains queued. A generation guard then lets only the
+ * current request update the shared config store after its IPC succeeds.
  */
-async function persistLocale(next: Locale): Promise<void> {
+async function drainLocalePersistence(): Promise<void> {
   try {
-    await invoke('set_locale', { locale: next });
-    // Keep the shared config store in step, so Settings is not left comparing
-    // its own draft against a stale locale.
-    configStore.update((cfg) => ({ ...cfg, locale: next }));
-  } catch (err) {
-    devLog(`[I18N] set_locale failed (locale stays mirror-only): ${String(err)}`);
+    while (pendingLocalePersistence !== null) {
+      const request = pendingLocalePersistence;
+      pendingLocalePersistence = null;
+      try {
+        await invoke('set_locale', { locale: request.locale });
+        if (request.generation === localePersistenceGeneration) {
+          // Keep the shared config store in step, so Settings is not left
+          // comparing its own draft against a stale locale.
+          configStore.update((cfg) => ({ ...cfg, locale: request.locale }));
+        }
+      } catch (err) {
+        devLog(
+          `[I18N] set_locale failed for '${request.locale}' ` +
+            `(current locale remains '${current}'): ${String(err)}`
+        );
+      } finally {
+        request.resolve();
+      }
+    }
+  } finally {
+    localePersistenceDraining = false;
   }
+}
+
+function persistLocale(next: Locale): Promise<void> {
+  let resolveRequest!: () => void;
+  const request: LocalePersistenceRequest = {
+    locale: next,
+    generation: ++localePersistenceGeneration,
+    settled: new Promise<void>((resolve) => {
+      resolveRequest = resolve;
+    }),
+    resolve: () => resolveRequest()
+  };
+
+  // A request that has not started is superseded immediately; the in-flight
+  // request retains its own promise until its IPC finishes.
+  pendingLocalePersistence?.resolve();
+  pendingLocalePersistence = request;
+  if (!localePersistenceDraining) {
+    localePersistenceDraining = true;
+    void drainLocalePersistence();
+  }
+  return request.settled;
 }
 
 /**

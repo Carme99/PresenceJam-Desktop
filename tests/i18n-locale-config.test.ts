@@ -23,6 +23,19 @@ import { en } from '$lib/i18n/en';
 type ConfigModule = typeof import('$lib/stores/config');
 type I18nModule = typeof import('$lib/i18n');
 
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason: unknown) => void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
 /**
  * A fresh copy of the config + i18n modules with their own `invoke` mock.
  * `beforeEach` clears storage first, so each load starts from a clean mirror.
@@ -31,6 +44,7 @@ async function loadStores(): Promise<{
   config: ConfigModule;
   i18n: I18nModule['i18n'];
   setLocaleCalls: () => unknown[][];
+  invoke: Mock;
 }> {
   vi.resetModules();
   const core = await import('@tauri-apps/api/core');
@@ -44,7 +58,8 @@ async function loadStores(): Promise<{
     config,
     i18n: i18nModule.i18n,
     // Only the locale write-through calls, not the store's other IPC traffic.
-    setLocaleCalls: () => invoke.mock.calls.filter((call) => call[0] === 'set_locale')
+    setLocaleCalls: () => invoke.mock.calls.filter((call) => call[0] === 'set_locale'),
+    invoke
   };
 }
 
@@ -118,6 +133,95 @@ describe('locale source of truth (#674)', () => {
     expect(setLocaleCalls()).toEqual([['set_locale', { locale: 'de' }]]);
     expect(get(config.configStore).locale).toBe('de');
     expect(localStorage.getItem('presencejam:locale')).toBe('de');
+  });
+
+  it('serializes rapid locale switches and ignores a superseded success', async () => {
+    const { config, i18n, invoke, setLocaleCalls } = await loadStores();
+    config.configHydrated.set(true);
+    const de = deferred<undefined>();
+    const fr = deferred<undefined>();
+    invoke.mockImplementationOnce(() => de.promise).mockImplementationOnce(() => fr.promise);
+
+    const deSave = i18n.set('de');
+    const frSave = i18n.set('fr');
+
+    await vi.waitFor(() =>
+      expect(setLocaleCalls()).toEqual([['set_locale', { locale: 'de' }]])
+    );
+    expect(i18n.locale).toBe('fr');
+
+    de.resolve(undefined);
+    await deSave;
+    await vi.waitFor(() =>
+      expect(setLocaleCalls()).toEqual([
+        ['set_locale', { locale: 'de' }],
+        ['set_locale', { locale: 'fr' }]
+      ])
+    );
+
+    fr.resolve(undefined);
+    await frSave;
+    expect(setLocaleCalls()).toEqual([
+      ['set_locale', { locale: 'de' }],
+      ['set_locale', { locale: 'fr' }]
+    ]);
+    expect(i18n.locale).toBe('fr');
+    expect(get(config.configStore).locale).toBe('fr');
+    expect(localStorage.getItem('presencejam:locale')).toBe('fr');
+  });
+
+  it('keeps the latest locale when the in-flight older write fails', async () => {
+    const { config, i18n, invoke, setLocaleCalls } = await loadStores();
+    config.configHydrated.set(true);
+    const de = deferred<undefined>();
+    invoke.mockImplementationOnce(() => de.promise).mockResolvedValueOnce(undefined);
+
+    const deSave = i18n.set('de');
+    const frSave = i18n.set('fr');
+    await vi.waitFor(() =>
+      expect(setLocaleCalls()).toEqual([['set_locale', { locale: 'de' }]])
+    );
+    expect(i18n.locale).toBe('fr');
+
+    de.reject(new Error('de persistence failed'));
+    await Promise.all([deSave, frSave]);
+    expect(setLocaleCalls()).toEqual([
+      ['set_locale', { locale: 'de' }],
+      ['set_locale', { locale: 'fr' }]
+    ]);
+    expect(i18n.locale).toBe('fr');
+    expect(get(config.configStore).locale).toBe('fr');
+    expect(localStorage.getItem('presencejam:locale')).toBe('fr');
+  });
+
+  it('continues persistence after the IPC throws synchronously', async () => {
+    const { config, i18n, invoke, setLocaleCalls } = await loadStores();
+    config.configHydrated.set(true);
+    invoke
+      .mockImplementationOnce(() => {
+        throw new Error('synchronous IPC failure');
+      })
+      .mockResolvedValueOnce(undefined);
+
+    try {
+      await i18n.set('de');
+      const frSave = i18n.set('fr');
+      await vi.waitFor(() =>
+        expect(setLocaleCalls()).toEqual([
+          ['set_locale', { locale: 'de' }],
+          ['set_locale', { locale: 'fr' }]
+        ])
+      );
+      await frSave;
+      expect(setLocaleCalls()).toEqual([
+        ['set_locale', { locale: 'de' }],
+        ['set_locale', { locale: 'fr' }]
+      ]);
+      expect(i18n.locale).toBe('fr');
+      expect(get(config.configStore).locale).toBe('fr');
+    } finally {
+      invoke.mockResolvedValue(undefined);
+    }
   });
 
   it('an unknown locale is ignored: no persistence, no retag', async () => {
