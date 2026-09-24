@@ -614,8 +614,8 @@ mod tests {
             .find("may_commit(")
             .expect("poll_teams_auth_core must gate its commit on the flow being current");
         let commit = body
-            .find(".commit_teams(")
-            .expect("poll_teams_auth must commit the tokens it polled");
+            .find("commit_teams(")
+            .expect("poll_teams_auth_core must commit the tokens it polled");
         assert!(
             gate < commit,
             "the supersession gate must run before the token slot is written, or \
