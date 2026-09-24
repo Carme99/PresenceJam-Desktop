@@ -1,23 +1,19 @@
 /**
- * #531 / #542 — the setup wizard must MERGE into the stored config, never
- * replace it.
+ * The setup wizard is a thin orchestration layer: it forwards each
+ * authentication command with the payload the backend expects, delegates
+ * Teams polling and expiry rules to the shared auth-flow store, and persists
+ * only the four fields it owns by merging them into the stored config.
  *
- * The wizard is reachable by returning users from three live entry points
- * (Dashboard `goToSetup`, Settings' "Run onboarding", Reconnect), and the
- * pre-4.6 `finish()` built a whole `AppConfig` from the component's own
- * defaults — silently resetting the user's quiet hours, track rules,
- * profanity filter/placeholder, polling bounds, logging level and
- * `start_minimized`. These tests pin the merge guarantee at the level the
- * wizard actually uses: `mergeWizardConfig` is the single place `finish()`
- * derives the payload it hands to `saveConfig`.
- *
- * Fail pre-fix (with a replace-style literal these values are gone), pass
- * post-fix.
+ * Pure merge behavior is covered below. The mounted cases pin the actual
+ * component boundary: command payloads, authentication phase transitions,
+ * and finish ordering. Expiry and polling semantics stay in `authFlow.test.ts`
+ * so this file does not duplicate the shared implementation's rules.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, fireEvent } from '@testing-library/svelte';
 import { get } from 'svelte/store';
 import { mergeWizardConfig, defaultConfig } from '$lib/stores/config';
+import { t } from '$lib/i18n';
 import type { AppConfig } from '$lib/types';
 
 // The mount tests below drive the real component, so the Tauri IPC has to be
@@ -33,7 +29,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 
 import Onboarding from '$lib/components/Onboarding.svelte';
 import { currentView } from '$lib/stores/app';
-import { resetAuthFlow, setSpotifyPhase, setTeamsPhase } from '$lib/stores/authFlow.svelte';
+import { authFlow, resetAuthFlow, setSpotifyPhase, setTeamsPhase } from '$lib/stores/authFlow.svelte';
 
 /**
  * A stored config that differs from `defaultConfig` in every field the
@@ -189,11 +185,19 @@ function mockBackend(complete: boolean, config: AppConfig = structuredClone(defa
   });
 }
 
+
+/** Settle mocked IPC and Svelte's microtask flush scheduler. */
+async function settle(rounds = 24) {
+  for (let i = 0; i < rounds; i++) await Promise.resolve();
+}
 /** Mount the wizard and settle its mocked IPC plus Svelte's flush scheduler. */
-async function renderWizard(complete: boolean) {
-  mockBackend(complete);
+async function renderWizard(
+  complete: boolean,
+  config: AppConfig = structuredClone(defaultConfig)
+) {
+  mockBackend(complete, config);
   const rendered = render(Onboarding);
-  for (let i = 0; i < 24; i++) await Promise.resolve();
+  await settle();
   return rendered;
 }
 
@@ -221,6 +225,211 @@ describe('wizard escape hatch (#967)', () => {
     const { queryByRole } = await renderWizard(false);
 
     expect(queryByRole('button', { name: 'Back to dashboard' })).toBeNull();
+  });
+});
+
+describe('mounted wizard command contracts (#763)', () => {
+  const spotifyClientId = 'a'.repeat(32);
+  const spotifyClientSecret = 'b'.repeat(32);
+
+  beforeEach(() => {
+    invoke.mockReset();
+    resetAuthFlow();
+    currentView.set('onboarding');
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+  });
+
+  it('starts Spotify auth with the credentials and canonical redirect URI', async () => {
+    const { container, getByRole } = await renderWizard(false);
+    invoke.mockClear();
+
+    await fireEvent.input(container.querySelector('#client-id') as HTMLInputElement, {
+      target: { value: spotifyClientId }
+    });
+    await fireEvent.input(container.querySelector('#client-secret') as HTMLInputElement, {
+      target: { value: spotifyClientSecret }
+    });
+    await fireEvent.click(getByRole('button', { name: t('onboarding.connectSpotify') }));
+    await settle();
+
+    expect(invoke).toHaveBeenCalledWith('start_spotify_auth', {
+      clientId: spotifyClientId,
+      clientSecret: spotifyClientSecret,
+      redirectUri: 'presencejam://callback'
+    });
+    expect(authFlow.spotify.phase).toBe('waiting');
+  });
+
+  it('completes Spotify from a manual callback and enters the connected phase', async () => {
+    setSpotifyPhase('waiting');
+    const { container, getByRole } = await renderWizard(false);
+    invoke.mockClear();
+
+    await fireEvent.input(container.querySelector('#manual-url') as HTMLInputElement, {
+      target: {
+        value: 'presencejam://callback?code=manual-code&state=oauth-state'
+      }
+    });
+    await fireEvent.click(getByRole('button', { name: t('onboarding.submitCode') }));
+    await settle();
+
+    expect(invoke).toHaveBeenCalledWith('complete_spotify_auth_manual', {
+      code: 'manual-code',
+      oauthState: 'oauth-state'
+    });
+    expect(authFlow.spotify.phase).toBe('done');
+  });
+
+  it('starts Teams device auth, opens its verification URL, and delegates polling', async () => {
+    setSpotifyPhase('done');
+    const { getByRole } = await renderWizard(false);
+    await fireEvent.click(getByRole('button', { name: t('onboarding.continue') }));
+    await settle();
+    invoke.mockClear();
+
+    invoke.mockImplementation(async (command: string) => {
+      switch (command) {
+        case 'start_teams_auth_device_code':
+          return {
+            user_code: 'ABCD-EFGH',
+            device_code: 'teams-device-code',
+            verification_url: 'https://microsoft.com/devicelogin',
+            interval: 7,
+            expires_in: 900
+          };
+        case 'open_external_url':
+        case 'poll_teams_auth':
+          return undefined;
+        default:
+          return undefined;
+      }
+    });
+
+    await fireEvent.click(
+      getByRole('button', { name: t('onboarding.startMicrosoftSignIn') })
+    );
+    await settle();
+
+    expect(invoke.mock.calls.map(([command]) => command)).toEqual([
+      'start_teams_auth_device_code',
+      'open_external_url',
+      'poll_teams_auth'
+    ]);
+    expect(invoke).toHaveBeenCalledWith('open_external_url', {
+      url: 'https://microsoft.com/devicelogin'
+    });
+    expect(invoke).toHaveBeenCalledWith('poll_teams_auth', {
+      deviceCode: 'teams-device-code',
+      interval: 7
+    });
+    expect(authFlow.teams.phase).toBe('done');
+  });
+
+  async function renderFinishStep(config: AppConfig) {
+    setSpotifyPhase('done');
+    setTeamsPhase('done');
+    const rendered = await renderWizard(false, config);
+    await fireEvent.click(rendered.getByRole('button', { name: t('onboarding.continue') }));
+    await settle();
+    await fireEvent.click(rendered.getByRole('button', { name: t('onboarding.continue') }));
+    await settle();
+    invoke.mockClear();
+    return rendered;
+  }
+
+  it('merges and saves wizard fields, conditionally enables autostart, and completes last', async () => {
+    const config = storedConfig();
+    const { container, getByRole } = await renderFinishStep(config);
+    let saved: AppConfig | undefined;
+    let completeOnboarding!: () => void;
+    const completionPending = new Promise<void>((resolve) => {
+      completeOnboarding = resolve;
+    });
+
+    invoke.mockImplementation(async (command: string, args?: { config?: AppConfig }) => {
+      switch (command) {
+        case 'load_config':
+          return structuredClone(config);
+        case 'save_config':
+          saved = structuredClone(args?.config);
+          return structuredClone(args?.config);
+        case 'set_autostart_enabled':
+          return undefined;
+        case 'complete_onboarding':
+          await completionPending;
+          return true;
+        default:
+          return undefined;
+      }
+    });
+
+    await fireEvent.input(container.querySelector('#client-id') as HTMLInputElement, {
+      target: { value: spotifyClientId }
+    });
+    await fireEvent.input(
+      container.querySelector('#status-format-onb') as HTMLInputElement,
+      { target: { value: 'Listening to {artist}' } }
+    );
+    await fireEvent.input(container.querySelector('#poll-interval-onb') as HTMLInputElement, {
+      target: { value: '25' }
+    });
+    await fireEvent.click(
+      container.querySelector('#launch-at-login-onb') as HTMLInputElement
+    );
+    await fireEvent.click(getByRole('button', { name: t('onboarding.finishSetup') }));
+    await settle();
+
+    expect(invoke.mock.calls.map(([command]) => command)).toEqual([
+      'load_config',
+      'save_config',
+      'set_autostart_enabled',
+      'complete_onboarding'
+    ]);
+    expect(invoke).toHaveBeenCalledWith('set_autostart_enabled', { enabled: true });
+    expect(saved?.spotify.client_id).toBe(spotifyClientId);
+    expect(saved?.teams.status_format).toBe('Listening to {artist}');
+    expect(saved?.polling.default_interval_seconds).toBe(25);
+    expect(saved?.autostart).toBe(true);
+    expect(saved?.status_rules).toEqual(config.status_rules);
+
+    // The lifecycle is not complete while its final command is still pending,
+    // so the wizard must remain mounted and must not expose a false success.
+    expect(get(currentView)).toBe('onboarding');
+
+    completeOnboarding();
+    await settle();
+
+    expect(get(currentView)).toBe('dashboard');
+  });
+
+  it('skips the autostart command when the launch-at-login choice is off', async () => {
+    const config = storedConfig();
+    const { getByRole } = await renderFinishStep(config);
+    let saved: AppConfig | undefined;
+
+    invoke.mockImplementation(async (command: string, args?: { config?: AppConfig }) => {
+      if (command === 'load_config') return structuredClone(config);
+      if (command === 'save_config') {
+        saved = structuredClone(args?.config);
+        return structuredClone(args?.config);
+      }
+      if (command === 'complete_onboarding') return true;
+      return undefined;
+    });
+
+    await fireEvent.click(getByRole('button', { name: t('onboarding.finishSetup') }));
+    await settle();
+
+    expect(saved?.autostart).toBe(false);
+    expect(invoke.mock.calls.some(([command]) => command === 'set_autostart_enabled')).toBe(
+      false
+    );
+    expect(invoke).toHaveBeenCalledWith('complete_onboarding');
+    expect(get(currentView)).toBe('dashboard');
   });
 });
 
