@@ -81,21 +81,17 @@
   }
 
   /**
-   * Issue #598: the old implementation clicked a synthetic anchor on a
-   * `blob:` URL and then reported success unconditionally. No download
-   * handler is registered anywhere in the app, so on engines that ignore
-   * an unhandled download (WebKitGTK) nothing was written while the user
-   * was told the file had been saved. The backend now performs the write
-   * and returns the path it created (dev-logged below), so success is
-   * reported only for a file that actually exists.
+   * Issue #921: ask Rust to collect and save its own typed snapshot. The
+   * webview deliberately supplies neither JSON nor a destination, so a
+   * compromised component cannot turn this command into an arbitrary-content
+   * file-write primitive. The existing in-memory snapshot remains available
+   * for Copy diagnostics if the save fails.
    */
   async function saveToFile() {
     if (!snapshot || saving) return;
     saving = true;
     try {
-      const path = await invoke<string>('save_diagnostics_snapshot', {
-        json: formatText(snapshot)
-      });
+      const path = await invoke<string>('save_diagnostics_snapshot');
       devLog('[DIAGNOSTICS] snapshot saved to', path);
       feedback = t('diagnostics.savedToDownloads');
     } catch (e) {
