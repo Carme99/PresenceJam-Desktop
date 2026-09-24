@@ -1872,7 +1872,11 @@ mod tests {
     #[test]
     fn persist_binds_both_slot_guards_before_cloning() {
         let src = include_str!("token_io.rs");
-        let body = test_scan::fn_body(src, "fn persist_tokens_at_with_writer(");
+        let production_src = src
+            .split_once("#[cfg(test)]")
+            .expect("token_io.rs must contain its test module")
+            .0;
+        let body = test_scan::fn_body(production_src, "fn persist_tokens_at_with_writer(");
         let spotify_guard = body
             .find("state.tokens.spotify()")
             .expect("persist_tokens_at_with_writer must bind the Spotify slot guard");
