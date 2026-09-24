@@ -1987,9 +1987,7 @@ mod tests {
 
         let reauth = classify_token_endpoint_error(
             400,
-            &format!(
-                r#"{{"error":"interaction_required","error_description":"{description}"}}"#
-            ),
+            &format!(r#"{{"error":"interaction_required","error_description":"{description}"}}"#),
         );
         assert!(matches!(&reauth, TeamsApiError::ReauthRequired(_)));
         assert_eq!(
@@ -2871,9 +2869,8 @@ mod tests {
         use super::{classify_device_code_response, truncate_for_log, PollAction};
 
         let description = "d".repeat(300);
-        let body = format!(
-            r#"{{"error":"bad_verification_code","error_description":"{description}"}}"#
-        );
+        let body =
+            format!(r#"{{"error":"bad_verification_code","error_description":"{description}"}}"#);
         let message = match classify_device_code_response(400, None, &body) {
             PollAction::Fail(message) => message,
             other => panic!("expected terminal device-code failure, got {other:?}"),
