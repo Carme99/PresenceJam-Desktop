@@ -246,9 +246,9 @@ impl From<crate::keychain::KeychainReadError> for TokensLoadError {
             crate::keychain::KeychainReadError::Unavailable(message) => {
                 Self::KeychainUnavailable(message)
             }
-            crate::keychain::KeychainReadError::Absent => Self::Corrupt(
-                crate::keychain::TOKENS_AES_KEY_NOT_FOUND_MSG.to_string(),
-            ),
+            crate::keychain::KeychainReadError::Absent => {
+                Self::Corrupt(crate::keychain::TOKENS_AES_KEY_NOT_FOUND_MSG.to_string())
+            }
             crate::keychain::KeychainReadError::Corrupt(message) => Self::Corrupt(message),
         }
     }
@@ -258,9 +258,7 @@ impl From<crate::keychain::KeychainReadError> for TokensLoadError {
 /// [`TokensFile`] if the file does not exist or is empty. A platform keychain
 /// failure remains typed so setup can protect the recoverable ciphertext from
 /// an empty-state persist.
-pub fn read_tokens_at(
-    app: &tauri::AppHandle,
-) -> Result<TokensFile, TokensLoadError> {
+pub fn read_tokens_at(app: &tauri::AppHandle) -> Result<TokensFile, TokensLoadError> {
     let path = tokens_file_path(app).map_err(TokensLoadError::Corrupt)?;
     read_tokens_at_path(&path, TokenReadMode::MigrateLegacy)
 }
@@ -274,11 +272,7 @@ pub fn read_tokens_at_path(
     path: &Path,
     mode: TokenReadMode,
 ) -> Result<TokensFile, TokensLoadError> {
-    read_tokens_at_path_with_key_fetcher(
-        path,
-        mode,
-        crate::keychain::read_tokens_aes_key,
-    )
+    read_tokens_at_path_with_key_fetcher(path, mode, crate::keychain::read_tokens_aes_key)
 }
 
 /// Read an explicit token path with the encrypted-store key lookup injected.
@@ -1132,15 +1126,12 @@ mod tests {
         let ciphertext = fs::read(&path).unwrap();
         let state = Arc::new(crate::AppState::new());
 
-        let result = read_tokens_at_path_with_key_fetcher(
-            &path,
-            TokenReadMode::MigrateLegacy,
-            || {
+        let result =
+            read_tokens_at_path_with_key_fetcher(&path, TokenReadMode::MigrateLegacy, || {
                 Err(crate::keychain::KeychainReadError::Unavailable(
                     "credential store locked".to_string(),
                 ))
-            },
-        );
+            });
         assert!(
             matches!(
                 &result,
@@ -1165,7 +1156,10 @@ mod tests {
             Ok(())
         });
         assert!(persist.is_err(), "the empty snapshot must be refused");
-        assert!(!writer_called, "the guarded persist must not reach its writer");
+        assert!(
+            !writer_called,
+            "the guarded persist must not reach its writer"
+        );
         assert_eq!(
             fs::read(&path).unwrap(),
             ciphertext,

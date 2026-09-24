@@ -438,8 +438,10 @@ impl TokensLoadGate {
     }
 
     pub fn mark_keychain_unavailable(&self) {
-        self.state
-            .store(TokensLoadState::KeychainUnavailable as u8, Ordering::Release);
+        self.state.store(
+            TokensLoadState::KeychainUnavailable as u8,
+            Ordering::Release,
+        );
     }
 
     pub fn mark_ready(&self) {

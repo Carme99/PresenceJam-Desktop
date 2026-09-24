@@ -1038,9 +1038,8 @@ fn create_or_adopt_tokens_key(
 ) -> Result<[u8; 32], KeychainReadError> {
     let _guard = tokens_key_create_lock().lock();
     match read() {
-        Ok(b64) => decode_tokens_aes_key(&b64).map_err(|detail| {
-            KeychainReadError::Corrupt(corrupt_tokens_aes_key_help(detail))
-        }),
+        Ok(b64) => decode_tokens_aes_key(&b64)
+            .map_err(|detail| KeychainReadError::Corrupt(corrupt_tokens_aes_key_help(detail))),
         Err(keyring::Error::NoEntry) => {
             let key = generate().map_err(KeychainReadError::Unavailable)?;
             let b64 = STANDARD.encode(key);
