@@ -1,6 +1,21 @@
 import { writable } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
 import type { AppConfig } from '../types';
+import { en } from '../i18n/en';
+import { de } from '../i18n/de';
+import { fr } from '../i18n/fr';
+
+type FrontendLocale = 'en' | 'de' | 'fr';
+
+const PROFANITY_PLACEHOLDER_KEY = 'settings.placeholderTextPlaceholder' as const;
+const PROFANITY_PLACEHOLDERS: Record<FrontendLocale, string> = {
+  en: en[PROFANITY_PLACEHOLDER_KEY],
+  de: de[PROFANITY_PLACEHOLDER_KEY],
+  fr: fr[PROFANITY_PLACEHOLDER_KEY]
+};
+
+let activeFrontendLocale: FrontendLocale = 'en';
+
 
 /**
  * Frontend mirror of Rust's `ShortcutsConfig::default()` (issue #676).
@@ -41,12 +56,12 @@ export const defaultConfig: AppConfig = {
     status_format: '🎵 {artist} - {track} 🎧',
     clear_on_pause: true,
     profanity_filter: true,
-    // Canonical frontend default for the profanity placeholder (issue
-    // #342). Onboarding and Settings import it from here instead of
-    // hardcoding their own copies. The Rust backend's canonical default
-    // (profanity::safe_placeholder_default, via config.rs) carries the
-    // same text at runtime and owns the whitespace fallback.
-    profanity_placeholder: 'Currently Listening to Spotify',
+    // Frontend-only reset/preview default. Its text comes from the locale
+    // dictionaries rather than a second literal; the Rust backend keeps the
+    // persisted English config default unchanged.
+    get profanity_placeholder(): string {
+      return PROFANITY_PLACEHOLDERS[activeFrontendLocale];
+    },
     start_minimized: false,
     availability_sync: false,
     presence_gate: true,
@@ -197,14 +212,15 @@ export function clientSecretStateOf(cfg: AppConfig): ClientSecretState {
 }
 
 /**
- * Single frontend canonical source for the profanity placeholder default
- * (issue #342). Import this instead of hardcoding the string; Settings'
- * reset-to-default reads the same value through `defaultConfig`.
+ * Live frontend default for the profanity placeholder (issue #980). The
+ * config store keeps this in step with the hydrated locale; importing it gets
+ * the current canonical dictionary value without importing the i18n store
+ * back into this module (which would form an initialization cycle).
  *
- * The setup wizard no longer imports it: since #531/#542 it merges into the
- * STORED config, so it never seeds a placeholder of its own.
+ * The setup wizard continues to merge into the stored config, so it never
+ * seeds a placeholder of its own.
  */
-export const DEFAULT_PROFANITY_PLACEHOLDER = defaultConfig.teams.profanity_placeholder;
+export let DEFAULT_PROFANITY_PLACEHOLDER = PROFANITY_PLACEHOLDERS.en;
 
 
 /** The two bindable actions, in the order the Settings card shows them. */
@@ -291,6 +307,34 @@ export const configStore = writable<AppConfig>(structuredClone(defaultConfig));
  * not truth, and nothing may be written back on their behalf.
  */
 export const configHydrated = writable(false);
+
+// `defaultConfig` is a frontend view of defaults, not a persisted document.
+// Keep its one locale-dependent field derived from the canonical dictionaries
+// while leaving the hydrated config document — including custom values — alone.
+let latestConfig: AppConfig = defaultConfig;
+let configLoaded = false;
+
+function applyFrontendDefaultLocale(locale: FrontendLocale): void {
+  if (locale === activeFrontendLocale) return;
+  activeFrontendLocale = locale;
+  DEFAULT_PROFANITY_PLACEHOLDER = PROFANITY_PLACEHOLDERS[locale];
+}
+
+configStore.subscribe((cfg) => {
+  latestConfig = cfg;
+  if (!configLoaded) return;
+  const next: FrontendLocale =
+    cfg.locale === 'de' || cfg.locale === 'fr' ? cfg.locale : 'en';
+  applyFrontendDefaultLocale(next);
+});
+configHydrated.subscribe((hydrated) => {
+  configLoaded = hydrated;
+  const next: FrontendLocale =
+    hydrated && (latestConfig.locale === 'de' || latestConfig.locale === 'fr')
+      ? latestConfig.locale
+      : 'en';
+  applyFrontendDefaultLocale(next);
+});
 
 /**
  * Rust `u64` fields are ts-rs `bigint` on the wire, and every one of them
