@@ -289,16 +289,15 @@ impl ShortcutsStatus {
 pub enum ShortcutPreflightFailure {
     /// Linux is running without a display that the X11 backend can connect to.
     X11Unavailable,
-    /// The plugin's private worker cannot be proven alive even though X11 is
-    /// reachable through the public API, so registration must fail closed.
+    /// An explicit liveness check reports that the plugin's private worker is
+    /// unavailable even though X11 is reachable.
     WorkerUnavailable,
 }
 
 fn x11_preflight_result<T, E>(result: Result<T, E>) -> Result<(), ShortcutPreflightFailure> {
-    match result {
-        Ok(_) => Err(ShortcutPreflightFailure::WorkerUnavailable),
-        Err(_) => Err(ShortcutPreflightFailure::X11Unavailable),
-    }
+    result
+        .map(|_| ())
+        .map_err(|_| ShortcutPreflightFailure::X11Unavailable)
 }
 
 fn preflight_reason(failure: ShortcutPreflightFailure) -> ShortcutReason {
@@ -312,9 +311,8 @@ fn preflight_reason(failure: ShortcutPreflightFailure) -> ShortcutReason {
 pub trait ShortcutRegistrar {
     /// Checks the platform prerequisite before any release or grab is attempted.
     /// The default performs the real X11 connection probe on Linux and is a
-    /// no-op elsewhere. A reachable X11 display is not proof that the plugin's
-    /// private worker is alive, so Linux fails closed until a real worker probe
-    /// is available through the public API.
+    /// no-op elsewhere. A reachable X11 display is accepted; worker liveness is
+    /// only checked when a platform-specific registrar explicitly reports it.
     fn preflight(&self) -> Result<(), ShortcutPreflightFailure> {
         #[cfg(target_os = "linux")]
         {
@@ -1330,11 +1328,8 @@ mod tests {
         assert!(status.toggle_sync.registered);
     }
     #[test]
-    fn reachable_x11_fails_closed_and_unreachable_x11_is_refused() {
-        assert_eq!(
-            x11_preflight_result::<(), ()>(Ok(())),
-            Err(ShortcutPreflightFailure::WorkerUnavailable)
-        );
+    fn reachable_x11_preflight_is_accepted_and_unreachable_x11_is_refused() {
+        assert_eq!(x11_preflight_result::<(), ()>(Ok(())), Ok(()));
         assert_eq!(
             x11_preflight_result::<(), ()>(Err(())),
             Err(ShortcutPreflightFailure::X11Unavailable)
