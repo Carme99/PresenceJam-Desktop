@@ -48,6 +48,16 @@ const PLURAL_RULES: Record<Locale, Intl.PluralRules> = {
 
 export type TKey = keyof typeof en;
 
+export const WEEKDAY_KEYS: Readonly<Record<number, TKey>> = {
+  1: 'rules.day1',
+  2: 'rules.day2',
+  3: 'rules.day3',
+  4: 'rules.day4',
+  5: 'rules.day5',
+  6: 'rules.day6',
+  7: 'rules.day7'
+};
+
 type StripPluralSuffix<K> = K extends `${infer Base}_one` ? Base : never;
 
 /**
