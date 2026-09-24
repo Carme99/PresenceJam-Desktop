@@ -106,7 +106,7 @@ no explicit ACL change is required. For `tokens.json` this is defense-in-depth *
 the AES-256-GCM encryption (issue #140): the ciphertext is never
 world-readable at any point of the write. For `config.json` (still
 plaintext JSON — it holds no credentials, only settings) the mode is the
-only file-level protection. The log holds track titles, artist names and — at Debug level — the truncated Graph token-response fragment `poll_teams_auth` writes, so its 0600 mode is load-bearing, not cosmetic. Claims tied to the source:
+only file-level protection. The log holds track titles, artist names and — at Debug level — the bounded Graph token-response body `poll_teams_auth` writes, so its 0600 mode is load-bearing, not cosmetic. Claims tied to the source:
 
 | Claim | Source |
 |---|---|
@@ -253,7 +253,7 @@ A Spotify token response without `refresh_token` surfaces the precise `token res
 
 Logs are written to the `tauri-plugin-log` log directory (`app_log_dir()` + the bundle id — see [`docs/architecture/storage-and-config.md`](./docs/architecture/storage-and-config.md)). Since **4.7.0 (#673)** rotation and retention are real and user-configurable: `lib.rs::log_rotation_strategy` maps `logging.keep_files` (1–20, default 3) to `RotationStrategy::KeepSome(n)` and the file target sets `.max_file_size(max_file_size_mb * 1024 * 1024)` (1–500 MB, default 10), both clamped by `config.rs::clamp_logging` and editable in Settings → Logging. `keep_files` counts **archived** files only, so the folder holds at most `keep_files + 1` files. A previous version of this document claimed logs were "rotated daily and retained for 30 days"; that claim was removed because no rotation code existed at the time — the v2.5.0 `logging.retention_days` config field was a no-op and was removed in v2.6.0.
 
-**Token responses are truncated in logs (v2.6.3):** The `poll_teams_auth` debug log records the first 256 characters of each token-endpoint body before the success/error branch, and `refresh_teams_token` truncates failed-response and parse-error bodies the same way. Depending on JSON field order, that prefix can still contain an `access_token` or `refresh_token`: the helper limits the log entry but does not redact token fields. Complete response bodies are not written, but application logs must still be treated as sensitive. `start_teams_auth_device_code` does not log its response body. The helper is char-boundary-safe (`body.char_indices().nth(256)`) and unit-tested against the multibyte-UTF-8 case. See [issue #62](https://github.com/Carme99/PresenceJam-Desktop/issues/62).
+**Token response logging is bounded, not redacted (v2.6.3):** The `poll_teams_auth` debug log and the failed-response and parse-error paths in `refresh_teams_token` pass token-endpoint bodies through `truncate_for_log`. Bodies of 256 characters or fewer are logged unchanged; longer bodies are reduced to their first 256 Unicode scalar values plus a suffix containing the original byte count. The helper does not separately redact `access_token` or `refresh_token` fields, so logs may contain those values when they occur in the unchanged short body or the retained prefix. Treat application logs as sensitive. `start_teams_auth_device_code` does not log its response body. The helper is char-boundary-safe (`body.char_indices().nth(256)`) and unit-tested against the multibyte-UTF-8 case. See [issue #62](https://github.com/Carme99/PresenceJam-Desktop/issues/62).
 
 
 ## Network Security
