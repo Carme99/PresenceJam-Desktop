@@ -307,9 +307,9 @@ pub trait ShortcutRegistrar {
     fn preflight(&self) -> Result<(), ShortcutPreflightFailure> {
         #[cfg(target_os = "linux")]
         {
-            return x11rb::rust_connection::RustConnection::connect(None)
+            x11rb::rust_connection::RustConnection::connect(None)
                 .map(|_| ())
-                .map_err(|_| ShortcutPreflightFailure::X11Unavailable);
+                .map_err(|_| ShortcutPreflightFailure::X11Unavailable)
         }
         #[cfg(not(target_os = "linux"))]
         Ok(())
