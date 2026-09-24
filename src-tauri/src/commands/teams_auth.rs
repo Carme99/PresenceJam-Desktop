@@ -145,7 +145,7 @@ pub async fn poll_teams_auth(
             {
                 state
                     .tokens_load
-                    .commit_teams(&state.inner().tokens, tokens);
+                    .commit_teams(&state.tokens, tokens);
                 log::info!("{CMD} poll_teams_auth: tokens stored in AppState");
             }
             // Issue #562: the sign-in already succeeded — the token endpoint
