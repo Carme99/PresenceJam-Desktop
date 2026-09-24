@@ -3093,32 +3093,55 @@ pub(crate) fn matching_track_rule_at_with_ctx<'a>(
 /// (issue #870) can mirror it without copying the literal — a future
 /// "make the prefix configurable" change should land in one place.
 pub(crate) const MUSIC_EMOJI: &str = "\u{1F3B5}";
-/// S4 (issue #672): fallbacks used when no config is loaded — the same literals
-/// `config.rs` defaults to, so a config-less iteration renders exactly what a
-/// default config renders.
-const DEFAULT_PAUSED_STATUS_FORMAT: &str = "Paused";
-const DEFAULT_STOPPED_STATUS_FORMAT: &str = "Nothing playing on Spotify";
+/// Shipped English defaults remain byte-identical to the pre-localization
+/// values. They identify untouched fields at POST time; they are never written
+/// back into the user's configuration.
+const DEFAULT_PAUSED_STATUS_FORMAT: &str = crate::i18n::EN.status_paused_default;
+const DEFAULT_STOPPED_STATUS_FORMAT: &str = crate::i18n::EN.status_stopped_default;
 
-/// S4 (issue #672): the configured paused text, falling back to the contract
-/// default when the field is absent OR EMPTY. An empty text would otherwise post
-/// a bare music emoji, and clearing a Settings field means "back to the
-/// default", not "post nothing that identifies me".
+fn config_locale(config: &Option<AppConfig>) -> Option<&str> {
+    config.as_ref().and_then(|cfg| cfg.locale.as_deref())
+}
+
+/// Resolve only an empty field or a byte-equal shipped English default. Any
+/// other value is user-authored and is returned without normalization.
+fn localized_status_fallback<'a>(
+    configured: Option<&'a str>,
+    shipped_english: &'static str,
+    localized: &'static str,
+) -> &'a str {
+    match configured {
+        Some(value) if !value.is_empty() && value != shipped_english => value,
+        _ => localized,
+    }
+}
+
+/// The configured paused text, localized at post time when the stored value
+/// is empty or still the shipped English default.
 fn paused_status_text(config: &Option<AppConfig>) -> &str {
-    config
-        .as_ref()
-        .map(|c| c.teams.paused_status_format.as_str())
-        .filter(|text| !text.is_empty())
-        .unwrap_or(DEFAULT_PAUSED_STATUS_FORMAT)
+    let strings = crate::i18n::strings_for(crate::i18n::resolve_tag(config_locale(config)));
+    localized_status_fallback(
+        config
+            .as_ref()
+            .map(|cfg| cfg.teams.paused_status_format.as_str()),
+        DEFAULT_PAUSED_STATUS_FORMAT,
+        strings.status_paused_default,
+    )
 }
 
-/// [`paused_status_text`]'s no-track sibling — same empty-field contract.
+/// [`paused_status_text`]'s no-track sibling, with the same untouched-default
+/// and user-authored-value contract.
 fn stopped_status_text(config: &Option<AppConfig>) -> &str {
-    config
-        .as_ref()
-        .map(|c| c.teams.stopped_status_format.as_str())
-        .filter(|text| !text.is_empty())
-        .unwrap_or(DEFAULT_STOPPED_STATUS_FORMAT)
+    let strings = crate::i18n::strings_for(crate::i18n::resolve_tag(config_locale(config)));
+    localized_status_fallback(
+        config
+            .as_ref()
+            .map(|cfg| cfg.teams.stopped_status_format.as_str()),
+        DEFAULT_STOPPED_STATUS_FORMAT,
+        strings.status_stopped_default,
+    )
 }
+
 
 /// S4 (issue #672): the paused-clear placeholder. The emoji is ours; the text is
 /// `teams.paused_status_format` (default "Paused"), so the default renders
@@ -3151,14 +3174,24 @@ fn status_config_fingerprint(config: &Option<crate::config::AppConfig>) -> Strin
         .as_ref()
         .map(|c| c.teams.profanity_filter)
         .unwrap_or(true);
-    let placeholder = effective
-        .as_ref()
-        .map(|c| c.teams.profanity_placeholder.as_str())
-        .unwrap_or(profanity::safe_placeholder_default());
+    let placeholder = effective.as_ref().map_or_else(
+        || profanity::safe_placeholder_default_for_locale(config_locale(config)),
+        |c| {
+            profanity::effective_placeholder(
+                &c.teams.profanity_placeholder,
+                &c.teams.profanity_extra_words,
+                c.locale.as_deref(),
+            )
+        },
+    );
     let format = effective
         .as_ref()
         .map(|c| c.teams.status_format.as_str())
         .unwrap_or("🎵 {artist} - {track} 🎧");
+    let extra_words = effective
+        .as_ref()
+        .map(|c| format!("{:?}", c.teams.profanity_extra_words))
+        .unwrap_or_else(|| "[]".to_string());
     // S4 (issue #672): the manual-status texts and the rule schedules are part
     // of the same key, so editing a window, a weekday set, `pause_polling` or
     // one of the two placeholder texts mid-track forces the same one-off
@@ -3223,7 +3256,7 @@ fn status_config_fingerprint(config: &Option<crate::config::AppConfig>) -> Strin
         format!("quiet=[{}] rules=[{}]", q.join(","), t.join(","))
     });
     format!(
-        "filter={filter} placeholder={placeholder} format={format} paused={paused_format} stopped={stopped_format} rules={}",
+        "filter={filter} placeholder={placeholder} extra_words={extra_words} format={format} paused={paused_format} stopped={stopped_format} rules={}",
         rules.as_deref().unwrap_or("quiet=[] rules=[]")
     )
 }
@@ -4327,11 +4360,12 @@ pub(crate) fn process_track(
                     .as_ref()
                     .map(|c| c.teams.profanity_extra_words.as_slice())
                     .unwrap_or(&[]);
-                profanity::filter_status(
+                profanity::filter_status_for_locale(
                     &status_message,
                     placeholder,
                     track.is_playing,
                     extra_words,
+                    config_locale(config),
                 )
             } else {
                 status_message.clone()
@@ -7017,6 +7051,67 @@ mod tests {
             status_config_fingerprint(&Some(cleared_texts)),
             "an empty status text must fingerprint like the default it renders"
         );
+
+        // Locale changes move the fingerprint only when they change effective
+        // posted text. Untouched defaults are localized; user-authored copy
+        // remains byte-identical.
+        let mut german = crate::config::AppConfig::default();
+        german.locale = Some("de".to_string());
+        assert_ne!(fp, status_config_fingerprint(&Some(german)));
+
+        let mut custom = crate::config::AppConfig::default();
+        custom.locale = Some("de".to_string());
+        custom.teams.profanity_placeholder = "Eigener Status".to_string();
+        custom.teams.paused_status_format = "Kurze Pause".to_string();
+        custom.teams.stopped_status_format = "Gerade nicht".to_string();
+        assert_eq!(
+            status_config_fingerprint(&Some(custom)),
+            {
+                let mut english = crate::config::AppConfig::default();
+                english.teams.profanity_placeholder = "Eigener Status".to_string();
+                english.teams.paused_status_format = "Kurze Pause".to_string();
+                english.teams.stopped_status_format = "Gerade nicht".to_string();
+                status_config_fingerprint(&Some(english))
+            },
+            "a locale cannot change user-authored status text, so it cannot change its fingerprint"
+        );
+
+        let mut empty_german = crate::config::AppConfig::default();
+        empty_german.locale = Some("de".to_string());
+        empty_german.teams.profanity_placeholder = String::new();
+        empty_german.teams.paused_status_format = String::new();
+        empty_german.teams.stopped_status_format = String::new();
+        assert_eq!(
+            status_config_fingerprint(&Some(empty_german)),
+            status_config_fingerprint(&Some(crate::config::AppConfig {
+                locale: Some("de".to_string()),
+                ..Default::default()
+            })),
+            "empty values fingerprint like the localized text they post"
+        );
+
+        let mut profane_english = crate::config::AppConfig::default();
+        profane_english.teams.profanity_placeholder = "my shit mix".to_string();
+        profane_english.teams.paused_status_format = "Custom pause".to_string();
+        profane_english.teams.stopped_status_format = "Custom stop".to_string();
+        let mut profane_german = profane_english.clone();
+        profane_german.locale = Some("de".to_string());
+        assert_ne!(
+            status_config_fingerprint(&Some(profane_english)),
+            status_config_fingerprint(&Some(profane_german)),
+            "a rejected custom placeholder must fingerprint the locale fallback that is actually posted"
+        );
+
+        let mut custom_lexicon = crate::config::AppConfig::default();
+        custom_lexicon.teams.profanity_placeholder = "Eigener Status".to_string();
+        custom_lexicon.teams.profanity_extra_words = vec!["Status".to_string()];
+        let mut without_lexicon = custom_lexicon.clone();
+        without_lexicon.teams.profanity_extra_words.clear();
+        assert_ne!(
+            status_config_fingerprint(&Some(without_lexicon)),
+            status_config_fingerprint(&Some(custom_lexicon)),
+            "a lexicon that rejects the placeholder must change the fingerprint"
+        );
     }
 
     /// Issue #343: the 304 force-rewrite fires exactly when the stored key
@@ -7741,54 +7836,40 @@ mod tests {
         assert_eq!(format_minutes_of_day(1439), "23:59");
     }
 
-    /// S4 (issue #672): the two manual-status texts replace the hardcoded
-    /// literals — a default (or absent) config renders exactly what 4.6 posted,
-    /// and a configured text is what gets posted, emoji prefix included.
+    /// Issue #980: the exact strings handed to Teams localize shipped English
+    /// defaults and empty fields, while every user-authored value remains
+    /// byte-identical. English keeps the original posted output.
     #[test]
-    fn test_manual_status_placeholders_use_the_configured_text() {
+    fn manual_status_placeholders_localize_only_untouched_defaults() {
         use crate::config::AppConfig;
-        let default = Some(AppConfig::default());
-        assert_eq!(paused_status_placeholder(&default), "\u{1F3B5} Paused");
-        assert_eq!(
-            stopped_status_placeholder(&default),
-            "\u{1F3B5} Nothing playing on Spotify"
-        );
-        // No config loaded: the same fallbacks a default config renders.
-        assert_eq!(paused_status_placeholder(&None), "\u{1F3B5} Paused");
-        assert_eq!(
-            stopped_status_placeholder(&None),
-            "\u{1F3B5} Nothing playing on Spotify"
-        );
 
-        let mut custom = AppConfig::default();
-        custom.teams.paused_status_format = "Back in 5".to_string();
-        custom.teams.stopped_status_format = "Idle".to_string();
-        assert_eq!(
-            paused_status_placeholder(&Some(custom.clone())),
-            "\u{1F3B5} Back in 5"
-        );
-        assert_eq!(stopped_status_placeholder(&Some(custom)), "\u{1F3B5} Idle");
-        // An EMPTY field means "back to the default": posting a bare emoji
-        // would be a status message that no longer names the state.
-        let mut emptied = AppConfig::default();
-        emptied.teams.paused_status_format = String::new();
-        emptied.teams.stopped_status_format = String::new();
-        assert_eq!(
-            paused_status_placeholder(&Some(emptied)),
-            "\u{1F3B5} Paused"
-        );
-        assert_eq!(
-            stopped_status_placeholder(&Some(AppConfig::default())),
-            "\u{1F3B5} Nothing playing on Spotify"
-        );
-        assert_eq!(
-            paused_status_text(&Some(AppConfig::default())),
-            DEFAULT_PAUSED_STATUS_FORMAT
-        );
-        assert_eq!(
-            stopped_status_text(&Some(AppConfig::default())),
-            DEFAULT_STOPPED_STATUS_FORMAT
-        );
+        for (locale, paused, stopped) in [
+            ("de", "Pausiert", "Nichts läuft auf Spotify"),
+            ("fr", "En pause", "Rien ne joue sur Spotify"),
+        ] {
+            let mut defaults = AppConfig::default();
+            defaults.locale = Some(locale.to_string());
+            assert_eq!(paused_status_placeholder(&Some(defaults.clone())), format!("🎵 {paused}"));
+            assert_eq!(stopped_status_placeholder(&Some(defaults.clone())), format!("🎵 {stopped}"));
+
+            let mut empty = defaults.clone();
+            empty.teams.paused_status_format.clear();
+            empty.teams.stopped_status_format.clear();
+            assert_eq!(paused_status_placeholder(&Some(empty.clone())), format!("🎵 {paused}"));
+            assert_eq!(stopped_status_placeholder(&Some(empty)), format!("🎵 {stopped}"));
+
+            let mut custom = defaults;
+            custom.teams.paused_status_format = "Kurze Pause".to_string();
+            custom.teams.stopped_status_format = "Gerade nicht".to_string();
+            assert_eq!(paused_status_placeholder(&Some(custom.clone())), "🎵 Kurze Pause");
+            assert_eq!(stopped_status_placeholder(&Some(custom)), "🎵 Gerade nicht");
+        }
+
+        let english = Some(AppConfig::default());
+        assert_eq!(paused_status_placeholder(&english), "🎵 Paused");
+        assert_eq!(stopped_status_placeholder(&english), "🎵 Nothing playing on Spotify");
+        assert_eq!(paused_status_placeholder(&None), "🎵 Paused");
+        assert_eq!(stopped_status_placeholder(&None), "🎵 Nothing playing on Spotify");
     }
 
     /// S4 (issue #672) acceptance (c) structural guard: the driver consults the
