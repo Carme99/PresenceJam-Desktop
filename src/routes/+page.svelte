@@ -296,8 +296,7 @@
     bottom: 8px;
     right: 12px;
     font-size: 11px;
-    color: var(--fg-subtle);
-    opacity: 0.6;
+    color: var(--fg-muted);
     pointer-events: none;
   }
 </style>
