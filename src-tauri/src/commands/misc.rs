@@ -201,7 +201,6 @@ mod tests {
     use super::preview_status;
 
     #[test]
-    #[test]
     fn preview_status_uses_explicit_locale_over_stale_global_locale() {
         let _serialised = crate::i18n::LOCALE_TEST_LOCK
             .lock()
