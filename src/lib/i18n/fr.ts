@@ -539,6 +539,10 @@ export const fr: Dict = {
   'dashboard.snoozeResuming': 'Reprise…',
   'dashboard.snoozeResumeFailed':
     'Impossible de reprendre la synchronisation. La pause reste enregistrée — réessayez.',
+  // Issue #736 : la région live du chip n’annonce le début/fin qu’une seule fois ;
+  // le compte à rebours à la seconde n’est plus dans la région live.
+  'dashboard.snoozeStatusStart': 'Synchronisation en pause pour {minutes} minutes',
+  'dashboard.snoozeStatusEnd': 'Synchronisation reprise',
 
   // 4.7.0 — S7 notifications (#675)
   'settings.notificationsTrackChange': 'Me notifier quand le titre change',

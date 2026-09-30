@@ -683,3 +683,92 @@ describe('Dashboard theme toggle glyph (#680)', () => {
     expect(glyph(container)).toBe('☾');
   });
 });
+
+/**
+ * Issue #736: the snooze chip's `role="status"` was previously the parent of
+ * the per-second countdown, so assistive tech queued a new announcement every
+ * tick. The fix splits the chip into two siblings:
+ *   - a static-text node with `role="status"` that announces only on snooze
+ *     entry ("Sync paused for X minutes") and on snooze exit ("Sync resumed");
+ *   - a sibling with no live semantics (and no `aria-hidden`) that owns the
+ *     `snoozeLabel` countdown.
+ *
+ * These tests pin both halves of that contract. They fail against the
+ * pre-fix chip because the live region's text changes every second.
+ */
+describe('Snooze chip live region is silent per-second (#736)', () => {
+  function activateSnooze() {
+    vi.useFakeTimers();
+    configStore.set({
+      ...get(configStore),
+      snooze_until: new Date(Date.now() + 30 * 60 * 1000).toISOString()
+    });
+  }
+
+  it('keeps the live-region text static while the visible countdown ticks', async () => {
+    activateSnooze();
+    const { container } = render(Dashboard);
+    await waitFor(() => expect(container.querySelector('.snooze-status')).not.toBeNull());
+
+    const liveNode = container.querySelector('.snooze-status');
+    const countdownNode = container.querySelector('.snooze-countdown');
+    expect(liveNode).not.toBeNull();
+    expect(countdownNode).not.toBeNull();
+
+    // The live region announces on entry only.
+    expect(liveNode?.textContent?.trim()).toBe(
+      t('dashboard.snoozeStatusStart', { minutes: 30 })
+    );
+    expect(liveNode?.getAttribute('role')).toBe('status');
+    expect(liveNode?.getAttribute('aria-hidden')).toBeNull();
+
+    // The countdown sibling is the visible ticking text. It has no role and
+    // is not aria-hidden — sighted users and AT on demand both need it.
+    expect(countdownNode?.getAttribute('role')).toBeNull();
+    expect(countdownNode?.getAttribute('aria-hidden')).toBeNull();
+
+    const countdownBefore = countdownNode?.textContent ?? '';
+    expect(countdownBefore).toBeTruthy();
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    await tick();
+
+    // The live region's text is the same after 10 seconds.
+    expect(container.querySelector('.snooze-status')?.textContent?.trim()).toBe(
+      t('dashboard.snoozeStatusStart', { minutes: 30 })
+    );
+    // The visible countdown changed (the per-second tick still runs).
+    expect(container.querySelector('.snooze-countdown')?.textContent).not.toBe(countdownBefore);
+  });
+
+  it('announces "Sync resumed" exactly once when the snooze ends', async () => {
+    activateSnooze();
+    const { container } = render(Dashboard);
+    await waitFor(() => expect(container.querySelector('.snooze-status')).not.toBeNull());
+    expect(container.querySelector('.snooze-status')?.textContent?.trim()).toBe(
+      t('dashboard.snoozeStatusStart', { minutes: 30 })
+    );
+
+    // End the snooze via the documented public surface (config write).
+    await vi.advanceTimersByTimeAsync(1000);
+    await tick();
+    configStore.set({ ...get(configStore), snooze_until: null });
+    await tick();
+    await waitFor(() => {
+      const text = container.querySelector('.snooze-status')?.textContent?.trim();
+      expect(text).toBe(t('dashboard.snoozeStatusEnd'));
+    });
+    // The Resume button leaves with the active snooze, so the "Sync resumed"
+    // announcement is the only thing the live region says after end.
+    expect(container.querySelector('.snooze-resume')).toBeNull();
+  });
+
+  it('the chip never wraps the whole element in role="status"', async () => {
+    activateSnooze();
+    const { container } = render(Dashboard);
+    await waitFor(() => expect(container.querySelector('.snooze-chip')).not.toBeNull());
+    // The parent must not be the live region — only the inner span is.
+    expect(container.querySelector('.snooze-chip')?.getAttribute('role')).toBeNull();
+    expect(container.querySelector('.snooze-status')?.getAttribute('role')).toBe('status');
+  });
+});

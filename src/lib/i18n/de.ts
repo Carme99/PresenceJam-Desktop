@@ -528,6 +528,10 @@ export const de: Dict = {
   'dashboard.snoozeResuming': 'Wird fortgesetzt…',
   'dashboard.snoozeResumeFailed':
     'Die Synchronisierung konnte nicht fortgesetzt werden. Die Pause bleibt gespeichert — bitte erneut versuchen.',
+  // Issue #736: die Live-Region des Chips kündigt Start/Ende nur einmal an;
+  // der sekündliche Countdown ist nicht mehr in der Live-Region.
+  'dashboard.snoozeStatusStart': 'Sync für {minutes} Minuten pausiert',
+  'dashboard.snoozeStatusEnd': 'Sync wird fortgesetzt',
 
   // 4.7.0 — S7 notifications (#675)
   'settings.notificationsTrackChange': 'Benachrichtigen, wenn der Titel wechselt',
