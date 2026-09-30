@@ -118,12 +118,14 @@ impl ErrorEventPayload {
 
 /// Event sink used by the canonical error emitters. Production delegates to
 /// Tauri's emitter; tests capture the same production payload without a GUI
-/// runtime.
+/// runtime. The generic `R: tauri::Runtime` lets the same impl serve the
+/// production `Wry` runtime and the test `MockRuntime` from
+/// `tauri::test::mock_app()`.
 pub(crate) trait ErrorEventEmitter {
     fn emit_error_event(&self, event: &str, payload: ErrorEventPayload);
 }
 
-impl ErrorEventEmitter for AppHandle {
+impl<R: tauri::Runtime> ErrorEventEmitter for AppHandle<R> {
     fn emit_error_event(&self, event: &str, payload: ErrorEventPayload) {
         let _ = self.emit(event, payload);
     }
