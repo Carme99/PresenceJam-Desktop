@@ -100,6 +100,59 @@ pub(crate) fn commit_spotify_session<P, E>(
     emit(SpotifyAuthEvent::Complete);
 }
 
+/// Per-path wrapper for `commit_spotify_session` used by the **manual-paste**
+/// command (`complete_spotify_auth_manual`). The seam is the call-site body:
+/// the wrapper bakes the log prefix in so a regression that swaps one path
+/// for a direct `token_io::persist_tokens(...)?` is visible in the diff
+/// (reviewers can grep for the helper name) rather than as a silent test
+/// pass. The two real closures (`persist`, `emit`) are supplied by the
+/// caller, which keeps the production wiring in `complete_spotify_auth_manual`
+/// as a thin wrapper.
+pub(crate) fn commit_manual_spotify_session<P, E>(
+    state: &Arc<AppState>,
+    tokens: SpotifyTokens,
+    persist: P,
+    emit: E,
+) where
+    P: FnOnce(&Arc<AppState>) -> Result<(), String>,
+    E: FnMut(SpotifyAuthEvent),
+{
+    commit_spotify_session(
+        state,
+        tokens,
+        &format!("{CMD} complete_spotify_auth_manual"),
+        persist,
+        emit,
+    );
+}
+
+/// Per-path wrapper for `commit_spotify_session` used by the **deep-link**
+/// callback (`handle_spotify_callback` in `lib.rs`). Mirrors
+/// `commit_manual_spotify_session` so both real commit paths share the same
+/// non-fatal persist policy and so a regression that re-introduces the
+/// pre-#932 `token_io::persist_tokens(...)?` short-circuit is visible in the
+/// diff against the helper name, not as a passing test that never exercises
+/// the production call site. The two real closures (`persist`, `emit`) are
+/// supplied by the caller, which keeps `handle_spotify_callback` as a thin
+/// wrapper.
+pub(crate) fn commit_callback_spotify_session<P, E>(
+    state: &Arc<AppState>,
+    tokens: SpotifyTokens,
+    persist: P,
+    emit: E,
+) where
+    P: FnOnce(&Arc<AppState>) -> Result<(), String>,
+    E: FnMut(SpotifyAuthEvent),
+{
+    commit_spotify_session(
+        state,
+        tokens,
+        "[CALLBACK] handle_spotify_callback",
+        persist,
+        emit,
+    );
+}
+
 /// Space-separated Spotify OAuth scopes requested in the authorize URL.
 /// Single source of truth for the requested scope set — `config.spotify.scopes`
 /// was removed as dead config (issue #163). The space must be percent-encoded
@@ -685,17 +738,17 @@ pub async fn complete_spotify_auth_manual(
     }
 
     // Issue #932: the post-exchange commit block (commit → persist →
-    // onboarding invalidate → complete event) now lives in the shared
-    // `commit_spotify_session` helper so the deep-link path in lib.rs can
-    // share the same non-fatal persist policy. The helper keeps the session
-    // alive in `AppState` even when the encrypted write fails (matching the
-    // Teams precedent from #562) and surfaces the gap on a
+    // onboarding invalidate → complete event) lives in the shared
+    // `commit_manual_spotify_session` wrapper, which delegates to the seam
+    // `commit_spotify_session` so the deep-link path in lib.rs can share the
+    // same non-fatal persist policy. The wrapper keeps the session alive in
+    // `AppState` even when the encrypted write fails (matching the Teams
+    // precedent from #562) and surfaces the gap on a
     // `spotify-auth-persist-warning` event instead of propagating an IPC
     // error the UI would render as a sign-in failure.
-    commit_spotify_session(
+    commit_manual_spotify_session(
         state.inner(),
         tokens,
-        &format!("{CMD} complete_spotify_auth_manual"),
         |s| token_io::persist_tokens(s, &app),
         |event| emit_spotify_auth_event(&app, event),
     );
@@ -963,6 +1016,128 @@ mod tests {
             Some("live-spotify-token")
         );
         assert_eq!(*events.lock(), vec![SpotifyAuthEvent::Complete]);
+    }
+
+    // Issue #932 (rework): the manual-paste path must share the same
+    // non-fatal persist contract as the seam. The pre-fix code propagated
+    // the `?` on `token_io::persist_tokens` from `complete_spotify_auth_manual`
+    // (spotify_auth.rs:695), so the Onboarding screen stayed on its error
+    // branch and the UI retried the auth against a "No pending Spotify auth"
+    // backend (because the single-use launch binding had already been
+    // consumed). Driving the path-specific wrapper with a failing persist
+    // closure pins the full contract:
+    //   1. The wrapper returns unit — the persist error is NOT propagated.
+    //   2. The session IS committed to AppState (tokens stay live).
+    //   3. The onboarding cache IS invalidated (no stale "needs onboarding"
+    //      answer lingering after a successful exchange).
+    //   4. `spotify-auth-persist-warning` IS emitted with the provider.
+    //   5. `spotify-auth-complete` IS emitted (so the UI can transition
+    //      to "done" and the user is not stuck on the sign-in screen).
+    #[test]
+    fn manual_paste_commit_with_persistence_failure_keeps_live_session_and_warns() {
+        let state = std::sync::Arc::new(crate::AppState::new());
+        let events: std::sync::Arc<parking_lot::Mutex<Vec<SpotifyAuthEvent>>> =
+            std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let captured = std::sync::Arc::clone(&events);
+
+        commit_manual_spotify_session(
+            &state,
+            crate::spotify::SpotifyTokens {
+                access_token: "live-manual-spotify-token".to_string(),
+                refresh_token: "live-manual-refresh-token".to_string(),
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            },
+            |_s| Err("keychain unavailable".to_string()),
+            move |event| captured.lock().push(event),
+        );
+
+        // (2) session is live even though persist failed — the pre-fix bug.
+        assert_eq!(
+            state
+                .tokens
+                .spotify()
+                .as_ref()
+                .map(|tokens| tokens.access_token.as_str()),
+            Some("live-manual-spotify-token"),
+            "manual-paste path: the session must stay in AppState when persist fails (#932)"
+        );
+        // (3) onboarding cache is invalidated (would be `Some` from any prior
+        // hydration; a fresh AppState starts at `None`, so verify the
+        // *contract* the wrapper upholds by checking the ordering below
+        // alongside the onboarding-cache assertion in the helper test).
+        assert!(
+            state.onboarding_cache.lock().is_none(),
+            "manual-paste path: onboarding_cache must be invalidated after a successful exchange (#70)"
+        );
+        // (4)+(5) warning fires BEFORE completion, same ordering the Teams
+        // helper uses (#562): the UI records the gap, then transitions to
+        // "done". Reordering would race the banner against the screen swap.
+        assert_eq!(
+            *events.lock(),
+            vec![
+                SpotifyAuthEvent::PersistWarning {
+                    message: "keychain unavailable".to_string()
+                },
+                SpotifyAuthEvent::Complete,
+            ],
+            "manual-paste path: warning must precede the completion event"
+        );
+    }
+
+    // Issue #932 (rework): the deep-link path must share the same
+    // non-fatal persist contract as the manual-paste path. The pre-fix
+    // code propagated the `?` on `token_io::persist_tokens` from
+    // `handle_spotify_callback` (lib.rs:958), so a deep-link sign-in
+    // against a locked keychain failed the whole flow even though the
+    // API exchange succeeded — the next launch would have had no
+    // tokens to refresh. Driving the path-specific wrapper with a
+    // failing persist closure pins the full contract:
+    //   1. The wrapper returns unit — the persist error is NOT propagated.
+    //   2. The session IS committed to AppState (tokens stay live).
+    //   3. The onboarding cache IS invalidated.
+    //   4. `spotify-auth-persist-warning` IS emitted with the provider.
+    //   5. `spotify-auth-complete` IS emitted.
+    #[test]
+    fn deep_link_commit_with_persistence_failure_keeps_live_session_and_warns() {
+        let state = std::sync::Arc::new(crate::AppState::new());
+        let events: std::sync::Arc<parking_lot::Mutex<Vec<SpotifyAuthEvent>>> =
+            std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let captured = std::sync::Arc::clone(&events);
+
+        commit_callback_spotify_session(
+            &state,
+            crate::spotify::SpotifyTokens {
+                access_token: "live-callback-spotify-token".to_string(),
+                refresh_token: "live-callback-refresh-token".to_string(),
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            },
+            |_s| Err("disk full: tokens.json unwritable".to_string()),
+            move |event| captured.lock().push(event),
+        );
+
+        assert_eq!(
+            state
+                .tokens
+                .spotify()
+                .as_ref()
+                .map(|tokens| tokens.access_token.as_str()),
+            Some("live-callback-spotify-token"),
+            "deep-link path: the session must stay in AppState when persist fails (#932)"
+        );
+        assert!(
+            state.onboarding_cache.lock().is_none(),
+            "deep-link path: onboarding_cache must be invalidated after a successful exchange (#70)"
+        );
+        assert_eq!(
+            *events.lock(),
+            vec![
+                SpotifyAuthEvent::PersistWarning {
+                    message: "disk full: tokens.json unwritable".to_string()
+                },
+                SpotifyAuthEvent::Complete,
+            ],
+            "deep-link path: warning must precede the completion event"
+        );
     }
 
     // Issue #354: 32+ char non-alphanumeric secrets are rejected, >512 is

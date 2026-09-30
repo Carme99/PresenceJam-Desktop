@@ -484,8 +484,15 @@ export const de: Dict = {
   // Platzhalter — die Settings-Karte übergibt den Anzeigenamen
   // (`Microsoft Teams` oder `Spotify`), sodass ein Banner beide Anbieter
   // abdeckt.
+  // #932 B3 (rework): „die {provider}-Sitzung“ wird mit `provider =
+  // "Microsoft Teams"` zu „die Microsoft Teams-Sitzung“ — im Deutschen
+  // verlangt ein zusammengesetztes Eigenname-Bindestrich (Genitiv- bzw.
+  // Kompositabindung). Stattdessen wird der Anbietername mit „von“ an
+  // „Sitzung“ angeschlossen: das gilt für „Microsoft Teams“ und für
+  // „Spotify“ gleichermassen und vermeidet die Bindestrichfalle ohne
+  // eine separate deutsche Anbieterform.
   'settings.authPersistWarning':
-    'Angemeldet, aber dieses Gerät konnte die {provider}-Sitzung nicht speichern — sie funktioniert bis zum Beenden. {provider} erneut verbinden, um das Speichern zu wiederholen.',
+    'Angemeldet, aber dieses Gerät konnte die Sitzung von {provider} nicht speichern — sie funktioniert bis zum Beenden. {provider} erneut verbinden, um das Speichern zu wiederholen.',
 
   // 4.7.0 — S4 (rules engine)
   'rules.quietWindowHint':
