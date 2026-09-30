@@ -771,4 +771,44 @@ describe('Snooze chip live region is silent per-second (#736)', () => {
     expect(container.querySelector('.snooze-chip')?.getAttribute('role')).toBeNull();
     expect(container.querySelector('.snooze-status')?.getAttribute('role')).toBe('status');
   });
+
+  /**
+   * Regression for the stale-clock bug on #736: `nowMs` was only refreshed
+   * at mount and after a Resume, so the entry announcement minutes baked in
+   * the mount-to-snooze delay. Render at t=0, advance 5 minutes, THEN start
+   * a 30-minute snooze; the announcement must say 30, not 35.
+   *
+   * Pre-fix: the announcement reads "Sync paused for 35 minutes".
+   * Post-fix: "Sync paused for 30 minutes".
+   *
+   * The `activateSnooze()` helper used by the other cases sets the deadline
+   * BEFORE rendering, so the clock is never stale on what they exercise —
+   * which is why this case has to render first, wait, then arm the snooze.
+   */
+  it('does not bake the mount-to-snooze delay into the entry announcement (#736 stale-clock)', async () => {
+    vi.useFakeTimers();
+    configStore.set({ ...get(configStore), snooze_until: null });
+    const { container } = render(Dashboard);
+    // Wait for the mount's own work to settle (load_config + get_sync_status),
+    // so `nowMs` is whatever onMount wrote, and nothing else has touched it.
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('get_sync_status'));
+
+    // Five minutes pass with no Dashboard activity — the stale-clock bug's
+    // exact pre-condition.
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+    await tick();
+
+    // Now arm a 30-minute snooze. The deadline is exactly 30 minutes from
+    // the current fake time, not from the mount-time `nowMs`.
+    configStore.set({
+      ...get(configStore),
+      snooze_until: new Date(Date.now() + 30 * 60 * 1000).toISOString()
+    });
+    await tick();
+    await waitFor(() => expect(container.querySelector('.snooze-status')).not.toBeNull());
+
+    expect(container.querySelector('.snooze-status')?.textContent?.trim()).toBe(
+      t('dashboard.snoozeStatusStart', { minutes: 30 })
+    );
+  });
 });
