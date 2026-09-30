@@ -948,27 +948,20 @@ async fn handle_spotify_callback(
         }
     }
 
-    {
-        app_state
-            .tokens_load
-            .commit_spotify(&app_state.tokens, tokens.clone());
-        log::info!("[CALLBACK] handle_spotify_callback: tokens stored in AppState");
-    }
-    token_io::persist_tokens(&app_state, app)?;
-    log::info!("[CALLBACK] handle_spotify_callback: tokens persisted atomically");
-
-    // Issue #70: invalidate the onboarding cache.
-    app_state.onboarding_cache.invalidate();
-    log::info!("[CALLBACK] handle_spotify_callback: onboarding_cache invalidated");
-    // Issue #813: same conflict dismissal as the manual fallback below —
-    // the current secret is in the keychain now, so the replayable flag
-    // must not survive the reconnect.
-    app_state
-        .secret_conflict
-        .store(false, std::sync::atomic::Ordering::Release);
-
-    log::info!("[CALLBACK] handle_spotify_callback: EMIT spotify-auth-complete event");
-    let _ = app.emit("spotify-auth-complete", ());
+    // Issue #932: the post-exchange commit block lives in the shared
+    // `commit_spotify_session` helper, so both Spotify commit paths share the
+    // same non-fatal persist policy (matching the Teams precedent from
+    // #562). A locked keychain, full disk or failed AES-key write leaves
+    // the live session in `AppState` and surfaces the gap on its own
+    // `spotify-auth-persist-warning` event instead of propagating an IPC
+    // error the UI would render as a sign-in failure.
+    crate::commands::spotify_auth::commit_spotify_session(
+        &app_state,
+        tokens,
+        "[CALLBACK] handle_spotify_callback",
+        |s| token_io::persist_tokens(s, app),
+        |event| crate::commands::spotify_auth::emit_spotify_auth_event(app, event),
+    );
 
     log::info!("[CALLBACK] handle_spotify_callback: SUCCESS");
     Ok(())

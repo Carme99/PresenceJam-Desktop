@@ -478,9 +478,14 @@ export const de: Dict = {
   'settings.languageHint':
     'Gilt auch für das Tray-Menü und das native Anwendungsmenü.',
 
-  // 4.7.0 — S3 tray/logs hygiene
-  'settings.teamsPersistWarning':
-    'Angemeldet, aber dieses Gerät konnte die Sitzung nicht speichern — sie funktioniert bis zum Beenden. Teams erneut verbinden, um das Speichern zu wiederholen.',
+  // Issue #932: das Banner war bisher nur für Teams
+  // (`settings.teamsPersistWarning`, mit #562 hinzugefügt). Der neue
+  // Spotify-Spiegel liefert denselben Text mit einem `{provider}`-
+  // Platzhalter — die Settings-Karte übergibt den Anzeigenamen
+  // (`Microsoft Teams` oder `Spotify`), sodass ein Banner beide Anbieter
+  // abdeckt.
+  'settings.authPersistWarning':
+    'Angemeldet, aber dieses Gerät konnte die {provider}-Sitzung nicht speichern — sie funktioniert bis zum Beenden. {provider} erneut verbinden, um das Speichern zu wiederholen.',
 
   // 4.7.0 — S4 (rules engine)
   'rules.quietWindowHint':

@@ -430,15 +430,31 @@
       })
     );
 
-    // #670 / finding D10: `teams-auth-persist-warning` fires while the
-    // sign-in flows own the screen (Onboarding/Reconnect call
-    // `poll_teams_auth`), so a Settings-only listener would drop it. The
-    // always-mounted layout records it and Settings renders the banner.
+    // #670 / finding D10 + #932: `teams-auth-persist-warning` (Teams
+    // sign-in, #562) and `spotify-auth-persist-warning` (Spotify sign-in,
+    // #932) both fire while their sign-in flows own the screen
+    // (Onboarding/Reconnect), so a Settings-only listener would drop them.
+    // The always-mounted layout records both events and Settings renders
+    // the banner. The payload shape is `{ provider, message }` for both
+    // events so the banner can pick the right copy and the right
+    // reconnect action.
     presenceTeardown.add(
-      listen<string>('teams-auth-persist-warning', (event) => {
-        devLog('[LAYOUT] teams-auth-persist-warning received');
-        markAuthPersistWarning(String(event.payload ?? ''));
-      })
+      listen<{ provider?: string; message?: string }>(
+        'teams-auth-persist-warning',
+        (event) => {
+          devLog('[LAYOUT] teams-auth-persist-warning received');
+          markAuthPersistWarning('teams', String(event.payload?.message ?? ''));
+        }
+      )
+    );
+    presenceTeardown.add(
+      listen<{ provider?: string; message?: string }>(
+        'spotify-auth-persist-warning',
+        (event) => {
+          devLog('[LAYOUT] spotify-auth-persist-warning received');
+          markAuthPersistWarning('spotify', String(event.payload?.message ?? ''));
+        }
+      )
     );
 
     // #675 / #711: completion is request-scoped. The tracker suppresses a

@@ -557,12 +557,14 @@ describe('Settings custom lexicon reaches the profanity matcher (#538)', () => {
  */
 describe('Settings Teams persistence warning (#693)', () => {
   it('renders the captured warning and clears it from the reconnect that retries the save', async () => {
-    markAuthPersistWarning('tokens could not be written');
+    markAuthPersistWarning('teams', 'tokens could not be written');
     const { container } = await mountSettings();
 
     const banner = container.querySelector('.persist-banner');
     expect(banner).not.toBeNull();
-    expect(banner?.textContent).toContain(t('settings.teamsPersistWarning'));
+    expect(banner?.textContent).toContain(
+      t('settings.authPersistWarning', { provider: t('settings.sectionTeams') })
+    );
     const reconnect = banner?.querySelector('button');
     expect(reconnect?.textContent).toContain(t('common.reconnect'));
 
@@ -577,7 +579,7 @@ describe('Settings Teams persistence warning (#693)', () => {
   });
 
   it('is dismissable without a reconnect, so an unfixable cause is not a permanent banner', async () => {
-    markAuthPersistWarning('keychain is locked');
+    markAuthPersistWarning('teams', 'keychain is locked');
     const { container } = await mountSettings();
     const banner = container.querySelector('.persist-banner');
     expect(banner).not.toBeNull();
@@ -595,6 +597,37 @@ describe('Settings Teams persistence warning (#693)', () => {
   it('shows no banner while the store holds no persistence fault', async () => {
     const { container } = await mountSettings();
     expect(container.querySelector('.persist-banner')).toBeNull();
+  });
+
+  // Issue #932: the Spotify mirror of the Teams banner. Same component,
+  // different provider — the copy must mention "Spotify" and the retry
+  // must drive `reconnect_spotify_session` (not `reconnect_teams`).
+  it('renders a Spotify persistence warning and triggers reconnect_spotify_session (#932)', async () => {
+    markAuthPersistWarning('spotify', 'spotify tokens could not be written');
+    const { container } = await mountSettings();
+
+    const banner = container.querySelector('.persist-banner');
+    expect(banner).not.toBeNull();
+    expect(banner?.textContent).toContain(
+      t('settings.authPersistWarning', { provider: t('settings.sectionSpotify') })
+    );
+
+    const reconnect = banner?.querySelector('button');
+    expect(reconnect?.textContent).toContain(t('common.reconnect'));
+    await fireEvent.click(reconnect as HTMLButtonElement);
+    await waitFor(() => expect(get(presence).authPersistWarning).toBeNull());
+    expect(container.querySelector('.persist-banner')).toBeNull();
+    await waitFor(() =>
+      expect(
+        invokeMock.mock.calls.some(([cmd]) => cmd === 'reconnect_spotify_session')
+      ).toBe(true)
+    );
+    // The provider must drive the *Spotify* retry, not Teams — the old
+    // banner hard-coded `reconnectTeams` (#693/562) which would have sent
+    // the user to the wrong place for a Spotify persist failure.
+    expect(
+      invokeMock.mock.calls.some(([cmd]) => cmd === 'reconnect_teams')
+    ).toBe(false);
   });
 });
 

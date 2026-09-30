@@ -7,6 +7,7 @@
 //! manual-code fallback (`complete_spotify_auth_manual`) and the in-flight
 //! token refresher (`refresh_spotify`).
 
+use crate::spotify::SpotifyTokens;
 use crate::token_io;
 use crate::{AppState, PendingSpotifyAuth};
 use std::sync::Arc;
@@ -14,6 +15,90 @@ use tauri::{AppHandle, Emitter};
 
 /// Log tag prefix for this submodule (issue #79 item 3).
 const CMD: &str = "[CMD.SPOTIFY_AUTH]";
+
+/// Events emitted by the shared Spotify-commit helper (issue #932). Keeping
+/// the payload union in the command core lets production delegate to Tauri
+/// while tests observe the exact warning emitted by the
+/// persistence-failure branch. Mirrors `TeamsAuthEvent` (issue #562), which
+/// owns the equivalent policy for Teams.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SpotifyAuthEvent {
+    PersistWarning { message: String },
+    Complete,
+}
+
+/// Tauri-side sink for [`SpotifyAuthEvent`]. The helper passes this closure
+/// shape into `commit_spotify_session` so the post-exchange commit block can
+/// run in a unit test without an `AppHandle`.
+pub(crate) fn emit_spotify_auth_event(app: &AppHandle, event: SpotifyAuthEvent) {
+    match event {
+        SpotifyAuthEvent::PersistWarning { message } => {
+            let _ = app.emit(
+                "spotify-auth-persist-warning",
+                serde_json::json!({ "provider": "spotify", "message": message }),
+            );
+        }
+        SpotifyAuthEvent::Complete => {
+            let _ = app.emit("spotify-auth-complete", ());
+        }
+    }
+}
+
+/// Production body of the post-Spotify-exchange commit block, shared by
+/// `complete_spotify_auth_manual` (the manual-paste command) and
+/// `handle_spotify_callback` (the deep-link path in lib.rs).
+///
+/// Issue #932: the persist step is **non-fatal**, mirroring the Teams policy
+/// from #562. A locked keychain, full disk or failed AES-key write leaves
+/// the live session in `AppState` and surfaces the gap on its own
+/// `spotify-auth-persist-warning` event instead of propagating an IPC error
+/// the UI would render as a sign-in failure. `persist` and `emit` are
+/// injectable so a unit test can drive the persistence-failure branch
+/// without a Tauri runtime.
+pub(crate) fn commit_spotify_session<P, E>(
+    state: &Arc<AppState>,
+    tokens: SpotifyTokens,
+    log_prefix: &str,
+    persist: P,
+    mut emit: E,
+) where
+    P: FnOnce(&Arc<AppState>) -> Result<(), String>,
+    E: FnMut(SpotifyAuthEvent),
+{
+    state.tokens_load.commit_spotify(&state.tokens, tokens);
+    log::info!("{}: tokens stored in AppState", log_prefix);
+
+    // #932: a sign-in that succeeded at the API must not turn into an IPC
+    // failure because the local disk refused the encrypted write. Keep the
+    // session alive and report the persistence gap on its own event — the
+    // UI surfaces it as a "session works until you quit" banner instead of a
+    // sign-in error (the same shape Teams already uses, #562).
+    match persist(state) {
+        Ok(()) => log::info!("{}: tokens persisted atomically", log_prefix),
+        Err(error) => {
+            log::warn!(
+                "{}: sign-in succeeded but tokens could not be persisted (session is live until restart): {}",
+                log_prefix,
+                error
+            );
+            emit(SpotifyAuthEvent::PersistWarning { message: error });
+        }
+    }
+
+    // Issue #70: invalidate the onboarding cache.
+    state.onboarding_cache.invalidate();
+    log::info!("{}: onboarding_cache invalidated", log_prefix);
+    // Issue #813: a completed reconnect resolves the startup secret conflict
+    // (the current secret is in the keychain; the next launch strips the
+    // stale plaintext), so clear the replayable flag alongside the
+    // frontend banner dismissal.
+    state
+        .secret_conflict
+        .store(false, std::sync::atomic::Ordering::Release);
+
+    log::info!("{}: EMIT spotify-auth-complete event", log_prefix);
+    emit(SpotifyAuthEvent::Complete);
+}
 
 /// Space-separated Spotify OAuth scopes requested in the authorize URL.
 /// Single source of truth for the requested scope set — `config.spotify.scopes`
@@ -599,28 +684,21 @@ pub async fn complete_spotify_auth_manual(
         }
     }
 
-    {
-        state
-            .tokens_load
-            .commit_spotify(&state.inner().tokens, tokens);
-        log::info!("{CMD} complete_spotify_auth_manual: tokens stored in AppState");
-    }
-    token_io::persist_tokens(state.inner(), &app)?;
-    log::info!("{CMD} complete_spotify_auth_manual: tokens persisted atomically");
-
-    // Issue #70: invalidate the onboarding cache.
-    state.onboarding_cache.invalidate();
-    log::info!("{CMD} complete_spotify_auth_manual: onboarding_cache invalidated");
-    // Issue #813: a completed reconnect resolves the startup secret
-    // conflict (the current secret is in the keychain; the next launch
-    // strips the stale plaintext), so clear the replayable flag alongside
-    // the frontend banner dismissal.
-    state
-        .secret_conflict
-        .store(false, std::sync::atomic::Ordering::Release);
-
-    log::info!("{CMD} complete_spotify_auth_manual: EMIT spotify-auth-complete event");
-    let _ = app.emit("spotify-auth-complete", ());
+    // Issue #932: the post-exchange commit block (commit → persist →
+    // onboarding invalidate → complete event) now lives in the shared
+    // `commit_spotify_session` helper so the deep-link path in lib.rs can
+    // share the same non-fatal persist policy. The helper keeps the session
+    // alive in `AppState` even when the encrypted write fails (matching the
+    // Teams precedent from #562) and surfaces the gap on a
+    // `spotify-auth-persist-warning` event instead of propagating an IPC
+    // error the UI would render as a sign-in failure.
+    commit_spotify_session(
+        state.inner(),
+        tokens,
+        &format!("{CMD} complete_spotify_auth_manual"),
+        |s| token_io::persist_tokens(s, &app),
+        |event| emit_spotify_auth_event(&app, event),
+    );
 
     log::info!("{CMD} complete_spotify_auth_manual: SUCCESS (manual fallback)");
     Ok(())
@@ -796,6 +874,95 @@ mod tests {
         );
         assert!(clear_dead_spotify_refresh(&state, "new"));
         assert!(state.tokens.spotify().is_none());
+    }
+
+    // Issue #932: a persistence failure after a successful exchange must NOT
+    // propagate as an IPC error — the session is live in AppState, the
+    // onboarding cache must be invalidated and the completion event must
+    // fire so the UI transitions to "done". The pre-fix code propagated the
+    // `?` on `token_io::persist_tokens`, so the Onboarding screen stayed
+    // on its error branch and the UI retried the auth against a
+    // "No pending Spotify auth" backend (because the single-use launch
+    // binding had already been consumed). This test pins the new contract
+    // by driving `commit_spotify_session` directly with a failing persist
+    // closure and an event-capture closure, mirroring the Teams precedent
+    // `successful_poll_with_persistence_failure_keeps_live_session_and_warns`
+    // (#562).
+    #[test]
+    fn commit_with_persistence_failure_keeps_live_session_and_warns() {
+        let state = std::sync::Arc::new(crate::AppState::new());
+        let events: std::sync::Arc<parking_lot::Mutex<Vec<SpotifyAuthEvent>>> =
+            std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let captured = std::sync::Arc::clone(&events);
+
+        commit_spotify_session(
+            &state,
+            crate::spotify::SpotifyTokens {
+                access_token: "live-spotify-token".to_string(),
+                refresh_token: "live-refresh-token".to_string(),
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            },
+            "[TEST] commit_spotify_session",
+            |_s| Err("keychain unavailable".to_string()),
+            move |event| captured.lock().push(event),
+        );
+
+        // The session is live even though persist failed — this is the
+        // pre-fix bug's symptom, fixed.
+        assert_eq!(
+            state
+                .tokens
+                .spotify()
+                .as_ref()
+                .map(|tokens| tokens.access_token.as_str()),
+            Some("live-spotify-token"),
+            "the session must stay in AppState when persist fails (#932)"
+        );
+        // The warning fires BEFORE the completion event so the UI records
+        // the gap and then transitions to "done" — same ordering the Teams
+        // helper uses (#562).
+        assert_eq!(
+            *events.lock(),
+            vec![
+                SpotifyAuthEvent::PersistWarning {
+                    message: "keychain unavailable".to_string()
+                },
+                SpotifyAuthEvent::Complete,
+            ]
+        );
+    }
+
+    // Issue #932: the happy-path persist must still log success and emit
+    // only the completion event — no spurious warning when the write
+    // actually succeeded.
+    #[test]
+    fn commit_with_successful_persistence_emits_only_complete() {
+        let state = std::sync::Arc::new(crate::AppState::new());
+        let events: std::sync::Arc<parking_lot::Mutex<Vec<SpotifyAuthEvent>>> =
+            std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let captured = std::sync::Arc::clone(&events);
+
+        commit_spotify_session(
+            &state,
+            crate::spotify::SpotifyTokens {
+                access_token: "live-spotify-token".to_string(),
+                refresh_token: "live-refresh-token".to_string(),
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            },
+            "[TEST] commit_spotify_session",
+            |_s| Ok(()),
+            move |event| captured.lock().push(event),
+        );
+
+        assert_eq!(
+            state
+                .tokens
+                .spotify()
+                .as_ref()
+                .map(|tokens| tokens.access_token.as_str()),
+            Some("live-spotify-token")
+        );
+        assert_eq!(*events.lock(), vec![SpotifyAuthEvent::Complete]);
     }
 
     // Issue #354: 32+ char non-alphanumeric secrets are rejected, >512 is

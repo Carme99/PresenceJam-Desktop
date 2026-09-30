@@ -468,9 +468,13 @@ export const en = {
   'settings.languageHint':
     'Also applies to the tray menu and the native application menu.',
 
-  // 4.7.0 — S3 tray/logs hygiene
-  'settings.teamsPersistWarning':
-    'Signed in, but this device could not save the session — it works until you quit. Reconnect Teams to try saving it again.',
+  // Issue #932: the banner used to be Teams-only
+  // (`settings.teamsPersistWarning`, added with #562). The new
+  // Spotify mirror ships the same copy with a `{provider}` placeholder
+  // — the Settings card passes the display name (`Microsoft Teams` or
+  // `Spotify`) so one banner covers both providers.
+  'settings.authPersistWarning':
+    'Signed in, but this device could not save the {provider} session — it works until you quit. Reconnect {provider} to try saving it again.',
 
   // 4.7.0 — S4 (rules engine)
   'rules.quietWindowHint':

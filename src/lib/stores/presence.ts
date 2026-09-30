@@ -48,13 +48,17 @@ export interface PresenceState {
    */
   syncing: boolean;
   /**
-   * Message from `teams-auth-persist-warning`: the Teams sign-in succeeded but
-   * the tokens could not be written (locked keychain, full disk), so the
-   * session dies at the next restart. Emitted while the sign-in flows own the
-   * screen, so the always-mounted layout captures it here for whichever view
-   * renders the banner (finding D10). `null` = nothing to report.
+   * Issue #932: a sign-in succeeded but the tokens could not be written to
+   * disk (locked keychain, full disk, failed AES-key write), so the session
+   * is live only until the next restart. Both `teams-auth-persist-warning`
+   * (the Teams sign-in flow, #562) and the new `spotify-auth-persist-warning`
+   * (the Spotify sign-in flow) feed this field with a `provider` discriminator
+   * so the banner can render the right copy and the right reconnect action.
+   * Emitted while the sign-in flows own the screen, so the always-mounted
+   * layout captures it here for whichever view renders the banner (finding
+   * D10). `null` = nothing to report.
    */
-  authPersistWarning: string | null;
+  authPersistWarning: { provider: 'teams' | 'spotify'; message: string } | null;
   /**
    * Incremented by every mutator that writes a field `hydrate()` can also
    * write. A caller reads it *before* asking the backend for a snapshot and
@@ -90,16 +94,27 @@ export function setSyncing(value: boolean): void {
 }
 
 /**
- * `teams-auth-persist-warning` (finding D10): the Teams sign-in succeeded but
- * the tokens could not be written, so the session is live only until the next
- * restart. Emitted while Onboarding/Reconnect owns the screen, so the
- * always-mounted layout records it here and whichever view renders the banner
- * (Settings) consumes it.
+ * `teams-auth-persist-warning` (finding D10) and `spotify-auth-persist-warning`
+ * (#932): a sign-in succeeded but the tokens could not be written, so the
+ * session is live only until the next restart. Emitted while Onboarding /
+ * Reconnect owns the screen, so the always-mounted layout records it here
+ * and whichever view renders the banner (Settings) consumes it. The
+ * `provider` discriminator lets the banner pick the right reconnect
+ * action and the right copy — the Teams helper exists since #562, the
+ * Spotify mirror was added in #932 to match.
  */
-export function markAuthPersistWarning(message: string): void {
-  presence.update((s) =>
-    s.authPersistWarning === message ? s : { ...s, authPersistWarning: message }
-  );
+export function markAuthPersistWarning(
+  provider: 'teams' | 'spotify',
+  message: string
+): void {
+  presence.update((s) => {
+    const next = { provider, message };
+    return s.authPersistWarning &&
+      s.authPersistWarning.provider === next.provider &&
+      s.authPersistWarning.message === next.message
+      ? s
+      : { ...s, authPersistWarning: next };
+  });
 }
 
 /** Drop the persistence banner once it has been shown or the session recovered. */

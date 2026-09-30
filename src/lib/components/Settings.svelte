@@ -1291,6 +1291,13 @@
       forwardToMain('settings');
       return;
     }
+    // Issue #932 / #693: the reconnect is the retry path this banner
+    // offers, so the warning clears as soon as one is initiated — a persist
+    // failure on the new sign-in re-raises it from the backend event.
+    // (The backend emits the warning *before* `spotify-auth-complete`, so
+    // the completion handler must not clear it: that would erase the
+    // fault it just reported.)
+    clearAuthPersistWarning();
     // #421: fresh entry clears this flow's stale phase only; never the sibling's.
     resetSpotifyAuthFlow();
     setSpotifyPhase('waiting');
@@ -1697,13 +1704,26 @@
         </div>
       {/if}
       {#if $presence.authPersistWarning}
-        <!-- #693: dismissible as well as retryable — the cause can be one the
-             user cannot fix in-session (a permanently locked keychain, a
-             read-only disk), and a banner that only clears after a
+        <!-- Issue #932: the banner is now provider-aware. Both Teams
+             (#562) and Spotify (#932) sign-in flows feed this banner with
+             a `provider` discriminator; the copy and the reconnect action
+             follow. The Teams banner used to hard-code
+             `settings.teamsPersistWarning` and `reconnectTeams`; the new
+             `settings.authPersistWarning` template takes the provider
+             display name so the same component covers both providers.
+             #693: dismissible as well as retryable — the cause can be one
+             the user cannot fix in-session (a permanently locked keychain,
+             a read-only disk), and a banner that only clears after a
              *successful* reconnect would be undismissable there. -->
+        {@const warning = $presence.authPersistWarning}
         <div class="persist-banner" role="alert">
-          <span class="hint">{t('settings.teamsPersistWarning')}</span>
-          <button type="button" class="btn-link" onclick={reconnectTeams} disabled={teamsAuthWaiting}>{t('common.reconnect')}</button>
+          <span class="hint">{t('settings.authPersistWarning', { provider: warning.provider === 'teams' ? t('settings.sectionTeams') : t('settings.sectionSpotify') })}</span>
+          <button
+            type="button"
+            class="btn-link"
+            onclick={warning.provider === 'teams' ? reconnectTeams : reconnectSpotify}
+            disabled={warning.provider === 'teams' ? teamsAuthWaiting : spotifyAuthWaiting}
+          >{t('common.reconnect')}</button>
           <button type="button" class="btn-link dismiss" onclick={clearAuthPersistWarning}>{t('common.dismiss')}</button>
         </div>
       {/if}
