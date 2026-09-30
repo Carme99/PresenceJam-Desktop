@@ -804,10 +804,10 @@ pub mod token_io;
 pub mod tray;
 pub mod updater_bg;
 
-async fn handle_spotify_callback(
+async fn handle_spotify_callback<R: tauri::Runtime>(
     code: &str,
     state_param: Option<&str>,
-    app: &AppHandle,
+    app: &AppHandle<R>,
 ) -> Result<(), String> {
     log::debug!(
         "[CALLBACK] handle_spotify_callback: ENTRY - code.len={}",
@@ -973,7 +973,7 @@ async fn handle_spotify_callback(
     Ok(())
 }
 
-fn handle_deep_link(url: &str, app: AppHandle) {
+fn handle_deep_link<R: tauri::Runtime>(url: &str, app: AppHandle<R>) {
     // #228: never log raw callback URL (contains code + state). Log only length/prefix.
     log::debug!(
         "[DEEP_LINK] handle_deep_link: ENTRY - url_len={} prefix={}…[REDACTED]",
@@ -1016,7 +1016,21 @@ fn handle_deep_link(url: &str, app: AppHandle) {
                 // whatever the first delivery decides applies to it too.
                 let callback_key = deep_link_callback_key(&code_str, state_param.as_deref());
                 {
-                    let app_state = app.state::<Arc<AppState>>();
+                    // Issue #937: a forwarded deep link can arrive before
+                    // AppState is managed (the single-instance plugin is live in
+                    // Builder::build, before the setup closure runs). `state()`
+                    // panics with "state() called before manage()", killing the
+                    // thread that was supposed to redeem the OAuth code — the
+                    // user is left with a stalled sign-in and no error. `try_state`
+                    // turns that panic into a logged no-op.
+                    let Some(app_state) = app.try_state::<Arc<AppState>>() else {
+                        log::warn!(
+                            "[DEEP_LINK] handle_deep_link: AppState not registered yet — \
+                             ignoring forwarded callback (single-instance arrived \
+                             before setup completed)"
+                        );
+                        return;
+                    };
                     if !app_state.deep_link_seen.claim(callback_key) {
                         log::info!(
                             "[DEEP_LINK] handle_deep_link: duplicate callback inside the dedup window — dropping before any token exchange"
@@ -1056,7 +1070,19 @@ fn handle_deep_link(url: &str, app: AppHandle) {
                 // #228: redact state in logs — never log raw values.
                 if let Some(st) = &state_param {
                     let secret_ok = {
-                        let app_state = app.state::<Arc<AppState>>();
+                        // Issue #937: same pre-manage guard as above — this
+                        // second `state()` site sits inside the launch-binding
+                        // validation block, so a forwarded deep link that
+                        // slipped past the dedup check on a pre-managed app
+                        // would panic here too.
+                        let Some(app_state) = app.try_state::<Arc<AppState>>() else {
+                            log::warn!(
+                                "[DEEP_LINK] handle_deep_link: AppState not registered yet — \
+                                 ignoring forwarded callback at launch-binding check \
+                                 (single-instance arrived before setup completed)"
+                            );
+                            return;
+                        };
                         match app_state.launch_binding.get() {
                             Some(binding) => {
                                 let parts: Vec<&str> = st.splitn(2, '.').collect();
@@ -4345,7 +4371,7 @@ mod tests {
             .split("#[cfg(test)]\nmod tests")
             .next()
             .expect("lib.rs has no #[cfg(test)] mod tests block");
-        let body = body_of(prod_source, "fn handle_deep_link(");
+        let body = body_of(prod_source, "fn handle_deep_link<");
         assert!(
             body.contains("deep_link_callback_key("),
             "handle_deep_link must hash the (code, state) pair for the \
@@ -4422,6 +4448,51 @@ mod tests {
                 t0 + DEEP_LINK_DEDUP_WINDOW + std::time::Duration::from_secs(1)
             ),
             "same pair past the window must proceed"
+        );
+    }
+
+    /// Issue #937: the single-instance plugin's deep-link feature forwards a
+    /// second launch that carries a `presencejam://` URL through
+    /// `handle_cli_arguments` → `on_open_url` → `handle_deep_link`. The
+    /// plugin is live in `Builder::build`, before the setup closure runs, so
+    /// a forwarded URL can reach `handle_deep_link` before
+    /// `app.manage(state.clone())` has executed. The pre-fix code calls
+    /// `app.state::<Arc<AppState>>()` which panics with "state() called
+    /// before manage()", killing the thread that was supposed to redeem the
+    /// OAuth code — the user is left with a stalled sign-in and no error.
+    ///
+    /// The fix uses `try_state` and returns early with a `warn!` log when
+    /// the state is absent. The test mirrors the pre-manage scenario on a
+    /// mock Tauri app whose state is *not* managed and asserts that the
+    /// call does not unwind, regardless of which `app.state()` site was
+    /// reached. `handle_deep_link` is generic over [`tauri::Runtime`] so a
+    /// mock-runtime app (which never initialises an event loop on a worker
+    /// thread) drives the production code path here.
+    #[test]
+    fn handle_deep_link_tolerates_missing_state_issue_937() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+
+        // `tauri::test::mock_app()` builds a MockRuntime app with no
+        // managed state and no setup hook, so `try_state::<Arc<AppState>>`
+        // is the exact pre-manage state the production bug exposes.
+        let app = tauri::test::mock_app();
+        let handle = app.handle().clone();
+
+        // A syntactically-valid `presencejam://` callback URL. The
+        // pre-manage guard fires before any field is read, so the
+        // code/state values are placeholders for this regression test.
+        let url = "presencejam://callback?code=test-code&state=test-state";
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            handle_deep_link(url, handle.clone());
+        }));
+
+        assert!(
+            result.is_ok(),
+            "handle_deep_link must not panic when AppState is not managed yet \
+             (issue #937: a second launch carrying a presencejam:// URL \
+             arriving before setup completes would drop the OAuth callback \
+             silently)"
         );
     }
 }
