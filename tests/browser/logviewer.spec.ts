@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 
 const LOG_LINES = [
   '[2026-01-01][12:00:00][browser][TRACE] trace message',
@@ -15,6 +15,65 @@ const SCROLL_LINES = Array.from(
 
 const LOCALES = ['en', 'de', 'fr'] as const;
 const DENSITIES = ['comfortable', 'compact'] as const;
+/**
+ * Reads `scrollTop` after the browser's smooth-scroll animation has
+ * settled. The browser performs animated keyboard scrolling on a focusable
+ * scroll container, so a naive `expect.poll(...).toBeGreaterThan(0)` returns
+ * as soon as the first frame of the animation moves the value off zero —
+ * that is a mid-animation sample, not the final position. If the next
+ * keyboard event fires while the previous animation is still running, the
+ * two animations overlap and the observed position settles far from where
+ * either keypress alone would have placed it. The fix is to sample only
+ * after the scroll has settled.
+ *
+ * Contract: the caller MUST guarantee that an animation is in progress
+ * before invoking this helper — otherwise three equal reads can mean "the
+ * animation finished" OR "we sampled before anything started", and the
+ * helper cannot tell those apart. A pre-animation zero reads exactly the
+ * same as a settled zero. In this spec the contract is enforced upstream
+ * by `expect.poll(...).toBeGreaterThan(0)` (and symmetrically `.toBeLessThan`
+ * for PageUp) — phase 1 of a two-phase split. After phase 1 returns, an
+ * animation is demonstrably running, and three equal reads can only mean
+ * it finished. The helper itself does not re-check that contract; a
+ * caller that skips phase 1 invites the pre-animation false-settle bug.
+ *
+ * Polls `scrollTop` until three consecutive reads separated by a short
+ * wait are equal (the animation has stopped). Returns the settled value,
+ * or throws if the cap is reached without stability. Local to this spec:
+ * one caller, deliberately not promoted to a shared utility.
+ *
+ * Edge case: an animation shorter than STABLE_INTERVAL_MS settles in a
+ * single step, so the first two reads are equal and the helper returns
+ * that value — which is correct, because a single-step animation has no
+ * in-flight states to mistake for a settled one. Chromium and WebKit
+ * keyboard scrolls run 200-400ms, so this path is theoretical here.
+ */
+async function settledScrollTop(
+  viewport: Locator,
+  label: string,
+  timeoutMs = 2000
+): Promise<number> {
+  const STABLE_INTERVAL_MS = 50;
+  const REQUIRED_STABLE_READS = 3;
+  const deadline = Date.now() + timeoutMs;
+  let previous = await viewport.evaluate((element) => element.scrollTop);
+  let stableReads = 0;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, STABLE_INTERVAL_MS));
+    const current = await viewport.evaluate((element) => element.scrollTop);
+    if (current === previous) {
+      stableReads += 1;
+      if (stableReads >= REQUIRED_STABLE_READS) return current;
+    } else {
+      stableReads = 0;
+      previous = current;
+    }
+  }
+  throw new Error(
+    `${label}: scrollTop did not settle within ${timeoutMs}ms (last observed value: ${previous})`
+  );
+}
+
 const LABELS_BY_LOCALE: Record<(typeof LOCALES)[number], readonly string[]> = {
   en: ['Trace', 'Debug', 'Info', 'Warning', 'Error'],
   de: ['Trace', 'Debug', 'Info', 'Warnung', 'Fehler'],
@@ -154,13 +213,47 @@ test('focuses the log viewport and navigates it with PageUp/PageDown in Chromium
       scrollHeight: element.scrollHeight,
       clientHeight: element.clientHeight
     }));
+    const maxScrollTop = geometry.scrollHeight - geometry.clientHeight;
     expect(geometry.scrollHeight).toBeGreaterThan(geometry.clientHeight);
+    // Guards against a CSS/layout regression shrinking the scroll range to
+    // nothing, which would make the PageUp/PageDown bounds below vacuous.
+    expect(maxScrollTop, 'viewport must be scrollable').toBeGreaterThan(0);
+
     await page.keyboard.press('PageDown');
-    await expect.poll(() => viewport.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
-    const afterPageDown = await viewport.evaluate((element) => element.scrollTop);
+    // Phase 1 — retrying, so a pre-animation zero cannot fool it.
+    // `expect.poll` retries on failure with its own backoff until the timeout
+    // (5s in this project). After this returns, scrollTop is demonstrably > 0,
+    // which means an animation is running.
+    await expect
+      .poll(() => viewport.evaluate((element) => element.scrollTop))
+      .toBeGreaterThan(0);
+    // Phase 2 — the scroll is running, so three equal reads can only mean it
+    // settled, not that the keypress never registered. The previous fix
+    // conflated these two cases (it returned 0 on a cold runner whose
+    // keypress→animation-start latency exceeded the 150ms stability window).
+    const afterPageDown = await settledScrollTop(viewport, 'after PageDown');
+    expect(
+      afterPageDown,
+      'PageDown must move past the start of the scroll range'
+    ).toBeGreaterThan(0);
+    expect(
+      afterPageDown,
+      'PageDown must not scroll past the end of the scroll range'
+    ).toBeLessThan(maxScrollTop);
 
     await page.keyboard.press('PageUp');
-    await expect.poll(() => viewport.evaluate((element) => element.scrollTop)).toBeLessThan(afterPageDown);
+    // Phase 1 — symmetric retry: prove the keypress took effect before
+    // trusting the helper. `afterPageDown` is the settled baseline, so a
+    // value strictly below it means PageUp has moved the viewport.
+    await expect
+      .poll(() => viewport.evaluate((element) => element.scrollTop))
+      .toBeLessThan(afterPageDown);
+    // Phase 2 — settle on the post-PageUp value.
+    const afterPageUp = await settledScrollTop(viewport, 'after PageUp');
+    expect(
+      afterPageUp,
+      'PageUp must land above the settled PageDown position'
+    ).toBeLessThan(afterPageDown);
   } finally {
     await context.close();
   }
