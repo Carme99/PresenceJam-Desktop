@@ -430,16 +430,19 @@
       })
     );
 
-    // #670 / finding D10: `teams-auth-persist-warning` fires while the
-    // sign-in flows own the screen (Onboarding/Reconnect call
-    // `poll_teams_auth`), so a Settings-only listener would drop it. The
-    // always-mounted layout records it and Settings renders the banner.
-    presenceTeardown.add(
-      listen<string>('teams-auth-persist-warning', (event) => {
-        devLog('[LAYOUT] teams-auth-persist-warning received');
-        markAuthPersistWarning(String(event.payload ?? ''));
-      })
-    );
+    // #670 / finding D10 + #932: the `*-auth-persist-warning` listeners live
+    // OUTSIDE this gated block (see the dedicated always-mounted block
+    // below). Tauri's `app.emit` broadcasts globally (verified against
+    // tauri 2.11.x source: the `Emitter` trait's `fn emit<S>(...)` for
+    // `AppHandle` comments "emits the synchronized event to all webviews"),
+    // so a deep-link sign-in while only the detached Settings pane is
+    // loaded reaches the webview — but this gated block would skip
+    // registration for the detached pane, so the user saw no banner
+    // before the next restart silently discarded the tokens. The
+    // persist-warning listeners are the ONLY listeners safe in a detached
+    // window — they just record the warning in the shared `presence`
+    // store, no IPC invokes, no OAuth flows — so they live in their own
+    // always-mounted block gated only by `isTauriRuntime`.
 
     // #675 / #711: completion is request-scoped. The tracker suppresses a
     // queued event and rechecks cancellation after notification permission
@@ -471,6 +474,50 @@
       if (playbackErrorTimeout) clearTimeout(playbackErrorTimeout);
     };
   });
+
+  // #932 B2 (rework): the `*-auth-persist-warning` listeners also run in
+  // detached webviews (Logs / Settings panes). They are the ONLY listeners
+  // that are safe in a detached window — they just record the warning in
+  // the shared `presence` store, no IPC invokes, no OAuth flows. The
+  // other listeners in the gated `onMount` above stay main-window-only
+  // because they would re-trigger device-code / OAuth flows if both
+  // windows received the event (issue #498 finding C7). Tauri's
+  // `app.emit` broadcasts globally (see the comment above for the source
+  // citation), so the Rust-side emit reaches the detached pane's webview
+  // already — the gap was purely that the listener was never installed
+  // there.
+  if (isTauriRuntime) {
+    const persistTeardown = useListenerTeardown();
+    persistTeardown.add(
+      listen<{ provider?: string; message?: string }>(
+        'teams-auth-persist-warning',
+        (event) => {
+          devLog(
+            isMainWindow
+              ? '[LAYOUT] teams-auth-persist-warning received'
+              : '[LAYOUT][detached] teams-auth-persist-warning received'
+          );
+          markAuthPersistWarning('teams', String(event.payload?.message ?? ''));
+        }
+      )
+    );
+    persistTeardown.add(
+      listen<{ provider?: string; message?: string }>(
+        'spotify-auth-persist-warning',
+        (event) => {
+          devLog(
+            isMainWindow
+              ? '[LAYOUT] spotify-auth-persist-warning received'
+              : '[LAYOUT][detached] spotify-auth-persist-warning received'
+          );
+          markAuthPersistWarning('spotify', String(event.payload?.message ?? ''));
+        }
+      )
+    );
+    onDestroy(() => {
+      void persistTeardown.dispose();
+    });
+  }
 
   onDestroy(() => {
     if (playbackErrorTimeout) clearTimeout(playbackErrorTimeout);

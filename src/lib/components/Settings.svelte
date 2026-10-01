@@ -15,6 +15,7 @@
   import { authFlow, setSpotifyPhase, setTeamsPhase, resetSpotifyAuthFlow, resetTeamsAuthFlow, teamsPollMutex, pollTeamsAuth } from '$lib/stores/authFlow.svelte';
   import DeviceCodeBox from './DeviceCodeBox.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
+  import { pickReconnectProvider } from '$lib/utils/routeReconnect';
   import PageHeader from './PageHeader.svelte';
   import { t, i18n, WEEKDAY_KEYS, type Locale, type TKey } from '$lib/i18n';
   import { theme, density } from '$lib/stores/theme';
@@ -1291,6 +1292,13 @@
       forwardToMain('settings');
       return;
     }
+    // Issue #932 / #693: the reconnect is the retry path this banner
+    // offers, so the warning clears as soon as one is initiated — a persist
+    // failure on the new sign-in re-raises it from the backend event.
+    // (The backend emits the warning *before* `spotify-auth-complete`, so
+    // the completion handler must not clear it: that would erase the
+    // fault it just reported.)
+    clearAuthPersistWarning();
     // #421: fresh entry clears this flow's stale phase only; never the sibling's.
     resetSpotifyAuthFlow();
     setSpotifyPhase('waiting');
@@ -1387,6 +1395,39 @@
       console.error('[SETTINGS] reconnect_teams failed:', e);
       setTeamsPhase('error', String(e));
     }
+  }
+  /**
+   * #932 (rework): the auth-persist banner's reconnect action, label and
+   * "in flight" disabled state all route off the `provider` discriminator.
+   * Centralising the routing here lets the JSX pick `{reconnect.label}`,
+   * `{reconnect.handler}` and `{reconnect.waiting}` without re-deriving
+   * the same ternary three times in the template, and lets the unit test
+   * assert the routing without re-implementing the ternary in JSX. The
+   * pure routing decision lives in `src/lib/utils/routeReconnect.ts`
+   * (`pickReconnectProvider`) so a Vitest spec can exercise it without
+   * the component harness — the commit message on `e833931` claimed such
+   * a test existed but no spec asserted the routing. An unknown value
+   * falls back to the Spotify reconnect (the Spotify banner is the newer
+   * of the two, #932 B1) so a future backend payload cannot crash the banner.
+   */
+  function routeReconnect(provider: 'teams' | 'spotify' | string): {
+    label: string;
+    handler: () => Promise<void>;
+    waiting: boolean;
+  } {
+    const target = pickReconnectProvider(provider);
+    if (target === 'teams') {
+      return {
+        label: t('settings.sectionTeams'),
+        handler: reconnectTeams,
+        waiting: teamsAuthWaiting
+      };
+    }
+    return {
+      label: t('settings.sectionSpotify'),
+      handler: reconnectSpotify,
+      waiting: spotifyAuthWaiting
+    };
   }
   /**
    * #785: the shared poll — the #396 mutex, the #429 expiry guard, the phase
@@ -1697,13 +1738,27 @@
         </div>
       {/if}
       {#if $presence.authPersistWarning}
-        <!-- #693: dismissible as well as retryable — the cause can be one the
-             user cannot fix in-session (a permanently locked keychain, a
-             read-only disk), and a banner that only clears after a
+        <!-- Issue #932: the banner is now provider-aware. Both Teams
+             (#562) and Spotify (#932) sign-in flows feed this banner with
+             a `provider` discriminator; the copy and the reconnect action
+             follow. The Teams banner used to hard-code
+             `settings.teamsPersistWarning` and `reconnectTeams`; the new
+             `settings.authPersistWarning` template takes the provider
+             display name so the same component covers both providers.
+             #693: dismissible as well as retryable — the cause can be one
+             the user cannot fix in-session (a permanently locked keychain,
+             a read-only disk), and a banner that only clears after a
              *successful* reconnect would be undismissable there. -->
+        {@const warning = $presence.authPersistWarning}
+        {@const reconnect = routeReconnect(warning.provider)}
         <div class="persist-banner" role="alert">
-          <span class="hint">{t('settings.teamsPersistWarning')}</span>
-          <button type="button" class="btn-link" onclick={reconnectTeams} disabled={teamsAuthWaiting}>{t('common.reconnect')}</button>
+          <span class="hint">{t('settings.authPersistWarning', { provider: reconnect.label })}</span>
+          <button
+            type="button"
+            class="btn-link"
+            onclick={reconnect.handler}
+            disabled={reconnect.waiting}
+          >{t('common.reconnect')}</button>
           <button type="button" class="btn-link dismiss" onclick={clearAuthPersistWarning}>{t('common.dismiss')}</button>
         </div>
       {/if}

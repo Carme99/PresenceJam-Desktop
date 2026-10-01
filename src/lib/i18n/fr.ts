@@ -489,9 +489,14 @@ export const fr: Dict = {
   'settings.languageHint':
     'S’applique aussi au menu de la zone de notification et au menu natif de l’application.',
 
-  // 4.7.0 — S3 tray/logs hygiene
-  'settings.teamsPersistWarning':
-    'Connecté, mais cet appareil n’a pas pu enregistrer la session — elle fonctionne jusqu’à la fermeture. Reconnectez Teams pour réessayer l’enregistrement.',
+  // Issue #932 : la bannière était réservée à Teams
+  // (`settings.teamsPersistWarning`, ajoutée avec #562). Le nouveau
+  // miroir Spotify fournit le même texte avec un espace réservé
+  // `{provider}` — la carte Paramètres transmet le nom affiché
+  // (« Microsoft Teams » ou « Spotify »), ainsi une bannière unique
+  // couvre les deux fournisseurs.
+  'settings.authPersistWarning':
+    'Connecté, mais cet appareil n’a pas pu enregistrer la session {provider} — elle fonctionne jusqu’à la fermeture. Reconnectez {provider} pour réessayer l’enregistrement.',
 
   // 4.7.0 — S4 (rules engine)
   'rules.quietWindowHint':

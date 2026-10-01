@@ -624,8 +624,30 @@ describe('Hydration loses to a newer event (#670)', () => {
 describe('Auth persistence warning while another view owns the screen (#670 / D10)', () => {
   it('records the warning from the always-mounted layout', async () => {
     await mountShell();
-    await emit('teams-auth-persist-warning', 'keychain locked: could not persist tokens');
-    expect(get(presence).authPersistWarning).toBe('keychain locked: could not persist tokens');
+    // Issue #932: the payload shape is `{ provider, message }` so the
+    // banner can route the retry to the right reconnect handler (Teams vs
+    // Spotify). Sending a bare string would lose the provider discriminator.
+    await emit('teams-auth-persist-warning', {
+      provider: 'teams',
+      message: 'keychain locked: could not persist tokens'
+    });
+    expect(get(presence).authPersistWarning).toEqual({
+      provider: 'teams',
+      message: 'keychain locked: could not persist tokens'
+    });
+  });
+
+  // Issue #932: the Spotify mirror of the Teams warning.
+  it('records a Spotify persistence warning from the always-mounted layout', async () => {
+    await mountShell();
+    await emit('spotify-auth-persist-warning', {
+      provider: 'spotify',
+      message: 'spotify tokens could not be persisted'
+    });
+    expect(get(presence).authPersistWarning).toEqual({
+      provider: 'spotify',
+      message: 'spotify tokens could not be persisted'
+    });
   });
 });
 

@@ -71,7 +71,13 @@ enum TeamsAuthEvent {
 fn emit_teams_auth_event(app: &AppHandle, event: TeamsAuthEvent) {
     match event {
         TeamsAuthEvent::PersistWarning(message) => {
-            let _ = app.emit("teams-auth-persist-warning", message);
+            // Issue #932: the payload shape is now `{ provider, message }`,
+            // matching the new `spotify-auth-persist-warning` event so the
+            // frontend can drive a single banner that handles both providers.
+            let _ = app.emit(
+                "teams-auth-persist-warning",
+                serde_json::json!({ "provider": "teams", "message": message }),
+            );
         }
         TeamsAuthEvent::Complete => {
             let _ = app.emit("teams-auth-complete", ());
