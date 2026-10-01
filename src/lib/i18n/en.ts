@@ -518,6 +518,10 @@ export const en = {
   'dashboard.snoozeResuming': 'Resuming…',
   'dashboard.snoozeResumeFailed':
     'Could not resume syncing. The snooze is still stored — try again.',
+  // Issue #736: the chip's live region announces entry/exit once; the
+  // per-second countdown is no longer in the live region.
+  'dashboard.snoozeStatusStart': 'Sync paused for {minutes} minutes',
+  'dashboard.snoozeStatusEnd': 'Sync resumed',
 
   // 4.7.0 — S7 notifications (#675): one toggle per desktop-notification
   // class, plus the copy for the three classes the always-mounted layout

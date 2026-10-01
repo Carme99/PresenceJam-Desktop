@@ -193,6 +193,62 @@
         })
       : ''
   );
+  // Issue #736: the chip's live region announces the entry ("Sync paused for
+  // X minutes") exactly once on enter. The per-second countdown lives in a
+  // sibling with no live semantics, so AT no longer queues a new
+  // announcement every tick. `prevSnoozeActive` is null until the effect has
+  // observed the initial state, so a Dashboard that mounts onto an
+  // already-active snooze (e.g. after a tray snooze before the user opened
+  // the window) does not re-announce entry.
+  let entryAnnouncementMinutes = $state(0);
+  let showResumeAnnouncement = $state(false);
+  let prevSnoozeActive: boolean | null = null;
+  let resumeAnnouncementTimeout: ReturnType<typeof setTimeout> | null = null;
+  $effect(() => {
+    const active = snoozeActive;
+    if (active === prevSnoozeActive) return;
+    const hadPrevious = prevSnoozeActive !== null;
+    prevSnoozeActive = active;
+    if (resumeAnnouncementTimeout) {
+      clearTimeout(resumeAnnouncementTimeout);
+      resumeAnnouncementTimeout = null;
+    }
+    if (active) {
+      // #736: enter. The announcement text is captured at the transition (not
+      // derived), so it does not change with the per-second tick. The visible
+      // countdown sibling still updates each second. `nowMs` is refreshed
+      // FIRST so a Dashboard that has been mounted for a while before the
+      // snooze started does not bake the mount-to-snooze delay into the
+      // announced minutes (the visible countdown would correct itself within
+      // a second via the 1 s tick, but the announcement is captured once and
+      // never revisited). This is the single choke point — every value
+      // derived from `nowMs` while a snooze is live (the entry minutes, the
+      // visible `snoozeRemainingMs`, and the chip's clock) reads the fresh
+      // number on its first render.
+      nowMs = Date.now();
+      entryAnnouncementMinutes =
+        snoozeUntilMs !== null
+          ? Math.max(1, Math.round((snoozeUntilMs - nowMs) / 60000))
+          : 0;
+      showResumeAnnouncement = false;
+      return;
+    }
+    if (hadPrevious) {
+      // #736: exit. The chip itself unmounts (the existing contract — the
+      // poller reads the cleared field on its next iteration); a separate
+      // tiny node announces "Sync resumed" exactly once, then disappears.
+      // 5 s window: long enough that slow screen readers and users who just
+      // tabbed in after Resume both catch the announcement, short enough
+      // that it does not linger into the next interaction. The dismissal is
+      // idempotent (cleared on the next enter as well) so a quick
+      // resume-then-snooze-again does not leak a stale timer.
+      showResumeAnnouncement = true;
+      resumeAnnouncementTimeout = setTimeout(() => {
+        showResumeAnnouncement = false;
+        resumeAnnouncementTimeout = null;
+      }, 5000);
+    }
+  });
   let displayErrorTimeout: ReturnType<typeof setTimeout> | null = null;
   let displayWarning = $state('');
   let displayWarningTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -246,6 +302,7 @@
     if (displayWarningTimeout) clearTimeout(displayWarningTimeout);
     if (goToSetupTimeout) clearTimeout(goToSetupTimeout);
     if (availabilityTimeout) clearTimeout(availabilityTimeout);
+    if (resumeAnnouncementTimeout) clearTimeout(resumeAnnouncementTimeout);
   });
 
   // #670: a genuine stop — and only a stop — drops the track card. The flag is
@@ -920,14 +977,38 @@
       </details>
     {/if}
     {#if snoozeActive}
-      <!-- S9 (issue #677): the tray snooze, mirrored from the persisted config
-           with a live countdown and the one action that ends it. -->
-      <div class="snooze-chip" role="status">
-        <span>{snoozeLabel}</span>
+      <!-- S9 (issue #677) + #736: the tray snooze, mirrored from the persisted
+           config. The chip is no longer the live region — the inner
+           `.snooze-status` span owns `role="status"` and is set once on
+           entry, while the per-second countdown (`snoozeLabel`) lives in a
+           sibling with no live semantics and no `aria-hidden`. AT sees one
+           announcement on enter, not one per second. -->
+      <div class="snooze-chip">
+        <span class="snooze-status" role="status">
+          {t('dashboard.snoozeStatusStart', { minutes: entryAnnouncementMinutes })}
+        </span>
+        <span class="snooze-countdown">{snoozeLabel}</span>
         <button class="snooze-resume" onclick={resumeSnooze} disabled={isResuming}>
           {isResuming ? t('dashboard.snoozeResuming') : t('dashboard.snoozeResume')}
         </button>
       </div>
+    {/if}
+    {#if showResumeAnnouncement}
+      <!-- #736: the chip itself unmounts when the snooze ends (the existing
+           contract — see tests/snooze.test.ts), so the exit announcement
+           lives in this small standalone live region. Mounted for a few
+           seconds, then dropped, so the polite queue gets exactly one
+           "Sync resumed" announcement.
+
+           STYLING COUPLING: this `<span class="snooze-status">` shares its
+           class with the entry sibling inside `.snooze-chip` above. There
+           is no `.snooze-status` style block — both rely on inheriting
+           `.snooze-chip` rules from the active chip. If the active chip is
+           ever restyled (font, colour, padding), the exit announcement will
+           drift visually because it no longer lives inside the chip.
+           Re-add a `.snooze-status` rule, or move this span back inside the
+           chip, if that ever happens. -->
+      <span class="snooze-status" role="status">{t('dashboard.snoozeStatusEnd')}</span>
     {/if}
     {#if availabilityAnnouncement}
       <div class="availability-chip" role="status">
@@ -1258,6 +1339,12 @@
     padding: var(--sp-2) var(--sp-3);
     font-size: var(--fs-sm);
     color: var(--fg);
+  }
+  /* Issue #736: the countdown sibling uses tabular numerals so the per-second
+     tick does not reflow the chip horizontally. The status sibling has no
+     styling — its text is set once on entry/exit and does not tick. */
+  .snooze-countdown {
+    font-variant-numeric: tabular-nums;
   }
   .snooze-resume {
     background: transparent;
