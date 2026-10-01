@@ -15,6 +15,7 @@
   import { authFlow, setSpotifyPhase, setTeamsPhase, resetSpotifyAuthFlow, resetTeamsAuthFlow, teamsPollMutex, pollTeamsAuth } from '$lib/stores/authFlow.svelte';
   import DeviceCodeBox from './DeviceCodeBox.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
+  import { pickReconnectProvider } from '$lib/utils/routeReconnect';
   import PageHeader from './PageHeader.svelte';
   import { t, i18n, WEEKDAY_KEYS, type Locale, type TKey } from '$lib/i18n';
   import { theme, density } from '$lib/stores/theme';
@@ -1402,18 +1403,20 @@
    * `{reconnect.handler}` and `{reconnect.waiting}` without re-deriving
    * the same ternary three times in the template, and lets the unit test
    * assert the routing without re-implementing the ternary in JSX. The
-   * `provider` argument is the typed discriminator the backend emits on
-   * `teams-auth-persist-warning` / `spotify-auth-persist-warning` (issue
-   * #932); an unknown value falls back to the Spotify reconnect (the
-   * Spotify banner is the newer of the two, #932 B1) so a future backend
-   * payload cannot crash the banner.
+   * pure routing decision lives in `src/lib/utils/routeReconnect.ts`
+   * (`pickReconnectProvider`) so a Vitest spec can exercise it without
+   * the component harness — the commit message on `e833931` claimed such
+   * a test existed but no spec asserted the routing. An unknown value
+   * falls back to the Spotify reconnect (the Spotify banner is the newer
+   * of the two, #932 B1) so a future backend payload cannot crash the banner.
    */
   function routeReconnect(provider: 'teams' | 'spotify' | string): {
     label: string;
     handler: () => Promise<void>;
     waiting: boolean;
   } {
-    if (provider === 'teams') {
+    const target = pickReconnectProvider(provider);
+    if (target === 'teams') {
       return {
         label: t('settings.sectionTeams'),
         handler: reconnectTeams,

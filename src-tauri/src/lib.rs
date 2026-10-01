@@ -948,17 +948,23 @@ async fn handle_spotify_callback(
         }
     }
 
-    // Issue #932: the post-exchange commit block lives in the shared
-    // `commit_callback_spotify_session` wrapper, which delegates to the seam
-    // `commit_spotify_session` so both Spotify commit paths share the same
-    // non-fatal persist policy (matching the Teams precedent from #562). A
-    // locked keychain, full disk or failed AES-key write leaves the live
-    // session in `AppState` and surfaces the gap on its own
+    // Issue #932: the post-exchange commit block lives in the single shared
+    // `commit_spotify_session` seam so both Spotify commit paths share the
+    // same non-fatal persist policy (matching the Teams precedent from
+    // #562). A locked keychain, full disk or failed AES-key write leaves
+    // the live session in `AppState` and surfaces the gap on its own
     // `spotify-auth-persist-warning` event instead of propagating an IPC
-    // error the UI would render as a sign-in failure.
-    crate::commands::spotify_auth::commit_callback_spotify_session(
+    // error the UI would render as a sign-in failure. There is intentionally
+    // NO per-path wrapper between this call and the seam: a regression that
+    // re-introduced the pre-#932 `token_io::persist_tokens(...)?` short-circuit
+    // here would make the seam unused-but-computable, which is exactly the
+    // mutation the reviewer disproved on commit `b11b254`. The source guard
+    // `deep_link_handler_uses_commit_spotify_session_seam` (in `commands/spotify_auth.rs`)
+    // pins this call site so any revert to `?`-propagation breaks the suite.
+    crate::commands::spotify_auth::commit_spotify_session(
         &app_state,
         tokens,
+        "[CALLBACK] handle_spotify_callback",
         |s| token_io::persist_tokens(s, app),
         |event| crate::commands::spotify_auth::emit_spotify_auth_event(app, event),
     );
