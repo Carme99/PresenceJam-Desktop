@@ -120,14 +120,6 @@ zbus = { version = "4", default-features = false, features = ["tokio"] }
 # connection preflight; no unsafe Xlib calls or additional lock crate.
 x11rb = "0.13"
 
-# Issue #929 rework: `tauri::test::mock_app()` drives the behavioural tests
-# for the shared Teams-write retry helper (no GUI runtime, no real
-# Graph/refresh traffic, observable event emits). Dev-only — the `test`
-# feature is gated on `cfg(any(test, feature = "test"))` upstream so it
-# cannot reach the production binary.
-[dev-dependencies]
-tauri = { version = "~2.11", features = ["test"] }
-
 # Release profile (issue #899). Cargo builds release artefacts with 16 codegen
 # units, no cross-crate LTO and a full symbol table by default, and every
 # shipped artefact — MSI, NSIS setup, DMG, .app.tar.gz, deb, AppImage — paid

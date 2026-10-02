@@ -3433,8 +3433,8 @@ fn config_flip_rewrite_track(
 /// shape; the split exists so the test module can drive the retry behaviour
 /// without a network round-trip (issue #929 rework).
 ///
-/// Generic over the Tauri runtime so the test module can drive the same
-/// shape with `tauri::test::mock_app()`'s `MockRuntime` (issue #929 rework).
+/// Generic over the Tauri runtime so the production call sites retain
+/// `&AppHandle<Rt>` for the persist + emit seams (issue #929 rework).
 fn teams_write_with_optional_refresh<F, Rt>(
     app: &AppHandle<Rt>,
     state: &Arc<AppState>,
@@ -3447,11 +3447,12 @@ where
     Rt: tauri::Runtime,
 {
     teams_write_with_refresh_fn(
-        app,
         state,
         teams_tok,
         write_fn,
         || refresh_teams_token(teams_tok),
+        |s| token_io::persist_tokens(s, app),
+        app,
         log_tag,
     )
 }
@@ -3476,18 +3477,20 @@ where
 ///      with the NEW access token; a second failure is classified and
 ///      returned, a second success returns the new tokens so the caller can
 ///      use them for the availability re-arm in the same iteration.
-fn teams_write_with_refresh_fn<F, R, Rt>(
-    app: &AppHandle<Rt>,
+fn teams_write_with_refresh_fn<F, R, E, P>(
     state: &Arc<AppState>,
     teams_tok: &TeamsTokens,
     mut write_fn: F,
     refresh_fn: R,
+    mut persist: P,
+    emitter: &E,
     log_tag: &str,
 ) -> Result<TeamsTokens, TeamsApiError>
 where
     F: FnMut(&str) -> Result<(), TeamsApiError>,
     R: FnOnce() -> Result<TeamsTokens, TeamsApiError>,
-    Rt: tauri::Runtime,
+    E: ErrorEventEmitter,
+    P: FnMut(&Arc<AppState>) -> Result<(), String>,
 {
     let pre_refresh_access_token = teams_tok.access_token.clone();
     let first_err = match write_fn(&pre_refresh_access_token) {
@@ -3497,7 +3500,7 @@ where
     let status = match first_err {
         TeamsApiError::ExpiredToken(s) => s,
         other => {
-            classify_teams_write_failure(app, &other, log_tag);
+            classify_teams_write_failure(emitter, &other, log_tag);
             return Err(other);
         }
     };
@@ -3515,12 +3518,12 @@ where
             );
             let err = handle_teams_refresh_failure(
                 state,
-                app,
+                &mut persist,
                 refresh_err,
                 &pre_refresh_access_token,
                 log_tag,
             );
-            classify_teams_write_failure(app, &err, log_tag);
+            classify_teams_write_failure(emitter, &err, log_tag);
             return Err(err);
         }
     };
@@ -3541,13 +3544,13 @@ where
             log_tag
         );
         let err = TeamsApiError::ExpiredToken(status);
-        classify_teams_write_failure(app, &err, log_tag);
+        classify_teams_write_failure(emitter, &err, log_tag);
         return Err(err);
     }
     // Issue #180: `cas_refresh_teams` owns the recovery-marker lock and
     // commits through `AppState`; this caller holds no token-slot write
     // guard. Persist only after it returns.
-    if let Err(persist_err) = token_io::persist_tokens(state, app) {
+    if let Err(persist_err) = persist(state) {
         log::warn!(
             "[POLLING] {}: failed to persist reactively refreshed teams tokens: {}",
             log_tag,
@@ -3562,7 +3565,7 @@ where
                 log_tag,
                 retry_err
             );
-            classify_teams_write_failure(app, &retry_err, log_tag);
+            classify_teams_write_failure(emitter, &retry_err, log_tag);
             Err(retry_err)
         }
     }
@@ -3574,8 +3577,8 @@ where
 /// `teams-reconnect-required`; Forbidden logs as permission/license
 /// (re-auth cannot fix it); rate-limited / transient / other log as
 /// transient.
-fn classify_teams_write_failure<Rt: tauri::Runtime>(
-    app: &AppHandle<Rt>,
+fn classify_teams_write_failure<E: ErrorEventEmitter>(
+    emitter: &E,
     e: &TeamsApiError,
     log_tag: &str,
 ) {
@@ -3587,7 +3590,7 @@ fn classify_teams_write_failure<Rt: tauri::Runtime>(
                 "[POLLING] {}: Teams auth failure detected, emitting teams-reconnect-required",
                 log_tag
             );
-            let _ = app.emit("teams-reconnect-required", json!(null));
+            emitter.emit_marker("teams-reconnect-required");
         }
         TeamsApiError::Forbidden(_, _) => {
             log::error!(
@@ -3645,13 +3648,16 @@ fn emit_paused_clear_failure<E: ErrorEventEmitter>(emitter: &E, e: &TeamsApiErro
 /// Transient because the newer session is alive; a transient refresh
 /// keeps the session and returns the original refresh error. The result
 /// is the typed error the caller hands to the classifier.
-fn handle_teams_refresh_failure<Rt: tauri::Runtime>(
+fn handle_teams_refresh_failure<P>(
     state: &Arc<AppState>,
-    app: &AppHandle<Rt>,
+    persist: &mut P,
     refresh_err: TeamsApiError,
     pre_refresh_access_token: &str,
     log_tag: &str,
-) -> TeamsApiError {
+) -> TeamsApiError
+where
+    P: FnMut(&Arc<AppState>) -> Result<(), String>,
+{
     // Issue #798: only clear when the slot still holds the token this
     // refresh ran from — a mid-flight replacement means the error is
     // about a superseded token and the newer session is alive.
@@ -3681,7 +3687,7 @@ fn handle_teams_refresh_failure<Rt: tauri::Runtime>(
         // Issue #180: the clear helper releases its write guard before
         // return. Persist in this later statement so the read lock cannot
         // overlap that guard.
-        if let Err(persist_err) = token_io::persist_tokens(state, app) {
+        if let Err(persist_err) = persist(state) {
             log::warn!(
                 "[POLLING] {}: failed to persist cleared teams tokens: {}",
                 log_tag,
@@ -5787,7 +5793,37 @@ fn network_failure_backoff(count: u8) -> u64 {
 mod tests {
     use super::*;
     use crate::polling::ErrorEventPayload;
-    use tauri::Listener;
+
+    /// Records every event the production emitters push, with no GUI runtime
+    /// and without linking Tauri's `test` module — which breaks the Windows
+    /// test binary's load (issue #929 rework). Module-scoped so both the
+    /// reconnect-marker and the severity tests can drive it.
+    struct CapturingEmitter {
+        events: std::sync::Mutex<Vec<(String, ErrorEventPayload)>>,
+        markers: std::sync::Mutex<Vec<String>>,
+    }
+    impl ErrorEventEmitter for CapturingEmitter {
+        fn emit_error_event(&self, event: &str, payload: ErrorEventPayload) {
+            self.events
+                .lock()
+                .expect("capturing-emitter mutex must not be poisoned")
+                .push((event.to_string(), payload));
+        }
+        fn emit_marker(&self, event: &str) {
+            self.markers
+                .lock()
+                .expect("capturing-emitter mutex must not be poisoned")
+                .push(event.to_string());
+        }
+    }
+    impl CapturingEmitter {
+        fn new() -> Self {
+            Self {
+                events: std::sync::Mutex::new(Vec::new()),
+                markers: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
 
     #[test]
     fn track_changed_event_serializes_exactly_the_seven_field_contract() {
@@ -6205,16 +6241,47 @@ mod tests {
         // clear + Teams proactive success + the two sites inside the
         // shared helper (refresh-success persist + dead-credential clear
         // persist).
+        //
+        // Issue #929 rework: the helper now takes an *injected* persist
+        // closure, so both call sites inside `teams_write_with_refresh_fn`
+        // and `handle_teams_refresh_failure` route through ONE closure
+        // whose body lives in the wrapper `teams_write_with_optional_refresh`.
+        // The literal `token_io::persist_tokens(` count drops by one (the
+        // two inline sites collapse into one closure body), so the lower
+        // bound is 7 — the four Spotify sites + two Teams proactive sites
+        // + one closure-injected site in the wrapper. The companion
+        // assertion below checks the closure itself is wired, so a future
+        // regression that drops the closure for, say, `idle persist`
+        // cannot silently slip past the count check alone.
         let persist_count = prod_source.matches("token_io::persist_tokens(").count();
         assert!(
-            persist_count >= 8,
-            "expected at least 8 persist_tokens call sites in production (4 Spotify \
-             sites + 2 Teams proactive sites + 2 inside `teams_write_with_optional_refresh` \
-             after issue #929 folded the three Teams write sites into the helper); found \
+            persist_count >= 7,
+            "expected at least 7 persist_tokens call sites in production (4 Spotify \
+             sites + 2 Teams proactive sites + 1 closure-injected site inside \
+             `teams_write_with_optional_refresh` after issue #929 rework collapsed the \
+             helper's two persist sites into the wrapper's persist closure); found \
              {}. If a call-site persist is removed, refreshed/cleared tokens stop being \
              flushed to disk; if one is added inside a CAS helper, the #180 \
              self-deadlock returns.",
             persist_count
+        );
+
+        // Companion guard for the issue #929 rework closure shape: the
+        // wrapper body must inject `token_io::persist_tokens(s, app)` as
+        // a closure so the helper stays seam-driven. Without this
+        // assertion, a future contributor could replace the closure
+        // literal with a no-op `|_| Ok(())` and the count check above
+        // would still pass at the lower bound — but the runtime would
+        // silently stop flushing refreshed/cleared tokens to disk.
+        let wrapper_body = prod_fn_body(prod_source, "fn teams_write_with_optional_refresh<F, Rt>(");
+        assert!(
+            wrapper_body.contains("|s| token_io::persist_tokens(s, app)"),
+            "the wrapper `teams_write_with_optional_refresh` must inject the \
+             production persist as a closure (`|s| token_io::persist_tokens(s, app)`) \
+             so the helper stays seam-driven for the test module (issue #929 rework); \
+             body substituted a different shape would silently stop flushing tokens \
+             to disk. Wrapper body:\n{}",
+            wrapper_body
         );
     }
 
@@ -8356,8 +8423,6 @@ mod tests {
     /// executing the helper proves the retry-after-refresh contract.
     #[test]
     fn test_teams_write_with_refresh_fn_retries_after_refresh_uses_new_token() {
-        let app = tauri::test::mock_app();
-        let handle = app.handle().clone();
         let state = Arc::new(AppState::new());
         let teams_tok = TeamsTokens {
             access_token: "old-access".to_string(),
@@ -8377,24 +8442,35 @@ mod tests {
         };
         let mut write_calls: Vec<String> = Vec::new();
         let mut refresh_calls: u32 = 0;
-        let result = teams_write_with_refresh_fn(
-            &handle,
-            &state,
-            &teams_tok,
-            |access_token| {
-                write_calls.push(access_token.to_string());
-                if write_calls.len() == 1 {
-                    Err(TeamsApiError::ExpiredToken(401))
-                } else {
+        let emitter = CapturingEmitter::new();
+        let persist_calls = std::sync::Arc::new(std::sync::Mutex::new(0u32));
+        let result = {
+            let persist_calls = persist_calls.clone();
+            teams_write_with_refresh_fn(
+                &state,
+                &teams_tok,
+                |access_token| {
+                    write_calls.push(access_token.to_string());
+                    if write_calls.len() == 1 {
+                        Err(TeamsApiError::ExpiredToken(401))
+                    } else {
+                        Ok(())
+                    }
+                },
+                || {
+                    refresh_calls += 1;
+                    Ok(new_tokens.clone())
+                },
+                |_s| {
+                    *persist_calls
+                        .lock()
+                        .expect("persist-call mutex must not be poisoned") += 1;
                     Ok(())
-                }
-            },
-            || {
-                refresh_calls += 1;
-                Ok(new_tokens.clone())
-            },
-            "test: retry-after-refresh",
-        );
+                },
+                &emitter,
+                "test: retry-after-refresh",
+            )
+        };
         let returned = result.expect("retry after refresh must succeed");
         assert_eq!(
             refresh_calls, 1,
@@ -8419,24 +8495,47 @@ mod tests {
              adopt them for the availability re-arm in the same iteration \
              (issue #929)"
         );
+        // Success path: persist runs exactly once (post-CAS, pre-retry).
+        // No reconnect marker, no typed-error payload.
+        assert_eq!(
+            *persist_calls
+                .lock()
+                .expect("persist-call mutex must not be poisoned"),
+            1,
+            "the success path must persist the refreshed tokens exactly once"
+        );
+        assert!(
+            emitter
+                .markers
+                .lock()
+                .expect("capturing-emitter mutex must not be poisoned")
+                .is_empty(),
+            "the success path must not emit `teams-reconnect-required`"
+        );
+        assert!(
+            emitter
+                .events
+                .lock()
+                .expect("capturing-emitter mutex must not be poisoned")
+                .is_empty(),
+            "the success path must not emit a typed error event"
+        );
     }
 
     /// Issue #929 rework: behavioural proof that a dead refresh credential
     /// causes the helper to surface `teams-reconnect-required` so the
-    /// Dashboard can prompt the user. Uses Tauri's mock runtime so the
-    /// `app.emit("teams-reconnect-required", json!(null))` call is observable
-    /// without a GUI runtime or a real network round-trip.
+    /// Dashboard can prompt the user. No GUI runtime, no Tauri event
+    /// channel — the module-scope [`CapturingEmitter`] captures the
+    /// marker directly and a recording closure counts the persist attempt.
     ///
     /// `write_fn` returns `ExpiredToken` on every call (the initial 401 and
     /// any retry the helper might attempt) so the helper cannot accidentally
     /// succeed via the retry-after-refresh path; `refresh_fn` returns the
     /// typed `InvalidGrant` dead-credential signal the refresh endpoint emits.
-    /// The listener registered on the mock app catches the emit; the helper
-    /// also returns the typed error so the caller's own classifier can react.
+    /// The helper also returns the typed error so the caller's own
+    /// classifier can react.
     #[test]
     fn test_teams_write_with_refresh_fn_emits_reconnect_on_dead_credential() {
-        let app = tauri::test::mock_app();
-        let handle = app.handle().clone();
         let state = Arc::new(AppState::new());
         let teams_tok = TeamsTokens {
             access_token: "old-access".to_string(),
@@ -8449,22 +8548,18 @@ mod tests {
         state
             .tokens_load
             .commit_teams(&state.tokens, teams_tok.clone());
-        let observed = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        {
-            let observed = observed.clone();
-            handle.listen("teams-reconnect-required", move |_event| {
-                observed
-                    .lock()
-                    .expect("event-listener mutex must not be poisoned")
-                    .push("teams-reconnect-required".to_string());
-            });
-        }
+        let emitter = CapturingEmitter::new();
+        let mut persist_calls: u32 = 0;
         let result = teams_write_with_refresh_fn(
-            &handle,
             &state,
             &teams_tok,
             |_| Err(TeamsApiError::ExpiredToken(401)),
             || Err(TeamsApiError::InvalidGrant),
+            |_s| {
+                persist_calls += 1;
+                Ok(())
+            },
+            &emitter,
             "test: dead-credential",
         );
         assert!(
@@ -8473,15 +8568,39 @@ mod tests {
              classify it (issue #929): got {:?}",
             result
         );
-        let observed = observed
+        assert_eq!(
+            persist_calls, 1,
+            "the cleared-token persist must be attempted after a dead-credential \
+             clear, otherwise the discarded tokens come back on next launch"
+        );
+        let markers = emitter
+            .markers
             .lock()
-            .expect("event-listener mutex must not be poisoned");
+            .expect("capturing-emitter mutex must not be poisoned");
         assert!(
-            observed.iter().any(|s| s == "teams-reconnect-required"),
+            markers.iter().any(|s| s == "teams-reconnect-required"),
             "the helper must emit `teams-reconnect-required` on a dead \
              credential so the Dashboard opens the reconnect prompt \
-             (issue #929): observed events = {:?}",
-            *observed
+             (issue #929): observed markers = {:?}",
+            *markers
+        );
+        assert_eq!(
+            markers.len(),
+            1,
+            "a dead-credential failure must emit exactly one marker, never a \
+             duplicate the Dashboard would render twice (issue #929): {:?}",
+            *markers
+        );
+        let events = emitter
+            .events
+            .lock()
+            .expect("capturing-emitter mutex must not be poisoned");
+        assert!(
+            events.is_empty(),
+            "the reconnect marker must NOT also raise an `error` event — that \
+             would double-report the same failure to the user (issue #929): \
+             events = {:?}",
+            *events
         );
     }
 
@@ -8498,27 +8617,13 @@ mod tests {
     /// caught.
     #[test]
     fn test_paused_clear_transient_failure_emits_warning_severity() {
-        struct CapturingEmitter {
-            events: std::sync::Mutex<Vec<(String, ErrorEventPayload)>>,
-        }
-        impl ErrorEventEmitter for CapturingEmitter {
-            fn emit_error_event(&self, event: &str, payload: ErrorEventPayload) {
-                self.events
-                    .lock()
-                    .expect("capturing-emitter mutex must not be poisoned")
-                    .push((event.to_string(), payload));
-            }
-        }
-
         for transient in [
             TeamsApiError::RateLimited(Some(30)),
             TeamsApiError::RateLimited(None),
             TeamsApiError::Transient("connection refused".to_string()),
             TeamsApiError::Other(502, "Bad Gateway".to_string()),
         ] {
-            let emitter = CapturingEmitter {
-                events: std::sync::Mutex::new(Vec::new()),
-            };
+            let emitter = CapturingEmitter::new();
             emit_paused_clear_failure(&emitter, &transient);
             let events = emitter
                 .events
@@ -8563,9 +8668,7 @@ mod tests {
             TeamsApiError::ReauthRequired("interaction_required".to_string()),
             TeamsApiError::Forbidden(403, "insufficient_claims".to_string()),
         ] {
-            let emitter = CapturingEmitter {
-                events: std::sync::Mutex::new(Vec::new()),
-            };
+            let emitter = CapturingEmitter::new();
             emit_paused_clear_failure(&emitter, &classified);
             let events = emitter
                 .events
