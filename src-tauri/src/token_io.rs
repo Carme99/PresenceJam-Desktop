@@ -158,7 +158,7 @@ fn decrypt_tokens(key: &[u8; 32], bytes: &[u8]) -> Result<Vec<u8>, String> {
 /// while `config::config_dir()` is `<base>/PresenceJam/` (e.g.
 /// `~/.config/PresenceJam/config.json`). Keep user-visible backup/restore
 /// instructions naming BOTH directories.
-pub fn tokens_file_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+pub fn tokens_file_path<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, String> {
     let base = app
         .path()
         .app_config_dir()
@@ -727,7 +727,10 @@ fn write_tokens_atomic_with_key(
 /// independent reads, a Teams commit landing between them stayed in memory
 /// but was dropped from the file, leaving a stale access token paired with
 /// a fresh refresh token on the next launch.
-pub fn persist_tokens(state: &Arc<crate::AppState>, app: &tauri::AppHandle) -> Result<(), String> {
+pub fn persist_tokens<R: tauri::Runtime>(
+    state: &Arc<crate::AppState>,
+    app: &tauri::AppHandle<R>,
+) -> Result<(), String> {
     let path = tokens_file_path(app)?;
     persist_tokens_at_with_retry(
         state,
