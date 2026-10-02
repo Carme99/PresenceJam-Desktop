@@ -6268,20 +6268,71 @@ mod tests {
 
         // Companion guard for the issue #929 rework closure shape: the
         // wrapper body must inject `token_io::persist_tokens(s, app)` as
-        // a closure so the helper stays seam-driven. Without this
-        // assertion, a future contributor could replace the closure
-        // literal with a no-op `|_| Ok(())` and the count check above
-        // would still pass at the lower bound — but the runtime would
-        // silently stop flushing refreshed/cleared tokens to disk.
+        // a closure OUTSIDE any string literal so the helper stays
+        // seam-driven. The naive `contains(...)` check the original
+        // rework shipped was defeated with one line:
+        //     let _decoy: &str = "|s| token_io::persist_tokens(s, app)";
+        // — a reviewer dropped it in while the real closure was
+        // `|_| Ok(())`, both checks passed, and the runtime silently
+        // stopped flushing refreshed/cleared tokens to disk. This guard
+        // builds the candidate by stripping `//`/`///` line comments AND
+        // the contents of every `"…"` string literal; the decoy line has
+        // quotes and is dropped, the real closure
+        // `|s| token_io::persist_tokens(s, app),` survives. A future
+        // regression that drops the closure entirely (or relocates it
+        // inside a string) fails this test.
         let wrapper_body =
             prod_fn_body(prod_source, "fn teams_write_with_optional_refresh<F, Rt>(");
+        let closure_pattern = "|s| token_io::persist_tokens(s, app)";
+        let mut candidate = String::new();
+        let mut in_string = false;
+        for line in wrapper_body.lines() {
+            // Drop line-level Rust comments (`//`, `///`, `//!`, `    // …`).
+            // A future contributor could put the real closure on a comment
+            // line and skip the guard; this filter blocks that.
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            // Walk the line char-by-char, suppressing string-literal
+            // contents so a decoy like
+            // `let _decoy: &str = "<pattern>";` contributes nothing to
+            // the candidate. Escape sequences (`\"`, `\\`, …) are honoured
+            // — the `\X` form skips the next char without toggling the
+            // string state. Multi-line strings are handled: the `in_string`
+            // state persists across lines, and a closing `"` on a later
+            // line ends the suppression. The wrapper body never uses raw
+            // strings (`r"…"`, `r#"…"#`); a future contributor adding one
+            // is a separate concern that this guard does not pretend to
+            // handle.
+            let mut stripped = String::new();
+            let mut chars = line.chars().peekable();
+            while let Some(c) = chars.next() {
+                if in_string {
+                    if c == '\\' {
+                        // Skip the escaped char (the `\"` form, etc.).
+                        chars.next();
+                    } else if c == '"' {
+                        in_string = false;
+                    }
+                    continue;
+                }
+                if c == '"' {
+                    in_string = true;
+                    continue;
+                }
+                stripped.push(c);
+            }
+            candidate.push_str(&stripped);
+            candidate.push('\n');
+        }
         assert!(
-            wrapper_body.contains("|s| token_io::persist_tokens(s, app)"),
+            candidate.contains(closure_pattern),
             "the wrapper `teams_write_with_optional_refresh` must inject the \
-             production persist as a closure (`|s| token_io::persist_tokens(s, app)`) \
-             so the helper stays seam-driven for the test module (issue #929 rework); \
-             body substituted a different shape would silently stop flushing tokens \
-             to disk. Wrapper body:\n{}",
+             production persist as a closure (`{closure_pattern}`) OUTSIDE any \
+             string literal, so a future contributor cannot defeat the guard \
+             with `let _decoy: &str = \"<pattern>\";`. The wrapper body had no \
+             occurrence outside string contexts — either the closure was removed, \
+             or every match is inside a string. Wrapper body:\n{}",
             wrapper_body
         );
     }
@@ -8603,6 +8654,133 @@ mod tests {
              events = {:?}",
             *events
         );
+    }
+
+    /// Issue #929 rework (B1 closure): behavioural proof that the production
+    /// wrapper `teams_write_with_optional_refresh` actually wires the real
+    /// `app` argument through to the emit call — the B1 finding that the
+    /// core-helper tests do not exercise. Driving
+    /// `teams_write_with_refresh_fn` with a `CapturingEmitter` cannot prove
+    /// this: the wrapper hands `app` to the helper as the emitter, and
+    /// replacing that handoff with a no-op emitter (or `let _ = &app;` in
+    /// the wrapper body) would make the helper-level test stay green while
+    /// the Dashboard silently stopped receiving `teams-reconnect-required` —
+    /// the exact bug #929 exists to prevent. THIS test drives the WRAPPER
+    /// through a real `tauri::test::mock_app()` so the `app` → listener
+    /// round-trip is exercised end-to-end.
+    ///
+    /// Non-Windows only (issue #929 rework): `tauri::test::mock_app()`
+    /// requires the `test` feature, which links the `tauri::test` module
+    /// into the Windows test binary and breaks its load with
+    /// `0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND`. Windows keeps using the
+    /// core-helper + `CapturingEmitter` coverage; this wrapper-level
+    /// coverage ships on Linux/macOS where the feature is safe.
+    ///
+    /// The dead-credential shape mirrors
+    /// `test_teams_write_with_refresh_fn_emits_reconnect_on_dead_credential`
+    /// so the two tests share the same preconditions; only the entry point
+    /// differs (the wrapper). Replacing the wrapper's emitter argument with
+    /// a no-op would make this test go RED while leaving the core-helper
+    /// test green — the B1 behavioural proof.
+    #[test]
+    #[cfg(not(windows))]
+    fn test_wrapper_emits_teams_reconnect_required_on_dead_credential() {
+        use tauri::Listener;
+
+        let mock_app = tauri::test::mock_app();
+        let app = mock_app.handle().clone();
+        let state = Arc::new(AppState::new());
+        let teams_tok = TeamsTokens {
+            access_token: "old-access".to_string(),
+            refresh_token: Some("dead-refresh".to_string()),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+        };
+        // Production precondition: the slot holds the pre-refresh token so
+        // the refresh-failure handler's clear-when-current path runs and
+        // the wrapper ends up classifying the typed `InvalidGrant`.
+        state
+            .tokens_load
+            .commit_teams(&state.tokens, teams_tok.clone());
+
+        // Register a real Tauri listener on the same event name the
+        // Dashboard subscribes to (`teams-reconnect-required`). Only a real
+        // listener can prove the wrapper's `app` handoff reaches the bus:
+        // any `CapturingEmitter` in the helper body would be invisible here
+        // because it would not be the `app` the wrapper actually passed in.
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let event_name = "teams-reconnect-required";
+        let _unlisten = app.listen(event_name, move |event| {
+            // `serde_json::json!(null)` on the wire is the literal string
+            // `"null"` — capture it so the test pins the wire payload
+            // shape (issue #929: production wire shape is unchanged).
+            let _ = tx.send(event.payload().to_string());
+        });
+
+        // Drive the WRAPPER (not the core helper) with the dead-credential
+        // shape: the initial write returns `ExpiredToken`, the refresh
+        // returns `InvalidGrant`. The wrapper must hand `app` through to
+        // `emit_marker("teams-reconnect-required")` so the listener above
+        // fires. The `write_fn` is invoked on the access token we supplied
+        // — it never reaches the network because the closure returns the
+        // error directly, just like the core-helper test does.
+        let result = teams_write_with_optional_refresh(
+            &app,
+            &state,
+            &teams_tok,
+            |_access_token| Err(TeamsApiError::ExpiredToken(401)),
+            "test: wrapper-binding",
+        );
+        assert!(
+            matches!(result, Err(TeamsApiError::InvalidGrant)),
+            "the wrapper must surface the typed refresh error so callers \
+             can classify it (issue #929): got {:?}",
+            result
+        );
+
+        // Poll the channel for the event delivery. Tauri's event dispatcher
+        // on `MockRuntime` is synchronous on the emitting thread, but the
+        // listener callback runs in the dispatcher's delivery path which
+        // is not guaranteed to fire before `try_recv()` here. A short
+        // busy-wait is sufficient: the listener either fires within a few
+        // ms or never does.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        let mut received_payload: Option<String> = None;
+        loop {
+            match rx.try_recv() {
+                Ok(payload) => {
+                    received_payload = Some(payload);
+                    break;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    if std::time::Instant::now() >= deadline {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+            }
+        }
+        let payload = received_payload.unwrap_or_else(|| {
+            panic!(
+                "the wrapper's real `app` emitter binding must reach a real \
+                 Tauri listener with `teams-reconnect-required`. Replacing the \
+                 wrapper's emitter argument with a no-op emitter (or dropping \
+                 the `app` handoff) would make this test go RED while leaving \
+                 the core-helper test green — that is the B1 behavioural \
+                 proof. Received nothing; the listener never fired."
+            )
+        });
+        assert_eq!(
+            payload, "null",
+            "the wire payload must be the documented `null` JSON literal \
+             (issue #929: production wire shape is unchanged): got {payload:?}"
+        );
+
+        // Tidy up the listener so the test doesn't keep the dispatcher
+        // pinned past the assertion. `EventId` is `Copy` (a plain `u32`
+        // newtype), so `drop` is a no-op — let-bind the value to silence
+        // the unused-binding lint without lying about an explicit unlisten.
+        let _ = _unlisten;
     }
 
     /// Issue #929 rework: behavioural proof that the paused-track clear arm
