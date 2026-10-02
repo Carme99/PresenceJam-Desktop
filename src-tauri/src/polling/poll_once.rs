@@ -6273,7 +6273,8 @@ mod tests {
         // literal with a no-op `|_| Ok(())` and the count check above
         // would still pass at the lower bound — but the runtime would
         // silently stop flushing refreshed/cleared tokens to disk.
-        let wrapper_body = prod_fn_body(prod_source, "fn teams_write_with_optional_refresh<F, Rt>(");
+        let wrapper_body =
+            prod_fn_body(prod_source, "fn teams_write_with_optional_refresh<F, Rt>(");
         assert!(
             wrapper_body.contains("|s| token_io::persist_tokens(s, app)"),
             "the wrapper `teams_write_with_optional_refresh` must inject the \
