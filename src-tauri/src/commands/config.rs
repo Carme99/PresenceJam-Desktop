@@ -18,9 +18,18 @@ use std::os::unix::fs::OpenOptionsExt;
 const CMD: &str = "[CMD.CONFIG]";
 
 #[tauri::command]
-pub fn load_config() -> Result<AppConfig, String> {
+/// Reads `config.json` off the IPC thread.
+///
+/// Issue #928: a non-async `#[tauri::command]` body runs inline on the
+/// main/UI thread, and this one is a blocking disk read *plus* the
+/// `client_secret_state` keychain stamp in [`config::load_config`]. On a
+/// Linux host with a locked Secret Service the probe blocks for the
+/// D-Bus timeout, so simply launching the app froze the window, the tray
+/// menu and window events for seconds. Both halves now run on the blocking
+/// pool (the same seam `get_recent_logs` uses).
+pub async fn load_config() -> Result<AppConfig, String> {
     log::debug!("{CMD} load_config: ENTRY");
-    match config::load_config() {
+    match load_config_offloaded(config::load_config).await {
         Ok(cfg) => {
             log::info!(
                 "{CMD} load_config: SUCCESS - spotify.client_id.len={}",
@@ -32,6 +41,22 @@ pub fn load_config() -> Result<AppConfig, String> {
             log::error!("{CMD} load_config: FAILED - {}", e);
             Err(e)
         }
+    }
+}
+
+/// Run one blocking config read on the blocking pool (#928).
+///
+/// The loader is injected so the unit test can observe *which thread the
+/// read ran on* — an assertion no source inspection can make. Production
+/// passes [`config::load_config`]; a join failure is folded into the same
+/// `String` error channel the command already reports.
+async fn load_config_offloaded<F>(load: F) -> Result<AppConfig, String>
+where
+    F: FnOnce() -> Result<AppConfig, String> + Send + 'static,
+{
+    match tauri::async_runtime::spawn_blocking(load).await {
+        Ok(result) => result,
+        Err(e) => Err(format!("load_config task panicked: {e}")),
     }
 }
 
@@ -1062,6 +1087,55 @@ pub async fn set_locale(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #928: `load_config` used to be a synchronous
+    /// `#[tauri::command]`, so Tauri's main thread ran the `config.json`
+    /// read and the `client_secret_state` keychain stamp inline — on a
+    /// locked Linux Secret Service that is the whole D-Bus timeout, freezing
+    /// the window, the tray menu and window events at every launch.
+    ///
+    /// `block_on` parks the calling thread, so a body that still ran inline
+    /// would report the caller's own thread id. The thread id is the
+    /// observable difference — asserted by execution, not by grepping the
+    /// signature (source-text guards are rejected here, issue #778).
+    #[test]
+    fn load_config_reads_the_document_off_the_calling_thread() {
+        let awaiting = std::thread::current().id();
+        let ran_on = std::sync::Arc::new(parking_lot::Mutex::new(None));
+        let sink = std::sync::Arc::clone(&ran_on);
+
+        let loaded = tauri::async_runtime::block_on(load_config_offloaded(move || {
+            *sink.lock() = Some(std::thread::current().id());
+            Ok(AppConfig::default())
+        }))
+        .expect("the offloaded read must not panic");
+
+        // The offload must not degrade into "returned nothing": a usable
+        // config still comes back.
+        assert!(loaded.spotify.client_id.is_empty(), "defaults round-trip");
+        let worker = ran_on.lock().expect("the config read must have run");
+        assert_ne!(
+            worker, awaiting,
+            "load_config must not read config.json (or probe the keychain) on \
+             the awaiting thread: in production that thread is the IPC/main \
+             thread, so a locked keyring freezes the whole UI for the D-Bus \
+             timeout (issue #928)"
+        );
+    }
+
+    /// A loader failure must reach the webview unchanged rather than being
+    /// swallowed by the join hop.
+    #[test]
+    fn load_config_propagates_the_loader_error_unchanged() {
+        let result = tauri::async_runtime::block_on(load_config_offloaded(|| {
+            Err("Failed to read config file '/x/config.json': permission denied".to_string())
+        }));
+        assert_eq!(
+            result.err(),
+            Some("Failed to read config file '/x/config.json': permission denied".to_string()),
+            "the typed loader error must cross the offload intact (issue #928)"
+        );
+    }
 
     /// Production half of this module — everything before the inline test
     /// module, so a scan can never match the assertions themselves.

@@ -32,6 +32,17 @@ where
         .map_err(|e| format!("{CMD} {label} task panicked: {e}"))
 }
 
+/// The blocking HTTPS refresh [`refresh_teams_impl`] drives (issue #928).
+///
+/// Taken as a trait object rather than a generic parameter so the impl keeps
+/// the exact signature literal the cross-file CAS guard in
+/// `polling/poll_once.rs` anchors on.
+type TeamsRefreshFn =
+    dyn Fn(&crate::teams::TeamsTokens) -> Result<crate::teams::TeamsTokens, TeamsApiError> + Send;
+
+/// The atomic `tokens.json` write [`refresh_teams_impl`] drives (issue #928).
+type TeamsPersistFn = dyn Fn(&Arc<AppState>) -> Result<(), String> + Send;
+
 /// Device code of the sign-in flow the UI is currently running (issue #933).
 ///
 /// [`start_teams_auth_device_code`] makes its code current, and a poll may
@@ -285,8 +296,31 @@ pub async fn refresh_teams(
 
     // Issue #928: the refresh is a blocking HTTPS round-trip and the commit
     // rewrites tokens.json — neither may run inline on the IPC thread.
-    let state = Arc::clone(state.inner());
-    offload_blocking("refresh_teams", move || refresh_teams_impl(&state, &app)).await?
+    let persist_app = app.clone();
+    refresh_teams_offloaded(
+        Arc::clone(state.inner()),
+        Box::new(crate::teams::refresh_teams_token),
+        Box::new(move |state| token_io::persist_tokens(state, &persist_app)),
+    )
+    .await
+}
+
+/// Offloaded entry point for [`refresh_teams`]: the HTTPS refresh and the
+/// `tokens.json` rewrite both run on the blocking pool, never on the IPC
+/// thread (issue #928). The two blocking steps are injected so a unit test
+/// can assert which thread each ran on without a network or a Tauri
+/// `AppHandle`.
+async fn refresh_teams_offloaded(
+    state: Arc<AppState>,
+    refresh: Box<TeamsRefreshFn>,
+    persist: Box<TeamsPersistFn>,
+) -> Result<(), String> {
+    offload_blocking("refresh_teams", move || {
+        // `&*boxed` (rather than `.as_ref()`) keeps the `+ Send` bound visible
+        // through the deref, so the closure stays `Send` and can cross the hop.
+        refresh_teams_impl(&state, &*refresh, &*persist)
+    })
+    .await?
 }
 
 /// Clear the exact Teams session whose refresh failed. The returned bool is
@@ -297,8 +331,20 @@ fn clear_dead_teams_refresh(state: &AppState, pre_refresh_access_token: &str) ->
         .clear_teams_if_current(&state.tokens, pre_refresh_access_token)
 }
 
-/// Blocking body of [`refresh_teams`].
-fn refresh_teams_impl(state: &Arc<AppState>, app: &AppHandle) -> Result<(), String> {
+/// Blocking body of [`refresh_teams`], with the HTTPS refresh and the
+/// atomic persist injected (issue #928) so a unit test can assert which
+/// thread each ran on. The CAS and its dead-session policy are unchanged.
+///
+/// The steps are taken as trait objects rather than generic parameters so the
+/// definition keeps the exact signature literal the cross-file CAS guard in
+/// `polling/poll_once.rs` anchors on. Do not spell that literal out in this
+/// doc comment: the guard's scanner takes the *second* occurrence, and a
+/// mention here would capture this comment instead.
+fn refresh_teams_impl(
+    state: &Arc<AppState>,
+    refresh: &TeamsRefreshFn,
+    persist: &TeamsPersistFn,
+) -> Result<(), String> {
     log::debug!("{CMD} refresh_teams: ENTRY");
 
     let current_tokens = {
@@ -318,14 +364,14 @@ fn refresh_teams_impl(state: &Arc<AppState>, app: &AppHandle) -> Result<(), Stri
     // generic failure.
     let pre_refresh_access_token = current_tokens.access_token.clone();
     let outcome = cas_refresh_teams(state, "teams-command", &pre_refresh_access_token, || {
-        crate::teams::refresh_teams_token(&current_tokens)
+        refresh(&current_tokens)
     });
     match outcome {
         // Issue #180: the write guard reborrowed into the CAS call above dies
         // at the end of that statement, so persisting here cannot re-lock the
         // same RwLock for reading.
         CasOutcome::Committed(new_tokens) => {
-            token_io::persist_tokens(state, app)?;
+            persist(state)?;
             log::info!(
                 "{CMD} refresh_teams: SUCCESS (state updated and persisted, access_token.len={})",
                 new_tokens.access_token.len()
@@ -359,7 +405,7 @@ fn refresh_teams_impl(state: &Arc<AppState>, app: &AppHandle) -> Result<(), Stri
                 "{CMD} refresh_teams: Teams refresh token is dead (invalid_grant); discarding tokens and requiring re-auth"
             );
             // The gate releases its slot guard before persistence retries.
-            if let Err(e) = token_io::persist_tokens(state, app) {
+            if let Err(e) = persist(state) {
                 log::warn!(
                     "{CMD} refresh_teams: failed to persist cleared teams tokens: {}",
                     e
@@ -405,9 +451,9 @@ pub fn get_teams_granted_scopes(state: tauri::State<'_, Arc<AppState>>) -> Vec<S
 mod tests {
     use super::{
         cancel_flow, clear_dead_teams_refresh, may_commit, offload_blocking, poll_teams_auth_core,
-        TeamsAuthEvent,
+        refresh_teams_offloaded, TeamsAuthEvent,
     };
-    use crate::teams::TeamsTokens;
+    use crate::teams::{TeamsApiError, TeamsTokens};
     use crate::AppState;
     use parking_lot::Mutex;
     use std::sync::Arc;
@@ -417,6 +463,120 @@ mod tests {
             access_token: "live-teams-token".to_string(),
             refresh_token: Some("live-refresh-token".to_string()),
             expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+        }
+    }
+
+    /// Issue #928: `refresh_teams` is a blocking HTTPS round-trip followed by
+    /// an atomic `tokens.json` rewrite. `block_on` parks the calling thread, so
+    /// a body that still ran inline would report the caller's own thread id —
+    /// which in production is the IPC/main thread that owns the window, the
+    /// tray menu and window events.
+    #[test]
+    fn refresh_teams_runs_its_network_and_persist_off_thread() {
+        let awaiting = std::thread::current().id();
+        let ran_on = Arc::new(Mutex::new(Vec::new()));
+
+        let state = Arc::new(AppState::new());
+        state.tokens_load.commit_teams(&state.tokens, tokens());
+
+        let refresh_log = Arc::clone(&ran_on);
+        let persist_log = Arc::clone(&ran_on);
+        let persisted = Arc::new(Mutex::new(Vec::new()));
+        let persist_sink = Arc::clone(&persisted);
+
+        let result = tauri::async_runtime::block_on(refresh_teams_offloaded(
+            Arc::clone(&state),
+            Box::new(move |_current| {
+                refresh_log
+                    .lock()
+                    .push(("https-refresh", std::thread::current().id()));
+                Ok(TeamsTokens {
+                    access_token: "refreshed-teams-token".to_string(),
+                    refresh_token: Some("refreshed-teams-refresh".to_string()),
+                    expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+                })
+            }),
+            Box::new(move |state| {
+                persist_log
+                    .lock()
+                    .push(("tokens-persist", std::thread::current().id()));
+                persist_sink.lock().push(
+                    state
+                        .tokens
+                        .teams()
+                        .as_ref()
+                        .map(|t| t.access_token.clone()),
+                );
+                Ok(())
+            }),
+        ));
+
+        assert_eq!(result, Ok(()));
+        let seen = ran_on.lock();
+        assert_eq!(
+            seen.len(),
+            2,
+            "both blocking steps must have run (issue #928): {seen:?}"
+        );
+        for (step, tid) in seen.iter() {
+            assert_ne!(
+                *tid, awaiting,
+                "refresh_teams step `{step}` ran on the awaiting (IPC) thread — \
+                 the HTTPS round trip and the fsync would freeze the window for \
+                 their whole duration (issue #928)"
+            );
+        }
+        // The offload must not turn the refresh into a no-op: the new tokens
+        // are committed and still reach disk.
+        assert_eq!(
+            *persisted.lock(),
+            vec![Some("refreshed-teams-token".to_string())],
+            "the refreshed Teams tokens must still be committed and persisted"
+        );
+    }
+
+    /// The typed dead-session classification must survive the offload: an
+    /// `invalid_grant` still drops the session and still asks for a re-sign-in
+    /// rather than surfacing a generic failure (issue #564).
+    #[test]
+    fn refresh_teams_still_classifies_a_dead_session_off_thread() {
+        let awaiting = std::thread::current().id();
+        let ran_on = Arc::new(Mutex::new(Vec::new()));
+
+        let state = Arc::new(AppState::new());
+        state.tokens_load.commit_teams(&state.tokens, tokens());
+
+        let refresh_log = Arc::clone(&ran_on);
+        let result = tauri::async_runtime::block_on(refresh_teams_offloaded(
+            Arc::clone(&state),
+            Box::new(move |_current| {
+                refresh_log
+                    .lock()
+                    .push(("https-refresh", std::thread::current().id()));
+                Err(TeamsApiError::InvalidGrant)
+            }),
+            Box::new(|_state| Ok(())),
+        ));
+
+        assert_eq!(
+            result,
+            Err(super::TEAMS_REAUTH_MSG.to_string()),
+            "a dead Teams refresh token must still produce the re-auth message"
+        );
+        assert!(
+            state.tokens.teams().is_none(),
+            "the dead Teams session must still be discarded"
+        );
+        let seen = ran_on.lock();
+        assert!(
+            !seen.is_empty(),
+            "the blocking refresh must still have run (issue #928)"
+        );
+        for (step, tid) in seen.iter() {
+            assert_ne!(
+                *tid, awaiting,
+                "refresh_teams step `{step}` ran on the awaiting (IPC) thread (issue #928)"
+            );
         }
     }
 
