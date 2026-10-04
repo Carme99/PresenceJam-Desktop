@@ -18,6 +18,7 @@
   import { t } from '$lib/i18n';
   import { reconcileDetachedPanes } from '$lib/stores/detach';
   import { clientSecretStateOf, loadConfig } from '$lib/stores/config';
+  import { ensureDashboardHydration } from '$lib/stores/dashboardHydration';
   import { useListenerTeardown } from '$lib/utils/useAuthListeners';
   import {
     markStatusPosted,
@@ -222,6 +223,12 @@
     void loadConfig()
       .then(migrateLegacyNotificationPreference)
       .catch((e) => console.warn('[LAYOUT] notification preference migration failed:', e));
+    // #888: the Dashboard's config read + status snapshot are owned by the
+    // hydration store. Warming it here — in the component that never unmounts
+    // — means the first Dashboard mount joins a snapshot that is already in
+    // flight instead of starting one of its own, and every remount inside the
+    // TTL after that costs no IPC at all.
+    void ensureDashboardHydration();
     let unlistenTeams: (() => void) | null = null;
     let unlistenSpotify: (() => void) | null = null;
     let unlistenPlayback: (() => void) | null = null;

@@ -79,7 +79,12 @@ import Layout from '../src/routes/+layout.svelte';
 import { presence } from '$lib/stores/presence';
 import { notificationPreferences, setNotificationPreference } from '$lib/stores/notifications';
 import { configStore, defaultConfig } from '$lib/stores/config';
-import { i18n, t } from '$lib/i18n';
+import {
+  HYDRATION_TTL_MS,
+  ensureDashboardHydration,
+  resetDashboardHydration
+} from '$lib/stores/dashboardHydration';
+import { i18n, t, tCount } from '$lib/i18n';
 import { theme } from '$lib/stores/theme';
 
 const invokeMock = invoke as unknown as Mock;
@@ -178,17 +183,40 @@ beforeEach(() => {
   i18n.set('en');
   sendNotificationMock.mockClear();
   invokeMock.mockReset();
+  // #764: every command the Dashboard's primary controls drive is modelled
+  // here rather than per test, so a case can never silently fall through to
+  // `undefined` and read as "the handler did nothing".
+  failingCommands.clear();
+  // #888: the hydration cache is module state; each case starts cold so a
+  // mount really does issue its own IPC.
+  resetDashboardHydration();
   status = syncStatus();
   invokeMock.mockImplementation(async (cmd: string, args?: { config?: unknown }) => {
+    if (failingCommands.has(cmd)) throw new Error(`${cmd} rejected`);
     if (cmd === 'get_sync_status') return status;
     // #675: the layout loads the config to feed the notification classes, and
     // a toggle saves it. Echoing the store keeps the two in lockstep without
     // this file having to model the backend's clamping.
     if (cmd === 'load_config') return get(configStore);
     if (cmd === 'save_config') return args?.config ?? get(configStore);
+    // #870 / #877: the composer's snapshot and the Activity ring. `null` and
+    // `[]` are what a fresh install answers with.
+    if (cmd === 'load_manual_status_command') return null;
+    if (cmd === 'get_presence_history') return [];
+    // #764: start / stop / refresh all acknowledge without a payload — the
+    // Dashboard reads the resulting state back out of `get_sync_status`.
+    if (cmd === 'start_syncing' || cmd === 'stop_syncing') return null;
+    if (cmd === 'refresh_status') return null;
     return undefined;
   });
 });
+
+/**
+ * #764: commands the shared mock should reject. Set by a case, cleared by
+ * `beforeEach`, so a failure path is expressed as "this one command fails"
+ * instead of replacing the whole backend.
+ */
+const failingCommands = new Set<string>();
 
 afterEach(() => {
   vi.useRealTimers();
@@ -413,12 +441,9 @@ describe('Dashboard error-event routing (#972)', () => {
     const { container } = render(Dashboard);
     await listenerReady('error');
     await emit('error', teamsRetry);
-    invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === 'start_syncing') throw new Error('toggle failed');
-      if (cmd === 'get_sync_status') return status;
-      if (cmd === 'load_config') return get(configStore);
-      return undefined;
-    });
+    // #764: the shared mock models every command, so a failure path is now
+    // "this one command rejects" instead of a whole replacement backend.
+    failingCommands.add('start_syncing');
 
     (container.querySelector('.header-right .icon-btn.primary') as HTMLButtonElement).click();
 
@@ -430,12 +455,7 @@ describe('Dashboard error-event routing (#972)', () => {
 
   it('clears a retry warning when snooze resume fails', async () => {
     configStore.set({ ...get(configStore), snooze_until: new Date(Date.now() + 60_000).toISOString() });
-    invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === 'save_config') throw new Error('resume failed');
-      if (cmd === 'get_sync_status') return status;
-      if (cmd === 'load_config') return get(configStore);
-      return undefined;
-    });
+    failingCommands.add('save_config');
     const { container } = render(Dashboard);
     await listenerReady('error');
     await waitFor(() => expect(container.querySelector('.snooze-resume')).not.toBeNull());
@@ -451,12 +471,7 @@ describe('Dashboard error-event routing (#972)', () => {
 
   it('clears a retry warning when status refresh fails', async () => {
     presence.set({ ...get(presence), syncing: true });
-    invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === 'refresh_status') throw new Error('refresh failed');
-      if (cmd === 'get_sync_status') return status;
-      if (cmd === 'load_config') return get(configStore);
-      return undefined;
-    });
+    failingCommands.add('refresh_status');
     const { container } = render(Dashboard);
     await listenerReady('error');
     await waitFor(() => expect(container.querySelector('.btn-refresh')).not.toBeNull());
@@ -592,6 +607,10 @@ describe('Hydration loses to a newer event (#670)', () => {
   it('discards a get_sync_status snapshot assembled before a pause already on screen', async () => {
     status = syncStatus({ last_posted_status: '🎵 An Artist - A Track 🎧' });
     await mountShell();
+    // #888: let the layout's own hydration land before this case takes the
+    // backend over — joining that in-flight read would skip the held answer
+    // below, which is the whole point of the case.
+    await ensureDashboardHydration();
 
     // Hold the IPC answer so the pause event can land while it is in flight —
     // the snapshot genuinely predates the event that would otherwise revert it.
@@ -604,6 +623,9 @@ describe('Hydration loses to a newer event (#670)', () => {
       }
       return Promise.resolve(undefined);
     });
+    // #888: with that read settled, drop the cache so the Dashboard mount below
+    // issues its own `get_sync_status` and we can hold it open.
+    resetDashboardHydration();
 
     const dash = render(Dashboard);
     await waitFor(() => expect(requested).toBe(true));
@@ -739,7 +761,7 @@ describe('Snooze chip live region is silent per-second (#736)', () => {
 
     // The live region announces on entry only.
     expect(liveNode?.textContent?.trim()).toBe(
-      t('dashboard.snoozeStatusStart', { minutes: 30 })
+      tCount('dashboard.snoozeStatusStart', 30, { minutes: 30 })
     );
     expect(liveNode?.getAttribute('role')).toBe('status');
     expect(liveNode?.getAttribute('aria-hidden')).toBeNull();
@@ -757,7 +779,7 @@ describe('Snooze chip live region is silent per-second (#736)', () => {
 
     // The live region's text is the same after 10 seconds.
     expect(container.querySelector('.snooze-status')?.textContent?.trim()).toBe(
-      t('dashboard.snoozeStatusStart', { minutes: 30 })
+      tCount('dashboard.snoozeStatusStart', 30, { minutes: 30 })
     );
     // The visible countdown changed (the per-second tick still runs).
     expect(container.querySelector('.snooze-countdown')?.textContent).not.toBe(countdownBefore);
@@ -768,7 +790,7 @@ describe('Snooze chip live region is silent per-second (#736)', () => {
     const { container } = render(Dashboard);
     await waitFor(() => expect(container.querySelector('.snooze-status')).not.toBeNull());
     expect(container.querySelector('.snooze-status')?.textContent?.trim()).toBe(
-      t('dashboard.snoozeStatusStart', { minutes: 30 })
+      tCount('dashboard.snoozeStatusStart', 30, { minutes: 30 })
     );
 
     // End the snooze via the documented public surface (config write).
@@ -830,7 +852,219 @@ describe('Snooze chip live region is silent per-second (#736)', () => {
     await waitFor(() => expect(container.querySelector('.snooze-status')).not.toBeNull());
 
     expect(container.querySelector('.snooze-status')?.textContent?.trim()).toBe(
-      t('dashboard.snoozeStatusStart', { minutes: 30 })
+      tCount('dashboard.snoozeStatusStart', 30, { minutes: 30 })
     );
+  });
+});
+
+/**
+ * #764 — the Dashboard's two primary controls.
+ *
+ * `stop_syncing` / `start_syncing` and `refresh_status` → `get_sync_status` were
+ * driven by no test. The failure mode that matters: the toggle button is
+ * disabled for the duration of the invoke, so a rejected `start_syncing` that
+ * missed the error branch would leave the Dashboard's main control permanently
+ * unusable with nothing to catch it — and the localized
+ * `dashboard.syncToggleFailed` toast from #289 was unprotected for the same
+ * reason.
+ *
+ * Fails pre-fix: the shared mock returned `undefined` for all four commands and
+ * no case exercised them, so a removed or reordered handler was invisible.
+ */
+describe('Dashboard sync toggle and Refresh (#764)', () => {
+  const toggleButton = (container: HTMLElement) =>
+    container.querySelector('.header-right .icon-btn.primary') as HTMLButtonElement;
+
+  it('starts syncing from a stopped Dashboard and flips the shared store', async () => {
+    status = syncStatus({ is_syncing: false });
+    const { container } = render(Dashboard);
+    await waitFor(() => expect(get(presence).syncing).toBe(false));
+    expect(toggleButton(container).disabled).toBe(false);
+
+    toggleButton(container).click();
+
+    await waitFor(() => expect(get(presence).syncing).toBe(true));
+    expect(invokeMock).toHaveBeenCalledWith('start_syncing');
+    expect(invokeMock).not.toHaveBeenCalledWith('stop_syncing');
+  });
+
+  it('stops syncing from a running Dashboard and flips the shared store', async () => {
+    status = syncStatus({ is_syncing: true });
+    const { container } = render(Dashboard);
+    await waitFor(() => expect(get(presence).syncing).toBe(true));
+
+    toggleButton(container).click();
+
+    await waitFor(() => expect(get(presence).syncing).toBe(false));
+    expect(invokeMock).toHaveBeenCalledWith('stop_syncing');
+    expect(invokeMock).not.toHaveBeenCalledWith('start_syncing');
+  });
+
+  it('surfaces the localized failure toast and re-enables the toggle when the invoke rejects', async () => {
+    status = syncStatus({ is_syncing: false });
+    failingCommands.add('start_syncing');
+    const { container } = render(Dashboard);
+    await waitFor(() => expect(get(presence).syncing).toBe(false));
+
+    toggleButton(container).click();
+
+    // The button is disabled for the whole invoke; if the rejection did not
+    // clear the flag it would still be disabled here and the Dashboard's main
+    // control would be dead for the rest of the session.
+    await waitFor(() =>
+      expect(container.querySelector('[role="alert"]')?.textContent?.trim()).toBe(
+        t('dashboard.syncToggleFailed')
+      )
+    );
+    expect(toggleButton(container).disabled).toBe(false);
+    // The store did not flip: the backend never started.
+    expect(get(presence).syncing).toBe(false);
+  });
+
+  it('refreshes before it re-reads, and the hydrated status reaches the store (#764)', async () => {
+    status = syncStatus({ is_syncing: true, current_track: TRACK, last_posted_status: 'before' });
+    const { container } = render(Dashboard);
+    await waitFor(() => expect(container.querySelector('.btn-refresh')).not.toBeNull());
+    invokeMock.mockClear();
+
+    (container.querySelector('.btn-refresh') as HTMLButtonElement).click();
+
+    await waitFor(() =>
+      expect(invokeMock.mock.calls.filter((call) => call[0] === 'get_sync_status').length).toBe(1)
+    );
+    const order = invokeMock.mock.calls.map((call) => call[0]);
+    expect(order[0]).toBe('refresh_status');
+    expect(order.indexOf('get_sync_status')).toBeGreaterThan(order.indexOf('refresh_status'));
+
+    // The re-read hydrated the shared presence store, not just local state.
+    await waitFor(() => expect(get(presence).postedStatus).toBe('before'));
+    expect(get(presence).syncing).toBe(true);
+  });
+});
+
+/**
+ * #888 — a remount must not re-pay the mount-time round trips.
+ *
+ * `+page.svelte` destroys the Dashboard on every view switch, so `load_config`
+ * (a config read whose answer includes an OS keychain probe) and
+ * `get_sync_status` (a snapshot that takes the four polling state locks) used to
+ * run again on every return to the Dashboard.
+ *
+ * Fails pre-fix: the second mount issues its own `load_config` and
+ * `get_sync_status`, so both counts go up by one.
+ */
+describe('Dashboard remount hydration (#888)', () => {
+  const ipcCount = (cmd: string) => invokeMock.mock.calls.filter((c) => c[0] === cmd).length;
+
+  it('serves the second mount from the hydration store', async () => {
+    configStore.set({ ...get(configStore), snooze_until: new Date(Date.now() + 30 * 60_000).toISOString() });
+    status = syncStatus();
+    await mountShell();
+
+    const first = render(Dashboard);
+    await waitFor(() => expect(first.container.querySelector('.track-card')).not.toBeNull());
+    await waitFor(() => expect(first.container.querySelector('.snooze-chip')).not.toBeNull());
+
+    const configAfterFirstMount = ipcCount('load_config');
+    const statusAfterFirstMount = ipcCount('get_sync_status');
+    expect(statusAfterFirstMount).toBe(1);
+
+    await unmount(first);
+    const second = render(Dashboard);
+    await waitFor(() => expect(second.container.querySelector('.track-card')).not.toBeNull());
+
+    // No second round trip for either command.
+    expect(ipcCount('load_config')).toBe(configAfterFirstMount);
+    expect(ipcCount('get_sync_status')).toBe(statusAfterFirstMount);
+
+    // ...and the remounted view is not blank: fresh connection state, the
+    // snooze chip, and the shared presence mirror all survive.
+    expect(second.container.querySelector('.badge.success')).not.toBeNull();
+    expect(second.container.querySelector('.snooze-chip')).not.toBeNull();
+    expect(get(presence).syncing).toBe(true);
+  });
+
+  it('re-reads once the freshness window has passed', async () => {
+    vi.useFakeTimers();
+    status = syncStatus();
+    await mountShell();
+    const first = render(Dashboard);
+    await waitFor(() => expect(first.container.querySelector('.track-card')).not.toBeNull());
+    const before = ipcCount('get_sync_status');
+
+    await unmount(first);
+    // Past `HYDRATION_TTL_MS`, the tray may have written the config in the
+    // meantime, so the cache must not be trusted.
+    await vi.advanceTimersByTimeAsync(HYDRATION_TTL_MS + 1);
+
+    const second = render(Dashboard);
+    await waitFor(() => expect(second.container.querySelector('.track-card')).not.toBeNull());
+    await waitFor(() => expect(ipcCount('get_sync_status')).toBe(before + 1));
+  });
+});
+
+/**
+ * #1120 — the snooze entry announcement has to agree in number.
+ *
+ * Pre-fix every locale announced "Sync paused for 1 minutes" (de: "Sync für 1
+ * Minuten pausiert", fr: "…pour 1 minutes"). Latent at the time — the tray only
+ * offered 30-minute presets — but wrong the moment a short snooze is reachable.
+ */
+describe('Snooze entry announcement agrees in number (#1120)', () => {
+  const SINGULAR: Record<'en' | 'de' | 'fr', string> = {
+    en: 'Sync paused for 1 minute',
+    de: 'Sync für 1 Minute pausiert',
+    fr: 'Synchronisation en pause pour 1 minute'
+  };
+
+  async function armOneMinuteSnooze() {
+    vi.useFakeTimers();
+    configStore.set({ ...get(configStore), snooze_until: null });
+    const rendered = render(Dashboard);
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('get_sync_status'));
+    // Exactly one minute from now: `entryAnnouncementMinutes` rounds to 1.
+    configStore.set({
+      ...get(configStore),
+      snooze_until: new Date(Date.now() + 60_000).toISOString()
+    });
+    await tick();
+    return rendered;
+  }
+
+  for (const locale of ['en', 'de', 'fr'] as const) {
+    it(`announces the singular form for a one-minute snooze in ${locale}`, async () => {
+      const { container } = await armOneMinuteSnooze();
+      await waitFor(() => expect(container.querySelector('.snooze-status')).not.toBeNull());
+      await i18n.set(locale);
+
+      await waitFor(() =>
+        expect(container.querySelector('.snooze-status')?.textContent?.trim()).toBe(
+          SINGULAR[locale]
+        )
+      );
+      expect(container.querySelector('.snooze-status')?.textContent).not.toContain(
+        locale === 'de' ? 'Minuten' : 'minutes'
+      );
+    });
+  }
+
+  it('keeps the plural form for a 30-minute snooze in all three locales', async () => {
+    vi.useFakeTimers();
+    configStore.set({
+      ...get(configStore),
+      snooze_until: new Date(Date.now() + 30 * 60_000).toISOString()
+    });
+    const { container } = render(Dashboard);
+    await waitFor(() => expect(container.querySelector('.snooze-status')).not.toBeNull());
+
+    for (const locale of ['en', 'de', 'fr'] as const) {
+      await i18n.set(locale);
+      await waitFor(() =>
+        expect(container.querySelector('.snooze-status')?.textContent?.trim()).toBe(
+          tCount('dashboard.snoozeStatusStart', 30, { minutes: 30 })
+        )
+      );
+      expect(container.querySelector('.snooze-status')?.textContent).toContain('30');
+    }
   });
 });

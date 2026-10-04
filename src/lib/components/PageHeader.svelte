@@ -46,7 +46,11 @@
     {#if showLogo}
       <Logo size={28} title={null} />
     {/if}
-    <h1>{title}</h1>
+    <!-- #739: `+page.svelte` moves focus here when a navigation lands on this
+         view, and #742 points the skip link at the body that follows this bar.
+         `tabindex="-1"` makes it focusable programmatically without adding a
+         tab stop, mirroring `#onboarding-step-heading`. -->
+    <h1 data-view-heading tabindex="-1">{title}</h1>
   </div>
   {#if onAction}
     <button type="button" class="icon-btn" onclick={onAction}
@@ -93,6 +97,9 @@
     font-size: var(--fs-2xl);
     font-weight: 700;
     letter-spacing: -0.02em;
+    /* Without this the flex item keeps its content width and the ellipsis
+       below never engages — the title is the only shrinkable thing in the bar. */
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

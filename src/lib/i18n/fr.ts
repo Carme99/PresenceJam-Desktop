@@ -546,7 +546,6 @@ export const fr: Dict = {
     'Impossible de reprendre la synchronisation. La pause reste enregistrée — réessayez.',
   // Issue #736 : la région live du chip n’annonce le début/fin qu’une seule fois ;
   // le compte à rebours à la seconde n’est plus dans la région live.
-  'dashboard.snoozeStatusStart': 'Synchronisation en pause pour {minutes} minutes',
   'dashboard.snoozeStatusEnd': 'Synchronisation reprise',
 
   // 4.7.0 — S7 notifications (#675)
@@ -745,4 +744,11 @@ export const fr: Dict = {
   // --- 5.0 wave3 playback-source ---
   'onboarding.playbackSourceMacNote':
     "Vous êtes sur macOS — seule la source de lecture Spotify est disponible ici. La source de session multimédia système (Windows SMTC / Linux MPRIS) n’est pas disponible sur macOS, donc PresenceJam se replie automatiquement sur Spotify. Repassez sur Spotify si l’assistant de configuration indique « aucun titre » alors qu’une autre application diffuse de la musique.",
+  // --- #1120: l’annonce d’entrée de la mise en sourdine s’accorde en
+  // nombre. Une mise en sourdine d’une minute annonçait « 1 minutes ».
+  'dashboard.snoozeStatusStart_one': 'Synchronisation en pause pour {minutes} minute',
+  'dashboard.snoozeStatusStart_other': 'Synchronisation en pause pour {minutes} minutes',
+
+  // --- #739: nom de la vue, annoncé lors de la navigation.
+  'onboarding.title': 'Configuration',
 };

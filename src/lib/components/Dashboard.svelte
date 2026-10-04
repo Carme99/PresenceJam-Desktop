@@ -6,14 +6,24 @@
   import { currentView } from '$lib/stores/app';
   import { detachedPanes, focusDetached } from '$lib/stores/detach';
   import { configStore, loadConfig, saveConfig, clientSecretStateOf } from '$lib/stores/config';
-  import type { ErrorEventPayload, SyncStatus, TrackInfo } from '$lib/types';
+  import type { ErrorEventPayload, TrackInfo } from '$lib/types';
   import { devLog } from '$lib/utils/dev';
   import { appliedTheme, toggleTheme } from '$lib/stores/theme';
-  import { presence, hydrate, setSyncing } from '$lib/stores/presence';
+  import { presence, setSyncing } from '$lib/stores/presence';
   import { notifyTrackChange } from '$lib/stores/notifications';
   import Logo from './Logo.svelte';
-  import { t, i18n } from '$lib/i18n';
+  import { t, tCount, i18n } from '$lib/i18n';
   import { useListenerTeardown } from '$lib/utils/useAuthListeners';
+  // #888: the mount-time config read + status snapshot live in a store, so a
+  // remount inside the TTL hydrates from memory instead of paying a keychain
+  // probe and a lock-taking status snapshot again. The connection badges read
+  // the shared snapshot directly; the track card keeps its own `$state`
+  // because the `spotify-track-changed` listener writes it between snapshots.
+  import {
+    ensureDashboardHydration,
+    refreshDashboardHydration,
+    syncStatusSnapshot
+  } from '$lib/stores/dashboardHydration';
 
 
   /**
@@ -61,8 +71,8 @@
   // with this component.
   let isToggling = $state(false);
   let isRefreshing = $state(false);
-  let spotifyConnected = $state(false);
-  let teamsConnected = $state(false);
+  let spotifyConnected = $derived($syncStatusSnapshot?.spotify_connected ?? false);
+  let teamsConnected = $derived($syncStatusSnapshot?.teams_connected ?? false);
   let currentTrack = $state<TrackInfo | null>(null);
   // #547/#670: statusPreview / presenceGated live in the module-level presence
   // store (see $lib/stores/presence.ts), written by the always-mounted layout
@@ -548,36 +558,21 @@
 
     // S9 (issue #677): the tray writes `snooze_until` straight into the config,
     // with no event and no webview involvement, and this view is destroyed on
-    // every view switch (`+page.svelte`). Re-reading the config on mount is
-    // therefore what makes a snooze started from the tray show up as a chip —
-    // including on the way back from the tray while the window was hidden.
-    // `loadConfig` resolves with the frontend defaults on a read failure, which
-    // here only means the chip stays hidden until the next mount.
-    try {
-      await loadConfig();
-    } catch (e) {
-      console.error('[DASHBOARD] onMount: loadConfig FAILED:', e);
-    }
+    // every view switch (`+page.svelte`). Re-reading the config is therefore
+    // what makes a snooze started from the tray show up as a chip — including
+    // on the way back from the tray while the window was hidden. `loadConfig`
+    // resolves with the frontend defaults on a read failure, which here only
+    // means the chip stays hidden until the next mount.
+    //
+    // #888: that re-read and the `get_sync_status` snapshot are owned by the
+    // hydration store, which serves both from memory while they are fresh, so
+    // a remount inside the TTL costs no IPC. The `tray-click` listener in
+    // `+page.svelte` invalidates the cache whenever the tray was just used.
+    const snapshot = await ensureDashboardHydration();
+    // #888: `nowMs` is refreshed AFTER the config read, so the countdown is
+    // measured against the deadline this mount actually saw.
     nowMs = Date.now();
-
-    try {
-      devLog('[DASHBOARD] onMount: calling invoke get_sync_status');
-      const snapshotRevision = get(presence).revision;
-      const status = await invoke<SyncStatus>('get_sync_status');
-      devLog('[DASHBOARD] initial sync status:', {
-        is_syncing: status.is_syncing,
-        spotify_connected: status.spotify_connected,
-        teams_connected: status.teams_connected,
-        current_track: status.current_track?.title ?? null
-      });
-
-      spotifyConnected = status.spotify_connected;
-      teamsConnected = status.teams_connected;
-      currentTrack = status.current_track;
-      hydrate(status, snapshotRevision);
-    } catch (e) {
-      console.error('[DASHBOARD] onMount: get_sync_status FAILED:', e);
-    }
+    currentTrack = snapshot?.current_track ?? null;
 
     // Issue #870: hydrate the manual status snapshot. The SyncStatus
     // payload already carries it; we read the dedicated helper so a
@@ -763,12 +758,11 @@
       devLog('[DASHBOARD] refreshStatus: calling invoke refresh_status');
       await invoke('refresh_status');
       devLog('[DASHBOARD] refreshStatus: calling invoke get_sync_status');
-      const snapshotRevision = get(presence).revision;
-      const status = await invoke<SyncStatus>('get_sync_status');
-      spotifyConnected = status.spotify_connected;
-      teamsConnected = status.teams_connected;
-      currentTrack = status.current_track;
-      hydrate(status, snapshotRevision);
+      // #888: the store owns the snapshot (and hydrates the presence store
+      // from it, revision-guarded), so Refresh and the mount path cannot drift
+      // apart. An explicit refresh always bypasses the freshness window.
+      const snapshot = await refreshDashboardHydration();
+      currentTrack = snapshot?.current_track ?? null;
     } catch (e) {
       console.error('[DASHBOARD] refreshStatus failed:', e);
       showFatal(t('dashboard.refreshFailed'));
@@ -883,43 +877,116 @@
       console.error('[DASHBOARD] updateMenuState failed:', e);
     }
   }
+
+  // ── #954 — the compact-width overflow menu ────────────────────────────────
+  //
+  // The five nav buttons are a fixed 256px of `.header-right`. At the 400px
+  // minimum window size that is most of the row, so below the breakpoint they
+  // collapse into one `⋯` menu. `menuAnchor` is what the outside-click test
+  // measures against, so a click anywhere else (including on the toggle
+  // itself) closes the menu.
+  let headerMenuOpen = $state(false);
+  let menuAnchor = $state<HTMLElement | null>(null);
 </script>
+
+<svelte:window
+  onpointerdown={(event) => {
+    if (headerMenuOpen && !menuAnchor?.contains(event.target as Node)) headerMenuOpen = false;
+  }}
+/>
 
 <div class="dashboard">
   <header>
     <div class="header-left">
       <Logo size={32} title={null} />
       <div class="title">
-        <h1>PresenceJam</h1>
+        <!-- #739: the navigation focus target for this view (see the effect in
+             `+page.svelte`) and #742's ellipsis target. `tabindex="-1"` keeps
+             it out of the tab order while letting it take focus. -->
+        <h1 data-view-heading tabindex="-1">PresenceJam</h1>
         <div class="badges">
           <span class="badge" class:success={spotifyConnected} class:error={!spotifyConnected}>
-            <span class="dot"></span>{spotifyConnected ? 'Spotify' : t('dashboard.spotifyOff')}
+            <span class="dot"></span><span class="badge-label">{spotifyConnected ? 'Spotify' : t('dashboard.spotifyOff')}</span>
           </span>
           <span class="badge" class:success={teamsConnected} class:error={!teamsConnected}>
-            <span class="dot"></span>{teamsConnected ? 'Teams' : t('dashboard.teamsOff')}
+            <span class="dot"></span><span class="badge-label">{teamsConnected ? 'Teams' : t('dashboard.teamsOff')}</span>
           </span>
           {#if $presence.syncing}
-            <span class="badge accent"><span class="dot pulse"></span>{t('dashboard.syncing')}</span>
+            <span class="badge accent"><span class="dot pulse"></span><span class="badge-label">{t('dashboard.syncing')}</span></span>
           {/if}
         </div>
       </div>
     </div>
     <div class="header-right">
-      <button class="icon-btn" onclick={toggleTheme} title={t('common.themeToggle')} aria-label={t('common.themeToggle')}>
-        <!-- #680: derived from the painted theme — under `system` the preference
-          alone cannot tell the user what the button shows or does. -->
-        {$appliedTheme === 'dark' ? '☀' : '☾'}
-      </button>
-      <button class="icon-btn" class:detached={$detachedPanes.logs}
-        onclick={openLogs}
-        title={$detachedPanes.logs ? t('dashboard.logsDetachedTitle') : t('dashboard.logsTitle')}
-        aria-label={$detachedPanes.logs ? t('dashboard.logsDetachedAria') : t('dashboard.openLogsAria')}>📋</button>
-      <button class="icon-btn" onclick={openDiagnostics} title={t('dashboard.diagnostics')} aria-label={t('dashboard.openDiagnosticsAria')}>🩺</button>
-      <button class="icon-btn" class:detached={$detachedPanes.settings}
-        onclick={openSettings}
-        title={$detachedPanes.settings ? t('dashboard.settingsDetachedTitle') : t('dashboard.settings')}
-        aria-label={$detachedPanes.settings ? t('dashboard.settingsDetachedAria') : t('dashboard.openSettingsAria')}>⚙</button>
-      <button class="icon-btn" onclick={openAbout} title={t('dashboard.about')} aria-label={t('dashboard.aboutAria')}>ⓘ</button>
+      <!-- #954: below the compact breakpoint the five nav buttons move into the
+           overflow menu, because together they are 256px of fixed width — more
+           than a 400px window can give the title column once the header padding
+           and the Sync button are paid for. Above it they stay inline, so the
+           extra button costs nothing on a normal window. -->
+      <div class="header-extra">
+        <button class="icon-btn" onclick={toggleTheme} title={t('common.themeToggle')} aria-label={t('common.themeToggle')}>
+          <!-- #680: derived from the painted theme — under `system` the preference
+            alone cannot tell the user what the button shows or does. -->
+          {$appliedTheme === 'dark' ? '☀' : '☾'}
+        </button>
+        <button class="icon-btn" class:detached={$detachedPanes.logs}
+          onclick={openLogs}
+          title={$detachedPanes.logs ? t('dashboard.logsDetachedTitle') : t('dashboard.logsTitle')}
+          aria-label={$detachedPanes.logs ? t('dashboard.logsDetachedAria') : t('dashboard.openLogsAria')}>📋</button>
+        <button class="icon-btn" onclick={openDiagnostics} title={t('dashboard.diagnostics')} aria-label={t('dashboard.openDiagnosticsAria')}>🩺</button>
+        <button class="icon-btn" class:detached={$detachedPanes.settings}
+          onclick={openSettings}
+          title={$detachedPanes.settings ? t('dashboard.settingsDetachedTitle') : t('dashboard.settings')}
+          aria-label={$detachedPanes.settings ? t('dashboard.settingsDetachedAria') : t('dashboard.openSettingsAria')}>⚙</button>
+        <button class="icon-btn" onclick={openAbout} title={t('dashboard.about')} aria-label={t('dashboard.aboutAria')}>ⓘ</button>
+      </div>
+      <div class="menu-anchor" bind:this={menuAnchor}>
+        {#if headerMenuOpen}
+          <!-- #954: the overflow menu. `role="menu"` / `role="menuitem"` because
+               this is a list of commands, not navigation — each entry does the
+               same thing its inline button does. -->
+          <div
+            class="header-menu"
+            role="menu"
+            tabindex="-1"
+            aria-label={t('common.moreActions')}
+            onkeydown={(e) => {
+              if (e.key === 'Escape') headerMenuOpen = false;
+            }}
+          >
+            <button type="button" class="btn-secondary menu-item" role="menuitem" onclick={toggleTheme}>
+              {$appliedTheme === 'dark' ? '☀' : '☾'}
+              <span>{t('common.themeToggle')}</span>
+            </button>
+            <button type="button" class="btn-secondary menu-item" role="menuitem" onclick={openLogs}>
+              <span aria-hidden="true">📋</span>
+              <span>{$detachedPanes.logs ? t('dashboard.logsDetachedAria') : t('dashboard.logsTitle')}</span>
+            </button>
+            <button type="button" class="btn-secondary menu-item" role="menuitem" onclick={openDiagnostics}>
+              <span aria-hidden="true">🩺</span>
+              <span>{t('dashboard.diagnostics')}</span>
+            </button>
+            <button type="button" class="btn-secondary menu-item" role="menuitem" onclick={openSettings}>
+              <span aria-hidden="true">⚙</span>
+              <span>{$detachedPanes.settings ? t('dashboard.settingsDetachedAria') : t('dashboard.settings')}</span>
+            </button>
+            <button type="button" class="btn-secondary menu-item" role="menuitem" onclick={openAbout}>
+              <span aria-hidden="true">ⓘ</span>
+              <span>{t('dashboard.about')}</span>
+            </button>
+          </div>
+        {/if}
+        <button
+          type="button"
+          class="icon-btn more-btn"
+          class:is-on={headerMenuOpen}
+          aria-haspopup="menu"
+          aria-expanded={headerMenuOpen}
+          onclick={() => { headerMenuOpen = !headerMenuOpen; }}
+          aria-label={t('common.moreActions')}
+          title={t('common.moreActions')}
+        >⋯</button>
+      </div>
       <button class="icon-btn primary" class:is-on={$presence.syncing} onclick={toggleSync}
         disabled={isToggling} aria-label={$presence.syncing ? t('dashboard.pauseSync') : t('dashboard.resumeSync')}
         title={$presence.syncing ? t('dashboard.pauseSync') : t('dashboard.resumeSync')}>
@@ -936,7 +1003,11 @@
     <div class="error-banner" role="alert">{displayError}</div>
   {/if}
 
-  <main>
+  <!-- #742: the skip link's target. It used to sit on the wrapper around the
+       whole mounted view, above this header, so activating it left the next Tab
+       inside the very chrome the link exists to bypass. One view is mounted at
+       a time, so this stays the document's single `#main-content`. -->
+  <main id="main-content" tabindex="-1">
     {#if $presence.gated}
       <div class="presence-chip" role="status">{gatedLabel}</div>
       <!-- Issue #868: expandable "why" row. The presence-gated reason
@@ -984,8 +1055,13 @@
            sibling with no live semantics and no `aria-hidden`. AT sees one
            announcement on enter, not one per second. -->
       <div class="snooze-chip">
+        <!-- #1120: `tCount` so a one-minute snooze announces the singular
+             ("Sync paused for 1 minute") instead of "for 1 minutes". The
+             dictionary carries the `_one` / `_other` pair in all three locales. -->
         <span class="snooze-status" role="status">
-          {t('dashboard.snoozeStatusStart', { minutes: entryAnnouncementMinutes })}
+          {tCount('dashboard.snoozeStatusStart', entryAnnouncementMinutes, {
+            minutes: entryAnnouncementMinutes
+          })}
         </span>
         <span class="snooze-countdown">{snoozeLabel}</span>
         <button class="snooze-resume" onclick={resumeSnooze} disabled={isResuming}>
@@ -1000,15 +1076,12 @@
            seconds, then dropped, so the polite queue gets exactly one
            "Sync resumed" announcement.
 
-           STYLING COUPLING: this `<span class="snooze-status">` shares its
-           class with the entry sibling inside `.snooze-chip` above. There
-           is no `.snooze-status` style block — both rely on inheriting
-           `.snooze-chip` rules from the active chip. If the active chip is
-           ever restyled (font, colour, padding), the exit announcement will
-           drift visually because it no longer lives inside the chip.
-           Re-add a `.snooze-status` rule, or move this span back inside the
-           chip, if that ever happens. -->
-      <span class="snooze-status" role="status">{t('dashboard.snoozeStatusEnd')}</span>
+           #1120: it used to borrow the chip's `.snooze-status` class, which has
+           no rule of its own — outside `.snooze-chip` it rendered as unstyled
+           bare text while the entry sibling sat inside the styled chip. It
+           carries `.resume-announcement` now, which is the chip shell applied
+           to this node, so the two read the same wherever they appear. -->
+      <span class="resume-announcement snooze-status" role="status">{t('dashboard.snoozeStatusEnd')}</span>
     {/if}
     {#if availabilityAnnouncement}
       <div class="availability-chip" role="status">
@@ -1232,7 +1305,11 @@
     display: flex;
     align-items: center;
     gap: var(--sp-3);
+    /* #954: the title column is the flexible one. Without this the flex item
+       keeps its content width, the ellipsis on `h1` below never engages, and
+       the title paints straight across the icon row. */
     min-width: 0;
+    flex: 1 1 auto;
   }
   .title {
     display: flex;
@@ -1240,19 +1317,108 @@
     gap: var(--sp-1);
     min-width: 0;
   }
+  /* #954: the same treatment PageHeader's title already had — a fixed-width
+     action group leaves the title a few dozen pixels at the 400px minimum, and
+     without the ellipsis the title overflows into it instead of shrinking. */
   h1 {
     font-size: var(--fs-lg);
     font-weight: 600;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .badges {
     display: flex;
     flex-wrap: wrap;
     gap: var(--sp-2);
+    min-width: 0;
   }
   .header-right {
     display: flex;
+    align-items: center;
     gap: var(--sp-2);
     flex-shrink: 0;
+  }
+  /* #954: the inline nav group. It is the wide layout's default; the compact
+     breakpoint below hides it in favour of the overflow menu. */
+  .header-extra {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+  }
+  /* #954: the badge label is its own box so the compact breakpoint can
+     ellipsise it. On an `inline-flex` badge the text is an anonymous flex item,
+     and `text-overflow` has nothing to attach to. */
+  .badge-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* #954: anchored so the menu can drop below the toggle without affecting the
+     header's own layout. */
+  .menu-anchor {
+    position: relative;
+    display: flex;
+  }
+  .more-btn {
+    display: none;
+  }
+  .header-menu {
+    position: absolute;
+    top: calc(100% + var(--sp-2));
+    right: 0;
+    z-index: 20;
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-1);
+    min-width: 200px;
+    padding: var(--sp-2);
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  }
+  /* Layout only — the look is the shared `btn-secondary` variant. */
+  .menu-item {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    width: 100%;
+    justify-content: flex-start;
+    text-align: left;
+  }
+
+  /* #954: the 400px minimum window. Below this the five inline nav buttons
+     (256px of fixed width) leave the title a few dozen pixels, so they move
+     into the overflow menu. The header padding and the icon buttons shrink
+     too, and the badges are pinned to a single row whose labels ellipsise —
+     a second badge row is what pushes the playback card down. The cut-over is
+     the ~640px the issue names: the shipped 600px default sits just inside it,
+     which is the whole point — that width is "only just wide enough" with the
+     full icon row, and the German and French badge labels are longer still. */
+  @media (max-width: 640px) {
+    header {
+      padding: var(--sp-3) var(--sp-4);
+      gap: var(--sp-2);
+    }
+    .icon-btn {
+      width: 32px;
+      height: 32px;
+    }
+    .header-extra { display: none; }
+    .more-btn { display: inline-flex; }
+    .badges {
+      flex-wrap: nowrap;
+      gap: var(--sp-1);
+    }
+    .badge {
+      min-width: 0;
+      font-size: var(--fs-xs);
+      padding: 2px var(--sp-1);
+      gap: var(--sp-1);
+    }
   }
   .icon-btn {
     width: 36px;
@@ -1340,9 +1506,26 @@
     font-size: var(--fs-sm);
     color: var(--fg);
   }
+  /* #1120: the "Sync resumed" live region lives outside `.snooze-chip` (the
+     chip unmounts when the snooze ends), so it cannot inherit the shell above.
+     `.resume-announcement` applies that same shell to the bare span, which is
+     what kept it rendering as unstyled text in the dashboard flow. The accent
+     border reads as "the snooze that just ended" next to the plain one it
+     replaces. */
+  .resume-announcement {
+    align-self: flex-start;
+    display: flex;
+    align-items: center;
+    gap: var(--sp-3);
+    background: var(--bg-elevated);
+    border: 1px solid var(--accent, var(--border));
+    border-radius: var(--r-md);
+    padding: var(--sp-2) var(--sp-3);
+    font-size: var(--fs-sm);
+    color: var(--fg);
+  }
   /* Issue #736: the countdown sibling uses tabular numerals so the per-second
-     tick does not reflow the chip horizontally. The status sibling has no
-     styling — its text is set once on entry/exit and does not tick. */
+     tick does not reflow the chip horizontally. */
   .snooze-countdown {
     font-variant-numeric: tabular-nums;
   }

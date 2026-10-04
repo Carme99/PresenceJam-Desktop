@@ -524,7 +524,6 @@ export const en = {
     'Could not resume syncing. The snooze is still stored — try again.',
   // Issue #736: the chip's live region announces entry/exit once; the
   // per-second countdown is no longer in the live region.
-  'dashboard.snoozeStatusStart': 'Sync paused for {minutes} minutes',
   'dashboard.snoozeStatusEnd': 'Sync resumed',
 
   // 4.7.0 — S7 notifications (#675): one toggle per desktop-notification
@@ -719,6 +718,16 @@ export const en = {
   // --- 5.0 wave3 playback-source ---
   'onboarding.playbackSourceMacNote':
     "You're on macOS — only the Spotify playback source is available here. The system media-session source (Windows SMTC / Linux MPRIS) is not available on macOS, so PresenceJam falls back to Spotify automatically. Switch to Spotify if the wizard ever reports \"no track\" while music is playing in another app.",
+
+  // --- #1120: the snooze entry announcement is count-aware. A one-minute
+  // snooze used to announce "Sync paused for 1 minutes"; German needs
+  // "Minute" and French "minute" in the singular.
+  'dashboard.snoozeStatusStart_one': 'Sync paused for {minutes} minute',
+  'dashboard.snoozeStatusStart_other': 'Sync paused for {minutes} minutes',
+
+  // --- #739: the wizard's view name, announced on navigation (there is no
+  // heading bar above the step, so the step title cannot stand in for it).
+  'onboarding.title': 'Setup',
 };
 
 export type Dict = { readonly [K in keyof typeof en]: string };

@@ -66,6 +66,7 @@ vi.mock('$lib/stores/detach', async () => {
 import { invoke } from '@tauri-apps/api/core';
 import Dashboard from '$lib/components/Dashboard.svelte';
 import { configStore, defaultConfig } from '$lib/stores/config';
+import { resetDashboardHydration } from '$lib/stores/dashboardHydration';
 import type { AppConfig } from '$lib/types';
 import { i18n } from '$lib/i18n';
 
@@ -90,6 +91,12 @@ function deadlineIn(seconds: number): string {
 
 beforeEach(() => {
   listeners.length = 0;
+  // #888: the Dashboard's mount-time config read is served from the shared
+  // hydration store while it is fresh, and that freshness is module state —
+  // without this every case after the first would mount from memory and never
+  // issue the IPC its assertions wait on. Each case starts cold, exactly as it
+  // did before the store existed.
+  resetDashboardHydration();
   invokeMock.mockReset();
   invokeMock.mockImplementation(async (cmd: string) => {
     switch (cmd) {
@@ -175,6 +182,9 @@ describe('Dashboard snooze chip (S9 / #677)', () => {
   });
 
   it('re-reads the config on mount, so a tray snooze reaches a fresh mount', async () => {
+    // #888: the `beforeEach` reset is what makes this case exercise the path it
+    // is named for — a cold cache, so the tray-written deadline on disk is only
+    // reachable through a real `load_config` round trip.
     // Nothing in the store, but the tray has written a snooze to disk.
     configStore.set(configWith(null));
     invokeMock.mockImplementation(async (cmd: string) => {
