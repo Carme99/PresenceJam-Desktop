@@ -1972,7 +1972,7 @@ fn run_player_action(
             if let Some((shuffle, repeat)) = resulting_modes {
                 note_playback_modes(shuffle, repeat);
             }
-            force_tray_refresh(app);
+            force_tray_refresh_from_app(app);
             // Immediate Teams catch-up after a successful player action:
             // wait 2 s for Spotify's currently-playing to catch up after
             // a skip, then run a one-shot poll (no-op when sync is off).
@@ -2086,7 +2086,7 @@ pub(crate) fn refresh_tray_from_state(app: &AppHandle) {
 /// Spotify HTTP, which must never run on a menu/app-event thread.
 pub(crate) fn refresh_tray_for_locale(app: &AppHandle) {
     let app_handle = app.clone();
-    std::thread::spawn(move || force_tray_refresh(&app_handle));
+    std::thread::spawn(move || force_tray_refresh_from_app(&app_handle));
 }
 
 /// Waits — bounded by [`TOGGLE_SETTLE_TIMEOUT`] — for the frontend's
@@ -2107,6 +2107,23 @@ fn await_sync_toggle(app: &AppHandle, before: bool) -> bool {
     false
 }
 
+/// Production entry point for [`force_tray_refresh`]: binds the managed-state
+/// lookup and the tray rebuild to a live `AppHandle`.
+///
+/// `try_state` — not `state` — is the lookup, because the single-instance
+/// forward can reach this path before `app.manage()` has run (issue #937).
+fn force_tray_refresh_from_app(app: &AppHandle) {
+    force_tray_refresh(
+        &|| {
+            app.try_state::<std::sync::Arc<crate::AppState>>()
+                .map(|state| state.inner().clone())
+        },
+        &mut |is_syncing, current_track| {
+            let _ = update_tray_menu(app, is_syncing, current_track);
+        },
+    );
+}
+
 /// Forces the next `update_tray_menu` call to rebuild and asks it for fresh
 /// Devices/Up Next lists: records the action (issue #883 — the caches stay, and
 /// the rebuild re-fetches under `TRAY_POST_ACTION_FETCH_MIN`), nudges the dedup
@@ -2119,20 +2136,31 @@ fn await_sync_toggle(app: &AppHandle, before: bool) -> bool {
 /// re-seed logic in `update_tray_menu` (which only fires on a genuine track
 /// change) doesn't clobber the toggle state set by the action. See
 /// issue #3.0-P3.
-fn force_tray_refresh(app: &AppHandle) {
-    // Issue #937: the single-instance plugin registers in `Builder::build`
-    // before the setup closure runs, so a forwarded second launch reaches
-    // `forward_launch_to_running_instance` → `refresh_tray_from_state` →
-    // `repaint_tray_from_state` / `force_tray_refresh` before
-    // `app.manage(state.clone())` has executed. `app.state::<>()` would
-    // panic with "state() called before manage()", killing the tray worker
-    // thread. `try_state` turns that panic into a logged no-op so the
-    // thread survives and the next legitimate refresh (after setup
-    // completes) repaints normally.
-    let Some(state) = try_app_state(app) else {
-        log::debug!(
-            "[TRAY] force_tray_refresh: AppState not registered yet — skipping rebuild \
-             (single-instance forwarded a callback before setup completed)"
+///
+/// Issue #937: the single-instance plugin registers in `Builder::build`
+/// before the setup closure runs, so a forwarded second launch reaches
+/// `forward_launch_to_running_instance` → `refresh_tray_from_state` →
+/// `repaint_tray_from_state` / this function before
+/// `app.manage(state.clone())` has executed. `app.state::<>()` panics there
+/// with "state() called before manage()", killing the tray worker thread.
+/// The pre-manage window is therefore modelled as an injected seam rather
+/// than an inline lookup: `managed_state` returning `None` *is* that window,
+/// and `rebuild` is then never called. The skip is logged at `warn!` — the
+/// default tauri-plugin-log level filters `debug!`, so a `debug!` line
+/// would fail issue #937's "produces a log line" criterion.
+///
+/// The seams are `&dyn Fn` rather than generic parameters so the #883/#886
+/// source guards in this module keep resolving to this body, and so the
+/// regression test drives this function itself instead of a stand-in.
+fn force_tray_refresh(
+    managed_state: &dyn Fn() -> Option<std::sync::Arc<crate::AppState>>,
+    rebuild: &mut dyn FnMut(bool, Option<crate::spotify::TrackInfo>),
+) {
+    let Some(state) = managed_state() else {
+        log::warn!(
+            "[TRAY] force_tray_refresh: AppState not managed yet — skipping the forced \
+             tray rebuild (a forwarded second launch arrived before setup completed, \
+             issue #937)"
         );
         return;
     };
@@ -2143,7 +2171,7 @@ fn force_tray_refresh(app: &AppHandle) {
     // instead of fetching (`TrayFetch::CacheOnly`) and an action cannot override
     // that. The nudge below still forces the repaint, which is all a snooze-time
     // repaint needs.
-    let snooze = snooze_from_app_state(state.inner());
+    let snooze = snooze_from_app_state(&state);
     // Issue #883: the caches stay. Emptying them was how this helper asked for
     // fresh Devices/Up Next lists, and it bypassed `TRAY_SPOTIFY_FETCH_THROTTLE`
     // on every player action; the action is recorded instead, and the rebuild
@@ -2160,11 +2188,9 @@ fn force_tray_refresh(app: &AppHandle) {
     // Issue #869: the nudge snapshot's profile key reads the post-action
     // value so the rebuild the function triggers sees a fresh dedup key —
     // the real write happens inside `store_active_profile`.
-    // Issue #937: this used to be a second `app.state::<>()` call. After
-    // the pre-manage guard above, the same `state` handle is still live
-    // (`snooze_from_app_state(state.inner())` only borrows it), so we
-    // reuse it here instead of paying for a second lookup — and
-    // guaranteeing this site can no longer panic.
+    // Issue #937: this used to be a second `app.state::<>()` call on the same
+    // guard-clause risk. The single lookup above is already in hand, so the
+    // key is read from it — one lookup, and this site can no longer panic.
     let nudge_profile_key = state
         .config
         .get()
@@ -2181,23 +2207,7 @@ fn force_tray_refresh(app: &AppHandle) {
     );
     nudge.is_syncing = !is_syncing;
     *last_tray_state().lock() = Some(nudge);
-    let _ = update_tray_menu(app, is_syncing, current_track);
-}
-
-/// Lookup wrapper for `Arc<AppState>` used by the pre-manage guard.
-///
-/// `app.try_state::<Arc<AppState>>()` panics in earlier Tauri releases on
-/// some platforms when called from a worker thread before
-/// `app.manage(state.clone())` has executed; on current releases it returns
-/// `None`. Wrapping it in a tiny generic helper lets `force_tray_refresh`
-/// route through a name the regression test can call on a mock-runtime app
-/// (`force_tray_refresh` itself is not generic — making it generic would
-/// cascade through every tray-submenu builder). The helper has no other
-/// behaviour: no logging, no defaults, no fallible paths. It is a lookup.
-fn try_app_state<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
-) -> Option<tauri::State<'_, std::sync::Arc<crate::AppState>>> {
-    app.try_state::<std::sync::Arc<crate::AppState>>()
+    rebuild(is_syncing, current_track);
 }
 
 /// One-line sync/status summary for the tray's status item and tooltip
@@ -4620,64 +4630,62 @@ mod tests {
     /// that window reaches `forward_launch_to_running_instance` (lib.rs) →
     /// `refresh_tray_from_state` → `repaint_tray_from_state` /
     /// `force_tray_refresh` before `app.manage(state.clone())` has executed.
-    /// `app.state::<Arc<AppState>>()` then panics with "state() called
-    /// before manage()", killing the tray worker thread and, on the argv
-    /// path, the deep-link callback itself.
+    /// The pre-fix body then called `app.state::<Arc<AppState>>()`, which
+    /// panics with "state() called before manage()" and kills the tray
+    /// worker thread — the user sees a tray that never repaints and a log
+    /// with no explanation.
     ///
-    /// The fix routes the lookup through the `try_app_state` helper, which
-    /// calls `try_state` and returns `None` when the state is absent instead
-    /// of panicking. `force_tray_refresh` is not generic over the runtime
-    /// (making it generic would cascade through every tray-submenu builder),
-    /// so the runtime check exercises the generic helper directly on a
-    /// mock-runtime app — that is the mechanism `force_tray_refresh` calls,
-    /// so a regression in the production path also fails this test. The
-    /// companion runtime test for `handle_deep_link` lives in lib.rs.
+    /// `force_tray_refresh` takes the managed-state lookup and the tray
+    /// rebuild as seams, so both arms of that window are driven here
+    /// directly: `None` is the pre-manage window and must return without
+    /// touching the tray, `Some` is the normal post-manage launch and must
+    /// rebuild from the state it read. Pre-fix this code could not be
+    /// expressed — the lookup was an inline `app.state::<>()` panic.
     #[test]
     fn force_tray_refresh_tolerates_missing_state_issue_937() {
         use std::panic::{catch_unwind, AssertUnwindSafe};
+        use std::sync::atomic::Ordering;
+        use std::sync::Arc;
 
-        // `tauri::test::mock_app()` builds a MockRuntime app with no
-        // managed state and no setup hook, so `try_state::<Arc<AppState>>`
-        // is the exact pre-manage state the production bug exposes.
-        let app = tauri::test::mock_app();
-        let handle = app.handle().clone();
-
-        let outcome = catch_unwind(AssertUnwindSafe(|| try_app_state(&handle)));
+        // Arm 1: the pre-manage window. The state lookup reports "not
+        // managed yet" exactly as `try_state` does before `app.manage()`.
+        let mut rebuilds: Vec<(bool, Option<crate::spotify::TrackInfo>)> = Vec::new();
+        let unwound = catch_unwind(AssertUnwindSafe(|| {
+            force_tray_refresh(&|| None, &mut |is_syncing, track| {
+                rebuilds.push((is_syncing, track));
+            });
+        }));
         assert!(
-            outcome.is_ok(),
-            "try_app_state must not panic when AppState is not managed yet \
-             (issue #937: a second-launch callback would forward the OAuth code \
-             through force_tray_refresh before setup completes and drop it \
-             silently). Pre-fix behaviour: `app.state::<>()` panics with \
-             'state() called before manage()', killing the tray worker \
-             thread."
+            unwound.is_ok(),
+            "force_tray_refresh must survive the pre-manage window (issue #937): \
+             pre-fix this path called app.state::<Arc<AppState>>(), which panics \
+             with 'state() called before manage()' and takes the tray worker \
+             thread down with it"
         );
         assert!(
-            outcome.expect("checked above").is_none(),
-            "state must be absent before app.manage() — that's the contract \
-             that turns the panic into a logged no-op (issue #937)"
+            rebuilds.is_empty(),
+            "with no managed AppState there is nothing to repaint from, so the tray \
+             must not be rebuilt (issue #937) — got {} rebuild(s)",
+            rebuilds.len()
         );
 
-        // WIRING GUARD (not a behaviour test): without this assertion a
-        // future revert of `force_tray_refresh` to `app.state::<...>()` would
-        // still pass the catch_unwind check above (the helper body itself
-        // does not change), so we pin that `force_tray_refresh` actually
-        // routes through `try_app_state`. Kept to one short assertion per
-        // AGENTS.md §10 — tests assert observable behaviour, not source
-        // text or wiring.
-        let body = body_of(
-            include_str!("tray.rs")
-                .split("#[cfg(test)]\nmod tests")
-                .next()
-                .unwrap(),
-            "fn force_tray_refresh(",
+        // Arm 2: the normal launch. A managed state proceeds, and the rebuild
+        // sees the sync flag the function read out of it.
+        let state = Arc::new(crate::AppState::new());
+        state.polling.set_syncing(true, Ordering::Release);
+        let mut rebuilds: Vec<(bool, Option<crate::spotify::TrackInfo>)> = Vec::new();
+        force_tray_refresh(&|| Some(state.clone()), &mut |is_syncing, track| {
+            rebuilds.push((is_syncing, track));
+        });
+        assert_eq!(
+            rebuilds.len(),
+            1,
+            "a managed AppState must produce exactly one forced rebuild (issue #937)"
         );
         assert!(
-            body.contains("try_app_state(app)"),
-            "force_tray_refresh must route its pre-manage lookup through the \
-             try_app_state helper (issue #937). Without this, a revert to \
-             `app.state::<>()` would re-introduce the panic and the runtime \
-             test would still pass because it only exercises the helper."
+            rebuilds[0].0,
+            "the rebuild must be driven by the managed state's sync flag, not a \
+             default (issue #937)"
         );
     }
 }

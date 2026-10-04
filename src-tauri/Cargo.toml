@@ -138,11 +138,3 @@ lto = "thin"
 panic = "abort"
 strip = true
 
-# Issue #937: the single-instance forward can land before AppState is managed
-# (the plugin registers in Builder::build, before the setup closure runs). The
-# regression test creates a mock Tauri app whose state is *not* managed and
-# calls the entry points under `catch_unwind`, so it needs `tauri::test::mock_app`
-# — that module is gated behind the `test` feature. Enabling it here is a test-
-# only change; the production binary is unaffected.
-[dev-dependencies]
-tauri = { version = "~2.11", features = ["test"] }
