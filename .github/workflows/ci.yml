@@ -485,19 +485,26 @@ jobs:
   # the introducing PR. The npm leg gates on production advisories
   # (`--omit=dev`); the full-tree run below stays advisory-only.
   #
-  # The CARGO leg is permanently non-gating, and that is a mechanism fact, not
-  # a temporary state. `RustSec/audit-check@v2.0.0` never calls `setFailed` on
-  # advisory content: on a non-schedule event it instead calls
-  # `checks.CheckReporter.startCheck`, which requires `checks: write`. This job
-  # grants only `contents: read`, so that call rejects, the reporter re-throws,
-  # and the step fails. `cargo audit` currently reports 9 allowed warnings
-  # (unmaintained + one `glib` unsoundness, see SECURITY.md), so the reporter
-  # fires on every run and `continue-on-error` is the only thing keeping this
-  # job green.
+  # The CARGO leg is non-gating, but for two DIFFERENT reasons depending on
+  # the event, and the split is worth knowing before you touch this.
   #
-  # Do NOT "fix" this by deleting the flag alone — that turns the job red
-  # permanently. To make the cargo leg gate you must BOTH add `checks: write`
-  # to this job's `permissions` AND add an explicit `run: cargo audit` step.
+  # `RustSec/audit-check@v2.0.0` never calls `setFailed` on advisory content.
+  # On a `pull_request` run `GITHUB_HEAD_REF` is set (GitHub sets it for every
+  # pull_request run, same-repo included — it is not a fork detector), so the
+  # reporter takes its fork path: it logs the report and returns success,
+  # failing only when `stats.critical > 0`, i.e. on a real vulnerability. The
+  # `continue-on-error` flag below is INERT on PR runs.
+  #
+  # On a `push` run `GITHUB_HEAD_REF` is unset, so `reportCheck` cannot call
+  # `checks.CheckReporter.startCheck` under this job's `contents: read`
+  # permission; it re-throws, main() catches, and `core.setFailed` fails the
+  # step. With 9 allowed warnings always present the reporter fires every run,
+  # so on push runs `continue-on-error` IS load-bearing and this job would be
+  # permanently red without it.
+  #
+  # Do NOT "fix" this by deleting the flag alone — that turns every push run
+  # red. A genuinely gating cargo leg needs BOTH `checks: write` in this job's
+  # `permissions` AND an explicit `run: cargo audit` step.
   #
   # The quick-xml `ignore: RUSTSEC-2026-0194,RUSTSEC-2026-0195` was dropped in
   # #642 once the lockfile cleared both IDs, restoring REPORTING of those two
