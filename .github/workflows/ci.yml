@@ -509,7 +509,8 @@ jobs:
           # Owner: maintainer; expiry: first release where `cargo audit`
           # shows both advisories cleared upstream (issue #642). Accepted
           # transitive risks, see SECURITY.md "Accepted transitive risks".
-          ignore: RUSTSEC-2026-0194,RUSTSEC-2026-0195
+          # The quick-xml ignore (RUSTSEC-2026-0194/-0195) was dropped once the
+          # lockfile cleared both IDs — see SECURITY.md for the replacement note.
 
       - name: Setup Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6.5.0
