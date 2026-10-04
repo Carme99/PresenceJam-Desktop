@@ -2110,8 +2110,10 @@ fn await_sync_toggle(app: &AppHandle, before: bool) -> bool {
 /// Production entry point for [`force_tray_refresh`]: binds the managed-state
 /// lookup and the tray rebuild to a live `AppHandle`.
 ///
-/// `try_state` — not `state` — is the lookup, because the single-instance
-/// forward can reach this path before `app.manage()` has run (issue #937).
+/// `try_state` — not `state` — is the lookup: `state()` panics with "state()
+/// called before manage()", so a lookup that can run before `app.manage()`
+/// must not use it. See the seam's doc comment for whether this function's
+/// current callers can (they cannot — this is defence-in-depth).
 fn force_tray_refresh_from_app(app: &AppHandle) {
     force_tray_refresh(
         &|| {
@@ -2137,17 +2139,33 @@ fn force_tray_refresh_from_app(app: &AppHandle) {
 /// change) doesn't clobber the toggle state set by the action. See
 /// issue #3.0-P3.
 ///
-/// Issue #937: the single-instance plugin registers in `Builder::build`
-/// before the setup closure runs, so a forwarded second launch reaches
-/// `forward_launch_to_running_instance` → `refresh_tray_from_state` →
-/// `repaint_tray_from_state` / this function before
-/// `app.manage(state.clone())` has executed. `app.state::<>()` panics there
-/// with "state() called before manage()", killing the tray worker thread.
-/// The pre-manage window is therefore modelled as an injected seam rather
-/// than an inline lookup: `managed_state` returning `None` *is* that window,
-/// and `rebuild` is then never called. The skip is logged at `warn!` — the
-/// default tauri-plugin-log level filters `debug!`, so a `debug!` line
-/// would fail issue #937's "produces a log line" criterion.
+/// Issue #937 asked for this path to tolerate a second launch arriving before
+/// `app.manage(state.clone())` has run in the setup closure. As it turns out
+/// this function has no such caller, and it did not crash before this change:
+/// its only two production callers — [`run_player_action`] (tray menu events)
+/// and [`refresh_tray_for_locale`] (the `save_config` IPC) — both run after
+/// setup has managed the state. The forwarded-second-launch path reaches
+/// [`refresh_tray_from_state`] → `repaint_tray_from_state`, which has used
+/// `try_state` on `main` already. So this is defence-in-depth, not a fix for
+/// an observed crash: the lookup cannot panic, and no future caller has to
+/// remember that it cannot.
+///
+/// The managed-state lookup is a parameter rather than an inline
+/// `app.try_state()` so the unit test can drive both arms — a lookup that
+/// reports "not managed yet" (`None`) and one that returns a managed state —
+/// without a GUI runtime. That is also why `managed_state` returning `None`
+/// is the arm under test: it is exactly what a pre-`manage()` caller would
+/// see. The skip is logged at `warn!`, not `debug!`: the default
+/// tauri-plugin-log level filters `debug!`, so a `debug!` line would be
+/// invisible to anyone actually debugging a real skip.
+///
+/// The binder in [`force_tray_refresh_from_app`] is deliberately UNPINNED:
+/// nothing in the test suite constrains it to `try_state` rather than
+/// `state()`, because Tauri offers no hermetic `AppHandle` constructor
+/// outside the `test` feature that #937's rework removed (that feature is
+/// what breaks the Windows test binary's loader). A revert of the binder
+/// would restore the panic at the call, with no test failing — acceptable
+/// only because no caller reaches this function before `manage()`.
 ///
 /// The seams are `&dyn Fn` rather than generic parameters so the #883/#886
 /// source guards in this module keep resolving to this body, and so the
@@ -2159,8 +2177,7 @@ fn force_tray_refresh(
     let Some(state) = managed_state() else {
         log::warn!(
             "[TRAY] force_tray_refresh: AppState not managed yet — skipping the forced \
-             tray rebuild (a forwarded second launch arrived before setup completed, \
-             issue #937)"
+             tray rebuild (issue #937)"
         );
         return;
     };
@@ -4625,30 +4642,32 @@ mod tests {
         );
     }
 
-    /// Issue #937: the single-instance plugin registers in `Builder::build`
-    /// before the setup closure runs, so a second launch that arrives during
-    /// that window reaches `forward_launch_to_running_instance` (lib.rs) →
-    /// `refresh_tray_from_state` → `repaint_tray_from_state` /
-    /// `force_tray_refresh` before `app.manage(state.clone())` has executed.
-    /// The pre-fix body then called `app.state::<Arc<AppState>>()`, which
-    /// panics with "state() called before manage()" and kills the tray
-    /// worker thread — the user sees a tray that never repaints and a log
-    /// with no explanation.
+    /// Issue #937: `force_tray_refresh` used to look the managed state up with
+    /// `app.state::<Arc<AppState>>()`, which panics with "state() called before
+    /// manage()" when the lookup runs before the setup closure has run
+    /// `app.manage(state.clone())`.
     ///
-    /// `force_tray_refresh` takes the managed-state lookup and the tray
-    /// rebuild as seams, so both arms of that window are driven here
-    /// directly: `None` is the pre-manage window and must return without
-    /// touching the tray, `Some` is the normal post-manage launch and must
-    /// rebuild from the state it read. Pre-fix this code could not be
-    /// expressed — the lookup was an inline `app.state::<>()` panic.
+    /// To be accurate about what this pins: no current caller can produce
+    /// that window. `force_tray_refresh` is reached from `run_player_action`
+    /// (tray menu events) and `refresh_tray_for_locale` (the `save_config`
+    /// IPC), both downstream of `manage()`; the forwarded-second-launch path
+    /// goes through `refresh_tray_from_state` → `repaint_tray_from_state`,
+    /// which already used `try_state` on `main`. The change is
+    /// defence-in-depth, and this test is its regression cover.
+    ///
+    /// The function takes the managed-state lookup and the tray rebuild as
+    /// seams, so both arms are driven here directly: a lookup reporting "not
+    /// managed yet" (`None` — what a pre-`manage()` caller would see) must
+    /// return without touching the tray, and a managed state must rebuild
+    /// exactly once, from the values it read.
     #[test]
     fn force_tray_refresh_tolerates_missing_state_issue_937() {
         use std::panic::{catch_unwind, AssertUnwindSafe};
         use std::sync::atomic::Ordering;
         use std::sync::Arc;
 
-        // Arm 1: the pre-manage window. The state lookup reports "not
-        // managed yet" exactly as `try_state` does before `app.manage()`.
+        // Arm 1: an unmanaged state. A lookup that returns `None` is exactly
+        // what `try_state` reports before `app.manage()` has run.
         let mut rebuilds: Vec<(bool, Option<crate::spotify::TrackInfo>)> = Vec::new();
         let unwound = catch_unwind(AssertUnwindSafe(|| {
             force_tray_refresh(&|| None, &mut |is_syncing, track| {
@@ -4657,9 +4676,9 @@ mod tests {
         }));
         assert!(
             unwound.is_ok(),
-            "force_tray_refresh must survive the pre-manage window (issue #937): \
+            "force_tray_refresh must survive an unmanaged AppState (issue #937): \
              pre-fix this path called app.state::<Arc<AppState>>(), which panics \
-             with 'state() called before manage()' and takes the tray worker \
+             with 'state() called before manage()' and would take the tray worker \
              thread down with it"
         );
         assert!(

@@ -976,8 +976,10 @@ async fn handle_spotify_callback<R: tauri::Runtime>(
 /// Production entry point for [`handle_deep_link`]: binds the managed-state
 /// lookup and the token-exchange spawn to a live `AppHandle`.
 ///
-/// `try_state` — not `state` — is the lookup, because the single-instance
-/// forward can reach this path before `app.manage()` has run (issue #937).
+/// `try_state` — not `state` — is the lookup: `state()` panics with "state()
+/// called before manage()", so a lookup that can run before `app.manage()`
+/// must not use it. See the seam's doc comment for whether this function's
+/// current callers can (they cannot — this is defence-in-depth).
 fn handle_deep_link_from_app<R: tauri::Runtime>(url: &str, app: AppHandle<R>) {
     handle_deep_link(
         url,
@@ -1009,11 +1011,28 @@ fn handle_deep_link_from_app<R: tauri::Runtime>(url: &str, app: AppHandle<R>) {
 /// The two effects the production path needs from a live app — reading the
 /// managed `AppState` and spawning the token exchange — are parameters, so
 /// the gates are driven directly by the unit tests and no GUI runtime has to
-/// exist. `managed_state` returns `None` when `app.manage(state.clone())`
-/// has not run yet, which is the pre-manage window of issue #937: the
-/// callback is logged and dropped rather than panicking the thread that was
-/// meant to redeem it. [`handle_deep_link_from_app`] supplies `try_state`
-/// and the spawn.
+/// exist.
+///
+/// Issue #937 asked this to tolerate a forwarded callback arriving before
+/// `app.manage(state.clone())` has run. Tracing the call graph says no
+/// caller can do that today, so this is defence-in-depth rather than a fix
+/// for an observed crash: both call sites live in the setup closure *after*
+/// `manage()` — the `get_current()` drain and the `on_open_url` listener
+/// registration. `tauri-plugin-deep-link`'s `handle_cli_arguments` does run
+/// during `Builder::build`, but its `deep-link://new-url` emit has no
+/// listener yet at that point, so the URL survives only in the plugin's
+/// `current` slot and is drained later by `get_current()` — after
+/// `manage()`.
+///
+/// A lookup returning `None` is therefore the arm the test drives: it is
+/// what a pre-`manage()` caller would see, and the callback is logged and
+/// dropped instead of panicking the thread meant to redeem it.
+/// [`handle_deep_link_from_app`] supplies `try_state` and the spawn; its
+/// binder is deliberately UNPINNED by tests (no hermetic `AppHandle` exists
+/// outside Tauri's `test` feature, which #937's rework removed because it
+/// breaks the Windows test binary's loader), so a revert of the binder to
+/// `state()` would fail no test. That is tolerable only while every caller
+/// is post-`manage()`.
 fn handle_deep_link<S, D>(url: &str, managed_state: S, dispatch: D)
 where
     S: FnOnce() -> Option<Arc<AppState>>,
@@ -1060,19 +1079,16 @@ where
                 // validation on purpose: a repeat is byte-identical, so
                 // whatever the first delivery decides applies to it too.
                 let callback_key = deep_link_callback_key(&code_str, state_param.as_deref());
-                // Issue #937: a forwarded deep link can arrive before
-                // AppState is managed (the single-instance plugin is live in
-                // Builder::build, before the setup closure runs). `state()`
-                // panics with "state() called before manage()", killing the
-                // thread that was supposed to redeem the OAuth code — the
-                // user is left with a stalled sign-in and no error. The
-                // lookup is injected and reports absence as `None`, which
-                // turns that panic into a logged no-op.
+                // Issue #937: `state()` panics with "state() called before
+                // manage()", so this lookup must not use it. The lookup is
+                // injected and reports absence as `None`, which turns that
+                // panic into a logged no-op. No current caller reaches this
+                // before `manage()` (both call sites are in the setup
+                // closure, after it), so this is defence-in-depth.
                 let Some(app_state) = managed_state() else {
                     log::warn!(
                         "[DEEP_LINK] handle_deep_link: AppState not registered yet — \
-                         ignoring forwarded callback (single-instance arrived \
-                         before setup completed)"
+                         ignoring forwarded callback (issue #937)"
                     );
                     return;
                 };
@@ -4473,25 +4489,30 @@ mod tests {
         );
     }
 
-    /// Issue #937: the single-instance plugin's deep-link feature forwards a
-    /// second launch that carries a `presencejam://` URL through
-    /// `handle_cli_arguments` → `on_open_url` → `handle_deep_link`. The
-    /// plugin is live in `Builder::build`, before the setup closure runs, so
-    /// a forwarded URL can reach `handle_deep_link` before
-    /// `app.manage(state.clone())` has executed. The pre-fix body called
-    /// `app.state::<Arc<AppState>>()` there, which panics with "state()
-    /// called before manage()" and kills the thread that was supposed to
-    /// redeem the OAuth code — the user is left on a stalled sign-in.
+    /// Issue #937: `handle_deep_link` used to look the managed state up with
+    /// `app.state::<Arc<AppState>>()`, which panics with "state() called
+    /// before manage()" when the lookup runs before the setup closure has run
+    /// `app.manage(state.clone())`.
     ///
-    /// The lookup is injected, so `None` *is* the pre-manage window: the
-    /// callback must be dropped with a log line and nothing may be
-    /// dispatched. Pre-fix the panic was not expressible as a branch at all.
+    /// To be accurate about what this pins: no current caller can produce
+    /// that window. Both call sites are in the setup closure *after*
+    /// `manage()` — the `get_current()` drain and the `on_open_url` listener
+    /// registration. `tauri-plugin-deep-link`'s `handle_cli_arguments` does
+    /// run during `Builder::build`, but it emits `deep-link://new-url` while
+    /// no listener is registered yet, so the URL survives only in the
+    /// plugin's `current` slot and is drained by `get_current()` — after
+    /// `manage()`. The change is defence-in-depth, and this test is its
+    /// regression cover.
+    ///
+    /// The lookup is injected, so a lookup returning `None` — what a
+    /// pre-`manage()` caller would see — is the arm driven here: the
+    /// callback must be dropped with a log line and nothing dispatched.
     #[test]
     fn handle_deep_link_tolerates_missing_state_issue_937() {
         use std::panic::{catch_unwind, AssertUnwindSafe};
 
         let dispatched = std::cell::RefCell::new(Vec::<(String, Option<String>)>::new());
-        // A syntactically-valid callback URL. The pre-manage guard fires
+        // A syntactically-valid callback URL. The unmanaged-state guard fires
         // before any field is read, so the code/state values are
         // placeholders for this regression test.
         let url = "presencejam://callback?code=test-code&state=csrf.test-secret";
@@ -4508,10 +4529,10 @@ mod tests {
 
         assert!(
             unwound.is_ok(),
-            "handle_deep_link must survive the pre-manage window (issue #937): \
+            "handle_deep_link must survive an unmanaged AppState (issue #937): \
              pre-fix this path called app.state::<Arc<AppState>>(), which panics \
-             with 'state() called before manage()' and takes the callback thread \
-             down with it"
+             with 'state() called before manage()' and would take the callback \
+             thread down with it"
         );
         assert!(
             dispatched.borrow().is_empty(),
@@ -4522,12 +4543,12 @@ mod tests {
         );
     }
 
-    /// The other arm of issue #937: once `app.manage()` has run, a callback
+    /// The other arm of issue #937: with a managed `AppState`, a callback
     /// that clears every gate is dispatched exactly once, with the same
-    /// `(code, state)` pair the URL carried. Pins that the pre-manage guard
-    /// is the only thing the seam changed — the validation ladder below it
-    /// (single-flight claim, launch binding, PKCE linkage) still runs and
-    /// still gates the exchange.
+    /// `(code, state)` pair the URL carried. Pins that the unmanaged-state
+    /// guard is the only thing the seam changed — the validation ladder
+    /// below it (single-flight claim, launch binding, PKCE linkage) still
+    /// runs and still gates the exchange.
     #[test]
     fn handle_deep_link_dispatches_valid_callback_when_state_is_managed_issue_937() {
         let state = Arc::new(AppState::new());
