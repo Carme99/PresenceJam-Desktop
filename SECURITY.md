@@ -421,18 +421,32 @@ previously affected `quick-xml` 0.37.5 (via `tauri-winrt-notification` 0.7.2,
 Windows toast notifications) and 0.39.4 (via `plist` 1.9.0, Tauri's macOS
 bundling/config path). Both were accepted because PresenceJam never parses
 untrusted XML at runtime — the affected paths are build-time tooling and XML
-the app generates itself. They are no longer accepted risks: the lockfile now
-resolves `plist` 1.10.1 and `tauri-winrt-notification` 0.7.3, which pull a
-fixed `quick-xml` (0.42.0), and `cargo audit` reports **0 vulnerabilities**.
-The matching `ignore: RUSTSEC-2026-0194,RUSTSEC-2026-0195` was removed from
-the `dep-audit` job in `.github/workflows/ci.yml` at the same time, so a future
-regression of either ID is reported again. Tracked by issue #642.
+the app generates itself. They are no longer accepted risks. The two crates
+cleared by different routes:
+
+- **`plist` 1.10.1** now pulls a fixed `quick-xml` 0.42.0 (both advisories
+  declare `patched = [">= 0.41.0"]`).
+- **`tauri-winrt-notification` 0.7.3** dropped its `quick-xml` dependency
+  entirely, moving to the Windows `Data_Xml_Dom` API. It no longer appears in
+  the `quick-xml` path at all.
+
+`cargo audit` now reports **0 vulnerabilities**. The matching
+`ignore: RUSTSEC-2026-0194,RUSTSEC-2026-0195` was removed from the `dep-audit`
+job in `.github/workflows/ci.yml` at the same time. Note that this restores
+**reporting**, not enforcement: the cargo leg remains non-gating
+(`continue-on-error: true`), because `RustSec/audit-check@v2.0.0` cannot reach
+the Checks API under this job's `contents: read` permission. See the `dep-audit`
+job header in `ci.yml` for the full mechanism and for what a real gate would
+require. Tracked by issue #642.
 
 **`glib` 0.18.5 (RUSTSEC-2024-0429) — accepted, unfixable on Tauri 2.x.** The
 advisory covers unsoundness in `VariantStrIter`'s `Iterator`/`DoubleEndedIterator`
-impls and is patched only in `glib >= 0.20`. Every Tauri 2.x release pins
-gtk-rs 0.18 through `tray-icon`, so no lockfile-only bump reaches 0.20 —
-clearing it needs a future Tauri release whose `tray-icon` moves to gtk 0.20.
+impls and is patched only in `glib >= 0.20`. No lockfile-only bump reaches it:
+Tauri 2.x takes gtk-rs 0.18 through nine direct `gtk` edges (`tauri`,
+`tauri-runtime`, `tauri-runtime-wry`, `tao`, `wry`, `webkit2gtk`, `muda`, and
+`tray-icon` -> `libappindicator`), and the tree resolves exactly one `glib`
+0.18.5. Clearing the advisory needs a coordinated ecosystem bump in which
+those crates move to gtk-rs 0.20 together.
 RustSec classifies it `informational = "unsound"`, so `cargo audit` reports it
 as an allowed **warning** and still exits 0. Reachability: the affected impls
 require `glib` object iteration, which this app does not perform — it uses

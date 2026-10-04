@@ -482,12 +482,27 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # Dependency-vulnerability gate (issue #357): surfaces new advisories on
-  # the introducing PR. The cargo leg stays advisory (`continue-on-error`
-  # scoped to that step) until the two accepted quick-xml
-  # RUSTSEC-2026-0194/-0195 advisories clear upstream (see SECURITY.md
-  # "Accepted transitive risks", issue #642); then drop the ignore IDs and
-  # the step-level flag to enforce. The npm leg gates on production
-  # advisories (`--omit=dev`); the full-tree run below stays advisory-only.
+  # the introducing PR. The npm leg gates on production advisories
+  # (`--omit=dev`); the full-tree run below stays advisory-only.
+  #
+  # The CARGO leg is permanently non-gating, and that is a mechanism fact, not
+  # a temporary state. `RustSec/audit-check@v2.0.0` never calls `setFailed` on
+  # advisory content: on a non-schedule event it instead calls
+  # `checks.CheckReporter.startCheck`, which requires `checks: write`. This job
+  # grants only `contents: read`, so that call rejects, the reporter re-throws,
+  # and the step fails. `cargo audit` currently reports 9 allowed warnings
+  # (unmaintained + one `glib` unsoundness, see SECURITY.md), so the reporter
+  # fires on every run and `continue-on-error` is the only thing keeping this
+  # job green.
+  #
+  # Do NOT "fix" this by deleting the flag alone — that turns the job red
+  # permanently. To make the cargo leg gate you must BOTH add `checks: write`
+  # to this job's `permissions` AND add an explicit `run: cargo audit` step.
+  #
+  # The quick-xml `ignore: RUSTSEC-2026-0194,RUSTSEC-2026-0195` was dropped in
+  # #642 once the lockfile cleared both IDs, restoring REPORTING of those two
+  # IDs (not enforcement). Accepted risks: SECURITY.md "Accepted transitive
+  # risks".
   dep-audit:
     name: Dependency audit (cargo + npm)
     runs-on: ubuntu-latest
@@ -506,11 +521,9 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           working-directory: src-tauri
-          # Owner: maintainer; expiry: first release where `cargo audit`
-          # shows both advisories cleared upstream (issue #642). Accepted
-          # transitive risks, see SECURITY.md "Accepted transitive risks".
-          # The quick-xml ignore (RUSTSEC-2026-0194/-0195) was dropped once the
-          # lockfile cleared both IDs — see SECURITY.md for the replacement note.
+          # Accepted transitive risks and the reporting-vs-enforcement caveat
+          # are documented in SECURITY.md "Accepted transitive risks" and in
+          # this job's header comment above.
 
       - name: Setup Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6.5.0
