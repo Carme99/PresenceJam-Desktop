@@ -788,6 +788,7 @@ pub mod commands;
 pub mod config;
 pub mod diagnostics;
 pub mod history;
+pub mod http;
 pub mod i18n;
 pub mod keychain;
 pub mod macos_deeplink;
