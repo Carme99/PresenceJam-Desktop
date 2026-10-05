@@ -11,10 +11,8 @@
 </script>
 
 <div class="about">
-  <!-- #742: About has no PageHeader bar, so its heading is the top of the card
-       and the card is this view's skip-link target. One view is mounted at a
-       time, so it stays the document's single `#main-content`. -->
-  <div class="card about-card" id="main-content" tabindex="-1">
+  <!-- #742 follow-up: this card is where the skip link's target moves to. -->
+  <div class="card about-card">
     <div class="logo-wrap"><Logo size={72} title={null} /></div>
     <!-- #739: `+page.svelte` focuses this heading when a navigation lands on
          About; `tabindex="-1"` keeps it out of the tab order. -->

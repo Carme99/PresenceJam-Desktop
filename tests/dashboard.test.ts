@@ -1068,3 +1068,34 @@ describe('Snooze entry announcement agrees in number (#1120)', () => {
     }
   });
 });
+
+/**
+ * #954 / P7 — the compact header cannot fit the full sync badge in German or
+ * French at the 400px minimum, and the reviewer was right that truncating it
+ * into an unreadable fragment is not an acceptable trade. The short form is a
+ * real localized string with the full label kept on the badge for hover and for
+ * assistive tech.
+ */
+describe('Compact sync badge (#954 / P7)', () => {
+  it('keeps a full-label badge in every locale, and a short label in all three', () => {
+    for (const locale of ['en', 'de', 'fr'] as const) {
+      void i18n.set(locale);
+      // The short form must be shorter than the full one everywhere, or the
+      // compact header gains nothing and the truncation problem is unchanged.
+      expect(t('dashboard.syncingShort').length, `${locale} short form is not shorter`).toBeLessThan(
+        t('dashboard.syncing').length
+      );
+    }
+  });
+
+  it('leaves the full label on the badge for hover and assistive tech', async () => {
+    const { container } = render(Dashboard);
+    await waitFor(() => expect(container.querySelector('.badge.accent')).not.toBeNull());
+    const badge = container.querySelector('.badge.accent');
+    // JSDOM has no `matchMedia`, so the component renders the wide form; what
+    // this pins is that the full label stays reachable on the element itself.
+    expect(badge?.getAttribute('aria-label')).toBe(t('dashboard.syncing'));
+    expect(badge?.getAttribute('title')).toBe(t('dashboard.syncing'));
+    expect(badge?.querySelector('.badge-label')?.textContent?.trim()).toBe(t('dashboard.syncing'));
+  });
+});

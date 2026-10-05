@@ -748,4 +748,10 @@ export const de: Dict = {
 
   // --- #739: Name der Ansicht für die Navigationsansage.
   'onboarding.title': 'Einrichtung',
+
+  // --- #954 / P7: the compact header's abbreviated sync badge. The full
+  // "Synchronisierung" / "Synchronisation" label ellipsises into an unreadable
+  // fragment at the 400px minimum, and a second badge row is worse. "Sync" is
+  // the established short form in all three locales.
+  'dashboard.syncingShort': 'Sync',
 };

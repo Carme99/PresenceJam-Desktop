@@ -487,10 +487,8 @@
     </div>
   {/if}
 
-  <!-- #742: the skip link's target — the wizard body below its brand bar. One
-       view is mounted at a time, so it stays the document's single
-       `#main-content`. -->
-  <div class="step" id="main-content" tabindex="-1">
+  <!-- #742 follow-up: this `.step` is where the skip link's target moves to. -->
+  <div class="step">
     {#if step === 1}
       <div class="card pane-card wizard-card">
         <!-- #739: `data-view-heading` is what the `+page.svelte` navigation effect

@@ -91,6 +91,8 @@ interface HeaderGeometry {
   inlineNavVisible: boolean;
   overflowButtonVisible: boolean;
   titleClipped: boolean;
+  syncLabel: string;
+  syncLabelClipped: boolean;
 }
 
 async function measureHeader(page: Page): Promise<HeaderGeometry> {
@@ -114,7 +116,11 @@ async function measureHeader(page: Page): Promise<HeaderGeometry> {
         !== null,
       overflowButtonVisible: (header.querySelector<HTMLElement>('.more-btn')?.offsetParent ?? null)
         !== null,
-      titleClipped: title.scrollWidth > title.clientWidth
+      titleClipped: title.scrollWidth > title.clientWidth,
+      syncLabel: header.querySelector<HTMLElement>('.badge.accent .badge-label')?.textContent?.trim() ?? '',
+      syncLabelClipped:
+        (header.querySelector<HTMLElement>('.badge.accent .badge-label')?.scrollWidth ?? 0) >
+        (header.querySelector<HTMLElement>('.badge.accent .badge-label')?.clientWidth ?? 0)
     };
   });
 }
@@ -146,6 +152,10 @@ for (const size of SIZES) {
         expect(header.badgesRight, `${context_}: badges overlap the icon row`).toBeLessThanOrEqual(
           header.iconRowLeft
         );
+        // P7: the compact badge uses the short localized label rather than an
+        // ellipsised fragment of the full one — in every locale.
+        expect(header.syncLabelClipped, `${context_}: the sync badge is clipped`).toBe(false);
+        expect(header.syncLabel, `${context_}: the sync badge lost its label`).toBeTruthy();
       } finally {
         await context.close();
       }
@@ -173,6 +183,24 @@ test('collapses the five nav buttons into one overflow menu only when compact', 
     // The menu holds the same five actions, and its entries are reachable.
     await compactPage.locator('.more-btn').click();
     await expect(compactPage.locator('.header-menu [role="menuitem"]')).toHaveCount(5);
+
+    // P5: the menu must be openable AND navigable by keyboard. A toggle that
+    // only reveals the items leaves every one of them skipped by Tab — the
+    // menu would work for pointer users only, and it does so at the shipped
+    // 600px default, not just at the 400px minimum.
+    // The menu is open from the click above; Escape returns focus to the toggle.
+    await compactPage.keyboard.press('Escape');
+    await expect(compactPage.locator('.more-btn')).toBeFocused();
+    await compactPage.keyboard.press('Enter');
+    await expect(compactPage.locator('.header-menu [role="menuitem"]').first()).toBeFocused();
+    await compactPage.keyboard.press('ArrowDown');
+    await expect(compactPage.locator('.header-menu [role="menuitem"]').nth(1)).toBeFocused();
+    await compactPage.keyboard.press('End');
+    await expect(compactPage.locator('.header-menu [role="menuitem"]').last()).toBeFocused();
+    await compactPage.keyboard.press('Escape');
+    await expect(compactPage.locator('.header-menu')).toHaveCount(0);
+    await expect(compactPage.locator('.more-btn')).toBeFocused();
+    await compactPage.keyboard.press('Enter');
 
     const widePage = await wide.newPage();
     await openDashboard(widePage, 'de');

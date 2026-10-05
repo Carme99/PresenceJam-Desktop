@@ -306,7 +306,21 @@
   // rule and its replace-in-place notification id — now lives in
   // `stores/notifications.ts` with the other three classes.
 
+  onMount(() => {
+    // jsdom ships no `matchMedia`, so the compact label falls back to the full
+    // one there; the browser gate is where the compact form is verified.
+    if (typeof window.matchMedia !== 'function') return;
+    compactQuery = window.matchMedia(COMPACT_HEADER_QUERY);
+    const applyCompact = () => {
+      compactHeader = compactQuery?.matches ?? false;
+    };
+    applyCompact();
+    compactQuery.addEventListener('change', applyCompact);
+    return () => compactQuery?.removeEventListener('change', applyCompact);
+  });
+
   onDestroy(() => {
+    compactQuery?.removeEventListener('change', () => undefined);
     void teardown.dispose();
     if (displayErrorTimeout) clearTimeout(displayErrorTimeout);
     if (displayWarningTimeout) clearTimeout(displayWarningTimeout);
@@ -887,6 +901,74 @@
   // itself) closes the menu.
   let headerMenuOpen = $state(false);
   let menuAnchor = $state<HTMLElement | null>(null);
+
+  /**
+   * The open menu's commands, in visual order. Resolved from the DOM rather
+   * than held in an array so it cannot drift out of sync with the markup.
+   */
+  function menuCommands(): HTMLButtonElement[] {
+    if (!menuAnchor) return [];
+    return [...menuAnchor.querySelectorAll<HTMLButtonElement>('.header-menu [role="menuitem"]')];
+  }
+
+  /**
+   * #954 / P5: opening the menu from the keyboard has to land ON the menu.
+   * A toggle that only reveals the items leaves a keyboard user tabbing past
+   * all five of them to the Sync button — the menu would exist for pointer
+   * users only.
+   */
+  async function openHeaderMenu(): Promise<void> {
+    headerMenuOpen = true;
+    await tick();
+    menuCommands()[0]?.focus();
+  }
+
+  function closeHeaderMenu(refocusToggle: boolean): void {
+    headerMenuOpen = false;
+    if (refocusToggle) menuAnchor?.querySelector<HTMLButtonElement>('.more-btn')?.focus();
+  }
+
+  /** Roving focus, per the `menu` pattern: arrows move, Tab leaves the menu. */
+  function onMenuKeydown(event: KeyboardEvent): void {
+    const commands = menuCommands();
+    const current = commands.indexOf(document.activeElement as HTMLButtonElement);
+    const focusAt = (index: number) => {
+      event.preventDefault();
+      commands[(index + commands.length) % commands.length]?.focus();
+    };
+    switch (event.key) {
+      case 'ArrowDown':
+        focusAt(current + 1);
+        break;
+      case 'ArrowUp':
+        focusAt(current - 1);
+        break;
+      case 'Home':
+        focusAt(0);
+        break;
+      case 'End':
+        focusAt(commands.length - 1);
+        break;
+      case 'Escape':
+        event.preventDefault();
+        closeHeaderMenu(true);
+        break;
+      case 'Tab':
+        // Tab is not trapped in a menu: it closes it and moves on.
+        closeHeaderMenu(false);
+        break;
+      default:
+        break;
+    }
+  }
+
+  // #954 / P7: the compact header cannot fit a full "Synchronisierung" badge in
+  // German (or "Synchronisation" in French) without truncating it into an
+  // unreadable fragment, and a second badge row is what pushes the playback
+  // card down. The shortened label is a real i18n string, not a truncation.
+  const COMPACT_HEADER_QUERY = '(max-width: 640px)';
+  let compactHeader = $state(false);
+  let compactQuery: MediaQueryList | null = null;
 </script>
 
 <svelte:window
@@ -912,7 +994,10 @@
             <span class="dot"></span><span class="badge-label">{teamsConnected ? 'Teams' : t('dashboard.teamsOff')}</span>
           </span>
           {#if $presence.syncing}
-            <span class="badge accent"><span class="dot pulse"></span><span class="badge-label">{t('dashboard.syncing')}</span></span>
+            <span class="badge accent" title={t('dashboard.syncing')} aria-label={t('dashboard.syncing')}>
+              <span class="dot pulse"></span>
+              <span class="badge-label" aria-hidden="true">{compactHeader ? t('dashboard.syncingShort') : t('dashboard.syncing')}</span>
+            </span>
           {/if}
         </div>
       </div>
@@ -950,9 +1035,7 @@
             role="menu"
             tabindex="-1"
             aria-label={t('common.moreActions')}
-            onkeydown={(e) => {
-              if (e.key === 'Escape') headerMenuOpen = false;
-            }}
+            onkeydown={onMenuKeydown}
           >
             <button type="button" class="btn-secondary menu-item" role="menuitem" onclick={toggleTheme}>
               {$appliedTheme === 'dark' ? '☀' : '☾'}
@@ -982,7 +1065,10 @@
           class:is-on={headerMenuOpen}
           aria-haspopup="menu"
           aria-expanded={headerMenuOpen}
-          onclick={() => { headerMenuOpen = !headerMenuOpen; }}
+          onclick={() => {
+            if (headerMenuOpen) closeHeaderMenu(false);
+            else void openHeaderMenu();
+          }}
           aria-label={t('common.moreActions')}
           title={t('common.moreActions')}
         >⋯</button>
@@ -1003,11 +1089,10 @@
     <div class="error-banner" role="alert">{displayError}</div>
   {/if}
 
-  <!-- #742: the skip link's target. It used to sit on the wrapper around the
-       whole mounted view, above this header, so activating it left the next Tab
-       inside the very chrome the link exists to bypass. One view is mounted at
-       a time, so this stays the document's single `#main-content`. -->
-  <main id="main-content" tabindex="-1">
+  <!-- #742: this is where the skip link's target moves to, but it lands with
+       the follow-up that also gives Settings / LogViewer / Diagnostics their
+       own. Until then `.app-container` still carries the id. -->
+  <main>
     {#if $presence.gated}
       <div class="presence-chip" role="status">{gatedLabel}</div>
       <!-- Issue #868: expandable "why" row. The presence-gated reason
@@ -1390,36 +1475,6 @@
     text-align: left;
   }
 
-  /* #954: the 400px minimum window. Below this the five inline nav buttons
-     (256px of fixed width) leave the title a few dozen pixels, so they move
-     into the overflow menu. The header padding and the icon buttons shrink
-     too, and the badges are pinned to a single row whose labels ellipsise —
-     a second badge row is what pushes the playback card down. The cut-over is
-     the ~640px the issue names: the shipped 600px default sits just inside it,
-     which is the whole point — that width is "only just wide enough" with the
-     full icon row, and the German and French badge labels are longer still. */
-  @media (max-width: 640px) {
-    header {
-      padding: var(--sp-3) var(--sp-4);
-      gap: var(--sp-2);
-    }
-    .icon-btn {
-      width: 32px;
-      height: 32px;
-    }
-    .header-extra { display: none; }
-    .more-btn { display: inline-flex; }
-    .badges {
-      flex-wrap: nowrap;
-      gap: var(--sp-1);
-    }
-    .badge {
-      min-width: 0;
-      font-size: var(--fs-xs);
-      padding: 2px var(--sp-1);
-      gap: var(--sp-1);
-    }
-  }
   .icon-btn {
     width: 36px;
     height: 36px;
@@ -1861,4 +1916,39 @@
     margin-bottom: var(--sp-2);
   }
   .not-playing h3 { font-size: var(--fs-xl); }
+
+  /* #954: the 400px minimum window. Below this the five inline nav buttons
+     (256px of fixed width) leave the title a few dozen pixels, so they move
+     into the overflow menu. The header padding and the icon buttons shrink
+     too, and the badges are pinned to a single row whose labels ellipsise —
+     a second badge row is what pushes the playback card down. The cut-over is
+     the ~640px the issue names: the shipped 600px default sits just inside it,
+     which is the whole point — that width is "only just wide enough" with the
+     full icon row, and the German and French badge labels are longer still.
+
+     This block lives at the END of the stylesheet on purpose: `.icon-btn`'s
+     base size below has the same specificity, so a compact rule placed above it
+     is dead code and the buttons stay 36px. */
+  @media (max-width: 640px) {
+    header {
+      padding: var(--sp-3) var(--sp-4);
+      gap: var(--sp-2);
+    }
+    .icon-btn {
+      width: 32px;
+      height: 32px;
+    }
+    .header-extra { display: none; }
+    .more-btn { display: inline-flex; }
+    .badges {
+      flex-wrap: nowrap;
+      gap: var(--sp-1);
+    }
+    .badge {
+      min-width: 0;
+      font-size: var(--fs-xs);
+      padding: 2px var(--sp-1);
+      gap: var(--sp-1);
+    }
+  }
 </style>

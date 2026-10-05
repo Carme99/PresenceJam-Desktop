@@ -728,6 +728,12 @@ export const en = {
   // --- #739: the wizard's view name, announced on navigation (there is no
   // heading bar above the step, so the step title cannot stand in for it).
   'onboarding.title': 'Setup',
+
+  // --- #954 / P7: the compact header's abbreviated sync badge. The full
+  // "Synchronisierung" / "Synchronisation" label ellipsises into an unreadable
+  // fragment at the 400px minimum, and a second badge row is worse. "Sync" is
+  // the established short form in all three locales.
+  'dashboard.syncingShort': 'Sync',
 };
 
 export type Dict = { readonly [K in keyof typeof en]: string };
