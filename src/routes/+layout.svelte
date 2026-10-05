@@ -52,7 +52,13 @@
     typeof (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !== 'undefined';
   const isMainWindow = isTauriRuntime ? getCurrentWindow().label === 'main' : false;
   import { authFlow, setTeamsPhase, setTeamsDeviceCode, setSpotifyPhase, expiresAtFromResponse, resetTeamsAuthFlow, pollTeamsAuth, teamsPollMutex } from '$lib/stores/authFlow.svelte';
+  import type { Snippet } from 'svelte';
   import type { DeviceCodeResponse, AppConfig } from '$lib/types';
+  // #779: this shell was the last legacy slot element in `src/`. SvelteKit
+  // hands a layout its page content as the `children` snippet; rendering it
+  // keeps route navigation swapping the body inside the shell and clears the
+  // one svelte-check warning the gate used to report.
+  let { children }: { children?: Snippet } = $props();
   devLog(`[LAYOUT] PresenceJam build: ${import.meta.env.VITE_APP_BUILD ?? 'dev build'}`);
 
   // #711: completion events carry the exact stage request id. Keep a bounded
@@ -548,7 +554,7 @@
     <p>{t('dashboard.setupHint')}</p>
   </main>
 {:else}
-<slot />
+{@render children?.()}
 {/if}
 {#if playbackError}
   <div class="playback-toast" role="alert">
