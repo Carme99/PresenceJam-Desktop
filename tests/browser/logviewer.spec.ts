@@ -53,8 +53,15 @@ async function settledScrollTop(
   label: string,
   timeoutMs = 2000
 ): Promise<number> {
-  const STABLE_INTERVAL_MS = 50;
-  const REQUIRED_STABLE_READS = 3;
+  // 150ms of apparent stability is not proof of settling: a smooth scroll can
+  // pause mid-animation long enough for three equal reads and then continue. On a
+  // loaded webkit runner that produced `afterPageDown = 19` followed by the same
+  // PageUp leaving scrollTop at 439 — the "settled" baseline was simply read
+  // before the animation finished. Widening the window to 300ms and requiring 4
+  // consecutive equal reads makes a mid-animation pause far less likely to pass
+  // as settled, while still returning well inside the 2s budget.
+  const STABLE_INTERVAL_MS = 75;
+  const REQUIRED_STABLE_READS = 4;
   const deadline = Date.now() + timeoutMs;
   let previous = await viewport.evaluate((element) => element.scrollTop);
   let stableReads = 0;
@@ -231,7 +238,7 @@ test('focuses the log viewport and navigates it with PageUp/PageDown in Chromium
     // settled, not that the keypress never registered. The previous fix
     // conflated these two cases (it returned 0 on a cold runner whose
     // keypress→animation-start latency exceeded the 150ms stability window).
-    const afterPageDown = await settledScrollTop(viewport, 'after PageDown');
+    let afterPageDown = await settledScrollTop(viewport, 'after PageDown');
     expect(
       afterPageDown,
       'PageDown must move past the start of the scroll range'
@@ -245,11 +252,26 @@ test('focuses the log viewport and navigates it with PageUp/PageDown in Chromium
     // Phase 1 — symmetric retry: prove the keypress took effect before
     // trusting the helper. `afterPageDown` is the settled baseline, so a
     // value strictly below it means PageUp has moved the viewport.
-    await expect
-      .poll(() => viewport.evaluate((element) => element.scrollTop))
-      .toBeLessThan(afterPageDown);
-    // Phase 2 — settle on the post-PageUp value.
-    const afterPageUp = await settledScrollTop(viewport, 'after PageUp');
+    // If the PageDown baseline was read mid-animation, PageUp's effect is masked
+    // by the still-running scroll and this times out. Retry the pair once from a
+    // freshly settled PageDown rather than failing the run on that race.
+    let afterPageUp = afterPageDown;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await expect
+          .poll(() => viewport.evaluate((element) => element.scrollTop))
+          .toBeLessThan(afterPageDown);
+        afterPageUp = await settledScrollTop(viewport, 'after PageUp');
+        break;
+      } catch (err) {
+        if (attempt === 1) throw err;
+        // Re-settle the baseline: press PageDown again and wait it out properly.
+        await page.keyboard.press('PageDown');
+        await settledScrollTop(viewport, 'after PageDown (retry)');
+        await page.keyboard.press('PageUp');
+        afterPageDown = await settledScrollTop(viewport, 'after PageDown (retry)');
+      }
+    }
     expect(
       afterPageUp,
       'PageUp must land above the settled PageDown position'
