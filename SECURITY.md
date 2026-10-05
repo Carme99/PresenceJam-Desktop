@@ -416,27 +416,68 @@ treat it as untrusted and re-download from the release page.
 
 ### Accepted transitive risks
 
-Two `quick-xml` advisories are currently **accepted risks**, tracked pending
-upstream fixes:
+**`quick-xml` (RUSTSEC-2026-0194 / RUSTSEC-2026-0195) — cleared.** These
+previously affected `quick-xml` 0.37.5 (via `tauri-winrt-notification` 0.7.2,
+Windows toast notifications) and 0.39.4 (via `plist` 1.9.0, Tauri's macOS
+bundling/config path). Both were accepted because PresenceJam never parses
+untrusted XML at runtime — the affected paths are build-time tooling and XML
+the app generates itself. They are no longer accepted risks. The two crates
+cleared by different routes:
 
-- **RUSTSEC-2026-0194 / RUSTSEC-2026-0195** affect the XML parser `quick-xml`.
-  The lockfile resolves two versions transitively: `quick-xml` 0.37.5 (pulled
-  in via `tauri-winrt-notification` 0.7.2, used for Windows toast
-  notifications) and `quick-xml` 0.39.4 (via `plist` 1.9.0, a dependency of
-  Tauri's macOS bundling/config path).
+- **`plist` 1.10.1** now pulls a fixed `quick-xml` 0.42.0 (both advisories
+  declare `patched = [">= 0.41.0"]`).
+- **`tauri-winrt-notification` 0.7.3** dropped its `quick-xml` dependency
+  entirely, moving to the Windows `Data_Xml_Dom` API. It no longer appears in
+  the `quick-xml` path at all.
 
-**Why this is accepted rather than patched:** PresenceJam never parses
-untrusted XML at runtime. The affected paths are build-time tooling and XML we
-generate ourselves (the Windows notification toast payload is constructed by
-the crate from our own field values; `plist` output is produced during bundling,
-not from user input). There is no attacker-controlled XML surface in the app's
-network or storage paths. Neither advisory has an upstream-fixed version of the
-transitive crates available; both clear automatically once
-`tauri-winrt-notification` and `plist` ship updates that pull a fixed
-`quick-xml`. This note should be removed at the first release where
-`cargo audit`/Dependabot shows both advisories cleared. The `dep-audit` CI
-job (`ci.yml`, issue #357) ignores these two IDs and is non-blocking
-(`continue-on-error`) until they clear; remove the flag to enforce.
+`cargo audit` now reports **0 vulnerabilities**. The matching
+`ignore: RUSTSEC-2026-0194,RUSTSEC-2026-0195` was removed from the `dep-audit`
+job in `.github/workflows/ci.yml` at the same time. Note that this restores
+**reporting**, not enforcement: the cargo leg remains non-gating
+(`continue-on-error: true`), because `RustSec/audit-check@v2.0.0` cannot reach
+the Checks API under this job's `contents: read` permission. See the `dep-audit`
+job header in `ci.yml` for the full mechanism and for what a real gate would
+require. Tracked by issue #642.
+
+**`glib` 0.18.5 (RUSTSEC-2024-0429) — accepted, unfixable on Tauri 2.x.** The
+advisory covers unsoundness in `VariantStrIter`'s `Iterator`/`DoubleEndedIterator`
+impls and is patched only in `glib >= 0.20`. No lockfile-only bump reaches it.
+The tree pins the whole gtk-rs stack at 0.18: twelve packages take a direct
+`gtk` dependency (`tauri`, `tauri-runtime`, `tauri-runtime-wry`, `tao`, `wry`,
+`webkit2gtk`, `muda`, `libappindicator`, `rfd`, and the gtk `-sys` crates) and
+twenty-six take `glib` directly (`atk`, `cairo-rs`, `gdk`, `gdk-pixbuf`,
+`gdkx11`, `gio`, `pango`, `soup3`, `javascriptcore-rs` and their `-sys`
+crates, alongside the gtk ones). `tray-icon` is not among them — it reaches
+gtk only through `muda` and `libappindicator`. Exactly one `glib` version is
+resolved, 0.18.5. Clearing the advisory needs a coordinated ecosystem bump in
+which those crates move to gtk-rs 0.20 together.
+RustSec classifies it `informational = "unsound"`, so `cargo audit` reports it
+as an allowed **warning** and still exits 0. Reachability: the affected impls
+require `glib` object iteration, which this app does not perform — it uses
+Tauri's tray and dialog APIs and never iterates a `glib` object collection
+itself.
+
+Two further `unsound` warnings are accepted for the same reason — neither is
+in this crate's direct dependency list, so the app cannot call the affected
+API itself, and both are reached only through Tauri internals:
+
+- **`anyhow` (RUSTSEC-2026-0190)** — unsoundness in `Error::downcast_mut()`.
+  `src-tauri/Cargo.toml` has no `anyhow` entry; it is pulled transitively by
+  `tauri`, `tauri-plugin`, `tauri-plugin-fs`, `tauri-utils` and the `wasm-*`
+  tooling chain. The defect requires calling `downcast_mut` on an error whose
+  concrete type has been moved, which this app never does — its own error paths
+  use `Result<T, E>` with typed variants (AGENTS.md §4), not `anyhow::Error`.
+- **`event-listener` (RUSTSEC-2026-0221)** — allows `!Send` tags to cross a
+  thread boundary. No direct `event-listener` entry in `src-tauri/Cargo.toml`;
+  it is pulled by the async stack (`async-lock`, `async-broadcast`,
+  `async-process`, `event-listener-strategy`) and by `zbus`, which Tauri uses
+  on Linux for its system tray. The app never constructs an `event-listener`
+  tag itself; all tags originate inside Tauri's own async runtime, so the
+  unsound crossing is confined to library code on that path.
+
+Both are `informational = "unsound"` in the RustSec database, so `cargo audit`
+reports them as allowed warnings and still exits 0. They are recorded here so
+the `dep-audit` job's warning count is explained rather than merely tolerated.
 
 ## Release Pipeline Token Rotation
 

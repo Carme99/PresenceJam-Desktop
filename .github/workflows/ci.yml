@@ -482,12 +482,36 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # Dependency-vulnerability gate (issue #357): surfaces new advisories on
-  # the introducing PR. The cargo leg stays advisory (`continue-on-error`
-  # scoped to that step) until the two accepted quick-xml
-  # RUSTSEC-2026-0194/-0195 advisories clear upstream (see SECURITY.md
-  # "Accepted transitive risks", issue #642); then drop the ignore IDs and
-  # the step-level flag to enforce. The npm leg gates on production
-  # advisories (`--omit=dev`); the full-tree run below stays advisory-only.
+  # the introducing PR. The npm leg gates on production advisories
+  # (`--omit=dev`); the full-tree run below stays advisory-only.
+  #
+  # The CARGO leg is non-gating, but for two DIFFERENT reasons depending on
+  # the event, and the split is worth knowing before you touch this.
+  #
+  # `RustSec/audit-check@v2.0.0` never calls `setFailed` on advisory content.
+  # On a `pull_request` run `GITHUB_HEAD_REF` is set (GitHub sets it for every
+  # pull_request run, same-repo included — it is not a fork detector), so the
+  # reporter takes its fork path: it logs the report and returns success,
+  # failing only when `stats.critical > 0`, i.e. on a real vulnerability. The
+  # `continue-on-error` flag below is INERT on PR runs.
+  #
+  # On a `push` run `GITHUB_HEAD_REF` is unset, so `reportCheck` cannot call
+  # `checks.CheckReporter.startCheck` under this job's `contents: read`
+  # permission; it re-throws, main() catches, and `core.setFailed` fails the
+  # step. `cargo audit` reports 9 allowed warnings — 6 `unmaintained`
+  # (proc-macro-error and the five `unic-*` crates) and 3 `unsound` (anyhow,
+  # event-listener, glib, all three documented in SECURITY.md) — so the
+  # reporter fires on every run and on push runs `continue-on-error` IS
+  # load-bearing: without it this job would be permanently red.
+  #
+  # Do NOT "fix" this by deleting the flag alone — that turns every push run
+  # red. A genuinely gating cargo leg needs BOTH `checks: write` in this job's
+  # `permissions` AND an explicit `run: cargo audit` step.
+  #
+  # The quick-xml `ignore: RUSTSEC-2026-0194,RUSTSEC-2026-0195` was dropped in
+  # #642 once the lockfile cleared both IDs, restoring REPORTING of those two
+  # IDs (not enforcement). Accepted risks: SECURITY.md "Accepted transitive
+  # risks".
   dep-audit:
     name: Dependency audit (cargo + npm)
     runs-on: ubuntu-latest
@@ -506,10 +530,9 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           working-directory: src-tauri
-          # Owner: maintainer; expiry: first release where `cargo audit`
-          # shows both advisories cleared upstream (issue #642). Accepted
-          # transitive risks, see SECURITY.md "Accepted transitive risks".
-          ignore: RUSTSEC-2026-0194,RUSTSEC-2026-0195
+          # Accepted transitive risks and the reporting-vs-enforcement caveat
+          # are documented in SECURITY.md "Accepted transitive risks" and in
+          # this job's header comment above.
 
       - name: Setup Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6.5.0
