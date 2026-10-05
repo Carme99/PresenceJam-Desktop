@@ -374,7 +374,6 @@ fn next_poll_wait(current: u64, err: &str) -> u64 {
     }
 }
 
-
 /// Failure message for the overall device-code deadline.
 const AUTH_TIMEOUT_MSG: &str = "Authentication timed out";
 
@@ -2425,7 +2424,9 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .expect("teams.rs has a #[cfg(test)] mod tests block");
-        let parsed = prod.matches(concat!("parse_retry_after(&", "response)")).count();
+        let parsed = prod
+            .matches(concat!("parse_retry_after(&", "response)"))
+            .count();
         assert_eq!(
             parsed, 5,
             "every throttled-response site (device-code poll, token refresh, status get/set/clear) must read the header: found {parsed}"
@@ -3021,8 +3022,11 @@ mod tests {
         );
         // The exit path (its own 3 s budget, #636) is the one deliberate
         // exception, and it is the ONLY exception.
-        let exit_call = [concat!("build_teams_client_with_timeout(", ""), "EXIT_CLEANUP_TIMEOUT)"]
-            .concat();
+        let exit_call = [
+            concat!("build_teams_client_with_timeout(", ""),
+            "EXIT_CLEANUP_TIMEOUT)",
+        ]
+        .concat();
         assert_eq!(
             prod.matches(&exit_call).count(),
             3,
