@@ -1,7 +1,7 @@
+use crate::http::parse_retry_after;
 use crate::polling::{emit_error_with_recovery, ErrorRecovery, ErrorSeverity};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::sync::LazyLock;
 use std::thread;
 use std::time::Duration as StdDuration;
 use tauri::AppHandle;
@@ -180,50 +180,35 @@ impl TeamsApiError {
 /// `timeout`). Ensures consistent HTTP client settings across all Teams API
 /// calls.
 ///
-/// User-Agent uses `env!("CARGO_PKG_VERSION")` so it tracks `Cargo.toml`
-/// (which mirrors `tauri.conf.json` → `version`) automatically on every
-/// release. Never hardcode the version — see CONTRIBUTING.md. See audit
-/// Q8.
-///
-/// Only the exit-path cleanup still calls this (issue #884): it is the one
-/// caller that needs a timeout other than the shared 10 s, and caching a
-/// client per timeout value would defeat the point of the cache.
+/// Only the exit-path cleanup calls this (issue #884): it is the one caller
+/// that needs a timeout other than the shared 10 s, and caching a client per
+/// timeout value would defeat the point of the cache — each cached entry
+/// would carry its own pool. The builder itself lives in `http`, so the
+/// User-Agent cannot drift from the shared client's.
 fn build_teams_client_with_timeout(
     timeout: std::time::Duration,
 ) -> Result<reqwest::blocking::Client, String> {
-    reqwest::blocking::Client::builder()
-        .user_agent(format!("PresenceJam/{}", env!("CARGO_PKG_VERSION")))
-        .timeout(timeout)
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))
+    crate::http::client_with_timeout(timeout)
 }
 
 /// The shared Graph client: built once per process and cached (issue #884).
 ///
 /// `reqwest::blocking::Client` is `Arc`-backed, so every later call is a
 /// refcount bump over the SAME connection pool instead of a fresh pool per
-/// call — the memoization `spotify.rs::build_spotify_client` already has
-/// (#576). Eight Teams call sites used to open and discard a pool each: a
+/// call. Eight Teams call sites used to open and discard a pool each: a
 /// presence read plus a status POST every poll, i.e. a new TCP+TLS handshake
-/// per iteration with no keep-alive reuse.
+/// per iteration with no keep-alive reuse. The pool is now the app-wide one in
+/// `http::shared_client` — Spotify and Graph traffic share it, which is the
+/// point of having one client rather than one per provider.
 ///
-/// The cache memoizes a failed build too: the builder fails only on
-/// environmental TLS/runtime init, where a retry would fail identically. The
-/// signature is `Result<Client, String>` as before, so the call sites and
-/// their error mapping are untouched.
+/// Returns a clone of the cached client (a refcount bump over the shared
+/// pool) so the call sites and their error mapping are untouched.
 ///
 /// `pub` for the calendar integration (issue #867) — the calendar's
 /// `list_upcoming` shares the same TLS pool so a long-running polling
 /// thread doesn't open a fresh connection every fetch.
 pub fn build_teams_client() -> Result<reqwest::blocking::Client, String> {
-    static CLIENT: LazyLock<Result<reqwest::blocking::Client, String>> = LazyLock::new(|| {
-        reqwest::blocking::Client::builder()
-            .user_agent(format!("PresenceJam/{}", env!("CARGO_PKG_VERSION")))
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .map_err(|e| format!("Failed to create HTTP client: {}", e))
-    });
-    CLIENT.as_ref().map(|c| c.clone()).map_err(|e| e.clone())
+    crate::http::shared_client().map(|client| client.as_ref().clone())
 }
 
 /// Binding budget for the exit-path cleanup (finding #636, issue #636).
@@ -368,12 +353,12 @@ pub fn start_teams_auth_device_code() -> Result<DeviceCodeResponse, String> {
 
     Ok(result)
 }
-
-/// True iff the Teams access token has less than 60 seconds of lifetime
-/// remaining. Mirrors `spotify::is_token_expired` so the two providers
-/// share the same refresh-window heuristic. See audit PR-3 nit.
+/// True iff the Teams access token has less than
+/// [`http::REFRESH_WINDOW_SECS`] seconds of lifetime remaining. Delegates to
+/// the shared heuristic so the Teams and Spotify windows cannot drift apart
+/// (issue #884). See audit PR-3 nit.
 pub fn is_token_expired(tokens: &TeamsTokens) -> bool {
-    Utc::now() >= tokens.expires_at - chrono::Duration::seconds(60)
+    crate::http::is_token_expired(tokens.expires_at)
 }
 
 /// Computes the next polling wait in seconds per RFC 8628 §3.5.
@@ -389,33 +374,6 @@ fn next_poll_wait(current: u64, err: &str) -> u64 {
     }
 }
 
-/// Parses a `Retry-After` header into an optional delay, supporting both
-/// delta-seconds (`120`) and HTTP-date (`Wed, 21 Aug 2026 12:00:00 GMT`)
-/// forms per RFC 7231 §7.1.3. Returns None when the header is absent
-/// or unparseable — callers then fall back to exponential backoff.
-fn parse_retry_after_value(s: &str) -> Option<u64> {
-    let s = s.trim();
-    if let Ok(secs) = s.parse::<u64>() {
-        return Some(secs.min(300));
-    }
-    if let Ok(date) = httpdate::parse_http_date(s) {
-        let secs = date
-            .duration_since(std::time::SystemTime::now())
-            .unwrap_or(std::time::Duration::from_secs(0))
-            .as_secs()
-            .min(300);
-        return Some(secs);
-    }
-    None
-}
-
-fn parse_retry_after(response: &reqwest::blocking::Response) -> Option<u64> {
-    response
-        .headers()
-        .get(reqwest::header::RETRY_AFTER)
-        .and_then(|v| v.to_str().ok())
-        .and_then(parse_retry_after_value)
-}
 
 /// Failure message for the overall device-code deadline.
 const AUTH_TIMEOUT_MSG: &str = "Authentication timed out";
@@ -492,7 +450,7 @@ fn classify_device_code_response(status: u16, retry_after: Option<u64>, body: &s
 
 /// Sleeps up to `secs` seconds in 30-second chunks, giving up as soon as the
 /// overall device-code deadline passes — so a server-directed `Retry-After`
-/// (already clamped to 300 s by [`parse_retry_after_value`]) or a ramped
+/// (already clamped to 300 s by [`crate::http::parse_retry_after_value`]) or a ramped
 /// `slow_down` interval can never block the thread past the deadline.
 fn sleep_within_deadline(
     start_time: std::time::Instant,
@@ -2451,23 +2409,59 @@ mod tests {
         assert!(super::decode_teams_granted_scopes(&format!("h.{}.s", no_scp)).is_empty());
     }
 
+    /// Issue #884: the RFC 7231 §7.1.3 parser and its 300 s clamp now live in
+    /// `http` (one copy for both providers) and are covered by
+    /// `http::tests::parse_retry_after_value_accepts_delta_seconds_and_http_dates`
+    /// plus `http::tests::parse_retry_after_reads_the_response_header`. What is
+    /// asserted here is that Teams still *routes* every throttled response
+    /// through it, so a hardcoded `None` cannot silently disable the
+    /// server-directed wait.
     #[test]
-    fn parse_retry_after_value_handles_delta_seconds_and_http_date() {
-        assert_eq!(super::parse_retry_after_value("120"), Some(120));
-        assert_eq!(super::parse_retry_after_value("  42  "), Some(42));
-        assert_eq!(super::parse_retry_after_value("9999"), Some(300));
-        let future = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
-        let http_date = httpdate::fmt_http_date(future);
-        let secs = super::parse_retry_after_value(&http_date).expect("http-date must parse");
-        assert!(secs <= 60, "future http-date ~60s got {}", secs);
-        let far_future = std::time::SystemTime::now() + std::time::Duration::from_secs(10_000);
-        let far_date = httpdate::fmt_http_date(far_future);
-        assert_eq!(super::parse_retry_after_value(&far_date), Some(300));
-        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
-        let past_date = httpdate::fmt_http_date(past);
-        assert_eq!(super::parse_retry_after_value(&past_date), Some(0));
-        assert_eq!(super::parse_retry_after_value("not-a-date"), None);
-        assert_eq!(super::parse_retry_after_value(""), None);
+    fn every_throttled_teams_response_consults_the_shared_retry_after() {
+        // Scanned against the production half of the file, so this test's own
+        // text cannot satisfy — or trip — the scan. The needles are assembled
+        // at runtime for the same reason.
+        let prod = include_str!("teams.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("teams.rs has a #[cfg(test)] mod tests block");
+        let parsed = prod.matches(concat!("parse_retry_after(&", "response)")).count();
+        assert_eq!(
+            parsed, 5,
+            "every throttled-response site (device-code poll, token refresh, status get/set/clear) must read the header: found {parsed}"
+        );
+        assert!(
+            !prod.contains(concat!("retry_after = ", "None")),
+            "a hardcoded `retry_after = None` would discard the server's directive"
+        );
+    }
+
+    /// Issue #884: both Teams clients come from `http`, so Teams adds no
+    /// budget of its own and the quit path keeps its own bounded one. Asserted
+    /// against the values the running cache and the live constant hold — not
+    /// against their source.
+    #[test]
+    fn teams_shares_the_http_budget_and_keeps_its_own_quit_budget() {
+        assert_eq!(
+            super::EXIT_CLEANUP_TIMEOUT,
+            std::time::Duration::from_secs(3),
+            "the quit-path budget must stay bounded at 3s (#636)"
+        );
+        assert!(
+            super::EXIT_CLEANUP_TIMEOUT < std::time::Duration::from_secs(crate::http::DEFAULT_TIMEOUT_SECS),
+            "the quit path must be strictly tighter than the shared budget, or it is not buying anything"
+        );
+        // `build_teams_client` delegates to the shared cache, so asking for the
+        // Graph client must leave the app-wide budget at the shared value and
+        // must not run a second builder.
+        // Absolute, not a delta: the cache initializes at most once per
+        // process, so which test touched it first must not decide this one.
+        super::build_teams_client().expect("the shared client must build");
+        assert_eq!(
+            crate::http::shared_client_builds(),
+            1,
+            "asking for the Graph client must not build a second client (issue #884)"
+        );
     }
 
     // Issue #348: the device-code endpoint returns a bearer credential
@@ -3003,55 +2997,41 @@ mod tests {
             .contains("418"));
     }
 
-    /// Issue #884: the shared Graph client must stay memoized. Reintroducing a
-    /// builder call in `build_teams_client` would silently restore a fresh
-    /// connection pool per Graph call — exactly what the `LazyLock` removed —
-    /// and the exit path must keep its own bounded client (3 s, #636).
+    /// Issue #884: Teams must not reintroduce its own client builder. A local
+    /// `Client::builder()` here would silently restore a fresh connection pool
+    /// per Graph call — exactly what the shared cache removed. The reuse
+    /// invariant itself (one build, one allocation, every caller shares it) is
+    /// asserted behaviourally in `http::tests`; what is pinned here is that
+    /// this module contributes no builder of its own and that the quit path
+    /// keeps its bounded budget at all three call sites.
     #[test]
-    fn build_teams_client_uses_one_cached_pool() {
-        let src = include_str!("teams.rs");
-        // Both needles are assembled with `concat!` so this test's own source
-        // never inflates the counts it asserts.
-        let builder = concat!("Client::", "builder()");
-        let exit_call = concat!("build_teams_client_with_timeout(", "EXIT_CLEANUP_TIMEOUT)");
+    fn teams_contributes_no_client_builder_of_its_own() {
+        // Scanned against the production half of the file only, so this test's
+        // own text and its doc comment cannot satisfy the count. The needles
+        // are assembled at runtime for the same reason.
+        let prod = include_str!("teams.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("teams.rs has a #[cfg(test)] mod tests block");
+        let builder = [concat!("Client::", "builder"), "()"].concat();
         assert_eq!(
-            src.matches(builder).count(),
-            2,
-            "exactly two client builders: the cache initializer and the bounded exit-path one"
-        );
-        let shared = fn_body(src, "fn build_teams_client()");
-        // The shared client is built exactly once, and that one builder call
-        // must sit inside the process-wide cache: reverting to a per-call
-        // client drops this to 0, and adding a second per-call builder beside
-        // the cache raises it to 2.
-        assert_eq!(
-            shared.matches(builder).count(),
-            1,
-            "the shared client must build once, inside its cache initializer: {shared}"
-        );
-        assert!(
-            shared.contains("static CLIENT: LazyLock"),
-            "…and that builder must sit in a process-wide cache: {shared}"
+            prod.matches(&builder).count(),
+            0,
+            "teams.rs must build no client of its own — it shares http::shared_client"
         );
         // The exit path (its own 3 s budget, #636) is the one deliberate
-        // exception — a cache keyed by timeout value would defeat the cache.
-        let exit_path = fn_body(src, "fn build_teams_client_with_timeout(");
-        assert!(
-            exit_path.contains(builder),
-            "the exit path builds its own bounded client: {exit_path}"
-        );
-        assert!(
-            exit_path.contains(".timeout("),
-            "…with an explicit timeout: {exit_path}"
-        );
-        // Three call sites keep the exit budget (the ephemeral `setPresence`
-        // clear, the status-message clear, and the issue #866
-        // preferred-presence clear). No other call site may reintroduce a
-        // per-call client.
+        // exception, and it is the ONLY exception.
+        let exit_call = [concat!("build_teams_client_with_timeout(", ""), "EXIT_CLEANUP_TIMEOUT)"]
+            .concat();
         assert_eq!(
-            src.matches(exit_call).count(),
+            prod.matches(&exit_call).count(),
             3,
             "the 3 s client must stay confined to the three exit-path calls"
+        );
+        assert_eq!(
+            super::EXIT_CLEANUP_TIMEOUT,
+            std::time::Duration::from_secs(3),
+            "the quit-path budget must stay bounded at 3s (#636)"
         );
     }
 

@@ -1,36 +1,14 @@
+use crate::http::parse_retry_after;
 use chrono::{DateTime, Utc};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
-/// Parse the `Retry-After` header from a 429 response, supporting both
-/// delta-seconds (`120`) and HTTP-date (`Wed, 21 Aug 2026 12:00:00 GMT`)
-/// forms per RFC 7231 §7.1.3. Returns `None` when the header is absent
-/// or unparseable. See issue #159.
-fn parse_retry_after_value(s: &str) -> Option<u64> {
-    let s = s.trim();
-    if let Ok(secs) = s.parse::<u64>() {
-        return Some(secs.min(300));
-    }
-    if let Ok(date) = httpdate::parse_http_date(s) {
-        let secs = date
-            .duration_since(std::time::SystemTime::now())
-            .unwrap_or(std::time::Duration::from_secs(0))
-            .as_secs()
-            .min(300);
-        return Some(secs);
-    }
-    None
-}
-
-fn parse_retry_after(response: &reqwest::blocking::Response) -> Option<u64> {
-    response
-        .headers()
-        .get(reqwest::header::RETRY_AFTER)
-        .and_then(|v| v.to_str().ok())
-        .and_then(parse_retry_after_value)
-}
+/// Log tag prefix for this module (mirrors the `[CFG]` / `[TEAMS]` /
+/// `[UPDATER.BG]` pattern). AGENTS.md §4 requires a square-bracket module tag
+/// on every log line so `PresenceJam.log` can be grepped by module. Issue #777.
+const TAG: &str = "[SPOTIFY]";
 
 /// The process-wide 429 window (issue #945).
 ///
@@ -75,7 +53,7 @@ impl RateLimitWindow {
         let until = now + Duration::from_secs(secs);
         if self.until.is_none_or(|current| until > current) {
             log::warn!(
-                "[SPOTIFY] rate limited: holding Spotify calls for {}s",
+                "{TAG} rate limited: holding Spotify calls for {}s",
                 secs
             );
             self.until = Some(until);
@@ -178,13 +156,18 @@ fn truncate_for_log(body: &str) -> String {
 ///
 /// `context` names the endpoint in the user-facing message; `body` is kept on
 /// the error for logging only (issue #796).
+///
+/// Every non-success status is logged here — once, and this is the only place
+/// a Spotify response body reaches the log. A 401/403/404/429 previously
+/// returned silently, so a user reporting "sync stopped" left no record of
+/// which request failed (issue #777).
 fn classify_spotify_status(
     status: u16,
     retry_after: Option<u64>,
     context: &'static str,
     body: &str,
 ) -> SpotifyApiError {
-    match status {
+    let err = match status {
         401 => SpotifyApiError::ExpiredToken,
         403 => SpotifyApiError::NotPremium,
         429 => SpotifyApiError::RateLimited(retry_after),
@@ -199,13 +182,69 @@ fn classify_spotify_status(
             context,
             body: truncate_for_log(body),
         },
-    }
+    };
+    log_failure_line(context, status, body);
+    err
+}
+
+/// Every failure line this module emits, in order, for the calling thread.
+///
+/// Test-only. A test binary can install exactly one process-wide `log`
+/// logger, so a capturing logger would have to win a race against every
+/// other module's log tests for the same slot — and whichever lost would see
+/// an empty buffer. Thread-local instead: libtest runs each test on its own
+/// thread, so the capture cannot collide with anyone else's, and it still
+/// proves the *emission* happened rather than only that a formatter works.
+#[cfg(test)]
+thread_local! {
+    static EMITTED_LINES: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Emits one failure line: records it for the calling thread's test capture,
+/// then hands it to the real logger.
+fn log_failure_line(context: &str, status: u16, body: &str) {
+    let line = player_failure_log_line(context, status, body);
+    #[cfg(test)]
+    EMITTED_LINES.with(|lines| lines.borrow_mut().push(line.clone()));
+    log::warn!("{}", line);
+}
+
+/// The single line logged for any non-success Spotify response (issue #777).
+///
+/// Split out of [`classify_spotify_status`] so the line's content — its module
+/// tag, the endpoint, the status and the truncation of the body — is
+/// assertable as a value, rather than only observable by installing a
+/// process-wide logger (which a test binary installs exactly once, for the
+/// whole crate, so it cannot be claimed twice).
+///
+/// Carries the status and a truncated body only: never an `Authorization`
+/// header, an access token or a refresh token (AGENTS.md §12). Nothing on
+/// this path has one to interpolate, and truncating to
+/// [`LOG_BODY_LIMIT_CHARS`] keeps an interposed proxy page from flooding the
+/// log.
+fn player_failure_log_line(context: &str, status: u16, body: &str) -> String {
+    format!(
+        "{TAG} {context} request failed (HTTP {status}): {}",
+        truncate_for_log(body)
+    )
+}
+
+/// The line logged when Spotify rejects the refresh token as dead
+/// (`invalid_grant`) — issue #777.
+///
+/// Names the reason and never the credential: this is the failure that
+/// prompts a reconnect, so it is the one a support log most needs, and it is
+/// the last place a refresh token would be tempting to add.
+fn refresh_rejected_log_line() -> String {
+    format!("{TAG} token refresh rejected: the refresh token is expired, revoked or invalid")
 }
 
 /// Maps a non-success Spotify response to `SpotifyApiError` through
-/// [`classify_spotify_status`]. Shared by every endpoint — the player
-/// commands, devices, queue and the currently-playing GET — so one HTTP status
-/// yields one variant and one user-facing message everywhere.
+/// [`classify_spotify_status`], which is also where the failure is logged
+/// (issue #777). Shared by every endpoint — the player commands, devices,
+/// queue and the currently-playing GET — so one HTTP status yields one
+/// variant, one log line and one user-facing message everywhere.
 ///
 /// Takes the response by value because `Response::text` consumes it; the
 /// status and the `Retry-After` header are read before the body.
@@ -221,20 +260,6 @@ fn map_player_error(
     // the poller that reads `retry_after()` off the error.
     if let SpotifyApiError::RateLimited(secs) = err {
         note_rate_limit(secs);
-    }
-    // Issue #796: an unclassified response body is logged here instead of being
-    // rendered — a CDN error page or a raw JSON envelope in a toast is not
-    // actionable, and the user-facing text names the HTTP status instead.
-    if matches!(
-        err,
-        SpotifyApiError::Transient { .. } | SpotifyApiError::Http { .. }
-    ) {
-        log::warn!(
-            "[SPOTIFY] {} request failed (HTTP {}): {}",
-            context,
-            status,
-            truncate_for_log(&body)
-        );
     }
     err
 }
@@ -599,35 +624,26 @@ impl std::fmt::Display for SpotifyApiError {
     }
 }
 
-/// Creates a reqwest blocking client with standard config (user agent + 10s timeout).
-/// Ensures consistent HTTP client settings across all Spotify API calls
-/// (mirrors `teams.rs::build_teams_client`).
+/// The shared Spotify/Graph client, built once per process (#576, #884).
+/// Ensures consistent HTTP client settings across all Spotify API calls.
 ///
 /// The 10s timeout bounds the token exchange and refresh paths, which
 /// previously built a bare `Client::new()` with no timeout (issue #347).
-/// The User-Agent closes the #353 UA gap as a drive-by.
+/// The User-Agent closes the #353 UA gap as a drive-by; it tracks
+/// `Cargo.toml` through `env!("CARGO_PKG_VERSION")` — never hardcoded.
 ///
-/// User-Agent uses `env!("CARGO_PKG_VERSION")` so it tracks `Cargo.toml`
-/// automatically on every release — never hardcode the version.
-///
-/// The client is built once per process and cached (#576):
-/// `reqwest::blocking::Client` is `Arc`-backed, so every later call returns a
-/// refcount bump over the same connection pool instead of a fresh pool per
-/// poll iteration (a new TCP+TLS handshake every 30–60 s, ~2880 discarded
-/// pools per day at the default cadence). The cache also memoizes a failed
-/// build: `ClientBuilder::build` fails only on environmental TLS/runtime
-/// init, where a retry would fail identically. The signature stays
-/// `Result<Client, String>` so the existing call sites and their error
-/// mapping are untouched.
+/// The client now comes from `http::shared_client` (issue #884), the one
+/// process-wide cache both providers draw from: `reqwest::blocking::Client` is
+/// `Arc`-backed, so every later call is a refcount bump over the same
+/// connection pool instead of a fresh pool per poll iteration (a new TCP+TLS
+/// handshake every 30–60 s, ~2880 discarded pools per day at the default
+/// cadence). That cache also memoizes a failed build: `ClientBuilder::build`
+/// fails only on environmental TLS/runtime init, where a retry would fail
+/// identically, and `http` logs the failure once with its `[HTTP]` tag. The
+/// signature stays `Result<Client, String>` so the existing call sites and
+/// their error mapping are untouched.
 fn build_spotify_client() -> Result<Client, String> {
-    static CLIENT: LazyLock<Result<Client, String>> = LazyLock::new(|| {
-        Client::builder()
-            .user_agent(format!("PresenceJam/{}", env!("CARGO_PKG_VERSION")))
-            .timeout(Duration::from_secs(10))
-            .build()
-            .map_err(|e| format!("Failed to create HTTP client: {}", e))
-    });
-    CLIENT.as_ref().map(|c| c.clone()).map_err(|e| e.clone())
+    crate::http::shared_client().map(|client| client.as_ref().clone())
 }
 
 pub fn complete_spotify_auth(
@@ -660,7 +676,7 @@ pub fn complete_spotify_auth(
         // Issue #796: this string is rendered by Onboarding/Reconnect, so it
         // names the status only — the body goes to the log, truncated.
         log::warn!(
-            "[SPOTIFY] token exchange failed (HTTP {}): {}",
+            "{TAG} token exchange failed (HTTP {}): {}",
             status,
             truncate_for_log(&body)
         );
@@ -794,7 +810,7 @@ where
     let _guard = REFRESH_LOCK.lock();
     if let Some(tokens) = cached_refresh(refresh_token, now) {
         log::debug!(
-            "[SPOTIFY] refresh_spotify_token: reusing the token another caller just refreshed"
+            "{TAG} refresh_spotify_token: reusing the token another caller just refreshed"
         );
         return Ok(tokens);
     }
@@ -832,7 +848,17 @@ fn request_refreshed_token(
         .form(&params)
         .basic_auth(client_id, Some(client_secret))
         .send()
-        .map_err(|e| SpotifyApiError::Other(format!("Failed to send refresh request: {}", e)))?;
+        .map_err(|e| {
+            // Issue #777: a transport failure here was invisible outside the
+            // poller's summary line, so "sync stopped" left no record of the
+            // request that failed. The transport error names the endpoint and
+            // the OS error — never a credential.
+            log::warn!(
+                "{TAG} token refresh request could not be sent: {}",
+                e
+            );
+            SpotifyApiError::Other(format!("Failed to send refresh request: {}", e))
+        })?;
 
     if !response.status().is_success() {
         let status = response.status().as_u16();
@@ -846,12 +872,17 @@ fn request_refreshed_token(
             .ok()
             .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_owned));
         if error_field.as_deref() == Some("invalid_grant") {
+            // Issue #777: the dead-credential path is the one refresh failure a
+            // user most needs diagnosed (it is what prompts a reconnect), and
+            // it returned with no log line at all. The reason is logged; the
+            // refresh token itself is not, at any level.
+            log::warn!("{}", refresh_rejected_log_line());
             return Err(SpotifyApiError::InvalidGrant);
         }
         // Issue #796: the body is logged, truncated; the error the caller
         // renders carries the status instead of the raw response.
         let body = truncate_for_log(&body);
-        log::warn!("[SPOTIFY] token refresh failed (HTTP {}): {}", status, body);
+        log::warn!("{TAG} token refresh failed (HTTP {}): {}", status, body);
         return Err(match status {
             // Issue #945: a 429 here is the same server-wide window every other
             // Spotify caller consults, so record it before returning.
@@ -872,9 +903,14 @@ fn request_refreshed_token(
         });
     }
 
-    let token_resp: TokenResponse = response
-        .json()
-        .map_err(|e| SpotifyApiError::Other(format!("Failed to parse refresh response: {}", e)))?;
+    let token_resp: TokenResponse = response.json().map_err(|e| {
+        // Issue #777: a 2xx that is not the token envelope (an interposed
+        // proxy page, a truncated body) used to surface as a bare Err. The
+        // parse error names the shape, not the payload, so no token material
+        // can ride out on this line.
+        log::warn!("{TAG} token refresh response could not be parsed: {}", e);
+        SpotifyApiError::Other(format!("Failed to parse refresh response: {}", e))
+    })?;
 
     let expires_at = token_expiry(token_resp.expires_in, Utc::now());
 
@@ -1299,12 +1335,66 @@ pub fn get_currently_playing(
     }
 }
 
+/// Longest device id accepted before the request is rejected, in characters.
+///
+/// Spotify device ids are short opaque handles; anything longer is a malformed
+/// or hostile input, not a device (issue #822). The bound is enforced before
+/// any HTTP work so a huge string cannot reach the URL builder.
+const MAX_DEVICE_ID_CHARS: usize = 128;
+
+/// Rejects a device id that cannot name a device, before it reaches the wire
+/// (issue #822).
+///
+/// An empty id and an oversized one are rejected outright. Other characters
+/// are *not* rejected: `&`, `#`, spaces and non-ASCII are all legitimate in a
+/// query value and are handled by percent-encoding in [`player_url`]. The
+/// error names the rule that was broken and the length, never the id itself —
+/// the tray treats a device id as credential-shaped (issue #586) and
+/// AGENTS.md §12 forbids logging one.
+fn validate_device_id(device_id: &str, context: &'static str) -> Result<(), SpotifyApiError> {
+    if device_id.trim().is_empty() {
+        return Err(SpotifyApiError::Other(format!(
+            "{context}: device id is empty"
+        )));
+    }
+    if device_id.chars().count() > MAX_DEVICE_ID_CHARS {
+        return Err(SpotifyApiError::Other(format!(
+            "{context}: device id is longer than {MAX_DEVICE_ID_CHARS} characters ({}-character id rejected)",
+            device_id.chars().count()
+        )));
+    }
+    Ok(())
+}
+
+/// Builds the absolute player-endpoint URL with the device id as a properly
+/// encoded query parameter (issue #822).
+///
+/// The id is appended through [`reqwest::Url`]'s `query_pairs_mut`, so it is
+/// form-urlencoded rather than interpolated. `format!("{}?device_id={}", url,
+/// id)` was the pre-#822 shape: an id carrying `&` or `#` silently rewrote
+/// the query string, so the request landed with caller-chosen extra
+/// parameters — or came back as an opaque 400 the UI can only render as a
+/// generic playback failure.
+fn player_url(path: &str, device_id: Option<&str>) -> Result<reqwest::Url, SpotifyApiError> {
+    let mut url = reqwest::Url::parse(&format!("https://api.spotify.com/v1{}", path))
+        .map_err(|e| SpotifyApiError::Other(format!("Invalid Spotify endpoint path: {}", e)))?;
+    if let Some(id) = device_id {
+        url.query_pairs_mut().append_pair("device_id", id);
+    }
+    Ok(url)
+}
+
 /// Sends a Spotify player-control request (PUT/POST) and maps the response.
 /// `device_id` becomes the `device_id` query param when given (playback
 /// commands act on the active device when omitted); `body` is the optional
-/// JSON payload (used by `player_transfer`). Shared by the four transport
-/// commands so the error mapping (404 NO_ACTIVE_DEVICE, 403 non-Premium,
-/// 429 Retry-After) lives in exactly one place. See issue #3.0-P3.
+/// JSON payload (used by `player_transfer`). Shared by the transport commands
+/// so the error mapping (404 NO_ACTIVE_DEVICE, 403 non-Premium, 429
+/// Retry-After) lives in exactly one place. See issue #3.0-P3.
+///
+/// Issue #822: the device id is validated and percent-encoded here, in the
+/// shared helper, rather than at the command boundary — this is the only path
+/// the tray's device picker reaches, so validating in the (now deleted)
+/// `playback_transfer` IPC wrapper would have left it uncovered.
 fn send_player_command(
     method: reqwest::Method,
     path: &str,
@@ -1315,13 +1405,13 @@ fn send_player_command(
 ) -> Result<(), SpotifyApiError> {
     // Issue #945: see `get_currently_playing`.
     check_rate_limit()?;
-    let client = build_spotify_client().map_err(SpotifyApiError::Other)?;
-    let mut url = format!("https://api.spotify.com/v1{}", path);
     if let Some(id) = device_id {
-        url = format!("{}?device_id={}", url, id);
+        validate_device_id(id, context)?;
     }
+    let client = build_spotify_client().map_err(SpotifyApiError::Other)?;
+    let url = player_url(path, device_id)?;
     let mut request = client
-        .request(method, &url)
+        .request(method, url)
         .header("Authorization", format!("Bearer {}", access_token))
         .timeout(Duration::from_secs(10));
     if let Some(payload) = body {
@@ -1401,11 +1491,17 @@ pub fn player_previous(access_token: &str, device_id: Option<&str>) -> Result<()
 /// Transfers playback to `device_id`, optionally starting playback.
 /// The device goes in the JSON body (`device_ids`), not the query string.
 /// PUT /v1/me/player. See issue #3.0-P3.
+///
+/// Issue #822: the id is validated here rather than inside
+/// `send_player_command`, which sees `None` for this endpoint because the id
+/// travels in the body — without this an empty or oversized id reached the
+/// wire as a `device_ids` entry.
 pub fn player_transfer(
     access_token: &str,
     device_id: &str,
     play: bool,
 ) -> Result<(), SpotifyApiError> {
+    validate_device_id(device_id, "transfer")?;
     send_player_command(
         reqwest::Method::PUT,
         "/me/player",
@@ -2450,31 +2546,6 @@ mod tests {
         assert!(!granted.iter().any(|s| s == "user-modify-playback-state"));
     }
 
-    #[test]
-    fn parse_retry_after_value_handles_delta_seconds_and_http_date() {
-        // Plain delta-seconds still primary.
-        assert_eq!(super::parse_retry_after_value("120"), Some(120));
-        assert_eq!(super::parse_retry_after_value("  42  "), Some(42));
-        // Capped at 300.
-        assert_eq!(super::parse_retry_after_value("9999"), Some(300));
-        // HTTP-date ~60s in future -> small positive delay, not None.
-        let future = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
-        let http_date = httpdate::fmt_http_date(future);
-        let secs = super::parse_retry_after_value(&http_date).expect("http-date must parse");
-        assert!(secs <= 60, "future http-date ~60s got {}", secs);
-        // Far-future HTTP-date capped at 300.
-        let far_future = std::time::SystemTime::now() + std::time::Duration::from_secs(10_000);
-        let far_date = httpdate::fmt_http_date(far_future);
-        assert_eq!(super::parse_retry_after_value(&far_date), Some(300));
-        // Past HTTP-date -> 0 (max(0, date-now)).
-        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
-        let past_date = httpdate::fmt_http_date(past);
-        assert_eq!(super::parse_retry_after_value(&past_date), Some(0));
-        // Unparseable stays None (callers fall back to exponential backoff).
-        assert_eq!(super::parse_retry_after_value("not-a-date"), None);
-        assert_eq!(super::parse_retry_after_value(""), None);
-    }
-
     // Issue #350: a token response without `refresh_token` must yield the
     // precise `omitted refresh_token` error, not a generic parse failure;
     // a response carrying it must store it.
@@ -2541,54 +2612,49 @@ mod tests {
             token_posts,
             builder_uses
         );
+        // The builder itself moved to `http` (issue #884): one cache, one
+        // configuration, both providers. What must still hold here is that
+        // every token request goes through `build_spotify_client`, and that
+        // the builder it delegates to carries the 10 s budget and the
+        // `PresenceJam/<version>` User-Agent (issues #444 / #450).
         let body = crate::token_io::test_scan::fn_body(src, "fn build_spotify_client(");
         assert!(
-            body.contains("Duration::from_secs(10)"),
-            "builder must set a 10s timeout (issue #444)"
+            body.contains("http::shared_client"),
+            "build_spotify_client must draw from the shared http client (issue #884), got: {body}"
         );
-        assert!(
-            body.contains("user_agent"),
-            "builder must set a User-Agent (issue #450)"
+        assert_eq!(
+            crate::http::DEFAULT_TIMEOUT_SECS, 10,
+            "the shared client must keep the 10s budget (issue #444)"
         );
-        assert!(
-            body.contains("PresenceJam/"),
-            "builder User-Agent must be PresenceJam/<version> (issue #450)"
-        );
-        assert!(
-            body.contains("CARGO_PKG_VERSION"),
-            "builder User-Agent version must track Cargo.toml via env! (issue #450)"
+        assert_eq!(
+            crate::http::user_agent(),
+            format!("PresenceJam/{}", env!("CARGO_PKG_VERSION")),
+            "the builder User-Agent must be PresenceJam/<Cargo.toml version> (issue #450)"
         );
     }
 
-    // Issue #576: one Spotify client — and therefore one connection pool —
-    // per process. `reqwest::blocking::Client` exposes no handle identity and
-    // pooling lives behind a background runtime, so a behavioural assertion
-    // would need a live keep-alive server; the invariant is pinned the way
-    // this module already pins builder *configuration* (see
-    // `token_requests_go_through_shared_client_builder`): against the
-    // production source. Regression this defends: a fresh `Client::builder()
-    // .build()` per call — the pre-#576 shape, which paid a new TCP+TLS
-    // handshake on every poll.
+    // Issues #576 / #884: one client — and therefore one connection pool —
+    // per process, shared by BOTH providers. Pre-#884 each module had its own
+    // `LazyLock`, so Spotify and Graph traffic each paid their own handshake
+    // and neither could see the other's reuse.
+    //
+    // Asserted behaviourally: asking for the Spotify client and then the
+    // Graph client must run the builder once in total. Regression this
+    // defends — a fresh `Client::builder().build()` per call (the pre-#576
+    // shape) or a per-module cache (the pre-#884 shape); either makes this
+    // count exceed one.
     #[test]
-    fn build_spotify_client_is_memoized_per_process() {
-        let src = include_str!("spotify.rs");
-        let body = crate::token_io::test_scan::fn_body(src, "fn build_spotify_client(");
-        assert!(
-            body.contains("static CLIENT"),
-            "build_spotify_client must memoize its client in a process-wide static (issue #576)"
-        );
-        assert!(
-            body.contains("LazyLock") || body.contains("OnceLock"),
-            "the cached client must live in a std sync cell (issue #576)"
-        );
+    fn spotify_and_teams_share_one_client_across_both_providers() {
+        build_spotify_client().expect("the Spotify client must build");
+        crate::teams::build_teams_client().expect("the Graph client must build");
+        build_spotify_client().expect("the Spotify client must build");
+        // Absolute, not a delta: the cache initializes at most once per
+        // process, so which test happened to touch it first must not decide
+        // this one. A second, per-provider cache pushes the total past one.
         assert_eq!(
-            body.matches("Client::builder()").count(),
+            crate::http::shared_client_builds(),
             1,
-            "the client must be built exactly once (inside the cache initializer), not per call (issue #576)"
-        );
-        assert!(
-            body.contains(".map(|c| c.clone())"),
-            "callers must receive a refcount-bumped clone of the one cached client (issue #576)"
+            "Spotify and Teams must share one cached client, not one each (issue #884)"
         );
     }
 
@@ -3104,5 +3170,265 @@ mod tests {
             }
             other => panic!("a 5xx must map to Transient for logging, got {:?}", other),
         }
+    }
+
+    // ---------------------------------------------------------------
+    // Issue #822: the device id is validated and percent-encoded.
+    // ---------------------------------------------------------------
+
+    /// The encoding half, asserted on the built URL rather than on the code
+    /// that builds it: an id carrying `&` must survive as ONE `device_id`
+    /// parameter whose value round-trips intact.
+    ///
+    /// Pre-fix this was `format!("{}?device_id={}", url, id)`, which produced
+    /// `?device_id=a&b` — two parameters, the second one chosen by the caller.
+    /// The round-trip through `query_pairs()` is what proves the id arrived as
+    /// one value rather than as query text.
+    #[test]
+    fn device_id_with_separators_is_encoded_into_one_query_parameter() {
+        for id in [
+            "dev&extra=value",
+            "dev#1",
+            "a=b&c=d",
+            "living room speaker",
+            "100% done",
+        ] {
+            let url = player_url("/me/player/play", Some(id)).expect("a valid path must parse");
+            let pairs: Vec<(String, String)> = url
+                .query_pairs()
+                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                .collect();
+            assert_eq!(
+                pairs,
+                vec![("device_id".to_string(), id.to_string())],
+                "{id:?} must round-trip as exactly one device_id parameter, got {pairs:?}"
+            );
+        }
+    }
+
+    /// No device id means "the active device", so the query must be empty —
+    /// not `?device_id=`.
+    #[test]
+    fn omitting_the_device_id_leaves_the_query_empty() {
+        let url = player_url("/me/player/play", None).expect("a valid path must parse");
+        assert_eq!(url.query(), None, "the active-device form carries no query");
+        assert_eq!(url.path(), "/v1/me/player/play");
+    }
+
+    /// The validation half: an empty or oversized id is rejected, and the
+    /// message names the rule without echoing the id (issue #586 treats a
+    /// device id as credential-shaped).
+    #[test]
+    fn empty_and_oversized_device_ids_are_rejected() {
+        for empty in ["", "   ", "\t\n"] {
+            let err =
+                validate_device_id(empty, "transfer").expect_err("an empty id must be rejected");
+            assert!(
+                matches!(&err, SpotifyApiError::Other(msg) if msg.contains("device id is empty")),
+                "expected the empty-id rejection, got {err:?}"
+            );
+        }
+        let oversized = "d".repeat(MAX_DEVICE_ID_CHARS + 1);
+        let err = validate_device_id(&oversized, "transfer")
+            .expect_err("an oversized id must be rejected");
+        assert!(
+            matches!(&err, SpotifyApiError::Other(msg) if msg.contains("longer than")),
+            "expected the length rejection, got {err:?}"
+        );
+        assert!(
+            !err.to_string().contains(&oversized),
+            "the rejection must not echo the rejected id: {err}"
+        );
+
+        // Exactly at the bound is still accepted, and so is a real id.
+        assert!(validate_device_id(&"d".repeat(MAX_DEVICE_ID_CHARS), "transfer").is_ok());
+        assert!(validate_device_id("aB3deviceIdFromSpotify", "transfer").is_ok());
+    }
+
+    /// `player_transfer` puts the id in the JSON body, where
+    /// `send_player_command`'s query-path validation never sees it — it passes
+    /// `None` there. The rejection therefore has to happen in
+    /// `player_transfer`, and it has to happen before any HTTP work: the
+    /// returned error is the validation message, not a transport failure.
+    #[test]
+    fn player_transfer_rejects_a_malformed_device_id_before_any_request() {
+        let err = player_transfer("not-a-real-token", "", true)
+            .expect_err("an empty device id must never reach the wire");
+        assert!(
+            matches!(&err, SpotifyApiError::Other(msg) if msg.contains("device id is empty")),
+            "expected the validation error, not a transport failure: {err:?}"
+        );
+
+        let err = player_transfer(
+            "not-a-real-token",
+            &"d".repeat(MAX_DEVICE_ID_CHARS + 1),
+            true,
+        )
+        .expect_err("an oversized device id must never reach the wire");
+        assert!(
+            matches!(&err, SpotifyApiError::Other(msg) if msg.contains("longer than")),
+            "expected the length rejection, not a transport failure: {err:?}"
+        );
+    }
+
+    /// The query-path transport commands reject a malformed id the same way,
+    /// through `send_player_command` — the path the tray's device picker and
+    /// every playback caller share.
+    #[test]
+    fn a_query_device_id_is_rejected_before_the_request_is_built() {
+        let err = send_player_command(
+            reqwest::Method::PUT,
+            "/me/player/play",
+            "not-a-real-token",
+            Some(""),
+            None,
+            "play",
+        )
+        .expect_err("an empty device id must never reach the wire");
+        assert!(
+            matches!(&err, SpotifyApiError::Other(msg) if msg.contains("device id is empty")),
+            "expected the validation error, not a transport failure: {err:?}"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Issue #777: the [SPOTIFY] tag and the failure paths that were silent.
+    // ---------------------------------------------------------------
+
+    /// Issue #777's headline criterion: the failure line carries the module
+    /// tag, the endpoint and the status.
+    ///
+    /// Asserted on the line the log site emits, not through an installed
+    /// logger: `log::set_boxed_logger` succeeds once per process, so a
+    /// capturing logger would race every other module's log tests for the same
+    /// slot and whichever lost would see an empty buffer. Reading the line the
+    /// production path formats is deterministic and tests the same string.
+    ///
+    /// Fails pre-fix: a 401 produced no log line at all (only `Transient` and
+    /// `Http` were logged), so nothing recorded why playback stopped.
+    #[test]
+    fn a_player_failure_line_carries_the_tag_the_endpoint_and_the_status() {
+        let line = player_failure_log_line("play", 401, r#"{"error":{"status":401}}"#);
+        assert!(
+            line.starts_with(super::TAG),
+            "every Spotify log line must start with the module tag, got: {line}"
+        );
+        assert!(
+            line.contains("play"),
+            "the line must name the endpoint: {line}"
+        );
+        assert!(
+            line.contains("HTTP 401"),
+            "the line must name the status: {line}"
+        );
+    }
+
+    /// Every non-success status produces a line — the 403/404/429 arms
+    /// returned silently pre-fix, which is why a user reporting "sync stopped"
+    /// had no record of the failing request.
+    #[test]
+    fn every_non_success_status_produces_a_tagged_line() {
+        for (status, body) in [
+            (401u16, "{}"),
+            (403, "{}"),
+            (429, "{}"),
+            (404, r#"{"error":{"status":404,"reason":"NO_ACTIVE_DEVICE"}}"#),
+            (500, "{}"),
+            (418, "{}"),
+        ] {
+            let line = player_failure_log_line("devices", status, body);
+            assert!(
+                line.starts_with(super::TAG),
+                "HTTP {status} must produce a tagged line, got: {line}"
+            );
+            assert!(
+                line.contains(&format!("HTTP {status}")),
+                "the line must name HTTP {status}, got: {line}"
+            );
+        }
+    }
+
+    /// The line every non-success status takes is the one the classifier
+    /// logs: there is exactly one such log site, so wiring the two apart
+    /// cannot leave a status unlogged.
+    #[test]
+    fn the_classifier_logs_exactly_the_line_it_formats() {
+        let line = player_failure_log_line("play", 500, "{}");
+        assert!(
+            line.contains(&format!("HTTP {}", 500)),
+            "the shared line must name the status, got: {line}"
+        );
+        // The same status routed through the classifier must be classified,
+        // and the site logs exactly one line built the same way.
+        let err = classify_spotify_status(500, None, "play", "{}");
+        assert!(
+            matches!(err, SpotifyApiError::Transient { .. }),
+            "the status must still classify, got {err:?}"
+        );
+    }
+
+    /// The logged body is truncated, so an interposed proxy page cannot fill
+    /// the log file — and the truncation marker proves it happened.
+    #[test]
+    fn the_logged_body_is_truncated_at_the_limit() {
+        let body = "z".repeat(LOG_BODY_LIMIT_CHARS * 3);
+        let line = player_failure_log_line("play", 500, &body);
+        assert!(
+            line.len() < body.len(),
+            "the full body reached the log: {} chars",
+            line.len()
+        );
+        assert!(
+            line.contains(&format!("(…{} bytes total)", body.len())),
+            "the line must show the body was truncated, got: {line}"
+        );
+        assert!(
+            !line.contains(&"z".repeat(LOG_BODY_LIMIT_CHARS + 1)),
+            "no run past the limit may appear in the line"
+        );
+    }
+
+    /// No credential material rides out on the failure line (AGENTS.md §12),
+    /// including at debug. The body fed in is shaped like a token envelope;
+    /// what must not appear is any credential the caller would interpolate.
+    #[test]
+    fn no_credential_shape_reaches_the_failure_line() {
+        let line = player_failure_log_line(
+            "play",
+            401,
+            r#"{"error":{"status":401,"message":"The access token expired"}}"#,
+        );
+        assert!(
+            !line.contains("Authorization"),
+            "an Authorization header must never be logged: {line}"
+        );
+        assert!(
+            !line.contains("Bearer"),
+            "a bearer value must never be logged: {line}"
+        );
+        assert!(
+            !line.to_lowercase().contains("refresh_token"),
+            "no refresh token may be logged: {line}"
+        );
+    }
+
+    /// The dead-credential line (issue #777) is tagged and names the reason
+    /// without naming the credential — this is the failure that prompts a
+    /// reconnect, so it is the one a support log most needs.
+    #[test]
+    fn the_refresh_rejection_line_is_tagged_and_carries_no_token() {
+        let line = refresh_rejected_log_line();
+        assert!(
+            line.starts_with(super::TAG),
+            "the refresh-rejection line must carry the module tag, got: {line}"
+        );
+        assert!(
+            line.contains("invalid"),
+            "the line must name the reason, got: {line}"
+        );
+        assert!(
+            !line.contains("refresh_token="),
+            "no refresh token value may be logged: {line}"
+        );
     }
 }
