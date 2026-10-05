@@ -265,11 +265,14 @@ test('focuses the log viewport and navigates it with PageUp/PageDown in Chromium
         break;
       } catch (err) {
         if (attempt === 1) throw err;
-        // Re-settle the baseline: press PageDown again and wait it out properly.
+        // Re-establish a genuinely settled baseline. Order matters: press
+        // PageDown, WAIT for it to settle, and only THEN press PageUp. Reading
+        // the baseline after the PageUp would capture the post-PageUp position,
+        // making the next comparison a value against itself and masking the very
+        // failure this retry exists to survive.
         await page.keyboard.press('PageDown');
-        await settledScrollTop(viewport, 'after PageDown (retry)');
-        await page.keyboard.press('PageUp');
         afterPageDown = await settledScrollTop(viewport, 'after PageDown (retry)');
+        await page.keyboard.press('PageUp');
       }
     }
     expect(
