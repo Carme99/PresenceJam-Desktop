@@ -323,14 +323,23 @@ mod tests {
     /// "all commands touching network/disk/keychain declared async" item
     /// unchecked for.
     ///
-    /// Scope (orchestrator ruling, 2026-09-19): #928 asked this guard to scan
-    /// every `#[tauri::command]` in the tree. Scanning the tree from this
-    /// branch would fail on files owned by other slices that are not converted
-    /// here, so the three files this slice owns are scanned in full and the
-    /// remainder is named here instead: `commands/config.rs::load_config`;
-    /// `commands/spotify_auth.rs::refresh_spotify`, `start_spotify_reconnect`,
-    /// `reconnect_spotify_session`. Wave 2 tightens this to the whole tree
-    /// once that remainder is off the main thread.
+    /// Scope: this grep-style scan covers the three files its own wave
+    /// converted (`sync.rs`, `window.rs`, `misc.rs`). It is **not** the
+    /// coverage for the rest of the tree, and deliberately so — source-text
+    /// guards are rejected in this repo (issue #778, PR #1116), and widening
+    /// this one to every command file would also misfire on bodies that
+    /// legitimately offload inside a `*_core` seam (`poll_teams_auth` is the
+    /// live example: it delegates to `poll_teams_auth_core`, so no
+    /// `spawn_blocking` literal appears in the command body).
+    ///
+    /// The commands this slice owns are covered **behaviourally** instead,
+    /// each by a test that drives the command's own offloaded entry point and
+    /// asserts the recorded thread id differs from the awaiting one:
+    /// `commands/config.rs::load_config` (`load_config_reads_the_document_off_the_calling_thread`),
+    /// `commands/spotify_auth.rs::{refresh_spotify, start_spotify_reconnect,
+    /// reconnect_spotify_session, is_spotify_client_secret_set}` and
+    /// `commands/teams_auth.rs::refresh_teams`. A thread id is observable at
+    /// runtime; a grep over a signature is not evidence the body moved.
     #[test]
     fn test_commands_touching_io_are_async_and_offloaded() {
         // Positive control: the detector must fire on a body that does exactly

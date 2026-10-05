@@ -16,6 +16,40 @@ use tauri::{AppHandle, Emitter};
 /// Log tag prefix for this submodule (issue #79 item 3).
 const CMD: &str = "[CMD.SPOTIFY_AUTH]";
 
+/// Run one blocking step of a command body on the blocking pool (issue #928).
+///
+/// Tauri executes a plain `#[tauri::command]` body inline on the main/UI
+/// thread, so a synchronous keychain read or `tokens.json` fsync there froze
+/// the window, the tray menu and window events for the whole call — on a
+/// locked Linux Secret Service that is the entire D-Bus timeout. `work` is
+/// a parameter so each command's offloaded entry point can be driven by a
+/// unit test that records the thread it ran on; production passes the real
+/// blocking call. Mirrors `commands/teams_auth.rs::offload_blocking`.
+async fn offload_blocking<T, F>(label: &'static str, work: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    match tauri::async_runtime::spawn_blocking(work).await {
+        Ok(value) => Ok(value),
+        Err(e) => Err(format!("{CMD} {label} task panicked: {e}")),
+    }
+}
+
+/// The OS-keychain credential read [`refresh_spotify_impl`] drives (#928).
+///
+/// Taken as a trait object rather than a generic parameter so the impl keeps
+/// the exact signature literal the cross-file CAS guard in
+/// `polling/poll_once.rs` anchors on (mirroring the Teams twin).
+type SpotifySecretReadFn = dyn Fn() -> Result<String, String> + Send;
+
+/// The blocking HTTPS token refresh [`refresh_spotify_impl`] drives (#928).
+type SpotifyRefreshFn = dyn Fn(&SpotifyTokens, &str, &str) -> Result<SpotifyTokens, crate::spotify::SpotifyApiError>
+    + Send;
+
+/// The atomic `tokens.json` write [`refresh_spotify_impl`] drives (#928).
+type SpotifyPersistFn = dyn Fn(&Arc<AppState>) -> Result<(), String> + Send;
+
 /// Events emitted by the shared Spotify-commit helper (issue #932). Keeping
 /// the payload union in the command core lets production delegate to Tauri
 /// while tests observe the exact warning emitted by the
@@ -237,10 +271,14 @@ pub(crate) fn restore_pending_after_failed_exchange(state: &AppState, pending: P
 /// Used by both `start_spotify_auth` (initial onboarding, writes
 /// secret to keychain) and `start_spotify_reconnect` (keychain
 /// already populated, reads from it).
+///
+/// Takes `&Arc<AppState>` rather than a borrowed `tauri::State` so the whole
+/// flow (including `open_url`, which shells out) can run inside a
+/// `spawn_blocking` closure on the blocking pool (issue #928).
 fn run_spotify_oauth_flow(
     client_id: String,
     redirect_uri: String,
-    state: &tauri::State<'_, Arc<AppState>>,
+    state: &Arc<AppState>,
 ) -> Result<(), String> {
     let verifier = crate::pkce::generate_verifier();
     log::info!(
@@ -373,7 +411,7 @@ pub async fn start_spotify_auth(
     .map_err(|e| format!("start_spotify_auth keychain task failed: {}", e))??;
     log::info!("{CMD} start_spotify_auth: client_secret stored in keychain");
 
-    run_spotify_oauth_flow(client_id, redirect_uri, &state)?;
+    run_spotify_oauth_flow(client_id, redirect_uri, state.inner())?;
 
     log::info!("{CMD} start_spotify_auth: SUCCESS - Spotify auth started");
     Ok(())
@@ -389,7 +427,7 @@ pub async fn start_spotify_auth(
 /// (and which would have overwritten the existing keychain entry with
 /// an empty string). See issues #9, #67, and the v2.6.4 verifier report.
 #[tauri::command]
-pub fn start_spotify_reconnect(
+pub async fn start_spotify_reconnect(
     window: tauri::Window,
     client_id: String,
     redirect_uri: String,
@@ -409,26 +447,55 @@ pub fn start_spotify_reconnect(
         return Err("client_id is required".to_string());
     }
 
-    // Read the existing secret from the keychain. This will return an
-    // error if the entry is missing (e.g., user cleared the keychain
-    // after Onboarding), in which case the frontend should redirect to
-    // Onboarding rather than retry. The `_` prefix tells the compiler
-    // we intentionally discard the value here — its presence (and the
-    // `?` above) proves the keychain entry exists.
-    let _client_secret = crate::keychain::get_spotify_client_secret()?;
-    log::info!("{CMD} start_spotify_reconnect: client_secret loaded from keychain");
-
-    // #67 validation: client_id format only — we never validate the
-    // secret here because it's already in the keychain (validated at
-    // Onboarding time).
-    validate_spotify_client_id(&client_id)?;
-    // Issue #349: same IPC-boundary pin as start_spotify_auth.
-    validate_spotify_redirect_uri(&redirect_uri)?;
-
-    run_spotify_oauth_flow(client_id, redirect_uri, &state)?;
+    // Issue #928: the credential read blocks for the whole OS timeout on a
+    // locked keyring (the D-Bus timeout on Linux) and the flow's browser
+    // hand-off shells out — neither may run inline on the IPC thread.
+    let flow_state = Arc::clone(state.inner());
+    start_spotify_reconnect_offloaded(crate::keychain::get_spotify_client_secret, move || {
+        // #67 validation: client_id format only — we never validate the
+        // secret here because it's already in the keychain (validated at
+        // Onboarding time).
+        validate_spotify_client_id(&client_id)?;
+        // Issue #349: same IPC-boundary pin as start_spotify_auth.
+        validate_spotify_redirect_uri(&redirect_uri)?;
+        run_spotify_oauth_flow(client_id, redirect_uri, &flow_state)
+    })
+    .await?;
 
     log::info!("{CMD} start_spotify_reconnect: SUCCESS - Spotify reconnect started");
     Ok(())
+}
+
+/// Blocking body of [`start_spotify_reconnect`], run on the blocking pool
+/// (issue #928).
+///
+/// The order is the pre-#928 order and is load-bearing: the stored
+/// credential is proved to exist *first*. A missing entry (the user
+/// cleared the keychain after Onboarding) is what routes the frontend
+/// back to Onboarding rather than retrying, so `read_secret` runs before
+/// `start_flow` and a failure short-circuits the flow entirely. The two
+/// steps are injected so a unit test can drive this without the OS
+/// keychain or a browser hand-off.
+async fn start_spotify_reconnect_offloaded<S, F>(
+    read_secret: S,
+    start_flow: F,
+) -> Result<(), String>
+where
+    S: FnOnce() -> Result<String, String> + Send + 'static,
+    F: FnOnce() -> Result<(), String> + Send + 'static,
+{
+    offload_blocking("start_spotify_reconnect", move || {
+        // Read the existing secret from the keychain. An error here (entry
+        // missing) must abort before the flow starts. The value is
+        // deliberately discarded — its presence (and the `?`) is the proof.
+        let _client_secret = read_secret()?;
+        log::info!("{CMD} start_spotify_reconnect: client_secret loaded from keychain");
+
+        // The flow itself opens the browser, which shells out — so it rides
+        // the same blocking hop rather than stalling the IPC thread.
+        start_flow()
+    })
+    .await?
 }
 
 /// State half of [`clear_spotify_session`]: drop the in-memory Spotify session
@@ -477,7 +544,7 @@ fn clear_spotify_session(state: &Arc<AppState>, app: &AppHandle) {
 /// already is (`is_spotify_client_secret_set`), and the presence check below
 /// keeps the two in agreement.
 #[tauri::command]
-pub fn reconnect_spotify_session(
+pub async fn reconnect_spotify_session(
     window: tauri::Window,
     client_id: String,
     redirect_uri: String,
@@ -501,17 +568,51 @@ pub fn reconnect_spotify_session(
     validate_spotify_client_id(&client_id)?;
     validate_spotify_redirect_uri(&redirect_uri)?;
 
-    // Presence check only — the value is never stored back. A missing entry
-    // means re-onboarding is the only way forward; the error propagates so the
-    // caller can route there.
-    let _client_secret = crate::keychain::get_spotify_client_secret()?;
-    log::info!("{CMD} reconnect_spotify_session: client_secret present in keychain");
-
-    clear_spotify_session(state.inner(), &app);
-    run_spotify_oauth_flow(client_id, redirect_uri, &state)?;
+    // Issue #928: the credential read blocks on a locked keyring and
+    // `clear_spotify_session` fsyncs `tokens.json` — neither may run inline
+    // on the IPC thread.
+    let clear_state = Arc::clone(state.inner());
+    let flow_state = Arc::clone(state.inner());
+    reconnect_spotify_session_offloaded(
+        crate::keychain::get_spotify_client_secret,
+        move || clear_spotify_session(&clear_state, &app),
+        move || run_spotify_oauth_flow(client_id, redirect_uri, &flow_state),
+    )
+    .await?;
 
     log::info!("{CMD} reconnect_spotify_session: SUCCESS - Spotify re-authorization started");
     Ok(())
+}
+
+/// Blocking body of [`reconnect_spotify_session`], run on the blocking pool
+/// (issue #928): the keychain probe, the atomic `tokens.json` rewrite and the
+/// browser hand-off.
+///
+/// Order is the pre-#928 order and is load-bearing. The credential probe runs
+/// first: a missing entry means re-onboarding is the only way forward, and
+/// the error must propagate **without** having cleared the live session (the
+/// user would otherwise lose a working sign-in to a keychain read that failed
+/// for an unrelated reason). The steps are injected so a unit test can drive
+/// this without the OS keychain, a real filesystem or a browser.
+async fn reconnect_spotify_session_offloaded<S, C, F>(
+    read_secret: S,
+    clear_session: C,
+    start_flow: F,
+) -> Result<(), String>
+where
+    S: FnOnce() -> Result<String, String> + Send + 'static,
+    C: FnOnce() + Send + 'static,
+    F: FnOnce() -> Result<(), String> + Send + 'static,
+{
+    offload_blocking("reconnect_spotify_session", move || {
+        // Presence check only — the value is never stored back.
+        let _client_secret = read_secret()?;
+        log::info!("{CMD} reconnect_spotify_session: client_secret present in keychain");
+
+        clear_session();
+        start_flow()
+    })
+    .await?
 }
 
 #[tauri::command]
@@ -727,7 +828,7 @@ fn clear_dead_spotify_refresh(state: &AppState, pre_refresh_access_token: &str) 
 }
 
 #[tauri::command]
-pub fn refresh_spotify(
+pub async fn refresh_spotify(
     window: tauri::Window,
     state: tauri::State<'_, Arc<AppState>>,
     app: AppHandle,
@@ -738,6 +839,64 @@ pub fn refresh_spotify(
     super::require_main_window(&window)?;
     log::debug!("{CMD} refresh_spotify: ENTRY");
 
+    // Issue #928: the body is a keychain read, an HTTPS refresh and an fsync
+    // — up to the 10 s client timeout for the middle one. Run inline on the
+    // IPC thread it froze the window, the tray menu and window events for
+    // the whole call.
+    let persist_app = app.clone();
+    refresh_spotify_offloaded(
+        Arc::clone(state.inner()),
+        Box::new(crate::keychain::get_spotify_client_secret),
+        Box::new(|tokens, client_id, client_secret| {
+            crate::spotify::refresh_spotify_token(tokens, client_id, client_secret)
+        }),
+        Box::new(move |state| token_io::persist_tokens(state, &persist_app)),
+        Box::new(move |event| {
+            let _ = app.emit(event, ());
+        }),
+    )
+    .await
+}
+
+/// Blocking body of [`refresh_spotify`], run on the blocking pool (#928).
+///
+/// The three I/O steps — the OS keychain read, the HTTPS token refresh and
+/// the atomic `tokens.json` write — are injected so a unit test can drive
+/// the real CAS / dead-session policy without a keychain, a network or a
+/// Tauri runtime. The events stay typed: the provider error reaches the
+/// caller as the same `String` the pre-#928 body produced, classified
+/// before it is stringified.
+async fn refresh_spotify_offloaded(
+    state: Arc<AppState>,
+    read_secret: Box<SpotifySecretReadFn>,
+    refresh: Box<SpotifyRefreshFn>,
+    persist: Box<SpotifyPersistFn>,
+    emit: Box<dyn Fn(&str) + Send>,
+) -> Result<(), String> {
+    offload_blocking("refresh_spotify", move || {
+        // `&*boxed` (rather than `.as_ref()`) keeps the `+ Send` bound visible
+        // through the deref, so the closure stays `Send` and can cross the hop.
+        refresh_spotify_impl(&state, &*read_secret, &*refresh, &*persist, &*emit)
+    })
+    .await?
+}
+
+/// The refresh policy itself: compare-and-swap the slot, persist, and apply
+/// the dead-session policy (#160/#564/#798). Split from the command so the
+/// offload above owns the threading and this owns the semantics.
+///
+/// The steps are taken as trait objects rather than generic parameters so the
+/// definition keeps the exact signature literal the cross-file CAS guard in
+/// `polling/poll_once.rs` anchors on (mirroring the Teams twin). Do not spell
+/// that literal out in this doc comment: the guard's scanner takes the *second*
+/// occurrence, and a mention here would capture this comment instead.
+fn refresh_spotify_impl(
+    state: &Arc<AppState>,
+    read_secret: &SpotifySecretReadFn,
+    refresh: &SpotifyRefreshFn,
+    persist: &SpotifyPersistFn,
+    emit: &dyn Fn(&str),
+) -> Result<(), String> {
     // Spotify client_id lives in the config (it's not a secret). The
     // client_secret is in the OS keychain (see issue #9). The previous
     // implementation read client_id from a persistent store — that path
@@ -753,7 +912,7 @@ pub fn refresh_spotify(
                 "Spotify client ID not found".to_string()
             })?
     };
-    let client_secret = crate::keychain::get_spotify_client_secret()?;
+    let client_secret = read_secret()?;
     log::info!("{CMD} refresh_spotify: credentials loaded (id from config, secret from keychain)");
 
     let current_tokens = {
@@ -778,14 +937,14 @@ pub fn refresh_spotify(
     // reentrant).
     let pre_refresh_access_token = current_tokens.access_token.clone();
     let outcome = crate::polling::cas_refresh_spotify(
-        state.inner(),
+        state,
         "spotify-refresh-cmd",
         &pre_refresh_access_token,
-        || crate::spotify::refresh_spotify_token(&current_tokens, &client_id, &client_secret),
+        || refresh(&current_tokens, &client_id, &client_secret),
     );
     match outcome {
         crate::polling::CasOutcome::Committed(_) => {
-            token_io::persist_tokens(state.inner(), &app)?;
+            persist(state)?;
             log::info!("{CMD} refresh_spotify: SUCCESS (state updated and persisted)");
         }
         // Somebody else replaced the token we refreshed from: whatever is in
@@ -809,14 +968,14 @@ pub fn refresh_spotify(
             error: crate::spotify::SpotifyApiError::InvalidGrant,
             replaced: false,
         } => {
-            let cleared = clear_dead_spotify_refresh(&state, &pre_refresh_access_token);
+            let cleared = clear_dead_spotify_refresh(state, &pre_refresh_access_token);
             if !cleared {
                 log::info!(
                     "{CMD} refresh_spotify: NOOP (slot replaced before invalid-grant clear; keeping newer session)"
                 );
                 return Ok(());
             }
-            if let Err(e) = token_io::persist_tokens(state.inner(), &app) {
+            if let Err(e) = persist(state) {
                 log::warn!(
                     "{CMD} refresh_spotify: failed to persist cleared tokens - {}",
                     e
@@ -826,7 +985,7 @@ pub fn refresh_spotify(
             log::error!(
                 "{CMD} refresh_spotify: refresh token is dead (invalid_grant); re-auth required"
             );
-            let _ = app.emit("spotify-reconnect-required", ());
+            emit("spotify-reconnect-required");
             return Err("Spotify sign-in expired - reconnect Spotify to continue.".to_string());
         }
         // Issue #798: the failed refresh never matched the slot — a newer
@@ -848,14 +1007,387 @@ pub fn refresh_spotify(
 /// OS keychain. The frontend uses this to decide whether the user can
 /// reconnect (keychain populated) or must re-enter the secret via
 /// Onboarding (keychain empty). See issue #9.
+///
+/// Issue #928: the probe is uncached, so on a locked Linux Secret Service it
+/// blocks for the whole D-Bus timeout — inline on the IPC thread that froze
+/// the window for every caller. It now runs on the blocking pool; the
+/// `bool` return (and therefore the JS signature) is unchanged.
 #[tauri::command]
-pub fn is_spotify_client_secret_set() -> bool {
-    crate::keychain::has_spotify_client_secret()
+pub async fn is_spotify_client_secret_set() -> bool {
+    match client_secret_present_offloaded(crate::keychain::has_spotify_client_secret).await {
+        Ok(present) => present,
+        Err(e) => {
+            // The command's contract is a bool with no error channel, and the
+            // pre-#928 probe already collapsed "keyring unavailable" into
+            // `false`. Classify and log rather than swallow silently.
+            log::error!("{CMD} is_spotify_client_secret_set: FAILED - {}", e);
+            false
+        }
+    }
+}
+
+/// Offloaded entry point for [`is_spotify_client_secret_set`]. The probe is
+/// injected so a test can assert the thread it ran on without touching the
+/// user's real OS keychain.
+async fn client_secret_present_offloaded<P>(probe: P) -> Result<bool, String>
+where
+    P: FnOnce() -> bool + Send + 'static,
+{
+    offload_blocking("is_spotify_client_secret_set", probe).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---------------------------------------------------------------------
+    // Issue #928 — behavioural coverage that each Spotify command's blocking
+    // work leaves the calling thread.
+    //
+    // `block_on` parks the calling thread, so work that ran inline would
+    // report the caller's own thread id. That thread is the IPC/main thread
+    // in production, so this assertion is the observable difference between
+    // "offloaded" and "still freezing the window" — a thread id, not a grep
+    // over the function signature (rejected in this repo, issue #778).
+    // ---------------------------------------------------------------------
+
+    /// Records the thread each injected step ran on, so a test can assert
+    /// every one of them left the awaiting thread.
+    #[derive(Default)]
+    struct ThreadLog(parking_lot::Mutex<Vec<(&'static str, std::thread::ThreadId)>>);
+
+    impl ThreadLog {
+        fn record(&self, step: &'static str) {
+            self.0.lock().push((step, std::thread::current().id()));
+        }
+
+        /// Every recorded step ran on a thread other than `awaiting`.
+        fn assert_all_off_thread(&self, awaiting: std::thread::ThreadId, what: &str) {
+            let seen = self.0.lock();
+            assert!(
+                !seen.is_empty(),
+                "{what}: expected the blocking steps to run, but none did"
+            );
+            for (step, tid) in seen.iter() {
+                assert_ne!(
+                    *tid, awaiting,
+                    "{what}: step `{step}` ran on the awaiting (IPC) thread — \
+                     the keychain/HTTPS/fsync work would freeze the window for \
+                     its whole duration (issue #928)"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn refresh_spotify_runs_keychain_network_and_persist_off_thread() {
+        let awaiting = std::thread::current().id();
+        let log = std::sync::Arc::new(ThreadLog::default());
+
+        let state = std::sync::Arc::new(AppState::new());
+        let mut config = crate::config::AppConfig::default();
+        config.spotify.client_id = "a".repeat(32);
+        *state.config.get_mut() = Some(config);
+        state.tokens_load.commit_spotify(
+            &state.tokens,
+            SpotifyTokens {
+                access_token: "old-access".to_string(),
+                refresh_token: "old-refresh".to_string(),
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            },
+        );
+
+        let log_secret = std::sync::Arc::clone(&log);
+        let log_refresh = std::sync::Arc::clone(&log);
+        let log_persist = std::sync::Arc::clone(&log);
+        let persisted = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+
+        let result = tauri::async_runtime::block_on(refresh_spotify_offloaded(
+            std::sync::Arc::clone(&state),
+            Box::new(move || {
+                log_secret.record("keychain-read");
+                Ok("client-secret".to_string())
+            }),
+            Box::new(move |_tokens, client_id, client_secret| {
+                log_refresh.record("https-refresh");
+                assert_eq!(client_id.len(), 32, "the configured id must be used");
+                assert_eq!(client_secret, "client-secret");
+                Ok(SpotifyTokens {
+                    access_token: "new-access".to_string(),
+                    refresh_token: "new-refresh".to_string(),
+                    expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+                })
+            }),
+            Box::new({
+                let persisted = std::sync::Arc::clone(&persisted);
+                move |state: &Arc<AppState>| {
+                    log_persist.record("tokens-persist");
+                    persisted.lock().push(
+                        state
+                            .tokens
+                            .spotify()
+                            .as_ref()
+                            .map(|t| t.access_token.clone()),
+                    );
+                    Ok(())
+                }
+            }),
+            Box::new(|_event| {}),
+        ));
+
+        assert_eq!(result, Ok(()));
+        log.assert_all_off_thread(awaiting, "refresh_spotify");
+        // The offload must not turn into a no-op: the CAS still committed and
+        // the refreshed credentials still reached disk.
+        assert_eq!(
+            *persisted.lock(),
+            vec![Some("new-access".to_string())],
+            "the refreshed tokens must still be committed and persisted"
+        );
+        assert_eq!(
+            state
+                .tokens
+                .spotify()
+                .as_ref()
+                .map(|t| t.access_token.as_str()),
+            Some("new-access")
+        );
+    }
+
+    #[test]
+    fn refresh_spotify_dead_session_still_classifies_off_thread() {
+        let awaiting = std::thread::current().id();
+        let log = std::sync::Arc::new(ThreadLog::default());
+        let events = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+
+        let state = std::sync::Arc::new(AppState::new());
+        let mut config = crate::config::AppConfig::default();
+        config.spotify.client_id = "a".repeat(32);
+        *state.config.get_mut() = Some(config);
+        state.tokens_load.commit_spotify(
+            &state.tokens,
+            SpotifyTokens {
+                access_token: "dying-access".to_string(),
+                refresh_token: "dying-refresh".to_string(),
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            },
+        );
+
+        let log_secret = std::sync::Arc::clone(&log);
+        let log_refresh = std::sync::Arc::clone(&log);
+        let log_persist = std::sync::Arc::clone(&log);
+        let sink = std::sync::Arc::clone(&events);
+
+        let result = tauri::async_runtime::block_on(refresh_spotify_offloaded(
+            std::sync::Arc::clone(&state),
+            Box::new(move || {
+                log_secret.record("keychain-read");
+                Ok("client-secret".to_string())
+            }),
+            Box::new(move |_tokens, _client_id, _client_secret| {
+                log_refresh.record("https-refresh");
+                Err(crate::spotify::SpotifyApiError::InvalidGrant)
+            }),
+            Box::new(move |_state| {
+                log_persist.record("tokens-persist");
+                Ok(())
+            }),
+            Box::new(move |event| sink.lock().push(event.to_string())),
+        ));
+
+        // The #160/#564 dead-session policy must survive the offload verbatim.
+        assert_eq!(
+            result,
+            Err("Spotify sign-in expired - reconnect Spotify to continue.".to_string())
+        );
+        assert_eq!(
+            *events.lock(),
+            vec!["spotify-reconnect-required".to_string()],
+            "a dead refresh token must still raise the re-auth signal"
+        );
+        assert!(
+            state.tokens.spotify().is_none(),
+            "the dead session must still be dropped"
+        );
+        log.assert_all_off_thread(awaiting, "refresh_spotify (dead session)");
+    }
+
+    #[test]
+    fn start_spotify_reconnect_probes_the_keychain_off_thread() {
+        let awaiting = std::thread::current().id();
+        let log = std::sync::Arc::new(ThreadLog::default());
+        let flowed = std::sync::Arc::new(parking_lot::Mutex::new(false));
+
+        let log_secret = std::sync::Arc::clone(&log);
+        let log_flow = std::sync::Arc::clone(&log);
+        let started = std::sync::Arc::clone(&flowed);
+
+        let result = tauri::async_runtime::block_on(start_spotify_reconnect_offloaded(
+            move || {
+                log_secret.record("keychain-read");
+                Ok("client-secret".to_string())
+            },
+            move || {
+                log_flow.record("oauth-flow");
+                *started.lock() = true;
+                Ok(())
+            },
+        ));
+
+        assert_eq!(result, Ok(()));
+        assert!(*flowed.lock(), "the OAuth flow must still start");
+        log.assert_all_off_thread(awaiting, "start_spotify_reconnect");
+    }
+
+    /// The credential probe must stay *first*: a missing keychain entry is
+    /// the "you must re-onboard" signal, and the flow must not start (nor the
+    /// session be cleared) when the keyring could not be read.
+    #[test]
+    fn start_spotify_reconnect_does_not_start_the_flow_without_a_credential() {
+        let awaiting = std::thread::current().id();
+        let log = std::sync::Arc::new(ThreadLog::default());
+        let flowed = std::sync::Arc::new(parking_lot::Mutex::new(false));
+
+        let log_secret = std::sync::Arc::clone(&log);
+        let started = std::sync::Arc::clone(&flowed);
+
+        let result = tauri::async_runtime::block_on(start_spotify_reconnect_offloaded(
+            move || {
+                log_secret.record("keychain-read");
+                Err("Spotify client_secret not found in keychain".to_string())
+            },
+            move || {
+                *started.lock() = true;
+                Ok(())
+            },
+        ));
+
+        assert!(
+            result.is_err(),
+            "a missing credential must fail the command"
+        );
+        assert!(
+            !*flowed.lock(),
+            "the OAuth flow must not start when the credential is absent"
+        );
+        log.assert_all_off_thread(awaiting, "start_spotify_reconnect (no credential)");
+    }
+
+    #[test]
+    fn reconnect_spotify_session_clears_and_flows_off_thread() {
+        let awaiting = std::thread::current().id();
+        let log = std::sync::Arc::new(ThreadLog::default());
+
+        let state = AppState::new();
+        state.tokens_load.commit_spotify(
+            &state.tokens,
+            SpotifyTokens {
+                access_token: "live".to_string(),
+                refresh_token: "refresh".to_string(),
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            },
+        );
+
+        let log_secret = std::sync::Arc::clone(&log);
+        let log_clear = std::sync::Arc::clone(&log);
+        let log_flow = std::sync::Arc::clone(&log);
+        let clear_state = std::sync::Arc::new(state);
+        let observed = std::sync::Arc::new(parking_lot::Mutex::new(None));
+
+        let result = tauri::async_runtime::block_on(reconnect_spotify_session_offloaded(
+            move || {
+                log_secret.record("keychain-read");
+                Ok("client-secret".to_string())
+            },
+            {
+                let observed = std::sync::Arc::clone(&observed);
+                move || {
+                    log_clear.record("session-clear");
+                    clear_spotify_session_state(&clear_state);
+                    *observed.lock() = Some(clear_state.tokens.spotify().is_none());
+                }
+            },
+            move || {
+                log_flow.record("oauth-flow");
+                Ok(())
+            },
+        ));
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            *observed.lock(),
+            Some(true),
+            "the live session must still be cleared on the re-authorize path"
+        );
+        log.assert_all_off_thread(awaiting, "reconnect_spotify_session");
+    }
+
+    /// A keyring that cannot be read must not cost the user their live
+    /// session: the probe short-circuits before the clear, and it does so
+    /// off the calling thread.
+    #[test]
+    fn reconnect_spotify_session_keeps_the_session_when_the_keyring_is_locked() {
+        let awaiting = std::thread::current().id();
+        let log = std::sync::Arc::new(ThreadLog::default());
+
+        let state = std::sync::Arc::new(AppState::new());
+        state.tokens_load.commit_spotify(
+            &state.tokens,
+            SpotifyTokens {
+                access_token: "live".to_string(),
+                refresh_token: "refresh".to_string(),
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            },
+        );
+
+        let log_secret = std::sync::Arc::clone(&log);
+        let cleared = std::sync::Arc::new(parking_lot::Mutex::new(false));
+        let clear_flag = std::sync::Arc::clone(&cleared);
+        let clear_state = std::sync::Arc::clone(&state);
+
+        let result = tauri::async_runtime::block_on(reconnect_spotify_session_offloaded(
+            move || {
+                log_secret.record("keychain-read");
+                Err("keychain unavailable".to_string())
+            },
+            move || {
+                *clear_flag.lock() = true;
+                clear_spotify_session_state(&clear_state);
+            },
+            || Ok(()),
+        ));
+
+        assert_eq!(result, Err("keychain unavailable".to_string()));
+        assert!(
+            !*cleared.lock(),
+            "a failed keychain probe must not clear the live session"
+        );
+        assert_eq!(
+            state
+                .tokens
+                .spotify()
+                .as_ref()
+                .map(|t| t.access_token.as_str()),
+            Some("live"),
+            "the session must survive a locked keyring"
+        );
+        log.assert_all_off_thread(awaiting, "reconnect_spotify_session (locked keyring)");
+    }
+
+    #[test]
+    fn is_spotify_client_secret_set_probes_off_thread() {
+        let awaiting = std::thread::current().id();
+        let log = std::sync::Arc::new(ThreadLog::default());
+        let probe_log = std::sync::Arc::clone(&log);
+
+        let result = tauri::async_runtime::block_on(client_secret_present_offloaded(move || {
+            probe_log.record("keychain-probe");
+            true
+        }));
+
+        assert_eq!(result, Ok(true));
+        log.assert_all_off_thread(awaiting, "is_spotify_client_secret_set");
+    }
 
     #[test]
     fn dead_refresh_clear_lets_replacement_win_and_clears_matching_token() {
@@ -1355,11 +1887,14 @@ mod tests {
     // whole point of the fix, and it is a keychain-side effect that no
     // unit-testable helper can express — hence a source guard. The command
     // itself takes Tauri state, so its body is isolated with the shared
-    // literal-aware scanner rather than driven directly.
+    // literal-aware scanner rather than driven directly. Issue #928 moved the
+    // keychain probe into `reconnect_spotify_session_offloaded` (the blocking
+    // pool hop), so the credential assertion is made against that body.
     #[test]
     fn re_authorize_command_never_deletes_the_stored_credential() {
         let src = include_str!("spotify_auth.rs");
-        let body = crate::token_io::test_scan::fn_body(src, "pub fn reconnect_spotify_session(");
+        let body =
+            crate::token_io::test_scan::fn_body(src, "pub async fn reconnect_spotify_session(");
         assert!(
             !body.contains("delete_spotify_client_secret"),
             "reconnect_spotify_session must not delete the keychain client_secret — that is what disconnect_spotify is for"
@@ -1373,10 +1908,19 @@ mod tests {
             "reconnect_spotify_session must clear the session and then start the flow"
         );
         // The credential is only ever read, and its absence is the "you must
-        // re-onboard" signal the frontend already routes on.
+        // re-onboard" signal the frontend already routes on. Issue #928 moved
+        // that read onto the blocking pool, so it now lives in the offloaded
+        // body rather than the command body.
+        // Anchor without the trailing `(`: the body takes generic parameters
+        // today, and the scanner finds the marker by substring.
+        let offloaded = crate::token_io::test_scan::fn_body(
+            src,
+            "async fn reconnect_spotify_session_offloaded",
+        );
         assert!(
-            body.contains("get_spotify_client_secret()?"),
-            "reconnect_spotify_session must prove the credential exists before starting the flow"
+            offloaded.contains("read_secret()?") && offloaded.contains("clear_session()"),
+            "reconnect_spotify_session must prove the credential exists before \
+             clearing the session and starting the flow (issue #928)"
         );
     }
 

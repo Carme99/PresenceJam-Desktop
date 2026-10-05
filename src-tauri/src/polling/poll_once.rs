@@ -6065,9 +6065,13 @@ mod tests {
                 "cas_refresh_teams(",
             ),
             (
-                "commands/spotify_auth.rs::refresh_spotify",
+                // Issue #928 moved this CAS into the command's blocking
+                // impl so the command can offload it to the blocking pool;
+                // this points at that impl, matching the Teams twin
+                // (`refresh_teams_impl`) directly below.
+                "commands/spotify_auth.rs::refresh_spotify_impl",
                 include_str!("../commands/spotify_auth.rs"),
-                "pub fn refresh_spotify(",
+                "fn refresh_spotify_impl(",
                 "crate::polling::cas_refresh_spotify(",
             ),
             (
