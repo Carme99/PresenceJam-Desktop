@@ -1,6 +1,7 @@
 import { writable } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
 import type { AppConfig } from '../types';
+import type { ConfigPatch } from '../types-generated/ConfigPatch';
 import { en } from '../i18n/en';
 
 const PROFANITY_PLACEHOLDER_KEY = 'settings.placeholderTextPlaceholder' as const;
@@ -531,21 +532,23 @@ export async function saveConfig(cfg: AppConfig): Promise<AppConfig> {
  *
  * Prefer this over [`saveConfig`] whenever the caller's `AppConfig` was not
  * read from the store in the same breath.
+ *
+ * Issue #767: this is now an alias of the Rust `ConfigPatch` itself rather
+ * than a hand-written mirror. It used to be spelled as
+ * `Partial<AppConfig['teams']>` and friends, which asserted a coverage the
+ * backend did not have: `teams` then typed as the whole section (so a caller
+ * could send fields no patch struct carried, and serde dropped them silently —
+ * the change appeared to persist and then reverted), and the sections the
+ * patch struct genuinely lacked had no way to be named at all. Deriving from
+ * the generated type makes the two sides one contract: a field the backend
+ * stops carrying stops compiling here, and a section the backend adds is
+ * writable from the webview the moment `cargo test --lib` regenerates it.
+ *
+ * `src/lib/types-generated/` is derived and gitignored, so this import only
+ * resolves after the Rust tests have run — the same ordering CI already
+ * enforces (it runs `cargo test --lib` before `npm run check`).
  */
-export interface ConfigPatchPayload {
-  spotify?: Partial<AppConfig['spotify']>;
-  teams?: Partial<AppConfig['teams']>;
-  polling?: Partial<AppConfig['polling']>;
-  logging?: Partial<AppConfig['logging']>;
-  autostart?: boolean;
-  // Issue #789: one-class toggle — the backend merges just this section, so
-  // a toggle never rewrites the document from a possibly-stale in-memory copy.
-  notifications?: Partial<AppConfig['notifications']>;
-  // Issue #789: the pause-sync deadline for the same partial-write path — a
-  // string sets it, `null` clears it, absent leaves it untouched.
-  snooze_until?: string | null;
-  status_rules?: Partial<AppConfig['status_rules']>;
-}
+export type ConfigPatchPayload = ConfigPatch;
 
 export async function updateConfig(patch: ConfigPatchPayload): Promise<AppConfig> {
   if (savePromise) await savePromise;
