@@ -457,6 +457,28 @@ require `glib` object iteration, which this app does not perform — it uses
 Tauri's tray and dialog APIs and never iterates a `glib` object collection
 itself.
 
+Two further `unsound` warnings are accepted for the same reason — neither is
+in this crate's direct dependency list, so the app cannot call the affected
+API itself, and both are reached only through Tauri internals:
+
+- **`anyhow` (RUSTSEC-2026-0190)** — unsoundness in `Error::downcast_mut()`.
+  `src-tauri/Cargo.toml` has no `anyhow` entry; it is pulled transitively by
+  `tauri`, `tauri-plugin`, `tauri-plugin-fs`, `tauri-utils` and the `wasm-*`
+  tooling chain. The defect requires calling `downcast_mut` on an error whose
+  concrete type has been moved, which this app never does — its own error paths
+  use `Result<T, E>` with typed variants (AGENTS.md §4), not `anyhow::Error`.
+- **`event-listener` (RUSTSEC-2026-0221)** — allows `!Send` tags to cross a
+  thread boundary. No direct `event-listener` entry in `src-tauri/Cargo.toml`;
+  it is pulled by the async stack (`async-lock`, `async-broadcast`,
+  `async-process`, `event-listener-strategy`) and by `zbus`, which Tauri uses
+  on Linux for its system tray. The app never constructs an `event-listener`
+  tag itself; all tags originate inside Tauri's own async runtime, so the
+  unsound crossing is confined to library code on that path.
+
+Both are `informational = "unsound"` in the RustSec database, so `cargo audit`
+reports them as allowed warnings and still exits 0. They are recorded here so
+the `dep-audit` job's warning count is explained rather than merely tolerated.
+
 ## Release Pipeline Token Rotation
 
 The release workflow (`.github/workflows/release.yml`) uses two repository secrets to publish to package managers. Both are personal access tokens (PATs) held by the maintainer and must be rotated on a 90-day cadence to limit blast radius if the token leaks through any other channel (CI logs, tap repo history, developer machine, etc.).

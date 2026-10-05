@@ -498,9 +498,11 @@ jobs:
   # On a `push` run `GITHUB_HEAD_REF` is unset, so `reportCheck` cannot call
   # `checks.CheckReporter.startCheck` under this job's `contents: read`
   # permission; it re-throws, main() catches, and `core.setFailed` fails the
-  # step. With 9 allowed warnings always present the reporter fires every run,
-  # so on push runs `continue-on-error` IS load-bearing and this job would be
-  # permanently red without it.
+  # step. `cargo audit` reports 9 allowed warnings — 6 `unmaintained`
+  # (proc-macro-error and the five `unic-*` crates) and 3 `unsound` (anyhow,
+  # event-listener, glib, all three documented in SECURITY.md) — so the
+  # reporter fires on every run and on push runs `continue-on-error` IS
+  # load-bearing: without it this job would be permanently red.
   #
   # Do NOT "fix" this by deleting the flag alone — that turns every push run
   # red. A genuinely gating cargo leg needs BOTH `checks: write` in this job's
