@@ -570,6 +570,19 @@ pub async fn app_exit(
 /// not an earlier read. New code MUST acquire these locks in the same order
 /// (never `teams` before `spotify`, never `config` before `current_track`)
 /// or risk a lock-ordering deadlock with this critical section.
+///
+/// Issue #879 adds the DURATION half of that contract. The section covers
+/// exactly: the four guards themselves, the `is_syncing` load, the
+/// `current_track` clone, the three presence/connected booleans derived from
+/// the guarded values, the `secret_conflict` atomic load, and the write-clocks
+/// clone (it must stay inside: the poller publishes a track and THEN that
+/// track's clocks, so reading the clocks after releasing `track_guard` could
+/// pair a track with the next track's clocks). Everything after the drops —
+/// the manual-status record (a `std::sync::Mutex`), the struct assembly, the
+/// log line — runs with all four guards released, because the writers of
+/// those same slots are the token refresh paths and must not queue behind
+/// work that needs no lock. New code MUST NOT move work into the section, and
+/// MUST NOT hold a guard while calling anything that acquires a lock.
 #[tauri::command]
 pub async fn get_sync_status(state: tauri::State<'_, Arc<AppState>>) -> Result<SyncStatus, String> {
     log::debug!("{CMD} get_sync_status: ENTRY");
@@ -578,13 +591,11 @@ pub async fn get_sync_status(state: tauri::State<'_, Arc<AppState>>) -> Result<S
 
 /// Issue #879: `get_sync_status`'s snapshot, handed to the blocking pool.
 ///
-/// The snapshot takes four read guards, and the token writers hold theirs
-/// ACROSS the HTTPS refresh — `cas_refresh_or_discard` is given
-/// `&mut *state.tokens.teams_mut()` (poller) or
-/// `&mut *state.tokens.spotify_mut()` (boot gate) before it runs its refresh
-/// closure. As a synchronous command this ran on the main thread, so the
+/// The snapshot takes four read guards on slots whose writers are the token
+/// refresh paths (the poller's Teams commit, the boot gate's Spotify
+/// refresh). As a synchronous command this ran on the main thread, so the
 /// Dashboard's mount-time and post-event calls parked the webview's UI thread
-/// until the in-flight refresh completed: a frozen window rather than a late
+/// until those guards were available: a frozen window rather than a late
 /// status. `SyncStatus` is plain data with no frontend change needed, so the
 /// assembly moves off the UI thread and the caller only awaits. Lifted out of
 /// the command (not inlined) so the offload itself is covered by a test.
@@ -600,6 +611,20 @@ async fn sync_status_offloaded(state: Arc<AppState>) -> Result<SyncStatus, Strin
 /// headless `--status` CLI flag reports exactly the shape and the field
 /// semantics the IPC returns instead of a second, drifting copy of them. See
 /// the doc comment above for the lock-ordering contract this fn implements.
+///
+/// Issue #879: the four read guards are held only for the values that must
+/// share one instant with each other — the `current_track` clone, the
+/// connected/paused booleans derived from the guarded values, `is_syncing`,
+/// the `secret_conflict` flag and the write clocks — and are dropped
+/// immediately afterwards. What runs after the drops (the manual-status
+/// record, the struct assembly, the log line) runs with the token slots free,
+/// which matters because the writers of those same slots are the refresh
+/// paths: the poller's token commit and the boot gate's refresh both take
+/// `tokens.*_mut()`, so a status command that held a token read guard across
+/// its tail work queued itself in front of a refresh for work that never
+/// needed a lock. The manual-status record and the recent-status ring are
+/// process-global state that the poller never pairs with a track, so reading
+/// them outside the section cannot tear the snapshot.
 pub fn sync_status_from_state(state: &AppState) -> SyncStatus {
     // Single critical section: all read guards held at once, clones below
     // cannot observe a writer interleaving between fields.
@@ -608,32 +633,50 @@ pub fn sync_status_from_state(state: &AppState) -> SyncStatus {
     let config_guard = state.config.get();
     let teams_guard = state.tokens.teams();
     let is_syncing = state.polling.is_syncing(Ordering::Acquire);
-    // Issue #813: the startup migration conflict is process state, not lock
-    // state — load it alongside (not inside) the read-guard critical section
-    // so the atomic read can never join the `current_track -> spotify ->
-    // config -> teams` lock ordering above (issue #398).
-    let spotify_secret_conflict = state.secret_conflict.load(Ordering::Acquire);
-    // #670: the poller's presence bookkeeping, read from the shared
-    // write-decision clocks (finding PollCore#4 / #572). `WRITE_CLOCKS` is a
-    // leaf lock — every production touch clones it in or out and never
-    // acquires another lock while holding it — so it does not participate in
-    // the `current_track -> spotify -> config -> teams` ordering above, and
-    // this read neither mutates nor resets it.
-    let clocks = polling::load_write_clocks();
 
     let current_track = track_guard.clone();
     // A pause is a state change, not a stop: the poller keeps the observed
     // `TrackInfo` for a paused track (finding D6, #669), so the stored
     // playback state is what the Dashboard renders as a paused card.
     let presence_paused = current_track.as_ref().is_some_and(|t| !t.is_playing);
+    let spotify_session_present = spotify_guard.is_some();
+    let spotify_client_configured = config_guard
+        .as_ref()
+        .map(|c| !c.spotify.client_id.is_empty())
+        .unwrap_or(false);
+    let teams_session_present = teams_guard.is_some();
+    // The two reads that must stay INSIDE the section, because their values
+    // are only consistent with `current_track` while `track_guard` is held:
+    // the poller publishes a new track and THEN its write clocks for that
+    // track, so reading the clocks after releasing `track_guard` can pair a
+    // track with the next track's `presence_gated` / `last_posted_status`.
+    // Both are cheap: `secret_conflict` is an atomic load and `WRITE_CLOCKS`
+    // is a documented leaf lock (every production touch clones it and never
+    // acquires another lock while holding it), so neither inverts the
+    // `current_track -> spotify -> config -> teams` ordering (#398).
+    // Issue #813: the startup migration conflict is process state, not lock
+    // state.
+    let spotify_secret_conflict = state.secret_conflict.load(Ordering::Acquire);
+    // #670: the poller's presence bookkeeping, read from the shared
+    // write-decision clocks (finding PollCore#4 / #572).
+    let clocks = polling::load_write_clocks();
 
-    let spotify_connected = spotify_guard.is_some()
-        && config_guard
-            .as_ref()
-            .map(|c| !c.spotify.client_id.is_empty())
-            .unwrap_or(false);
+    // Issue #879: end of the critical section. The two connected booleans
+    // below are computed from values read above, and every field that had to
+    // agree with `current_track` was read above the drops — so releasing here
+    // cannot make the snapshot inconsistent. What is left below is the
+    // manual-status record, the struct assembly and the log line, none of
+    // which can be observed torn against a track.
+    drop(track_guard);
+    drop(spotify_guard);
+    drop(config_guard);
+    drop(teams_guard);
+    #[cfg(test)]
+    section_released_probe();
 
-    let teams_connected = teams_guard.is_some();
+    // --- no AppState guard is held below this line ---
+    let spotify_connected = spotify_session_present && spotify_client_configured;
+    let teams_connected = teams_session_present;
 
     log::info!(
         "{CMD} sync_status_from_state: is_syncing={}, spotify_connected={}, teams_connected={}, presence_gated={}, presence_paused={}",
@@ -655,6 +698,38 @@ pub fn sync_status_from_state(state: &AppState) -> SyncStatus {
         manual_status: crate::commands::status::load_manual_status(),
         recent_manual_statuses: crate::commands::status::load_recent_statuses(),
         spotify_secret_conflict,
+    }
+}
+
+// Issue #879 test seam: fires at the exact instant the snapshot releases its
+// critical section — guards dropped, the rest of the snapshot still to build —
+// so a test can observe the token slots from a would-be writer while the
+// command is mid-assembly. Compiled out of production builds, so the command
+// path carries no cost for it.
+#[cfg(test)]
+thread_local! {
+    static SECTION_RELEASED_PROBE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
+/// Install `probe` for the duration of `body`, on this thread.
+#[cfg(test)]
+pub(super) fn with_section_released_probe<R>(
+    probe: impl FnOnce() + 'static,
+    body: impl FnOnce() -> R,
+) -> R {
+    SECTION_RELEASED_PROBE.with(|slot| *slot.borrow_mut() = Some(Box::new(probe)));
+    let assembled = body();
+    SECTION_RELEASED_PROBE.with(|slot| slot.borrow_mut().take());
+    assembled
+}
+
+/// One-shot invocation point for [`with_section_released_probe`].
+#[cfg(test)]
+fn section_released_probe() {
+    let probe = SECTION_RELEASED_PROBE.with(|slot| slot.borrow_mut().take());
+    if let Some(probe) = probe {
+        probe();
     }
 }
 #[tauri::command]
@@ -1011,6 +1086,72 @@ mod tests {
             !status.teams_connected && !status.spotify_connected,
             "an empty token slot must report disconnected, not a torn snapshot \
              (issues #398, #879)"
+        );
+    }
+
+    /// Issue #879, critical-section half: ALL FOUR read guards must be
+    /// released as soon as the values they protect have been read, so nothing
+    /// else in the snapshot — the manual-status record, the struct assembly,
+    /// the log line — runs with a slot held. Pre-fix the guards lived to the
+    /// end of the fn, so the writers of those same slots (the poller's track
+    /// store and token commit, the config save, the boot gate's refresh) all
+    /// queued behind work that never needed a lock.
+    ///
+    /// The probe fires at the release instant and stands a writer on another
+    /// thread that takes all four slots in the section's documented order and
+    /// signals only after the fourth: it must get in while the snapshot is
+    /// still mid-assembly. Removing any one of the four drops leaves the
+    /// writer blocked and fails this test.
+    #[test]
+    fn test_snapshot_releases_every_section_guard_before_its_tail_work() {
+        use super::{sync_status_from_state, with_section_released_probe, AppState};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc;
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let state = Arc::new(AppState::new());
+        let slots_free = Arc::new(AtomicBool::new(false));
+        let probe_flag = Arc::clone(&slots_free);
+        let probe_state = Arc::clone(&state);
+
+        let status = with_section_released_probe(
+            move || {
+                let writer_state = Arc::clone(&probe_state);
+                let (taken_tx, taken_rx) = mpsc::channel::<()>();
+                let writer = std::thread::spawn(move || {
+                    // All four slots of the snapshot's section, taken in the
+                    // documented order (`current_track -> spotify -> config ->
+                    // teams`), and signalling only after the fourth is held —
+                    // so one bounded wait covers every guard, and a release
+                    // order matching the section cannot deadlock here.
+                    let _track = writer_state.polling.current_track_mut();
+                    let _spotify = writer_state.tokens.spotify_mut();
+                    let _config = writer_state.config.get_mut();
+                    let _teams = writer_state.tokens.teams_mut();
+                    let _ = taken_tx.send(());
+                });
+                // Bounded: a snapshot that still holds any of the four guards
+                // at this instant never lets the writer in, and the wait ends.
+                let taken = taken_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+                if taken {
+                    writer.join().expect("the writer thread must finish");
+                }
+                probe_flag.store(taken, Ordering::Release);
+            },
+            || sync_status_from_state(&state),
+        );
+
+        assert!(
+            slots_free.load(Ordering::Acquire),
+            "the snapshot must drop ALL FOUR guards as soon as it has read their \
+             values — a writer standing in for the poller's track store or token \
+             commit, the config save, or the boot gate's refresh was still blocked while the tail work ran (issue #879)"
+        );
+        assert!(
+            !status.teams_connected && !status.spotify_connected,
+            "narrowing the section must not change what the snapshot reports: an \
+             empty token slot still reads as disconnected (issues #398, #879)"
         );
     }
 
