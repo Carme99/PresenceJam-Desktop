@@ -33,6 +33,10 @@ const MIN_WIDTH = 400;
  * `dashboard.openDiagnosticsAria` i18n key. Used to navigate to the pane
  * through the real UI rather than through an internal store.
  */
+/** The overflow-menu item's visible label — a different key from the inline
+ *  button's aria-label, so it needs its own table (see the nav block below). */
+const DIAGNOSTICS_MENU_LABEL: Record<Locale, string> = { en: 'Diagnostics', de: 'Diagnose', fr: 'Diagnostics' };
+
 const DIAGNOSTICS_ARIA_LABEL: Record<Locale, string> = {
   en: 'Open diagnostics',
   de: 'Diagnose öffnen',
@@ -99,10 +103,33 @@ async function openApp(page: Page, locale: Locale): Promise<void> {
       },
       async invoke(command: string): Promise<unknown> {
         if (command === 'is_onboarding_complete') return true;
-        if (command === 'load_config') return { spotify: {}, locale: selectedLocale };
+        if (command === 'load_config') {
+          // `updates.channel` is read by the update banner on every mount.
+          return { spotify: {}, locale: selectedLocale, updates: { channel: 'stable' } };
+        }
         if (command === 'get_recent_logs') return [];
         if (command === 'get_diagnostics_snapshot') return snapshot;
-        if (command === 'get_sync_status') return null;
+        if (command === 'get_sync_status') {
+          // #888's hydration store passes this straight into `hydrate(status, …)`,
+          // which reads `presence_paused`. Returning null threw during boot and
+          // the pane never settled. Same shape as skip-link.spec.ts.
+          return {
+            is_syncing: true,
+            current_track: {
+              id: 'track-1',
+              title: 'A Track',
+              artist: 'An Artist',
+              album: 'An Album',
+              album_art_url: null,
+              duration_ms: 200000,
+              progress_ms: 1000,
+              is_playing: true
+            },
+            spotify_connected: true,
+            teams_connected: true,
+            presence_paused: false
+          };
+        }
         if (command === 'is_spotify_client_secret_set') return 'Present';
         if (command === 'plugin:event|listen') return callbackId;
         if (command === 'plugin:event|unlisten') return null;
@@ -231,7 +258,34 @@ for (const width of [DEFAULT_WIDTH, MIN_WIDTH]) {
         // Dashboard; the Diagnostics pane is reachable from there.
         await openApp(page, locale);
         await page.goto('/');
-        await page.getByRole('button', { name: DIAGNOSTICS_ARIA_LABEL[locale] }).click();
+        // At <=640px the Dashboard collapses its five nav buttons into the
+        // overflow menu (#954), so the Diagnostics control is not a top-level
+        // button at these widths. Open the menu first, exactly as
+        // dashboard-header.spec.ts does. The LogViewer case above sidesteps
+        // this by navigating straight to /detached/logs.
+        const overflow = page.locator('.more-btn');
+        // `isVisible()` answers immediately for an element that has not rendered
+        // yet, which would silently take the inline-button branch at a width
+        // where that button is hidden. Wait for the Dashboard to settle first.
+        await page.locator('.app-container').waitFor({ state: 'attached' });
+        const overflowShown = await overflow
+          .waitFor({ state: 'visible', timeout: 5_000 })
+          .then(() => true)
+          .catch(() => false);
+        if (overflowShown) {
+          await overflow.click();
+          // The overflow item renders `dashboard.diagnostics` ("Diagnostics"),
+          // while the inline button carries `dashboard.openDiagnosticsAria`
+          // ("Open diagnostics"). They are different strings, so the menu item
+          // has to be matched by its own label.
+          const item = page
+            .locator('.header-menu [role="menuitem"]')
+            .filter({ hasText: DIAGNOSTICS_MENU_LABEL[locale] });
+          await expect(item).toHaveCount(1);
+          await item.click();
+        } else {
+          await page.getByRole('button', { name: DIAGNOSTICS_ARIA_LABEL[locale] }).click();
+        }
         const toolbar = page.locator('.diagnostics .toolbar');
         await expect(toolbar).toBeVisible();
 

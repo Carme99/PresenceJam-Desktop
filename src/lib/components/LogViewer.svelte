@@ -546,13 +546,20 @@
     gap: var(--sp-4);
   }
 
+  /* #948: this row overflowed the pane at the shipped 600x750 default because
+     nothing was allowed to wrap and nothing could yield space. `flex-wrap`
+     breaks it; the explicit `row-gap` keeps the wrapped rows on the same rhythm
+     as the items' `column-gap`. Mirrors Diagnostics' toolbar. */
   .toolbar {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: var(--sp-2);
+    row-gap: var(--sp-2);
   }
   .count {
     margin-right: auto;
+    min-width: 0;
     font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--fg-subtle);
@@ -565,8 +572,17 @@
     font-size: var(--fs-sm);
   }
 
+  /* #948: the level strip is the one toolbar child that cannot shrink — six
+     buttons, wider than the pane at the 400px declared minimum. Without this
+     the whole toolbar overflows instead of wrapping, because the strip is
+     incompressible. Let it shrink and scroll its own overflow instead: the
+     contract #948 chose over a duplicate overflow menu. `inScrollableStrip`
+     exempts these buttons from the pane-edge assertions for the same reason. */
   .seg {
     display: inline-flex;
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: auto;
     background: var(--bg-elevated);
     border: 1px solid var(--border);
     border-radius: var(--r-md);
