@@ -7,6 +7,24 @@
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { t } from '$lib/i18n';
   import { configHydrated, configStore, loadConfig } from '$lib/stores/config';
+  // Issue #782: every updater payload below is generated from
+  // `src-tauri/src/updater_bg.rs` by `#[ts(export)]` and re-exported from
+  // `$lib/types`. These used to be hand-mirrored local interfaces, so a
+  // Rust-side field rename left the banner reading `undefined` at runtime
+  // while `npm run check` stayed green.
+  import type {
+    CancelDeferredOutcome,
+    StageDeferredOutcome,
+    StageProgressEvent,
+    UpdateCheckOutcome,
+    UpdateInstall
+  } from '$lib/types';
+
+  // #940: the banner's periodic check must not stack on another unresolved
+  // check. A hung endpoint used to leave `check_for_update` unresolved and
+  // every 24 h tick then started another; the backend now fails such a check
+  // within 30 s, and this flag keeps the tick off the in-flight one.
+  let checkInFlight = false;
 
   let { onStageStart, onStageCancellation }: {
     onStageStart?: (requestId: string) => boolean;
@@ -23,7 +41,7 @@
   // with an explicit install/skip choice, and the backend refuses stale
   // stages (older than or equal to the running build) unless the user
   // forces them after seeing both versions.
-  let update = $state<UpdateInfo | null>(null);
+  let update = $state<UpdateCheckOutcome | null>(null);
   let dismissed = $state(false);
   let downloading = $state(false);
   let downloadedBytes = $state(0);
@@ -64,40 +82,22 @@
     return `${Date.now()}-${stageRequestSerial}`;
   }
 
-  // Mirrors the backend `UpdateCheckOutcome` returned by `check_for_update`
-  // (kept local, same convention as StageOutcome). `notes` and `pub_date`
-  // are the manifest's release notes and publish date.
-  interface UpdateInfo {
-    version: string;
-    notes: string | null;
-    pub_date: string | null;
-  }
+  // #894: `UpdateCheckOutcome.install` — a `deb` / `rpm` install is owned by a
+  // system package manager, so the banner offers the package command and no
+  // install buttons instead of downloading an AppImage the plugin cannot
+  // apply. `null` means the in-app path, which is every non-Linux-package
+  // bundle type.
+  const packageManaged = $derived<UpdateInstall | null>(
+    update !== null && update.install.kind !== 'in-app' ? update.install : null
+  );
+  // The asset file name the release publishes for this flavour — the command
+  // in the notice has to name the file the user actually downloaded.
+  const packageAssetName = $derived(
+    packageManaged === null
+      ? ''
+      : packageManaged.package_url.slice(packageManaged.package_url.lastIndexOf('/') + 1)
+  );
 
-  // Mirrors the backend `StageDeferredOutcome` shape (kept local so no
-  // generated types need to change for this slice). `skipped` (#957) says
-  // WHICH nothing-to-do a `staged: null` outcome was — the reason names are
-  // the backend's `SKIP_REASON_*` constants — and is absent on the staged
-  // case (`skip_serializing_if`), hence optional.
-  interface StageOutcome {
-    staged: string | null;
-    current: string;
-    skipped?: 'current' | 'stale' | 'already-skipped' | 'cancelled' | null;
-  }
-
-  // Mirrors the backend `StageProgress` shape emitted on
-  // `update-stage-progress` (kept local, same convention as StageOutcome).
-  // `total` is `null` when the server sent no `Content-Length`; `request_id`
-  // identifies the exact stage so a losing download cannot overwrite the next
-  // stage's progress.
-  interface StageProgress {
-    downloaded: number;
-    total: number | null;
-    request_id?: string;
-  }
-
-  interface CancelOutcome {
-    state: 'idle' | 'cancelled' | 'already-completed';
-  }
 
   // 4.7.0 (issue #678): the candidate comes from the backend, which resolves
   // `config.updates.channel`; the immediate JS `downloadAndInstall()` below
@@ -136,7 +136,12 @@
   // banner has already moved on from.
   let checkGen = 0;
 
-  function checkForUpdate() {
+  function checkForUpdate(source: 'startup' | 'periodic' | 'channel-switch' = 'startup') {
+    // #940: a periodic tick skips while another check is unresolved. The
+    // backend now fails a hung endpoint within 30 s, but the tick must not
+    // stack on top of a check that is already in flight — that is what pinned
+    // a blocking-pool thread per tick while an endpoint hung.
+    if (source === 'periodic' && checkInFlight) return;
     // #977: remember the channel this check runs against so the effect below
     // can tell a Settings switch apart from the hydration flip. Before
     // hydration the store still holds the mirror's default, so recording
@@ -151,7 +156,8 @@
     // The backend resolves the configured channel into the endpoint list —
     // the plugin's JS `check()` cannot take endpoints and is hard-wired to
     // the static stable entry (issue #678).
-    invoke<UpdateInfo | null>('check_for_update')
+    checkInFlight = true;
+    invoke<UpdateCheckOutcome | null>('check_for_update')
       .then((u) => {
         if (gen !== checkGen) return;
         if (u) {
@@ -181,10 +187,16 @@
       .catch((e) => {
         // Offline / unreachable endpoint / mismatched pubkey etc. — never
         // surface a failed update check to the user, whether at startup
-        // or from a background timer.
+        // or from a background timer. A check that times out (#940) lands
+        // here too, which is the point: it settles rather than hanging.
         console.error('[UPDATER] check failed:', e);
+      })
+      .finally(() => {
+        // #940: release the in-flight guard on every exit, success or
+        // failure, so a bounded check that timed out does not wedge the
+        // 24h tick off permanently.
+        if (gen === checkGen) checkInFlight = false;
       });
-  }
 
   // #977: a channel switch in Settings republishes the persisted document
   // into `configStore` (`saveConfig`/`updateConfig`), and that is the signal
@@ -212,7 +224,7 @@
     confirming = false;
     dismissed = false;
     if (!stagedVersion) update = null;
-    checkForUpdate();
+    checkForUpdate('channel-switch');
   });
 
   onMount(() => {
@@ -227,13 +239,15 @@
     if (get(configHydrated)) channelResolved = true;
     else loadConfig().finally(() => (channelResolved = true));
     checkForUpdate();
-    const interval = setInterval(checkForUpdate, CHECK_INTERVAL_MS);
+    // #940: the tick goes through the `periodic` source so it steps over a
+    // check that is still in flight instead of stacking another one.
+    const interval = setInterval(() => checkForUpdate('periodic'), CHECK_INTERVAL_MS);
     // #590: staging progress. `listen()` resolves asynchronously, so an
     // unmount before it does must release the subscription immediately —
     // the `destroyed` guard the other listener sites in this app use.
     let destroyed = false;
     let unlistenStage: UnlistenFn | null = null;
-    listen<StageProgress>('update-stage-progress', (event) => {
+    listen<StageProgressEvent>('update-stage-progress', (event) => {
       const requestId = event.payload.request_id ?? '';
       if (
         requestId &&
@@ -365,7 +379,7 @@
     stageTotal = null;
     error = '';
     try {
-      const outcome = await invoke<StageOutcome>('stage_deferred_update', {
+      const outcome = await invoke<StageDeferredOutcome>('stage_deferred_update', {
         force,
         requestId
       });
@@ -452,7 +466,7 @@
     if (staging) stageAborted = true;
     if (requestId) onStageCancellation?.(requestId, true);
     try {
-      const outcome = await invoke<CancelOutcome>('cancel_deferred_update', { requestId });
+      const outcome = await invoke<CancelDeferredOutcome>('cancel_deferred_update', { requestId });
       // Every successful response leaves the request tombstone in place:
       // `idle`/`cancelled` are acknowledged by the older stage command's
       // terminal result, while `already-completed` may still have a queued
@@ -515,6 +529,15 @@
             ? t('update.confirmQuitInstall', { staged: update.version, current: currentVersion })
             : t('update.confirmQuitInstallUnknown', { staged: update.version })}
         </span>
+      {:else if packageManaged}
+        <!-- #894: the apt/rpm line replaces the whole install-choice chain for
+             a package-manager install — there is nothing here to install,
+             confirm, skip or stage. -->
+        <span class="update-package-note">
+          {packageManaged.kind === 'deb'
+            ? t('update.packageManagedDeb', { version: update.version })
+            : t('update.packageManagedRpm', { version: update.version })}
+        </span>
       {:else if isStaleSkipped && !stageProgress}
         <span class="update-stale">
           {currentVersion
@@ -559,73 +582,98 @@
           : t('update.preparing')}
       </span>
     {/if}
-    <div class="update-actions">
-      {#if channelResolved && !isBeta}
-        <button
-          type="button"
-          class="download-btn"
-          onclick={downloadAndInstall}
-          disabled={downloading || staging}
+    <!-- #894: a package-manager install has no in-app update path. The
+         manifest offers the AppImage payload, which `install_deb` rejects as
+         `invalid updater binary format` (and which the AppImage fallback
+         cannot write under /usr), so the strip shows the package command and
+         the download link and hides both install buttons — offering either
+         would download the whole AppImage and then fail. -->
+    {#if packageManaged}
+      <div class="update-package">
+        <a
+          class="update-package-link"
+          href={packageManaged.package_url}
+          target="_blank"
+          rel="noopener noreferrer"
+          download
         >
-          {downloading ? t('update.downloading') : t('update.downloadAndInstall')}
-        </button>
-      {/if}
-      {#if staging || stagedVersion}
-        <button
-          type="button"
-          class="quit-btn"
-          onclick={cancelStage}
-          disabled={cancelling || stageAborted}
-        >
-          {t('update.cancelStage')}
-        </button>
-      {:else if confirming}
-        <button
-          type="button"
-          class="quit-btn"
-          onclick={confirmQuitInstall}
-          disabled={downloading}
-        >
-          {t('update.installOnQuit')}
-        </button>
-        <button
-          type="button"
-          class="quit-btn"
-          onclick={cancelQuitConfirm}
-          disabled={downloading}
-        >
-          {t('common.dismiss')}
-        </button>
-      {:else if isStaleSkipped}
-        <button
-          type="button"
-          class="quit-btn"
-          onclick={installStaleAnyway}
-          disabled={downloading}
-        >
-          {t('update.installAnyway')}
-        </button>
-      {:else}
-        <button
-          type="button"
-          class="quit-btn"
-          onclick={openQuitConfirm}
-          disabled={downloading}
-        >
-          {t('update.installOnQuit')}
-        </button>
-      {/if}
-      <button
-        type="button"
-        class="icon-btn dismiss-btn"
-        onclick={dismissPrompt}
-        aria-label={t('update.dismissAria')}
-        title={t('common.dismiss')}
-        disabled={downloading || staging || Boolean(stagedVersion)}
-      >
-        ×
-      </button>
-    </div>
+          {packageAssetName}
+        </a>
+        <code class="update-package-cmd">
+          {packageManaged.kind === 'deb'
+            ? t('update.packageManagerInstallDeb', { file: packageAssetName })
+            : t('update.packageManagerInstallRpm', { file: packageAssetName })}
+        </code>
+      </div>
+    {:else}
+      <div class="update-actions">
+        {#if channelResolved && !isBeta}
+          <button
+            type="button"
+            class="download-btn"
+            onclick={downloadAndInstall}
+            disabled={downloading || staging}
+          >
+            {downloading ? t('update.downloading') : t('update.downloadAndInstall')}
+          </button>
+        {/if}
+        {#if staging || stagedVersion}
+          <button
+            type="button"
+            class="quit-btn"
+            onclick={cancelStage}
+            disabled={cancelling || stageAborted}
+          >
+            {t('update.cancelStage')}
+          </button>
+        {:else if confirming}
+          <button
+            type="button"
+            class="quit-btn"
+            onclick={confirmQuitInstall}
+            disabled={downloading}
+          >
+            {t('update.installOnQuit')}
+          </button>
+          <button
+            type="button"
+            class="quit-btn"
+            onclick={cancelQuitConfirm}
+            disabled={downloading}
+          >
+            {t('common.dismiss')}
+          </button>
+        {:else if isStaleSkipped}
+          <button
+            type="button"
+            class="quit-btn"
+            onclick={installStaleAnyway}
+            disabled={downloading}
+          >
+            {t('update.installAnyway')}
+          </button>
+        {:else}
+          <button
+            type="button"
+            class="quit-btn"
+            onclick={openQuitConfirm}
+            disabled={downloading}
+          >
+            {t('update.installOnQuit')}
+          </button>
+        {/if}
+      </div>
+    {/if}
+    <button
+      type="button"
+      class="icon-btn dismiss-btn"
+      onclick={dismissPrompt}
+      aria-label={t('update.dismissAria')}
+      title={t('common.dismiss')}
+      disabled={downloading || staging || Boolean(stagedVersion)}
+    >
+      ×
+    </button>
   </div>
 {/if}
 
@@ -711,6 +759,32 @@
   .update-beta {
     font-size: var(--fs-xs);
     color: var(--fg-muted);
+  }
+  .update-package-note {
+    font-size: var(--fs-xs);
+    color: var(--fg-muted);
+  }
+  /* #894: the apt/rpm notice replaces the button group. It yields to the
+     strip the same way `.update-actions` does, so the asset link and the
+     command wrap onto a second row rather than spilling past the border. */
+  .update-package {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--sp-2);
+    row-gap: var(--sp-1);
+  }
+  .update-package-link {
+    font-size: var(--fs-sm);
+    color: var(--accent);
+  }
+  .update-package-cmd {
+    padding: var(--sp-1) var(--sp-2);
+    font-size: var(--fs-xs);
+    color: var(--fg-muted);
+    background: var(--bg-base);
+    border: 1px solid var(--fg-muted);
+    border-radius: var(--r-sm);
   }
   .update-error {
     font-size: var(--fs-xs);

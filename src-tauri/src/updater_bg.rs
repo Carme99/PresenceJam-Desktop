@@ -104,13 +104,21 @@ const SKIP_REASON_CANCELLED: &str = "cancelled";
 /// confirmation surface can show staged-vs-current without an extra
 /// round-trip or new frontend permissions. `skipped` says WHICH nothing-to-do
 /// this was (issue #957), and is absent on the staged case so that payload's
-/// wire shape is unchanged. No `ts_rs` export: the shape is mirrored by a
-/// local interface in `UpdatePrompt.svelte`.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+/// wire shape is unchanged.
+///
+/// Exported with `ts_rs` (issue #782): `UpdatePrompt.svelte` consumed a
+/// hand-mirrored copy of this shape, so a Rust-side rename silently left the
+/// banner reading `undefined` while `npm run check` stayed green.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct StageDeferredOutcome {
     pub staged: Option<String>,
     pub current: String,
+    /// `skip_serializing_if` drops the key entirely when there is no skip
+    /// reason, so the TypeScript side is `skipped?: string` rather than a
+    /// required `string | null`.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub skipped: Option<String>,
 }
 
@@ -118,8 +126,12 @@ pub struct StageDeferredOutcome {
 /// `idle` means the exact request has not begun yet and is now tombstoned;
 /// `already-completed` means its verified payload was already committed, so
 /// cancellation still removes it before the exit installer can see it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+///
+/// Exported with `ts_rs` (issue #782): `UpdatePrompt.svelte` mirrored both this
+/// enum and [`CancelDeferredOutcome`] by hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
 #[serde(rename_all = "kebab-case")]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
 pub enum CancelDeferredState {
     Idle,
     Cancelled,
@@ -128,8 +140,9 @@ pub enum CancelDeferredState {
 
 /// Result of cancelling the deferred stage. The discriminator is the backend
 /// race verdict, so the frontend never has to infer completion from a local
-/// promise ordering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+/// promise ordering. Exported with `ts_rs` (issue #782).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct CancelDeferredOutcome {
     pub state: CancelDeferredState,
 }
@@ -311,10 +324,14 @@ impl Default for PendingUpdate {
 
 /// Emitted on `update-stage-progress` while a deferred update downloads, so
 /// the banner can drive its progress bar instead of sitting on "Preparing…"
-/// for the whole payload. No `ts_rs` export: the shape is mirrored by a
-/// local interface in `UpdatePrompt.svelte` (same convention as
-/// [`StageDeferredOutcome`]).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+/// for the whole payload.
+///
+/// Exported with `ts_rs` (issue #782) for the same reason as
+/// [`StageDeferredOutcome`]: the banner used a hand-mirrored copy. `total` is
+/// nullable exactly as the payload is — the plugin reports `None` when the
+/// server sent no `Content-Length`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct StageProgress {
     /// Bytes downloaded so far. The plugin's callback reports the running
     /// total, not the size of the chunk just read.
@@ -990,19 +1007,181 @@ where
     Err(last_error.unwrap_or_else(|| "no update endpoints configured".to_string()))
 }
 
+/// Wall-clock ceiling on one endpoint's update check (issue #940).
+///
+/// A captive portal, a corporate proxy or a half-open TCP connection makes
+/// the request hang rather than fail, so without a bound `check_for_update`
+/// never resolves: the banner silently stops offering updates and every
+/// 24 h tick pins another blocking-pool thread. 30 s is far above a healthy
+/// GitHub manifest round-trip and below the point a user reads the banner as
+/// broken.
+const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Wall-clock ceiling on one deferred payload download (issue #940).
+///
+/// Generous next to a check: this bounds a whole multi-megabyte transfer on a
+/// slow link, not a manifest fetch. The point is that it is finite — a stalled
+/// transfer used to sit on "Preparing…" with no error path and no way to
+/// release the transfer at all.
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// User-visible failure for a download that outlived its budget (issue #940).
+fn download_timeout_error(limit: Duration) -> String {
+    format!("update download timed out after {}s", limit.as_secs())
+}
+
+/// Outcome of a bounded await (issue #940).
+#[derive(Debug, PartialEq, Eq)]
+enum Bounded<T> {
+    /// The awaited operation finished inside its budget.
+    Completed(T),
+    /// The budget elapsed first; the awaited operation was dropped, which
+    /// cancels the in-flight request.
+    Elapsed,
+}
+
+/// Polls `work` and `deadline` together and reports whichever settled first.
+///
+/// Generic over the deadline future so the bound is provable without a socket
+/// or a real sleep: a test drives a never-resolving `work` against an
+/// already-elapsed deadline and asserts [`Bounded::Elapsed`], and drives a
+/// ready `work` against a never-elapsing deadline and asserts the value comes
+/// through — the two arms [`Elapses`] can take in production.
+async fn bounded<F, W, T>(work: F, deadline: W) -> Bounded<T>
+where
+    F: Future<Output = T>,
+    W: Future<Output = ()>,
+{
+    let mut work = std::pin::pin!(work);
+    let mut deadline = std::pin::pin!(deadline);
+    std::future::poll_fn(move |cx| {
+        // `work` first: when both are ready the operation that actually
+        // finished wins, so a transfer that completes exactly on the boundary
+        // is not reported as a timeout.
+        if let std::task::Poll::Ready(value) = work.as_mut().poll(cx) {
+            return std::task::Poll::Ready(Bounded::Completed(value));
+        }
+        if deadline.as_mut().poll(cx).is_ready() {
+            return std::task::Poll::Ready(Bounded::Elapsed);
+        }
+        std::task::Poll::Pending
+    })
+    .await
+}
+
+/// Wake-up slot shared between the timer thread and [`Elapses`].
+///
+/// `parking_lot` rather than `std::sync::Mutex` per AGENTS.md §4 — it is the
+/// project default, and the critical section is a single `Option` swap.
+struct ElapseSignal {
+    spent: std::sync::atomic::AtomicBool,
+    waker: Mutex<Option<std::task::Waker>>,
+}
+
+impl ElapseSignal {
+    fn new() -> Self {
+        Self {
+            spent: std::sync::atomic::AtomicBool::new(false),
+            waker: Mutex::new(None),
+        }
+    }
+
+    /// Marks the budget spent and wakes the waiting task, if any.
+    fn fire(&self) {
+        self.spent.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(waker) = self.waker.lock().take() {
+            waker.wake();
+        }
+    }
+
+    /// Publishes the task to wake when the budget elapses.
+    fn arm(&self, cx: &std::task::Context<'_>) {
+        *self.waker.lock() = Some(cx.waker().clone());
+    }
+}
+
+/// Deadline future that completes `limit` after construction (issue #940).
+///
+/// One short-lived OS thread per bounded operation — a deferred stage or a
+/// channel check, both user-initiated and rare — sleeps out the budget and
+/// then fires the shared signal. Deliberately not a busy poll: `bounded`'s
+/// `work` future only makes progress while it is being polled, so spinning
+/// here would starve the very transfer the budget is bounding.
+struct Elapses {
+    signal: std::sync::Arc<ElapseSignal>,
+}
+
+impl Elapses {
+    fn after(limit: Duration) -> Self {
+        let signal = std::sync::Arc::new(ElapseSignal::new());
+        let fired = signal.clone();
+        std::thread::Builder::new()
+            .name("pj-updater-deadline".to_string())
+            .spawn(move || {
+                std::thread::sleep(limit);
+                fired.fire();
+            })
+            // Only fails when the OS refuses to create a thread at all. There
+            // is no deadline left to enforce without one, so the bounded
+            // operation would silently become unbounded — the exact failure
+            // #940 exists to remove — and that has to be loud, not quiet.
+            .expect("spawning the updater deadline thread must succeed");
+        Self { signal }
+    }
+}
+
+impl Future for Elapses {
+    type Output = ();
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        if self.signal.spent.load(std::sync::atomic::Ordering::SeqCst) {
+            return std::task::Poll::Ready(());
+        }
+        self.signal.arm(cx);
+        // Re-read after arming: a fire that raced this poll would otherwise
+        // find no waker registered and leave the task parked forever.
+        if self.signal.spent.load(std::sync::atomic::Ordering::SeqCst) {
+            return std::task::Poll::Ready(());
+        }
+        std::task::Poll::Pending
+    }
+}
+
 /// Runs one endpoint's updater `check()` (issue #807).
 ///
 /// Split out of [`check_with_channel`] so the same endpoint can be consulted
 /// twice — once for its announced version, once for the plugin's `Update` —
 /// without repeating the builder setup.
+///
+/// Two bounds apply, because they cover different failures (issue #940). The
+/// builder timeout reaches the plugin's own reqwest client, so a stalled
+/// connection is aborted at the socket; the [`bounded`] watchdog additionally
+/// bounds the whole `check()` await, so the command still settles if the
+/// client-level timeout is ever bypassed or the future stalls somewhere the
+/// client cannot see. Dropping the future cancels the request.
+///
+/// A builder-level timeout cannot reach a download — the built `Update`
+/// hardcodes its own timeout to `None` — which is why
+/// [`stage_deferred_update`] bounds its download separately.
 async fn check_endpoint(app: &AppHandle, url: Url) -> Result<Option<Update>, String> {
+    let announced = url.clone();
     let updater = app
         .updater_builder()
         .endpoints(vec![url])
         .map_err(|e| format!("invalid update endpoint: {e}"))?
+        .timeout(CHECK_TIMEOUT)
         .build()
         .map_err(|e| format!("updater unavailable: {e}"))?;
-    updater.check().await.map_err(|e| e.to_string())
+    match bounded(updater.check(), Elapses::after(CHECK_TIMEOUT)).await {
+        Bounded::Completed(result) => result.map_err(|e| e.to_string()),
+        Bounded::Elapsed => Err(format!(
+            "update check at {announced} did not answer within {}s",
+            CHECK_TIMEOUT.as_secs()
+        )),
+    }
 }
 
 /// Checks for an update on the configured release channel.
@@ -1052,10 +1231,52 @@ async fn check_with_channel(
     }
 }
 
-/// Banner payload of [`check_for_update`] (issue #678). No `ts_rs` export:
-/// the shape is mirrored by a local interface in `UpdatePrompt.svelte` (same
-/// convention as [`StageDeferredOutcome`]).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+/// How the running install has to be updated (issue #894).
+///
+/// `latest.json` publishes exactly one `linux-x86_64` entry and it points at
+/// the AppImage, but the plugin's installer branches on the bundle type the
+/// running binary was packaged in: a `.deb` install routes to `install_deb`,
+/// which rejects AppImage bytes as `invalid updater binary format`, and a run
+/// without the AppImage marker falls through to `install_appimage`, which
+/// rewrites the binary in place under `/usr` and fails on permissions. So the
+/// Debian/Ubuntu/Mint/popOS install SETUP.md recommends could never update at
+/// all. The banner says so instead of downloading a payload that cannot be
+/// installed.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+// Exported for the same reason as [`UpdateCheckOutcome`] (issue #782), and
+// for a sharper reason: without `export_to` ts-rs writes this type to its
+// default `bindings/` directory next to the crate root, and
+// `UpdateCheckOutcome.ts` then imports it from `../../../src-tauri/bindings/`
+// — a cross-tree import into the Rust source directory that no diff shows,
+// because `src/lib/types-generated/` is gitignored. `src-tauri/bindings/` is
+// deliberately NOT gitignored: it is the signal for exactly this mistake.
+#[ts(export, export_to = "../../src/lib/types-generated/")]
+pub enum UpdateInstall {
+    /// The running bundle type has a matching payload in the manifest and the
+    /// plugin can install it in place.
+    InApp,
+    /// Installed from a `.deb` (Debian/Ubuntu/Mint/popOS) — apt owns the
+    /// install, so the banner shows the package command and no install button.
+    Deb {
+        /// Direct download URL of the `.deb` asset for this version.
+        package_url: String,
+    },
+    /// Installed from an `.rpm` (Fedora/RHEL/openSUSE) — same split for the
+    /// RPM payload the release also ships.
+    Rpm {
+        /// Direct download URL of the `.rpm` asset for this version.
+        package_url: String,
+    },
+}
+
+/// Banner payload of [`check_for_update`] (issue #678).
+///
+/// Exported with `ts_rs` (issue #782): `UpdatePrompt.svelte` used to declare a
+/// hand-mirrored copy of this shape, so a Rust-side field rename left the
+/// banner reading `undefined` at runtime while `npm run check` stayed green.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct UpdateCheckOutcome {
     /// The version the manifest announces.
     pub version: String,
@@ -1065,6 +1286,8 @@ pub struct UpdateCheckOutcome {
     /// Publish date exactly as the manifest spells it — RFC 3339, e.g.
     /// `2026-09-16T21:07:35Z`.
     pub pub_date: Option<String>,
+    /// How this install has to be updated (issue #894).
+    pub install: UpdateInstall,
 }
 
 /// The manifest's own `pub_date` literal.
@@ -1081,6 +1304,53 @@ fn manifest_pub_date(raw_json: &serde_json::Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Base of the published release-download URLs. The tag carries the app
+/// version (`v4.7.0`) and the asset name is the fixed Linux artefact name the
+/// release workflow publishes (`.github/workflows/release.yml`, "Package Linux
+/// artifacts").
+const RELEASES_DOWNLOAD_BASE: &str =
+    "https://github.com/Carme99/PresenceJam-Desktop/releases/download";
+
+/// File name of the published `.deb` asset for a release.
+const LINUX_DEB_ASSET: &str = "PresenceJam-linux-amd64.deb";
+
+/// File name of the published `.rpm` asset for a release.
+const LINUX_RPM_ASSET: &str = "PresenceJam-linux-amd64.rpm";
+
+/// Direct download URL of `asset` for the release tagged `v<version>`.
+///
+/// `version` comes from the signed-and-verified update manifest, never from a
+/// user-supplied string, and the tag is asserted to be `v`-prefixed by the
+/// release workflow itself. The value reaches the webview as a link target,
+/// so it is assembled from these two constants rather than from anything the
+/// check can be steered into — no endpoint, header or token can reach it.
+fn release_asset_url(version: &str, asset: &str) -> String {
+    format!("{RELEASES_DOWNLOAD_BASE}/v{version}/{asset}")
+}
+
+/// Which install path the running build has, from Tauri's own bundle marker
+/// (issue #894).
+///
+/// `tauri::utils::platform::bundle_type` is the exact signal the updater plugin
+/// branches on internally (`installer_for_bundle_type`), so consulting it here
+/// keeps the banner's answer and the plugin's eventual behaviour in agreement.
+/// Every other bundle type — including `AppImage`, `Msi`, `Nsis` and `App` —
+/// keeps the in-app path, which is the behaviour that already works.
+fn install_method_for(
+    bundle: Option<tauri::utils::config::BundleType>,
+    version: &str,
+) -> UpdateInstall {
+    match bundle {
+        Some(tauri::utils::config::BundleType::Deb) => UpdateInstall::Deb {
+            package_url: release_asset_url(version, LINUX_DEB_ASSET),
+        },
+        Some(tauri::utils::config::BundleType::Rpm) => UpdateInstall::Rpm {
+            package_url: release_asset_url(version, LINUX_RPM_ASSET),
+        },
+        _ => UpdateInstall::InApp,
+    }
+}
+
 /// Tauri command: check for an update on the configured channel (issue #678).
 ///
 /// The banner uses this instead of the plugin's JS `check()` because the JS
@@ -1089,7 +1359,9 @@ fn manifest_pub_date(raw_json: &serde_json::Value) -> Option<String> {
 ///
 /// #215 convention: config read and network both happen on a blocking-pool
 /// thread. `Ok(None)` means the running build is already current; `Err` means
-/// every endpoint of the channel failed.
+/// every endpoint of the channel failed. Each check is bounded at
+/// [`CHECK_TIMEOUT`] (issue #940), so a hung endpoint fails rather than
+/// pinning this command and its blocking-pool thread indefinitely.
 #[cfg(desktop)]
 #[tauri::command]
 pub async fn check_for_update(app: AppHandle) -> Result<Option<UpdateCheckOutcome>, String> {
@@ -1115,10 +1387,24 @@ pub async fn check_for_update(app: AppHandle) -> Result<Option<UpdateCheckOutcom
         Some(update) => log::info!("{TAG} check_for_update: v{} available", update.version),
         None => log::info!("{TAG} check_for_update: already current"),
     }
-    Ok(found.map(|update| UpdateCheckOutcome {
-        version: update.version,
-        notes: update.body,
-        pub_date: manifest_pub_date(&update.raw_json),
+    Ok(found.map(|update| {
+        let install = install_method_for(tauri::utils::platform::bundle_type(), &update.version);
+        if !matches!(install, UpdateInstall::InApp) {
+            // #894: the manifest offers the AppImage payload, which this
+            // install flavour cannot apply. The banner shows the package
+            // command instead of an install button that would always fail.
+            log::info!(
+                "{TAG} check_for_update: v{} is package-manager managed; offering apt/rpm \
+                 instructions instead of an in-app install",
+                update.version
+            );
+        }
+        UpdateCheckOutcome {
+            version: update.version,
+            notes: update.body,
+            pub_date: manifest_pub_date(&update.raw_json),
+            install,
+        }
     }))
 }
 
@@ -1130,18 +1416,28 @@ pub async fn check_for_update(app: AppHandle) -> Result<Option<UpdateCheckOutcom
 /// downloaded/total state machine; the caller stamps every emission with the
 /// active request id so a cancelled or superseded download cannot overwrite
 /// the next stage's frontend position.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-struct StageProgressEvent {
+///
+/// This is the shape the webview actually receives, so it — not
+/// [`StageProgress`] — is what `UpdatePrompt.svelte` types its
+/// `update-stage-progress` listener with. Exported for the same reason as the
+/// rest (issue #782).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
+pub struct StageProgressEvent {
     #[serde(flatten)]
+    #[ts(flatten)]
     progress: StageProgress,
     request_id: String,
 }
 
 /// Emitted once on `update-stage-complete` after a deferred update has been
 /// staged successfully, so an always-mounted consumer can notify without
-/// being the webview that invoked [`stage_deferred_update`]. No `ts_rs`
-/// export: the shape is mirrored by a local interface where it is consumed.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+/// being the webview that invoked [`stage_deferred_update`].
+///
+/// Exported with `ts_rs` (issue #782) — same reason as
+/// [`StageDeferredOutcome`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct StageComplete {
     /// Version that is now staged for install on quit.
     pub version: String,
@@ -1270,6 +1566,25 @@ pub async fn stage_deferred_update(
                     skipped: Some(SKIP_REASON_CANCELLED.to_string()),
                 });
             }
+            // Issue #894: this flavour's update is a package the user installs,
+            // not a payload the plugin can apply. The banner hides both install
+            // buttons for it, so reaching here means a stale banner — refuse
+            // rather than stage an AppImage whose install would fail at quit
+            // and leave a failed-install marker on the next launch.
+            if !matches!(
+                install_method_for(tauri::utils::platform::bundle_type(), &update.version),
+                UpdateInstall::InApp
+            ) {
+                app.state::<PendingUpdate>()
+                    .0
+                    .lock()
+                    .finish_without_staging(&active);
+                return Err(
+                    "this install is package-manager managed; install the published package \
+                     instead"
+                        .to_string(),
+                );
+            }
             let version = update.version.clone();
             // Issue #431: never stage a stale update unless the user
             // explicitly forced it after seeing both versions on the
@@ -1319,28 +1634,45 @@ pub async fn stage_deferred_update(
             }
             // Issue #590: stream throttled progress while the payload
             // downloads, so a multi-minute stage is not a black box.
+            //
+            // Issue #940: the download is bounded too. The builder timeout set
+            // in `check_endpoint` cannot reach here — the built `Update`
+            // hardcodes its own `timeout` to `None` — so without this watchdog
+            // a stalled transfer held "Preparing…" forever with no error and no
+            // way to release it. Elapsing returns a user-visible error, and
+            // the generation is released so a retry is a fresh stage rather
+            // than a wait on a dead one.
             let progress_app = app.clone();
             let progress_request_id = active.request_id.clone();
             let mut progress = StageProgressThrottle::new();
-            let bytes = update
-                .download(
-                    move |chunk_len, content_length| {
-                        if let Some(progress) =
-                            progress.observe(Instant::now(), chunk_len as u64, content_length)
-                        {
-                            let _ = progress_app.emit(
-                                "update-stage-progress",
-                                StageProgressEvent {
-                                    progress,
-                                    request_id: progress_request_id.clone(),
-                                },
-                            );
-                        }
-                    },
-                    || {},
-                )
-                .await
-                .map_err(|e| format!("update download failed: {e}"))?;
+            let download = update.download(
+                move |chunk_len, content_length| {
+                    if let Some(progress) =
+                        progress.observe(Instant::now(), chunk_len as u64, content_length)
+                    {
+                        let _ = progress_app.emit(
+                            "update-stage-progress",
+                            StageProgressEvent {
+                                progress,
+                                request_id: progress_request_id.clone(),
+                            },
+                        );
+                    }
+                },
+                || {},
+            );
+            let bytes = match bounded(download, Elapses::after(DOWNLOAD_TIMEOUT)).await {
+                Bounded::Completed(result) => {
+                    result.map_err(|e| format!("update download failed: {e}"))?
+                }
+                Bounded::Elapsed => {
+                    app.state::<PendingUpdate>()
+                        .0
+                        .lock()
+                        .finish_without_staging(&active);
+                    return Err(download_timeout_error(DOWNLOAD_TIMEOUT));
+                }
+            };
             // Cancellation and this commit contend for one lock. Whichever
             // arrives first wins: a cancelled generation drops the bytes
             // without emitting terminal progress/completion; a commit emits

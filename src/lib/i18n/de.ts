@@ -310,6 +310,16 @@ export const de: Dict = {
   'update.staleSkippedUnknown':
     'v{staged} wurde übersprungen — es ist nicht neuer als Ihre aktuelle Version.',
   'update.installAnyway': 'Trotzdem installieren',
+  // #894: eine .deb-/.rpm-Installation wird über den Paketmanager aktualisiert,
+  // nicht über den eingebauten Updater — das Release-Manifest bietet nur die
+  // AppImage-Nutzlast, die kein dieser Installer anwenden kann. Das Banner zeigt
+  // den Befehl statt einer Installations-Schaltfläche.
+  'update.packageManagedDeb':
+    'v{version} ist verfügbar. Diese Kopie wurde als .deb-Paket installiert — Updates kommen aus apt.',
+  'update.packageManagedRpm':
+    'v{version} ist verfügbar. Diese Kopie wurde als .rpm-Paket installiert — Updates kommen aus dnf.',
+  'update.packageManagerInstallDeb': 'sudo apt install ./{file}',
+  'update.packageManagerInstallRpm': 'sudo dnf install ./{file}',
 
   // ── onboarding ────────────────────────────────────────────────────
   'onboarding.stepOf': 'Schritt {step} von 3',
