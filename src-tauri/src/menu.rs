@@ -174,30 +174,40 @@ pub fn build_app_menu<R: Runtime, M: Manager<R>>(
         .map_err(|e| e.to_string())
 }
 
-/// Sets a built menu as the window's menu bar.
+/// Installs a built menu as the application menu bar.
 ///
-/// Using `window.set_menu()` instead of `app.set_menu()` keeps click events
-/// routed through `on_menu_event`. [`Window::set_menu`] marshals the native
-/// call onto the main thread itself, so a caller on a command thread is safe.
+/// #788: this must be [`AppHandle::set_menu`], not [`WebviewWindow::set_menu`].
+/// The window form is not supported on macOS — its main-thread closure carries
+/// only `#[cfg(windows)]` and `#[cfg(any(target_os = "linux", target_os = "bsd"))]`
+/// arms, and Tauri's own documentation states the macOS menu is app-wide and
+/// directs callers here. Nothing in this crate calls `app.set_menu()` or
+/// `Builder::menu()` anywhere else, so the localized File/View/Help bar built by
+/// [`build_app_menu`] was never installed on macOS: Mac users saw only Tauri's
+/// default app/Edit/Window menu, and `rebuild_app_menu` logged "menu bar
+/// relabelled for the new locale" while changing nothing.
+///
+/// Click routing is unaffected — events arrive through `on_menu_event` either
+/// way; only the installation call changes.
 fn apply_app_menu<R: Runtime>(
-    window: &WebviewWindow<R>,
+    app: &AppHandle<R>,
     menu: tauri::menu::Menu<R>,
 ) -> Result<(), String> {
-    window
-        .set_menu(menu)
-        .map_err(|e| format!("Failed to set window menu: {}", e))?;
-    Ok(())
+    // `AppHandle::set_menu` hands back the menu it replaced (an `Option`), not
+    // `()`; discard it so this keeps the `Result<(), String>` the callers use.
+    app.set_menu(menu)
+        .map(|_replaced| ())
+        .map_err(|e| format!("Failed to set app menu: {}", e))
 }
 
 /// Builds and applies the application menu bar for the startup path.
-pub fn setup_app_menu(app: &tauri::App, window: &WebviewWindow) -> Result<(), String> {
+pub fn setup_app_menu(app: &tauri::App, _window: &WebviewWindow) -> Result<(), String> {
     // 4.7.0 (issue #674): install the locale stored in the config before the
     // labels are read. `setup_tray` does the same, so the menu stays correct
     // even when the tray failed to initialise.
     let state = app.state::<std::sync::Arc<crate::AppState>>();
     crate::i18n::install_from_app_state(state.inner());
     let menu = build_app_menu(app)?;
-    apply_app_menu(window, menu)?;
+    apply_app_menu(app.handle(), menu)?;
     log::info!("[MENU] setup_app_menu: window menu bar created successfully");
     Ok(())
 }
@@ -205,11 +215,8 @@ pub fn setup_app_menu(app: &tauri::App, window: &WebviewWindow) -> Result<(), St
 /// Rebuilds the application menu bar for the newly installed locale (issue
 /// #674), so switching language relabels the native menu without a restart.
 pub fn rebuild_app_menu(app: &AppHandle) -> Result<(), String> {
-    let window = app
-        .get_webview_window("main")
-        .ok_or_else(|| "main window not found".to_string())?;
     let menu = build_app_menu(app)?;
-    apply_app_menu(&window, menu)?;
+    apply_app_menu(app, menu)?;
     log::info!("[MENU] rebuild_app_menu: menu bar relabelled for the new locale");
     Ok(())
 }
