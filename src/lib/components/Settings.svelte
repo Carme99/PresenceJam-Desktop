@@ -1,6 +1,6 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import { currentView, settingsDirty, pendingMenuNav, type View } from '$lib/stores/app';
   import { emitTo } from '@tauri-apps/api/event';
   // C7 multi-window detach: pop-out/pop-back controls.
@@ -163,6 +163,62 @@
     const [moved] = rules.splice(index, 1);
     rules.splice(target, 0, moved);
     markDirty();
+  }
+
+  // #981: removing a quiet-hours row or a track rule is reversible. A track
+  // rule carries a replacement status, a presence pair, a weekday set and a
+  // time window — one mis-click used to lose all of it, and the only recovery
+  // was a Discard that also threw away every other edit in the form. The
+  // pending removal holds the entry object itself (spliced out of the proxy
+  // array, not copied) and the index it came from, so Undo re-inserts the very
+  // same values at the very same position instead of an empty row.
+  type QuietHoursEntry = AppConfig['status_rules']['quiet_hours'][number];
+  type TrackRule = AppConfig['status_rules']['track_rules'][number];
+  type PendingRemoval =
+    | { list: 'quiet_hours'; index: number; entry: QuietHoursEntry }
+    | { list: 'track_rules'; index: number; entry: TrackRule };
+  // Only the most recent removal is undoable; removing again replaces it.
+  let pendingRemoval = $state<PendingRemoval | null>(null);
+
+  function removeQuietHours(index: number): void {
+    const list = localConfig.status_rules.quiet_hours;
+    const entry = list[index];
+    if (entry === undefined) return;
+    pendingRemoval = { list: 'quiet_hours', index, entry };
+    list.splice(index, 1);
+    markDirty();
+  }
+
+  function removeTrackRule(index: number): void {
+    const list = localConfig.status_rules.track_rules;
+    const entry = list[index];
+    if (entry === undefined) return;
+    pendingRemoval = { list: 'track_rules', index, entry };
+    list.splice(index, 1);
+    markDirty();
+  }
+
+  /** #981: put the entry back where it was, then move focus onto it. */
+  async function undoRemove(): Promise<void> {
+    const pending = pendingRemoval;
+    if (pending === null) return;
+    if (pending.list === 'quiet_hours') {
+      localConfig.status_rules.quiet_hours.splice(pending.index, 0, pending.entry);
+    } else {
+      localConfig.status_rules.track_rules.splice(pending.index, 0, pending.entry);
+    }
+    pendingRemoval = null;
+    markDirty();
+    // The restored row is the same DOM position it held before, so focus goes
+    // there rather than back to the top of the form: keyboard and screen-reader
+    // users land on the row they just recovered instead of losing their place.
+    await tick();
+    document
+      .querySelector<HTMLElement>(
+        `[data-rule-list="${pending.list}"][data-rule-index="${pending.index}"]`
+      )
+      ?.querySelector<HTMLElement>('input, select, button')
+      ?.focus();
   }
   // Issue #869: name for a freshly-added profile. The Rust side dedupes
   // again on load, so a concurrent edit cannot wedge the form — this is
@@ -1171,6 +1227,8 @@
       extraWordsText = localConfig.teams.profanity_extra_words.join('\n');
       isDirty = false;
       settingsDirty.set(false);
+      // #981: the removal is committed now, so there is nothing left to undo.
+      pendingRemoval = null;
       saveMessage = t('settings.saved');
       if (saveTimeout) clearTimeout(saveTimeout);
       saveTimeout = setTimeout(() => saveMessage = '', 2000);
@@ -1267,6 +1325,9 @@
       extraWordsText = localConfig.teams.profanity_extra_words.join('\n');
       isDirty = false;
       settingsDirty.set(false);
+      // #981: the imported document replaced the draft, so the pending
+      // removal refers to a row that no longer exists.
+      pendingRemoval = null;
       saveMessage = '';
       backupMessage = t('settings.backupImported', { path: outcome.path });
     } catch (e) {
@@ -1563,10 +1624,33 @@
   function discardAndLeave() {
     isDirty = false;
     settingsDirty.set(false);
+    // #981: the draft is being abandoned, so its pending removal goes with it.
+    pendingRemoval = null;
     const target = pendingNav ?? $pendingMenuNav;
     pendingNav = null;
     pendingMenuNav.set(null);
     if (target) leaveSettings(target);
+  }
+
+  /**
+   * #966: put the draft back to the last saved configuration without leaving
+   * the form. The dirty banner's Discard used to be unreachable unless a
+   * navigation was blocked, and the per-card Reset buttons restore shipped
+   * defaults rather than what is stored — so before this, a half-finished
+   * edit could not be abandoned at all except by saving it. This re-snapshots
+   * `$configStore` exactly the way the initial load does, so the visible draft
+   * is the stored document again.
+   */
+  function revertChanges() {
+    localConfig = structuredClone($configStore);
+    // Issue #538: the lexicon textarea is a separate draft buffer, not a bind
+    // on `localConfig`, so it needs the same re-snapshot the load path does.
+    extraWordsText = localConfig.teams.profanity_extra_words.join('\n');
+    isDirty = false;
+    settingsDirty.set(false);
+    // #981: the draft the pending removal belonged to is gone with it.
+    pendingRemoval = null;
+    saveMessage = '';
   }
 
   function stayHere() {
@@ -1581,21 +1665,38 @@
     onAction={detached ? undefined : handlePopOut}
     actionTitle={detached ? '' : t('settings.popOutActionTitle')} />
   {#if isDirty}
+    <!-- #966: the banner is the commit point. It used to carry actions only
+         while a navigation was parked, so the ordinary case was a status line
+         with no way to act on it and the sole Save sat at the end of a
+         twelve-card form. Both variants live here now: the pendingNav labels
+         differ because those actions navigate as well as commit or discard. -->
     <div class="dirty-banner" role="status">
       <span>{t('settings.unsavedChanges')}</span>
-      {#if pendingNav}
-        <div class="dirty-actions">
+      <div class="dirty-actions">
+        {#if pendingNav}
           <button type="button" class="btn-secondary" onclick={saveAndLeave} disabled={isSaving}>
             {isSaving ? t('settings.saving') : t('settings.saveAndLeave')}
           </button>
           <button type="button" class="btn-link" onclick={discardAndLeave}>{t('settings.discardChanges')}</button>
           <button type="button" class="btn-link" onclick={stayHere}>{t('settings.stayHere')}</button>
-        </div>
-      {/if}
+        {:else}
+          <button type="button" class="btn-secondary" onclick={handleSave} disabled={isSaving}>
+            {isSaving ? t('settings.saving') : t('settings.saveChanges')}
+          </button>
+          <button type="button" class="btn-link" onclick={revertChanges}>{t('settings.revertChanges')}</button>
+        {/if}
+      </div>
     </div>
   {/if}
 
-  <div class="sections">
+  <!-- #742: the skip link's target. It used to sit on `.app-container` in
+       +page.svelte, which wraps this view *and* the PageHeader above it, so
+       "Skip to main content" landed on the very chrome the link promises to
+       bypass. `.sections` is the first region below the header, so one Tab
+       from here reaches the body's first control. `tabindex="-1"` keeps the
+       target focusable without putting it in the tab order. Only one view is
+       mounted at a time, so the id stays unique per document. -->
+  <div class="sections" id="main-content" tabindex="-1">
     <section class="card pane-card">
       <header class="section-header">
         <h2>{t('settings.sectionSpotify')}</h2>
@@ -1851,7 +1952,17 @@
     <section class="card pane-card">
       <header class="section-header">
         <h2>{t('rules.sectionTitle')}</h2>
-        <button type="button" class="btn-link" onclick={resetRulesDefaults}>{t('common.resetToDefault')}</button>
+        <!-- #981: the card header is where a removal is announced and taken
+             back. It lives here, not on each row, because a row that was just
+             removed is by definition not on screen to host its own control. -->
+        <span class="section-actions">
+          {#if pendingRemoval !== null && isDirty}
+            <button type="button" class="btn-link btn-link-tap" onclick={undoRemove}>
+              {t('rules.undoRemove')}
+            </button>
+          {/if}
+          <button type="button" class="btn-link" onclick={resetRulesDefaults}>{t('common.resetToDefault')}</button>
+        </span>
       </header>
       <p class="hint">{t('rules.sectionHint')}</p>
       {#if localConfig.status_rules == null}
@@ -1866,7 +1977,13 @@
         {#each localConfig.status_rules.quiet_hours as entry, i}
           <!-- #746: the ordinal is appended so two rows are not announced under
                the same group name; the label keys carry no `{n}` placeholder. -->
-          <div class="rule-row rule-col" role="group" aria-label={`${t('rules.quietHoursLabel')} ${i + 1}`}>
+          <div
+            class="rule-row rule-col"
+            role="group"
+            aria-label={`${t('rules.quietHoursLabel')} ${i + 1}`}
+            data-rule-list="quiet_hours"
+            data-rule-index={i}
+          >
             <div class="rule-row">
               <input type="checkbox" bind:checked={entry.enabled} aria-label={t('rules.ruleEnabled')} />
               <input
@@ -1889,8 +2006,8 @@
               />
               <button
                 type="button"
-                class="btn-link"
-                onclick={() => { localConfig.status_rules.quiet_hours.splice(i, 1); markDirty(); }}
+                class="btn-link btn-link-tap"
+                onclick={() => removeQuietHours(i)}
               >{t('rules.removeRule')}</button>
             </div>
             <div class="rule-row days-row" role="group" aria-label={t('rules.quietDays')}>
@@ -2012,30 +2129,41 @@
         {/if}
         {#each localConfig.status_rules.track_rules as rule, j}
           <!-- #746: same ordinal as the Move up/down buttons below. -->
-          <div class="rule-row rule-col" role="group" aria-label={`${t('rules.trackRulesLabel')} ${j + 1}`}>
+          <div
+            class="rule-row rule-col"
+            role="group"
+            aria-label={`${t('rules.trackRulesLabel')} ${j + 1}`}
+            data-rule-list="track_rules"
+            data-rule-index={j}
+          >
             <div class="rule-row">
               <label class="rule-check">
                 <input type="checkbox" bind:checked={rule.enabled} />
                 <span>{t('rules.ruleEnabled')}</span>
               </label>
+              <!-- #741: `.btn-link` is `padding: 0`, so these two arrows were
+                   a ~14x21px hit area 8px apart — under the WCAG 2.5.8 24x24
+                   target, and a mis-hit silently reorders a rule that only
+                   takes effect on Save. `btn-link-tap` widens the target and
+                   keeps the glyph and its aria-label. -->
               <button
                 type="button"
-                class="btn-link"
+                class="btn-link btn-link-tap"
                 disabled={j === 0}
                 aria-label={t('rules.moveRuleUp', { n: j + 1 })}
                 onclick={() => moveRule(localConfig.status_rules.track_rules, j, -1)}
               >↑</button>
               <button
                 type="button"
-                class="btn-link"
+                class="btn-link btn-link-tap"
                 disabled={j === localConfig.status_rules.track_rules.length - 1}
                 aria-label={t('rules.moveRuleDown', { n: j + 1 })}
                 onclick={() => moveRule(localConfig.status_rules.track_rules, j, 1)}
               >↓</button>
               <button
                 type="button"
-                class="btn-link"
-                onclick={() => { localConfig.status_rules.track_rules.splice(j, 1); markDirty(); }}
+                class="btn-link btn-link-tap"
+                onclick={() => removeTrackRule(j)}
               >{t('rules.removeRule')}</button>
             </div>
             <div class="rule-row">
@@ -3057,6 +3185,15 @@
     gap: var(--sp-4);
   }
 
+  /* #981: the rules card header holds two link actions (Undo, Reset to
+     default) on its trailing edge, so they need their own row rather than
+     being flung apart by the header's `space-between`. */
+  .section-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-3);
+  }
+
 
   .form-group { display: flex; flex-direction: column; gap: var(--sp-2); }
   .form-group label,
@@ -3257,15 +3394,20 @@
     border-color: var(--accent);
     box-shadow: 0 0 0 3px var(--accent-soft);
   }
+  /* #904: the swatches paint through app.css tokens, not hex literals. The
+     light swatch is on screen while the dark theme is live, so these cannot
+     be the theme-scoped surface tokens — `--preview-*` is the preview-only
+     pair app.css declares for exactly this, and `--swatch-h` is what compact
+     density scales. Changing the palette moves the swatch from here alone. */
   .swatch {
     display: block;
-    height: 64px;
+    height: var(--swatch-h);
     border-radius: var(--r-sm);
     border: 1px solid var(--border);
   }
-  .swatch-dark { background: linear-gradient(135deg, #0F1226 0%, #232852 100%); }
-  .swatch-light { background: linear-gradient(135deg, #F6F7FB 0%, #FFFFFF 100%); }
-  .swatch-system { background: linear-gradient(100deg, #0F1226 0 48%, #F6F7FB 48% 100%); }
+  .swatch-dark { background: linear-gradient(135deg, var(--preview-dark-1) 0%, var(--preview-dark-2) 100%); }
+  .swatch-light { background: linear-gradient(135deg, var(--preview-light-1) 0%, var(--preview-light-2) 100%); }
+  .swatch-system { background: linear-gradient(100deg, var(--preview-dark-1) 0 48%, var(--preview-light-1) 48% 100%); }
   .theme-name {
     font-size: var(--fs-sm);
     font-weight: 600;
