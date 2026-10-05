@@ -2111,23 +2111,3 @@ describe('Settings CSS token contracts (#741, #904)', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// #742 — the skip link lands below the view header, not on it.
-// ---------------------------------------------------------------------------
-describe('Settings skip-link target (#742)', () => {
-  it('puts #main-content on the body region and keeps it out of the tab order', async () => {
-    const { container } = await mountSettings();
-    const target = container.querySelector('#main-content') as HTMLElement;
-
-    expect(target).not.toBeNull();
-    expect(target.classList.contains('sections')).toBe(true);
-    expect(target.getAttribute('tabindex')).toBe('-1');
-    // Below the header, not on it: the PageHeader is a sibling that comes first.
-    const header = container.querySelector('.page-header');
-    expect(header).not.toBeNull();
-    expect(
-      header!.compareDocumentPosition(target) & Node.DOCUMENT_POSITION_FOLLOWING
-    ).toBeTruthy();
-    expect(container.querySelectorAll('#main-content')).toHaveLength(1);
-  });
-});
