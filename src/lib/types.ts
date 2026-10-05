@@ -38,6 +38,21 @@ export type { DiagnosticsSnapshot } from './types-generated/DiagnosticsSnapshot'
  */
 export type { ShortcutReason } from './types-generated/ShortcutReason';
 export type { SlotRegistration } from './types-generated/SlotRegistration';
+/**
+ * Issue #782: the updater banner's payloads are generated from
+ * `src-tauri/src/updater_bg.rs` (`#[ts(export)]`) instead of being mirrored by
+ * hand in `UpdatePrompt.svelte`. A Rust-side rename now fails
+ * `npm run check` rather than leaving the banner reading `undefined` at
+ * runtime. `UpdateCheckOutcome.install` (issue #894) tells the banner whether
+ * this install is in-app-updatable or owned by a system package manager.
+ */
+export type { StageDeferredOutcome } from './types-generated/StageDeferredOutcome';
+export type { StageProgress } from './types-generated/StageProgress';
+export type { StageProgressEvent } from './types-generated/StageProgressEvent';
+export type { StageComplete } from './types-generated/StageComplete';
+export type { UpdateCheckOutcome, UpdateInstall } from './types-generated/UpdateCheckOutcome';
+export type { CancelDeferredOutcome } from './types-generated/CancelDeferredOutcome';
+export type { CancelDeferredState } from './types-generated/CancelDeferredState';
 export type { ShortcutsStatus } from './types-generated/ShortcutsStatus';
 /**
  * Payload of the `error` event emitted by the Rust polling loop. The

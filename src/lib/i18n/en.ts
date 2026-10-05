@@ -300,6 +300,16 @@ export const en = {
   'update.staleSkippedUnknown':
     'v{staged} was skipped — it is not newer than your current version.',
   'update.installAnyway': 'Install anyway',
+  // #894: a `.deb` / `.rpm` install is updated by its package manager, not by
+  // the in-app updater — the release manifest only offers the AppImage payload,
+  // which neither installer can apply. The banner shows the command instead of
+  // an install button.
+  'update.packageManagedDeb':
+    'v{version} is available. This copy was installed as a .deb package, so updates come from apt.',
+  'update.packageManagedRpm':
+    'v{version} is available. This copy was installed as an .rpm package, so updates come from dnf.',
+  'update.packageManagerInstallDeb': 'sudo apt install ./{file}',
+  'update.packageManagerInstallRpm': 'sudo dnf install ./{file}',
 
   // ── onboarding ────────────────────────────────────────────────────
   'onboarding.stepOf': 'Step {step} of 3',

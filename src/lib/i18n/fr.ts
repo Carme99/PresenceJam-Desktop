@@ -318,6 +318,16 @@ export const fr: Dict = {
   'update.staleSkippedUnknown':
     'v{staged} ignorée — elle n’est pas plus récente que votre version actuelle.',
   'update.installAnyway': 'Installer quand même',
+  // #894 : une installation .deb/.rpm se met à jour via son gestionnaire de
+  // paquets, pas via le moteur de mise à jour intégré — le manifeste de la
+  // version ne propose que la charge AppImage, qu'aucun de ces installeurs ne
+  // peut appliquer. La bannière affiche la commande au lieu d'un bouton.
+  'update.packageManagedDeb':
+    'v{version} est disponible. Cette copie a été installée comme paquet .deb — les mises à jour viennent d’apt.',
+  'update.packageManagedRpm':
+    'v{version} est disponible. Cette copie a été installée comme paquet .rpm — les mises à jour viennent de dnf.',
+  'update.packageManagerInstallDeb': 'sudo apt install ./{file}',
+  'update.packageManagerInstallRpm': 'sudo dnf install ./{file}',
 
   // ── onboarding ────────────────────────────────────────────────────
   'onboarding.stepOf': 'Étape {step} sur 3',
