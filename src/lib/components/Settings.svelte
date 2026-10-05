@@ -1696,7 +1696,7 @@
        from here reaches the body's first control. `tabindex="-1"` keeps the
        target focusable without putting it in the tab order. Only one view is
        mounted at a time, so the id stays unique per document. -->
-  <div class="sections" id="main-content" tabindex="-1">
+  <div class="sections">
     <section class="card pane-card">
       <header class="section-header">
         <h2>{t('settings.sectionSpotify')}</h2>
