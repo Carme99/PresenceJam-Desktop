@@ -1408,7 +1408,6 @@ pub async fn check_for_update(app: AppHandle) -> Result<Option<UpdateCheckOutcom
     }))
 }
 
-
 // ---------------------------------------------------------------------
 // Stage completion (issue #678)
 // ---------------------------------------------------------------------
