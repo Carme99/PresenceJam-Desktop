@@ -7,8 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-Every change merged after 4.7.0 lands here until the release cut, which renames this
+Every change merged after 5.0.0 lands here until the release cut, which renames this
 section to the released version and opens a fresh empty one (see `docs/RELEASING.md` §2).
+
+## [5.0.0] - 2026-10-06
 
 ### Added
 - **OS presentation-state gate (#872).** `SHQueryUserNotificationState` is now folded into the existing presence gate through a new `PresentationState` enum behind a swappable trait in `src-tauri/src/platform/focus.rs`. A new opt-in `teams.gate_when_presenting` toggle pauses the Teams status write while a full-screen app, slide deck or Windows Focus Assist Quiet Time is on; the toggle defaults to OFF and is a no-op on Linux/macOS (where the probe answers `Unknown`). The new reason sits at the lowest precedence of the presence-class reasons so it can never outrank `busy` or `in a call`.
@@ -1550,8 +1552,9 @@ Closes #60 #61 #62 #63
 ### Removed
 
 - PowerShell script version — this is a full rewrite
+[5.0.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.7.0...v5.0.0
 [4.7.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.6.0...v4.7.0
-[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.7.0...HEAD
+[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v5.0.0...HEAD
 [4.6.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.5.2...v4.6.0
 [4.5.2]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.5.1...v4.5.2
 [4.5.1]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.5.0...v4.5.1

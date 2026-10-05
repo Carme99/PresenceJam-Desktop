@@ -1,4 +1,4 @@
-# State of Features — v4.8.0 (unreleased: current main + wave-9)
+# State of Features — v5.0.0
 
 Quick, no-hedge answers to "does this thing actually work in *my* setup?"
 Most of the answers below are tied to a code path or a docs file you can read
