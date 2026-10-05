@@ -186,38 +186,44 @@ pub fn build_app_menu<R: Runtime, M: Manager<R>>(
         // `Menu::default`'s `Menu` cannot be nested here. Building it inline also
         // avoids that helper's own File/Edit/View/Window/Help submenus, which
         // would duplicate the ones below and add an English "Window".
+        //
+        // No `AboutMetadata` / `PredefinedMenuItem::about` here: this crate has
+        // its own `ID_ABOUT` in the Help submenu, routed to `emit_about()`. Adding
+        // the predefined About as well would give macOS two About items.
         let app_handle = manager.app_handle();
         let pkg_info = app_handle.package_info();
-        let about_metadata = tauri::menu::AboutMetadata {
-            name: Some(pkg_info.name.clone()),
-            version: Some(pkg_info.version.to_string()),
-            copyright: app_handle.config().bundle.copyright.clone(),
-            authors: app_handle
-                .config()
-                .bundle
-                .publisher
-                .clone()
-                .map(|p| vec![p]),
-            ..Default::default()
-        };
-        let app_submenu = Submenu::with_items(
-            app_handle,
-            pkg_info.name.clone(),
-            true,
-            &[
-                &PredefinedMenuItem::services(app_handle, None).map_err(|e| e.to_string())?,
-                &PredefinedMenuItem::separator(app_handle).map_err(|e| e.to_string())?,
-                &PredefinedMenuItem::hide(app_handle, None).map_err(|e| e.to_string())?,
-                &PredefinedMenuItem::hide_others(app_handle, None).map_err(|e| e.to_string())?,
-                &PredefinedMenuItem::separator(app_handle).map_err(|e| e.to_string())?,
-                // OUR `ID_QUIT`, not `PredefinedMenuItem::quit`: the predefined
-                // item quits through the OS and would never reach
-                // `request_graceful_shutdown`, silently dropping the graceful
-                // state flush on the shipped macOS target.
-                &quit_item,
-            ],
-        )
-        .map_err(|e| format!("Failed to build the macOS app submenu: {}", e))?;
+        // `Submenu::with_items` takes `&[&dyn IsMenuItem<R>]`. Binding each entry
+        // to that trait object explicitly is required here: the array mixes
+        // `PredefinedMenuItem` (services/separator/hide/hide_others) with this
+        // crate's own `MenuItem` (`quit_item`), and inference otherwise latches
+        // onto the first element's type and rejects the rest. Inline
+        // `map_err(...)?` cannot coerce through the unsized trait object, hence
+        // the `let` bindings.
+        let services_item: &dyn tauri::menu::IsMenuItem<R> =
+            &PredefinedMenuItem::services(app_handle, None).map_err(|e| e.to_string())?;
+        let sep_1: &dyn tauri::menu::IsMenuItem<R> =
+            &PredefinedMenuItem::separator(app_handle).map_err(|e| e.to_string())?;
+        let hide_item: &dyn tauri::menu::IsMenuItem<R> =
+            &PredefinedMenuItem::hide(app_handle, None).map_err(|e| e.to_string())?;
+        let hide_others_item: &dyn tauri::menu::IsMenuItem<R> =
+            &PredefinedMenuItem::hide_others(app_handle, None).map_err(|e| e.to_string())?;
+        let sep_2: &dyn tauri::menu::IsMenuItem<R> =
+            &PredefinedMenuItem::separator(app_handle).map_err(|e| e.to_string())?;
+        let quit_ref: &dyn tauri::menu::IsMenuItem<R> = &quit_item;
+        let app_items: [&dyn tauri::menu::IsMenuItem<R>; 6] = [
+            services_item,
+            sep_1,
+            hide_item,
+            hide_others_item,
+            sep_2,
+            quit_ref,
+        ];
+        // Fully qualified rather than imported: `Submenu` is only used by this
+        // macOS arm, so a top-level `use` would be an unused import (and a
+        // clippy -D warnings failure) on every other platform.
+        let app_submenu =
+            tauri::menu::Submenu::with_items(app_handle, pkg_info.name.clone(), true, &app_items)
+                .map_err(|e| format!("Failed to build the macOS app submenu: {}", e))?;
         MenuBuilder::new(manager)
             .item(&app_submenu)
             .item(&file_menu)
