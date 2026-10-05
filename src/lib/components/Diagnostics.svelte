@@ -195,7 +195,7 @@
     than landing on it. `tabindex="-1"` keeps it focusable programmatically
     without adding a tab stop, and only one view mounts at a time so the id
     stays unique per document. -->
-  <div class="content" id="main-content" tabindex="-1">
+  <div class="content">
     {#if loading}
       <div class="empty-state">
         <p>{t('diagnostics.collecting')}</p>
