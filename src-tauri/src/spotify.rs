@@ -52,10 +52,7 @@ impl RateLimitWindow {
         };
         let until = now + Duration::from_secs(secs);
         if self.until.is_none_or(|current| until > current) {
-            log::warn!(
-                "{TAG} rate limited: holding Spotify calls for {}s",
-                secs
-            );
+            log::warn!("{TAG} rate limited: holding Spotify calls for {}s", secs);
             self.until = Some(until);
         }
     }
@@ -187,14 +184,17 @@ fn classify_spotify_status(
     err
 }
 
-/// Every failure line this module emits, in order, for the calling thread.
-///
-/// Test-only. A test binary can install exactly one process-wide `log`
-/// logger, so a capturing logger would have to win a race against every
-/// other module's log tests for the same slot — and whichever lost would see
-/// an empty buffer. Thread-local instead: libtest runs each test on its own
-/// thread, so the capture cannot collide with anyone else's, and it still
-/// proves the *emission* happened rather than only that a formatter works.
+// Every failure line this module emits, in order, for the calling thread.
+//
+// Test-only. A test binary can install exactly one process-wide `log`
+// logger, so a capturing logger would have to win a race against every
+// other module's log tests for the same slot — and whichever lost would see
+// an empty buffer. Thread-local instead: libtest runs each test on its own
+// thread, so the capture cannot collide with anyone else's, and it still
+// proves the *emission* happened rather than only that a formatter works.
+//
+// Plain comments, not doc comments: `thread_local!` is a macro invocation and
+// rustc does not generate documentation for those (clippy: unused_doc_comment).
 #[cfg(test)]
 thread_local! {
     static EMITTED_LINES: std::cell::RefCell<Vec<String>> =
@@ -809,9 +809,7 @@ where
 {
     let _guard = REFRESH_LOCK.lock();
     if let Some(tokens) = cached_refresh(refresh_token, now) {
-        log::debug!(
-            "{TAG} refresh_spotify_token: reusing the token another caller just refreshed"
-        );
+        log::debug!("{TAG} refresh_spotify_token: reusing the token another caller just refreshed");
         return Ok(tokens);
     }
     let tokens = fetch()?;
@@ -853,10 +851,7 @@ fn request_refreshed_token(
             // poller's summary line, so "sync stopped" left no record of the
             // request that failed. The transport error names the endpoint and
             // the OS error — never a credential.
-            log::warn!(
-                "{TAG} token refresh request could not be sent: {}",
-                e
-            );
+            log::warn!("{TAG} token refresh request could not be sent: {}", e);
             SpotifyApiError::Other(format!("Failed to send refresh request: {}", e))
         })?;
 
@@ -2623,7 +2618,8 @@ mod tests {
             "build_spotify_client must draw from the shared http client (issue #884), got: {body}"
         );
         assert_eq!(
-            crate::http::DEFAULT_TIMEOUT_SECS, 10,
+            crate::http::DEFAULT_TIMEOUT_SECS,
+            10,
             "the shared client must keep the 10s budget (issue #444)"
         );
         assert_eq!(
@@ -3332,7 +3328,10 @@ mod tests {
             (401u16, "{}"),
             (403, "{}"),
             (429, "{}"),
-            (404, r#"{"error":{"status":404,"reason":"NO_ACTIVE_DEVICE"}}"#),
+            (
+                404,
+                r#"{"error":{"status":404,"reason":"NO_ACTIVE_DEVICE"}}"#,
+            ),
             (500, "{}"),
             (418, "{}"),
         ] {
