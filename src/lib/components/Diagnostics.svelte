@@ -190,7 +190,12 @@
 
   <p class="feedback" role="status">{feedback}</p>
 
-  <div class="content">
+  <!-- #742: the skip link's target — the view body BELOW this view's header
+    bar, so activating the link bypasses the repeated Back/theme chrome rather
+    than landing on it. `tabindex="-1"` keeps it focusable programmatically
+    without adding a tab stop, and only one view mounts at a time so the id
+    stays unique per document. -->
+  <div class="content" id="main-content" tabindex="-1">
     {#if loading}
       <div class="empty-state">
         <p>{t('diagnostics.collecting')}</p>
@@ -328,20 +333,30 @@
     gap: var(--sp-4);
   }
 
+  /* #948: same wrap + overflow contract as the LogViewer toolbar — the
+     German/French hint and action labels are longer than the English ones,
+     so at the shipped 600x750 default this row overflowed the pane too.
+     `flex-wrap` breaks it and the explicit `row-gap` keeps the broken rows on
+     the same rhythm as the items' `column-gap`. */
   .toolbar {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: var(--sp-2);
+    row-gap: var(--sp-2);
   }
   .toolbar .btn-secondary {
     width: auto;
+    flex-shrink: 0;
     padding: var(--sp-2) var(--sp-4);
     font-size: var(--fs-sm);
   }
   /* #751: `.hint` is global now. Only its toolbar placement is local — the
      hint is the flexible item in that flex row, so it absorbs the slack and
-     keeps the two action buttons on the right. */
-  .toolbar .hint { margin-right: auto; }
+     keeps the two action buttons on the right. #948 adds `min-width: 0` so it
+     yields space (and wraps its own text) before the buttons are pushed past
+     the pane edge. */
+  .toolbar .hint { margin-right: auto; min-width: 0; }
   /* The load-error hint sits in the centred empty-state column, where the
      auto margin is what pinned it left; the other hints are in block
      containers, where it never had an effect. */

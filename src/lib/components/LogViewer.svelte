@@ -43,6 +43,22 @@
   // #400: stickiness threshold in px (scrollHeight - scrollTop - clientHeight).
   const SCROLL_THRESHOLD = 48;
 
+  // #887: eviction runs in whole batches. `logs.shift()` per streamed
+  // record was an O(n) memmove over a 500-row buffer for every line, so
+  // the cost scaled with the log rate; splicing the oldest rows once the
+  // buffer overshoots MAX_BUFFER by a full batch makes it O(1) amortised.
+  const EVICT_BATCH = 100;
+
+  // #887: the coalescing latches for the streamed-record path. Two
+  // per-frame costs used to be paid once per LINE — a forced layout read
+  // (`isAtBottom`) plus a queued animation frame — so a Trace-level
+  // burst queued one rAF per record and re-read geometry for each.
+  // `geometrySampled` marks that this frame's pre-push geometry has been
+  // read; `framePending` marks that its animation frame is already
+  // queued. Both are per-frame, not per-record.
+  let geometrySampled = false;
+  let framePending = false;
+
   let seqCounter = 0;
   // #400: true while the list is pinned to the bottom.
   let atBottom = $state(true);
@@ -121,45 +137,81 @@
     logContainer.scrollTop += row.offsetTop - anchorOffset;
   }
 
-  // Recompute stickiness and snap when pinned. Pinned state survives
-  // content swaps (e.g. filter buttons); an unpinned view only auto-pins
-  // when the new content fits entirely in view, hiding the Jump button.
-  function updateStickinessAndSnap() {
-    if (!logContainer) return;
-    if (logContainer.scrollHeight <= logContainer.clientHeight + SCROLL_THRESHOLD) {
+  // #887: one geometry read and one animation frame per frame, whatever
+  // the log rate. The push path calls `scheduleFrameWork`; a burst of N
+  // records inside one frame therefore costs ONE forced layout read and
+  // ONE queued rAF instead of one of each per line.
+  function scheduleFrameWork() {
+    if (framePending) return;
+    framePending = true;
+    requestAnimationFrame(runFrameWork);
+  }
+
+  function runFrameWork() {
+    framePending = false;
+    // #887: this frame's sample is now spent. Clearing it here — rather than
+    // relying on the `scroll` event that a `restoreScrollAnchor` write would
+    // fire — matters on the unpinned burst path: when the anchor row has been
+    // evicted by the time the frame runs, no write happens, no scroll event
+    // fires, and a latch left set would stop `captureScrollAnchor` running for
+    // every later frame. The reader's place would then slide one row per
+    // frame, which is exactly the #600 bug this whole path exists to prevent.
+    geometrySampled = false;
+    const el = logContainer;
+    if (!el) return;
+    // The single geometry read of this frame. Everything below reuses
+    // these three numbers instead of re-reading them — the old shape
+    // read scrollHeight/clientHeight in the call, `isAtBottom()` twice
+    // more, and then all three AGAIN inside its nested rAF.
+    const scrollHeight = el.scrollHeight;
+    const clientHeight = el.clientHeight;
+    const scrollTop = el.scrollTop;
+    const distance = scrollHeight - scrollTop - clientHeight;
+
+    // Content that fits entirely in view is pinned by definition, and so
+    // is a pane the reader has not scrolled away from.
+    if (scrollHeight <= clientHeight + SCROLL_THRESHOLD || distance < SCROLL_THRESHOLD) {
       atBottom = true;
     }
+
     if (!atBottom) {
-      atBottom = isAtBottom();
-      if (!atBottom) {
-        // #600: unpinned — hold the reader's place instead of snapping.
-        // Same rAF the pinned path uses, so both land in one frame.
-        requestAnimationFrame(() => {
-          restoreScrollAnchor();
-          atBottom = isAtBottom();
-        });
-        return;
-      }
+      // #600: unpinned — hold the reader's place instead of snapping.
+      // Same frame as the pinned path, so both land together.
+      restoreScrollAnchor();
+      return;
     }
-    // Snap inside rAF only, after re-reading: a mid-frame scroll-up
-    // must not get yanked back to the bottom.
-    const el = logContainer;
-    requestAnimationFrame(() => {
-      // Re-read geometry: a mid-frame scroll-up must not get yanked back.
-      const still =
-        el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_THRESHOLD;
-      atBottom = still;
-      if (still) {
-        el.scrollTop = el.scrollHeight;
-      }
-    });
+
+    // Snap from the geometry read at the top of THIS frame. Because the
+    // read and the write share a frame with nothing in between, a
+    // mid-frame scroll-up is already reflected in `distance` above and
+    // took the unpinned branch — it cannot be yanked back here.
+    el.scrollTop = scrollHeight;
+  }
+
+  // #887: sample the pre-push geometry at most once per animation frame.
+  // The reader's position cannot change between two records in the same
+  // frame, so re-reading it per line was pure forced-layout cost.
+  function sampleGeometry() {
+    if (geometrySampled) return;
+    geometrySampled = true;
+    atBottom = isAtBottom();
+    captureScrollAnchor();
+  }
+
+  // #887: amortised eviction. One splice per EVICT_BATCH overshoot
+  // instead of an O(n) `shift()` per record: the buffer stays bounded by
+  // MAX_BUFFER + EVICT_BATCH and the per-record cost is O(1).
+  function evictOverflow() {
+    if (logs.length > MAX_BUFFER + EVICT_BATCH) {
+      logs.splice(0, logs.length - MAX_BUFFER);
+    }
   }
 
   // Filter tabs swap the visible list: wait a tick for the DOM, then
   // recompute stickiness (pinned stays pinned and snaps).
   function selectFilter(f: string) {
     filter = f;
-    void tick().then(() => updateStickinessAndSnap());
+    void tick().then(() => scheduleFrameWork());
   }
 
   // Three-way count label without a nested template ternary.
@@ -279,7 +331,7 @@
     logs = [...dedupedSeeded, ...logs].slice(-MAX_BUFFER);
     if (!atBottom) return;
     await tick();
-    updateStickinessAndSnap();
+    scheduleFrameWork();
   }
 
   onMount(async () => {
@@ -289,10 +341,10 @@
     // registration is handed to the teardown rather than awaited, so an
     // unmount before it resolves still releases it (#692).
     teardown.add(listen<LogPayload>('log://log', (event) => {
-      // #400: capture stickiness BEFORE the push changes the scroll height.
-      atBottom = isAtBottom();
-      // #600: anchor before the push shifts the rendered window.
-      captureScrollAnchor();
+      // #887: sample stickiness and the scroll anchor ONCE per animation
+      // frame, before the first push of that frame changes the content
+      // height. #400 needs the pre-push sample; #600 needs the anchor.
+      sampleGeometry();
       // Map numeric level (1=Trace, 2=Debug, 3=Info, 4=Warning, 5=Error) to string
       const levelMap: Record<number, string> = { 1: 'Trace', 2: 'Debug', 3: 'Info', 4: 'Warning', 5: 'Error' };
       const numericLevel = event.payload?.level;
@@ -303,8 +355,10 @@
         level: levelStr,
         message: event.payload?.message || ''
       });
-      if (logs.length > MAX_BUFFER) logs.shift();
-      updateStickinessAndSnap();
+      // #887: amortised batch eviction, then ONE coalesced frame of
+      // layout work for every record that landed inside it.
+      evictOverflow();
+      scheduleFrameWork();
     }));
 
     await seedHistory();
@@ -333,11 +387,16 @@
   let countLabel = $derived(describeCount(visibleLogs.length, filteredLogs.length));
 
   function handleScroll() {
+    // A real scroll is fresh input: clear the frame's sample latch so the
+    // next streamed record re-reads geometry instead of reusing the
+    // pre-scroll sample (#887).
+    geometrySampled = false;
     atBottom = isAtBottom();
   }
 
   function jumpToLatest() {
     atBottom = true;
+    geometrySampled = false;
     if (logContainer) {
       logContainer.scrollTop = logContainer.scrollHeight;
     }
