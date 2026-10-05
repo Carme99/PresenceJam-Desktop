@@ -767,4 +767,7 @@ export const fr: Dict = {
   // fragment at the 400px minimum, and a second badge row is worse. "Sync" is
   // the established short form in all three locales.
   'dashboard.syncingShort': 'Sync',
+  // --- #966 / #981 Settings draft actions ---
+  'settings.revertChanges': 'Revenir aux valeurs enregistrées',
+  'rules.undoRemove': 'Annuler la suppression',
 };

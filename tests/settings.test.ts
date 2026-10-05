@@ -17,6 +17,7 @@ import { render, cleanup, fireEvent, waitFor } from '@testing-library/svelte';
 import { get } from 'svelte/store';
 import { tick } from 'svelte';
 import type { Mock } from 'vitest';
+import { readFileSync } from 'node:fs';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 vi.mock('@tauri-apps/api/event', () => ({
@@ -77,6 +78,80 @@ function notificationsOffConfig() {
     auth_required: false,
     update_staged: false
   };
+  return cfg;
+}
+
+/**
+ * A configured install carrying two populated quiet-hours rows and two
+ * populated track rules — the state #981's undo has to put back exactly, and
+ * the state #741's reorder arrows are only rendered in.
+ */
+function populatedRulesConfig() {
+  const cfg = configuredConfig();
+  cfg.status_rules = {
+    quiet_hours: [
+      {
+        enabled: true,
+        start_minutes: 1320,
+        end_minutes: 420,
+        days: [1, 3],
+        replacement_status: '🙈 quiet',
+        presence_availability: '',
+        presence_activity: '',
+        pause_polling: true
+      },
+      {
+        enabled: false,
+        start_minutes: 600,
+        end_minutes: 660,
+        days: [2],
+        replacement_status: 'later',
+        presence_availability: '',
+        presence_activity: '',
+        pause_polling: false
+      }
+    ],
+    track_rules: [
+      {
+        enabled: true,
+        artist_substring: 'first',
+        track_substring: 'opener',
+        match_kind: 'substring',
+        album_substring: '',
+        show_substring: '',
+        device_substring: '',
+        playlist_uri: '',
+        min_duration_seconds: 0,
+        negate: false,
+        replacement_status: '🎧 first',
+        presence_availability: 'Busy',
+        presence_activity: 'InACall',
+        action: { kind: 'replace', status: '🎧 first' },
+        days: [1, 2],
+        start_minutes: 60,
+        end_minutes: 1380
+      },
+      {
+        enabled: false,
+        artist_substring: 'second',
+        track_substring: '',
+        match_kind: 'exact',
+        album_substring: 'album',
+        show_substring: '',
+        device_substring: 'laptop',
+        playlist_uri: '',
+        min_duration_seconds: 30,
+        negate: true,
+        replacement_status: '',
+        presence_availability: '',
+        presence_activity: '',
+        action: { kind: 'snooze', minutes: 15 },
+        days: [],
+        start_minutes: 0,
+        end_minutes: 1440
+      }
+    ]
+  } as unknown as typeof cfg.status_rules;
   return cfg;
 }
 
@@ -1028,7 +1103,9 @@ describe('Settings update channel (#678)', () => {
 
     await fireEvent.change(select, { target: { value: 'beta' } });
     await tick();
-    await fireEvent.click(getByRole('button', { name: t('settings.saveChanges') }));
+    // #966: the banner carries a Save of the same name while the draft is
+    // dirty, so this test names the footer control explicitly.
+    await fireEvent.click(container.querySelector('.actions .btn-full') as HTMLButtonElement);
 
     // The harness's `save_config` echo returns exactly the payload it was
     // given (#297), so a store that settled on `beta` can only have received
@@ -1469,12 +1546,13 @@ describe('Settings dirty flag (#890)', () => {
   });
 
   it('clears the flag once the draft is saved, and keeps it when the save fails', async () => {
-    const { container, getByRole } = await mountSettings();
+    const { container } = await mountSettings();
     await fireEvent.input(formatInput(container), { target: { value: '🎧 {track}' } });
     await tick();
     expect(container.querySelector('.dirty-banner')).not.toBeNull();
 
-    await fireEvent.click(getByRole('button', { name: t('settings.saveChanges') }));
+    // #966: the banner now offers a Save too, so the footer one is named here.
+    await fireEvent.click(container.querySelector('.actions .btn-full') as HTMLButtonElement);
     await waitFor(() => expect(container.querySelector('.dirty-banner')).toBeNull());
 
     const base = invokeMock.getMockImplementation()!;
@@ -1485,7 +1563,7 @@ describe('Settings dirty flag (#890)', () => {
 
     await fireEvent.input(formatInput(container), { target: { value: '🎧 {track} — {artist}' } });
     await tick();
-    await fireEvent.click(getByRole('button', { name: t('settings.saveChanges') }));
+    await fireEvent.click(container.querySelector('.actions .btn-full') as HTMLButtonElement);
     await waitFor(() => expect(container.querySelector('.settings')?.textContent).toContain('disk full'));
     // A save that never happened must not clear the flag: Back still asks.
     expect(container.querySelector('.dirty-banner')).not.toBeNull();
@@ -1682,7 +1760,8 @@ describe('Settings status default provenance (#980)', () => {
 
     await fireEvent.click(reset);
     expect(input.value).toBe(de['settings.placeholderTextPlaceholder']);
-    await fireEvent.click(getByRole('button', { name: t('settings.saveChanges') }));
+    // #966: the banner's Save carries the same label while dirty — name the footer.
+    await fireEvent.click(container.querySelector('.actions .btn-full') as HTMLButtonElement);
 
     await waitFor(() => expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'save_config')).toBe(true));
     const saved = invokeMock.mock.calls.filter(([cmd]) => cmd === 'save_config').at(-1)?.[1] as {
@@ -1803,3 +1882,232 @@ describe('Settings status default provenance (#980)', () => {
     await i18n.set('en');
   });
  });
+
+// ---------------------------------------------------------------------------
+// #966 — the dirty banner is a commit point, not just a status line.
+// ---------------------------------------------------------------------------
+describe('Settings unsaved-changes banner commits and reverts (#966)', () => {
+  const bannerButton = (container: HTMLElement, name: string) =>
+    [...container.querySelectorAll('.dirty-banner button')].find(
+      (btn) => btn.textContent?.trim() === name
+    ) as HTMLButtonElement | undefined;
+
+  it('commits the draft from the banner, without the footer Save', async () => {
+    const { container } = await mountSettings();
+
+    await fireEvent.input(formatInput(container), { target: { value: '🎧 from the banner' } });
+    await tick();
+
+    // The whole point: the commit control is above the fold, in the banner the
+    // edit itself triggered. Pre-fix the banner rendered no actions at all
+    // unless a navigation was parked.
+    const save = bannerButton(container, t('settings.saveChanges'));
+    expect(save).toBeDefined();
+    expect(container.querySelector('.actions .btn-full')).not.toBeNull(); // still there, no longer the only way
+
+    await fireEvent.click(save!);
+
+    await waitFor(() =>
+      expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'save_config')).toBe(true)
+    );
+    await waitFor(() => expect(container.querySelector('.dirty-banner')).toBeNull());
+    const saved = invokeMock.mock.calls.find(([cmd]) => cmd === 'save_config')?.[1] as
+      | { config: { teams: { status_format: string } } }
+      | undefined;
+    expect(saved?.config.teams.status_format).toBe('🎧 from the banner');
+  });
+
+  it('reverts the draft to the last saved values and clears the dirty flag', async () => {
+    configStore.update((cfg) => ({ ...cfg, teams: { ...cfg.teams, status_format: 'stored {track}' } }));
+    const { container } = await mountSettings();
+    expect(formatInput(container).value).toBe('stored {track}');
+
+    await fireEvent.input(formatInput(container), { target: { value: 'half-finished edit' } });
+    await tick();
+    expect(container.querySelector('.dirty-banner')).not.toBeNull();
+
+    const revert = bannerButton(container, t('settings.revertChanges'));
+    expect(revert).toBeDefined();
+    await fireEvent.click(revert!);
+    await tick();
+
+    expect(formatInput(container).value).toBe('stored {track}');
+    expect(container.querySelector('.dirty-banner')).toBeNull();
+    // Reverting is not saving: nothing reached the backend.
+    expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'save_config')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #981 — removing a rule is reversible for as long as the form is dirty.
+// ---------------------------------------------------------------------------
+describe('Settings undo for a removed rule (#981)', () => {
+
+  const rowsOf = (container: HTMLElement, list: 'quiet_hours' | 'track_rules') =>
+    [...container.querySelectorAll<HTMLElement>(`[data-rule-list="${list}"]`)];
+
+
+  async function mountWithRules() {
+    configStore.set(populatedRulesConfig());
+    return await mountSettings();
+  }
+
+  it('restores a populated track rule at its original index, values and focus', async () => {
+    const { container, getByRole } = await mountWithRules();
+    const before = structuredClone(get(configStore).status_rules.track_rules);
+
+    const rows = rowsOf(container, 'track_rules');
+    expect(rows).toHaveLength(2);
+    const remove = [...rows[0].querySelectorAll('button')].at(-1) as HTMLButtonElement;
+    await fireEvent.click(remove);
+    await tick();
+
+    expect(rowsOf(container, 'track_rules')).toHaveLength(1);
+    // The undo affordance only exists while the removal is recoverable.
+    const undo = getByRole('button', { name: t('rules.undoRemove') }) as HTMLButtonElement;
+    expect(undo).toBeTruthy();
+
+    await fireEvent.click(undo);
+    await tick();
+
+    const restored = rowsOf(container, 'track_rules');
+    expect(restored).toHaveLength(2);
+    expect(restored[0].querySelector<HTMLInputElement>('input[type="text"]')?.value).toBe('first');
+    // Focus lands on the row that came back, not back at the top of the form.
+    await waitFor(() => expect(restored[0].contains(document.activeElement)).toBe(true));
+    // …and the undo is spent.
+    expect(
+      [...container.querySelectorAll('button')].some(
+        (b) => b.textContent?.trim() === t('rules.undoRemove')
+      )
+    ).toBe(false);
+
+    // The whole entry survived: save and compare the payload field for field.
+    await fireEvent.click(container.querySelector('.actions .btn-full') as HTMLButtonElement);
+    await waitFor(() =>
+      expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'save_config')).toBe(true)
+    );
+    const saved = invokeMock.mock.calls.find(([cmd]) => cmd === 'save_config')?.[1] as
+      | { config: { status_rules: { track_rules: unknown[] } } }
+      | undefined;
+    expect(saved?.config.status_rules.track_rules).toEqual(before);
+  });
+
+  it('restores a quiet-hours row at its original index', async () => {
+    const { container, getByRole } = await mountWithRules();
+    const before = structuredClone(get(configStore).status_rules.quiet_hours);
+
+    const rows = rowsOf(container, 'quiet_hours');
+    await fireEvent.click([...rows[1].querySelectorAll('button')].at(-1) as HTMLButtonElement);
+    await tick();
+    expect(rowsOf(container, 'quiet_hours')).toHaveLength(1);
+
+    await fireEvent.click(getByRole('button', { name: t('rules.undoRemove') }));
+    await tick();
+
+    const restored = rowsOf(container, 'quiet_hours');
+    expect(restored).toHaveLength(2);
+    expect(
+      restored[1].querySelector<HTMLInputElement>('input[type="time"]')?.value
+    ).toBe('10:00');
+
+    await fireEvent.click(container.querySelector('.actions .btn-full') as HTMLButtonElement);
+    await waitFor(() =>
+      expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'save_config')).toBe(true)
+    );
+    const saved = invokeMock.mock.calls.find(([cmd]) => cmd === 'save_config')?.[1] as
+      | { config: { status_rules: { quiet_hours: unknown[] } } }
+      | undefined;
+    expect(saved?.config.status_rules.quiet_hours).toEqual(before);
+  });
+
+  it('drops the undo once the removal is saved', async () => {
+    const { container } = await mountWithRules();
+    const rows = rowsOf(container, 'track_rules');
+    await fireEvent.click([...rows[0].querySelectorAll('button')].at(-1) as HTMLButtonElement);
+    await tick();
+    expect(
+      [...container.querySelectorAll('button')].some(
+        (b) => b.textContent?.trim() === t('rules.undoRemove')
+      )
+    ).toBe(true);
+
+    await fireEvent.click(container.querySelector('.actions .btn-full') as HTMLButtonElement);
+    await waitFor(() =>
+      expect(
+        [...container.querySelectorAll('button')].some(
+          (b) => b.textContent?.trim() === t('rules.undoRemove')
+        )
+      ).toBe(false)
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #741 / #904 — the stylesheet is loaded into jsdom so the cascade the browser
+// would apply is the one under test, not a copy of it.
+// ---------------------------------------------------------------------------
+describe('Settings CSS token contracts (#741, #904)', () => {
+  const appCss = readFileSync('src/app.css', 'utf8');
+  const rootToken = (name: string) =>
+    getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+  beforeEach(() => {
+    const style = document.createElement('style');
+    style.setAttribute('data-test', 'app-css');
+    style.textContent = appCss;
+    document.head.appendChild(style);
+  });
+
+  afterEach(() => {
+    document.head.querySelectorAll('style[data-test="app-css"]').forEach((el) => el.remove());
+    document.documentElement.removeAttribute('data-density');
+    document.documentElement.removeAttribute('data-theme');
+  });
+
+  it('gives every reorder arrow at least a 24x24 target, in both densities', async () => {
+    configStore.set(populatedRulesConfig());
+    const { container } = await mountSettings();
+    const arrows = [
+      ...container.querySelectorAll<HTMLButtonElement>('[data-rule-list="track_rules"] button')
+    ].filter((btn) => btn.textContent?.trim() === '↑' || btn.textContent?.trim() === '↓');
+    expect(arrows.length).toBeGreaterThanOrEqual(2);
+
+    for (const density of ['comfortable', 'compact']) {
+      document.documentElement.setAttribute('data-density', density);
+      for (const arrow of arrows) {
+        const computed = getComputedStyle(arrow);
+        // Pre-fix `.btn-link` is `padding: 0`, so these resolve to nothing at
+        // all and the hit area was the arrow glyph's ~14x21px line box.
+        expect(parseFloat(computed.minWidth), `${density} width`).toBeGreaterThanOrEqual(24);
+        expect(parseFloat(computed.minHeight), `${density} height`).toBeGreaterThanOrEqual(24);
+      }
+    }
+  });
+
+  it('paints the theme previews from tokens and scales the swatch with density', async () => {
+    const { container } = await mountSettings();
+
+    // The three previews the picker offers are all still painted…
+    expect(container.querySelector('.swatch-dark')).not.toBeNull();
+    expect(container.querySelector('.swatch-light')).not.toBeNull();
+    expect(container.querySelector('.swatch-system')).not.toBeNull();
+
+    // …and each palette's preview tokens resolve to the palette they stand in
+    // for, so revising a palette moves the swatch without touching Settings.
+    // (Pre-fix these tokens did not exist at all; the swatches carried their
+    // own copies of the same values.)
+    document.documentElement.setAttribute('data-theme', 'dark');
+    expect(rootToken('--preview-dark-1')).toBe(rootToken('--bg-base'));
+    expect(rootToken('--preview-dark-2')).toBe(rootToken('--bg-elevated'));
+    document.documentElement.setAttribute('data-theme', 'light');
+    expect(rootToken('--preview-light-1')).toBe(rootToken('--bg-base'));
+    expect(rootToken('--preview-light-2')).toBe(rootToken('--bg-surface'));
+
+    document.documentElement.setAttribute('data-density', 'comfortable');
+    expect(rootToken('--swatch-h')).toBe('64px');
+    document.documentElement.setAttribute('data-density', 'compact');
+    expect(rootToken('--swatch-h')).toBe('48px');
+  });
+});
+

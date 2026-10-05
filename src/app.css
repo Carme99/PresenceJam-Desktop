@@ -56,6 +56,19 @@
   /* Z-stack */
   --z-tooltip: 100;
   --z-update-banner: 1000;
+
+  /* Theme-preview swatches (#904). These are PREVIEW-ONLY constants, and
+     deliberately NOT --bg-base / --bg-elevated: the appearance picker paints
+     the light palette while the dark theme is live, so a swatch bound to the
+     theme-scoped surface tokens would advertise the wrong colours half the
+     time. Seeded from the dark/light palettes below — a palette revision
+     moves them here and the swatches follow. */
+  --preview-dark-1: #0F1226;
+  --preview-dark-2: #232852;
+  --preview-light-1: #F6F7FB;
+  --preview-light-2: #FFFFFF;
+  /* Height of a preview swatch. Density-scaled below like the other sizes. */
+  --swatch-h: 64px;
 }
 
 /* ---------- Density: compact (#680) ----------
@@ -85,6 +98,8 @@
   --fs-3xl: 28px;
   --lh-tight: 1.2;
   --lh-normal: 1.4;
+  /* #904: the appearance picker's swatch shrinks with the rest of the card. */
+  --swatch-h: 48px;
 }
 
 /* ---------- Theme: dark (default) ---------- */
@@ -305,6 +320,22 @@ button:disabled {
   width: auto;
 }
 .btn-link:hover { color: var(--accent); }
+
+/* Tap target for a bare `.btn-link` row action (#741, WCAG 2.5.8).
+ * `.btn-link` is `padding: 0`, so a glyph-only control's hit area is its line
+ * box (~21px tall, ~14px wide) — under the 24x24 minimum, and two of them
+ * 8px apart are a mis-hit waiting to happen. Row actions pair this class with
+ * `.btn-link`; it widens the target without changing the link's look. The
+ * 24px floor is a literal, not a spacing token: it is the WCAG minimum, and
+ * `--sp-*` is density-scaled while this must not be. */
+.btn-link-tap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  min-height: 24px;
+  padding: var(--sp-1);
+}
 
 /* Icon-only square button (header actions) */
 .icon-btn {
