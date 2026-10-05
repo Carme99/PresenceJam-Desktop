@@ -457,23 +457,29 @@ require `glib` object iteration, which this app does not perform — it uses
 Tauri's tray and dialog APIs and never iterates a `glib` object collection
 itself.
 
-Two further `unsound` warnings are accepted for the same reason — neither is
-in this crate's direct dependency list, so the app cannot call the affected
-API itself, and both are reached only through Tauri internals:
+Two further `unsound` warnings are accepted. Neither is a *direct* dependency of
+this crate, but they differ in how far the app actually reaches them:
 
 - **`anyhow` (RUSTSEC-2026-0190)** — unsoundness in `Error::downcast_mut()`.
   `src-tauri/Cargo.toml` has no `anyhow` entry; it is pulled transitively by
   `tauri`, `tauri-plugin`, `tauri-plugin-fs`, `tauri-utils` and the `wasm-*`
-  tooling chain. The defect requires calling `downcast_mut` on an error whose
-  concrete type has been moved, which this app never does — its own error paths
-  use `Result<T, E>` with typed variants (AGENTS.md §4), not `anyhow::Error`.
+  tooling chain. `grep -rn anyhow src-tauri/src/` returns nothing — the app
+  never imports it. Its own error paths use `Result<T, E>` with typed variants
+  (AGENTS.md §4), so the affected `downcast_mut` call is unreachable from app
+  code.
 - **`event-listener` (RUSTSEC-2026-0221)** — allows `!Send` tags to cross a
-  thread boundary. No direct `event-listener` entry in `src-tauri/Cargo.toml`;
-  it is pulled by the async stack (`async-lock`, `async-broadcast`,
-  `async-process`, `event-listener-strategy`) and by `zbus`, which Tauri uses
-  on Linux for its system tray. The app never constructs an `event-listener`
-  tag itself; all tags originate inside Tauri's own async runtime, so the
-  unsound crossing is confined to library code on that path.
+  thread boundary. There is no `event-listener` entry in
+  `src-tauri/Cargo.toml`, **but the app does reach it**: `zbus` IS a direct
+  dependency (`src-tauri/Cargo.toml:117`, Linux target only), and the app
+  calls zbus directly for Linux MPRIS playback detection —
+  `src-tauri/src/sources/mpris.rs:36` imports `zbus::blocking::{Connection,
+  Proxy}` and `:37` `zbus::names::OwnedBusName`. zbus pulls `event-listener`
+  through its async stack (`async-broadcast`, `async-lock`, `async-process`).
+  The app still never constructs an `event-listener` tag itself; every tag
+  originates inside zbus's own async internals, and the app only uses zbus's
+  blocking session-bus API. So the unsound crossing is confined to library
+  code — but the honest statement is that it sits on a dependency the app
+  calls directly, not that it is "not in the app's call path".
 
 Both are `informational = "unsound"` in the RustSec database, so `cargo audit`
 reports them as allowed warnings and still exits 0. They are recorded here so
