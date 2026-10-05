@@ -487,10 +487,14 @@
     </div>
   {/if}
 
+  <!-- #742 follow-up: this `.step` is where the skip link's target moves to. -->
   <div class="step">
     {#if step === 1}
       <div class="card pane-card wizard-card">
-        <h2 id="onboarding-step-heading" tabindex="-1">{t('onboarding.step1Title')}</h2>
+        <!-- #739: `data-view-heading` is what the `+page.svelte` navigation effect
+             focuses when a view switch lands on the wizard; the step-change effect
+             below focuses the same node. -->
+        <h2 id="onboarding-step-heading" data-view-heading tabindex="-1">{t('onboarding.step1Title')}</h2>
         <p>
           {t('onboarding.step1Intro')}
         </p>
@@ -566,7 +570,10 @@
       </div>
     {:else if step === 2}
       <div class="card pane-card wizard-card">
-        <h2 id="onboarding-step-heading" tabindex="-1">{t('onboarding.step2Title')}</h2>
+        <!-- #739: `data-view-heading` is what the `+page.svelte` navigation effect
+             focuses when a view switch lands on the wizard; the step-change effect
+             below focuses the same node. -->
+        <h2 id="onboarding-step-heading" data-view-heading tabindex="-1">{t('onboarding.step2Title')}</h2>
         <p>
           {t('onboarding.step2Intro')}
         </p>
@@ -598,7 +605,10 @@
       </div>
     {:else}
       <div class="card pane-card wizard-card">
-        <h2 id="onboarding-step-heading" tabindex="-1">{t('onboarding.step3Title')}</h2>
+        <!-- #739: `data-view-heading` is what the `+page.svelte` navigation effect
+             focuses when a view switch lands on the wizard; the step-change effect
+             below focuses the same node. -->
+        <h2 id="onboarding-step-heading" data-view-heading tabindex="-1">{t('onboarding.step3Title')}</h2>
         <p>
           {t('onboarding.step3Intro')}
         </p>

@@ -364,6 +364,8 @@
 <div class="reconnect">
   <PageHeader title={t('reconnect.title')} onBack={goToDashboard} showThemeToggle={false} />
 
+  <!-- #742 follow-up: this `.content` is where the skip link's target moves
+       to, once every view owns one. -->
   <div class="content">
     <p class="description">
       {t('reconnect.description')}

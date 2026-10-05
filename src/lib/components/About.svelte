@@ -11,9 +11,12 @@
 </script>
 
 <div class="about">
+  <!-- #742 follow-up: this card is where the skip link's target moves to. -->
   <div class="card about-card">
     <div class="logo-wrap"><Logo size={72} title={null} /></div>
-    <h1>PresenceJam</h1>
+    <!-- #739: `+page.svelte` focuses this heading when a navigation lands on
+         About; `tabindex="-1"` keeps it out of the tab order. -->
+    <h1 data-view-heading tabindex="-1">PresenceJam</h1>
     <p class="version">{t('about.version', { version: BUILD })}</p>
     <p class="description">
       {t('about.description')}

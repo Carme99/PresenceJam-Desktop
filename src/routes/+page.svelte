@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
+  import { tick } from 'svelte';
   import { currentView, settingsDirty, pendingMenuNav, type View } from '$lib/stores/app';
   import Onboarding from '$lib/components/Onboarding.svelte';
   import Dashboard from '$lib/components/Dashboard.svelte';
@@ -11,10 +12,11 @@
   import { devLog } from '$lib/utils/dev';
   import { useListenerTeardown } from '$lib/utils/useAuthListeners';
   import About from '$lib/components/About.svelte';
+  import { resetDashboardHydration } from '$lib/stores/dashboardHydration';
   import Reconnect from '$lib/components/Reconnect.svelte';
   import { bootView } from '$lib/utils/boot';
   import { clientSecretStateOf, loadConfig } from '$lib/stores/config';
-  import { t } from '$lib/i18n';
+  import { t, type TKey } from '$lib/i18n';
 
   // Build info — injected at build time via vite.config.js define
   // (mirrors the consumer in About.svelte; the vite define key is the
@@ -160,8 +162,13 @@
   onMount(() => {
     devLog('[PAGE] onMount: ENTRY');
     void boot();
-    devLog('[PAGE] onMount: setting up tray-click listener');
+    // #888: the tray writes `snooze_until` (and the whole config) from Rust
+    // with no webview event, and the Dashboard reads it out of the hydration
+    // store's cache. `tray-click` is the one signal the webview gets that the
+    // tray was just used, so it is where that cache's freshness has to end —
+    // otherwise a snooze armed from the tray could miss the next mount.
     teardown.add(listen('tray-click', async () => {
+      resetDashboardHydration();
       devLog('[PAGE] EVENT: tray-click received');
       devLog('[PAGE] EVENT: calling invoke show_window');
       try {
@@ -233,6 +240,49 @@
     };
   });
 
+  // ── #739 — focus and announce the view a navigation landed on ────────────
+  //
+  // A view switch replaces the mounted component, so whatever control the user
+  // activated is destroyed with the old view and focus falls back to `<body>`
+  // with nothing announced. Both entry points (icon buttons, PageHeader's Back,
+  // the tray's `navigate` event) funnel through `currentView`, so one effect
+  // here covers every one of them.
+  //
+  // Each view's heading carries `data-view-heading` and `tabindex="-1"`, which
+  // makes it programmatically focusable without adding a tab stop — the same
+  // contract `#onboarding-step-heading` already uses. Onboarding's own step
+  // effect keeps working: it focuses the same element.
+  //
+  // The announcement goes through a single always-mounted `aria-live="polite"`
+  // node rather than the heading itself: focusing an `h1` does not make screen
+  // readers read it, so without this the change would be visible-only.
+  const VIEW_ANNOUNCEMENT_KEY: Record<View, TKey | null> = {
+    onboarding: 'onboarding.title',
+    // The Dashboard is the app itself — the product name needs no translation,
+    // and i18n's only literal exception is exactly this.
+    dashboard: null,
+    settings: 'settings.title',
+    logs: 'logs.title',
+    diagnostics: 'diagnostics.title',
+    about: 'dashboard.about',
+    reconnect: 'reconnect.title'
+  };
+  const APP_NAME = 'PresenceJam';
+  let viewAnnouncement = $state('');
+
+  $effect(() => {
+    const view = $currentView;
+    // Boot owns the first paint; focusing before there is a view to focus
+    // would throw the user into a heading that is about to be replaced.
+    if (!ready) return;
+    const key = VIEW_ANNOUNCEMENT_KEY[view];
+    viewAnnouncement = key === null ? APP_NAME : t(key);
+    void (async () => {
+      await tick();
+      document.querySelector<HTMLElement>('[data-view-heading]')?.focus();
+    })();
+  });
+
   devLog('[PAGE] currentView value:', $currentView);
 </script>
 {#if !ready}
@@ -240,6 +290,13 @@
     <span>{t('common.loading')}</span>
   </div>
 {:else}
+  <!-- #739: the polite announcement for the view that just mounted. -->
+  <p class="view-announcement" aria-live="polite">{viewAnnouncement}</p>
+  <!-- #742 is split out of this branch and lands last. The target has to move
+       DOWN, out of this wrapper, onto the region below each view's heading bar
+       — but that cannot happen until Settings, LogViewer and Diagnostics own
+       their targets too, or the skip link becomes a DEAD fragment on exactly
+       the three views it is meant to help. So the id stays here for now. -->
   <div class="app-container" id="main-content" tabindex="-1">
     {#if bootError}
       <div class="boot-error" role="alert">
@@ -267,6 +324,20 @@
 {/if}
 
 <style>
+  /* #739: the navigation live region is read by assistive tech, never seen.
+     The 1px clip keeps it out of the layout flow without `display: none`,
+     which would stop it being announced at all. */
+  .view-announcement {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+  }
   .loading {
     display: flex;
     align-items: center;

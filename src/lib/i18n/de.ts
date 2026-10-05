@@ -542,7 +542,6 @@ export const de: Dict = {
     'Die Synchronisierung konnte nicht fortgesetzt werden. Die Pause bleibt gespeichert — bitte erneut versuchen.',
   // Issue #736: die Live-Region des Chips kündigt Start/Ende nur einmal an;
   // der sekündliche Countdown ist nicht mehr in der Live-Region.
-  'dashboard.snoozeStatusStart': 'Sync für {minutes} Minuten pausiert',
   // Abgeschlossen (nicht Verlauf wie „wird fortgesetzt"): passt zur
   // englischen Vorlage „Sync resumed" und wird unmittelbar nach dem
   // Aufwecken gesprochen, nicht währenddessen.
@@ -741,4 +740,18 @@ export const de: Dict = {
   // --- 5.0 wave3 playback-source ---
   'onboarding.playbackSourceMacNote':
     'Sie verwenden macOS — hier ist nur die Spotify-Wiedergabequelle verfügbar. Die System-Mediensitzungsquelle (Windows SMTC / Linux MPRIS) ist auf macOS nicht verfügbar, daher fällt PresenceJam automatisch auf Spotify zurück. Wechseln Sie zu Spotify, falls der Einrichtungsassistent jemals „kein Titel" meldet, obwohl in einer anderen App Musik abgespielt wird.',
+  // --- #1120: der Einstiegstext der Stummschaltung ist zählabhängig. Eine
+  // einminütige Stummschaltung meldete bislang "Sync für 1 Minuten
+  // pausiert"; im Singular heißt es "Minute".
+  'dashboard.snoozeStatusStart_one': 'Sync für {minutes} Minute pausiert',
+  'dashboard.snoozeStatusStart_other': 'Sync für {minutes} Minuten pausiert',
+
+  // --- #739: Name der Ansicht für die Navigationsansage.
+  'onboarding.title': 'Einrichtung',
+
+  // --- #954 / P7: the compact header's abbreviated sync badge. The full
+  // "Synchronisierung" / "Synchronisation" label ellipsises into an unreadable
+  // fragment at the 400px minimum, and a second badge row is worse. "Sync" is
+  // the established short form in all three locales.
+  'dashboard.syncingShort': 'Sync',
 };
