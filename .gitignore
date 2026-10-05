@@ -65,3 +65,8 @@ playwright-report/
 # Pasted screenshots land here by accident — real captures live in docs/screenshots/ (#774)
 /image_0*.*
 /tmp-screenshots/
+
+# Scratch working dir (issue-body downloads, sweep scripts, run logs).
+# Must stay untracked+ignored: the no-vendored-binaries CI gate fails on
+# untracked, unignored root paths (`git status --porcelain | grep -E '^\?\? [^/]*/?$'`).
+.tmp/
