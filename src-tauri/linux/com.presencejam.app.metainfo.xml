@@ -67,6 +67,20 @@
   <content_rating type="oars-1.1"/>
   <releases>
     <!-- Newest first. release.yml asserts the top entry matches the tag. -->
+    <release version="5.0.0" date="2026-10-06">
+      <description>
+        <p>
+          The v5 audit-wave backlog: every config section covered by
+          ConfigPatch with unknown keys preserved and a monotonic schema
+          version; a cached shared HTTP client and validated playback device
+          ids; bounded update checks with a working .deb/.rpm update path;
+          macOS app menu installed app-wide; blocking Tauri commands moved
+          off the main thread; Dashboard hydration so a view switch no longer
+          re-reads config and status; and the accessibility, localisation
+          and documentation corrections that went with them.
+        </p>
+      </description>
+    </release>
     <release version="4.7.0" date="2026-09-17">
       <description>
         <p>

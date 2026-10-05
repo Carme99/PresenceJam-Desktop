@@ -13,7 +13,7 @@ Index of the docs: [`README.md`](./README.md). Post-release verification lives i
 
 ## 1. Version-bearing files
 
-Five files, **six literals**:
+Five files, **six literals** — plus a seventh file (`com.presencejam.app.metainfo.xml`) that is not a literal but is gated the same way:
 
 | # | File | Literal | Notes |
 | --- | --- | --- | --- |
@@ -23,6 +23,7 @@ Five files, **six literals**:
 | 4 | [`src-tauri/tauri.conf.json`](../src-tauri/tauri.conf.json) | `"version"` | **the version the built binary self-reports** — the one the updater compares against |
 | 5 | [`src-tauri/Cargo.toml`](../src-tauri/Cargo.toml) | `version = "…"` under `[package]` | crate `presence-jam` |
 | 6 | [`src-tauri/Cargo.lock`](../src-tauri/Cargo.lock) | `version = "…"` in the `[[package]] name = "presence-jam"` block | the workspace member's locked version |
+| 7 | [`src-tauri/linux/com.presencejam.app.metainfo.xml`](../src-tauri/linux/com.presencejam.app.metainfo.xml) | newest `<release version="…">` | **Not a plain literal.** `release.yml` greps the *first* `<release version=` and fails the build when it is not the version being tagged, so a cut must **prepend** a new `<release>` entry rather than edit the existing one. This is the gate that silently under-counts if it is missed. |
 
 Find them all (replace `<old-version>` with the version you are leaving):
 
@@ -30,6 +31,7 @@ Find them all (replace `<old-version>` with the version you are leaving):
 grep -n '"version"' package.json package-lock.json src-tauri/tauri.conf.json
 grep -n '^version' src-tauri/Cargo.toml
 grep -n -A2 '^name = "presence-jam"' src-tauri/Cargo.lock
+grep -n -m1 '<release version=' src-tauri/linux/com.presencejam.app.metainfo.xml
 ```
 
 ### The `package-lock.json` trap
