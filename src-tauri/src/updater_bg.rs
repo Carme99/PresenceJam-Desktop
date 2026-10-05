@@ -1244,6 +1244,14 @@ async fn check_with_channel(
 /// installed.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
+// Exported for the same reason as [`UpdateCheckOutcome`] (issue #782), and
+// for a sharper reason: without `export_to` ts-rs writes this type to its
+// default `bindings/` directory next to the crate root, and
+// `UpdateCheckOutcome.ts` then imports it from `../../../src-tauri/bindings/`
+// — a cross-tree import into the Rust source directory that no diff shows,
+// because `src/lib/types-generated/` is gitignored. `src-tauri/bindings/` is
+// deliberately NOT gitignored: it is the signal for exactly this mistake.
+#[ts(export, export_to = "../../src/lib/types-generated/")]
 pub enum UpdateInstall {
     /// The running bundle type has a matching payload in the manifest and the
     /// plugin can install it in place.
