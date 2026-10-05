@@ -71,4 +71,4 @@ Neither the app nor its author is affiliated with Spotify AB or Microsoft Corpor
 
 ---
 
-*This list was generated from Cargo.toml and the `dependencies` + `devDependencies` in package.json.*
+*Derived from `src-tauri/Cargo.toml` and the `dependencies` + `devDependencies` in `package.json`, then narrowed to the crates and packages this app actually uses. Some direct dependencies are omitted — notably the six platform-FFI crates pulled in for the tray, focus and idle probes, and `@playwright/test`.*

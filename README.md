@@ -62,7 +62,7 @@ Latest release: [GitHub Releases](https://github.com/Carme99/PresenceJam-Desktop
 
 Download the installer for your platform from the [latest release](https://github.com/Carme99/PresenceJam-Desktop/releases/latest):
 
-- **Windows 10/11 (64-bit)** — `PresenceJam-<tag>.msi` (e.g., `PresenceJam-v4.0.0.msi`)
+- **Windows 10/11 (64-bit)** — `PresenceJam-<tag>-setup.exe` (e.g. `PresenceJam-v4.0.0-setup.exe`). This NSIS installer is the one the in-app updater replaces, and it installs per-user with no elevation. `PresenceJam-<tag>.msi` is also published for managed/machine-wide installs, but it installs per-machine under Program Files and cannot be updated by a non-admin user, so use it only where you can install as administrator.
 - **macOS (Apple Silicon)** — `PresenceJam-macos.dmg`
 - **Debian / Ubuntu / Mint / popOS (64-bit)** — `PresenceJam-linux-amd64.deb`
 - **Any modern Linux (64-bit, no install required)** — `PresenceJam-linux-amd64.AppImage`
@@ -145,15 +145,20 @@ npm run tauri build
 
 ## Command-line flags
 
-PresenceJam is a tray app, but the binary also answers three CLI flags — useful from a script,
+PresenceJam is a tray app, but the binary also answers seven CLI flags plus `--help` — useful from a script,
 a cron job or a support session. None of them opens the app window, and any *other* argument is
 ignored, so the app starts normally exactly as it always has.
 
 | Command | What it does |
 | --- | --- |
 | `presencejam --status` | Prints the sync status as **JSON on stdout** and exits `0` — the same fields the app's `get_sync_status` command returns. Fully headless: builds no window and no tray icon and takes no single-instance lock. `spotify_connected` / `teams_connected` come from the same `config.json` and `tokens.json` the app reads. |
-| `presencejam --sync-once` | Runs **exactly one poll iteration** (including the Teams status write) and exits `0` on success, or `1` with the reason on **stderr**. Needs a configured Spotify `client_id` and a sign-in to both Spotify and Teams; logs go to the normal log file. |
-| `presencejam --help` | Prints the usage text — these three flags plus `--minimized` — and exits `0`. Fully headless. |
+| `presencejam --sync-once` | Runs **exactly one poll iteration** (including the Teams status write) and exits `0`
+| `presencejam --set-status <message>` | Writes a manual Teams status, then exits. Replacement text is capped at 128 characters.
+| `presencejam --set-status-expiry <minutes>` | Sets how long that manual status lives before the poller clears it.
+| `presencejam --clear-status` | Clears any manual status immediately.
+| `presencejam --serve[=PORT]` | Serves the token-guarded localhost read-only status API (the surface `--status` reads from).
+| `presencejam --daemon` | Runs the background daemon without a window — what the systemd unit, the launchd plist and the Windows Task Scheduler definitions under `packaging/` invoke. | on success, or `1` with the reason on **stderr**. Needs a configured Spotify `client_id` and a sign-in to both Spotify and Teams; logs go to the normal log file. |
+| `presencejam --help` | Prints the usage text — every flag below — and exits `0`. Fully headless. |
 | `presencejam --minimized` | Starts with the window hidden (what the autostart plugin passes at login). This is a normal GUI launch. |
 
 **Platform requirement.** `--status` and `--help` need no desktop at all. `--sync-once` does on

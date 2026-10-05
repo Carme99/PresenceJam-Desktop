@@ -47,7 +47,7 @@ see [`docs/RELEASING.md`](./docs/RELEASING.md).
 | Frontend framework | SvelteKit with `@sveltejs/adapter-static` | Svelte `5.57`, SvelteKit `2.70` |
 | Frontend language | TypeScript | `5.9` |
 | Build / bundler | Vite | `6.4` |
-| Test runners | Vitest (`@vitest/coverage-v8`) + Playwright Chromium | `4.1` / `1.63` |
+| Test runners | Vitest (`@vitest/coverage-v8`) + Playwright (Chromium and WebKit) | `4.1` / `1.63` |
 | Type checker | `svelte-check` | `4.7` |
 | Node | npm | `engines.node >= 22`; CI installs Node 24 |
 
@@ -529,7 +529,7 @@ fix:
 | `dep-audit` | Ubuntu | npm production audit gates; Cargo audit and the full npm tree are advisory | new production npm advisory or audit step failure |
 | `no-vendored-binaries` | Ubuntu | Fails on untracked, unignored root paths | vendored browser/build binary enters the tree |
 | `cargo-deny` | Ubuntu | Cargo-deny checks dependency licenses and sources | incompatible license or disallowed source |
-| `rust-coverage` | Ubuntu | llvm-cov line coverage and per-file floors | coverage falls below the ratchet |
+| `rust-coverage` | Ubuntu | llvm-cov line coverage, reported | never fails today — every per-file floor on `main` is `0`, so it is informational only |
 
 The `rust-platform-check` job is the one that catches **cross-platform
 regressions**: a regression inside `#[cfg(target_os = "macos")]` fails the
@@ -597,8 +597,12 @@ the v5 retrospectives track why each one was forbidden.
 - **Do NOT skip the profanity filter** on any code path that ends at the
   Teams status. The filter is the only thing standing between a crafted
   track title and a Teams status blast.
-- **Do NOT write `unsafe`** in production code. There is no `unsafe` in
-  this codebase today; do not introduce one.
+- **Do NOT introduce new `unsafe`** in production code. Ten existing FFI blocks
+  are reviewed exceptions for platform calls with no safe Rust wrapper: the
+  atomic-publish renames in `diagnostics.rs`, the CLI parent-console attach in
+  `lib.rs`, the LaunchServices claim in `macos_deeplink.rs`, and the Win32
+  probes in `platform/{focus,idle}.rs`. Keep that list at ten — an eleventh
+  needs a reason in the PR.
 - **Do NOT bypass `redact_sensitive`** when building a diagnostics payload.
 - **Do NOT change the bundle id** (`com.presencejam.app`) — it is the
   on-disk anchor for `tokens.json` and `app_log_dir()`.

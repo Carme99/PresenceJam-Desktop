@@ -78,7 +78,7 @@ If your change affects the UI, please include a screenshot in the PR. Screenshot
 
 ## Project Structure
 
-See [the architecture frontend page](./docs/architecture/frontend.md#directory-structure) for the full directory tree.
+See [the architecture frontend page](./docs/architecture/frontend.md#directory-structure) for the directory tree.
 
 ## Logging
 

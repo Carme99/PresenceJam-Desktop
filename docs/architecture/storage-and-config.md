@@ -34,9 +34,10 @@ settings:
   `migrate_config` in place.
 
 The current config writer has a monotonic `revision` field and rejects stale
-whole-document payloads. The cross-process sidecar lock, the reserved
-JavaScript-safe terminal boundary, `config-changed` publication, and live
-frontend adoption are **not present at this main checkout**. The headless
+whole-document payloads. `config-changed` publication and live frontend adoption **are** present: `config.rs` declares
+`CONFIG_CHANGED_EVENT` and emits it after every accepted save (issue #943), and the webview
+subscribes and reloads. The cross-process sidecar lock and the reserved JavaScript-safe terminal
+boundary remain **not present at this main checkout**.
 `--profile` path is a direct next-load write because it exits before the Tauri
 event path; it does not publish a live profile change to a running GUI.
 

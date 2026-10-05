@@ -487,11 +487,11 @@ the `dep-audit` job's warning count is explained rather than merely tolerated.
 
 ## Release Pipeline Token Rotation
 
-The release workflow (`.github/workflows/release.yml`) uses two repository secrets to publish to package managers. Both are personal access tokens (PATs) held by the maintainer and must be rotated on a 90-day cadence to limit blast radius if the token leaks through any other channel (CI logs, tap repo history, developer machine, etc.).
+The release workflow (`.github/workflows/release.yml`) uses two repository secrets to publish to package managers. Both are personal access tokens (PATs) held by the maintainer and must be rotated every 30 days to limit blast radius if the token leaks through any other channel (CI logs, tap repo history, developer machine, etc.).
 
 | Secret | Scope | Stored where | Rotation check |
 |---|---|---|---|
-| `HOMEBREW_TAP_TOKEN` | `contents:write` on `carme99/homebrew-tap` only (fine-grained PAT) | GitHub Actions secrets | When did the token last rotate? If >90 days, generate a new fine-grained PAT with the same scope, update the secret, revoke the old one. |
+| `HOMEBREW_TAP_TOKEN` | `contents:write` on `carme99/homebrew-tap` only (fine-grained PAT) | GitHub Actions secrets | When did the token last rotate? If >30 days, generate a new fine-grained PAT with the same scope, update the secret, revoke the old one. |
 | `WINGET_TOKEN` | `public_repo` + `workflow` on `Carme99/winget-pkgs` fork only (classic PAT; `komac sync-fork` then PR fork → `microsoft/winget-pkgs`) | GitHub Actions secrets | Same as above. |
 
 **Rotation procedure:**
@@ -501,9 +501,9 @@ The release workflow (`.github/workflows/release.yml`) uses two repository secre
 4. Trigger a dry-run of the release workflow (push a `v0.0.0-test` tag, then delete it) to confirm the new tokens work.
 5. Record the rotation in the repo's release notes / changelog under "Internal / security".
 
-**Why fine-grained where possible, not classic everywhere:** A classic PAT grants the token owner full access to every repository they can see. If `HOMEBREW_TAP_TOKEN` leaks, a classic PAT lets the attacker push to PresenceJam-Desktop, the homebrew tap, and any other repo under the Carme99 account. A fine-grained PAT scoped to a single repo with `contents:write` only leaks the ability to push to that one repo. `WINGET_TOKEN` is the exception: the winget releaser action only supports classic PATs with `workflow` scope (fine-grained returns 422), so it stays classic but is scoped to the `Carme99/winget-pkgs` fork, not `microsoft/winget-pkgs`, and is rotated on the same 90-day cadence.
+**Why fine-grained where possible, not classic everywhere:** A classic PAT grants the token owner full access to every repository they can see. If `HOMEBREW_TAP_TOKEN` leaks, a classic PAT lets the attacker push to PresenceJam-Desktop, the homebrew tap, and any other repo under the Carme99 account. A fine-grained PAT scoped to a single repo with `contents:write` only leaks the ability to push to that one repo. `WINGET_TOKEN` is the exception: the winget releaser action only supports classic PATs with `workflow` scope (fine-grained returns 422), so it stays classic but is scoped to the `Carme99/winget-pkgs` fork, not `microsoft/winget-pkgs`, and is rotated on the same 30-day cadence.
 
-**Why 90 days:** A compromise window of 90 days balances the operational cost of rotation against the average time-to-detection for token misuse in monitoring (per GitHub's own PAT guidance). Shorter windows (30/60 days) are acceptable if rotation can be automated; longer windows increase the blast radius of any leak.
+**Why 30 days:** A compromise window of 30 days balances the operational cost of rotation against the average time-to-detection for token misuse in monitoring (per GitHub's own PAT guidance). A shorter window is acceptable if rotation can be automated; a longer one increases the blast radius of any leak.
 ## Open Source
 
 PresenceJam is open source. You're encouraged to review the code yourself:

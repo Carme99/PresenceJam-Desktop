@@ -233,7 +233,7 @@ mirroring the backend bound:
 
 | Field | Bound (backend, `config.rs`) | Settings | Consumed by |
 |-------|------------------------------|----------|-------------|
-| `status_rules.quiet_hours[].replacement_status` | `MAX_RULE_STATUS_CHARS` = 160 | "Post this instead (empty = suppress)" per quiet-hours row | ✅ the playing path *and* the no-track clear — a quiet-hours replacement is posted from both |
+| `status_rules.quiet_hours[].replacement_status` | `MAX_RULE_STATUS_CHARS` = 128 | "Post this instead (empty = suppress)" per quiet-hours row | ✅ the playing path *and* the no-track clear — a quiet-hours replacement is posted from both |
 | `teams.profanity_extra_words` | `clamp_teams`: at most 64 entries, each truncated to 32 chars | "Custom words to filter", one per line | ✅ `profanity::filter_status(text, placeholder, is_playing, extra_words)` → `contains_extra_word` (built-in boundary/evasion rules, no built-in stem carve-outs) — consumed by the polling status write and by `preview_status` |
 | `polling.pause_backoff_max_seconds` | `clamp_polling`: 60–3600 s | "Paused backoff ceiling (seconds)" | ✅ `poll_once::pause_backoff(consecutive, default, ceiling)` — the ladder's top rung (default 300 s; floored at the base interval so it cannot invert the ladder) |
 

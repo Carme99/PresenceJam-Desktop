@@ -281,7 +281,7 @@ The current log level is set in **Settings → Logging** (the same value lives i
 
 ## Command-line flags
 
-PresenceJam is a tray app, but the binary also answers three CLI flags — handy from a script, a
+PresenceJam is a tray app, but the binary also answers seven CLI flags plus `--help` — handy from a script, a
 cron job or a support session. None of them opens the app window. Any *other* argument is
 ignored and the app starts normally, exactly as it always has (that includes the autostart
 plugin's `--minimized` and a `presencejam://` deep-link URL, which are both normal GUI
@@ -291,7 +291,12 @@ launches).
 |---------|--------------|
 | `presencejam --status` | Prints the sync status as **JSON on stdout** and exits `0`. The fields are the ones the app's `get_sync_status` command returns: `is_syncing`, `current_track`, `spotify_connected`, `teams_connected`, `last_posted_status`, `presence_gated`, `presence_paused`. It builds no window and no tray icon and takes no single-instance lock, so it works on a **headless machine**. A freshly started process has no poller, so `is_syncing` is `false`, `current_track` is `null` and the presence fields are empty — the values describe *that* process. `spotify_connected` / `teams_connected` are read from the same `config.json` and `tokens.json` the app uses. If either file cannot be read, the JSON is still printed (both providers reported as disconnected) and the reason goes to **stderr**. |
 | `presencejam --sync-once` | Runs **exactly one poll iteration** — including the Teams status write — and exits `0` on success or `1` with the reason on **stderr**. Requires a configured Spotify `client_id` and a sign-in to **both** Spotify and Teams; without them it exits `1` before doing anything else. Logs go to the normal log file. |
-| `presencejam --help` | Prints the usage text — the three flags above plus `--minimized` — and exits `0`. Fully headless. |
+| `presencejam --set-status <message>` | Writes a manual Teams status, then exits. Replacement text is capped at 128 characters.
+| `presencejam --set-status-expiry <minutes>` | Sets how long that manual status lives before the poller clears it.
+| `presencejam --clear-status` | Clears any manual status immediately.
+| `presencejam --serve[=PORT]` | Serves the token-guarded localhost read-only status API.
+| `presencejam --daemon` | Runs the background daemon without a window — what the units under `packaging/` invoke.
+| `presencejam --help` | Prints the usage text — every flag above — and exits `0`. Fully headlessdless. |
 | `presencejam --minimized` | Starts with the window hidden (what the autostart plugin passes at login). This is a normal GUI launch. |
 
 On Windows the release build is a GUI-subsystem executable, so it owns no console of its own:
