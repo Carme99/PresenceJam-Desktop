@@ -30,7 +30,10 @@ pub(crate) enum SpotifyAuthEvent {
 /// Tauri-side sink for [`SpotifyAuthEvent`]. The helper passes this closure
 /// shape into `commit_spotify_session` so the post-exchange commit block can
 /// run in a unit test without an `AppHandle`.
-pub(crate) fn emit_spotify_auth_event(app: &AppHandle, event: SpotifyAuthEvent) {
+pub(crate) fn emit_spotify_auth_event<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    event: SpotifyAuthEvent,
+) {
     match event {
         SpotifyAuthEvent::PersistWarning { message } => {
             let _ = app.emit(
@@ -1436,7 +1439,10 @@ mod tests {
         // the only one that calls `commit_spotify_session` from that
         // translation unit, so a targeted scan keeps the assertion tight.
         let src = include_str!("../lib.rs");
-        let body = crate::token_io::test_scan::fn_body(src, "async fn handle_spotify_callback(");
+        // No trailing '(' in the marker: the signature is generic over
+        // `tauri::Runtime` (issue #937), and `fn_body` takes the first `{`
+        // after the marker, so a name-only marker matches either shape.
+        let body = crate::token_io::test_scan::fn_body(src, "async fn handle_spotify_callback");
         assert_uses_commit_spotify_session_seam(body, "deep-link path");
     }
 }
