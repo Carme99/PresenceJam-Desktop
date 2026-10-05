@@ -3428,24 +3428,63 @@ enum TeamsWriteError {
     Api(TeamsApiError),
 }
 
-/// Issue #1117: how `process_track`'s playing write reacts to a failure.
+/// Issue #1117: how `process_track`'s playing write reacts to a failure, and
+/// what the ITERATION then does about it.
 ///
-/// Held in a small function so the decision is executable: the superseded
-/// case has to end the iteration BEFORE the presence tail re-arms on the
-/// stale token (main's pre-#929 `return 0`), while a genuine failure still
-/// logs, banners and honours a server-directed backoff.
+/// This is the whole arm decision, hoisted out of `process_track` so it is a
+/// pure function whose RETURN VALUE is what `process_track` returns. That
+/// matters because the superseded case has to end the iteration BEFORE the
+/// presence tail re-arms on the stale token (main's pre-#929 `return 0;`),
+/// while a genuine failure still logs, banners and honours a server-directed
+/// backoff.
+///
+/// The short-circuit is [`PlayingIterationOutcome::EndIteration`]'s
+/// `sleep_secs`, not a `return` statement pasted into the match arm: the first
+/// cut of this fix kept the `return 0;` in the arm and only mapped the typed
+/// error to an enum variant, which left the P0 unpinned — deleting the
+/// `return 0;` restored the stale-token `sync_availability` re-arm plus a
+/// backoff and every test stayed green.
 #[derive(Debug)]
-enum PlayingWriteReaction {
-    /// End the iteration now — sleep 0, no error banner, no presence tail.
-    SupersededNoOp,
-    /// Carry the typed error to the caller's error handling.
-    Failed(TeamsApiError),
+enum PlayingIterationOutcome {
+    /// End the iteration now, returning exactly `sleep_secs`: no error
+    /// banner, no backoff, and — crucially — no presence tail, because the
+    /// token that just lost the slot must never be re-armed.
+    EndIteration {
+        sleep_secs: u64,
+    },
+    /// Fall through to the presence tail, carrying the typed error for the
+    /// caller's banner and the backoff to raise `teams_backoff_secs` to.
+    ContinueWithBackoff {
+        backoff_secs: u64,
+        error: TeamsApiError,
+    },
 }
 
-fn playing_write_reaction(failure: TeamsWriteError) -> PlayingWriteReaction {
+/// Issue #1117: the pure form of `process_track`'s playing-write failure arm.
+///
+/// `prior_backoff_secs` is `process_track`'s `teams_backoff_secs` as it stands
+/// when the write fails. A genuine failure raises it with the server-directed
+/// `Retry-After` (issue #154); a superseded slot ignores it entirely and ends
+/// the iteration with a zero sleep, because a newer session already owns
+/// Teams and there is nothing to wait out or report.
+fn playing_write_iteration_outcome(
+    failure: TeamsWriteError,
+    prior_backoff_secs: u64,
+) -> PlayingIterationOutcome {
     match failure {
-        TeamsWriteError::Superseded => PlayingWriteReaction::SupersededNoOp,
-        TeamsWriteError::Api(error) => PlayingWriteReaction::Failed(error),
+        // Issue #1117: the pre-#929 `return 0;`, moved here so the caller
+        // returns a value this function computed. Deleting the short-circuit
+        // (or giving it any non-zero sleep, or letting it honour
+        // `prior_backoff_secs`) reintroduces the stale-token re-arm that #929
+        // exists to prevent, and the behavioural test fails.
+        TeamsWriteError::Superseded => PlayingIterationOutcome::EndIteration { sleep_secs: 0 },
+        // Issue #154: a 429 extends the next poll to the server-directed
+        // delay. The typed error is handed back unchanged so the caller
+        // banners exactly what the shared helper classified.
+        TeamsWriteError::Api(error) => PlayingIterationOutcome::ContinueWithBackoff {
+            backoff_secs: prior_backoff_secs.max(rate_limit_sleep_secs(&error)),
+            error,
+        },
     }
 }
 
@@ -4943,33 +4982,39 @@ pub(crate) fn process_track(
                         config.as_ref(),
                     );
                 }
-                Err(failure) => match playing_write_reaction(failure) {
-                    // Issue #1117 (option 2 of the issue's two options): a
-                    // superseded slot short-circuits `process_track` exactly
-                    // as the pre-#929 inline handler did with
-                    // `return 0;`. No write happened, `teams_tok` is stale,
-                    // and the newer session owns Teams — so there is nothing
-                    // to banner, no error to back off for, and the presence
-                    // tail below must not re-arm on a token that just 401'd.
-                    // The next iteration picks the new session up through
-                    // `teams_token_for_write`.
-                    PlayingWriteReaction::SupersededNoOp => return 0,
-                    PlayingWriteReaction::Failed(e) => {
-                        log::error!("[POLLING] process_track: Failed to set Teams status: {}", e);
-                        // Issue #974: the Dashboard banner reads `user_message()`,
-                        // never `Display`. `Display` carries the raw Graph body for
-                        // 403/418 — useful in logs, useless to a user staring at a
-                        // five-second banner.
-                        emit_teams_write_error(app, &e);
-                        // Issue #154: a 429 extends the next poll to the
-                        // server-directed delay.
-                        teams_backoff_secs = teams_backoff_secs.max(rate_limit_sleep_secs(&e));
-                        // The shared helper already classified the
-                        // typed error (issue #929): dead credential →
-                        // `teams-reconnect-required`; Forbidden logged
-                        // as permission/license; transient logged.
+                // Issue #1117 (option 2 of the issue's two options): the whole
+                // arm decision — including the sleep this iteration returns —
+                // is computed by `playing_write_iteration_outcome`, so the
+                // short-circuit is a return VALUE the unit tests assert on
+                // rather than a `return 0;` statement nothing could pin. No
+                // write happened, `teams_tok` is stale, and the newer session
+                // owns Teams — so there is nothing to banner, no error to back
+                // off for, and the presence tail below must not re-arm on a
+                // token that just 401'd. The next iteration picks the new
+                // session up through `teams_token_for_write`.
+                Err(failure) => {
+                    match playing_write_iteration_outcome(failure, teams_backoff_secs) {
+                        PlayingIterationOutcome::EndIteration { sleep_secs } => return sleep_secs,
+                        PlayingIterationOutcome::ContinueWithBackoff { backoff_secs, error } => {
+                            log::error!(
+                                "[POLLING] process_track: Failed to set Teams status: {}",
+                                error
+                            );
+                            // Issue #974: the Dashboard banner reads
+                            // `user_message()`, never `Display`. `Display` carries
+                            // the raw Graph body for 403/418 — useful in logs,
+                            // useless to a user staring at a five-second banner.
+                            emit_teams_write_error(app, &error);
+                            // Issue #154: a 429 extends the next poll to the
+                            // server-directed delay.
+                            teams_backoff_secs = backoff_secs;
+                            // The shared helper already classified the
+                            // typed error (issue #929): dead credential →
+                            // `teams-reconnect-required`; Forbidden logged
+                            // as permission/license; transient logged.
+                        }
                     }
-                },
+                }
             }
         } else if config
             .as_ref()
@@ -8917,53 +8962,112 @@ mod tests {
         }
     }
 
-    /// Issue #1117: the caller-side half of the same fix. `process_track`'s
-    /// playing write must turn a superseded failure into "end the iteration"
-    /// — no error log, no Dashboard banner, no backoff, and (because it
-    /// returns before the presence tail) no `sync_availability` call against
-    /// the stale token that just lost the slot. Main's pre-#929 inline handler
-    /// did exactly this with `return 0;`.
+    /// Issue #1117: the caller-side half of the same fix, pinned on the
+    /// RETURN VALUE. `process_track`'s playing write must turn a superseded
+    /// failure into "end the iteration with a zero sleep" — no error log, no
+    /// Dashboard banner, no backoff, and (because it returns before the
+    /// presence tail) no `sync_availability` call against the stale token that
+    /// just lost the slot. Main's pre-#929 inline handler did exactly this with
+    /// `return 0;`.
     ///
-    /// The decision lives in [`playing_write_reaction`] so it is executable:
-    /// `process_track`'s other inputs (real `AppHandle`, real presence reads,
-    /// a Graph round-trip) put the arm itself out of reach for a hermetic
-    /// unit test. Swapping the two arms — treating a superseded slot as an
-    /// ordinary failure, or silently swallowing a real one — fails here.
+    /// Why this asserts the whole [`PlayingIterationOutcome`] and not just a
+    /// mapper: the first cut kept `return 0;` as a statement in the match arm
+    /// and only mapped the typed error to an enum variant. Mutation testing
+    /// showed the mapper test stayed green with that `return 0;` replaced by
+    /// `() => {}`, which restored the stale-token `sync_availability` re-arm
+    /// plus a backoff — the exact P0 #929 exists to fix, unpinned. The arm
+    /// decision now lives in [`playing_write_iteration_outcome`], so the
+    /// short-circuit IS the value this test checks, and deleting it fails
+    /// here.
+    ///
+    /// The `prior_backoff_secs` sweep is load-bearing: it pins the superseded
+    /// arm at a zero sleep even when a backoff is already pending, which is
+    /// the "backoff instead of 0" half of that regression.
     #[test]
-    fn test_playing_write_reaction_no_ops_a_superseded_write_only() {
-        assert!(
-            matches!(
-                playing_write_reaction(TeamsWriteError::Superseded),
-                PlayingWriteReaction::SupersededNoOp
-            ),
-            "a superseded slot must end the iteration (pre-#929 `return 0;`) \
-             so no banner fires and the presence tail never re-arms on the \
-             stale token (issue #1117)"
-        );
+    fn test_playing_write_iteration_outcome_ends_only_a_superseded_write() {
+        for prior_backoff_secs in [0u64, 1, 30, 300, 900] {
+            assert!(
+                matches!(
+                    playing_write_iteration_outcome(
+                        TeamsWriteError::Superseded,
+                        prior_backoff_secs
+                    ),
+                    PlayingIterationOutcome::EndIteration { sleep_secs: 0 }
+                ),
+                "a superseded slot must end the iteration with a ZERO sleep \
+                 (pre-#929 `return 0;`) so no banner fires and the presence \
+                 tail never re-arms on the stale token — and it must not honour \
+                 the pending backoff of {prior_backoff_secs}s, because a newer \
+                 live session already owns Teams (issue #1117)"
+            );
+        }
 
         let genuine = [
             TeamsApiError::Transient("connection reset".to_string()),
             TeamsApiError::RateLimited(Some(30)),
+            TeamsApiError::RateLimited(None),
             TeamsApiError::Forbidden(403, "insufficient_claims".to_string()),
             TeamsApiError::InvalidGrant,
             TeamsApiError::ExpiredToken(401),
         ];
         for error in genuine {
-            let reaction = playing_write_reaction(TeamsWriteError::Api(error.clone()));
-            match reaction {
-                PlayingWriteReaction::Failed(surfaced) => assert_eq!(
-                    surfaced.to_string(),
-                    error.to_string(),
-                    "a genuine Teams failure must reach the caller's error path \
-                     with the SAME typed error so the banner and backoff are \
-                     unchanged (issue #1117): {error:?}"
-                ),
-                other => panic!(
-                    "a genuine Teams failure must NOT be swallowed as a \
-                     no-op — the Dashboard would show a stuck status with no \
-                     banner (issue #1117): {other:?} for {error:?}"
-                ),
+            for prior_backoff_secs in [0u64, 30, 300] {
+                match playing_write_iteration_outcome(
+                    TeamsWriteError::Api(error.clone()),
+                    prior_backoff_secs,
+                ) {
+                    PlayingIterationOutcome::ContinueWithBackoff {
+                        backoff_secs,
+                        error: surfaced,
+                    } => {
+                        assert_eq!(
+                            surfaced.to_string(),
+                            error.to_string(),
+                            "a genuine Teams failure must reach the caller's error \
+                             path with the SAME typed error so the banner and backoff \
+                             are unchanged (issue #1117): {error:?}"
+                        );
+                        // Issue #154: only a 429 with a server-directed delay may
+                        // raise the backoff, and it may never lower one that is
+                        // already pending.
+                        let floor = match &error {
+                            TeamsApiError::RateLimited(Some(secs)) => *secs,
+                            _ => 0,
+                        };
+                        assert!(
+                            backoff_secs == prior_backoff_secs.max(floor),
+                            "the backoff must be `max(prior, Retry-After)` and \
+                             never a delay of its own: error = {error:?}, prior = \
+                             {prior_backoff_secs}, got {backoff_secs} (issue #154)"
+                        );
+                    }
+                    other => panic!(
+                        "a genuine Teams failure must NOT be swallowed as a \
+                         no-op — the Dashboard would show a stuck status with no \
+                         banner, and a rate limit would be ignored (issue #1117): \
+                         {other:?} for {error:?} with prior {prior_backoff_secs}"
+                    ),
+                }
             }
+        }
+
+        // A 429 with no `Retry-After` still has to hold the poll off; the
+        // fallback is jittered, so assert the shape (raised, never lowered)
+        // rather than a fixed number.
+        match playing_write_iteration_outcome(
+            TeamsWriteError::Api(TeamsApiError::RateLimited(None)),
+            900,
+        ) {
+            PlayingIterationOutcome::ContinueWithBackoff { backoff_secs, .. } => assert_eq!(
+                backoff_secs,
+                900,
+                "the jittered rate-limit fallback must not shorten an existing \
+                 backoff (issue #154)"
+            ),
+            other => panic!(
+                "a 429 without `Retry-After` must still reach the caller's error \
+                 path (issue #1117): {other:?}"
+            ),
         }
     }
 
