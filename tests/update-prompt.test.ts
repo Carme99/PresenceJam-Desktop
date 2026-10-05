@@ -105,7 +105,10 @@ const notifyUpdateStagedMock = notifyUpdateStaged as unknown as Mock;
 const CANDIDATE = {
   version: '4.6.0',
   notes: 'Fixes and polish',
-  pub_date: '2026-09-16T21:07:35Z'
+  pub_date: '2026-09-16T21:07:35Z',
+  // #894: the backend now reports HOW the running install must be updated.
+  // 'in-app' is the in-place path every existing case exercises.
+  install: { kind: 'in-app' }
 };
 
 /** Resolvers of the in-flight `stage_deferred_update` calls, in call order. */
@@ -650,7 +653,7 @@ describe('UpdatePrompt release channel (#678)', () => {
     const base = invokeMock.getMockImplementation()!;
     invokeMock.mockImplementation(async (cmd: string, args?: unknown) =>
       cmd === 'check_for_update'
-        ? { version: '4.7.0', notes: null, pub_date: null }
+        ? { version: '4.7.0', notes: null, pub_date: null, install: { kind: 'in-app' } }
         : base(cmd, args)
     );
 
@@ -699,7 +702,7 @@ describe('UpdatePrompt check race (#977)', () => {
     await waitFor(() => expect(pending).toHaveLength(2));
 
     // The newer check answers first…
-    pending[1]({ version: '4.7.0', notes: null, pub_date: null });
+    pending[1]({ version: '4.7.0', notes: null, pub_date: null, install: { kind: 'in-app' } });
     await waitFor(() =>
       expect(rendered.container.querySelector('.update-title')).not.toBeNull()
     );

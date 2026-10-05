@@ -2,7 +2,7 @@
   import { get } from 'svelte/store';
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import { currentView } from '$lib/stores/app';
   import { detachedPanes, focusDetached } from '$lib/stores/detach';
   import { configStore, loadConfig, saveConfig, clientSecretStateOf } from '$lib/stores/config';

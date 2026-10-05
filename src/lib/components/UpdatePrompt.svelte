@@ -87,7 +87,10 @@
   // install buttons instead of downloading an AppImage the plugin cannot
   // apply. `null` means the in-app path, which is every non-Linux-package
   // bundle type.
-  const packageManaged = $derived<UpdateInstall | null>(
+  // Only the package variants carry `package_url`; narrowing the TYPE as well as
+  // the value keeps `.package_url` type-safe instead of asserting past the union.
+  type PackageManagedInstall = Extract<UpdateInstall, { kind: 'deb' | 'rpm' }>;
+  const packageManaged = $derived<PackageManagedInstall | null>(
     update !== null && update.install.kind !== 'in-app' ? update.install : null
   );
   // The asset file name the release publishes for this flavour — the command
@@ -97,7 +100,6 @@
       ? ''
       : packageManaged.package_url.slice(packageManaged.package_url.lastIndexOf('/') + 1)
   );
-
 
   // 4.7.0 (issue #678): the candidate comes from the backend, which resolves
   // `config.updates.channel`; the immediate JS `downloadAndInstall()` below
@@ -197,6 +199,7 @@
         // 24h tick off permanently.
         if (gen === checkGen) checkInFlight = false;
       });
+  }
 
   // #977: a channel switch in Settings republishes the persisted document
   // into `configStore` (`saveConfig`/`updateConfig`), and that is the signal
@@ -254,8 +257,11 @@
         requestId !== activeStageRequestId &&
         requestId !== stagedStageRequestId
       ) return;
-      stageDownloaded = event.payload.downloaded;
-      stageTotal = event.payload.total;
+      // ts-rs types a Rust `u64` as `bigint`; these drive a byte counter and a
+      // percentage, so narrow at the boundary rather than widening the whole
+      // component to bigint arithmetic (issue #765).
+      stageDownloaded = Number(event.payload.downloaded);
+      stageTotal = event.payload.total === null ? null : Number(event.payload.total);
     }).then((fn) => {
       if (destroyed) fn();
       else unlistenStage = fn;

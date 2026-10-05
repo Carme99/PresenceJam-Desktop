@@ -50,7 +50,10 @@ export type { StageDeferredOutcome } from './types-generated/StageDeferredOutcom
 export type { StageProgress } from './types-generated/StageProgress';
 export type { StageProgressEvent } from './types-generated/StageProgressEvent';
 export type { StageComplete } from './types-generated/StageComplete';
-export type { UpdateCheckOutcome, UpdateInstall } from './types-generated/UpdateCheckOutcome';
+export type { UpdateCheckOutcome } from './types-generated/UpdateCheckOutcome';
+// `UpdateInstall` is its own ts-rs module (issue #894), not a member of
+// `UpdateCheckOutcome` — re-exporting it from there fails type-check.
+export type { UpdateInstall } from './types-generated/UpdateInstall';
 export type { CancelDeferredOutcome } from './types-generated/CancelDeferredOutcome';
 export type { CancelDeferredState } from './types-generated/CancelDeferredState';
 export type { ShortcutsStatus } from './types-generated/ShortcutsStatus';
