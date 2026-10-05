@@ -280,6 +280,14 @@ pub struct PreferredPresenceConfig {
     /// arm clears on quit). Default: 60 minutes.
     #[serde(default = "default_preferred_presence_expiry")]
     pub expiry_minutes: u32,
+    /// Unknown / future keys NESTED inside this section, retained across
+    /// load→save so a section written by a newer binary is not silently
+    /// stripped by an older one (issue #938 — this object is a SECTION in its
+    /// own right, reachable at `teams.preferred_presence`, and it was the one
+    /// nested object still missing the retention map its siblings all carry).
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[ts(skip)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 fn default_preferred_presence_expiry() -> u32 {
@@ -293,6 +301,7 @@ impl Default for PreferredPresenceConfig {
             availability: String::new(),
             activity: String::new(),
             expiry_minutes: default_preferred_presence_expiry(),
+            extra: BTreeMap::new(),
         }
     }
 }
@@ -891,6 +900,80 @@ fn clamp_logging(cfg: &mut LoggingConfig) {
     cfg.max_file_size_mb = cfg.max_file_size_mb.clamp(1, 500);
     cfg.keep_files = cfg.keep_files.clamp(1, 20);
 }
+
+/// Canonicalise the stored UI locale to a tag the app can actually render
+/// (issue #767 — the clamp for the new `ConfigPatch::locale` field).
+///
+/// `None` stays `None`: that is the documented pre-4.7 state, and it means
+/// "follow the OS", not "English". A present tag is reduced to its base
+/// language and mapped onto one of the three shipped dictionaries through
+/// [`crate::i18n::resolve_tag`], which is the same function the `set_locale`
+/// command canonicalises with — so a patch, a `set_locale` call and a
+/// hand-edited file all converge on the identical stored value. Without it a
+/// patch could persist `"de-AT-x-priv"` and the picker would render a tag
+/// that resolves to English while the file claims German.
+fn clamp_locale(cfg: &mut AppConfig) {
+    let Some(tag) = cfg.locale.as_deref() else {
+        return;
+    };
+    cfg.locale = Some(crate::i18n::resolve_tag(Some(tag)).to_string());
+}
+
+/// Read a three-state `Option<Option<String>>` patch field: absent leaves the
+/// stored value untouched, `null` clears it, a string sets it (issue #767).
+///
+/// Serde cannot do this unaided. For `Option<Option<T>>` both a MISSING key and
+/// an explicit `null` deserialize to `None`, so the two states that the field
+/// exists to distinguish collapse into one — `{"locale": null}` would read as
+/// "this patch says nothing about the locale" and the caller's intent to clear
+/// it would be silently dropped. This maps the two JSON spellings onto the two
+/// distinct `Option` layers, with `#[serde(default)]` still supplying the
+/// missing-key case.
+fn deserialize_optional_tag<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
+}
+
+/// Bound the length of the two shortcut bindings (issue #767 — the clamp for
+/// the new `ConfigPatch::shortcuts` field).
+///
+/// A binding is user-supplied text that goes straight into `config.json`, and
+/// the Settings number/text inputs do not constrain a typed value, so an
+/// unbounded string is the same class of hazard `clamp_rule_text` bounds for a
+/// rule's replacement text. It is capped here rather than validated because
+/// whether an accelerator PARSES is `commands::shortcuts::validate_accelerator`'s
+/// job, and its failure is surfaced to the user as a `ShortcutReason` rather
+/// than silently unbound (issue #810). A second, quieter rule here would make
+/// two places answer "is this binding usable?".
+///
+/// A blank binding is deliberately LEFT ALONE — `Some("  ")` is not rewritten
+/// to `None`, and nothing is trimmed away. `configured_binding` already treats
+/// blank as unbound when it plans a registration, and the Settings field
+/// renders exactly what is stored; a writer that normalised it away would make
+/// that field lie about the document on disk (pinned by
+/// `shortcut_bindings_round_trip_through_json`).
+fn clamp_shortcuts(cfg: &mut ShortcutsConfig) {
+    fn bound(slot: &mut Option<String>) {
+        let Some(value) = slot.as_deref() else {
+            return;
+        };
+        if value.chars().count() > MAX_SHORTCUT_BINDING_CHARS {
+            *slot = Some(value.chars().take(MAX_SHORTCUT_BINDING_CHARS).collect());
+        }
+    }
+    bound(&mut cfg.toggle_playback);
+    bound(&mut cfg.toggle_sync);
+}
+
+/// Longest accelerator spelling `clamp_shortcuts` will store (issue #767).
+///
+/// Generous next to any real binding — `CmdOrCtrl+Alt+Shift+F12` is 23
+/// characters — and small enough that a pasted paragraph cannot become the
+/// stored document. The registrar still rejects anything that does not parse
+/// (`validate_accelerator`); this only bounds the text on the way to disk.
+const MAX_SHORTCUT_BINDING_CHARS: usize = 128;
 
 /// Whether a stored snooze deadline is still in the future (4.7.0, S9 /
 /// issue #677), as a UTC instant.
@@ -1979,6 +2062,7 @@ impl Default for AppConfig {
 /// both are derived display values filled in by [`with_keychain_flags`] from
 /// the OS keychain, so a client must not be able to assert them.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct SpotifyPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
@@ -1987,7 +2071,13 @@ pub struct SpotifyPatch {
 }
 
 /// Field-level patch for the `teams` section (CfgDiag#0, issue #535).
+///
+/// Every user-facing field of [`TeamsConfig`] is carried here, so no
+/// `update_config` caller is pushed onto the whole-document `save_config`
+/// path for want of a field (issue #767). Every value is re-clamped by
+/// [`clamp_teams`] through [`clamped_config`] after the merge.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct TeamsPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_format: Option<String>,
@@ -2005,6 +2095,27 @@ pub struct TeamsPatch {
     pub presence_gate: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profanity_extra_words: Option<Vec<String>>,
+    /// Finding #635 (issue #635): never overwrite a Teams status message the
+    /// user set by hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub respect_manual_status: Option<bool>,
+    /// Finding #637 (issue #637): also gate the status write while the user
+    /// is marked out of office.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_when_out_of_office: Option<bool>,
+    /// Issue #872: also gate while the OS reports a full-screen app,
+    /// presentation mode or Quiet Time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_when_presenting: Option<bool>,
+    /// Issue #873: idle threshold in seconds; `0` disables the gate.
+    /// Clamped into `60..=3600` (or left at `0`) by `clamp_teams`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_away_after_seconds: Option<u64>,
+    /// Issue #867: minutes before a meeting starts that the write is
+    /// suppressed; `0` means during the meeting only. Capped at 60 by
+    /// `clamp_teams`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_meeting_suppress_minutes: Option<u16>,
     /// S4 (issue #672): the user-templatable paused/stopped status texts, part
     /// of the same field-level patch as the rest of the section — a Settings
     /// save that omitted them would leave the stored text untouched.
@@ -2019,9 +2130,42 @@ pub struct TeamsPatch {
     pub preferred_presence: Option<PreferredPresenceConfig>,
 }
 
+/// Field-level patch for the `updates` section (issue #767).
+///
+/// The channel is the section's only user-facing field. Unlike
+/// [`UpdatesConfig::channel`] on the config itself, an unrecognised
+/// spelling here REJECTS the patch rather than being read leniently: a
+/// partial write is a deliberate IPC action by a caller that already holds
+/// the rendered channel list, so a value outside the enum means the two
+/// sides disagree — and the stored document is then left untouched, which
+/// is the safe answer for a partial write.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
+pub struct UpdatesPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<UpdateChannel>,
+}
+
+/// Field-level patch for the `shortcuts` section (issue #767).
+///
+/// `None` in the stored [`ShortcutsConfig`] is the documented "unbound"
+/// state, so a patch names a slot with a string and leaves it out to keep
+/// the stored binding. A blank string is normalised to unbound by
+/// `clamp_shortcuts`, exactly as
+/// [`crate::commands::shortcuts::configured_binding`] already reads it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
+pub struct ShortcutsPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toggle_playback: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toggle_sync: Option<String>,
+}
+
 /// Field-level patch for the `polling` section (CfgDiag#0, issue #535). Every
 /// value is re-clamped by [`clamped_config`] after the merge.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct PollingPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_interval_seconds: Option<u64>,
@@ -2036,12 +2180,27 @@ pub struct PollingPatch {
 }
 
 /// Field-level patch for the `logging` section (CfgDiag#0, issue #535).
+///
+/// Issue #767: the rotation settings (`max_file_size_mb`, `keep_files`) and
+/// the issue #877 `presence_history` mirror are user-facing too, so they
+/// ride the same partial-write path instead of forcing a whole-document
+/// save. Re-clamped by [`clamp_logging`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct LoggingPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_level: Option<String>,
+    /// Rotation ceiling in mebibytes; clamped to `1..=500` by `clamp_logging`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_file_size_mb: Option<u64>,
+    /// Archived log files to retain; clamped to `1..=20` by `clamp_logging`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_files: Option<u32>,
+    /// Issue #877: mirror the bounded status-decision history to disk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence_history: Option<bool>,
 }
 
 /// Field-level patch for the `status_rules` section (CfgDiag#0, issue #535).
@@ -2050,6 +2209,7 @@ pub struct LoggingPatch {
 /// naming `quiet_hours` means "this is the new list". Omitting it leaves the
 /// stored list untouched.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct StatusRulesPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quiet_hours: Option<Vec<QuietHoursEntry>>,
@@ -2062,6 +2222,7 @@ pub struct StatusRulesPatch {
 /// absent class leaves the stored flag untouched, mirroring the per-field
 /// shape of every other section patch above.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct NotificationsPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub track_change: Option<bool>,
@@ -2089,7 +2250,16 @@ pub struct NotificationsPatch {
 /// reset the user's `start_minimized`, profanity and presence settings — the
 /// very clobber this command exists to prevent, reproduced one level down.
 /// An absent key MUST leave the stored value untouched.
+///
+/// **Every section the app can write is represented here** (issue #767).
+/// A section missing from this struct is a section whose only write path is
+/// the whole-document `save_config` — the clobber class this type exists to
+/// end. `presence_profiles` / `active_profile` are deliberately absent: the
+/// tray's profile picker owns them and reaches `save_config` under the write
+/// guard itself (issue #869), so a second addressing scheme would only add a
+/// way for the two to disagree.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct ConfigPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spotify: Option<SpotifyPatch>,
@@ -2099,6 +2269,12 @@ pub struct ConfigPatch {
     pub polling: Option<PollingPatch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logging: Option<LoggingPatch>,
+    /// Release channel for the updater (issue #767).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updates: Option<UpdatesPatch>,
+    /// Playback source selection (issue #767).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playback: Option<PlaybackPatch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autostart: Option<bool>,
     // Issue #789: one-class toggle + pause-sync deadline for the same
@@ -2107,10 +2283,44 @@ pub struct ConfigPatch {
     // untouched, `Some(None)` clears it, `Some(Some(..))` sets it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notifications: Option<NotificationsPatch>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // Issue #789: the pause-sync deadline for the same partial-write path.
+    // `Option<Option<_>>` so the three states stay distinct: absent leaves the
+    // stored deadline untouched, `Some(None)` clears it, `Some(Some(..))` sets
+    // a new one. `deserialize_with` is what makes the middle state reachable —
+    // see `deserialize_optional_tag`.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_tag",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub snooze_until: Option<Option<String>>,
+    /// UI locale (issue #767). Same three-state shape as `snooze_until`:
+    /// absent leaves the stored tag untouched, `Some(None)` clears it back to
+    /// the documented "follow the OS" default, `Some(Some(..))` sets it. The
+    /// value is canonicalised by `clamp_locale` on the way out, so a patch
+    /// cannot persist a tag the app cannot render.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_tag",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub locale: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_rules: Option<StatusRulesPatch>,
+    /// Global-shortcut bindings (issue #767).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shortcuts: Option<ShortcutsPatch>,
+}
+
+/// Field-level patch for the `playback` section (issue #767).
+///
+/// `source` is the section's only field; `Auto` is the documented default and
+/// is what an untouched config resolves to.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "../../src/lib/types-generated/")]
+pub struct PlaybackPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<crate::sources::PlaybackSourceKind>,
 }
 
 /// Merge a patch into `base`, field by field. Only the fields the patch
@@ -2152,6 +2362,25 @@ pub fn apply_patch(base: &mut AppConfig, patch: &ConfigPatch) {
         if let Some(v) = &p.profanity_extra_words {
             base.teams.profanity_extra_words = v.clone();
         }
+        // Issue #767: the presence gates and the two bounded windows join the
+        // patch, so a caller that owns one toggle no longer has to hold the
+        // whole document to change it. `clamp_teams` re-bounds them after the
+        // merge, exactly as it does for a full save.
+        if let Some(v) = p.respect_manual_status {
+            base.teams.respect_manual_status = v;
+        }
+        if let Some(v) = p.gate_when_out_of_office {
+            base.teams.gate_when_out_of_office = v;
+        }
+        if let Some(v) = p.gate_when_presenting {
+            base.teams.gate_when_presenting = v;
+        }
+        if let Some(v) = p.idle_away_after_seconds {
+            base.teams.idle_away_after_seconds = v;
+        }
+        if let Some(v) = p.pre_meeting_suppress_minutes {
+            base.teams.pre_meeting_suppress_minutes = v;
+        }
         if let Some(v) = &p.paused_status_format {
             base.teams.paused_status_format = v.clone();
         }
@@ -2186,6 +2415,31 @@ pub fn apply_patch(base: &mut AppConfig, patch: &ConfigPatch) {
         if let Some(v) = &p.log_level {
             base.logging.log_level = v.clone();
         }
+        // Issue #767: the rotation ceiling, the retained-archive count and the
+        // #877 history mirror. `clamp_logging` re-bounds the two numbers.
+        if let Some(v) = p.max_file_size_mb {
+            base.logging.max_file_size_mb = v;
+        }
+        if let Some(v) = p.keep_files {
+            base.logging.keep_files = v;
+        }
+        if let Some(v) = p.presence_history {
+            base.logging.presence_history = v;
+        }
+    }
+    // Issue #767: the release channel. Replaced wholesale (it is a single
+    // field), and an unrecognised spelling never reaches this function —
+    // serde rejects the patch instead, leaving the stored document alone.
+    if let Some(p) = &patch.updates {
+        if let Some(v) = p.channel {
+            base.updates.channel = v;
+        }
+    }
+    // Issue #767: the playback source selection.
+    if let Some(p) = &patch.playback {
+        if let Some(v) = p.source {
+            base.playback.source = v;
+        }
     }
     if let Some(v) = patch.autostart {
         base.autostart = v;
@@ -2216,6 +2470,21 @@ pub fn apply_patch(base: &mut AppConfig, patch: &ConfigPatch) {
         }
         if let Some(v) = &p.track_rules {
             base.status_rules.track_rules = v.clone();
+        }
+    }
+    // Issue #767: `locale` mirrors `snooze_until`'s three states, so a patch
+    // that names no locale leaves the user's tag exactly as it was.
+    if let Some(v) = &patch.locale {
+        base.locale = v.clone();
+    }
+    // Issue #767: shortcut bindings, one slot at a time. `clamp_shortcuts`
+    // normalises a blank binding to "unbound" on the write path.
+    if let Some(p) = &patch.shortcuts {
+        if let Some(v) = &p.toggle_playback {
+            base.shortcuts.toggle_playback = Some(v.clone());
+        }
+        if let Some(v) = &p.toggle_sync {
+            base.shortcuts.toggle_sync = Some(v.clone());
         }
     }
 }
@@ -2277,6 +2546,156 @@ pub(crate) fn quarantine_backup_path(path: &std::path::Path) -> PathBuf {
     let mut backup = path.as_os_str().to_owned();
     backup.push(".bak");
     PathBuf::from(backup)
+}
+
+/// The sidecar an imported document is staged in before it replaces the live
+/// config: `<config.json>.import.tmp`.
+///
+/// Deliberately distinct from `atomic_write_json`'s `<config.json>.tmp`, so an
+/// import in flight and an ordinary save can never consume or clear each
+/// other's staged bytes. Beside the live file, so the final rename stays on
+/// one volume and is atomic (issue #939).
+fn staged_import_path(path: &std::path::Path) -> PathBuf {
+    let mut staged = path.as_os_str().to_owned();
+    staged.push(".import.tmp");
+    PathBuf::from(staged)
+}
+
+/// Replace the config at `path` with `json`, keeping the outgoing document as
+/// `<path>.bak` (issue #939).
+///
+/// Order is the whole point. The incoming bytes are written and fsynced to a
+/// same-directory sidecar FIRST, so a replacement that cannot be written — disk
+/// full, quota, permission denied, an antivirus lock — fails with the live
+/// `config.json` still in place. Only then is the live file moved aside and
+/// the staged copy renamed over it; both of those are renames, so the window in
+/// which no live config exists is a single syscall wide rather than spanning a
+/// write.
+///
+/// If that final rename fails, the backup is moved back before the error
+/// returns, so the user is left with the document they had rather than with
+/// only a `.bak` that nothing in the app restores. Every failure path removes
+/// the staged sidecar, and a stale one from a crashed import is pre-cleared
+/// exactly as `atomic_write_json` does for `config.json.tmp` (#135 path A).
+///
+/// The command layer's `import_config` runs this inside the config write
+/// guard (issue #946), so no competing writer can slip between the file
+/// replacement and the reload that publishes it.
+fn replace_with_backup(path: &std::path::Path, json: &str) -> Result<(), String> {
+    let staged = staged_import_path(path);
+
+    if let Err(e) = fs::remove_file(&staged) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return Err(format!(
+                "Failed to remove stale import temp file '{}': {}",
+                staged.display(),
+                e
+            ));
+        }
+    }
+
+    // 0600 at creation, never chmod-after-create, for the same reason
+    // `atomic_write_json` does it: no window in which the config is
+    // world-readable.
+    #[cfg(unix)]
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&staged)
+        .map_err(|e| {
+            format!(
+                "Failed to create import temp file '{}': {}",
+                staged.display(),
+                e
+            )
+        })?;
+
+    #[cfg(not(unix))]
+    let mut file = fs::File::create(&staged).map_err(|e| {
+        format!(
+            "Failed to create import temp file '{}': {}",
+            staged.display(),
+            e
+        )
+    })?;
+
+    if let Err(e) = file.write_all(json.as_bytes()) {
+        let _ = fs::remove_file(&staged);
+        return Err(format!(
+            "Failed to write import temp file '{}': {}",
+            staged.display(),
+            e
+        ));
+    }
+    if let Err(e) = file.sync_all() {
+        let _ = fs::remove_file(&staged);
+        return Err(format!(
+            "Failed to sync import temp file '{}': {}",
+            staged.display(),
+            e
+        ));
+    }
+    drop(file);
+
+    // The incoming document is now fully durable on disk, so moving the live
+    // file aside can no longer lose the user's settings.
+    let backup = quarantine_backup_path(path);
+    let had_live = path.exists();
+    if had_live {
+        if let Err(e) = fs::rename(path, &backup) {
+            let _ = fs::remove_file(&staged);
+            return Err(format!(
+                "Failed to move the current config to '{}': {}",
+                backup.display(),
+                e
+            ));
+        }
+        log::info!(
+            "[CFG] import: previous config moved to '{}'",
+            backup.display()
+        );
+    }
+
+    if let Err(e) = fs::rename(&staged, path) {
+        log::error!(
+            "[CFG] import: FAILED to install the imported config at '{}': {}",
+            path.display(),
+            e
+        );
+        let _ = fs::remove_file(&staged);
+        if had_live {
+            match fs::rename(&backup, path) {
+                Ok(()) => log::warn!("[CFG] import: the previous config was moved back into place"),
+                Err(rollback) => log::error!(
+                    "[CFG] import: rollback FAILED - the previous config is at '{}': {}",
+                    backup.display(),
+                    rollback
+                ),
+            }
+        }
+        return Err(format!(
+            "Failed to install the imported config at '{}': {}",
+            path.display(),
+            e
+        ));
+    }
+
+    // Same parent-directory fsync `atomic_write_json` performs: the renames
+    // above are only durable once the directory entry is flushed too.
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = fs::File::open(parent) {
+            if let Err(e) = dir.sync_all() {
+                log::warn!(
+                    "[CFG] Failed to fsync config dir '{}': {}",
+                    parent.display(),
+                    e
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Bare file name of the quarantine backup for `path` when one exists,
@@ -2573,6 +2992,12 @@ fn load_config_from(path: &std::path::Path) -> Result<AppConfig, String> {
     // removed (a hand-edited config or an upgrade that dropped profiles
     // cannot silently land on a phantom id).
     clamp_presence_profiles(&mut config.presence_profiles, &mut config.active_profile);
+    // Issue #767: same two clamps as `clamped_config`, so the document a load
+    // hands the webview already carries the canonical tag and the normalised
+    // bindings. The reader does not persist anything here — the values reach
+    // disk on the next guarded write, exactly like every other clamp.
+    clamp_locale(&mut config);
+    clamp_shortcuts(&mut config.shortcuts);
     // 4.7.0 (S9, issue #677): an expired snooze is reported here and REMOVED by
     // the guarded writers below, never by this reader.
     //
@@ -3021,6 +3446,12 @@ pub fn clamped_config(config: &AppConfig) -> AppConfig {
     // its own deadline) normalizes it away, so the in-memory copy, the file on
     // disk and the tray can never disagree about a snooze being active.
     clamp_snooze(&mut cfg, chrono::Utc::now());
+    // Issue #767: the two clamps for the patch fields that did not exist when
+    // this function was written. Without them a `update_config` patch could
+    // persist a locale tag the app cannot render, or a blank shortcut binding
+    // that renders as set-up while registering nothing.
+    clamp_locale(&mut cfg);
+    clamp_shortcuts(&mut cfg.shortcuts);
     // Issue #916: the write path strips too, so a payload that carries a
     // `client_secret` in an unknown-key bucket cannot put a credential back
     // into `config.json` (or into an export) on the way out.
@@ -3330,17 +3761,29 @@ fn strip_client_secret_from_extra(extra: &mut BTreeMap<String, serde_json::Value
 /// the section maps are themselves issue #938).
 fn strip_client_secret_from_extras(config: &mut AppConfig) -> usize {
     let mut removed = strip_client_secret_from_extra(&mut config.extra);
+    // The list MUST stay exhaustive over every `extra` bucket the config
+    // carries. Three of them were missed (#938): `playback`, each entry of
+    // `presence_profiles`, and `teams.preferred_presence`. A `client_secret`
+    // left in one of those buckets is deserialized, handed to the webview by
+    // the `load_config` command and re-serialized on the next save — exactly
+    // the IPC crossing issue #916 forbids, reachable through a section that
+    // only gained its retention map later.
     for extra in [
         &mut config.spotify.extra,
         &mut config.teams.extra,
+        &mut config.teams.preferred_presence.extra,
         &mut config.polling.extra,
         &mut config.logging.extra,
         &mut config.updates.extra,
+        &mut config.playback.extra,
         &mut config.notifications.extra,
         &mut config.status_rules.extra,
         &mut config.shortcuts.extra,
     ] {
         removed += strip_client_secret_from_extra(extra);
+    }
+    for profile in &mut config.presence_profiles {
+        removed += strip_client_secret_from_extra(&mut profile.extra);
     }
     removed
 }
@@ -3455,6 +3898,11 @@ pub fn prepare_import(raw: &str) -> Result<PreparedImport, String> {
     // or an upgrade that dropped profiles cannot silently land on a
     // phantom id.
     clamp_presence_profiles(&mut config.presence_profiles, &mut config.active_profile);
+    // Issue #767: an imported document's locale tag and shortcut bindings take
+    // the same clamps as a load, so an import cannot introduce a value the UI
+    // could not have saved.
+    clamp_locale(&mut config);
+    clamp_shortcuts(&mut config.shortcuts);
     // Deliberately NOT `stamp_schema_version`: `migrate_config` raises the
     // version to the floor and passes a *newer* file through at its own
     // version, exactly as `load_config` does. Stamping would relabel a
@@ -3517,22 +3965,13 @@ pub fn import_config_document(
         );
         return Ok(None);
     }
-    if path.exists() {
-        let backup = quarantine_backup_path(path);
-        fs::rename(path, &backup).map_err(|e| {
-            format!(
-                "Failed to move the current config to '{}': {}",
-                backup.display(),
-                e
-            )
-        })?;
-        log::info!(
-            "[CFG] import: previous config moved to '{}'",
-            backup.display()
-        );
-    }
-
-    atomic_write_json(path, &prepared.document)?;
+    // Issue #939: stage the incoming document to a same-directory sidecar and
+    // only then move the live file aside (see `replace_with_backup`). Doing it
+    // the other way round — rename first, write second — meant a write that
+    // failed, or a process death between the two, left the user with NO live
+    // config at all: the next launch booted on defaults and their settings
+    // existed only in a `.bak` that nothing in the app restores.
+    replace_with_backup(path, &prepared.document)?;
     log::info!(
         "[CFG] import: configuration imported into '{}'",
         path.display()
@@ -4089,6 +4528,7 @@ mod tests {
             availability: "Busy".to_string(),
             activity: "InACall".to_string(),
             expiry_minutes: 60,
+            ..PreferredPresenceConfig::default()
         };
         clamp_preferred_presence(&mut pp);
         assert!(pp.enabled);
@@ -4101,6 +4541,7 @@ mod tests {
             availability: "busy".to_string(),
             activity: "inacall".to_string(),
             expiry_minutes: 60,
+            ..PreferredPresenceConfig::default()
         };
         clamp_preferred_presence(&mut pp);
         assert_eq!(pp.availability, "Busy");
@@ -4112,6 +4553,7 @@ mod tests {
             availability: "Busy".to_string(),
             activity: "DoNotDisturb".to_string(),
             expiry_minutes: 60,
+            ..PreferredPresenceConfig::default()
         };
         clamp_preferred_presence(&mut pp);
         assert!(!pp.enabled, "unsupported pair must disable the feature");
@@ -4124,6 +4566,7 @@ mod tests {
             availability: "Busy".to_string(),
             activity: "InACall".to_string(),
             expiry_minutes: 1,
+            ..PreferredPresenceConfig::default()
         };
         clamp_preferred_presence(&mut pp);
         assert_eq!(pp.expiry_minutes, 5);
@@ -4132,6 +4575,7 @@ mod tests {
             availability: "Busy".to_string(),
             activity: "InACall".to_string(),
             expiry_minutes: 9999,
+            ..PreferredPresenceConfig::default()
         };
         clamp_preferred_presence(&mut pp);
         assert_eq!(pp.expiry_minutes, 720);
@@ -4149,6 +4593,7 @@ mod tests {
                 availability: "Busy".to_string(),
                 activity: "InACall".to_string(),
                 expiry_minutes: 60,
+                ..PreferredPresenceConfig::default()
             },
             ..TeamsConfig::default()
         };
@@ -4587,6 +5032,359 @@ mod tests {
             Some(&serde_json::json!({"a": 1}))
         );
         assert_eq!(base.extra.get("future_key"), merged.extra.get("future_key"));
+    }
+
+    // ---------------------------------------------------------------
+    // Issue #767: ConfigPatch covers every writable section, and the
+    // patch types are exported so the frontend cannot drift from them.
+    // ---------------------------------------------------------------
+
+    /// Issue #767: every section the app can write is reachable through
+    /// `ConfigPatch`. Before this, `teams` carried neither `respect_manual_status`
+    /// nor `gate_when_out_of_office`, and `updates`, `playback`, `locale` and
+    /// `shortcuts` were absent from the patch entirely — so a caller holding
+    /// one of those settings had exactly one way to change it, the
+    /// whole-document `save_config` that drops whatever it did not send.
+    ///
+    /// Asserted by round-tripping a patch through serde and through
+    /// `clamped_config` (the write path), so a field that is declared but not
+    /// merged, or merged but not re-clamped, both fail here.
+    #[test]
+    fn test_patch_reaches_every_section_it_declares() {
+        let base = non_default_config();
+
+        // Every key below names a section and a field that did NOT exist on
+        // `ConfigPatch` before this change.
+        let raw = r#"{
+            "teams": {
+                "respect_manual_status": false,
+                "gate_when_out_of_office": true,
+                "gate_when_presenting": true,
+                "idle_away_after_seconds": 900,
+                "pre_meeting_suppress_minutes": 15
+            },
+            "logging": {"max_file_size_mb": 42, "keep_files": 9, "presence_history": true},
+            "updates": {"channel": "beta"},
+            "playback": {"source": "spotify"},
+            "locale": "de",
+            "shortcuts": {"toggle_playback": "Ctrl+Alt+M", "toggle_sync": ""}
+        }"#;
+        let patch: ConfigPatch = serde_json::from_str(raw).expect("patch must parse");
+
+        let mut merged = base.clone();
+        apply_patch(&mut merged, &patch);
+
+        assert!(!merged.teams.respect_manual_status, "gate must be settable");
+        assert!(merged.teams.gate_when_out_of_office);
+        assert!(merged.teams.gate_when_presenting);
+        assert_eq!(merged.teams.idle_away_after_seconds, 900);
+        assert_eq!(merged.teams.pre_meeting_suppress_minutes, 15);
+        assert_eq!(merged.logging.max_file_size_mb, 42);
+        assert_eq!(merged.logging.keep_files, 9);
+        assert!(merged.logging.presence_history);
+        assert_eq!(merged.updates.channel, UpdateChannel::Beta);
+        assert_eq!(
+            merged.playback.source,
+            crate::sources::PlaybackSourceKind::Spotify
+        );
+        assert_eq!(merged.locale.as_deref(), Some("de"));
+        assert_eq!(
+            merged.shortcuts.toggle_playback.as_deref(),
+            Some("Ctrl+Alt+M")
+        );
+
+        // A blank binding is the documented "unbound" spelling and is stored
+        // verbatim: `configured_binding` reads it as unbound when planning a
+        // registration, and rewriting it here would make the Settings field
+        // lie about what the document actually holds. The clamp bounds LENGTH
+        // only — see `clamp_shortcuts`.
+        let persisted = clamped_config(&merged);
+        assert_eq!(persisted.shortcuts.toggle_sync.as_deref(), Some(""));
+
+        // The whole thing survives the disk round trip with the same values,
+        // which is what proves the patch struct and the config struct agree
+        // on the key names rather than merely compiling.
+        let json = serde_json::to_string_pretty(&persisted).expect("must serialize");
+        let back: AppConfig = serde_json::from_str(&json).expect("must re-parse");
+        assert_eq!(back.updates.channel, UpdateChannel::Beta);
+        assert_eq!(back.locale.as_deref(), Some("de"));
+        assert!(back.teams.gate_when_out_of_office);
+        assert_eq!(back.logging.keep_files, 9);
+    }
+
+    /// Issue #767, the drift guard the issue asks for: "a test fails when a
+    /// patch field is dropped from its struct."
+    ///
+    /// A dropped field is invisible to the compiler (serde ignores an unknown
+    /// key), and the symptom is a setting that appears to save and then
+    /// reverts. This asserts the exact set of leaves a patch moves, so
+    /// removing any one field from any one patch struct turns this red.
+    #[test]
+    fn test_every_patch_field_is_actually_merged() {
+        // (patch JSON, the leaves it must move)
+        let cases: &[(&str, &[&str])] = &[
+            (
+                r#"{"teams": {"respect_manual_status": false}}"#,
+                &["teams.respect_manual_status"],
+            ),
+            (
+                r#"{"teams": {"gate_when_out_of_office": true}}"#,
+                &["teams.gate_when_out_of_office"],
+            ),
+            (
+                r#"{"teams": {"gate_when_presenting": true}}"#,
+                &["teams.gate_when_presenting"],
+            ),
+            (
+                r#"{"teams": {"idle_away_after_seconds": 900}}"#,
+                &["teams.idle_away_after_seconds"],
+            ),
+            (
+                r#"{"teams": {"pre_meeting_suppress_minutes": 15}}"#,
+                &["teams.pre_meeting_suppress_minutes"],
+            ),
+            (
+                r#"{"logging": {"max_file_size_mb": 42}}"#,
+                &["logging.max_file_size_mb"],
+            ),
+            (r#"{"logging": {"keep_files": 9}}"#, &["logging.keep_files"]),
+            (
+                r#"{"logging": {"presence_history": true}}"#,
+                &["logging.presence_history"],
+            ),
+            (r#"{"updates": {"channel": "beta"}}"#, &["updates.channel"]),
+            (
+                r#"{"playback": {"source": "spotify"}}"#,
+                &["playback.source"],
+            ),
+            (r#"{"locale": "de"}"#, &["locale"]),
+            (
+                r#"{"shortcuts": {"toggle_playback": "Ctrl+Alt+M"}}"#,
+                &["shortcuts.toggle_playback"],
+            ),
+            (
+                r#"{"shortcuts": {"toggle_sync": "Ctrl+Alt+N"}}"#,
+                &["shortcuts.toggle_sync"],
+            ),
+        ];
+
+        for (json, expected) in cases {
+            let base = non_default_config();
+            let patch: ConfigPatch = serde_json::from_str(json)
+                .unwrap_or_else(|e| panic!("patch {json} must parse: {e}"));
+            let mut merged = base.clone();
+            apply_patch(&mut merged, &patch);
+            let expected: Vec<String> = expected.iter().map(|p| (*p).to_string()).collect();
+            assert_eq!(
+                changed_paths(&base, &merged),
+                expected,
+                "patch {json} did not move exactly the leaf it names — a patch \
+                 field is declared but never merged"
+            );
+        }
+    }
+
+    /// Issue #767's acceptance criterion: a partial patch leaves unmentioned
+    /// sections byte-identical — `snooze_until` and `notifications` named
+    /// explicitly, because those two were the ones that had to move off the
+    /// whole-document save path.
+    #[test]
+    fn test_partial_patch_leaves_snooze_and_notifications_untouched() {
+        let mut base = non_default_config();
+        base.snooze_until = Some("2099-01-01T00:00:00Z".to_string());
+        base.notifications.track_change = false;
+        base.notifications.sync_stopped = false;
+        base.notifications.auth_required = false;
+        base.notifications.update_staged = false;
+
+        let patch: ConfigPatch =
+            serde_json::from_str(r#"{"teams": {"respect_manual_status": false}}"#)
+                .expect("patch must parse");
+        let mut merged = base.clone();
+        apply_patch(&mut merged, &patch);
+
+        assert_eq!(
+            merged.snooze_until.as_deref(),
+            Some("2099-01-01T00:00:00Z"),
+            "a patch that names no snooze must not touch the deadline"
+        );
+        assert!(!merged.notifications.track_change);
+        assert!(!merged.notifications.sync_stopped);
+        assert!(!merged.notifications.auth_required);
+        assert!(!merged.notifications.update_staged);
+
+        // Byte-identical, not merely equal in the fields named above: the
+        // whole document except the one patched leaf is unchanged.
+        assert_eq!(
+            changed_paths(&base, &merged),
+            vec!["teams.respect_manual_status".to_string()]
+        );
+    }
+
+    /// Issue #767: `locale` is a three-state field like `snooze_until` — absent
+    /// leaves the tag alone, `null` clears it, a string sets it — and
+    /// `clamp_locale` canonicalises it on the way to disk so a patch cannot
+    /// persist a tag the app cannot render.
+    #[test]
+    fn test_locale_patch_is_three_state_and_canonicalised() {
+        let base_locale = Some("de".to_string());
+
+        let mut untouched = non_default_config();
+        untouched.locale = base_locale.clone();
+        apply_patch(
+            &mut untouched,
+            &serde_json::from_str(r#"{"teams": {"clear_on_pause": true}}"#).unwrap(),
+        );
+        assert_eq!(
+            untouched.locale, base_locale,
+            "absent must not touch locale"
+        );
+
+        let mut cleared = non_default_config();
+        cleared.locale = base_locale.clone();
+        apply_patch(
+            &mut cleared,
+            &serde_json::from_str(r#"{"locale": null}"#).unwrap(),
+        );
+        assert_eq!(cleared.locale, None, "an explicit null clears the tag");
+
+        let mut set = non_default_config();
+        set.locale = base_locale.clone();
+        apply_patch(
+            &mut set,
+            &serde_json::from_str(r#"{"locale": "fr"}"#).unwrap(),
+        );
+        assert_eq!(set.locale.as_deref(), Some("fr"));
+
+        // `clamp_locale` reduces a regional variant to a shipped dictionary and
+        // maps an unknown tag to English — the same function `set_locale` uses,
+        // so the two write paths cannot disagree.
+        let mut regional = non_default_config();
+        regional.locale = Some("de-AT".to_string());
+        assert_eq!(clamped_config(&regional).locale.as_deref(), Some("de"));
+        let mut unknown = non_default_config();
+        unknown.locale = Some("pt-BR".to_string());
+        assert_eq!(clamped_config(&unknown).locale.as_deref(), Some("en"));
+        let mut blank = non_default_config();
+        blank.locale = Some(String::new());
+        assert_eq!(clamped_config(&blank).locale.as_deref(), Some("en"));
+        let mut absent = non_default_config();
+        absent.locale = None;
+        assert_eq!(
+            clamped_config(&absent).locale,
+            None,
+            "\"follow the OS\" is a real state, not a synonym for English"
+        );
+    }
+
+    /// Issue #767: an unrecognised `updates.channel` in a patch REJECTS the
+    /// patch, so a caller whose channel list drifted from the binary's
+    /// changes nothing rather than silently storing `stable`.
+    #[test]
+    fn test_unknown_update_channel_in_a_patch_is_refused() {
+        assert!(
+            serde_json::from_str::<ConfigPatch>(r#"{"updates": {"channel": "nightly"}}"#).is_err(),
+            "a channel outside the enum must fail the patch, not default to stable"
+        );
+        // The lenient document read is unchanged by this (#678): a config FILE
+        // carrying an unknown channel keeps every other setting.
+        let (dir, path) = temp_config_file(
+            "patch-channel-refused",
+            r#"{"updates": {"channel": "nightly", "future_channel_key": 1}, "autostart": true}"#,
+        );
+        let cfg = load_config_from(&path).expect("a bad channel must not fail the document");
+        assert_eq!(cfg.updates.channel, UpdateChannel::Stable);
+        assert!(
+            cfg.updates.extra.contains_key("future_channel_key"),
+            "its sibling unknown key is still retained"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #767: `clamp_shortcuts` bounds a binding's LENGTH and leaves
+    /// everything else alone.
+    ///
+    /// A blank binding is deliberately NOT normalised to `None`: the
+    /// registration planner (`configured_binding`) is what decides that blank
+    /// means unbound, and a writer that rewrote it would make the Settings
+    /// field render something other than what is stored — pinned by
+    /// `shortcut_bindings_round_trip_through_json`.
+    #[test]
+    fn test_clamp_shortcuts_bounds_length_and_preserves_blanks() {
+        let mut blank = non_default_config();
+        blank.shortcuts.toggle_playback = Some("CmdOrCtrl+Shift+P".to_string());
+        blank.shortcuts.toggle_sync = Some("  ".to_string());
+        let clamped = clamped_config(&blank);
+        assert_eq!(
+            clamped.shortcuts.toggle_playback.as_deref(),
+            Some("CmdOrCtrl+Shift+P")
+        );
+        assert_eq!(
+            clamped.shortcuts.toggle_sync.as_deref(),
+            Some("  "),
+            "a blank binding is stored verbatim — the registrar, not the \
+             writer, decides that blank means unbound"
+        );
+
+        let mut padded = non_default_config();
+        padded.shortcuts.toggle_playback = Some("  Ctrl+Alt+P  ".to_string());
+        assert_eq!(
+            clamped_config(&padded).shortcuts.toggle_playback.as_deref(),
+            Some("  Ctrl+Alt+P  "),
+            "surrounding whitespace is part of what the user stored"
+        );
+
+        // An over-long binding is bounded, so a pasted paragraph cannot become
+        // the stored document.
+        let mut huge = non_default_config();
+        huge.shortcuts.toggle_playback = Some("x".repeat(MAX_SHORTCUT_BINDING_CHARS * 3));
+        let bounded = clamped_config(&huge);
+        assert_eq!(
+            bounded
+                .shortcuts
+                .toggle_playback
+                .as_deref()
+                .map(str::chars)
+                .map(Iterator::count),
+            Some(MAX_SHORTCUT_BINDING_CHARS),
+            "a binding longer than the cap must be truncated to it"
+        );
+        // The sibling slot is untouched by that clamp.
+        assert_eq!(
+            bounded.shortcuts.toggle_sync,
+            non_default_config().shortcuts.toggle_sync
+        );
+    }
+
+    /// Issue #767: the patch types carry `#[ts(export)]`, so the generated
+    /// `ConfigPatch` the frontend aliases is the SAME contract the backend
+    /// deserializes — rather than a hand-written mirror that could assert a
+    /// coverage the backend does not have.
+    ///
+    /// Asserted through the real behaviour the export exists for: a payload
+    /// in the generated shape deserializes into the Rust patch, and every
+    /// section key it names survives to the merged document.
+    #[test]
+    fn test_generated_patch_shape_deserializes_and_merges() {
+        // Mirrors `src/lib/types-generated/ConfigPatch.ts`: every section key
+        // optional, snake_case as serde names them.
+        let patch: ConfigPatch = serde_json::from_str(
+            r#"{"spotify": {"client_id": "a"}, "teams": {"status_format": "x"},
+                "polling": {"default_interval_seconds": 45}, "logging": {"enabled": true},
+                "updates": {"channel": "stable"}, "playback": {"source": "auto"},
+                "autostart": false, "notifications": {"track_change": true},
+                "locale": "fr", "snooze_until": null,
+                "status_rules": {"quiet_hours": []},
+                "shortcuts": {"toggle_sync": "Ctrl+Alt+S"}}"#,
+        )
+        .expect("the generated ConfigPatch shape must deserialize");
+
+        let mut merged = non_default_config();
+        apply_patch(&mut merged, &patch);
+        assert_eq!(merged.spotify.client_id, "a");
+        assert_eq!(merged.locale.as_deref(), Some("fr"));
+        assert_eq!(merged.shortcuts.toggle_sync.as_deref(), Some("Ctrl+Alt+S"));
+        assert!(!merged.autostart);
     }
 
     // ---------------------------------------------------------------
@@ -6939,6 +7737,180 @@ mod tests {
         };
         stamp_schema_version(&mut stale);
         assert_eq!(stale.schema_version, SCHEMA_VERSION);
+    }
+
+    /// Issue #938: `teams.preferred_presence` is a config section in its own
+    /// right, and it was the one nested object still missing the unknown-key
+    /// retention map every one of its siblings carries. A key a newer build
+    /// nested there was dropped by the next save from this build.
+    #[test]
+    fn test_preferred_presence_nested_keys_survive_load_then_save() {
+        let (dir, path) = temp_config_file(
+            "preferred-presence-extra",
+            r#"{"teams": {"preferred_presence": {"enabled": true,
+                     "availability": "Busy", "activity": "InACall",
+                     "future_pp_flag": true, "future_pp_block": {"a": [1, 2]}}}}"#,
+        );
+        let cfg = load_config_from(&path).expect("must load");
+        assert_eq!(
+            cfg.teams.preferred_presence.extra.get("future_pp_flag"),
+            Some(&serde_json::json!(true)),
+            "a nested unknown key must be retained, not dropped"
+        );
+
+        save_config_to(&path, &cfg).expect("save must succeed");
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            written["teams"]["preferred_presence"]["future_pp_flag"], true,
+            "it must survive the load-then-save round trip"
+        );
+        assert_eq!(
+            written["teams"]["preferred_presence"]["future_pp_block"],
+            serde_json::json!({"a": [1, 2]})
+        );
+        assert_eq!(written["teams"]["preferred_presence"]["enabled"], true);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #938/#916: the `client_secret` strip must cover EVERY unknown-key
+    /// bucket. `playback`, each `presence_profiles` entry and
+    /// `teams.preferred_presence` were all missed, so a secret in one of them
+    /// was deserialized, handed to the webview by the `load_config` command,
+    /// and re-serialized on the next save — the IPC crossing SECURITY.md
+    /// promises cannot happen, reachable through a section that only gained
+    /// its retention map later.
+    #[test]
+    fn test_client_secret_is_stripped_from_every_retained_bucket() {
+        let (dir, path) = temp_config_file(
+            "extras-secret-coverage",
+            r#"{"autostart": true,
+                "playback": {"source": "auto", "client_secret": "PLAYBACK-SENTINEL",
+                             "kept_playback": 1},
+                "presence_profiles": [{"name": "Focus", "client_secret": "PROFILE-SENTINEL",
+                                       "kept_profile": 2}],
+                "teams": {"preferred_presence": {"client_secret": "PP-SENTINEL",
+                                                  "kept_pp": 3}}}"#,
+        );
+        let cfg = load_config_from(&path).expect("must load");
+
+        let serialized = serde_json::to_string(&cfg).expect("must serialize");
+        assert!(
+            !serialized.contains("SENTINEL"),
+            "no client_secret may reach the webview: {serialized}"
+        );
+        // A sibling key of a stripped secret is kept — the strip is targeted.
+        assert_eq!(
+            cfg.playback.extra.get("kept_playback"),
+            Some(&serde_json::json!(1))
+        );
+        assert_eq!(
+            cfg.presence_profiles[0].extra.get("kept_profile"),
+            Some(&serde_json::json!(2))
+        );
+        assert_eq!(
+            cfg.teams.preferred_presence.extra.get("kept_pp"),
+            Some(&serde_json::json!(3))
+        );
+
+        save_config_to(&path, &cfg).expect("save must succeed");
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !written.contains("SENTINEL"),
+            "the next save must not write a credential back: {written}"
+        );
+        assert!(written.contains("kept_playback"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #939: a failed import must leave the previous `config.json` in
+    /// place, and it must still load.
+    ///
+    /// `import_config_document` used to rename the live file to `.bak` FIRST
+    /// and write the imported document afterwards, so a write that failed —
+    /// disk full, quota, permission denied — or a process death between the
+    /// two left the user with NO live config: the next launch logged "Config
+    /// file not found", booted on defaults, and their settings existed only in
+    /// a `.bak` that nothing in the app restores.
+    ///
+    /// The failure is induced by occupying the staged sidecar path with a
+    /// directory, so the staging write cannot succeed. That is deterministic
+    /// and — unlike a `0o555` directory, which root writes through anyway — it
+    /// behaves identically whatever uid the suite runs under.
+    #[test]
+    fn test_failed_import_keeps_the_previous_config_loadable() {
+        let dir = std::env::temp_dir().join(format!(
+            "pj-test-import-survives-{}-{}",
+            std::process::id(),
+            chrono_like_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let previous = r#"{"spotify":{"client_id":"LIVE"},"logging":{"keep_files":7}}"#;
+        std::fs::write(&path, previous).unwrap();
+        // A non-empty directory at the sidecar path: `remove_file` refuses it
+        // with something other than NotFound, which is exactly the "a staged
+        // import cannot be written" case.
+        let blocked = staged_import_path(&path);
+        std::fs::create_dir(&blocked).unwrap();
+        std::fs::write(blocked.join("occupant"), b"x").unwrap();
+
+        let outcome = import_config_document(r#"{"spotify":{"client_id":"NEW"}}"#, &path, || true);
+
+        let err = outcome.expect_err("an unwritable sidecar must fail the import");
+        assert!(!err.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            previous,
+            "the previous config must survive a failed import byte-for-byte"
+        );
+        assert!(
+            !quarantine_backup_path(&path).exists(),
+            "the live file must never have been moved aside"
+        );
+        // And it is still a usable config: the next launch must not boot on
+        // defaults.
+        let loaded = load_config_from(&path).expect("the surviving config must load");
+        assert_eq!(loaded.spotify.client_id, "LIVE");
+        assert_eq!(loaded.logging.keep_files, 7);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue #939: the imported bytes are staged BEFORE the live file is moved
+    /// aside. A `.bak` can therefore only ever appear next to a config that was
+    /// successfully replaced, never as the user's sole surviving copy, and the
+    /// sidecar is consumed on success rather than left beside the file.
+    #[test]
+    fn test_import_stages_before_moving_the_live_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "pj-test-import-stage-{}-{}",
+            std::process::id(),
+            chrono_like_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(&path, r#"{"spotify":{"client_id":"OLD"}}"#).unwrap();
+
+        let imported = import_config_document(r#"{"spotify":{"client_id":"NEW"}}"#, &path, || true)
+            .unwrap()
+            .expect("the overwrite was confirmed");
+
+        assert_eq!(imported.spotify.client_id, "NEW");
+        assert_eq!(
+            std::fs::read_to_string(quarantine_backup_path(&path)).unwrap(),
+            r#"{"spotify":{"client_id":"OLD"}}"#,
+            "the outgoing document is still preserved"
+        );
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written["spotify"]["client_id"], "NEW");
+        assert!(
+            !staged_import_path(&path).exists(),
+            "a successful import must consume its sidecar, leaving no stray"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // -----------------------------------------------------------------
