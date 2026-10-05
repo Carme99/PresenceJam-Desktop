@@ -14,7 +14,7 @@ name = "presence_jam_lib"
 crate-type = ["rlib"]
 
 [build-dependencies]
-tauri-build = { version = "~2.6", features = [] }
+tauri-build = { version = "~2.7", features = [] }
 
 [target."cfg(any(target_os = \"macos\", windows, target_os = \"linux\"))".dependencies]
 tauri-plugin-single-instance = { version = "~2.4", features = ["deep-link"] }
