@@ -263,29 +263,24 @@ for (const width of [DEFAULT_WIDTH, MIN_WIDTH]) {
         // button at these widths. Open the menu first, exactly as
         // dashboard-header.spec.ts does. The LogViewer case above sidesteps
         // this by navigating straight to /detached/logs.
+        // #954 collapses the five nav buttons into the overflow menu at <=640px,
+        // and both widths under test are inside that range, so the menu button is
+        // deterministically present. Wait for it rather than branching on
+        // `isVisible()`: that answers immediately for an element that has not
+        // rendered yet, so a slow boot would fall through to the hidden inline
+        // button and burn the whole 30s timeout.
         const overflow = page.locator('.more-btn');
-        // `isVisible()` answers immediately for an element that has not rendered
-        // yet, which would silently take the inline-button branch at a width
-        // where that button is hidden. Wait for the Dashboard to settle first.
-        await page.locator('.app-container').waitFor({ state: 'attached' });
-        const overflowShown = await overflow
-          .waitFor({ state: 'visible', timeout: 5_000 })
-          .then(() => true)
-          .catch(() => false);
-        if (overflowShown) {
-          await overflow.click();
-          // The overflow item renders `dashboard.diagnostics` ("Diagnostics"),
-          // while the inline button carries `dashboard.openDiagnosticsAria`
-          // ("Open diagnostics"). They are different strings, so the menu item
-          // has to be matched by its own label.
-          const item = page
-            .locator('.header-menu [role="menuitem"]')
-            .filter({ hasText: DIAGNOSTICS_MENU_LABEL[locale] });
-          await expect(item).toHaveCount(1);
-          await item.click();
-        } else {
-          await page.getByRole('button', { name: DIAGNOSTICS_ARIA_LABEL[locale] }).click();
-        }
+        await expect(overflow).toBeVisible();
+        await overflow.click();
+        // The overflow item renders `dashboard.diagnostics` ("Diagnostics"),
+        // while the inline button carried `dashboard.openDiagnosticsAria`
+        // ("Open diagnostics") — different strings, so match on the item's own
+        // label.
+        const item = page
+          .locator('.header-menu [role="menuitem"]')
+          .filter({ hasText: DIAGNOSTICS_MENU_LABEL[locale] });
+        await expect(item).toHaveCount(1);
+        await item.click();
         const toolbar = page.locator('.diagnostics .toolbar');
         await expect(toolbar).toBeVisible();
 
