@@ -616,7 +616,7 @@
         {#if channelResolved && !isBeta}
           <button
             type="button"
-            class="download-btn"
+            class="btn-secondary btn-sm"
             onclick={downloadAndInstall}
             disabled={downloading || staging}
           >
@@ -626,7 +626,7 @@
         {#if staging || stagedVersion}
           <button
             type="button"
-            class="quit-btn"
+            class="btn-quiet btn-sm"
             onclick={cancelStage}
             disabled={cancelling || stageAborted}
           >
@@ -635,7 +635,7 @@
         {:else if confirming}
           <button
             type="button"
-            class="quit-btn"
+            class="btn-quiet btn-sm"
             onclick={confirmQuitInstall}
             disabled={downloading}
           >
@@ -643,7 +643,7 @@
           </button>
           <button
             type="button"
-            class="quit-btn"
+            class="btn-quiet btn-sm"
             onclick={cancelQuitConfirm}
             disabled={downloading}
           >
@@ -652,7 +652,7 @@
         {:else if isStaleSkipped}
           <button
             type="button"
-            class="quit-btn"
+            class="btn-quiet btn-sm"
             onclick={installStaleAnyway}
             disabled={downloading}
           >
@@ -661,7 +661,7 @@
         {:else}
           <button
             type="button"
-            class="quit-btn"
+            class="btn-quiet btn-sm"
             onclick={openQuitConfirm}
             disabled={downloading}
           >
@@ -806,21 +806,12 @@
        past its border — its automatic minimum size keeps every button whole
        and wraps them onto a second row when the window is too narrow. */
   }
-  .download-btn {
-    padding: var(--sp-2) var(--sp-4);
-    font-size: var(--fs-sm);
-  }
-  .quit-btn {
-    padding: var(--sp-2) var(--sp-4);
-    font-size: var(--fs-sm);
-    background: transparent;
-    color: var(--fg-muted);
-    border: 1px solid var(--fg-muted);
-  }
-  .quit-btn:hover:not(:disabled) {
-    color: var(--fg);
-    border-color: var(--fg);
-  }
+  /* #903: the banner's actions take their box from `.btn-sm` and their look
+     from `.btn-secondary` / `.btn-quiet` in `app.css`. `.download-btn` and
+     `.quit-btn` each re-declared padding here, so the same "secondary action"
+     rendered at a different height and radius from the Dashboard's refresh and
+     snooze-resume buttons — and `.quit-btn`'s hover was a third mechanism
+     beside `btn-secondary`'s and the refresh button's `filter: brightness()`. */
   .update-staged {
     font-size: var(--fs-xs);
     color: var(--success);

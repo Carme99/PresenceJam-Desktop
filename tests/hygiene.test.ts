@@ -131,3 +131,66 @@ describe('token files are the only place a colour literal lives (#904)', () => {
     expect(scanned.some((f) => f.endsWith('Settings.svelte'))).toBe(true);
   });
 });
+
+/**
+ * #903 — the shared button primitives.
+ *
+ * `.btn-refresh` and `.snooze-resume` (Dashboard) and `.download-btn` /
+ * `.quit-btn` (UpdatePrompt) each re-declared padding, a border and a radius
+ * locally, so the same class of secondary action rendered at different heights
+ * and radii — and the refresh button's hover was a `filter: brightness(1.08)`
+ * that bypassed the theme tokens entirely, so a palette revision could not
+ * reach it. These two shapes are the shapes that defect took.
+ *
+ * Fails against the pre-fix components: `Dashboard.svelte` declared
+ * `filter: brightness(1.08)`, and `padding` / `border` / `border-radius` on
+ * `.btn-refresh` and `.snooze-resume`; `UpdatePrompt.svelte` declared padding
+ * on `.download-btn` and `.quit-btn`.
+ *
+ * The rendered half — matching heights and radii between equivalent actions,
+ * and the `prefers-reduced-motion` override surviving the rewrite — is a layout
+ * contract and lives in `tests/browser/button-primitives.spec.ts`.
+ */
+
+/** Every component's `<style>` text, with comments and var() fallbacks stripped. */
+function componentStyles(): { file: string; css: string }[] {
+  return styleFiles()
+    .filter((file) => file.endsWith('.svelte'))
+    .map((file) => ({ file, css: applicableCss(file) }));
+}
+
+/** The declaration block of every rule in `css` whose selector names `className`. */
+function rulesFor(css: string, className: string): string[] {
+  const bodies: string[] = [];
+  for (const rule of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    if (new RegExp(`\\.${className}(?![\\w-])`).test(rule[1])) bodies.push(rule[2]);
+  }
+  return bodies;
+}
+
+describe('no component paints anything through a CSS filter (#903)', () => {
+  it('finds none', () => {
+    const offenders = componentStyles()
+      .filter(({ css }) => /(^|[;{\s])filter\s*:/.test(css))
+      .map(({ file }) => file);
+    expect(offenders).toEqual([]);
+  });
+});
+
+describe('no component re-declares a button box (#903)', () => {
+  /** One-off classes that existed only to re-state the shared geometry. */
+  const RETIRED_BUTTON_CLASSES = ['btn-refresh', 'snooze-resume', 'quit-btn', 'download-btn'];
+  const BOX_PROPERTY = /(^|[;{\s])(padding|padding-[\w-]+|border|border-[\w-]+|border-radius)\s*:/;
+
+  it('finds none', () => {
+    const offenders: string[] = [];
+    for (const { file, css } of componentStyles()) {
+      for (const className of RETIRED_BUTTON_CLASSES) {
+        for (const body of rulesFor(css, className)) {
+          if (BOX_PROPERTY.test(body)) offenders.push(`${file}: .${className} { ${body.trim()} }`);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+});

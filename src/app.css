@@ -122,6 +122,11 @@
   /* Borders */
   --border: #2A2F5A;
   --border-strong: #3A4180;
+  /* #740: the boundary a form control is identified BY (WCAG 1.4.11 needs
+     3:1). `--border` sits at 1.32:1 on --bg-surface / 1.10:1 on the
+     --bg-elevated field fill, so a field drawn with it has no visible edge.
+     Decorative dividers keep `--border`; only the field border moves. */
+  --border-input: #6B75C0;       /* 3.95:1 on --bg-surface, 3.29:1 on --bg-elevated */
 
   /* Brand */
   --accent: #1DB954;            /* Spotify green */
@@ -161,6 +166,9 @@
 
   --border: #DFE2F0;
   --border-strong: #B7BEDB;
+  /* #740: 3.48:1 on --bg-surface, 3.08:1 on the --bg-elevated field fill.
+     See the dark-theme note above for why this is a separate token. */
+  --border-input: #7E88B0;
 
   --accent: #118238;           /* WCAG: trio darkened so --fg-on-accent white clears 4.5:1 (4.91 on accent) */
   --accent-hover: #0E6D2E;
@@ -309,6 +317,36 @@ button:disabled {
   background: var(--bg-elevated);
 }
 
+/* Size modifier (#903), not a variant: `.btn-sm` contributes the box and
+ * leaves the palette to the variant it is paired with, so a compact action
+ * matches its equivalent on height and radius instead of each control
+ * declaring its own padding (Dashboard's refresh and snooze-resume buttons,
+ * the update banner's quit button all did). Radius comes from the base
+ * `button` rule, so every `.btn-sm` is `--r-md` whatever it is paired with. */
+.btn-sm {
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-sm);
+}
+
+/* Quiet variant (#903): a secondary action that should not read as a filled
+ * control. The border is `--fg-muted`, not `--border`, because a transparent
+ * button has no fill to sit against — `--border` would leave its boundary at
+ * the same ~1.3:1 the form fields had (#740), and WCAG 1.4.11 asks for 3:1
+ * from a control's boundary whichever kind of control it is. */
+.btn-quiet {
+  background: transparent;
+  color: var(--fg-muted);
+  border-color: var(--fg-muted);
+}
+.btn-quiet:hover:not(:disabled) {
+  background: var(--bg-surface);
+  color: var(--fg);
+  border-color: var(--fg);
+}
+.btn-quiet:active:not(:disabled) {
+  background: var(--bg-surface);
+}
+
 /* Tertiary / link button: no bg, accent text */
 .btn-link {
   background: transparent;
@@ -376,7 +414,9 @@ select {
   font-size: var(--fs-base);
   color: var(--fg);
   background: var(--bg-elevated);
-  border: 1px solid var(--border);
+  /* #740: the field's own boundary token — this is the one edge a form
+     control is identified by, so it carries the 3:1 non-text minimum. */
+  border: 1px solid var(--border-input);
   border-radius: var(--r-md);
   padding: var(--sp-3);
   width: 100%;
