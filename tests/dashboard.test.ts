@@ -77,6 +77,7 @@ import { sendNotification } from '@tauri-apps/plugin-notification';
 import Dashboard from '$lib/components/Dashboard.svelte';
 import Layout from '../src/routes/+layout.svelte';
 import { presence } from '$lib/stores/presence';
+import { currentView, settingsDirty, pendingMenuNav } from '$lib/stores/app';
 import { notificationPreferences, setNotificationPreference } from '$lib/stores/notifications';
 import { configStore, defaultConfig } from '$lib/stores/config';
 import {
@@ -165,12 +166,18 @@ beforeEach(() => {
     availabilityListening: false,
     stopped: false,
     syncing: false,
+    syncFatal: null,
     authPersistWarning: null,
     revision: 0
   });
+  // #704: the reconnect navigation writes these; each case starts parked
+  // nowhere with a clean draft so a navigation assertion reads only what
+  // its own event produced.
+  currentView.set('dashboard');
+  settingsDirty.set(false);
+  pendingMenuNav.set(null);
   // #675: the notification classes come from the config now. The mocked
   // backend echoes whatever this file seeds, so a test can enable exactly the
-  // class it exercises.
   configStore.set({
     ...structuredClone(defaultConfig),
     notifications: {
@@ -426,12 +433,19 @@ describe('Dashboard error-event routing (#972)', () => {
   });
 
   it('clears a retry warning when polling reports a fatal panic', async () => {
+    // #704: the panic listener moved to the always-mounted layout — the
+    // shell records the fatal in the shared store and this mount renders
+    // it through the same fatal path.
+    await mountShell();
+    await listenerReady('polling-thread-panicked');
     const { container } = render(Dashboard);
     await listenerReady('error');
     await emit('error', teamsRetry);
 
     await emit('polling-thread-panicked', {});
 
+    expect(get(presence).syncing).toBe(false);
+    expect(get(presence).syncFatal).toBe(t('dashboard.syncCrashed'));
     expect(container.querySelector('.warning-banner')).toBeNull();
     expect(container.querySelector('[role="alert"]')?.textContent).toBe(t('dashboard.syncCrashed'));
   });
@@ -1097,5 +1111,87 @@ describe('Compact sync badge (#954 / P7)', () => {
     expect(badge?.getAttribute('aria-label')).toBe(t('dashboard.syncing'));
     expect(badge?.getAttribute('title')).toBe(t('dashboard.syncing'));
     expect(badge?.querySelector('.badge-label')?.textContent?.trim()).toBe(t('dashboard.syncing'));
+  });
+});
+
+/**
+ * #704 — the last two Dashboard-scoped listeners (`polling-thread-panicked`
+ * and the generic `reconnect-required`) move to the always-mounted
+ * `+layout.svelte`, mirroring #670. `+page.svelte` destroys the Dashboard
+ * on every view switch, so an event that landed while Settings/Logs/
+ * Diagnostics owned the screen was dropped and the sync mirror stayed on
+ * "Syncing".
+ *
+ * Fails pre-fix: with the listeners still on Dashboard, no shell listener
+ * exists (`listenerReady('polling-thread-panicked')` / `('reconnect-required')`
+ * never settles), the store keeps `syncing: true`, and no fatal or
+ * reconnect target is recorded. Verified by stashing the production half
+ * of the change and re-running this block.
+ */
+describe('Panic and reconnect land while no Dashboard is mounted (#704)', () => {
+  it('records the panic fatal from the always-mounted layout with no Dashboard', async () => {
+    presence.set({ ...get(presence), syncing: true });
+    await mountShell();
+    await listenerReady('polling-thread-panicked');
+
+    // No Dashboard is mounted: exactly the window the pre-#704 listeners
+    // (registered by Dashboard itself) did not exist in.
+    await emit('polling-thread-panicked', {});
+
+    expect(get(presence).syncing).toBe(false);
+    expect(get(presence).syncFatal).toBe(t('dashboard.syncCrashed'));
+  });
+
+  it('renders the recorded fatal when a Dashboard mounts afterwards', async () => {
+    presence.set({ ...get(presence), syncing: true });
+    await mountShell();
+    await listenerReady('polling-thread-panicked');
+    await emit('polling-thread-panicked', {});
+
+    const dash = render(Dashboard);
+    await waitFor(() =>
+      expect(dash.container.querySelector('[role="alert"]')?.textContent).toBe(
+        t('dashboard.syncCrashed')
+      )
+    );
+  });
+
+  it('routes the generic reconnect through the layout with no Dashboard', async () => {
+    presence.set({ ...get(presence), syncing: true });
+    await mountShell();
+    await listenerReady('reconnect-required');
+
+    await emit('reconnect-required', {});
+
+    expect(get(presence).syncing).toBe(false);
+    expect(get(currentView)).toBe('reconnect');
+  });
+
+  it('parks the reconnect when Settings holds unsaved edits (#817 guard)', async () => {
+    presence.set({ ...get(presence), syncing: true });
+    currentView.set('settings');
+    settingsDirty.set(true);
+    await mountShell();
+    await listenerReady('reconnect-required');
+
+    await emit('reconnect-required', {});
+
+    // The form stays mounted with its draft; the target parks in the
+    // shared store for the banner's Save / Discard / Stay choice.
+    expect(get(currentView)).toBe('settings');
+    expect(get(pendingMenuNav)).toBe('reconnect');
+    expect(get(presence).syncing).toBe(false);
+  });
+
+  it('registers each moved listener exactly once with Dashboard mounted', async () => {
+    await mountShell();
+    render(Dashboard);
+    await listenerReady('polling-thread-panicked');
+    await listenerReady('reconnect-required');
+
+    // Dashboard no longer registers either event: a single delivery per
+    // event, never a double-handled one.
+    expect(listeners.filter((l) => l.event === 'polling-thread-panicked').length).toBe(1);
+    expect(listeners.filter((l) => l.event === 'reconnect-required').length).toBe(1);
   });
 });

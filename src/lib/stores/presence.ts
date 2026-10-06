@@ -48,6 +48,15 @@ export interface PresenceState {
    */
   syncing: boolean;
   /**
+   * #704: the poller thread panicked (`polling-thread-panicked`). The
+   * Dashboard used to show this from component-local `$state` owned by its
+   * own listener, so a panic that landed while another view was mounted
+   * never surfaced — and a Dashboard that mounted afterwards showed
+   * nothing. The always-mounted layout records the fatal message here; the
+   * next Dashboard mount renders it. `null` = nothing to report.
+   */
+  syncFatal: string | null;
+  /**
    * Issue #932: a sign-in succeeded but the tokens could not be written to
    * disk (locked keychain, full disk, failed AES-key write), so the session
    * is live only until the next restart. Both `teams-auth-persist-warning`
@@ -77,6 +86,7 @@ export const INITIAL_PRESENCE: PresenceState = {
   availabilityListening: false,
   stopped: false,
   syncing: false,
+  syncFatal: null,
   authPersistWarning: null,
   revision: 0
 };
@@ -120,6 +130,23 @@ export function markAuthPersistWarning(
 /** Drop the persistence banner once it has been shown or the session recovered. */
 export function clearAuthPersistWarning(): void {
   presence.update((s) => (s.authPersistWarning === null ? s : { ...s, authPersistWarning: null }));
+}
+/**
+ * #704: `polling-thread-panicked` — the poller thread died, so the fatal
+ * message is recorded here for the next Dashboard mount to render. A
+ * repeated panic with the same message is fully silent (the equality
+ * guard returns the identical state reference, so Svelte issues no
+ * notification and the view's shown-guard suppresses any re-render) —
+ * unlike the pre-fix direct `showFatal`, which re-armed the dismissal
+ * timer on every event.
+ */
+export function markSyncFatal(message: string): void {
+  presence.update((s) => (s.syncFatal === message ? s : { ...s, syncFatal: message }));
+}
+
+/** Drop the fatal banner once it has been shown or the session recovered. */
+export function clearSyncFatal(): void {
+  presence.update((s) => (s.syncFatal === null ? s : { ...s, syncFatal: null }));
 }
 
 /**

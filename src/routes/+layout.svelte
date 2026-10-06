@@ -1,5 +1,6 @@
 <script lang="ts">
   import '../app.css';
+  import { get } from 'svelte/store';
   import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
@@ -14,7 +15,7 @@
   import { devLog } from '$lib/utils/dev';
   import UpdatePrompt from '$lib/components/UpdatePrompt.svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
-  import { currentView } from '$lib/stores/app';
+  import { currentView, settingsDirty, pendingMenuNav } from '$lib/stores/app';
   import { t } from '$lib/i18n';
   import { reconcileDetachedPanes } from '$lib/stores/detach';
   import { clientSecretStateOf, loadConfig } from '$lib/stores/config';
@@ -28,6 +29,7 @@
     setAvailabilityListening,
     setPlaybackState,
     setSyncing,
+    markSyncFatal,
     markAuthPersistWarning
   } from '$lib/stores/presence';
   import {
@@ -440,6 +442,49 @@
         devLog('[LAYOUT] sync-stopped received');
         setSyncing(false);
         if (event.payload?.self_terminated === true) void notifySyncStopped();
+      })
+    );
+    // #704 (final D2 move — Dashboard owned these until now): the poller
+    // thread died or the auth refresh loop demanded a reconnect while a
+    // non-Dashboard view was mounted. Same store writes Dashboard used to
+    // do; the fatal message is recorded in the shared store (not
+    // component-local `$state`) so a Dashboard that mounts afterwards
+    // still renders it. The reconnect navigation goes through the same
+    // #817 dirty-draft park the root page's `navigateTo` gate applies —
+    // read live from the stores at event time, never cached — instead of
+    // setting the view directly.
+    presenceTeardown.add(
+      listen('polling-thread-panicked', () => {
+        // Rust side clears `is_syncing` in `polling::state::start_polling`'s
+        // panic-cleanup block, but the JS-side mirror was not being flipped
+        // — UI would stay "Syncing" forever after a thread panic. See issue #33.
+        devLog('[LAYOUT] polling-thread-panicked received');
+        setSyncing(false);
+        devLog('[LAYOUT] isSyncing=false (panic recovery)');
+        markSyncFatal(t('dashboard.syncCrashed'));
+      })
+    );
+    presenceTeardown.add(
+      listen('reconnect-required', () => {
+        // Generic reconnect signal emitted from `poll_once::run` (e.g. when
+        // the auth refresh loop has been failing for too long). The
+        // provider-specific events are handled elsewhere:
+        // spotify-reconnect-required above (issue #220),
+        // teams-reconnect-required above (issue #157);
+        // this is the catch-all that takes the user to the reconnect view.
+        devLog('[LAYOUT] reconnect-required received');
+        setSyncing(false);
+        devLog('[LAYOUT] isSyncing=false (reconnect)');
+        // #817: a menu target that lands while Settings holds unsaved
+        // edits parks instead of unmounting the form and destroying the
+        // draft — the parked target resolves through the banner's
+        // Save / Discard / Stay choice exactly like a tray navigation.
+        if (get(currentView) === 'settings' && get(settingsDirty)) {
+          devLog('[LAYOUT] reconnect-required parked: settings draft is dirty');
+          pendingMenuNav.set('reconnect');
+          return;
+        }
+        currentView.set('reconnect');
       })
     );
 

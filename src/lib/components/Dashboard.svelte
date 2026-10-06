@@ -9,7 +9,7 @@
   import type { ErrorEventPayload, TrackInfo } from '$lib/types';
   import { devLog } from '$lib/utils/dev';
   import { appliedTheme, toggleTheme } from '$lib/stores/theme';
-  import { presence, setSyncing } from '$lib/stores/presence';
+  import { presence, setSyncing, clearSyncFatal } from '$lib/stores/presence';
   import { notifyTrackChange } from '$lib/stores/notifications';
   import Logo from './Logo.svelte';
   import { t, tCount, i18n } from '$lib/i18n';
@@ -322,6 +322,11 @@
   onDestroy(() => {
     compactQuery?.removeEventListener('change', () => undefined);
     void teardown.dispose();
+    // #704: the fatal banner's 5 s dismissal is component-local; consume
+    // the shared record on unmount so a panic handled in a previous mount
+    // does not replay on every future mount. A panic that lands while no
+    // Dashboard is mounted stays in the store until one mounts.
+    clearSyncFatal();
     if (displayErrorTimeout) clearTimeout(displayErrorTimeout);
     if (displayWarningTimeout) clearTimeout(displayWarningTimeout);
     if (goToSetupTimeout) clearTimeout(goToSetupTimeout);
@@ -553,6 +558,24 @@
     devLog(`[DASHBOARD] sync state changed: isSyncing=${isSyncing}`);
     void updateMenuState();
   });
+  // #704: the fatal the always-mounted layout recorded in the shared store
+  // (`polling-thread-panicked` while another view was mounted). Rendered
+  // here on the next mount — and live while mounted — through the same
+  // fatal path the other error sources share, so a retry warning still
+  // yields to it and the 5 s dismissal still applies. Keyed on the message
+  // value: each distinct panic re-renders, and the mount path replays
+  // whatever the store still holds.
+  let syncFatalShown: string | null = null;
+  $effect(() => {
+    const fatal = $presence.syncFatal;
+    if (fatal === null) {
+      syncFatalShown = null;
+      return;
+    }
+    if (fatal === syncFatalShown) return;
+    syncFatalShown = fatal;
+    showFatal(fatal);
+  });
 
   // S9 (issue #677): tick the countdown once a second, and only while a snooze
   // is live. The effect reads `snoozeActive` but never writes the clock itself,
@@ -654,31 +677,12 @@
     // #670: `sync-started` / `sync-stopped` are owned by +layout.svelte for the
     // same reason and mirror into `$presence.syncing`, so this component no
     // longer registers them.
-
-    devLog('[DASHBOARD] onMount: setting up polling-thread-panicked listener');
-    teardown.add(listen('polling-thread-panicked', () => {
-      // Rust side clears `is_syncing` in `polling::state::start_polling`'s
-      // panic-cleanup block, but the JS-side mirror was not being flipped
-      // — UI would stay "Syncing" forever after a thread panic. See issue #33.
-      devLog('[DASHBOARD] EVENT: polling-thread-panicked received');
-      setSyncing(false);
-      devLog('[DASHBOARD] EVENT: isSyncing=false (panic recovery)');
-      showFatal(t('dashboard.syncCrashed'));
-    }));
-
-    devLog('[DASHBOARD] onMount: setting up reconnect-required listener');
-    teardown.add(listen('reconnect-required', () => {
-      // Generic reconnect signal emitted from `poll_once::run` (e.g. when
-      // the auth refresh loop has been failing for too long). The
-      // provider-specific events are handled elsewhere:
-      // spotify-reconnect-required in +layout.svelte (issue #220),
-      // teams-reconnect-required in +layout.svelte (issue #157);
-      // this is the catch-all that takes the user to the reconnect view.
-      devLog('[DASHBOARD] EVENT: reconnect-required received');
-      setSyncing(false);
-      devLog('[DASHBOARD] EVENT: isSyncing=false (reconnect)');
-      currentView.set('reconnect');
-    }));
+    // #704 (final D2 move): `polling-thread-panicked` and the generic
+    // `reconnect-required` moved to the always-mounted +layout.svelte for
+    // the same reason — a panic or reconnect demand that landed while
+    // another view was mounted was dropped with this component. The layout
+    // writes the same shared store (`setSyncing(false)` in both, the fatal
+    // message into `$presence.syncFatal`); this component only renders it.
   });
 
   /**
