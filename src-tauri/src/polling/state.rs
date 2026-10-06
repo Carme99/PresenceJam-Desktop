@@ -16,7 +16,7 @@
 //! The actual iteration logic lives in [`super::loop_`] and
 //! [`super::poll_once`].
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -60,31 +60,108 @@ pub(crate) struct ExitSnapshot {
     pub(crate) manual_status_blocks: bool,
 }
 
-static EXIT_SNAPSHOT: Mutex<ExitSnapshot> = Mutex::new(ExitSnapshot {
-    armed_presence: None,
-    last_posted_status: None,
-    manual_status_blocks: false,
-});
-
+/// Issue #758: per-`AppState` polling session state.
+///
+/// The write-decision clocks, quiet/snooze latches, last-now-playing cache,
+/// preferred-presence session, exit snapshot and the diagnostics mirrors used
+/// to live as module-level statics, which forced the test-wide
+/// `global_state_lock` and meant a second poller in one process shared the
+/// first one's clocks. They now live here, owned by `AppState` (see
+/// `AppState::session`): each test constructs its own `SessionState::new()`,
+/// and production session boundaries reset the clocks/mirrors while the exit
+/// residue still survives them (finding D1, issue #684).
+///
+/// The lock shapes match the previous statics exactly (`std` mutexes where
+/// the statics used them, `parking_lot` for the now-playing cache), so the
+/// single-session behaviour is unchanged.
+pub struct SessionState {
+    write_clocks: Mutex<super::poll_once::WriteClocks>,
+    quiet_pause_active: AtomicBool,
+    snooze_active: AtomicBool,
+    last_now_playing: parking_lot::Mutex<Option<crate::spotify::NowPlaying>>,
+    preferred_presence: Mutex<Option<super::poll_once::PreferredPresenceSession>>,
+    exit_snapshot: Mutex<ExitSnapshot>,
+    transient_failures: AtomicU8,
+    network_failures: AtomicU8,
+    gate_reason: Mutex<Option<String>>,
+    track_fingerprint: Mutex<Option<crate::history::TrackFingerprint>>,
+}
+impl SessionState {
+    pub(crate) fn new() -> Self {
+        Self {
+            write_clocks: Mutex::new(super::poll_once::WriteClocks::default()),
+            quiet_pause_active: AtomicBool::new(false),
+            snooze_active: AtomicBool::new(false),
+            last_now_playing: parking_lot::Mutex::new(None),
+            preferred_presence: Mutex::new(None),
+            exit_snapshot: Mutex::new(ExitSnapshot::default()),
+            transient_failures: AtomicU8::new(0),
+            network_failures: AtomicU8::new(0),
+            gate_reason: Mutex::new(None),
+            track_fingerprint: Mutex::new(None),
+        }
+    }
+    /// The quiet-hours pause latch for [`super::poll_once::quiet_pause_iteration`].
+    pub(crate) fn quiet_pause_latch(&self) -> &AtomicBool {
+        &self.quiet_pause_active
+    }
+    /// The snooze latch for [`super::poll_once::snooze_gate`].
+    pub(crate) fn snooze_latch(&self) -> &AtomicBool {
+        &self.snooze_active
+    }
+    /// Publish the last observed `NowPlaying` item (or retire it with `None`).
+    pub(crate) fn store_now_playing(&self, now: Option<crate::spotify::NowPlaying>) {
+        *self.last_now_playing.lock() = now;
+    }
+    /// Read the last observed `NowPlaying` item.
+    pub(crate) fn load_now_playing(&self) -> Option<crate::spotify::NowPlaying> {
+        self.last_now_playing.lock().clone()
+    }
+    /// The write-decision clock slot. Owned by [`super::poll_once`]'s
+    /// load/store/reset trio, which implement the generation-checked
+    /// publish contract (finding D11, issue #694) against this slot.
+    pub(super) fn write_clocks_slot(&self) -> &Mutex<super::poll_once::WriteClocks> {
+        &self.write_clocks
+    }
+    /// The preferred-presence slot (issue #866). Owned by the
+    /// [`super::poll_once`] arm/clear/expiry helpers.
+    pub(super) fn preferred_presence_slot(
+        &self,
+    ) -> &Mutex<Option<super::poll_once::PreferredPresenceSession>> {
+        &self.preferred_presence
+    }
+}
+impl Default for SessionState {
+    /// Required by `clippy::new_without_default`. Equivalent to
+    /// `SessionState::new()`.
+    fn default() -> Self {
+        Self::new()
+    }
+}
 /// Snapshot the exit state. A poisoned lock is recovered rather than
 /// propagated, exactly like the write-decision clocks: this is best-effort
 /// cleanup bookkeeping, and losing it costs at most one skipped quit cleanup.
-pub(crate) fn load_exit_snapshot() -> ExitSnapshot {
-    EXIT_SNAPSHOT
+pub(crate) fn load_exit_snapshot(session: &SessionState) -> ExitSnapshot {
+    session
+        .exit_snapshot
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone()
 }
-
 /// Publish a whole exit snapshot (the accessor the tests and the exit path
 /// use).
-pub(crate) fn store_exit_snapshot(snapshot: ExitSnapshot) {
-    *EXIT_SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner()) = snapshot;
+pub(crate) fn store_exit_snapshot(session: &SessionState, snapshot: ExitSnapshot) {
+    *session
+        .exit_snapshot
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = snapshot;
 }
-
 /// Record a successful `setPresence` arm (`Some`) or `clearPresence` (`None`).
-pub(crate) fn record_armed_presence(pair: Option<(&str, &str, &str)>) {
-    let mut snapshot = EXIT_SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner());
+pub(crate) fn record_armed_presence(session: &SessionState, pair: Option<(&str, &str, &str)>) {
+    let mut snapshot = session
+        .exit_snapshot
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     snapshot.armed_presence = pair.map(|(availability, activity, label)| {
         (
             availability.to_string(),
@@ -93,19 +170,23 @@ pub(crate) fn record_armed_presence(pair: Option<(&str, &str, &str)>) {
         )
     });
 }
-
 /// Record a successful playing-status POST (`Some`) or placeholder clear
 /// (`None`) — the two states `clear_presence_on_exit` tells apart.
-pub(crate) fn record_posted_status(status: Option<&str>) {
-    let mut snapshot = EXIT_SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner());
+pub(crate) fn record_posted_status(session: &SessionState, status: Option<&str>) {
+    let mut snapshot = session
+        .exit_snapshot
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     snapshot.last_posted_status = status.map(|s| s.to_string());
 }
-
 /// Record the manual-status verdict observed alongside a presence sample
 /// (review round 2, item 7). Called from the poller's read sites with the same
 /// predicate the write gate uses, so the exit path's view cannot drift from it.
-pub(crate) fn record_manual_status_blocks(blocks: bool) {
-    let mut snapshot = EXIT_SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner());
+pub(crate) fn record_manual_status_blocks(session: &SessionState, blocks: bool) {
+    let mut snapshot = session
+        .exit_snapshot
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     snapshot.manual_status_blocks = blocks;
 }
 /// Issue #863: consecutive AUTH-credential failures toward the 5-strikes
@@ -114,85 +195,80 @@ pub(crate) fn record_manual_status_blocks(blocks: bool) {
 /// the mutation (its loop locals); this slot only mirrors the latest values
 /// after every iteration so diagnostics can tell reconnect-versus-backoff
 /// apart — following the `token_metadata` read pattern on the consume side.
-static TRANSIENT_FAILURE_COUNT: AtomicU8 = AtomicU8::new(0);
-static CONSECUTIVE_NETWORK_FAILURES: AtomicU8 = AtomicU8::new(0);
-
+/// Mirror the driver's loop-local counters into the session slot (issue #863).
+/// Relaxed ordering: best-effort triage data, read once per snapshot — the
+/// same laxity as the snooze/quiet atomics in `poll_once`.
+pub(crate) fn record_failure_counters(session: &SessionState, transient: u8, network: u8) {
+    session
+        .transient_failures
+        .store(transient, Ordering::Relaxed);
+    session.network_failures.store(network, Ordering::Relaxed);
+}
+/// Read the mirrored failure counters (issue #863).
+pub(crate) fn load_failure_counters(session: &SessionState) -> (u8, u8) {
+    (
+        session.transient_failures.load(Ordering::Relaxed),
+        session.network_failures.load(Ordering::Relaxed),
+    )
+}
 /// Issue #863: the reason the presence gate currently holds writes back
 /// (`"busy"`, `"in a call"`, `"quiet-hours"`, …). Mirrored by the driver from
 /// the newest `presence-gated` history entry while a gate is recorded;
 /// cleared when no gate is. Reason token only — never posted text.
-static LAST_GATE_REASON: Mutex<Option<String>> = Mutex::new(None);
-
-/// Mirror the driver's loop-local counters into the shared slot (issue #863).
-/// Relaxed ordering: best-effort triage data, read once per snapshot — the
-/// same laxity as the snooze/quiet atomics in `poll_once`.
-pub(crate) fn record_failure_counters(transient: u8, network: u8) {
-    TRANSIENT_FAILURE_COUNT.store(transient, Ordering::Relaxed);
-    CONSECUTIVE_NETWORK_FAILURES.store(network, Ordering::Relaxed);
-}
-
-/// Read the mirrored failure counters (issue #863).
-pub(crate) fn load_failure_counters() -> (u8, u8) {
-    (
-        TRANSIENT_FAILURE_COUNT.load(Ordering::Relaxed),
-        CONSECUTIVE_NETWORK_FAILURES.load(Ordering::Relaxed),
-    )
-}
-
 /// Publish the current presence-gate reason (`None` clears it, issue #863).
-pub(crate) fn record_gate_reason(reason: Option<String>) {
-    *LAST_GATE_REASON.lock().unwrap_or_else(|e| e.into_inner()) = reason;
+pub(crate) fn record_gate_reason(session: &SessionState, reason: Option<String>) {
+    *session
+        .gate_reason
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = reason;
 }
-
 /// Read the current presence-gate reason (issue #863).
-pub(crate) fn load_gate_reason() -> Option<String> {
-    LAST_GATE_REASON
+pub(crate) fn load_gate_reason(session: &SessionState) -> Option<String> {
+    session
+        .gate_reason
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone()
 }
-
 /// Forget the mirrored sync state once the session that produced it has
 /// ended, so a stopped poller reports zeros/`None` instead of the last
 /// session's counters (issue #863). Called from the driver's exit tail next
 /// to `reset_write_clocks`; deliberately separate from `reset_exit_snapshot`,
 /// which must SURVIVE a session end (finding D1).
-pub(crate) fn reset_sync_state() {
-    record_failure_counters(0, 0);
-    record_gate_reason(None);
+pub(crate) fn reset_sync_state(session: &SessionState) {
+    record_failure_counters(session, 0, 0);
+    record_gate_reason(session, None);
 }
-
 /// Issue #877: the `(title, artist)` pair the poller currently tracks,
 /// read by the `emit_presence_gated` history emitter so an Activity card
 /// entry can pin the gate to the track it targeted. Updated in lockstep
 /// with [`super::state::current_track`].
-pub(crate) fn current_track_fingerprint() -> Option<crate::history::TrackFingerprint> {
-    CURRENT_TRACK_FINGERPRINT
+pub(crate) fn current_track_fingerprint(
+    session: &SessionState,
+) -> Option<crate::history::TrackFingerprint> {
+    session
+        .track_fingerprint
         .lock()
         .ok()
         .and_then(|guard| guard.clone())
 }
-
 /// Issue #877: the writer side of [`current_track_fingerprint`]. The
 /// poller calls this on every track change + same-track pause so the
 /// gate emitter always sees the latest fingerprint without holding an
 /// `AppState` lock across the Graph call.
 pub(crate) fn record_current_track_fingerprint(
+    session: &SessionState,
     fingerprint: Option<crate::history::TrackFingerprint>,
 ) {
-    if let Ok(mut guard) = CURRENT_TRACK_FINGERPRINT.lock() {
+    if let Ok(mut guard) = session.track_fingerprint.lock() {
         *guard = fingerprint;
     }
 }
-
-static CURRENT_TRACK_FINGERPRINT: Mutex<Option<crate::history::TrackFingerprint>> =
-    Mutex::new(None);
-
 /// Forget the snapshot, once a completed exit cleanup has made it moot (and so
 /// a repeated `RunEvent::Exit` is a no-op). Deliberately NOT called when a
 /// session starts: see the struct docs.
-pub(crate) fn reset_exit_snapshot() {
-    store_exit_snapshot(ExitSnapshot::default());
+pub(crate) fn reset_exit_snapshot(session: &SessionState) {
+    store_exit_snapshot(session, ExitSnapshot::default());
 }
 
 /// Spawn the polling thread.
@@ -217,12 +293,11 @@ pub fn start_polling(
     // write-decision clocks. `polling_loop` resets them on a clean exit; this
     // covers the case it cannot — a previous thread that died by panic, whose
     // `catch_unwind` below never reaches the loop's own reset.
-    super::poll_once::reset_write_clocks();
+    super::poll_once::reset_write_clocks(&state.session);
     // Issue #863: the mirrored counters/gate reason start cold too — a fresh
-    // session must not inherit the previous session's values. Fresh name, so
-    // no D1/PollCore#4 structural guard trips; deliberately NOT
+    // session must not inherit the previous session's values. Deliberately NOT
     // `reset_exit_snapshot`, which must survive a session start (finding D1).
-    reset_sync_state();
+    reset_sync_state(&state.session);
     // Finding D1 (issue #684): the EXIT SNAPSHOT is deliberately NOT reset
     // here, unlike the clocks above. It is not a dedup input but a record of
     // what this app currently has live on Teams — and stopping or starting a
@@ -383,16 +458,6 @@ pub fn stop_polling(state: &AppState) {
     log::info!("[POLLING] stop_polling: stop channel closed (is_syncing left set until join)");
 }
 
-/// Serialises the tests (in this module and in `poll_once`) that mutate the
-/// process-wide write-clock / exit-snapshot statics. `cargo test` runs tests in
-/// parallel threads and those slots are shared, so several tests touching both
-/// need ONE lock rather than one each.
-#[cfg(test)]
-pub(crate) fn global_state_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: Mutex<()> = Mutex::new(());
-    LOCK.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -405,15 +470,18 @@ mod tests {
     /// silently stops clearing Teams again.
     #[test]
     fn test_exit_snapshot_survives_the_write_clock_reset() {
-        let _guard = global_state_lock();
-        reset_exit_snapshot();
-        record_posted_status(Some("\u{1F3B5} A - T \u{1F3A7}"));
-        record_armed_presence(Some(("Available", "Available", "Listening (Available)")));
+        let session = SessionState::new();
+        reset_exit_snapshot(&session);
+        record_posted_status(&session, Some("\u{1F3B5} A - T \u{1F3A7}"));
+        record_armed_presence(
+            &session,
+            Some(("Available", "Available", "Listening (Available)")),
+        );
 
         // Exactly what `polling_loop`'s exit tail does before `RunEvent::Exit`:
-        crate::polling::poll_once::reset_write_clocks();
+        crate::polling::poll_once::reset_write_clocks(&session);
 
-        let snapshot = load_exit_snapshot();
+        let snapshot = load_exit_snapshot(&session);
         assert_eq!(
             snapshot.last_posted_status.as_deref(),
             Some("\u{1F3B5} A - T \u{1F3A7}"),
@@ -426,7 +494,7 @@ mod tests {
         );
 
         // The clocks really did reset — the snapshot is what survives.
-        let cold = crate::polling::poll_once::load_write_clocks();
+        let cold = crate::polling::poll_once::load_write_clocks(&session);
         assert!(
             cold.last_posted_status.is_none() && cold.last_availability_arm.is_none(),
             "this test only means something if the reset actually happened"
@@ -438,39 +506,45 @@ mod tests {
     /// the exit plan honours it without a Graph read of its own.
     #[test]
     fn test_manual_status_verdict_round_trips_into_the_snapshot() {
-        let _guard = global_state_lock();
-        reset_exit_snapshot();
-        record_posted_status(Some("\u{1F3B5} A - T \u{1F3A7}"));
-        record_manual_status_blocks(true);
+        let session = SessionState::new();
+        reset_exit_snapshot(&session);
+        record_posted_status(&session, Some("\u{1F3B5} A - T \u{1F3A7}"));
+        record_manual_status_blocks(&session, true);
         assert!(
-            load_exit_snapshot().manual_status_blocks,
+            load_exit_snapshot(&session).manual_status_blocks,
             "the observed manual-status verdict must be part of the exit snapshot"
         );
-        reset_exit_snapshot();
+        reset_exit_snapshot(&session);
         assert!(
-            !load_exit_snapshot().manual_status_blocks,
+            !load_exit_snapshot(&session).manual_status_blocks,
             "a fresh snapshot starts with no manual-status verdict on record"
         );
     }
 
-    /// #681: the write-decision clocks are ONE process-wide slot. The driver
-    /// loads it once per iteration and publishes its `&mut` view back; the
-    /// manual `Refresh status` one-shot loads the same slot. If they were
-    /// per-thread, that refresh could re-arm the availability session on a
-    /// fresh clock or re-POST a status the #384 guard would skip (issue #572).
-    /// Observed across threads on purpose: the sharing is the contract.
+    /// #681 (issue #758: per-session clocks): the write-decision clocks are ONE
+    /// slot per session. The driver loads it once per iteration and publishes
+    /// its `&mut` view back; the manual `Refresh status` one-shot loads the
+    /// same session's slot. If they were per-thread, that refresh could re-arm
+    /// the availability session on a fresh clock or re-POST a status the #384
+    /// guard would skip (issue #572). Observed across threads on purpose: the
+    /// sharing within a session is the contract; across sessions there is none
+    /// (see `test_two_sessions_do_not_share_clocks_latches_or_caches` below).
     #[test]
-    fn test_write_clocks_are_one_process_wide_slot() {
-        let _guard = global_state_lock();
-        crate::polling::poll_once::reset_write_clocks();
+    fn test_write_clocks_are_shared_within_a_session() {
+        use std::sync::Arc;
+        let session = Arc::new(SessionState::new());
+        crate::polling::poll_once::reset_write_clocks(&session);
 
-        let mut mine = crate::polling::poll_once::load_write_clocks();
+        let mut mine = crate::polling::poll_once::load_write_clocks(&session);
         mine.last_track_key = Some("cross-thread-key".to_string());
-        crate::polling::poll_once::store_write_clocks(&mine);
+        crate::polling::poll_once::store_write_clocks(&session, &mine);
 
-        let other = std::thread::spawn(crate::polling::poll_once::load_write_clocks)
-            .join()
-            .expect("the clock-reading thread must not panic");
+        let other_session = Arc::clone(&session);
+        let other = std::thread::spawn(move || {
+            crate::polling::poll_once::load_write_clocks(&other_session)
+        })
+        .join()
+        .expect("the clock-reading thread must not panic");
         assert_eq!(
             other.last_track_key.as_deref(),
             Some("cross-thread-key"),
@@ -478,12 +552,12 @@ mod tests {
              loads — the driver and the manual refresh share a single slot (#572)"
         );
 
-        crate::polling::poll_once::reset_write_clocks();
+        crate::polling::poll_once::reset_write_clocks(&session);
         assert!(
-            crate::polling::poll_once::load_write_clocks()
+            crate::polling::poll_once::load_write_clocks(&session)
                 .last_track_key
                 .is_none(),
-            "resetting the shared slot is what a session boundary does, so the \
+            "resetting the session slot is what a session boundary does, so the \
              next load must be cold (#572)"
         );
     }
@@ -496,15 +570,18 @@ mod tests {
     /// exists for, so each transition is observed on its own.
     #[test]
     fn test_snapshot_fields_record_and_retire_independently() {
-        let _guard = global_state_lock();
-        reset_exit_snapshot();
-        record_posted_status(Some("\u{1F3B5} A - T \u{1F3A7}"));
-        record_armed_presence(Some(("Available", "Available", "Listening (Available)")));
-        record_manual_status_blocks(true);
+        let session = SessionState::new();
+        reset_exit_snapshot(&session);
+        record_posted_status(&session, Some("\u{1F3B5} A - T \u{1F3A7}"));
+        record_armed_presence(
+            &session,
+            Some(("Available", "Available", "Listening (Available)")),
+        );
+        record_manual_status_blocks(&session, true);
 
         // A placeholder clear retires the posted status only.
-        record_posted_status(None);
-        let after_status_clear = load_exit_snapshot();
+        record_posted_status(&session, None);
+        let after_status_clear = load_exit_snapshot(&session);
         assert!(
             after_status_clear.last_posted_status.is_none(),
             "a placeholder clear must retire the posted status"
@@ -525,9 +602,9 @@ mod tests {
         );
 
         // ...and a session clear retires the presence arm only.
-        record_posted_status(Some("\u{1F3B5} A - T \u{1F3A7}"));
-        record_armed_presence(None);
-        let after_presence_clear = load_exit_snapshot();
+        record_posted_status(&session, Some("\u{1F3B5} A - T \u{1F3A7}"));
+        record_armed_presence(&session, None);
+        let after_presence_clear = load_exit_snapshot(&session);
         assert!(
             after_presence_clear.armed_presence.is_none(),
             "clearing the presence session must retire the arm"
@@ -540,9 +617,9 @@ mod tests {
 
         // A completed cleanup retires all three, so a repeated
         // `RunEvent::Exit` is a no-op (finding D1).
-        reset_exit_snapshot();
+        reset_exit_snapshot(&session);
         assert_eq!(
-            load_exit_snapshot(),
+            load_exit_snapshot(&session),
             ExitSnapshot::default(),
             "a completed exit cleanup must retire the whole snapshot"
         );
@@ -552,17 +629,114 @@ mod tests {
     /// retires them without touching the exit residue (finding D1).
     #[test]
     fn test_sync_state_mirror_records_and_retires() {
-        let _guard = global_state_lock();
-        reset_exit_snapshot();
-        reset_sync_state();
-        record_failure_counters(3, 7);
-        record_gate_reason(Some("busy".to_string()));
-        let (transient, network) = load_failure_counters();
+        let session = SessionState::new();
+        reset_exit_snapshot(&session);
+        reset_sync_state(&session);
+        record_failure_counters(&session, 3, 7);
+        record_gate_reason(&session, Some("busy".to_string()));
+        let (transient, network) = load_failure_counters(&session);
         assert_eq!((transient, network), (3, 7));
-        assert_eq!(load_gate_reason().as_deref(), Some("busy"));
-        reset_sync_state();
-        let (transient, network) = load_failure_counters();
+        assert_eq!(load_gate_reason(&session).as_deref(), Some("busy"));
+        reset_sync_state(&session);
+        let (transient, network) = load_failure_counters(&session);
         assert_eq!((transient, network), (0, 0));
-        assert!(load_gate_reason().is_none());
+        assert!(load_gate_reason(&session).is_none());
+    }
+
+    /// Issue #758 acceptance: two `SessionState` instances do not share
+    /// clocks, latches or caches. Pre-fix every slot here was a module-level
+    /// static, so planting in one "session" leaked into the other and this
+    /// test failed; now each `SessionState::new()` owns its slots, which is
+    /// structural — no lock or reset ordering can re-share them.
+    #[test]
+    fn test_two_sessions_do_not_share_clocks_latches_or_caches() {
+        let first = SessionState::new();
+        let second = SessionState::new();
+
+        // Plant residue in the first session only: every one of the ten
+        // session slots (write clocks, both latches, failure counters, gate
+        // reason, posted status, armed presence, manual-status verdict,
+        // now-playing cache, track fingerprint, preferred-presence session).
+        // A static-regression in ANY slot leaks into `second` and fails below.
+        let mut clocks = crate::polling::poll_once::load_write_clocks(&first);
+        clocks.last_track_key = Some("first-session-key".to_string());
+        crate::polling::poll_once::store_write_clocks(&first, &clocks);
+        first
+            .quiet_pause_latch()
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        first
+            .snooze_latch()
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        record_failure_counters(&first, 5, 9);
+        record_gate_reason(&first, Some("busy".to_string()));
+        record_posted_status(&first, Some("\u{1F3B5} A - T \u{1F3A7}"));
+        record_armed_presence(
+            &first,
+            Some(("Available", "Available", "Listening (Available)")),
+        );
+        record_manual_status_blocks(&first, true);
+        first.store_now_playing(Some(crate::spotify::NowPlaying::default()));
+        record_current_track_fingerprint(
+            &first,
+            Some(crate::history::TrackFingerprint {
+                title: "A".to_string(),
+                artist: "T".to_string(),
+            }),
+        );
+        crate::polling::poll_once::record_preferred_presence_session(
+            &first,
+            Some(crate::polling::poll_once::PreferredPresenceSession {
+                pair: crate::config::normalize_presence_pair("Available", "Available")
+                    .expect("Available/Available is a valid pair"),
+                expires_at: chrono::Utc::now() + chrono::Duration::minutes(30),
+                label: "test",
+            }),
+        );
+
+        // The second session is untouched by all of it.
+        assert!(
+            crate::polling::poll_once::load_write_clocks(&second)
+                .last_track_key
+                .is_none(),
+            "a fresh session must start with cold clocks, not the first session's"
+        );
+        assert!(
+            !second
+                .quiet_pause_latch()
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "the quiet-hours latch must be per-session"
+        );
+        assert!(
+            !second
+                .snooze_latch()
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "the snooze latch must be per-session"
+        );
+        assert_eq!(
+            load_failure_counters(&second),
+            (0, 0),
+            "the failure mirrors must be per-session"
+        );
+        assert!(
+            load_gate_reason(&second).is_none(),
+            "the gate reason must be per-session"
+        );
+        assert_eq!(
+            load_exit_snapshot(&second),
+            ExitSnapshot::default(),
+            "the exit residue must be per-session"
+        );
+        assert!(
+            second.load_now_playing().is_none(),
+            "the now-playing cache must be per-session"
+        );
+        assert!(
+            current_track_fingerprint(&second).is_none(),
+            "the track fingerprint must be per-session"
+        );
+        assert!(
+            crate::polling::poll_once::load_preferred_presence_session(&second).is_none(),
+            "the preferred-presence session must be per-session"
+        );
     }
 }

@@ -65,6 +65,7 @@ fn arm_preferred_for_snooze(state: &AppState, app: &tauri::AppHandle) {
         return;
     };
     super::poll_once::arm_preferred_presence_session(
+        &state.session,
         app,
         &tokens.access_token,
         &pair,
@@ -83,6 +84,7 @@ fn clear_preferred_for_snooze(state: &AppState, app: &tauri::AppHandle) {
         return;
     };
     super::poll_once::clear_preferred_presence_session(
+        &state.session,
         app,
         &tokens.access_token,
         "Snooze preferred presence cleared",
@@ -184,7 +186,7 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
         let snooze_gate = {
             // Scoped: the config read guard must not be held across the sleep.
             let config = state.config.get();
-            super::poll_once::snooze_gate(&config)
+            super::poll_once::snooze_gate(&state.session, &config)
         };
         match snooze_gate {
             super::poll_once::SnoozeGate::Skipped(seconds) => {
@@ -211,7 +213,7 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
                         at: chrono::Utc::now(),
                         kind: "snooze-start".to_string(),
                         note: format!("snoozed for {}s", seconds),
-                        track_fingerprint: super::state::current_track_fingerprint(),
+                        track_fingerprint: super::state::current_track_fingerprint(&state.session),
                         posted_status: None,
                         gate_reason: Some("snooze".to_string()),
                     },
@@ -273,7 +275,7 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
                         at: chrono::Utc::now(),
                         kind: "snooze-end".to_string(),
                         note: "snooze cleared".to_string(),
-                        track_fingerprint: super::state::current_track_fingerprint(),
+                        track_fingerprint: super::state::current_track_fingerprint(&state.session),
                         posted_status: None,
                         gate_reason: Some("snooze".to_string()),
                     },
@@ -297,7 +299,7 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
         let quiet_pause_seconds = {
             // Scoped: the config read guard must not be held across the sleep.
             let config = state.config.get();
-            super::poll_once::quiet_pause_iteration(&config)
+            super::poll_once::quiet_pause_iteration(&state.session, &config)
         };
         if let Some(seconds) = quiet_pause_seconds {
             log::debug!(
@@ -323,7 +325,7 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
         // fresh clock or re-POSTing a status the #384 guard would skip. A
         // concurrent load/store can only lose dedup precision (one redundant
         // write), never correctness.
-        let mut clocks = super::poll_once::load_write_clocks();
+        let mut clocks = super::poll_once::load_write_clocks(&state.session);
 
         // Delegate the iteration. The driver passes `&mut` to per-iteration
         // state so poll_once can mutate consecutive_pauses / transient counters
@@ -352,13 +354,14 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
             &mut clocks.last_idle_verdict,
             &mut clocks.force_resume_write,
         );
-        super::poll_once::store_write_clocks(&clocks);
+        super::poll_once::store_write_clocks(&state.session, &clocks);
         // Issue #863: mirror the driver's per-iteration failure counters into
         // the shared polling-state slot (the `token_metadata` slot pattern on
         // the consume side in `diagnostics.rs`) so the diagnostics snapshot
         // can tell reconnect-versus-backoff apart. Relaxed atomics: best-effort
         // triage data, read once per snapshot.
         super::state::record_failure_counters(
+            &state.session,
             transient_failure_count,
             consecutive_network_failures,
         );
@@ -368,7 +371,7 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
         // stored, so clearing here covers all of them — past and future —
         // with no per-site edits. Reason token only, never posted text.
         if clocks.gated_track_key.is_none() {
-            super::state::record_gate_reason(None);
+            super::state::record_gate_reason(&state.session, None);
         }
 
         // Post-iteration tray sync — independent of the API result.
@@ -404,12 +407,12 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
     // no session runs) would read a stale `last_track_key`/gate and skip the
     // `spotify-track-changed` emit and the `current_track` update for a track
     // that is already playing.
-    super::poll_once::reset_write_clocks();
+    super::poll_once::reset_write_clocks(&state.session);
     // Issue #863: the mirrored counters/gate reason die with the session too —
     // a stopped poller reports zeros/`None` instead of the last session's
     // values. Deliberately NOT `reset_exit_snapshot`: the exit residue must
     // survive this tail (finding D1, see the comment below).
-    super::state::reset_sync_state();
+    super::state::reset_sync_state(&state.session);
     // Finding D1 (issue #684): the clocks die here, but what this session left
     // on TEAMS does not — the exit snapshot in `polling/state.rs` is
     // deliberately NOT reset on this path. `RunEvent::Exit` runs
@@ -514,27 +517,23 @@ mod tests {
     /// armed `Available` session live on Teams after a quit.
     #[test]
     fn test_a_cold_session_end_still_carries_the_teams_residue() {
-        let _guard = crate::polling::state::global_state_lock();
-        // Start from a clean slate through the poller's own recorders: this
-        // file must stay free of a snapshot-reset call (the D1 source guard in
-        // `poll_once.rs` reads this file, and the driver must never retire the
-        // residue — only a completed exit cleanup may).
-        crate::polling::state::record_posted_status(None);
-        crate::polling::state::record_armed_presence(None);
-        crate::polling::state::record_manual_status_blocks(false);
-        crate::polling::state::record_posted_status(Some("\u{1F3B5} A - T \u{1F3A7}"));
-        crate::polling::state::record_armed_presence(Some((
-            "Available",
-            "Available",
-            "Listening (Available)",
-        )));
+        // A fresh session IS the clean slate — no recorders, no reset, no
+        // lock. This file must stay free of a snapshot-reset call (the D1
+        // source guard in `poll_once.rs` reads this file, and the driver must
+        // never retire the residue — only a completed exit cleanup may).
+        let session = crate::polling::SessionState::new();
+        crate::polling::state::record_posted_status(&session, Some("\u{1F3B5} A - T \u{1F3A7}"));
+        crate::polling::state::record_armed_presence(
+            &session,
+            Some(("Available", "Available", "Listening (Available)")),
+        );
 
         // The exit tail, verbatim...
-        crate::polling::poll_once::reset_write_clocks();
+        crate::polling::poll_once::reset_write_clocks(&session);
         // ...and the next session's start, which resets the same slot.
-        crate::polling::poll_once::reset_write_clocks();
+        crate::polling::poll_once::reset_write_clocks(&session);
 
-        let cold = crate::polling::poll_once::load_write_clocks();
+        let cold = crate::polling::poll_once::load_write_clocks(&session);
         assert!(
             cold.last_track_key.is_none()
                 && cold.last_posted_status.is_none()
@@ -543,7 +542,7 @@ mod tests {
              cleanup cannot read them (finding D1)"
         );
 
-        let residue = crate::polling::state::load_exit_snapshot();
+        let residue = crate::polling::state::load_exit_snapshot(&session);
         assert_eq!(
             residue.last_posted_status.as_deref(),
             Some("\u{1F3B5} A - T \u{1F3A7}"),

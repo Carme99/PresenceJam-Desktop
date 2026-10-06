@@ -725,13 +725,14 @@ fn sync_state(state: &crate::AppState) -> SyncState {
         })
         .unwrap_or((false, None));
     let (transient_failure_count, consecutive_network_failures) =
-        crate::polling::load_failure_counters();
+        crate::polling::load_failure_counters(&state.session);
     SyncState {
         is_syncing: state.polling.is_syncing(),
         snoozed,
         snooze_minutes_left,
-        manual_status_blocks: crate::polling::load_exit_snapshot().manual_status_blocks,
-        presence_gate_reason: crate::polling::load_gate_reason(),
+        manual_status_blocks: crate::polling::load_exit_snapshot(&state.session)
+            .manual_status_blocks,
+        presence_gate_reason: crate::polling::load_gate_reason(&state.session),
         transient_failure_count,
         consecutive_network_failures,
     }
@@ -2471,12 +2472,11 @@ mod tests {
     /// all, so every assertion below fails on the old shape.
     #[test]
     fn test_sync_state_plants_survive_into_snapshot_json() {
-        let _guard = crate::polling::global_state_lock();
-        crate::polling::reset_sync_state();
-        crate::polling::record_failure_counters(3, 7);
-        crate::polling::record_gate_reason(Some("busy".to_string()));
-        crate::polling::record_manual_status_blocks(true);
         let state = crate::AppState::default();
+        crate::polling::reset_sync_state(&state.session);
+        crate::polling::record_failure_counters(&state.session, 3, 7);
+        crate::polling::record_gate_reason(&state.session, Some("busy".to_string()));
+        crate::polling::record_manual_status_blocks(&state.session, true);
         state.polling.set_syncing(true);
         {
             let cfg = crate::config::AppConfig {
@@ -2517,8 +2517,6 @@ mod tests {
         ] {
             assert!(json.contains(needle), "missing {needle} in {json}");
         }
-        crate::polling::reset_sync_state();
-        crate::polling::reset_exit_snapshot();
     }
 
     #[test]

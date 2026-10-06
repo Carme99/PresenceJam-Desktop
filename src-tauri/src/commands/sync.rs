@@ -713,9 +713,9 @@ pub fn sync_status_from_state(state: &AppState) -> SyncStatus {
     // Issue #813: the startup migration conflict is process state, not lock
     // state.
     let spotify_secret_conflict = state.secret_conflict.load(Ordering::Acquire);
-    // #670: the poller's presence bookkeeping, read from the shared
+    // #670: the poller's presence bookkeeping, read from the session's
     // write-decision clocks (finding PollCore#4 / #572).
-    let clocks = polling::load_write_clocks();
+    let clocks = polling::load_write_clocks(&state.session);
 
     // Issue #879: end of the critical section. The two connected booleans
     // below are computed from values read above, and every field that had to
