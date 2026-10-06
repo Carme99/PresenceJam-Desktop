@@ -118,24 +118,14 @@ impl ErrorEventPayload {
 
 /// Event sink used by the canonical error emitters. Production delegates to
 /// Tauri's emitter; tests capture the same production payload without a GUI
-/// runtime, and without linking Tauri's `test` module (which breaks the
-/// Windows test binary's load — issue #929 rework).
+/// runtime.
 pub(crate) trait ErrorEventEmitter {
     fn emit_error_event(&self, event: &str, payload: ErrorEventPayload);
-    /// Emit a marker event with a `null` payload — the shape the reconnect
-    /// prompts use. Split from [`Self::emit_error_event`] because those
-    /// carry a structured `ErrorEventPayload`, and a single trait cannot
-    /// express both without erasing the distinction the tests assert on.
-    fn emit_marker(&self, event: &str);
 }
 
-impl<R: tauri::Runtime> ErrorEventEmitter for AppHandle<R> {
+impl ErrorEventEmitter for AppHandle {
     fn emit_error_event(&self, event: &str, payload: ErrorEventPayload) {
         let _ = self.emit(event, payload);
-    }
-
-    fn emit_marker(&self, event: &str) {
-        let _ = self.emit(event, serde_json::json!(null));
     }
 }
 
@@ -175,12 +165,6 @@ mod tests {
     impl ErrorEventEmitter for RecordingErrorEmitter {
         fn emit_error_event(&self, event: &str, payload: ErrorEventPayload) {
             self.events.lock().push((event.to_string(), payload));
-        }
-        fn emit_marker(&self, event: &str) {
-            self.events.lock().push((
-                event.to_string(),
-                ErrorEventPayload::new("test", String::new(), ErrorSeverity::Warning, None),
-            ));
         }
     }
 

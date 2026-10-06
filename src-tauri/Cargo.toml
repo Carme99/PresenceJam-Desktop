@@ -44,27 +44,6 @@ objc2-core-services = { version = "~0.3", default-features = false, features = [
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security", "Win32_UI_Shell", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_SystemInformation", "Win32_System_Console", "Win32_Storage_FileSystem", "Media_Control", "Storage_Streams"] }
 windows-collections = "0.3"
 
-# Issue #929 rework (B1 closure): the wrapper-level test for the `app` emitter
-# binding uses `tauri::test::mock_app()`, which requires tauri's `test` feature.
-# The feature is EMPTY upstream but flips
-# `#[cfg(any(test, feature = "test"))]` in tauri's lib, compiling the
-# `tauri::test` module into the rlib the WINDOWS test binary links — and
-# the linked binary then fails to load with
-# `0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND` on the Windows CI leg. Proof:
-# branches WITH this dev-dep build `presence_jam_lib-352d250090363d71.exe`
-# and FAIL on Windows CI; branches WITHOUT it build
-# `presence_jam_lib-d797c262adba749f.exe` and PASS (3 pass, 2 fail, no
-# overlap, Linux/macOS unaffected).
-#
-# Target-gated to non-Windows so Linux/macOS tests can drive the wrapper
-# through a real Tauri listener while Windows tests keep using
-# `CapturingEmitter` directly against `teams_write_with_refresh_fn`. A
-# future contributor MUST NOT "simplify" this back to a non-gated
-# dev-dep — the binary-fingerprint evidence above is load-bearing
-# documentation, not optional commentary.
-[target.'cfg(not(windows))'.dev-dependencies]
-tauri = { version = "~2.11", features = ["test"] }
-
 [dependencies]
 tauri = { version = "~2.11", features = ["tray-icon"] }
 tauri-plugin-deep-link = "~2.4"
