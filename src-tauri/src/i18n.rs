@@ -1,16 +1,15 @@
 //! Rust-side UI string table for the native surfaces (4.7.0, issue #674).
 //!
-//! The webview owns its own dictionaries (`src/lib/i18n/{en,de,fr}.ts`); this
+//! The webview owns its own dictionaries (`src/lib/i18n/{en,de,fr,es,it,pl,pt,nl}.ts`); this
 //! module is the Rust counterpart for literals rendered outside the webview:
 //! the tray menu, native application menu, and posted Teams fallbacks.
 //!
-//! [`Strings`] carries one field per user-visible literal and the three tables
+//! [`Strings`] carries one field per user-visible literal and the eight tables
 //! below must stay field-for-field identical. That is enforced, not assumed:
 //! `tables_carry_an_identical_field_set` parses the struct declaration out of
 //! this file and fails when a table misses a field or falls out of order, and
 //! `no_user_visible_literal_stays_hard_coded` scans production literals in
 //! `tray.rs`/`menu.rs` and fails when user-visible copy is not in these tables.
-//!
 //! Deliberate exceptions, mirroring the frontend's documented limitation:
 //! error strings surfaced through `invoke()` rejections or event payloads
 //! (e.g. `playback-error`) stay English, and the app name ("PresenceJam",
@@ -135,7 +134,7 @@ pub struct Strings {
     pub profile_empty: &'static str,
 }
 
-/// English table — the source of truth the other two mirror.
+/// English table — the source of truth the other seven mirror.
 pub const EN: Strings = Strings {
     show_window: "Show Window",
     hide_window: "Hide Window",
@@ -309,9 +308,299 @@ pub const FR: Strings = Strings {
     profile_empty: "(aucun profil configuré)",
 };
 
+/// Spanish table (#984 — model-written, human review pending).
+pub const ES: Strings = Strings {
+    show_window: "Mostrar ventana",
+    hide_window: "Ocultar ventana",
+    pause_sync: "Pausar sincronización",
+    resume_sync: "Reanudar sincronización",
+    open_settings: "Abrir ajustes",
+    open_logs_folder: "Abrir carpeta de registros",
+    quit: "Salir",
+    play_pause: "Reproducir/Pausar",
+    previous: "Anterior",
+    next: "Siguiente",
+    shuffle: "Aleatorio",
+    repeat_off: "Repetir: desactivado",
+    repeat_context: "Repetir: contexto",
+    repeat_track: "Repetir: pista",
+    devices: "Dispositivos",
+    no_devices: "(sin dispositivos)",
+    up_next: "A continuación",
+    queue_empty: "(cola vacía)",
+    status_syncing: "Sincronizando",
+    status_paused: "En pausa",
+    status_not_syncing: "Sin sincronizar",
+    status_syncing_no_track: "Sincronizando — sin pista",
+    placeholder_default: "Escuchando Spotify ahora",
+    status_paused_default: "En pausa",
+    status_stopped_default: "Nada sonando en Spotify",
+    menu_file: "Archivo",
+    menu_edit: "Editar",
+    menu_view: "Ver",
+    menu_help: "Ayuda",
+    menu_settings: "Ajustes...",
+    menu_quit: "Salir de PresenceJam",
+    menu_show_dashboard: "Mostrar panel",
+    menu_show_logs: "Mostrar registros",
+    menu_about: "Acerca de PresenceJam",
+    snooze_pause_menu: "Pausar sincronización…",
+    snooze_30_minutes: "30 minutos",
+    snooze_1_hour: "1 hora",
+    snooze_until_tomorrow: "Hasta mañana",
+    snooze_until_next_meeting_ends: "Hasta que termine esta reunión",
+    snooze_resume_now: "Reanudar sincronización ahora",
+    snooze_paused: "Sincronización en pausa",
+    snooze_minutes_left: "min restantes",
+    manual_status_recent_menu: "Estados recientes",
+    manual_status_recent_empty: "(sin estados recientes)",
+    manual_status_clear: "Borrar estado manual",
+    volume_menu: "Volumen",
+    volume_percent_label: "{percent} %",
+    seek_menu: "Buscar",
+    seek_back_30s_label: "Retroceder {seconds} s",
+    seek_forward_30s_label: "Avanzar {seconds} s",
+    // ── Profile submenu (issue #869) ──────────────────────────────────────────
+    profile_menu: "Perfil activo",
+    profile_base: "Configuración base",
+    profile_empty: "(sin perfiles configurados)",
+};
+
+/// Italian table (#984 — model-written, human review pending).
+pub const IT: Strings = Strings {
+    show_window: "Mostra finestra",
+    hide_window: "Nascondi finestra",
+    pause_sync: "Metti in pausa la sincronizzazione",
+    resume_sync: "Riprendi la sincronizzazione",
+    open_settings: "Apri impostazioni",
+    open_logs_folder: "Apri cartella dei registri",
+    quit: "Esci",
+    play_pause: "Riproduci/Pausa",
+    previous: "Precedente",
+    next: "Successivo",
+    shuffle: "Casuale",
+    repeat_off: "Ripeti: disattivato",
+    repeat_context: "Ripeti: contesto",
+    repeat_track: "Ripeti: brano",
+    devices: "Dispositivi",
+    no_devices: "(nessun dispositivo)",
+    up_next: "In coda",
+    queue_empty: "(coda vuota)",
+    status_syncing: "Sincronizzazione",
+    status_paused: "In pausa",
+    status_not_syncing: "Non sincronizzato",
+    status_syncing_no_track: "Sincronizzazione — nessun brano",
+    placeholder_default: "In ascolto di Spotify",
+    status_paused_default: "In pausa",
+    status_stopped_default: "Nulla in riproduzione su Spotify",
+    menu_file: "File",
+    menu_edit: "Modifica",
+    menu_view: "Vista",
+    menu_help: "Aiuto",
+    menu_settings: "Impostazioni...",
+    menu_quit: "Esci da PresenceJam",
+    menu_show_dashboard: "Mostra pannello",
+    menu_show_logs: "Mostra registri",
+    menu_about: "Informazioni su PresenceJam",
+    snooze_pause_menu: "Metti in pausa per…",
+    snooze_30_minutes: "30 minuti",
+    snooze_1_hour: "1 ora",
+    snooze_until_tomorrow: "Fino a domani",
+    snooze_until_next_meeting_ends: "Fino alla fine della riunione",
+    snooze_resume_now: "Riprendi subito la sincronizzazione",
+    snooze_paused: "Sincronizzazione in pausa",
+    snooze_minutes_left: "min rimanenti",
+    manual_status_recent_menu: "Stati recenti",
+    manual_status_recent_empty: "(nessuno stato recente)",
+    manual_status_clear: "Cancella stato manuale",
+    volume_menu: "Volume",
+    volume_percent_label: "{percent} %",
+    seek_menu: "Posizione",
+    seek_back_30s_label: "Indietro di {seconds} s",
+    seek_forward_30s_label: "Avanti di {seconds} s",
+    // ── Profile submenu (issue #869) ──────────────────────────────────────────
+    profile_menu: "Profilo attivo",
+    profile_base: "Configurazione di base",
+    profile_empty: "(nessun profilo configurato)",
+};
+
+/// Polish table (#984 — model-written, human review pending).
+pub const PL: Strings = Strings {
+    show_window: "Pokaż okno",
+    hide_window: "Ukryj okno",
+    pause_sync: "Wstrzymaj synchronizację",
+    resume_sync: "Wznów synchronizację",
+    open_settings: "Otwórz ustawienia",
+    open_logs_folder: "Otwórz folder dzienników",
+    quit: "Zakończ",
+    play_pause: "Odtwarzaj/Wstrzymaj",
+    previous: "Poprzedni",
+    next: "Następny",
+    shuffle: "Losowo",
+    repeat_off: "Powtarzanie: wyłączone",
+    repeat_context: "Powtarzanie: kontekst",
+    repeat_track: "Powtarzanie: utwór",
+    devices: "Urządzenia",
+    no_devices: "(brak urządzeń)",
+    up_next: "Następne",
+    queue_empty: "(pusta kolejka)",
+    status_syncing: "Synchronizowanie",
+    status_paused: "Wstrzymano",
+    status_not_syncing: "Niezsynchronizowano",
+    status_syncing_no_track: "Synchronizowanie — brak utworu",
+    placeholder_default: "Słucha teraz Spotify",
+    status_paused_default: "Wstrzymano",
+    status_stopped_default: "Nic nie gra na Spotify",
+    menu_file: "Plik",
+    menu_edit: "Edycja",
+    menu_view: "Widok",
+    menu_help: "Pomoc",
+    menu_settings: "Ustawienia...",
+    menu_quit: "Zakończ PresenceJam",
+    menu_show_dashboard: "Pokaż panel",
+    menu_show_logs: "Pokaż dzienniki",
+    menu_about: "O PresenceJam",
+    snooze_pause_menu: "Wstrzymaj synchronizację na…",
+    snooze_30_minutes: "30 minut",
+    snooze_1_hour: "1 godzina",
+    snooze_until_tomorrow: "Do jutra",
+    snooze_until_next_meeting_ends: "Do końca tego spotkania",
+    snooze_resume_now: "Wznów synchronizację teraz",
+    snooze_paused: "Synchronizacja wstrzymana",
+    snooze_minutes_left: "min pozostało",
+    manual_status_recent_menu: "Ostatnie statusy",
+    manual_status_recent_empty: "(brak ostatnich statusów)",
+    manual_status_clear: "Wyczyść status ręczny",
+    volume_menu: "Głośność",
+    volume_percent_label: "{percent} %",
+    seek_menu: "Przewijanie",
+    seek_back_30s_label: "Cofnij {seconds} s",
+    seek_forward_30s_label: "Przewiń {seconds} s",
+    // ── Profile submenu (issue #869) ──────────────────────────────────────────
+    profile_menu: "Aktywny profil",
+    profile_base: "Konfiguracja bazowa",
+    profile_empty: "(brak skonfigurowanych profili)",
+};
+
+/// Brazilian-Portuguese table (#984 — model-written, human review pending).
+pub const PT: Strings = Strings {
+    show_window: "Mostrar janela",
+    hide_window: "Ocultar janela",
+    pause_sync: "Pausar sincronização",
+    resume_sync: "Retomar sincronização",
+    open_settings: "Abrir configurações",
+    open_logs_folder: "Abrir pasta de registros",
+    quit: "Sair",
+    play_pause: "Tocar/Pausar",
+    previous: "Anterior",
+    next: "Próxima",
+    shuffle: "Aleatório",
+    repeat_off: "Repetir: desligado",
+    repeat_context: "Repetir: contexto",
+    repeat_track: "Repetir: faixa",
+    devices: "Dispositivos",
+    no_devices: "(sem dispositivos)",
+    up_next: "A seguir",
+    queue_empty: "(fila vazia)",
+    status_syncing: "Sincronizando",
+    status_paused: "Pausado",
+    status_not_syncing: "Sem sincronização",
+    status_syncing_no_track: "Sincronizando — sem faixa",
+    placeholder_default: "Ouvindo Spotify agora",
+    status_paused_default: "Pausado",
+    status_stopped_default: "Nada tocando no Spotify",
+    menu_file: "Arquivo",
+    menu_edit: "Editar",
+    menu_view: "Exibir",
+    menu_help: "Ajuda",
+    menu_settings: "Configurações...",
+    menu_quit: "Sair do PresenceJam",
+    menu_show_dashboard: "Mostrar painel",
+    menu_show_logs: "Mostrar registros",
+    menu_about: "Sobre o PresenceJam",
+    snooze_pause_menu: "Pausar sincronização por…",
+    snooze_30_minutes: "30 minutos",
+    snooze_1_hour: "1 hora",
+    snooze_until_tomorrow: "Até amanhã",
+    snooze_until_next_meeting_ends: "Até o fim desta reunião",
+    snooze_resume_now: "Retomar sincronização agora",
+    snooze_paused: "Sincronização pausada",
+    snooze_minutes_left: "min restantes",
+    manual_status_recent_menu: "Status recentes",
+    manual_status_recent_empty: "(sem status recentes)",
+    manual_status_clear: "Limpar status manual",
+    volume_menu: "Volume",
+    volume_percent_label: "{percent} %",
+    seek_menu: "Posição",
+    seek_back_30s_label: "Voltar {seconds} s",
+    seek_forward_30s_label: "Avançar {seconds} s",
+    // ── Profile submenu (issue #869) ──────────────────────────────────────────
+    profile_menu: "Perfil ativo",
+    profile_base: "Configuração base",
+    profile_empty: "(sem perfis configurados)",
+};
+
+/// Dutch table (#984 — model-written, human review pending).
+pub const NL: Strings = Strings {
+    show_window: "Venster tonen",
+    hide_window: "Venster verbergen",
+    pause_sync: "Synchronisatie pauzeren",
+    resume_sync: "Synchronisatie hervatten",
+    open_settings: "Instellingen openen",
+    open_logs_folder: "Logmap openen",
+    quit: "Afsluiten",
+    play_pause: "Afspelen/Pauzeren",
+    previous: "Vorige",
+    next: "Volgende",
+    shuffle: "Willekeurig",
+    repeat_off: "Herhalen: uit",
+    repeat_context: "Herhalen: context",
+    repeat_track: "Herhalen: nummer",
+    devices: "Apparaten",
+    no_devices: "(geen apparaten)",
+    up_next: "Hierna",
+    queue_empty: "(wachtrij leeg)",
+    status_syncing: "Synchroniseren",
+    status_paused: "Gepauzeerd",
+    status_not_syncing: "Niet synchroniseren",
+    status_syncing_no_track: "Synchroniseren — geen nummer",
+    placeholder_default: "Luistert nu naar Spotify",
+    status_paused_default: "Gepauzeerd",
+    status_stopped_default: "Niets speelt op Spotify",
+    menu_file: "Bestand",
+    menu_edit: "Bewerken",
+    menu_view: "Weergave",
+    menu_help: "Help",
+    menu_settings: "Instellingen...",
+    menu_quit: "PresenceJam afsluiten",
+    menu_show_dashboard: "Dashboard tonen",
+    menu_show_logs: "Logboeken tonen",
+    menu_about: "Over PresenceJam",
+    snooze_pause_menu: "Synchronisatie pauzeren voor…",
+    snooze_30_minutes: "30 minuten",
+    snooze_1_hour: "1 uur",
+    snooze_until_tomorrow: "Tot morgen",
+    snooze_until_next_meeting_ends: "Tot het einde van deze vergadering",
+    snooze_resume_now: "Synchronisatie nu hervatten",
+    snooze_paused: "Synchronisatie gepauzeerd",
+    snooze_minutes_left: "min resterend",
+    manual_status_recent_menu: "Recente statussen",
+    manual_status_recent_empty: "(geen recente statussen)",
+    manual_status_clear: "Handmatige status wissen",
+    volume_menu: "Volume",
+    volume_percent_label: "{percent} %",
+    seek_menu: "Zoeken",
+    seek_back_30s_label: "{seconds} s terug",
+    seek_forward_30s_label: "{seconds} s vooruit",
+    // ── Profile submenu (issue #869) ──────────────────────────────────────────
+    profile_menu: "Actief profiel",
+    profile_base: "Basisconfiguratie",
+    profile_empty: "(geen profielen ingesteld)",
+};
+
 /// Canonical locale tags, in table order. The value persisted in
 /// `AppConfig::locale` is always one of these.
-pub const LOCALES: [&str; 3] = ["en", "de", "fr"];
+pub const LOCALES: [&str; 8] = ["en", "de", "fr", "es", "it", "pl", "pt", "nl"];
 
 /// Lowercased base language subtag: `"DE_at"`/`"de-AT"` → `"de"`.
 fn base_tag(locale: &str) -> String {
@@ -326,17 +615,27 @@ fn base_tag(locale: &str) -> String {
 /// Canonical tag for a stored `AppConfig::locale`.
 ///
 /// `None` is the documented pre-4.7 state and an empty string is what a
-/// hand-edited config may carry — both mean English without a warning. A
-/// *unknown* tag (`"zz"`, `"pt-BR"`) also falls back to English but logs the
+/// hand-edited config may carry — both mean English without a warning. An
+/// *unknown* tag (`"zz"`, `"ja"`) also falls back to English but logs the
 /// fallback, so a typo'd locale is visible in the log instead of silent.
+/// Longest-tag-first (#984): the exact regional tag `pt-BR` resolves to the
+/// Brazilian-Portuguese table before any bare-base fallback is consulted.
 pub fn resolve_tag(locale: Option<&str>) -> &'static str {
     let Some(raw) = locale.map(str::trim).filter(|value| !value.is_empty()) else {
         return "en";
     };
+    if raw.eq_ignore_ascii_case("pt-BR") {
+        return "pt";
+    }
     match base_tag(raw).as_str() {
         "en" => "en",
         "de" => "de",
         "fr" => "fr",
+        "es" => "es",
+        "it" => "it",
+        "pl" => "pl",
+        "pt" => "pt",
+        "nl" => "nl",
         unknown => {
             log::warn!("[I18N] unknown locale '{}' — falling back to 'en'", unknown);
             "en"
@@ -344,12 +643,17 @@ pub fn resolve_tag(locale: Option<&str>) -> &'static str {
     }
 }
 
-/// The table for a canonical tag. Anything that is not `"de"`/`"fr"` reads as
-/// English, so a caller can never render a half-translated menu.
+/// The table for a canonical tag. Anything unrecognised reads as English,
+/// so a caller can never render a half-translated menu.
 pub fn strings_for(tag: &str) -> &'static Strings {
     match tag {
         "de" => &DE,
         "fr" => &FR,
+        "es" => &ES,
+        "it" => &IT,
+        "pl" => &PL,
+        "pt" => &PT,
+        "nl" => &NL,
         _ => &EN,
     }
 }
@@ -805,7 +1109,7 @@ mod tests {
         offenders
     }
 
-    /// Mirrors the frontend's `Dict` parity test: the three tables describe
+    /// Mirrors the frontend's `Dict` parity test: the eight tables describe
     /// exactly the fields `Strings` declares, in the same order.
     #[test]
     fn tables_carry_an_identical_field_set() {
@@ -815,7 +1119,16 @@ mod tests {
             "the parser must find the whole struct, found {:?}",
             declared
         );
-        for (tag, table) in [("en", &EN), ("de", &DE), ("fr", &FR)] {
+        for (tag, table) in [
+            ("en", &EN),
+            ("de", &DE),
+            ("fr", &FR),
+            ("es", &ES),
+            ("it", &IT),
+            ("pl", &PL),
+            ("pt", &PT),
+            ("nl", &NL),
+        ] {
             let names: Vec<String> = table
                 .values()
                 .iter()
@@ -829,14 +1142,39 @@ mod tests {
         }
     }
 
-    /// A table that is a copy of English would render a German UI as English.
+    /// A table that is a copy of English would render a non-English UI as English.
+    /// (#984 — the five new tables are model-written; this pins that they are
+    /// real translations, not English passed through, pending human review.)
+    /// A handful of fields are legitimate cognates — the correct word in the
+    /// target language happens to match English — and are allowlisted by
+    /// (tag, field) pair, never by pattern: Italian macOS "File", Dutch
+    /// "Help", and "Volume" as the standard audio term in Italian,
+    /// Portuguese and Dutch (French says "Volume sonore", Spanish "Volumen").
     #[test]
-    fn de_and_fr_translate_every_field() {
+    fn non_english_tables_translate_every_field() {
+        const COGNATES: &[(&str, &str)] = &[
+            ("it", "menu_file"),
+            ("nl", "menu_help"),
+            ("it", "volume_menu"),
+            ("pt", "volume_menu"),
+            ("nl", "volume_menu"),
+        ];
         let en = EN.values();
-        for (tag, table) in [("de", &DE), ("fr", &FR)] {
+        for (tag, table) in [
+            ("de", &DE),
+            ("fr", &FR),
+            ("es", &ES),
+            ("it", &IT),
+            ("pl", &PL),
+            ("pt", &PT),
+            ("nl", &NL),
+        ] {
             for ((name, english), (_, translated)) in en.iter().zip(table.values()) {
                 let english: &'static str = english;
                 let name: &'static str = name;
+                if COGNATES.contains(&(tag, name)) {
+                    continue;
+                }
                 assert_ne!(
                     translated, english,
                     "the `{}` table still carries the English copy for `{}`",
@@ -854,13 +1192,21 @@ mod tests {
 
     /// Issue #674: a locale the binary does not know must render English and
     /// say so, and the tag a caller persists must be one of `LOCALES`.
+    /// Issue #984: the five new tags resolve, and `pt-BR` beats `pt`.
     #[test]
     fn unknown_locale_falls_back_to_english() {
         assert_eq!(resolve_tag(None), "en", "the pre-4.7 default is English");
         assert_eq!(resolve_tag(Some("")), "en", "a blank tag is not a locale");
         assert_eq!(resolve_tag(Some("   ")), "en");
         assert_eq!(resolve_tag(Some("zz")), "en", "an unknown tag falls back");
-        assert_eq!(resolve_tag(Some("pt-BR")), "en");
+        assert_eq!(resolve_tag(Some("ja")), "en", "Japanese is not shipped");
+        assert_eq!(resolve_tag(Some("pt-BR")), "pt", "the regional tag wins");
+        assert_eq!(resolve_tag(Some("PT-br")), "pt", "case is folded");
+        assert_eq!(resolve_tag(Some("es-ES")), "es");
+        assert_eq!(resolve_tag(Some("it")), "it");
+        assert_eq!(resolve_tag(Some("pl-PL")), "pl");
+        assert_eq!(resolve_tag(Some("pt")), "pt");
+        assert_eq!(resolve_tag(Some("nl_NL")), "nl");
         assert_eq!(resolve_tag(Some("en-GB")), "en");
         assert_eq!(
             resolve_tag(Some("DE-at")),
@@ -873,6 +1219,11 @@ mod tests {
             strings_for("zz").show_window,
             EN.show_window,
             "an uncanonical tag must never render a half-translated menu"
+        );
+        assert_eq!(
+            strings_for("pt").show_window,
+            PT.show_window,
+            "the Portuguese table must reach the builders"
         );
     }
 
@@ -955,7 +1306,7 @@ mod tests {
 
     /// Issue #843: scan forward, not only for table values reappearing in the
     /// two modules that build native surfaces. A new English-only label must
-    /// enter all three tables before it can live there.
+    /// enter all eight tables before it can live there.
     #[test]
     fn no_user_visible_literal_stays_hard_coded() {
         let mut offenders = Vec::new();

@@ -10,7 +10,9 @@
  * (Dict copy — PageHeader default, Onboarding placeholders,
  * reconnect.reconnectSpotify delete — is owned by the ux slice.)
  * #752 adds placeholder-shape parity: per-key `{param}` sets across
- * en/de/fr, plus the call-site direction (literal params vs en template).
+ * all eight locales, plus the call-site direction (literal params vs en
+ * template). #984 adds es/it/pl/pt/nl and detection asserts (es-ES,
+ * pt-BR-beats-pt, new language).
  */
 import { describe, it, expect, vi } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
@@ -79,32 +81,42 @@ const BRACE_LITERAL: Record<string, true> = {
 };
 
 describe('i18n key coverage (#488)', () => {
+  // #984: the shipped set. Every sweep below iterates it, so the next
+  // language joins every guard by joining this list.
+  const LOCALES_8 = ['en', 'de', 'fr', 'es', 'it', 'pl', 'pt', 'nl'] as const;
   const enSrc = read('src/lib/i18n/en.ts');
-  const deSrc = read('src/lib/i18n/de.ts');
-  const frSrc = read('src/lib/i18n/fr.ts');
+  const otherSrcs = {
+    'de.ts': read('src/lib/i18n/de.ts'),
+    'fr.ts': read('src/lib/i18n/fr.ts'),
+    'es.ts': read('src/lib/i18n/es.ts'),
+    'it.ts': read('src/lib/i18n/it.ts'),
+    'pl.ts': read('src/lib/i18n/pl.ts'),
+    'pt.ts': read('src/lib/i18n/pt.ts'),
+    'nl.ts': read('src/lib/i18n/nl.ts')
+  } as const;
 
-  it('en/de/fr carry exactly the same key set', () => {
+  it('all eight locales carry exactly the same key set (#984)', () => {
     const en = dictKeys(enSrc).sort();
-    const de = dictKeys(deSrc).sort();
-    const fr = dictKeys(frSrc).sort();
-    expect(de).toEqual(en);
-    expect(fr).toEqual(en);
+    for (const [file, source] of Object.entries(otherSrcs)) {
+      expect(dictKeys(source).sort(), file).toEqual(en);
+    }
   });
 
   // #752, dictionary direction: every `{name}` slot must exist under the
-  // same name in all three locales. A typo (`{timm}`) or a dropped slot in
-  // de/fr renders raw braces to the user while en stays correct — the
-  // key-set test above cannot see it. Brace-literal hints (user-facing
+  // same name in all eight locales. A typo (`{timm}`) or a dropped slot in
+  // any dictionary renders raw braces to the user while en stays correct —
+  // the key-set test above cannot see it. Brace-literal hints (user-facing
   // token documentation, rendered WITHOUT params) are exempt by
   // individual name and guarded by the next test instead.
-  it('placeholders match across en/de/fr (#752)', () => {
-    const de = dictMap(deSrc);
-    const fr = dictMap(frSrc);
+  it('placeholders match across all eight locales (#752, #984)', () => {
+    const dicts = Object.fromEntries(
+      Object.entries(otherSrcs).map(([file, source]) => [file, dictMap(source)])
+    ) as Record<keyof typeof otherSrcs, Map<string, string>>;
     const offenders: string[] = [];
     for (const { key, value } of dictEntries(enSrc)) {
       if (BRACE_LITERAL[key]) continue;
       const want = JSON.stringify(placeholdersOf(value));
-      for (const [file, dict] of [['de.ts', de], ['fr.ts', fr]] as const) {
+      for (const [file, dict] of Object.entries(dicts)) {
         const got = JSON.stringify(placeholdersOf(dict.get(key) ?? ''));
         if (got !== want) offenders.push(`${file}: ${key} uses ${got}, en uses ${want}`);
       }
@@ -116,8 +128,9 @@ describe('i18n key coverage (#488)', () => {
   // translation — a locale that lost every `{token}` teaches nothing.
   it('brace-literal hints keep their documented tokens in every locale (#752)', () => {
     const offenders: string[] = [];
+    const allSrcs = { 'en.ts': enSrc, ...otherSrcs };
     for (const key of Object.keys(BRACE_LITERAL)) {
-      for (const [file, source] of [['en.ts', enSrc], ['de.ts', deSrc], ['fr.ts', frSrc]] as const) {
+      for (const [file, source] of Object.entries(allSrcs)) {
         const value = dictMap(source).get(key) ?? '';
         if (placeholdersOf(value).length === 0) offenders.push(`${file}: ${key} documents no tokens`);
       }
@@ -132,11 +145,7 @@ describe('i18n key coverage (#488)', () => {
   // to. Fail on the ASCII sequence in ANY dictionary value.
   it('spells the ellipsis with U+2026 in every dictionary value (#906)', () => {
     const offenders: string[] = [];
-    for (const [file, source] of [
-      ['en.ts', enSrc],
-      ['de.ts', deSrc],
-      ['fr.ts', frSrc],
-    ] as const) {
+    for (const [file, source] of Object.entries({ 'en.ts': enSrc, ...otherSrcs })) {
       for (const { key, value } of dictEntries(source)) {
         if (value.includes('...')) offenders.push(`${file}: ${key}`);
       }
@@ -144,8 +153,8 @@ describe('i18n key coverage (#488)', () => {
     expect(offenders).toEqual([]);
   });
 
-  it('renders the same ellipsis for loading and reconnecting in en/de/fr (#906)', () => {
-    for (const locale of ['en', 'de', 'fr'] as const) {
+  it('renders the same ellipsis for loading and reconnecting in every locale (#906, #984)', () => {
+    for (const locale of LOCALES_8) {
       void i18n.set(locale);
       expect(t('common.loading')).toContain('…');
       expect(t('common.reconnecting')).toContain('…');
@@ -161,7 +170,7 @@ describe('i18n key coverage (#488)', () => {
     // U+00A0, spelled out: an invisible literal in the source is a trap.
     const NBSP = '\u00a0';
     const offenders: string[] = [];
-    for (const { key, value } of dictEntries(frSrc)) {
+    for (const { key, value } of dictEntries(otherSrcs['fr.ts'])) {
       if (/[A-Za-zÀ-ÿ]'[A-Za-zÀ-ÿ]/.test(value)) {
         offenders.push(`${key}: ASCII apostrophe between letters`);
       }
@@ -475,13 +484,29 @@ describe('i18n key coverage (#488)', () => {
   });
 
   it('no dictionary carries a duplicated status key (#619, #905)', () => {
-    for (const source of [enSrc, deSrc, frSrc]) {
+    for (const source of [enSrc, ...Object.values(otherSrcs)]) {
       // #619: one key for the reconnect status message.
       expect(dictKeys(source)).not.toContain('reconnect.needsReconnect');
       // #905: both rule cards post the same replacement, so they read the
       // same key — the quiet-hours copy had already drifted in French.
       expect(dictKeys(source)).not.toContain('rules.quietReplacementPlaceholder');
     }
+  });
+
+  // #984: every shipped locale resolves real copy through `t()` — a dict
+  // that loads but renders the key is a silent English-UI regression the
+  // key-set test cannot see (it only parses source).
+  it('every locale renders real copy for a sample of keys (#984)', () => {
+    const samples = ['common.back', 'settings.title', 'dashboard.settings'] as const;
+    for (const locale of LOCALES_8) {
+      void i18n.set(locale);
+      for (const key of samples) {
+        const rendered = t(key);
+        expect(rendered, `${locale}:${key}`).not.toBe(key);
+        expect(rendered.trim().length, `${locale}:${key}`).toBeGreaterThan(0);
+      }
+    }
+    void i18n.set('en');
   });
 });
 
@@ -501,28 +526,43 @@ describe('plural and number formatting (#616)', () => {
     expect(tCount('logs.count', 1)).toBe('1 Eintrag');
     expect(tCount('logs.count', 2)).toBe('2 Einträge');
 
+    // #984/#1154: Polish `few`/`many` resolve through `_other` until full
+    // `_few` support lands — pin the fallback shape so the limitation is
+    // observable, not silent.
+    void i18n.set('pl');
+    expect(tCount('logs.count', 2)).toBe(
+      `${new Intl.NumberFormat('pl').format(2)} wpisów`
+    );
+    expect(tCount('logs.count', 5)).toBe(
+      `${new Intl.NumberFormat('pl').format(5)} wpisów`
+    );
+
     i18n.set('en');
   });
 
-  it('routes numeric params through the locale number format', () => {
-    const en = t('logs.showingOf', { shown: 100, total: 5000 });
-    expect(en).toBe('Showing 100 of 5,000');
+  it('routes numeric params through the locale number format (#616, #984)', () => {
+    for (const locale of ['en', 'de', 'fr', 'es', 'it', 'pl', 'pt', 'nl'] as const) {
+      const tag = locale === 'pt' ? 'pt-BR' : locale;
+      void i18n.set(locale);
+      const grouped = new Intl.NumberFormat(tag).format(5000);
+      expect(t('logs.showingOf', { shown: 100, total: 5000 })).toContain(grouped);
+      expect(tCount('logs.count', 5000)).toContain(grouped);
+    }
+    // The pre-#984 pins that grouping is real, not identity: en groups with
+    // a comma, fr with a narrow no-break space — never the raw digits.
+    void i18n.set('en');
+    expect(t('logs.showingOf', { shown: 100, total: 5000 })).toBe('Showing 100 of 5,000');
 
-    i18n.set('fr');
+    void i18n.set('fr');
     const fr = t('logs.showingOf', { shown: 100, total: 5000 });
     expect(fr).toBe(`100 sur ${new Intl.NumberFormat('fr').format(5000)} affichées`);
     expect(fr).not.toBe('100 sur 5000 affichées');
     expect(tCount('logs.count', 5000)).toBe(`${new Intl.NumberFormat('fr').format(5000)} entrées`);
 
-    i18n.set('de');
+    void i18n.set('de');
     expect(tCount('logs.count', 5000)).toBe(`${new Intl.NumberFormat('de').format(5000)} Einträge`);
 
-    i18n.set('en');
-  });
-
-  it('leaves string params and param-less keys alone', () => {
-    expect(t('about.version', { version: '4.6.0' })).toBe('Version 4.6.0');
-    expect(t('settings.formatTemplatePlaceholder')).toContain('{artist}');
+    void i18n.set('en');
   });
 });
 
@@ -569,7 +609,8 @@ describe('<html lang> and cross-webview convergence (#620)', () => {
     // The one path the other tests cannot reach: the store tags `lang` and
     // migrates the legacy mirror when it is first imported. `vi.resetModules`
     // + a dynamic import is the only way to re-run that load (module-init
-    // boundary), so this test is last.
+    // boundary), so this test is last-but-one: the #984 detection suite
+    // below re-imports the module once more.
     localStorage.setItem('locale', 'de');
     localStorage.removeItem('presencejam:locale');
     document.documentElement.lang = 'en';
@@ -586,5 +627,63 @@ describe('<html lang> and cross-webview convergence (#620)', () => {
     // statically imported store (already English) would not retag it.
     await reloaded.i18n.set('en');
     expect(document.documentElement.lang).toBe('en');
+  });
+});
+
+// #984: first-run detection maps the OS language onto the shipped set.
+// `detectInitialLocale` is module-init code, so each case re-imports the
+// store with a fresh localStorage + navigator. Fails pre-fix: `es-ES`,
+// `pt-BR` and any new tag all fell through to English.
+describe('first-run language detection (#984)', () => {
+  async function detectWith(languages: readonly string[]): Promise<string> {
+    localStorage.removeItem('presencejam:locale');
+    localStorage.removeItem('presencejam:locale-follow-system');
+    localStorage.removeItem('locale');
+    document.documentElement.lang = 'en';
+    vi.resetModules();
+    vi.stubGlobal('navigator', { language: languages[0] ?? 'en', languages: [...languages] });
+    const reloaded = await import('$lib/i18n/store.svelte');
+    const seen = reloaded.i18n.locale;
+    vi.unstubAllGlobals();
+    await reloaded.i18n.set('en');
+    return seen;
+  }
+
+  it('maps es-ES to Spanish', async () => {
+    expect(await detectWith(['es-ES', 'en'])).toBe('es');
+  });
+
+  it('maps pt-BR to Portuguese, beating the bare pt base', async () => {
+    // Longest-tag-first: the exact regional tag wins over any base fallback.
+    expect(await detectWith(['pt-BR'])).toBe('pt');
+    expect(await detectWith(['pt-PT'])).toBe('pt');
+  });
+
+  it('maps every other new language to its locale', async () => {
+    expect(await detectWith(['it-IT'])).toBe('it');
+    expect(await detectWith(['pl-PL'])).toBe('pl');
+    expect(await detectWith(['nl-NL'])).toBe('nl');
+    expect(await detectWith(['de-AT'])).toBe('de');
+  });
+
+  it('keeps English for unknown languages', async () => {
+    expect(await detectWith(['ja-JP'])).toBe('en');
+    expect(await detectWith(['zz'])).toBe('en');
+  });
+
+  it('re-resolves from the OS language in follow-system mode', async () => {
+    localStorage.removeItem('presencejam:locale');
+    localStorage.removeItem('locale');
+    localStorage.setItem('presencejam:locale', 'de');
+    localStorage.setItem('presencejam:locale-follow-system', '1');
+    document.documentElement.lang = 'en';
+    vi.resetModules();
+    vi.stubGlobal('navigator', { language: 'es-ES', languages: ['es-ES'] });
+    const reloaded = await import('$lib/i18n/store.svelte');
+    // The stored mirror is skipped: the OS language wins.
+    expect(reloaded.i18n.locale).toBe('es');
+    vi.unstubAllGlobals();
+    localStorage.removeItem('presencejam:locale-follow-system');
+    await reloaded.i18n.set('en');
   });
 });

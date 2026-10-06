@@ -70,7 +70,7 @@ Types: `feat`, `fix`, `docs`, `test`, `refactor`, `chore`
 - Add TypeScript types for new interfaces
 - Use `devLog()` from `$lib/utils/dev` for debug logging — it is a no-op in production builds
 - `console.error` and `console.warn` are fine for actual errors that should always be visible
-- **All user-facing UI strings must go through `t()` from `$lib/i18n`** — never hardcode English text in components. Add the key to all three dictionaries (`src/lib/i18n/en.ts`, `de.ts`, `fr.ts`); the shared `Dict` type makes a missing translation a compile error. Interpolation uses `{name}` placeholders. Known limitation: Rust-side error strings surfaced through `invoke()` rejections and event payloads stay English.
+- **All user-facing UI strings must go through `t()` from `$lib/i18n`** — never hardcode English text in components. Add the key to all eight dictionaries (`src/lib/i18n/en.ts`, `de.ts`, `fr.ts`, `es.ts`, `it.ts`, `pl.ts`, `pt.ts`, `nl.ts`); the shared `Dict` type makes a missing translation a compile error. Interpolation uses `{name}` placeholders. Known limitation: Rust-side error strings surfaced through `invoke()` rejections and event payloads stay English.
 
 ### Screenshots
 
@@ -145,6 +145,28 @@ If you use AI coding tools (GitHub Copilot, Claude, ChatGPT, etc.) to build feat
 - Has no debug code left in (`console.log`, `println!`, etc.)
 
 You don't need to disclose that you used AI — just submit the best code you can.
+
+## Translation provenance and review expectations
+
+> Issue #984. `en` is the source dictionary — every other table (webview
+> dictionaries and the Rust tray/menu tables) translates it. Machine
+> translation is never shipped as if human-reviewed:
+>
+> - A new or updated translation states its source in the dictionary file's
+>   header comment (e.g. "Model-written Spanish translation (issue #984) —
+>   human review pending") and keeps the `Best-effort translation (no native
+>   review yet)` marker on entries no native speaker has checked.
+> - Current status: `de` / `fr` are the long-standing shipped locales;
+>   `es` / `it` / `pl` / `pt` (Brazilian Portuguese) / `nl` are
+>   model-written with human review pending — usable, but a native speaker
+>   should read each dictionary (and the matching Rust table) before the
+>   "pending" marker is dropped.
+> - Reviewing a locale means reading the dictionary file end to end for
+>   mistranslation, tone/address-form consistency, and placeholder fidelity
+>   (`{name}` slots byte-identical, `…` U+2026, no ASCII `...`), then
+>   removing that locale's pending marker. `tests/i18n.test.ts` pins the
+>   mechanical half (key parity, placeholder sets, ellipsis); only a human
+>   can pin the meaning half.
 
 ## License
 

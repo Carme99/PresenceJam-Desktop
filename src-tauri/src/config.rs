@@ -917,8 +917,8 @@ fn clamp_logging(cfg: &mut LoggingConfig) {
 /// (issue #767 — the clamp for the new `ConfigPatch::locale` field).
 ///
 /// `None` stays `None`: that is the documented pre-4.7 state, and it means
-/// "follow the OS", not "English". A present tag is reduced to its base
-/// language and mapped onto one of the three shipped dictionaries through
+/// "follow the OS", not "English". A present tag is resolved onto one of the
+/// shipped dictionaries through
 /// [`crate::i18n::resolve_tag`], which is the same function the `set_locale`
 /// command canonicalises with — so a patch, a `set_locale` call and a
 /// hand-edited file all converge on the identical stored value. Without it a
@@ -5285,8 +5285,11 @@ mod tests {
         let mut regional = non_default_config();
         regional.locale = Some("de-AT".to_string());
         assert_eq!(clamped_config(&regional).locale.as_deref(), Some("de"));
+        let mut brazilian = non_default_config();
+        brazilian.locale = Some("pt-BR".to_string());
+        assert_eq!(clamped_config(&brazilian).locale.as_deref(), Some("pt"));
         let mut unknown = non_default_config();
-        unknown.locale = Some("pt-BR".to_string());
+        unknown.locale = Some("ja".to_string());
         assert_eq!(clamped_config(&unknown).locale.as_deref(), Some("en"));
         let mut blank = non_default_config();
         blank.locale = Some(String::new());

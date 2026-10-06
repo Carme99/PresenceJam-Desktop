@@ -98,7 +98,7 @@ frontend type-check reads stale generated types.
 │   │   ├── components/      # About, Dashboard, Onboarding, Settings, Reconnect,
 │   │   │                    #   LogViewer, Diagnostics, UpdatePrompt, DeviceCodeBox,
 │   │   │                    #   PageHeader, Logo
-│   │   ├── i18n.ts + i18n/   # `t()` barrel, en/de/fr dictionaries, Dict parity type
+│   │   ├── i18n.ts + i18n/   # `t()` barrel, en/de/fr/es/it/pl/pt/nl dictionaries, Dict parity type
 │   │   ├── stores/          # app, authFlow, config, detach, notifications, presence, theme
 │   │   ├── types-generated/ # gitignored; ts-rs output (Rust → TS)
 │   │   ├── types.ts
@@ -324,9 +324,10 @@ always be visible. Plain `console.log` is forbidden in `src/`.
 
 ## 6. i18n contract
 
-- Three locales ship: **en, de, fr** (`src/lib/i18n/en.ts`, `de.ts`, `fr.ts`).
+- Eight locales ship: **en, de, fr, es, it, pl, pt, nl** (`src/lib/i18n/*.ts`);
+  `pt` is Brazilian Portuguese and `pt-BR` resolves to it, `en` stays the fallback (#984).
 - The shared `Dict` type enforces key parity at compile time: any missing or
-  extra key in any of the three dictionaries fails `npm run check`.
+  extra key in any of the eight dictionaries fails `npm run check`.
 - **All user-facing UI strings MUST go through `t()` from `$lib/i18n`** — no
   hard-coded English strings in components. The single exception is literal
   punctuation and the app name itself.
@@ -334,10 +335,13 @@ always be visible. Plain `console.log` is forbidden in `src/`.
   Rust-side error strings stay English (documented limitation; tracked in the
   v5 backlog).
 - Cross-locale placeholder parity is enforced by `tests/i18n.test.ts` (#752):
-  per-key `{param}` sets must match in all three dicts, and every literal
+  per-key `{param}` sets must match in all eight dicts, and every literal
   `t()` / `tCount()` call passes exactly the en placeholders. Five
   brace-literal keys are allowlisted by name; check the list before adding
   a new placeholder.
+- Translation provenance (#984): `es` / `it` / `pl` / `pt` / `nl` are
+  model-written with human review pending (see CONTRIBUTING). Never ship
+  them as human-reviewed.
 - When the German translations disagree with the webview terminology, fix
   both surfaces — see #901 (`align the German tray wording with the webview
   terminology`). The Rust and TS tables share the same key *names*, but the
@@ -572,7 +576,8 @@ the v5 retrospectives track why each one was forbidden.
   webview does not invoke.** The v5 epic is *removing* dead grants; do
   not re-add them.
 - **Do NOT hard-code English UI strings** in components. Every new
-  user-facing string is a `t()` key in `en.ts`, `de.ts`, `fr.ts`.
+  user-facing string is a `t()` key in all eight dictionaries (`en.ts`,
+  `de.ts`, `fr.ts`, `es.ts`, `it.ts`, `pl.ts`, `pt.ts`, `nl.ts`).
 - **Do NOT introduce new hex colour literals** outside `src/app.css`. Every
   colour goes through a token; theme preview swatches are token-driven.
 - **Do NOT create a new one-off button style.** Use the existing `Button`
@@ -667,7 +672,7 @@ one outside this list, treat it as a bug and file an issue.
 | `presencejam://` | The deep-link scheme for the Spotify PKCE callback. |
 | `devLog()` | The frontend debug logger. No-op in production. |
 | `t()` | The i18n lookup from `$lib/i18n`. |
-| `Dict` | The shared TS type that enforces en/de/fr key parity. |
+| `Dict` | The shared TS type that enforces eight-locale key parity. |
 | `ts(export)` | The ts-rs derive that materialises `src/lib/types-generated/*.ts`. |
 
 ---

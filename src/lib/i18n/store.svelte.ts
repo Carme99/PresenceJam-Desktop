@@ -26,7 +26,7 @@ import { invoke } from '@tauri-apps/api/core';
 import type { AppConfig } from '$lib/types';
 import { devLog } from '$lib/utils/dev';
 
-export type Locale = 'en' | 'de' | 'fr';
+export type Locale = 'en' | 'de' | 'fr' | 'es' | 'it' | 'pl' | 'pt' | 'nl';
 
 const STORAGE_KEY = 'presencejam:locale';
 /**
@@ -37,7 +37,25 @@ const STORAGE_KEY = 'presencejam:locale';
  * never consulted again.
  */
 const LEGACY_STORAGE_KEY = 'locale';
-const KNOWN: readonly Locale[] = ['en', 'de', 'fr'];
+/**
+ * Canonical tags, in preference order for documentation only — resolution
+ * follows the caller's candidate order, never this array's.
+ */
+const KNOWN: readonly Locale[] = ['en', 'de', 'fr', 'es', 'it', 'pl', 'pt', 'nl'];
+/**
+ * Exact regional tags that resolve to a shipped base locale (#984). `pt-BR`
+ * is Brazilian Portuguese, the variety the `pt` dictionary is written in, so
+ * the regional tag resolves before any bare-base fallback is consulted.
+ */
+const TAG_ALIASES: Readonly<Record<string, Locale>> = { 'pt-br': 'pt' };
+/**
+ * Mirror of the Settings "follow system language" choice (#984). When set,
+ * the stored mirror is ignored and the browser language is re-resolved on
+ * every boot (and on `languagechange`); the last resolution is still
+ * persisted into `config.locale` so the tray and the native menu render the
+ * same language. An explicit language choice clears it.
+ */
+const FOLLOW_SYSTEM_KEY = 'presencejam:locale-follow-system';
 /**
  * The locale both sides fall back to. Mirrors Rust's `i18n::resolve_tag`,
  * which resolves an absent/unknown `AppConfig::locale` to `"en"` — so writing
@@ -47,10 +65,39 @@ const DEFAULT_LOCALE: Locale = 'en';
 
 function resolveLocale(value: unknown): Locale | null {
   if (typeof value !== 'string') return null;
-  const raw = value.trim();
+  const raw = value.trim().toLowerCase();
   if (raw.length === 0) return null;
-  const base = raw.split(/[-_]/, 1)[0].trim().toLowerCase();
+  // Longest-tag-first (#984): an exact regional tag beats its bare base, so
+  // `pt-BR` resolves to the Brazilian-Portuguese dictionary even though a
+  // bare-base fallback would also match.
+  const aliased = TAG_ALIASES[raw];
+  if (aliased !== undefined) return aliased;
+  if ((KNOWN as readonly string[]).includes(raw)) return raw as Locale;
+  const base = raw.split(/[-_]/, 1)[0].trim();
   return (KNOWN as readonly string[]).includes(base) ? (base as Locale) : null;
+}
+
+/**
+ * Whether the user asked the app to track the OS language (#984). Stored
+ * beside the locale mirror rather than in the config: it is a resolution
+ * policy, not a language, so Rust never needs to read it.
+ */
+export function followsSystemLanguage(): boolean {
+  try {
+    return localStorage.getItem(FOLLOW_SYSTEM_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function setFollowsSystemLanguage(follow: boolean): void {
+  try {
+    if (follow) localStorage.setItem(FOLLOW_SYSTEM_KEY, '1');
+    else localStorage.removeItem(FOLLOW_SYSTEM_KEY);
+  } catch {
+    // The mode is a convenience, not state — a session without storage
+    // keeps the explicitly resolved locale either way.
+  }
 }
 
 /**
@@ -75,18 +122,14 @@ function migrateLegacyStorageKey(): void {
 migrateLegacyStorageKey();
 
 /**
- * The locale the first frame renders in: the localStorage mirror when present,
- * otherwise the browser language (de/fr prefixes), otherwise English.
+ * The locale the first frame renders in (#984): when the user follows the
+ * system language, the localStorage mirror is skipped and the browser
+ * language is re-resolved on every boot; otherwise the mirror wins when
+ * present, then the browser language, then English. Every candidate goes
+ * through [`resolveLocale`], so an unsupported system language degrades to
+ * English with no signal — the documented fallback.
  */
-function detectInitialLocale(): Locale {
-  try {
-    const storedLocale = resolveLocale(localStorage.getItem(STORAGE_KEY));
-    if (storedLocale !== null) {
-      return storedLocale;
-    }
-  } catch {
-    // localStorage unavailable — fall through to browser detection.
-  }
+function detectSystemLocale(): Locale | null {
   const candidates =
     typeof navigator !== 'undefined'
       ? navigator.languages ?? [navigator.language]
@@ -95,7 +138,20 @@ function detectInitialLocale(): Locale {
     const resolved = resolveLocale(lang);
     if (resolved !== null) return resolved;
   }
-  return DEFAULT_LOCALE;
+  return null;
+}
+function detectInitialLocale(): Locale {
+  if (!followsSystemLanguage()) {
+    try {
+      const storedLocale = resolveLocale(localStorage.getItem(STORAGE_KEY));
+      if (storedLocale !== null) {
+        return storedLocale;
+      }
+    } catch {
+      // localStorage unavailable — fall through to browser detection.
+    }
+  }
+  return detectSystemLocale() ?? DEFAULT_LOCALE;
 }
 
 const initialLocale = detectInitialLocale();
@@ -264,16 +320,34 @@ export const i18n = {
   get locale(): Locale {
     return current;
   },
+  /** Whether the app tracks the OS language instead of a fixed choice (#984). */
+  get followSystem(): boolean {
+    return followsSystemLanguage();
+  },
   /**
    * Switch locale: applies it to this webview immediately, mirrors it for the
    * pre-paint frame, and persists it to `AppConfig::locale` (the single source
-   * of truth) via the `set_locale` command. An unknown value is ignored.
+   * of truth) via the `set_locale` command. An unknown value is ignored. An
+   * explicit choice leaves follow-system mode.
    */
   async set(next: Locale): Promise<void> {
     const locale = resolveLocale(next);
     if (locale === null) return;
+    setFollowsSystemLanguage(false);
     applyLocale(locale);
     await persistLocale(locale);
+  },
+  /**
+   * Follow the system language (#984): re-resolve from the browser language
+   * right now and persist the resolution, so the tray and the native menu
+   * render the same language; later OS changes re-resolve through the
+   * `languagechange` listener below.
+   */
+  async followSystemLanguage(): Promise<void> {
+    setFollowsSystemLanguage(true);
+    const resolved = detectSystemLocale() ?? DEFAULT_LOCALE;
+    applyLocale(resolved);
+    await persistLocale(resolved);
   }
 };
 
@@ -284,13 +358,29 @@ export const i18n = {
 // write; this mirrors the #423 theme listener (stores/theme.ts).
 if (typeof window !== 'undefined') {
   window.addEventListener('storage', (e) => {
+    // A peer entering follow-system mode writes only the flag: apply the
+    // mode without touching the locale (the entering window persists the
+    // resolution itself, which arrives as its own event).
+    if (e.key === FOLLOW_SYSTEM_KEY) {
+      if (e.newValue === '1') applyLocale(detectSystemLocale() ?? current);
+      return;
+    }
     if (e.key !== STORAGE_KEY) return;
     const next = resolveLocale(e.newValue);
     if (next === null) return;
     // Same-value guard: `applyLocale` would re-tag the document.
     if (next === current) return;
+    // An explicit choice from another window wins over follow-system mode.
+    setFollowsSystemLanguage(false);
     // Local only — the window that switched already wrote the config, so
     // persisting again here would be a redundant round-trip.
     applyLocale(next);
+  });
+  // #984: while follow-system mode is on, an OS language change
+  // re-resolves and persists, so the tray and the native menu follow the
+  // new language without a restart.
+  window.addEventListener('languagechange', () => {
+    if (!followsSystemLanguage()) return;
+    void i18n.followSystemLanguage();
   });
 }

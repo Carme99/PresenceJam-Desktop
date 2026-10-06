@@ -477,6 +477,12 @@ export const en = {
   // truth, so the picker also drives the tray and the native app menu.
   'settings.languageHint':
     'Also applies to the tray menu and the native application menu.',
+  // #984: the follow-system-language toggle beside the picker. The mode
+  // re-resolves from the OS language on every boot (and on change) and
+  // persists the resolution, so the tray and the native menu follow too.
+  'settings.languageFollowSystemLabel': 'Follow the system language',
+  'settings.languageFollowSystemHint':
+    'When on, the language picker above is ignored: the app re-resolves from your operating system’s language on every launch. Unsupported system languages still fall back to English.',
 
   // Issue #932: the banner used to be Teams-only
   // (`settings.teamsPersistWarning`, added with #562). The new
