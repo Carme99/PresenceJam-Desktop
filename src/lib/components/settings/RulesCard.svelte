@@ -2,7 +2,6 @@
   import { invoke } from '@tauri-apps/api/core';
   import { tick } from 'svelte';
   import { t, WEEKDAY_KEYS, type TKey } from '$lib/i18n';
-  import { defaultConfig } from '$lib/stores/config';
   import type { AppConfig } from '$lib/types';
   import type { TrackRuleAction } from '$lib/types-generated/TrackRuleAction';
   import SettingsCard from './SettingsCard.svelte';

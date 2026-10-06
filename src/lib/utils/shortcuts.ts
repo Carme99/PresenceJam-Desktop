@@ -100,13 +100,3 @@ export async function validateShortcutBinding(
     return normalizeShortcutReason(e);
   }
 }
-
-/** The card's pending rejection, if any — read by the save path. */
-export function pendingShortcutRejection(
-  errors: Record<ShortcutSlot, ShortcutReason | null>
-): { slot: ShortcutSlot; reason: ShortcutReason } | null {
-  const rejected = SHORTCUT_SLOTS.find((slot) => errors[slot] !== null);
-  if (rejected === undefined) return null;
-  const reason = errors[rejected];
-  return reason === null ? null : { slot: rejected, reason };
-}

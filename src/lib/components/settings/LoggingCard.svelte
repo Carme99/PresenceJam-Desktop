@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
+  import { onDestroy } from 'svelte';
   import { t } from '$lib/i18n';
   import type { AppConfig } from '$lib/types';
   import SettingsCard from './SettingsCard.svelte';
@@ -38,6 +39,10 @@
       saveTimeout = setTimeout(() => (saveMessage = ''), 3000);
     }
   }
+
+  onDestroy(() => {
+    if (saveTimeout !== null) clearTimeout(saveTimeout);
+  });
 </script>
 
 <!-- 4.7.0 (S5): log rotation. Rust owns the file target; this card is the

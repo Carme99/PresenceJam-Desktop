@@ -46,6 +46,7 @@
    * being captured.
    */
   let capturingSlot = $state<ShortcutSlot | null>(null);
+  let lastPublishedShortcuts: AppConfig['shortcuts'] | null = null;
 
   // The two rows' pending values, read off the bindable draft (issue #676).
   let shortcutBindings = $derived(shortcutBindingsOf({ shortcuts } as AppConfig));
@@ -112,7 +113,9 @@
   function setShortcutBinding(slot: ShortcutSlot, accelerator: string | null) {
     const bindings = shortcutBindingsOf({ shortcuts } as AppConfig);
     bindings[slot] = accelerator;
-    shortcuts = { ...bindings };
+    const next = { ...bindings };
+    lastPublishedShortcuts = next;
+    shortcuts = next;
     onchange();
     const otherSlot = slot === 'toggle_playback' ? 'toggle_sync' : 'toggle_playback';
     void validateShortcut(slot);
@@ -222,9 +225,14 @@
   // and re-register from the config on screen. The parent replaces the
   // `shortcuts` object wholesale on load/import/revert, which can land after
   // this card mounts — so the pass tracks object identity, not mount, and
-  // re-runs whenever a new document arrives.
+  // re-runs whenever a new document arrives. Local edits via
+  // setShortcutBinding already replace `shortcuts` too, but they validate
+  // the pair directly; re-registering here as well would fire a redundant
+  // register_shortcuts round-trip per keystroke, so the effect skips the
+  // object this card itself just published.
   $effect(() => {
-    void shortcuts;
+    if (shortcuts === lastPublishedShortcuts) return;
+    lastPublishedShortcuts = null;
     (async () => {
       for (const slot of SHORTCUT_SLOTS) void validateShortcut(slot);
       await refreshShortcutStatus();
