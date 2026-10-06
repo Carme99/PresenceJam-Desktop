@@ -161,9 +161,16 @@ pub struct ConfigSummary {
     pub start_minimized: bool,
     pub availability_sync: bool,
     pub presence_gate: bool,
+    // Issue #765: same override idiom as `TrackInfo`/`DeviceCodeResponse` —
+    // serde_json delivers these as JS `number`, not `bigint`. Small interval
+    // values, well under 2^53.
+    #[ts(type = "number")]
     pub default_interval_seconds: u64,
+    #[ts(type = "number")]
     pub minimum_interval_seconds: u64,
+    #[ts(type = "number")]
     pub maximum_interval_seconds: u64,
+    #[ts(type = "number")]
     pub expiry_buffer_seconds: u64,
     pub logging_enabled: bool,
     pub log_level: String,
@@ -171,9 +178,15 @@ pub struct ConfigSummary {
     /// Issue #432: rule counts only (substrings/replacements are user
     /// content — never snapshot them). Keeps the "explicit field per
     /// config value" invariant without leaking rule text.
+    // Issue #765: ts-rs renders `usize` as `bigint`, but serde_json delivers
+    // these small counts as JS `number` — same override idiom as above.
+    #[ts(type = "number")]
     pub quiet_hours_count: usize,
+    #[ts(type = "number")]
     pub quiet_hours_enabled_count: usize,
+    #[ts(type = "number")]
     pub track_rules_count: usize,
+    #[ts(type = "number")]
     pub track_rules_enabled_count: usize,
     /// CfgDiag#2 (issue #537, completing #379): true when this process
     /// found `config.json` unreadable, quarantined it to `<name>.bak` and
@@ -194,6 +207,9 @@ pub struct ConfigSummary {
     pub gate_when_out_of_office: bool,
     /// Count only, like the rule counts above: the extra words are user
     /// content and never travel (#432 rule, issue #864).
+    // Issue #765: `usize` renders as `bigint` in ts-rs; the wire carries a
+    // plain JS number.
+    #[ts(type = "number")]
     pub profanity_extra_words_count: usize,
     /// Configured UI locale; `None` is the documented `"en"` default
     /// (issue #864) — needed to reproduce anything from a translated build.
@@ -207,10 +223,14 @@ pub struct ConfigSummary {
     /// expiry/parse rules, and [`crate::config::snooze_minutes_left`] is the
     /// same rounding the tray and Dashboard render.
     pub snoozed: bool,
+    // Issue #765: ts-rs renders `i64` as `bigint`; the wire carries a plain
+    // JS number (whole minutes left on a live snooze, or null).
+    #[ts(type = "number | null")]
     pub snooze_minutes_left: Option<i64>,
     /// Rotation settings from `logging` (issue #874): without them a reader
     /// cannot tell how far back the log above should reach — 64 KiB of a
     /// 10 MB file looks the same as 64 KiB of a 1 MB one.
+    #[ts(type = "number")]
     pub log_max_file_size_mb: u64,
     pub log_keep_files: u32,
 }
@@ -255,6 +275,9 @@ pub struct SyncState {
     pub snoozed: bool,
     /// Whole minutes left on the live snooze, rounded up like the tray and
     /// the Dashboard render it; `None` when no snooze is live.
+    // Issue #765: ts-rs renders `i64` as `bigint`; the wire carries a plain
+    // JS number.
+    #[ts(type = "number | null")]
     pub snooze_minutes_left: Option<i64>,
     /// The last observed verdict of the respect-manual-status write gate —
     /// `true` while a status message the USER owns holds our writes back.

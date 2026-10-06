@@ -2706,7 +2706,7 @@
                   profile.idle_away_after_seconds = null;
                 } else {
                   const n = Math.min(MAX_PROFILE_IDLE_SECONDS, Math.max(0, Number(raw)));
-                  profile.idle_away_after_seconds = BigInt(n);
+                  profile.idle_away_after_seconds = n;
                 }
                 markDirty();
               }}

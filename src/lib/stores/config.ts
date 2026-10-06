@@ -69,8 +69,9 @@ export const defaultConfig: AppConfig = {
     // 5.0 wave3 (issue #873): the desktop-idle threshold. `0` disables
     // (mirrors the Rust serde default and the onboarding flow's 4.7
     // behaviour). Non-zero values are clamped to 60..=3600 by Rust.
-    // `BigInt` because the Rust field is `u64` — see `BIGINT_SECTIONS`.
-    idle_away_after_seconds: BigInt(0),
+    // A plain number: the Rust field is `u64` but serde_json delivers it as
+    // JS `number` (issue #765 — the generated type is `number`, not `bigint`).
+    idle_away_after_seconds: 0,
     // 4.7.0 — S4 (issue #672): the user-templatable paused/stopped status
     // texts. Rust keeps the emoji prefix out of the field, so these mirror
     // the serde defaults verbatim.
@@ -93,22 +94,22 @@ export const defaultConfig: AppConfig = {
     pre_meeting_suppress_minutes: 0
   },
   polling: {
-    default_interval_seconds: BigInt(30),
-    minimum_interval_seconds: BigInt(10),
-    max_interval_seconds: BigInt(60),
-    expiry_buffer_seconds: BigInt(10),
+    default_interval_seconds: 30,
+    minimum_interval_seconds: 10,
+    max_interval_seconds: 60,
+    expiry_buffer_seconds: 10,
     // 4.6 (issue #538): ceiling for the paused-playback backoff, clamped to
     // 60..=3600 by Rust's `clamp_polling`.
-    pause_backoff_max_seconds: BigInt(300)
+    pause_backoff_max_seconds: 300
   },
   logging: {
     enabled: true,
     log_level: 'Info',
-    // 4.7.0: log rotation. `max_file_size_mb` is a Rust `u64`, so ts-rs types
-    // it `bigint` — see `BIGINT_SECTIONS` below; `keep_files` is a `u32`
-    // (`number`). Both mirror `config.rs`'s serde defaults and its
-    // `clamp_logging` band (1..=500 MB, 1..=20 files).
-    max_file_size_mb: BigInt(10),
+    // 4.7.0: log rotation. A plain number like the polling intervals
+    // (issue #765): the Rust field is `u64` but the wire carries a JS
+    // `number`. Mirrors `config.rs`'s serde default and its `clamp_logging`
+    // band (1..=500 MB, 1..=20 files); `keep_files` is a `u32` (`number`).
+    max_file_size_mb: 10,
     keep_files: 3,
     // Issue #877: opt-in JSONL mirror of the bounded decision history.
     // OFF by default so a noisy rule set does not grow the log
@@ -298,11 +299,13 @@ export const configHydrated = writable(false);
 // rewritten as a side effect of a config-store emission.
 
 /**
- * Rust `u64` fields are ts-rs `bigint` on the wire, and every one of them
- * needs the same rounding/normalisation on the way in and out; a hand-edited
- * `config.json` that carries a section but omits or nulls one of its fields
- * used to leave the store holding `undefined`, which `toSavePayload` turned
- * into `NaN` → `null` and Rust's serde rejected (issue #541).
+ * The `u64` interval/size fields arrive from the backend as plain JS numbers
+ * (serde_json decodes them as f64 — issue #765, so the generated types read
+ * `number`). Every one of them needs the same rounding/normalisation on the
+ * way in and out; a hand-edited `config.json` that carries a section but
+ * omits or nulls one of its fields used to leave the store holding
+ * `undefined`, which `toSavePayload` turned into `NaN` → `null` and Rust's
+ * serde rejected (issue #541).
  *
  * Keyed by section, with the `defaultConfig` mirror of that section as the
  * fallback: the ts-rs bindings in `src/lib/types-generated/` are derived
@@ -320,12 +323,10 @@ const POLLING_KEYS = [
 ] as const;
 
 /**
- * 5.0 wave3 (issue #873): the desktop-idle threshold. Rust's `u64`
- * surfaces as ts-rs `bigint`, so it shares the polling/logging
- * rounding/normalisation path. The clamp (60..=3600, `0` = off) is
- * the Rust `clamp_teams` band — the Settings card's number input is
- * bounded the same way and the store keeps the value as BigInt until
- * `toSavePayload` rounds it for the wire.
+ * 5.0 wave3 (issue #873): the desktop-idle threshold. A plain number like the
+ * polling/logging fields above. The clamp (60..=3600, `0` = off) is the Rust
+ * `clamp_teams` band — the Settings card's number input is bounded the same
+ * way and the store keeps the rounded value until `toSavePayload`.
  */
 const TEAMS_IDLE_KEYS = ['idle_away_after_seconds'] as const;
 
@@ -340,7 +341,7 @@ const DEFAULT_POLLING = defaultConfig.polling as unknown as Record<string, unkno
 const DEFAULT_LOGGING = defaultConfig.logging as unknown as Record<string, unknown>;
 const DEFAULT_TEAMS = defaultConfig.teams as unknown as Record<string, unknown>;
 
-const BIGINT_SECTIONS = [
+const NUMERIC_SECTIONS = [
   { section: 'polling', keys: POLLING_KEYS, defaults: DEFAULT_POLLING },
   {
     section: 'logging',
@@ -359,19 +360,18 @@ let savePromise: Promise<AppConfig> | null = null;
 
 function normalizeLoadedConfig(cfg: AppConfig): AppConfig {
   const c = cfg as unknown as Record<string, Record<string, unknown> | undefined>;
-  for (const group of BIGINT_SECTIONS) {
+  for (const group of NUMERIC_SECTIONS) {
     const section = c[group.section];
     if (!section) continue;
     for (const key of group.keys) {
       const value = section[key];
-      if (typeof value === 'bigint') continue;
       const numeric =
         typeof value === 'number' || typeof value === 'string' ? Number(value) : NaN;
       // Issue #541: a missing, null or unparsable field falls back to the
       // default instead of leaving `undefined` in the store — mirroring the
       // status_rules deep-backfill below.
       section[key] = Number.isFinite(numeric)
-        ? BigInt(Math.trunc(numeric))
+        ? Math.trunc(numeric)
         : group.defaults[key];
     }
   }
@@ -413,14 +413,13 @@ export function toSavePayload(cfg: AppConfig): AppConfig {
     string,
     Record<string, unknown> | undefined
   >;
-  for (const group of BIGINT_SECTIONS) {
+  for (const group of NUMERIC_SECTIONS) {
     const section = payload[group.section];
     if (!section) continue;
     for (const key of group.keys) {
-      const numeric = Number(section[key] as bigint | number | string);
-      // Issues #297/#541: the payload is JSON, so a `bigint` would throw and
-      // a `NaN` would serialize as `null` and be rejected by Rust's `u64`.
-      // Neither may ever reach `invoke('save_config')`.
+      const numeric = Number(section[key] as number | string);
+      // Issues #297/#541: a `NaN` would serialize as `null` and be rejected
+      // by Rust's `u64`. It may never reach `invoke('save_config')`.
       section[key] = Number.isFinite(numeric)
         ? Math.trunc(numeric)
         : Number(group.defaults[key]);
@@ -436,7 +435,7 @@ export function toSavePayload(cfg: AppConfig): AppConfig {
 export interface WizardConfigFields {
   spotify_client_id: string;
   status_format: string;
-  default_interval_seconds: bigint;
+  default_interval_seconds: number;
   autostart: boolean;
 }
 
@@ -562,7 +561,7 @@ export async function updateConfig(patch: ConfigPatchPayload): Promise<AppConfig
       if (p) {
         for (const key of POLLING_KEYS) {
           if (!(key in p)) continue;
-          const numeric = Number(p[key] as bigint | number | string);
+          const numeric = Number(p[key] as number | string);
           p[key] = Number.isFinite(numeric)
             ? Math.trunc(numeric)
             : Number(DEFAULT_POLLING[key]);

@@ -413,7 +413,7 @@
       const cfg: AppConfig = mergeWizardConfig(stored, {
         spotify_client_id: spotifyClientId,
         status_format: statusFormat,
-        default_interval_seconds: BigInt(pollingInterval),
+        default_interval_seconds: pollingInterval,
         autostart: launchAtLogin
       });
       devLog('[ONBOARDING] finish: config merged');

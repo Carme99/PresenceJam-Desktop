@@ -150,6 +150,7 @@ pub struct TeamsConfig {
     /// always report `None` (`platform::idle`), so the toggle is a no-op
     /// on those targets.
     #[serde(default)]
+    #[ts(type = "number")]
     pub idle_away_after_seconds: u64,
     /// Issue #867: minutes before a busy Outlook calendar event starts that
     /// the status write is suppressed. `0` means suppress only during the
@@ -309,19 +310,29 @@ impl Default for PreferredPresenceConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct PollingConfig {
+    // Issue #765: Tauri IPC crosses the boundary via serde_json, which decodes
+    // `u64` values as JS `number` (f64). Override ts-rs's `bigint` default so
+    // the generated `.ts` matches what `invoke()` actually returns at
+    // runtime — `bigint` would type-lie about the wire shape. All five values
+    // are small (seconds, clamped to <= 3600), well under 2^53.
     #[serde(default = "default_interval_seconds")]
+    #[ts(type = "number")]
     pub default_interval_seconds: u64,
     #[serde(default = "default_min_interval_seconds")]
+    #[ts(type = "number")]
     pub minimum_interval_seconds: u64,
     #[serde(default = "default_max_interval_seconds")]
+    #[ts(type = "number")]
     pub max_interval_seconds: u64,
     #[serde(default = "default_expiry_buffer_seconds")]
+    #[ts(type = "number")]
     pub expiry_buffer_seconds: u64,
     /// Ceiling for the "paused playback" exponential backoff (CfgDiag#3(c),
     /// issue #538). `pause_backoff` used to hardcode a 300 s cap; it is now
     /// the ladder's ceiling (default 300, so an untouched config is unchanged)
     /// and the value is clamped into 60..=3600 by `clamp_polling`.
     #[serde(default = "default_pause_backoff_max")]
+    #[ts(type = "number")]
     pub pause_backoff_max_seconds: u64,
     /// Unknown / future keys NESTED inside this section, retained across
     /// load→save so a section written by a newer binary is not silently
@@ -847,6 +858,7 @@ pub struct LoggingConfig {
     /// once it would exceed this size. Clamped to 1..=500 by
     /// [`clamp_logging`].
     #[serde(default = "default_max_file_size_mb")]
+    #[ts(type = "number")]
     pub max_file_size_mb: u64,
     /// How many *archived* log files to retain (4.7.0). The active
     /// `PresenceJam.log` is not counted, so the directory holds at most
@@ -1645,6 +1657,7 @@ pub struct PresenceProfile {
     /// edited config cannot put the idle gate in a permanently-firing
     /// state. `None` keeps the base value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "number | null")]
     pub idle_away_after_seconds: Option<u64>,
     /// `None` keeps the base `teams.preferred_presence`; `Some` overlays
     /// the whole `PreferredPresenceConfig` (enabled, availability,
@@ -2110,6 +2123,7 @@ pub struct TeamsPatch {
     /// Issue #873: idle threshold in seconds; `0` disables the gate.
     /// Clamped into `60..=3600` (or left at `0`) by `clamp_teams`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "number | null")]
     pub idle_away_after_seconds: Option<u64>,
     /// Issue #867: minutes before a meeting starts that the write is
     /// suppressed; `0` means during the meeting only. Capped at 60 by
@@ -2168,14 +2182,19 @@ pub struct ShortcutsPatch {
 #[ts(export, export_to = "../../src/lib/types-generated/")]
 pub struct PollingPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "number | null")]
     pub default_interval_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "number | null")]
     pub minimum_interval_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "number | null")]
     pub max_interval_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "number | null")]
     pub expiry_buffer_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "number | null")]
     pub pause_backoff_max_seconds: Option<u64>,
 }
 
@@ -2194,6 +2213,7 @@ pub struct LoggingPatch {
     pub log_level: Option<String>,
     /// Rotation ceiling in mebibytes; clamped to `1..=500` by `clamp_logging`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "number | null")]
     pub max_file_size_mb: Option<u64>,
     /// Archived log files to retain; clamped to `1..=20` by `clamp_logging`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

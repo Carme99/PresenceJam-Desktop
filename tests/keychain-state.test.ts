@@ -231,7 +231,7 @@ describe('wizard merge keeps the derived keychain pair consistent (#560)', () =>
     const merged = mergeWizardConfig(configWith('absent'), {
       spotify_client_id: CLIENT_ID,
       status_format: '🎵 {artist} - {track} 🎧',
-      default_interval_seconds: BigInt(30),
+      default_interval_seconds: 30,
       autostart: false
     });
 
